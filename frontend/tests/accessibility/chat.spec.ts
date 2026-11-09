@@ -127,7 +127,7 @@ test('the menu of one chat in the list, and the menu of a group', async ({ page 
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Group', exact: true }).click();
-  await expect(page.getByRole('menuitem', { name: 'People in this group' })).toBeVisible();
+  await expect(page.getByRole('menuitem', { name: 'Members' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -137,8 +137,8 @@ test('the people of a group, and adding somebody from outside the org as a guest
   await signIn(page);
   await page.goto(`${MESSAGES}?chat=${String(group.chat)}`);
   await page.getByRole('button', { name: 'Group', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'People in this group' }).click();
-  await expect(page.getByRole('dialog', { name: 'People in this group' })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Members' }).click();
+  await expect(page.getByRole('dialog', { name: 'Members' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 

@@ -45,8 +45,9 @@ socket. Logs rotate at 10 MiB, five files each. Every service that has
 something to say about its health has a health check; the API's is
 `orchctl doctor` run inside it.
 
-**The web edge** answers more than the application: it carries `/api/`, the realtime
-socket and the machines' link to the services behind it, refuses `/internal/`, and answers
+**The web edge** answers more than the application: it carries the browser's `/api/v1/`
+and keys' `/openapi/v1/`, including their separate realtime sockets, and the machines'
+link to the services behind it, refuses `/internal/`, and answers
 `POST /edge-check` with 204 after reading the whole body, which is what `orchctl doctor --url` sends 8 MiB
 to, so that a front that cuts or refuses a large body is found out (the API would close the
 connection on a body it will not take, and say nothing about the front).
@@ -94,6 +95,26 @@ for. The gateway has it as a network alias on `control`, so the node (and
 anything else in the stack) finds it by that name; managed runtimes, which
 run outside Compose on the host's Docker, get a host entry that sends it to the
 published port.
+
+**Regional gateways.** With no `gateway.instances`, the existing `gateway_id` and
+`gateway.endpoints` form one entry. To add regions, list each gateway's stable
+ID, operator label, region and pinned/public entrances in `config/orch.toml` as
+shown there. Each deployed gateway needs its own matching `gateway_id`, service
+certificate and existing outbound API backplane. Gateways have no peer links or
+database connection. Admin catalogue edits use a persisted system override;
+they change advertised metadata, without deploying a gateway or moving a healthy
+connector.
+
+Each connector keeps one primary for control and people's connections. A tool
+pair uses the executor's primary gateway: the other connector attaches directly
+there for tunnels. If that entrance cannot serve both ends, the frozen pair
+plan tries a common gateway and reports a labelled refusal if none works.
+Tunnel-only sessions close after `link.tunnel_session_idle_secs` of being unused
+(60 seconds by default); live channels and thread references protect them.
+Machine-to-machine tunnel bytes pass through one gateway and bypass the API.
+If a gateway process is lost, affected tunnels reset and ordinary interrupted
+work recovery applies. Deploy the API and gateways with this capability before
+enabling regional connector choices.
 
 ## Harness builds
 
@@ -173,6 +194,11 @@ made; unpacking happens in a staging directory that is renamed into place when
 it is whole. `compose.yml`, `nginx.conf`, `.env`, `config/orch.toml` and existing
 secrets are kept by an update; a missing port assertion key is added to an older
 complete set. When a release needs a configuration change its notes say so. The
+key HTTP and WebSocket routes require the `/openapi/` and `/openapi/v1/ws` blocks
+from the shipped `nginx.conf`, forwarded without stripping the prefix. Review and
+merge these into an older installation's retained edge configuration before using
+keys, including any outer HTTPS proxy or CDN; the updater preserves that file.
+Installer downloads remain under `/api/v1/downloads/`. The
 server archive is unpacked with `unzip` where the host has it, and
 otherwise by a container of the web edge's image (`ORCH_UPDATE_NO_UNZIP=1` takes that
 path on any host). The images that the manifest names (the default environment image)
@@ -240,6 +266,17 @@ Read `sh install/install.sh --help`, `sh install/install-node.sh --help`, or
 `./install/install.ps1 -Help` in PowerShell, without a token or any installation. Help follows
 the shell's locale or PowerShell's UI language (English or Chinese). The enrollment dialog uses
 the same **User service**, **System service** and **Foreground** choices.
+
+Pass `--gateway automatic` or `--gateway <id>` to either POSIX installer,
+or `-Gateway automatic` / `-Gateway <id>` to PowerShell. Direct connector/node
+enrollment accepts the same `--gateway` flag. Without a flag, a terminal offers
+Automatic and the operator's labelled regions; unattended fresh enrollment uses
+Automatic, and re-enrollment keeps an existing choice. Automatic uses the median
+of three verified round trips on the enrolling machine and measures again on
+primary reconnect. A hand-picked primary is always honoured, including when it
+is unreachable; another gateway is never substituted for it. The local console's
+gateway selector is an explicit operator change. A tunnel's gateway may differ
+from the connector's primary without changing that choice.
 
 System addresses use HTTPS, with one development exception: HTTP is accepted only for literal
 loopback hosts, `127.0.0.0/8` in four decimal octets, `[::1]` (including its expanded form), or

@@ -1,5 +1,10 @@
 //! Paged administration of agent programs, their immutable builds and the capabilities proved for them.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::Identity;
+
 use crate::admin::{HarnessArch, HarnessBuild, HarnessBuildStatus, HarnessChannelsStatus};
 use crate::common::Page;
 use crate::programs::ProgramInfo;
@@ -154,19 +159,27 @@ pub struct ProgramChannelReadReply {
 
 crate::endpoints! {
     /// Reads release channels explicitly and returns a bounded acknowledgement.
-    AdminProgramChannelsRead: POST "/admin/programs/{kind}/channels", Session, none, none, json ProgramChannelReadReply, 200;
+    AdminProgramChannelsRead: POST "/admin/programs/{kind}/channels", Session, none, none, json ProgramChannelReadReply, 200,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Fetches and checks one exact version; at most the six supported platform builds are returned.
-    AdminProgramVersionFetch: POST "/admin/programs/{kind}/builds/{version}/fetch", Session, none, none, json Vec<HarnessBuild>, 200;
+    AdminProgramVersionFetch: POST "/admin/programs/{kind}/builds/{version}/fetch", Session, none, none, json crate::admin::HarnessFetchResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Identity(I::System)], Target::System));
     /// Reads one version, independently of the current build page.
-    AdminProgramVersionGet: GET "/admin/programs/{kind}/builds/{version}", Session, none, none, json Vec<HarnessBuild>, 200;
+    AdminProgramVersionGet: GET "/admin/programs/{kind}/builds/{version}", Session, none, none, json Vec<HarnessBuild>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Adds or selects one build without replying with the complete catalogue.
-    AdminProgramBuildSet: PUT "/admin/programs/{kind}/builds/{version}", Session, none, json HarnessBuild, json HarnessBuild, 200;
+    AdminProgramBuildSet: PUT "/admin/programs/{kind}/builds/{version}", Session, none, json HarnessBuild, json HarnessBuild, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Claims the platform checks of this exact version in the background.
-    AdminProgramBuildCheck: POST "/admin/programs/{kind}/builds/{version}/check", Session, none, none, json ProgramBuildCheckReply, 200;
+    AdminProgramBuildCheck: POST "/admin/programs/{kind}/builds/{version}/check", Session, none, none, json ProgramBuildCheckReply, 200,
+        operation Op::single(Manage, &[Identity(I::System)], Target::System);
     /// Lists agent programs with server-selected builds and channel/check states.
-    AdminProgramList: GET "/admin/programs", Session, query AdminProgramListQuery, none, json Page<ProgramSummary>, 200;
+    AdminProgramList: GET "/admin/programs", Session, query AdminProgramListQuery, none, json Page<ProgramSummary>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads one program's declaration, grouped capabilities and version setup.
-    AdminProgramGet: GET "/admin/programs/{kind}", Session, none, none, json ProgramDetail, 200;
+    AdminProgramGet: GET "/admin/programs/{kind}", Session, none, none, json ProgramDetail, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads one bounded page of a program's builds.
-    AdminProgramBuildList: GET "/admin/programs/{kind}/builds", Session, query AdminProgramBuildListQuery, none, json Page<HarnessBuild>, 200;
+    AdminProgramBuildList: GET "/admin/programs/{kind}/builds", Session, query AdminProgramBuildListQuery, none, json Page<HarnessBuild>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
 }

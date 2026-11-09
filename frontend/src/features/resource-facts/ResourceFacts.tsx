@@ -14,7 +14,7 @@ import { type ResourceSubject, resourceHint, resourceName } from './facts';
 import ResourceCard from './ResourceCard';
 
 const GLYPHS = { provider: PlugZap, model: Cpu, host: Server, environment: Box, mount: Box, mcp_server: Plug, template: Cpu, agent: Bot, skill: GraduationCap };
-const chipClasses = 'resource-chip inline-flex min-w-0 max-w-full items-center gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-sm';
+const chipClasses = 'resource-chip inline-flex min-w-0 max-w-full gap-1 rounded-md border bg-surface px-1.5 py-0.5 text-sm';
 
 export function ResourceGlyph({ kind }: { kind: ResourceSubject['kind'] }) {
   const Icon = GLYPHS[kind];
@@ -32,31 +32,51 @@ export function HostCapacity({ place }: { place: PlaceHost }) {
   return <span className="flex min-w-0 flex-col gap-1"><Meter neutral showActual look="compact" value={place.declared.memory_mb / place.capacity.memory_mb * 100} label={label} /><span className="text-sm text-text-muted">{label}</span></span>;
 }
 
-export function ResourceHint({ subject, className }: { subject: ResourceSubject; className?: string }) {
+export function ResourceHint({ subject, className, wrap = false }: { subject: ResourceSubject; className?: string; wrap?: boolean }) {
   const { t } = useTranslation();
   const format = useFormatContext();
   const now = useNow();
   const hint = resourceHint(subject, { ...format, t, now });
   return hint.text === '' ? null : <span data-resource-hint={subject.kind} data-warning={hint.warning || undefined}
-    className={cx('block min-w-0 max-w-full truncate text-sm font-normal', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className="min-w-0 max-w-full [&>span:last-child]:truncate" /> : hint.text}</span>;
+    className={cx('block min-w-0 max-w-full text-sm font-normal', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate', hint.warning ? 'text-warning-text' : 'text-text-muted', className)}>{hint.warning ? <StatusDot tone="warning" label={hint.text} showLabel className={cx('min-w-0 max-w-full', !wrap && '[&>span:last-child]:truncate')} /> : hint.text}</span>;
+}
+
+function previewResource(subject: ResourceSubject): CardPreview['resource'] {
+  switch(subject.kind) {
+    case 'provider': return {kind:subject.kind,id:subject.provider.id,data:subject.provider};
+    case 'agent': return {kind:subject.kind,id:subject.agent.id,data:subject.agent};
+    case 'environment': return {kind:subject.kind,id:subject.environment.id,data:subject.environment};
+    case 'host': return {kind:subject.kind,id:subject.host.id,data:subject.place??subject.host};
+    case 'mount': return {kind:subject.kind,id:subject.mount.id,data:subject.mount};
+    case 'mcp_server': return {kind:subject.kind,id:subject.server.id,data:subject.server};
+    case 'template': return {kind:subject.kind,id:subject.template.id,data:subject.template};
+    case 'skill': return {kind:subject.kind,id:subject.skill.id,data:subject.skill};
+    case 'model': return undefined;
+  }
 }
 
 export function resourcePreview(subject: ResourceSubject): CardPreview {
-  return { label: resourceName(subject), hint: <ResourceHint subject={subject} />, renderName: (name) => <ResourceChip subject={subject} card={false} hint={false}>{name}</ResourceChip>, content: () => <ResourceCard subject={subject} /> };
+  return { resource: previewResource(subject), label: resourceName(subject), hint: <ResourceHint subject={subject} />, renderName: (name) => <ResourceChip subject={subject} card={false} hint={false}>{name}</ResourceChip>, content: () => <ResourceCard subject={subject} /> };
 }
 
 /** An option's one-line hint and its inspection card always describe the same permitted subject. */
 export function resourceChoice(subject: ResourceSubject) {
-  return { description: <ResourceHint subject={subject} />, preview: resourcePreview(subject) };
+  const preview=resourcePreview(subject);
+  const resource=preview.resource;
+  const own=resource?.data!==null&&typeof resource?.data==='object'&&Object.hasOwn(resource.data,'home');
+  return {description:<ResourceHint subject={subject}/>,preview,...(own?{resource}:{})};
 }
 
 /** Names keep their native link or control; their details appear on hover and focus. */
-export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, className }: { subject: ResourceSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; className?: string }) {
-  if (!card) return <span className={cx(chipClasses, 'border-border', className)}><ResourceGlyph kind={subject.kind} /><span className="min-w-0 truncate">{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} className="truncate" />}</span>;
+export function ResourceChip({ subject, children, asChild = false, card = true, hint = true, wrap = false, className }: { subject: ResourceSubject; children?: ReactNode; asChild?: boolean; card?: boolean; hint?: boolean; wrap?: boolean; className?: string }) {
+  const valueClass = cx('min-w-0', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate');
+  const rowClasses = cx(chipClasses, wrap ? 'items-start' : 'items-center');
+  const glyph = wrap ? <span className="inline-flex h-5 shrink-0 items-center"><ResourceGlyph kind={subject.kind} /></span> : <ResourceGlyph kind={subject.kind} />;
+  if (!card) return <span className={cx(rowClasses, 'border-border', className)}>{glyph}<span className={valueClass}>{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} wrap={wrap} />}</span>;
   const trigger = asChild && isValidElement<{ children?: ReactNode; className?: string }>(children)
-    ? cloneElement(children, { className: cx(chipClasses, 'border-control-border', children.props.className, className) }, <><ResourceGlyph kind={subject.kind} />{typeof children.props.children === 'string' ? <span className="min-w-0 truncate">{children.props.children}</span> : children.props.children}</>)
-    : <><ResourceGlyph kind={subject.kind} /><span className="min-w-0 truncate">{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} className="truncate" />}</>;
-  return <DetailCard {...resourcePreview(subject)} asChild={asChild} className={cx(chipClasses, 'border-control-border', className)}>
+    ? cloneElement(children, { className: cx(rowClasses, 'border-control-border', children.props.className, className) }, <>{glyph}{typeof children.props.children === 'string' ? <span className={valueClass}>{children.props.children}</span> : children.props.children}</>)
+    : <>{glyph}<span className={valueClass}>{children ?? resourceName(subject)}</span>{hint && <ResourceHint subject={subject} wrap={wrap} />}</>;
+  return <DetailCard {...resourcePreview(subject)} asChild={asChild} className={cx(rowClasses, 'border-control-border', className)}>
     {trigger}
   </DetailCard>;
 }

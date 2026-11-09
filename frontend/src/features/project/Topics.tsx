@@ -31,7 +31,7 @@ export function Topics({ project, search }: { project: Project; search: ProjectS
   const [anchor, setAnchor] = useState<string | null>(null);
   const mayOpen = canCreateIn('project', project.access);
   const content = () => {
-    if (list.isPending) return <SkeletonRows rows={5} />;
+    if (list.isPending) return <SkeletonRows read={list} rows={5} />;
     if (list.isError) return <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
     if (topics.length === 0) return isFiltered(search)
       ? <EmptyState icon={<SearchX aria-hidden />} title={t('places.project.noMatch')} description={t('places.project.noMatchAbout')} />

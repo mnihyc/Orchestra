@@ -16,9 +16,24 @@ const SHIPPED_PROGRAMS: [&str; 6] = [
     "orch-connector",
     "orchctl",
 ];
-/// The beginnings of the names of files that hold a licence or a notice, in
-/// lowercase.
-const LICENCE_FILE_PREFIXES: [&str; 5] = ["license", "licence", "copying", "notice", "unlicense"];
+/// Licence/notice names may carry a separated format or licence identifier.
+const LICENCE_FILE_STEMS: &[&str] = &[
+    "license",
+    "licenses",
+    "licence",
+    "licences",
+    "copying",
+    "notice",
+    "notices",
+    "unlicense",
+];
+/// Source code, stylesheets and generated maps are not full licence texts, even
+/// when their names or containing directories mention licences.
+const SOURCE_FILE_EXTENSIONS: &[&str] = &[
+    "c", "cc", "cpp", "cxx", "h", "hpp", "rs", "go", "java", "py", "sh", "sql", "ts", "tsx", "mts",
+    "cts", "js", "jsx", "mjs", "cjs", "map", "css", "scss", "sass", "less", "vue", "svelte",
+    "wasm",
+];
 /// Where the container sees Cargo's downloads.
 const CONTAINER_CARGO_HOME: &str = "/cargo-home/";
 
@@ -103,8 +118,11 @@ fn read(path: &Path) -> Result<Vec<u8>, ReleaseError> {
     })
 }
 
+/// The files under `dir`, in name order, so that every notice built from them is the same on every machine (a
+/// directory's listing order is the file system's own and differs between runners).
 fn files(dir: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
     walkdir::WalkDir::new(dir)
+        .sort_by_file_name()
         .into_iter()
         .filter_entry(|entry| {
             !matches!(
@@ -121,16 +139,25 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, ReleaseError> {
 }
 
 fn usual(path: &Path) -> bool {
+    if path.extension().is_some_and(|extension| {
+        SOURCE_FILE_EXTENSIONS.contains(&extension.to_string_lossy().to_ascii_lowercase().as_str())
+    }) {
+        return false;
+    }
     path.file_name().is_some_and(|name| {
-        LICENCE_FILE_PREFIXES.iter().any(|prefix| {
-            name.to_string_lossy()
-                .to_ascii_lowercase()
-                .starts_with(prefix)
+        let name = name.to_string_lossy().to_ascii_lowercase();
+        LICENCE_FILE_STEMS.iter().any(|&stem| {
+            name.strip_prefix(stem).is_some_and(|suffix| {
+                suffix
+                    .chars()
+                    .next()
+                    .is_none_or(|first| matches!(first, '.' | '-' | '_' | ' '))
+            })
         })
-    }) || path.components().any(|part| {
-        part.as_os_str()
-            .to_string_lossy()
-            .eq_ignore_ascii_case("LICENSES")
+    }) || path.ancestors().skip(1).any(|directory| {
+        directory
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("LICENSES"))
     })
 }
 
@@ -262,11 +289,11 @@ fn append(
 
 /// Generate Rust notices offline from the source cache used by this artifact.
 pub fn collect(root: &Path, builder: &Builder, triples: &[&str]) -> Result<String, ReleaseError> {
+    // Metadata reads package manifests outside the filtered resolve graph. Fetch the complete locked
+    // source set first, including foreign-target packages; the per-target graph still selects notices.
+    builder.cargo(&["fetch", "--locked"], &[])?;
     let mut all = BTreeMap::new();
     for triple in triples {
-        // The build fetched only what it compiled; the workspace's metadata reads every package that resolves for
-        // the platform, so the others are fetched first, at the versions the lock file names.
-        builder.cargo(&["fetch", "--locked", "--target", triple], &[])?;
         let printed = builder.cargo_output(&[
             "metadata",
             "--locked",
@@ -318,11 +345,12 @@ pub fn collect_frontend(root: &Path) -> Result<String, ReleaseError> {
             source,
         })?;
     let inventory = root.join("frontend/dist/.vite/notice-packages.json");
-    let paths: Vec<String> =
+    let mut paths: Vec<String> =
         serde_json::from_slice(&read(&inventory)?).map_err(|source| ReleaseError::Json {
             path: inventory,
             source,
         })?;
+    paths.sort();
     let policy = policy(root)?;
     let mut output = String::new();
     for path in paths {
@@ -363,6 +391,145 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn licence_files_are_listed_in_name_order_whatever_the_directory_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "license.txt",
+            "LICENSE-MIT",
+            "lib/misc/licenses.d.ts",
+            "lib/misc/licenses.d.mts",
+            "AUTHORS",
+            "a/NOTICE",
+        ] {
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, name).unwrap();
+        }
+        let names: Vec<String> = files(dir.path())
+            .unwrap()
+            .iter()
+            .map(|path| path.strip_prefix(dir.path()).unwrap().display().to_string())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_by(|a, b| {
+            let key = |path: &str| path.split('/').map(str::to_owned).collect::<Vec<_>>();
+            key(a).cmp(&key(b))
+        });
+        assert_eq!(names, sorted);
+        assert_eq!(names.len(), 5);
+    }
+
+    #[test]
+    fn notices_keep_licence_texts_and_directories_without_collecting_source_modules() {
+        let directory = tempfile::tempdir().unwrap();
+        let policy: Policy = toml::from_str("[licenses]\nallow = ['MIT']").unwrap();
+        let package = Crate {
+            name: "notice-fixture".into(),
+            version: "1.0.0".into(),
+            licence: "MIT".into(),
+            repository: String::new(),
+            source_dir: String::new(),
+        };
+        let texts = [
+            "LICENSE-MIT",
+            "LICENSE.md",
+            "LICENCE.txt",
+            "COPYING.LESSER",
+            "NOTICE",
+            "NOTICE.html",
+            "NOTICES.txt",
+            "LICENSES/MIT.txt",
+            "LICENSES/Apache-2.0",
+            "nested/licenses/vendor-terms",
+        ];
+        let sources = [
+            "lib/misc/licenses.d.ts",
+            "licenses.ts",
+            "license.js",
+            "NOTICE.js",
+            "license.js.map",
+            "LICENCE.RS",
+            "license.h",
+            "copying.py",
+            "LICENSES/license.tsx",
+            "LICENSES/notice.jsx",
+            "LICENSES/license.mjs",
+            "LICENSES/license.cjs",
+            "LICENSES/license.d.ts.map",
+            "LICENSES/notice.css",
+            "LICENSES/license.wasm",
+            "licensee.txt",
+            "noticesHelper.txt",
+        ];
+        let mut outputs = Vec::new();
+        for reverse in [false, true] {
+            let dir = directory
+                .path()
+                .join(if reverse { "reverse" } else { "forward" });
+            let mut paths: Vec<_> = texts.iter().chain(&sources).copied().collect();
+            if reverse {
+                paths.reverse();
+            }
+            for name in paths {
+                let path = dir.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, format!("fixture contents of {name}")).unwrap();
+            }
+            let mut output = String::new();
+            append(&mut output, &package, &dir, &policy).unwrap();
+            for name in &texts {
+                assert!(
+                    output.contains(&format!("fixture contents of {name}\n")),
+                    "missing {name}"
+                );
+            }
+            for name in &sources {
+                assert!(
+                    !output.contains(&format!("fixture contents of {name}\n")),
+                    "source {name}"
+                );
+            }
+            outputs.push(output);
+        }
+        assert_eq!(outputs[0], outputs[1]);
+    }
+
+    #[test]
+    fn frontend_notices_keep_package_order_independent_of_the_inventory_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("deny.toml"), "[licenses]\nallow = ['MIT']").unwrap();
+        std::fs::create_dir_all(root.join("frontend/dist/.vite")).unwrap();
+        std::fs::create_dir_all(root.join("licenses/novnc-1.7.0")).unwrap();
+        std::fs::write(root.join("licenses/novnc-1.7.0/NOTICE"), "vendored notice").unwrap();
+        let mut packages = serde_json::Map::new();
+        for name in ["node_modules/zulu", "node_modules/alpha"] {
+            let dir = root.join("frontend").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("LICENSE"), format!("original terms for {name}")).unwrap();
+            packages.insert(name.into(), json!({"version":"1.0.0","license":"MIT"}));
+        }
+        std::fs::write(
+            root.join("frontend/package-lock.json"),
+            serde_json::to_vec(&json!({"packages":packages})).unwrap(),
+        )
+        .unwrap();
+        let inventory = root.join("frontend/dist/.vite/notice-packages.json");
+        let mut outputs = Vec::new();
+        for names in [
+            ["node_modules/zulu", "node_modules/alpha"],
+            ["node_modules/alpha", "node_modules/zulu"],
+        ] {
+            std::fs::write(&inventory, serde_json::to_vec(&names).unwrap()).unwrap();
+            outputs.push(collect_frontend(root).unwrap());
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        assert!(outputs[0].contains("original terms for node_modules/alpha"));
+        assert!(outputs[0].contains("original terms for node_modules/zulu"));
+        assert!(outputs[0].contains("vendored notice"));
+    }
+
+    #[test]
     fn shipped_dependencies_keep_versions_and_licences_without_test_or_lock_only_crates() {
         let metadata = json!({"packages":[
             {"id":"app","name":"orch-api","source":null},
@@ -371,7 +538,8 @@ mod tests {
             {"id":"borrow","name":"borrow-or-share","version":"0.2.4","source":"registry+x","license":"MIT-0"},
             {"id":"proptest","name":"proptest","source":"registry+x"},
             {"id":"termwiz","name":"termwiz","source":"registry+x"},
-            {"id":"terminfo","name":"terminfo","source":"registry+x"}
+            {"id":"terminfo","name":"terminfo","source":"registry+x"},
+            {"id":"windows-gnu","name":"windows_x86_64_gnu","version":"0.53.1","license":"MIT","source":"registry+x"}
         ],"resolve":{"nodes":[
             {"id":"app","deps":[{"pkg":"serde","dep_kinds":[{"kind":null}]},{"pkg":"jsonschema","dep_kinds":[{"kind":null}]},{"pkg":"proptest","dep_kinds":[{"kind":"dev"}]}]},
             {"id":"jsonschema","deps":[{"pkg":"borrow","dep_kinds":[{"kind":null}]}]},
@@ -385,11 +553,10 @@ mod tests {
         assert_eq!(found["serde"].name, "serde");
         assert_eq!(found["borrow"].licence, "MIT-0");
         assert_eq!(found["borrow"].version, "0.2.4");
-        assert!(
-            !found
-                .values()
-                .any(|row| matches!(row.name.as_str(), "termwiz" | "terminfo" | "proptest"))
-        );
+        assert!(!found.values().any(|row| matches!(
+            row.name.as_str(),
+            "termwiz" | "terminfo" | "proptest" | "windows_x86_64_gnu"
+        )));
     }
 
     #[test]

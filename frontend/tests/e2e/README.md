@@ -152,7 +152,7 @@ unticked inside a ticked place, directly visible content/date options, a plan pa
 is chosen), a place that allows none, nothing ticked, the line that says workspace files are not included and where its link goes, the
 names of places read whole on a phone; a job followed in the status bar until it ends and its Download, one that fails
 and says why, and a third archive at a time refused; a thread the person reads and may not export (Export… switched off in its menu
-with one line and the way to ask, left out of a row's menu, greyed and counted in the dialog of its place); the list of one's exports
+with one line and the way to ask in both row and screen menus, greyed and counted in the dialog of its place); the list of one's exports
 with a ready one, one being written, a failed one, a removed one, an expired one and one whose place is gone, the line of what each left
 out, Remove, Cancel and Download again, and the list as cards on a phone; and the dialog of a place and of a thread worked by keyboard alone.
 

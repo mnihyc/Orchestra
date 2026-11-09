@@ -1,0 +1,23 @@
+# Central runs on diag-28 = the B28 cut + two diagnostics-only patches: leading NAME=value words are a check's settings
+# (diag-23/patch-targeted.py), and ORCH_TEST_DUMP_ON_TIMEOUT prints the newest jobs, the database's busy sessions and
+# their blockers when the API tests' shared wait gives up (diag-28/patch-dump.py). Never part of a cut.
+# ladder-ext D27: the two import cases that change an existing document, with phases and the database at the stall
+test ORCH_TEST_NATIVE_OPERATIONS=1 ORCH_TEST_DUMP_ON_TIMEOUT=1 -p orch-api-core --test imports -- a_document_that_changed_at_its_source_is_replaced_in_place_and_what_it_said_is_kept_as_a_version a_document_somebody_else_changed_since_the_import_stays_when_it_is_taken_back --nocapture --test-threads=1
+# ladder-ext B27-API4: the links graph pair case
+test ORCH_TEST_NATIVE_OPERATIONS=1 ORCH_TEST_DUMP_ON_TIMEOUT=1 -p orch-api-core --test links -- graph_pairs_keep_duplicate_mentions_live_history_and_private_boundaries_equivalent --exact --nocapture
+# scope-map-b D26A and DIAG25: the fork groups that still fail, with the startup outcome hook 0e5d5c15f
+test ORCH_TEST_NATIVE_OPERATIONS=1 ORCH_TEST_DUMP_ON_TIMEOUT=1 -p orch-api-core --test forks -- batch_cancel_scopes:: side_native_scopes:: immediate_native_scopes:: confirmation_scopes:: --nocapture --test-threads=1
+# copy_out_ask's audit case and chat_duplicates' move notice case
+test ORCH_TEST_NATIVE_OPERATIONS=1 ORCH_TEST_DUMP_ON_TIMEOUT=1 -p orch-api-core --test chat_duplicates --test copy_out_ask -- --nocapture --test-threads=1
+# held-plan-ws B27-ANNOUNCE: why no turn starts after a held queue is released
+test ORCH_TEST_DUMP_ON_TIMEOUT=1 RUST_LOG=error,orch_api::native_operations=debug,orch_engine=debug -p orch-api-core --test announcement_scopes -- --nocapture --test-threads=1
+# ci-triage-c B27-CODEX: the Codex adapter cases it fixed, and the native Auto reviewer replay with its frames
+test -p orch-adapter-codex --test interface -- --nocapture
+test -p orch-adapter-codex --test fake -- model_processes::forwarded_model_processes_keep_concurrent_windows_gates_and_rpc_ownership --exact --nocapture
+test -p orch-adapter-codex --test upgrade_controls --test upgrade_notifications -- --nocapture
+test -p orch-adapter-codex --test performance_schema -- the_generated_protocol_preserves_the_request_events_the_adapter_measures --exact --nocapture
+test ORCH_CONFORMANCE_FRAMES=1 -p orch-adapter-codex --test conformance -- native_auto_reviewer_decisions_and_model_policy_are_proven --exact --nocapture
+# The engine's fork cases that still fail, with the copy-out refusal each meets (diag-28/patch-fork.py)
+test -p orch-engine --test forks -- a_side_thread_kept_by_a_fork_is_closed_with_that_reason confirmed_source::a_side_fork_counts_its_captured_parent_when_deciding_what_fits environment_switch:: native_transfer::a_sole_upload_of_another_command_never_supplies_this_jobs_bytes --nocapture --test-threads=1
+# bg-wake-facts: the real harness wake cases
+test -p orch-engine --test background_wake_native -- --nocapture --test-threads=1

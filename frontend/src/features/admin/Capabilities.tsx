@@ -203,7 +203,7 @@ export function Capabilities() {
         </Button>
       </div>
       {defs.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={defs} rows={4} />
       ) : defs.isError ? (
         <ErrorState error={defs.error} retrying={defs.isRefetching} onRetry={() => void defs.refetch()} />
       ) : defs.data.length === 0 ? (

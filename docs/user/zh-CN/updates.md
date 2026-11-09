@@ -6,6 +6,7 @@ heading_id.机器和节点: machines-and-nodes
 heading_id.本机策略拒绝时: when-local-policy-refuses
 heading_id.环境和提供方运行时: environments-and-provider-runtimes
 heading_id.服务器: the-server
+summary: 比较运行中和推荐的构建，再更新机器、节点或受管单元。
 ---
 
 # 更新 Orch 和机器

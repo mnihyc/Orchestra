@@ -65,7 +65,7 @@ export function StoredTimeline({ snapshot }: { snapshot: ThreadSync }) {
 
 function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadReadRef }) {
   const key = snapshot.thread.id;
-  const preferences = useTimelinePreferences();
+  const preferences = useTimelinePreferences(key);
   const view = useThreadView(key);
   const ui = useThreadUi(key);
   useEffect(() => {
@@ -76,7 +76,7 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
     detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
-  return <TimelineContextValue.Provider value={context}><div className="mx-auto flex w-full max-w-(--reading-width) flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <RowView key={row.key} row={row} />)}</div></TimelineContextValue.Provider>;
+  return <TimelineContextValue.Provider value={context}><ol role="list" className="mx-auto flex w-full max-w-(--reading-width) list-none flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <li key={row.key}><RowView row={row} /></li>)}</ol></TimelineContextValue.Provider>;
 }
 
 export interface TimelineHandle {
@@ -106,6 +106,7 @@ export interface TimelineProps {
   focusPrompt?: PromptFocus | null | undefined;
   /** Version browsing keeps its prompt in place; ordinary permalinks still briefly identify their target. */
   highlightLink?: boolean;
+  pinApprovals?: boolean;
   ref?: Ref<TimelineHandle>;
 }
 
@@ -126,12 +127,12 @@ function Skeletons() {
   );
 }
 
-export function Timeline({ threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, ref }: TimelineProps) {
+export function Timeline({ threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, pinApprovals = false, ref }: TimelineProps) {
   const compact = useCompactControls();
   const { t } = useTranslation();
   const read = useThreadReadRef(threadId);
   const view = useThreadView(threadId);
-  const preferences = useTimelinePreferences();
+  const preferences = useTimelinePreferences(threadId);
   const ui = useThreadUi(threadId);
   const meId = useStore(client.session, (state) => state.userId);
   const socket = useSocketStatus();
@@ -182,6 +183,8 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
       threadId,
       threadName: thread?.name ?? '',
       detail: preferences.detail,
+      liveTools: !readOnly && preferences.liveTools,
+      pinApprovals: pinApprovals && !readOnly,
       recent,
       layout: preferences.layout,
       setLayout: preferences.setLayout,
@@ -194,7 +197,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
       lit,
       selection: readOnly ? NOT_PICKING : selection,
     }),
-    [threadId, thread, preferences.detail, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect],
+    [threadId, thread, preferences.detail, preferences.liveTools, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals],
   );
 
   // New rows below the reader's place: counted since they were last at the end.

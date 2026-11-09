@@ -36,5 +36,5 @@ export function ProfilePage({ username }: { username: string }) {
   const { t } = useTranslation();
   const query = useQuery(profileQuery(username));
   useScreenHeading({ title: query.data?.user.display_name ?? t('profile.page.title'), icon: UserRound, target: query.data === undefined ? undefined : { kind: 'user', id: query.data.user.id } });
-  return <Page>{query.isPending ? <SkeletonRows rows={6} /> : query.isError ? query.error instanceof ApiError && query.error.status === 404 ? <EmptyState icon={<UserRound aria-hidden />} titleAs="h1" title={t('profile.page.missing')} action={<Button asChild><Link to="/">{t('actions.home.label')}</Link></Button>} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <ProfileContents profile={query.data} />}</Page>;
+  return <Page>{query.isPending ? <SkeletonRows read={query} rows={6} /> : query.isError ? query.error instanceof ApiError && query.error.status === 404 ? <EmptyState icon={<UserRound aria-hidden />} titleAs="h1" title={t('profile.page.missing')} action={<Button asChild><Link to="/">{t('actions.home.label')}</Link></Button>} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <ProfileContents profile={query.data} />}</Page>;
 }

@@ -104,19 +104,35 @@ impl<'a, N> Layer<'a, N> {
 /// - `min`: the smallest number among the layers that set the key; with
 ///   none, the default, which when unset means no limit. A lock changes
 ///   nothing.
+/// - `max`: the greatest minimum set by a scope. A lower scope cannot reduce it.
+/// - `all`: every setting scope must allow the permission.
+/// - `any`: any setting scope can require the protection.
+/// - `stricter`: the highest-ranked choice in the declared schema, strictest last.
+///
+/// Shipped defaults are fallback values, never implicit constraints. A setting's
+/// declared unbounded zero and nullable bounds resolve as unset when no finite
+/// scope bounds them; an ordinary zero cap remains a real cap. Equal constraints
+/// name the nearest matching source, so an equal local value is not ineffective.
 ///
 /// A layer whose value is not of the kind its mode combines is passed over.
 #[must_use]
 pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<N> {
     let mut ordered: Vec<&Layer<'_, N>> = layers.iter().collect();
     ordered.sort_by_key(|layer| layer.scope.depth());
-    let (defaults, rows): (Vec<_>, Vec<_>) = ordered
-        .into_iter()
-        .partition(|layer| layer.scope == SourceScope::Default);
-    let default = defaults
+    let (defaults, rows): (Vec<_>, Vec<_>) = ordered.into_iter().partition(|layer| {
+        layer.scope == SourceScope::Default
+            || !def.merge.honours_locks() && layer.scope == SourceScope::Environment
+    });
+    let mut default = defaults
         .last()
         .map(|layer| layer.value.clone())
         .or_else(|| def.default_value());
+    if matches!(def.merge, Merge::Min | Merge::Max)
+        && def.zero_means_no_limit()
+        && default.as_ref().is_some_and(is_zero)
+    {
+        default = None;
+    }
 
     let lock = if def.merge.honours_locks() {
         rows.iter().position(|layer| layer.locked)
@@ -136,13 +152,21 @@ pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<
         .last()
         .map_or_else(Source::registry, |layer| layer.source());
     let given = default.clone();
-    let (value, used) = match def.merge {
+    let Merged {
+        value,
+        used,
+        source,
+    } = match def.merge {
         Merge::Replace => replace(default, counted),
         Merge::Union => union(default, counted),
         Merge::Intersect => intersect(default, counted),
         Merge::Map => map(default, counted),
         Merge::Append => append(default, counted),
-        Merge::Min => min(default, counted),
+        Merge::Min => bound(def, default, counted, false),
+        Merge::Max => bound(def, default, counted, true),
+        Merge::All => boolean(default, counted, false),
+        Merge::Any => boolean(default, counted, true),
+        Merge::Stricter => stricter(def, default, counted),
     };
     // The default is a part of the value where the mode joins it with the rows, and where no row
     // counted; otherwise the rows replace it.
@@ -151,7 +175,7 @@ pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<
     let supplied: Vec<SuppliedPart<N>> = given
         .filter(|value| joins_default && !value.is_null())
         .map(|value| SuppliedPart {
-            source: default_source,
+            source: default_source.clone(),
             value,
             locked: false,
             ignored: false,
@@ -166,9 +190,7 @@ pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<
         .collect();
     Resolved {
         value: value.filter(|value| !value.is_null()),
-        source: used
-            .last()
-            .map_or_else(Source::registry, |layer| layer.source()),
+        source: source.map_or_else(|| default_source.clone(), |layer| layer.source()),
         locked_by,
         parts: used
             .iter()
@@ -182,12 +204,26 @@ pub fn resolve<N: Clone>(def: &SettingDef, layers: &[Layer<'_, N>]) -> Resolved<
 }
 
 /// What a merge comes to, and the layers that counted for it.
-type Merged<'r, 'a, N> = (Option<Json>, Vec<&'r Layer<'a, N>>);
+struct Merged<'r, 'a, N> {
+    value: Option<Json>,
+    used: Vec<&'r Layer<'a, N>>,
+    source: Option<&'r Layer<'a, N>>,
+}
+
+impl<'r, 'a, N> Merged<'r, 'a, N> {
+    fn new(value: Option<Json>, used: Vec<&'r Layer<'a, N>>) -> Self {
+        Self {
+            value,
+            source: used.last().copied(),
+            used,
+        }
+    }
+}
 
 fn replace<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r, 'a, N> {
     match rows.last() {
-        Some(nearest) => (Some(nearest.value.clone()), vec![*nearest]),
-        None => (default, Vec::new()),
+        Some(nearest) => Merged::new(Some(nearest.value.clone()), vec![*nearest]),
+        None => Merged::new(default, Vec::new()),
     }
 }
 
@@ -198,7 +234,7 @@ fn union<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<
         .filter(|layer| layer.value.is_array())
         .collect();
     if lists.is_empty() {
-        return (default, lists);
+        return Merged::new(default, lists);
     }
     let mut all: Vec<Json> = Vec::new();
     let given = default
@@ -216,7 +252,7 @@ fn union<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<
             all.push(item.clone());
         }
     }
-    (Some(Json::Array(all)), lists)
+    Merged::new(Some(Json::Array(all)), lists)
 }
 
 fn intersect<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r, 'a, N> {
@@ -225,23 +261,34 @@ fn intersect<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Mer
         .copied()
         .filter(|layer| layer.value.is_array())
         .collect();
-    let named: Vec<&Vec<Json>> = lists
-        .iter()
-        .filter_map(|layer| layer.value.as_array())
-        .collect();
-    let Some((first, others)) = named.split_first() else {
-        return (default, lists);
-    };
-    let mut kept: Vec<Json> = Vec::new();
-    for item in first
-        .iter()
-        .filter(|item| others.iter().all(|list| list.contains(item)))
-    {
-        if !kept.contains(item) {
-            kept.push(item.clone());
+    let mut kept: Option<Vec<Json>> = None;
+    let mut source = None;
+    for layer in &lists {
+        let Some(values) = layer.value.as_array() else {
+            continue;
+        };
+        if let Some(kept) = &mut kept {
+            let before = kept.len();
+            kept.retain(|item| values.contains(item));
+            if kept.len() != before || values.iter().all(|item| kept.contains(item)) {
+                source = Some(*layer);
+            }
+        } else {
+            let mut first = Vec::new();
+            for item in values {
+                if !first.contains(item) {
+                    first.push(item.clone());
+                }
+            }
+            kept = Some(first);
+            source = Some(*layer);
         }
     }
-    (Some(Json::Array(kept)), lists)
+    Merged {
+        value: kept.map(Json::Array).or(default),
+        used: lists,
+        source,
+    }
 }
 
 fn map<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r, 'a, N> {
@@ -251,7 +298,7 @@ fn map<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r
         .filter(|layer| layer.value.is_object())
         .collect();
     if objects.is_empty() {
-        return (default, objects);
+        return Merged::new(default, objects);
     }
     let mut merged = default
         .as_ref()
@@ -263,7 +310,7 @@ fn map<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r
             merged.insert(name.clone(), value.clone());
         }
     }
-    (Some(Json::Object(merged)), objects)
+    Merged::new(Some(Json::Object(merged)), objects)
 }
 
 /// What a scope adds to a joined text: its text without the line breaks
@@ -280,40 +327,171 @@ fn append<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged
         .filter(|layer| piece(layer.value).is_some())
         .collect();
     if texts.is_empty() {
-        return (default, texts);
+        return Merged::new(default, texts);
     }
     let given = default.as_ref().and_then(piece);
     let pieces: Vec<&str> = given
         .into_iter()
         .chain(texts.iter().filter_map(|layer| piece(layer.value)))
         .collect();
-    (Some(Json::String(pieces.join(BLANK_LINE))), texts)
+    Merged::new(Some(Json::String(pieces.join(BLANK_LINE))), texts)
 }
 
-fn min<'r, 'a, N>(default: Option<Json>, rows: &[&'r Layer<'a, N>]) -> Merged<'r, 'a, N> {
-    let below = |one: &Json, other: &Json| match (one.as_i64(), other.as_i64()) {
-        (Some(one), Some(other)) => one < other,
-        _ => one
-            .as_f64()
-            .zip(other.as_f64())
-            .is_some_and(|(one, other)| one < other),
+fn decimal_parts(value: &str) -> Option<(&str, &str)> {
+    let (whole, fraction) = match value.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return None,
+        None => (value, ""),
     };
-    let numbers: Vec<_> = rows
-        .iter()
-        .copied()
-        .filter(|layer| layer.value.is_number())
-        .collect();
-    let mut smallest: Option<&'r Layer<'a, N>> = None;
-    for layer in &numbers {
-        if smallest.is_none_or(|least| below(layer.value, least.value)) {
-            smallest = Some(*layer);
+    if whole.is_empty()
+        || !whole
+            .bytes()
+            .chain(fraction.bytes())
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let whole = whole.trim_start_matches('0');
+    Some((
+        if whole.is_empty() { "0" } else { whole },
+        fraction.trim_end_matches('0'),
+    ))
+}
+
+fn is_zero(value: &Json) -> bool {
+    value.as_i64() == Some(0)
+        || value.as_f64() == Some(0.0)
+        || value
+            .as_str()
+            .and_then(decimal_parts)
+            .is_some_and(|parts| parts == ("0", ""))
+}
+
+fn number_cmp(one: &Json, other: &Json) -> Option<std::cmp::Ordering> {
+    if let (Some(one), Some(other)) = (one.as_i64(), other.as_i64()) {
+        return Some(one.cmp(&other));
+    }
+    if let (Some(one), Some(other)) = (one.as_u64(), other.as_u64()) {
+        return Some(one.cmp(&other));
+    }
+    if let (Some(one), Some(other)) = (one.as_str(), other.as_str()) {
+        let ((a, af), (b, bf)) = (decimal_parts(one)?, decimal_parts(other)?);
+        return Some(a.len().cmp(&b.len()).then_with(|| a.cmp(b)).then_with(|| {
+            let places = af.len().max(bf.len());
+            af.bytes()
+                .chain(std::iter::repeat(b'0'))
+                .take(places)
+                .cmp(bf.bytes().chain(std::iter::repeat(b'0')).take(places))
+        }));
+    }
+    one.as_f64()?.partial_cmp(&other.as_f64()?)
+}
+
+fn bound<'r, 'a, N>(
+    def: &SettingDef,
+    default: Option<Json>,
+    rows: &[&'r Layer<'a, N>],
+    largest: bool,
+) -> Merged<'r, 'a, N> {
+    use crate::registry::{Form, Schema};
+    let mut schema = &def.schema;
+    while let Schema::Nullable { of } = schema {
+        schema = of;
+    }
+    let decimal = matches!(
+        schema,
+        Schema::Text {
+            form: Form::Decimal | Form::PositiveDecimal,
+            ..
+        }
+    );
+    let nullable = matches!(def.schema, Schema::Nullable { .. }) || def.zero_means_no_limit();
+    let mut winner: Option<&'r Layer<'a, N>> = None;
+    let mut unbounded = None;
+    for layer in rows.iter().copied() {
+        if nullable && layer.value.is_null() || def.zero_means_no_limit() && is_zero(layer.value) {
+            unbounded = Some(layer);
+            continue;
+        }
+        let numeric = if decimal {
+            layer.value.as_str().and_then(decimal_parts).is_some()
+        } else {
+            layer.value.is_number()
+        };
+        if !numeric {
+            continue;
+        }
+        let wins = winner.is_none_or(|previous| {
+            number_cmp(layer.value, previous.value).is_some_and(|order| {
+                order == std::cmp::Ordering::Equal
+                    || if largest {
+                        order.is_gt()
+                    } else {
+                        order.is_lt()
+                    }
+            })
+        });
+        if wins {
+            winner = Some(layer);
         }
     }
-    match smallest {
-        Some(least) => (Some(least.value.clone()), vec![least]),
-        None => (default, Vec::new()),
+    if let Some(winner) = winner {
+        Merged::new(Some(winner.value.clone()), vec![winner])
+    } else if let Some(unbounded) = unbounded {
+        Merged::new(None, vec![unbounded])
+    } else {
+        Merged::new(default, Vec::new())
     }
 }
+
+fn boolean<'r, 'a, N>(
+    default: Option<Json>,
+    rows: &[&'r Layer<'a, N>],
+    strict: bool,
+) -> Merged<'r, 'a, N> {
+    let mut winner: Option<(&'r Layer<'a, N>, bool)> = None;
+    for layer in rows.iter().copied() {
+        let Some(value) = layer.value.as_bool() else {
+            continue;
+        };
+        if winner.is_none_or(|(_, previous)| value == strict || value == previous) {
+            winner = Some((layer, value));
+        }
+    }
+    match winner {
+        Some((layer, value)) => Merged::new(Some(Json::Bool(value)), vec![layer]),
+        None => Merged::new(default, Vec::new()),
+    }
+}
+
+fn stricter<'r, 'a, N>(
+    def: &SettingDef,
+    default: Option<Json>,
+    rows: &[&'r Layer<'a, N>],
+) -> Merged<'r, 'a, N> {
+    let crate::registry::Schema::Choice { values } = def.schema else {
+        return Merged::new(default, Vec::new());
+    };
+    let winner = rows
+        .iter()
+        .copied()
+        .filter_map(|layer| {
+            let value = layer.value.as_str()?;
+            values
+                .iter()
+                .position(|choice| *choice == value)
+                .map(|rank| (layer, rank))
+        })
+        .max_by_key(|(_, rank)| *rank);
+    match winner {
+        Some((layer, _)) => Merged::new(Some(layer.value.clone()), vec![layer]),
+        None => Merged::new(default, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+#[path = "merge/narrowing_tests.rs"]
+mod narrowing_tests;
 
 #[cfg(test)]
 mod tests {
@@ -333,6 +511,54 @@ mod tests {
 
     fn locked<'a>(scope: Scope, node: Option<Id>, value: &'a Json) -> Layer<'a, Id> {
         Layer::at(scope, node, value, true)
+    }
+
+    #[test]
+    fn ask_model_policy_intersects_identities_in_parent_order_and_unset_stays_absent() {
+        // EN: system Ask models A/B > org tries C or reverses B/A; only parent
+        // identities survive, in system order. Remove A to choose B as default.
+        // 中文：系统允许 A/B > 组织尝试 C 或改为 B/A；只能保留父级允许项及顺序，移除 A 才能默认 B。
+        let first = json!({"provider_id":new_id(),"model":"first"});
+        let second = json!({"provider_id":new_id(),"model":"second"});
+        let extra = json!({"provider_id":new_id(),"model":"extra"});
+        let parent = json!([first, second]);
+        let child = json!([second, first, extra]);
+        let node = new_id();
+        let definition = def(keys::ASK_MODELS);
+        assert_eq!(definition.class, Class::Policy);
+        assert_eq!(definition.merge, Merge::Intersect);
+        assert_eq!(
+            resolve(
+                definition,
+                &[
+                    Layer::at(Scope::System, None, &parent, false),
+                    at_node(Scope::Org, node, &child)
+                ]
+            )
+            .value,
+            Some(parent.clone())
+        );
+        let narrowed = json!([second, extra]);
+        assert_eq!(
+            resolve(
+                definition,
+                &[
+                    Layer::at(Scope::System, None, &parent, false),
+                    at_node(Scope::Org, node, &narrowed)
+                ]
+            )
+            .value,
+            Some(json!([second]))
+        );
+        assert_eq!(resolve::<Id>(definition, &[]).value, None);
+        assert!(
+            crate::registry::validate_at(
+                keys::ASK_MODELS,
+                Scope::Org,
+                &json!([{"provider_id":new_id(),"model":"first","params":{"effort":"high"}}])
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -379,13 +605,15 @@ mod tests {
     #[test]
     fn of_the_orgs_on_a_path_the_inner_one_is_nearer() {
         let (root, department) = (new_id(), new_id());
-        let (outer, inner) = (json!(false), json!(true));
+        let (outer, inner) = (json!(30), json!(7));
         let layers = [
             at_node(Scope::Org, root, &outer),
             at_node(Scope::Org, department, &inner),
         ];
-        let resolved = resolve(def(keys::CHAT_ENABLED), &layers);
-        assert_eq!(resolved.value, Some(json!(true)));
+        let definition = def(keys::RETENTION_ARCHIVE_IDLE_DAYS);
+        assert_eq!(definition.merge, Merge::Replace);
+        let resolved = resolve(definition, &layers);
+        assert_eq!(resolved.value, Some(json!(7)));
         assert_eq!(resolved.source.node, Some(department));
     }
 
@@ -438,14 +666,16 @@ mod tests {
     #[test]
     fn of_two_locks_the_one_further_up_decides() {
         let (org, project) = (new_id(), new_id());
-        let (at_system, at_org, at_project) = (json!(false), json!(true), json!(true));
+        let (at_system, at_org, at_project) = (json!(0), json!(7), json!(30));
         let layers = [
             locked(Scope::System, None, &at_system),
             locked(Scope::Org, Some(org), &at_org),
             at_node(Scope::Project, project, &at_project),
         ];
-        let resolved = resolve(def(keys::TERMINAL_ENABLED), &layers);
-        assert_eq!(resolved.value, Some(json!(false)));
+        let definition = def(keys::RETENTION_ARCHIVE_IDLE_DAYS);
+        assert_eq!(definition.merge, Merge::Replace);
+        let resolved = resolve(definition, &layers);
+        assert_eq!(resolved.value, Some(json!(0)));
         assert_eq!(
             resolved.locked_by,
             Some(LockedBy {
@@ -821,15 +1051,15 @@ mod tests {
     #[test]
     fn a_setting_locked_at_the_root_org_decides_three_levels_down() {
         let path: Vec<Id> = (0..4).map(|_| new_id()).collect();
-        let (at_root, deeper) = (json!("members"), json!("off"));
+        let (at_root, deeper) = (json!(30), json!(0));
         let mut layers = vec![locked(Scope::Org, Some(path[0]), &at_root)];
         layers.extend(
             path[1..]
                 .iter()
                 .map(|org| at_node(Scope::Org, *org, &deeper)),
         );
-        let resolved = resolve(def(keys::CHAT_DIRECT), &layers);
-        assert_eq!(resolved.value, Some(json!("members")));
+        let resolved = resolve(def(keys::RETENTION_ARCHIVE_IDLE_DAYS), &layers);
+        assert_eq!(resolved.value, Some(json!(30)));
         assert_eq!(resolved.locked_by.and_then(|lock| lock.node), Some(path[0]));
     }
 }

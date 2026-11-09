@@ -78,7 +78,7 @@ describe('one provider usage card', () => {
   });
   it('retains the vendor’s decimal scale and unit for extra spending', () => {
     const provider = planProvider();
-    provider.facts.extra_usage = { enabled: true, used: 1234, limit: 2000, used_percent: 61.7, unit: 'GBP', decimal_places: 2, disabled_reason: null, limit_reached: false };
+    provider.facts.extra_usage = { enabled: true, used: '1234', limit: '2000', used_percent: 61.7, unit: 'GBP', decimal_places: 2, disabled_reason: null, limit_reached: false };
     provider.facts_state.extra_usage = 'told';
     show(<ProviderUsageCard provider={provider} />);
     expect(screen.getByText('12.34 GBP used of 20 GBP')).toBeInTheDocument();

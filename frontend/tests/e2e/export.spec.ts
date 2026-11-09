@@ -358,16 +358,18 @@ test.describe('what may be read and not taken away', () => {
     await expect(ask).toContainText('Asked Ada Lovelace. You will be told when they answer.');
   });
 
-  test('somebody who may take it away has it offered, and a viewer’s row menu leaves out what they may not do', async ({ page }) => {
+  test('a visible row keeps Export with its reason for a viewer who may not take it away', async ({ page }) => {
     await steer('/bar', { username: 'dora', permission: 'thread.export', object: ACME.repro });
     await signIn(page, PEOPLE.dora);
     // The left bar opens the topic the thread lies in, so that both threads are in it.
     await page.goto(`/thread/${ACME.mainThread}`);
-    // In the left bar the entry is left out for the thread dora may not export, and there for the one she may.
+    // In the left bar the same known Export action explains the refused thread and stays usable for the allowed one.
     await page.getByRole('button', { name: 'Actions for Repro' }).first().click();
     await expect(page.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
     await expect(page.getByText(/Checking what you can do/)).toHaveCount(0);
-    await expect(page.getByRole('menuitem', { name: 'Export…' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Export…' })).toHaveAttribute('aria-disabled', 'true');
+    await expect(page.getByRole('menuitem', { name: 'Export…' })).toContainText('Taking this away as a file is for people Ada Lovelace names');
+    await expect(page.getByRole('menuitem', { name: 'Request access' })).toBeVisible();
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Actions for Main thread' }).first().click();
     await expect(page.getByRole('menuitem', { name: 'Export…' })).toBeVisible();

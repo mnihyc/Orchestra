@@ -216,10 +216,17 @@ test('several people make a group with a name; an admin who leaves reads on, rea
   await expect(page.getByRole('heading', { name: 'Release crew' })).toBeVisible();
   await expect(page.getByText('Ada Lovelace made this group')).toBeVisible();
   await page.getByRole('button', { name: 'Group', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'People in this group' }).click();
-  const people = page.getByRole('dialog', { name: 'People in this group' });
+  await page.getByRole('menuitem', { name: 'Members' }).click();
+  const people = page.getByRole('dialog', { name: 'Members' });
   await expect(people.getByText('Dora Developer')).toBeVisible();
   await expect(people.getByText('Linus Pauling')).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  // A group keeps a manager when its first manager leaves.
+  await page.getByRole('button', { name: 'Group', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Members' }).click();
+  await page.getByRole('dialog', { name: 'Members' }).getByRole('combobox', { name: 'Role for Dora Developer' }).click();
+  await page.getByRole('option', { name: 'Manager', exact: true }).click();
   await page.keyboard.press('Escape');
 
   // An admin of the org who leaves the group is no longer in it, and may still read it as an admin does.

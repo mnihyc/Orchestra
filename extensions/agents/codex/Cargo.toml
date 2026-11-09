@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+orch-api-contract.workspace = true
 orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-plugin-contract.workspace = true
@@ -32,7 +33,7 @@ tracing.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
-orch-api-contract.workspace = true
+sha2.workspace = true      # integrity of the published native protocol schema fixtures
 orch-conformance.workspace = true
 orch-testkit.workspace = true
 axum.workspace = true       # the relay of the check against a real model, in tests/common/relay.rs

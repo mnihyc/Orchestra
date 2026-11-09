@@ -12,8 +12,10 @@ reader_owned AS MATERIALIZED (
   SELECT n.*, t.state AS thread_state, t.last_activity_at AS thread_activity_at,
          CASE WHEN pn.id IS NULL AND pc.id IS NULL THEN page.value ELSE
            jsonb_set(jsonb_set(page.value,'{participating}',
-             to_jsonb(pn.id IS NOT NULL OR COALESCE((page.value->>'participating')::boolean,false))),
-             '{chat,participating}',to_jsonb(pc.id IS NOT NULL OR COALESCE((page.value->'chat'->>'participating')::boolean,false))) END AS "grant"
+             to_jsonb(COALESCE((page.value->>'scope_main')::boolean,true)
+               AND (pn.id IS NOT NULL OR COALESCE((page.value->>'participating')::boolean,false)))),
+             '{chat,participating}',to_jsonb(COALESCE((page.value->>'scope_chat')::boolean,true)
+               AND (pc.id IS NOT NULL OR COALESCE((page.value->'chat'->>'participating')::boolean,false)))) END AS "grant"
     -- node_id is unique. Keep this lookup parameterized when a parent probes its first visible child;
     -- flattening it lets the planner scan the whole thread table once per parent.
     FROM nodes n LEFT JOIN LATERAL (
@@ -31,6 +33,6 @@ reader_owned AS MATERIALIZED (
              CASE WHEN n.org_id = ANY(__ROOTS__::uuid[]) AND n.id IN (SELECT object_id FROM reader_owned)
                THEN 'owned' ELSE 'ordinary' END],
            '{"view":false,"named":false,"access":"path_only","share":false,"settings":false}'::jsonb) value) page
-   WHERE n.deleted_at IS NULL AND t.side_of IS NULL
+   WHERE n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
 )

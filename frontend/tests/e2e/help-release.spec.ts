@@ -1,3 +1,5 @@
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 /** Decision guidance, exact setting help, and a real-target walk that never opens a port for the reader. */
 import { expect, test, type Page } from '@playwright/test';
 import { ACME, RUNS_ON } from '../doubles/fixtures';
@@ -81,3 +83,48 @@ test('an exact thread source link reads its existing setting editor under curren
   await expect(source.locator('[data-setting="collab.attribution"]')).toBeVisible();
   await expect(source.locator('[data-setting]')).toHaveCount(1);
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`finds the native offline turn deadline help (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const title = locale === 'en' ? 'Offline turn deadline' : '离线轮次截止时间';
+    const description = locale === 'en'
+      ? 'End the active turn after this many offline seconds. No deadline keeps waiting. Each outage keeps the setting it began with.'
+      : '离线达到此秒数后结束当前轮次。不设截止时间则继续等待。每次离线期间沿用该次离线开始时的设置。';
+    await page.goto('/help');
+    await page.getByRole('searchbox', { name: locale === 'en' ? 'Search the help' : '搜索帮助' }).fill('threads.offline_deadline');
+    await page.getByRole('button', { name: new RegExp(`^${title}`) }).click();
+    await expect(page.getByRole('heading', { name: title, level: 1, exact: true })).toBeVisible();
+    await expect(page.getByText(description, { exact: true })).toBeVisible();
+    await expect(page.getByText('threads.offline_deadline', { exact: true })).toBeVisible();
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`finds the running-thread guide in its authored work group (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const words = locale === 'en' ? english : chinese;
+    const title = locale === 'en' ? 'Follow a running thread' : '关注正在运行的线程';
+    await page.goto('/help');
+    await page.getByRole('tab', { name: new RegExp(`^${words.help.parts.articles}`) }).click();
+    const group = page.getByRole('heading', { name: words.help.articleGroups.work, exact: true }).locator('..');
+    await group.getByRole('button', { name: new RegExp(`^${title}`) }).click();
+    await expect(page.getByRole('heading', { name: title, exact: true, level: 1 })).toBeVisible();
+  });
+}

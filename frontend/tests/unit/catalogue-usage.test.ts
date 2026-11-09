@@ -31,6 +31,9 @@ const RUNTIME_MESSAGES: readonly RuntimeMessages[] = [
     ...['screen', 'navigation', 'resource-navigation', 'outline', 'history', 'chat', 'documents', 'people', 'changes', 'files', 'git', 'environment', 'processes', 'resources', 'ports', 'browsers', 'displays', 'parameters', 'usage', 'knowledge', 'given', 'diagnostics', 'terminal', 'comments', 'links', 'help', 'browser', 'vnc', 'file', 'difference', 'search-result'].flatMap((name) => ['name', 'description'].map((field) => `workbench.choices.views.${name}.${field}`)),
     ...['navigation', 'resource-navigation', 'conversation', 'team', 'code', 'environment', 'agent', 'document', 'help'].flatMap((name) => ['name', 'description'].map((field) => `workbench.choices.containers.${name}.${field}`)),
   ] },
+  { source: 'features/summaries/model.ts', reason: 'summaryActionKey names each summary action for its subject: the plain summary box, the catch-up box and the chat title box', keys: [
+    ...['ask', 'refresh', 'choose', 'details'].flatMap((action) => [`summaryBox.${action}`, `summaryBox.catchUpActions.${action}`, `summaryBox.chatTitleActions.${action}`]),
+  ] },
   { source: 'features/resources/ResourceNames.tsx', reason: 'MCP/mount list prefixes selected by kind, followed by the five literal property names in that shared view', keys: [
     'resourceDetails.mcp.list.lead', 'resourceDetails.mcp.list.search', 'resourceDetails.mcp.list.none', 'resourceDetails.mcp.list.noneLead', 'resourceDetails.mcp.list.noMatch',
     'resourceDetails.mount.list.lead', 'resourceDetails.mount.list.search', 'resourceDetails.mount.list.none', 'resourceDetails.mount.list.noneLead', 'resourceDetails.mount.list.noMatch',

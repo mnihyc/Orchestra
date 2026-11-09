@@ -1,4 +1,242 @@
 {
+  "modelList": {
+    "add": "Add model",
+    "entry": "Model {{number}}",
+    "moveUp": "Move {{model}} up",
+    "moveDown": "Move {{model}} down",
+    "remove": "Remove {{model}}"
+  },
+  "ask": {
+    "blockedNotConfigured": "Ask models have not been configured for this organization",
+    "blockedEmpty": "Ask has no configured models in this organization",
+    "blockedNoUsableModels": "None of this organization’s configured Ask models is usable",
+    "blockedByPolicy": "Ask models are excluded by this organization’s policy",
+    "configureModels": "Configure Ask models",
+    "modelsFromAbove": "This list comes from above. Remove entries to narrow it.",
+    "threadProgram": "Read-only questions",
+    "startProgram": "Start read-only questions",
+    "chooseNativeProgram": "Choose an agent profile",
+    "programAudience": "Thread access",
+    "programPrivate": "Private",
+    "programDefaults": "Use this topic’s default access",
+    "threadProgramDescription": "Answers using the sender’s current read access in this organization.",
+    "noEnvironment": "No environment needed",
+    "forkTitle": "Fork {{name}}",
+    "forkDefaultDestination": "Use this thread’s topic or an authorized default",
+    "export": "Export conversation",
+    "actions": {
+      "noConversation": "No conversation yet",
+      "checking": "Checking conversation",
+      "unavailable": "Conversation unavailable",
+      "answerRunning": "Wait for the answer to finish",
+      "exportDenied": "Export is not allowed for this conversation",
+      "keepDenied": "Keeping this conversation is not allowed",
+      "exporting": "Exporting conversation"
+    },
+    "inspectOrg": "Inspect this organization’s conversations",
+    "inspectEnable": "Enable As admin to inspect this conversation",
+    "imageReference": "This model receives a linked file reference",
+    "waitForFiles": "Wait for the uploads, then close this view",
+    "modelExclusion_disabled": "Disabled by the provider",
+    "modelExclusion_provider_unavailable": "The provider is unavailable",
+    "modelExclusion_generation_unsupported": "The provider has no generation interface",
+    "modelExclusion_no_use": "Your provider access does not include this model",
+    "modelExclusion_parameters_unavailable": "The model’s default parameters are unavailable here",
+    "modelExclusion_excluded_by_policy": "Excluded by this organization’s policy",
+    "conversationOwner": "The conversation’s owner",
+    "toolSearch": "Searching sources",
+    "toolList": "Listing sources",
+    "toolHistory": "Reading history",
+    "toolDocs": "Reading the guide",
+    "toolFind": "Finding sources",
+    "toolRead": "Reading a source",
+    "guide": "Ask about your work",
+    "helpWhat": "Ask reads work in one organization using your current access and cites its sources.",
+    "helpChoice": "Use Side thread for the working agent’s own conversation; Ask uses an API model and your applicable usage limits.",
+    "title": "Ask",
+    "about": "A personal, read-only conversation about one organization",
+    "open": "Ask about this page",
+    "shortcut": "Open Ask",
+    "history": "History",
+    "new": "New conversation",
+    "newConversation": "New conversation",
+    "keep": "Keep as thread",
+    "scope": "In",
+    "organization": "Organization",
+    "pageContext": "Page: {{name}}",
+    "noOrg": "Choose an organization to ask about",
+    "ready": "Ready",
+    "running": "Answering",
+    "stopped": "Stopped",
+    "closed": "Access ended",
+    "kept": "Kept as thread",
+    "empty": "Ask about this page or your organization",
+    "deleted": "This conversation has expired",
+    "conversation": "Ask conversation",
+    "composer": "Message Ask",
+    "placeholder": "Ask a question…",
+    "resources": "Mention a resource",
+    "noResources": "No matching resources",
+    "model": "Model and effort",
+    "defaultModel": "Default",
+    "noModels": "No API models available here",
+    "modelUnavailable": "This model is unavailable here",
+    "sources": "Sources",
+    "sourceUnavailable": "Source no longer available",
+    "copy": "Copy answer",
+    "retry": "Retry answer",
+    "question": "Question",
+    "findResource": "Find a resource",
+    "older": "Load earlier messages",
+    "noHistory": "No conversations yet",
+    "retention": "Kept for {{days}} days after the last message",
+    "expires": "Expires",
+    "adminNotice": "This organization’s admins can inspect and export this conversation",
+    "inspection": "Read-only admin inspection",
+    "readOnlyTools": "Reads as you · cites sources · makes no changes",
+    "paidBy": "Paid by",
+    "settingOwner": "The setting’s owner",
+    "privateThread": "Creates a Private permanent thread in this organization",
+    "destination": "Destination topic",
+    "defaultDestination": "Use the page’s topic or an authorized default",
+    "contextNoRoom": "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves.",
+    "contextTooLong": "This conversation is too long for {{model}}; start a new one or keep it as a thread."
+  },
+  "viewWindow": {
+    "floating": "Open in a floating window",
+    "dock": "Dock",
+    "popOut": "Pop out",
+    "maximize": "Maximize",
+    "restore": "Restore size",
+    "move": "Move {{name}} window",
+    "resize": "Resize {{name}} window"
+  },
+  "orgTerms": {
+    "title": "Terms",
+    "accept": "I accept the terms of {{org}}",
+    "unavailable": "Terms could not be read",
+    "changed": "Terms changed · review and accept again",
+    "accepted": "Accepted the terms",
+    "preview": "Preview",
+    "none": "No terms"
+  },
+  "linkSharing": {
+    "separator": ",",
+    "settingsTitle": "Links",
+    "preference": "Share viewing when I send a link",
+    "lead": "Share viewing with",
+    "label": "Share viewing with {{people}}, {{agents}}",
+    "people_one": "{{number}} person",
+    "people_other": "{{number}} people",
+    "agents_one": "{{number}} agent",
+    "agents_other": "{{number}} agents",
+    "checking": "Checking sharing…",
+    "unavailable": "Sharing could not be checked",
+    "skip": "Skip sharing",
+    "lockedOff": "Viewing sharing is off here",
+    "changed": "Sharing changed · Review and send again",
+    "membership": "Adds members to",
+    "review": "Some viewing access needs review",
+    "shared": "Shared with"
+  },
+  "mcpSwitch": {
+    "use": "Use {{name}} here",
+    "saving": "Saving…",
+    "unavailable": "Enabled servers could not be read",
+    "readOnly": "Cannot change this setting",
+    "locked": "Setting locked",
+    "accepted": "Updated · refreshing",
+    "available": "Available MCP servers",
+    "noneAvailable": "No MCP servers available",
+    "where": "Switched on in",
+    "placeCount_one": "{{number}} place",
+    "placeCount_other": "{{number}} places",
+    "observed": "Observed places: {{number}}",
+    "nowhere": "None",
+    "place": "Place",
+    "needsUse": "Needs Use on this server"
+  },
+  "mcpWords": {
+    "forget": "Forget",
+    "forgetTitle": "Forget {{name}}?",
+    "details": "Details",
+    "applies": {
+      "immediately": "Applies now",
+      "next_turn": "Before the next turn",
+      "next_session": "At the next session"
+    },
+    "reasons": {
+      "disabled": "This server is switched off",
+      "otherEnvironment": "This server belongs to another environment",
+      "noMachine": "No machine is available",
+      "otherMachine": "Runs only on the machine it was imported from",
+      "addOff": "Adding MCP servers is off on this machine",
+      "importOff": "Imported MCP servers are off on this machine",
+      "nameConflict": "Another enabled server has this name",
+      "accessLost": "The person who switched it on no longer has access",
+      "capability": "A required capability is not allowed here",
+      "commandMissing": "The command is not installed on its machine",
+      "offline": "The machine is offline",
+      "failed": "The MCP server could not start",
+      "unavailable": "This MCP server is unavailable"
+    }
+  },
+  "mcpImport": {
+    "here_one": "{{program}} on {{machine}} · {{number}} MCP configuration",
+    "here_other": "{{program}} on {{machine}} · {{number}} MCP configurations",
+    "importEnable": "Import and switch on here",
+    "chooseNames": "Choose names before importing together",
+    "review": "Review names",
+    "unavailable": "Import is unavailable",
+    "title": "Import MCP server",
+    "import": "Import",
+    "imported": "Imported",
+    "name": "Name in Orch",
+    "nameInvalid": "Use 2–32 lowercase letters, numbers, _ or -",
+    "environment": "Environment",
+    "program": "Program",
+    "scope": "Configuration",
+    "transport": "Connection",
+    "keeps": "Orch keeps",
+    "secrets": "Secrets",
+    "stayOnMachine": "Stay on the machine",
+    "enableHere": "Switch on here",
+    "notOwner": "Only the machine owner can import",
+    "policyOff": "MCP import is off on this machine",
+    "found": "Found in the agents’ own configuration",
+    "empty": "No MCP servers found",
+    "fromMachine": "Import from a machine",
+    "create": "New server",
+    "noEnvironment": "No environment on a machine is available",
+    "chooseEnvironment": "Choose an environment",
+    "environments": "Environments",
+    "scopes": {
+      "user": "User configuration",
+      "project": "Project configuration"
+    },
+    "transports": {
+      "stdio": "Command (stdio)",
+      "http": "HTTP"
+    },
+    "shape": {
+      "stdio": "Name, command and argument structure",
+      "http": "Name, URL and connection structure"
+    }
+  },
+  "linkCards": {
+    "sharing": "Sharing: {{access}}",
+    "share": "Share…",
+    "sharingChecking": "Checking sharing",
+    "sharingUnavailable": "Sharing details unavailable",
+    "sharingRestricted": "Sharing details restricted",
+    "sharingUnsupported": "Sharing unsupported",
+    "sharingReadOnly": "Read-only sharing"
+  },
+  "linkActions": {
+    "referenceUnavailable": "Message reference unavailable",
+    "selectLines": "Select lines",
+    "copyLines": "Copy link to these lines"
+  },
   "adminDefaults": {
     "reset": "Reset to shipped access",
     "resetTitle": "Reset system access defaults?",
@@ -21,7 +259,8 @@
     "retrying": "Retrying {{environment}}…",
     "unavailable": "{{environment}} is unavailable.",
     "held": "Your message is kept.",
-    "failedChoice": "Unavailable after a failed start; choose another environment or retry it from its page."
+    "failedChoice": "Unavailable after a failed start; choose another environment or retry it from its page.",
+    "environmentManager": "Ask {{who}} or an environment manager"
   },
   "switchChoice": {
     "picker": "Agent and provider",
@@ -66,6 +305,8 @@
   "temporary": {
     "name": "Temporary",
     "description": "Delete this environment and its owned files after idle time, or when the thread that made it is archived. Existing directories are kept.",
+    "idleDescription": "Delete this environment and its owned files after idle time. Existing directories are kept.",
+    "idleConsent": "Deletes owned files after the idle limit, with advance warning. Choose Keep before the deadline to cancel deletion.",
     "consent": "Deletes owned files when the idle limit or thread lifetime ends, with at least an hour’s warning first.",
     "keep": "Keep",
     "kept": "Kept; automatic deletion cancelled",
@@ -84,6 +325,7 @@
     "retry": "Try export again"
   },
   "changeReady": {
+    "chooseNativeBinding": "Choose a provider, agent profile and model.",
     "applying": "Starting the change…",
     "unchanged": "Choose something to change",
     "chooseModel": "Choose a model",
@@ -200,6 +442,7 @@
       "label": "As admin: {{state}}",
       "enable": "Turn on As admin",
       "description": "Use your administrator reach in this session. Your agents keep their own access.",
+      "leftPage": "You left admin mode; this page needed it.",
       "failed": "The admin mode could not be changed.",
       "stateOn": "On",
       "stateOff": "Off"
@@ -230,6 +473,26 @@
     }
   },
   "choiceCatalog": {
+    "askPayer": {
+      "person": {
+        "name": "Person asking",
+        "description": "The person asking pays; usage is attributed to that person."
+      },
+      "setter": {
+        "name": "Setting’s writer",
+        "description": "The person who set this value pays; usage remains attributed to the person asking."
+      }
+    },
+    "promptCacheTtl": {
+      "5m": {
+        "name": "5 minutes",
+        "description": "Ask the program to use a five-minute prompt cache lifetime."
+      },
+      "1h": {
+        "name": "1 hour",
+        "description": "Ask the program to use a one-hour prompt cache lifetime; cache writes may cost more."
+      }
+    },
     "environmentLifetime": {
       "lasting": {
         "name": "Lasting",
@@ -786,24 +1049,36 @@
     },
     "agentStep": {
       "none": {
-        "name": "None",
+        "name": "—",
         "description": "Give no access in this area."
       },
       "view": {
-        "name": "View",
+        "name": "Can view",
         "description": "Let agents read this area."
       },
       "write": {
-        "name": "Write",
+        "name": "Can write",
         "description": "Let agents write messages in this area."
       },
       "edit": {
-        "name": "Edit",
+        "name": "Can edit",
         "description": "Let agents edit documents in this area."
       },
       "manage": {
-        "name": "Manage",
-        "description": "Let agents manage this area, including its access."
+        "name": "Can manage",
+        "description": "Manage documents, moderate chat messages, or archive, fork and delete threads. Permission pages and ownership stay separate."
+      },
+      "post": {
+        "name": "Can post",
+        "description": "Read and post messages in the shared chats."
+      },
+      "send": {
+        "name": "Can send",
+        "description": "Read and send messages to the shared threads."
+      },
+      "read": {
+        "name": "$t(choiceCatalog.agentStep.view.name)",
+        "description": "$t(choiceCatalog.agentStep.view.description)"
       }
     },
     "period": {
@@ -1092,6 +1367,10 @@
       "place": {
         "name": "Place",
         "description": "Group notifications by the place they belong to."
+      },
+      "kind": {
+        "name": "Kind",
+        "description": "Group notifications by kind."
       }
     },
     "discussionLevel": {
@@ -1762,48 +2041,6 @@
         "description": "Apply the selected update when this unit next starts."
       }
     },
-    "broadcastReach": {
-      "topic": {
-        "name": "Topic",
-        "description": "Announce to threads in the current topic."
-      },
-      "project": {
-        "name": "Project",
-        "description": "Announce to threads in the current project where the agent may take part."
-      },
-      "org": {
-        "name": "Organization",
-        "description": "Announce to threads in the nearest organization where the agent may take part."
-      }
-    },
-    "agentReach": {
-      "none": {
-        "name": "None",
-        "description": "Do not offer this reach to agents by this setting."
-      },
-      "topic": {
-        "name": "Topic",
-        "description": "Use the visible work in this topic as the setting allows."
-      },
-      "project": {
-        "name": "Project",
-        "description": "Use the visible work in this project, including its readable folders, as allowed."
-      }
-    },
-    "agentDocumentAccess": {
-      "none": {
-        "name": "None",
-        "description": "Give no automatic document access through this setting."
-      },
-      "read": {
-        "name": "Read",
-        "description": "Let the selected agents read the documents covered by this setting."
-      },
-      "write": {
-        "name": "Write",
-        "description": "Let the selected agents change documents within the permitted reach."
-      }
-    },
     "indexMode": {
       "full": {
         "name": "Indexed",
@@ -1896,10 +2133,6 @@
       "summarizer": {
         "name": "Summarizer",
         "description": "Use the configured summarizer for this generated text."
-      },
-      "rollup": {
-        "name": "Rollup",
-        "description": "Use the configured rollup to summarize the topic's work."
       }
     },
     "automationTrigger": {
@@ -1914,6 +2147,18 @@
       "interval": {
         "name": "Interval",
         "description": "Consider the configured automation at its chosen interval."
+      },
+      "content_changed": {
+        "name": "Content changed",
+        "description": "Refresh after document content changes."
+      },
+      "message_posted": {
+        "name": "New message",
+        "description": "Refresh after a chat message arrives."
+      },
+      "child_changed": {
+        "name": "Child changed",
+        "description": "Refresh after readable work in the topic changes."
       }
     },
     "capabilityDecision": {
@@ -2087,7 +2332,7 @@
       },
       "manage_shared": {
         "name": "Manage shared",
-        "description": "Review and confirm a permitted management act on shared work. Ambiguous document names are refused with candidates before anything changes."
+        "description": "Create document folders, copy, move and restore directly. Document deletion and thread/chat management require a preview and confirmation. Ambiguous document names are refused with candidates before anything changes."
       },
       "send_message": {
         "name": "Send message",
@@ -2330,6 +2575,10 @@
       "default": {
         "name": "Default",
         "description": "Use the first supported way to run this agent here."
+      },
+      "control_plane": {
+        "name": "Run in Orch",
+        "description": "The built-in program runs in Orch without an environment."
       }
     },
     "serviceTier": {
@@ -2737,6 +2986,114 @@
         "name": "Off",
         "description": "Use the initial graph breadth without an iterative scan."
       }
+    },
+    "agentReach": {
+      "nothing": {
+        "name": "$t(agentAccess.where.nothing)",
+        "description": "$t(agentAccess.reach.nothing)"
+      },
+      "thread": {
+        "name": "$t(agentAccess.where.thread)",
+        "description": "$t(agentAccess.reach.thread)"
+      },
+      "topic": {
+        "name": "$t(agentAccess.where.topic)",
+        "description": "$t(agentAccess.reach.topic)"
+      },
+      "project": {
+        "name": "$t(agentAccess.where.project)",
+        "description": "$t(agentAccess.reach.project)"
+      }
+    },
+    "webSearch": {
+      "indexed": {
+        "name": "Indexed",
+        "description": "Use the program's indexed web search where supported."
+      },
+      "service": {
+        "name": "Service",
+        "description": "Use Orch's search and page-reading tools through an enabled provider service. Native search is off; the service provider may charge per call."
+      },
+      "disabled": {
+        "name": "Disabled",
+        "description": "Do not offer the native web search tool."
+      },
+      "cached": {
+        "name": "Cached",
+        "description": "Use indexed content without live web retrieval where supported."
+      },
+      "live": {
+        "name": "Live",
+        "description": "Let the model search the public web when needed."
+      }
+    },
+    "backgroundWake": {
+      "on": {
+        "name": "On",
+        "description": "Wake the agent when background work finishes."
+      },
+      "off": {
+        "name": "Off",
+        "description": "Keep Codex results for the next input. Claude Code commands run in the foreground."
+      }
+    },
+    "tunnelGateway": {
+      "lowest_combined_rtt": {
+        "name": "Lowest combined round trip",
+        "description": "Compare fresh measurements from both machines; use the executor’s gateway when samples are missing or stale."
+      },
+      "executor": {
+        "name": "Executor’s gateway",
+        "description": "Keep new tunnels on the executor’s primary gateway."
+      }
+    },
+    "pageFetch": {
+      "off": {
+        "name": "Off",
+        "description": "Do not offer native or managed page fetching for this capability."
+      },
+      "on": {
+        "name": "Native",
+        "description": "Use the program or model page reader where its declared access supports it."
+      },
+      "service": {
+        "name": "Service",
+        "description": "Use the explicitly selected fetch backend through Orch. Current provider Use and usage caps still apply."
+      }
+    },
+    "imageGeneration": {
+      "off": {
+        "name": "Off",
+        "description": "Do not offer an image generation tool."
+      },
+      "on": {
+        "name": "Native",
+        "description": "Use the program or model image tool where the selected access supports it."
+      },
+      "service": {
+        "name": "Service",
+        "description": "Use the explicitly selected backend through Orch and turn native image generation off."
+      }
+    },
+    "agentSchedules": {
+      "on": {
+        "name": "On",
+        "description": "Let the agent schedule future inputs in this thread. Current permissions and provider allowances still apply."
+      },
+      "off": {
+        "name": "Off",
+        "description": "Do not let this thread’s agent schedule future inputs."
+      }
+    },
+    "webSearchBackend": {
+      "model": {
+        "name": "Model",
+        "description": "Use an enabled model’s native web search."
+      },
+      "api": {
+        "name": "API",
+        "description": "Use the provider’s enabled search service and optional fetch service."
+      }
     }
   },
   "inventoryChoices": {
@@ -2975,7 +3332,6 @@
     "unavailable": "This machine has not offered the required service.",
     "source": "the source machine",
     "automatic": "an available destination",
-    "oldDirectory": "The previous connection closes. The source data remains as a recovery copy; existing directories are not changed.",
     "inheritedTemplate": "Use the place's template",
     "inheritedTemplateAbout": "Use the template set for this environment's home, if one is set."
   },
@@ -3045,6 +3401,24 @@
     "section": "Who may make projects, topics and threads"
   },
   "settingRegistry": {
+    "org": {
+      "terms": {
+        "title": "Terms for people who join",
+        "description": "Markdown terms for joining this org or accepting a guest invitation to its places or chats. Root terms come first, followed by each nearer org’s terms. Empty text adds no terms; existing members are not asked to accept later edits."
+      }
+    },
+    "api": {
+      "idempotency_window": {
+        "title": "Creation replay window",
+        "description": "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased."
+      }
+    },
+    "message": {
+      "body_max_chars": {
+        "title": "Message length",
+        "description": "How many characters an administrator message may contain; the default can be changed at the system or organization."
+      }
+    },
     "agent": {
       "model": {
         "title": "Model",
@@ -3084,6 +3458,22 @@
       }
     },
     "agents": {
+      "page_fetch": {
+        "title": "Page fetch",
+        "description": "Program default when unset. Native uses a supported page reader; Service uses the selected fetch backend and turns native page fetching off. Web search does not enable page fetch."
+      },
+      "image_generation": {
+        "title": "Image generation",
+        "description": "Program default when unset. Native uses a supported native image tool; Service uses the selected backend and turns native image generation off. Current provider Use is checked when it runs."
+      },
+      "web_search_backend": {
+        "title": "Web search backend",
+        "description": "Choose an enabled provider and native-search model, or that provider's search and fetch services. Unset offers no paid service automatically."
+      },
+      "prompt_cache_ttl": {
+        "title": "Prompt cache lifetime",
+        "description": "An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it."
+      },
       "subagents_at_once": {
         "title": "Sub-agents at once",
         "description": "How many sub-agents the agent program may run at once. The smallest value at this place or above applies. An unsupported control says why it does not apply."
@@ -3127,6 +3517,10 @@
       "harness_trust_mirror": {
         "title": "Trust mirror checksums",
         "description": "Allow the release mirror to publish executable checksums of its own. These builds are labelled as mirror checksums, not vendor checksums."
+      },
+      "image_generation_backend": {
+        "title": "Image generation backend",
+        "description": "Choose an exact declared route and enabled provider offering. Unset selects no paid service. Configuration holds references, never provider credentials."
       }
     },
     "thread": {
@@ -3235,6 +3629,10 @@
       "subscription_sharing": {
         "title": "Subscriptions shared",
         "description": "The agent programs whose subscriptions may be used by people other than their owner."
+      },
+      "model_groups_max": {
+        "title": "Model groups",
+        "description": "The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept."
       }
     },
     "collab": {
@@ -3346,6 +3744,10 @@
       }
     },
     "exec": {
+      "version_overrides": {
+        "title": "Any agent version",
+        "description": "Machine program paths and versions that an environment manager allows with any agent version. A changed path or version needs approval again."
+      },
       "offers": {
         "title": "Exec offers",
         "description": "How an agent running with its provider may run tools in this environment, in the order tried."
@@ -3363,20 +3765,36 @@
       "calls_per_minute": {
         "title": "Tool calls a minute",
         "description": "How many calls of Orch's tools one thread's agent may make in a minute."
+      },
+      "owner_reads": {
+        "title": "Personal read tools",
+        "description": "Let the thread use its owner’s current access for open, search, find_operation and read, including when shared. Off by default. The audience banner names who can see or act and says personal reads are visible to them. Every call checks the option, current access and organization. Sharing earlier results still requires confirmation. orch_docs is always available."
+      },
+      "search_query_chars": {
+        "title": "Shared search query budget",
+        "description": "The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries."
+      },
+      "search_results": {
+        "title": "Shared search result budget",
+        "description": "The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation."
+      },
+      "search_context": {
+        "title": "Shared search context budget",
+        "description": "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context."
       }
     },
     "sharing": {
-      "agent_reach": {
-        "title": "Agents' reach",
-        "description": "Which other threads the agents here may read without anybody sharing them: none, those of their topic, or those of their project."
-      },
-      "agent_documents": {
-        "title": "Topic documents",
-        "description": "Whether agents may read or also edit and create public documents beside their topic and its main threads; private documents, conversations, chats, management and Export keep their own rules."
+      "on_link": {
+        "title": "Share viewing on send",
+        "description": "The default viewing-share choice for links sent here. A person can switch this off for themselves."
       },
       "snapshot_max_bytes": {
         "title": "Largest copy",
         "description": "The largest copy that may be shared with an agent in one request, in bytes."
+      },
+      "allow_copy_out": {
+        "title": "Copies to other orgs",
+        "description": "Whether things here may be duplicated or moved into another org."
       },
       "allow_external": {
         "title": "Owners share outside",
@@ -3415,10 +3833,6 @@
       "rate_per_hour": {
         "title": "Announcements an hour",
         "description": "How many announcements one thread's agent may send in a rolling hour; 0 allows none."
-      },
-      "agent_scope": {
-        "title": "Announcement reach",
-        "description": "How far an agent's announcement may reach: its topic, its project or its nearest org."
       }
     },
     "export": {
@@ -3704,17 +4118,9 @@
         "title": "Titles",
         "description": "How automatic titles are written: no title, the first input, the agent’s title, or a summary."
       },
-      "description": {
-        "title": "Descriptions",
-        "description": "Whether the summarizer keeps a description as live progress."
-      },
       "tags": {
         "title": "Tags",
         "description": "Whether the summarizer sets a place's tags."
-      },
-      "topic_rollup": {
-        "title": "Topic description",
-        "description": "Whether a topic's description is summed up from those of its threads."
       },
       "summarizer": {
         "title": "Summarizer",
@@ -3722,7 +4128,7 @@
       },
       "triggers": {
         "title": "Triggers",
-        "description": "When automatic titles and descriptions are written again: after a turn, at a milestone or at intervals, and how often at most."
+        "description": "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most."
       }
     },
     "usage": {
@@ -3762,7 +4168,7 @@
       },
       "group_mentions": {
         "title": "Role and group mentions",
-        "description": "Who may name role and group audiences among current readers: chat writers, or chat managers; the creator manages a group chat."
+        "description": "Who may name role and group audiences among current readers: chat writers, or its current managers for a group chat."
       },
       "attachment_max_bytes": {
         "title": "Attachment size",
@@ -3811,10 +4217,6 @@
       "files_max_bytes": {
         "title": "Files together",
         "description": "The most the files of one document here may come to together, in bytes."
-      },
-      "description_chars": {
-        "title": "Document description length",
-        "description": "Characters the summarizer may write for a document's description."
       }
     },
     "documents": {
@@ -4221,6 +4623,119 @@
       "handoff_input_share": {
         "title": "Summary input share",
         "description": "How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends: the newest turns first, older ones as their one-line index."
+      },
+      "targets": {
+        "title": "Summary targets",
+        "description": "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries."
+      },
+      "follow_interval_secs": {
+        "title": "Summary follow interval",
+        "description": "Free reads while a summary is eligible or running; future work waits until its due time."
+      },
+      "read_batch_size": {
+        "title": "Summary read batch",
+        "description": "Distinct source targets in one stored search-summary window; further targets continue."
+      }
+    },
+    "threads": {
+      "agent_schedules": {
+        "title": "Agent schedules",
+        "description": "Let the agent schedule visible future inputs on this thread. Off by default; current permissions and provider allowances apply to every run.",
+        "keywords": [
+          "schedule",
+          "wake",
+          "cron",
+          "计划",
+          "唤醒"
+        ]
+      },
+      "agent_schedule_hours": {
+        "title": "Agent schedule duration",
+        "description": "Default lifetime in hours for recurring agent schedules. An explicit end may be later; this is a default, not a cap."
+      },
+      "agent_schedule_runs": {
+        "title": "Agent schedule runs",
+        "description": "Default occurrence count for recurring agent schedules. The agent may choose another positive count; this is a default, not a cap."
+      },
+      "agent_access": {
+        "title": "Agent access",
+        "description": "The initial reach and area levels shown when creating a thread. The creator confirms what they may give. Applies to new threads, without rewriting existing grants."
+      },
+      "background_wake": {
+        "title": "Background wake",
+        "description": "Wake when background tasks or subagents finish. Off keeps Codex results for the next input. Claude Code background tasks are not offered and commands run in the foreground. Changes apply to the next session.",
+        "keywords": [
+          "background",
+          "wake",
+          "后台",
+          "唤醒"
+        ]
+      },
+      "offline_deadline": {
+        "title": "Offline turn deadline",
+        "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with."
+      },
+      "let_viewers_in": {
+        "title": "Let thread viewers in",
+        "description": "The initial choice to let a new thread’s viewers use its environment. Confirmed when the thread is created; changing this default grants no access by itself."
+      }
+    },
+    "gateways": {
+      "tunnel_strategy": {
+        "title": "Tunnel gateway",
+        "description": "New pairing plans use the lowest combined fresh round trip, or stay on the executor’s gateway. Existing tunnels keep their frozen plan and fallback order."
+      }
+    },
+    "ask": {
+      "models": {
+        "title": "Ask models",
+        "description": "Allowed API model identities for Ask. Child scopes only narrow the list; parent order is retained. The first usable identity is the default. Unset everywhere or empty blocks Ask."
+      },
+      "paid_by": {
+        "title": "Who pays for Ask",
+        "description": "The person asking, or the writer of this setting. Usage is always attributed to the person asking."
+      },
+      "retention_days": {
+        "title": "Ask history kept",
+        "description": "Days after the last message before permanent deletion, within the root organization's minimum and maximum."
+      },
+      "retention_min_days": {
+        "title": "Shortest Ask retention",
+        "description": "The minimum history retention chosen by administrators of the conversation's root organization."
+      },
+      "retention_max_days": {
+        "title": "Longest Ask retention",
+        "description": "The maximum history retention allowed by administrators of the conversation's root organization."
+      },
+      "max_steps": {
+        "title": "Ask steps per turn",
+        "description": "The model steps allowed for one question before it asks the person to continue."
+      },
+      "max_tools": {
+        "title": "Ask tools per turn",
+        "description": "The read operations allowed for one question before it asks the person to narrow the question."
+      },
+      "tool_bytes": {
+        "title": "Ask source size",
+        "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source."
+      },
+      "turn_tool_bytes": {
+        "title": "Ask sources per turn",
+        "description": "The total read-result bytes supplied while answering one question."
+      },
+      "max_output_tokens": {
+        "title": "Ask answer tokens",
+        "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies."
+      },
+      "context_tokens": {
+        "title": "Ask context tokens",
+        "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies."
+      }
+    },
+    "services": {
+      "allowed": {
+        "title": "Allowed services",
+        "description": "Patterns for enabled provider services allowed here. Every scope that sets a list must allow the service."
       }
     }
   },
@@ -4470,7 +4985,8 @@
     "ring": {
       "label": "Context {{used}} of {{window}} ({{percent}}); shortens at {{compact}}",
       "labelBare": "Context {{used}} of {{window}} ({{percent}})",
-      "open": "Show what fills the context ({{label}})"
+      "open": "Show what fills the context ({{label}})",
+      "modelLabel": "{{model}}: {{context}}"
     },
     "panel": {
       "title": "What fills the context",
@@ -4489,7 +5005,8 @@
       "harnessEstimated": "{{harness}} estimated these parts from its last answer. Opened between turns, it counts them.",
       "neverShortened": "The conversation has not been shortened yet.",
       "shortened": "Last shortened",
-      "freed": "freed {{tokens}}"
+      "freed": "freed {{tokens}}",
+      "model": "Context reported for {{model}}"
     },
     "absent": {
       "noFillYet": "Nothing has said what fills the context yet.",
@@ -4564,7 +5081,6 @@
   "mcpServers": {
     "title": "MCP servers",
     "empty": "No servers are enabled for this environment.",
-    "applies": "Agents refresh their tools while working where supported; otherwise they get the change at their next turn.",
     "restart": "Restart",
     "restartHint": "Restart this server alone and clear its failure count",
     "restarting": "Restarting this server…",
@@ -4686,8 +5202,8 @@
     "alreadyMore_other": "{{count}} more people already hold some of these permissions.",
     "inside": "This place and what follows it inside",
     "itself": "This thing alone",
-    "download": "Agents may also take files away",
-    "noDownload": "No file download is added",
+    "download": "Export requested",
+    "noDownload": "Export not requested",
     "future": "Includes future threads in the destination",
     "copy_one": "A copy of {{count}} file, {{bytes}} bytes",
     "copy_other": "A copy of {{count}} files, {{bytes}} bytes",
@@ -5236,7 +5752,12 @@
       "review": "Review and undo files…",
       "titleTurn": "Restore files to before this turn",
       "titleUndo": "Undo the restore",
-      "lead": "The directory is put back as it was recorded. Nothing is written until you confirm the plan, and a complete copy of how it is now is kept first, so that it can be undone.",
+      "lead": "Read the plan before restoring. Nothing is written until you confirm, and the files being changed are kept first so the restore can be undone.",
+      "whole": "Whole directory",
+      "touched": "Files the agent changed ({{count}})",
+      "fallback": "Whole-directory state unavailable: {{reason}} — showing the files the agent changed",
+      "toolCoverage": "Changes made by commands outside the agent’s file tools are not covered.",
+      "overwrite": "Overwrite later changes to {{path}}",
       "hide": "Hide progress",
       "freshPlan": "Make a fresh plan",
       "confirm": "Restore these files",
@@ -5294,6 +5815,7 @@
       },
       "blocked": {
         "interruptNotAllowed": "You may not interrupt the turn that writes here. Choose Wait instead.",
+        "preimage": "The complete earlier contents of {{path}} were not retained.",
         "other": "This restore cannot be carried out as it stands."
       }
     },
@@ -5400,6 +5922,7 @@
     },
     "review": {
       "comment": "Comment on lines…",
+      "commentLine": "Comment on {{side}}, line {{line}}",
       "title": "Comment on {{path}}",
       "lead": "The comment stays in your draft, where only you see it, until you send it to the agent with the others.",
       "save": "Save comment",
@@ -5719,7 +6242,10 @@
     },
     "on": {
       "all": "all models",
-      "group": "the {{name}} group of models"
+      "group": "the {{name}} group of models",
+      "allOfferings": "all models and services",
+      "services": "services {{names}}",
+      "serviceGroup": "the {{name}} service group"
     },
     "with": "with {{agents}}",
     "speed": "at the speed {{speeds}}",
@@ -5809,9 +6335,7 @@
       "typedFamily": "Every model whose name begins so",
       "typedName": "Model ID from the provider",
       "groupOf": "A group of models",
-      "modelsList": "Models and groups",
       "modelsChosen": "Models this limit covers",
-      "modelRemove": "Take {{name}} out",
       "modelsAll": "All models · type to name some",
       "modelsAnother": "Another model, family or group",
       "modelsNone": "No model of that name. Press Enter to use what you typed.",
@@ -5857,7 +6381,14 @@
         "groupName": "A group is @ and its name: letters, digits, - and _.",
         "space": "A name has no space in it.",
         "note": "A note is at most {{count}} characters."
-      }
+      },
+      "services": "Services",
+      "purposes": "Purposes",
+      "patternRemove": "Remove {{name}}",
+      "serviceExample": "Service name, family or @group",
+      "purposesAll": "All purposes",
+      "allOfferings": "All models and services",
+      "noModels": "No models"
     },
     "limits": {
       "title": "Limits",
@@ -5947,7 +6478,8 @@
     "titlePerson": "<person/> on {{models}} {{where}}",
     "selectionMore": "{{names}} and {{total}} more",
     "programNamesUnreported_one": "{{total}} agent program (name not reported)",
-    "programNamesUnreported_other": "{{total}} agent programs (names not reported)"
+    "programNamesUnreported_other": "{{total}} agent programs (names not reported)",
+    "forPurposes": "· {{purposes}}"
   },
   "usagePerf": {
     "views": "Usage views",
@@ -5969,8 +6501,8 @@
     "modelAndProvider": "Model and provider",
     "tokensInOut": "Tokens in / out",
     "tokenPair": "{{input}} in / {{output}} out",
-    "program": "Access programme",
-    "noProgram": "No programme",
+    "program": "Access program",
+    "noProgram": "No program",
     "notMeasured": "Not measured",
     "speedValue": "{{value}} tok/s",
     "timeValue": "{{value}} s",
@@ -6008,7 +6540,7 @@
       "done": "Done",
       "provider_exhausted": "Limit reached",
       "provider_unauthorized": "Refused",
-      "provider_busy": "Rate limited",
+      "provider_busy": "Provider busy",
       "provider_unreachable": "Network",
       "model_unavailable": "Model unavailable",
       "context_overflow": "Context limit reached",
@@ -6020,7 +6552,10 @@
       "cap_reached": "Usage limit reached",
       "not_measured": "Not measured",
       "errors": "Failures",
-      "model_refused": "Request refused"
+      "model_refused": "Request refused",
+      "rate_limited": "Rate limited",
+      "overloaded": "Provider overloaded",
+      "stream_interrupted": "Stream interrupted"
     },
     "dash": "—",
     "why": "?",
@@ -6132,8 +6667,8 @@
           "description": "Compare reasoning effort choices."
         },
         "program": {
-          "name": "Programme",
-          "description": "Compare access programmes, including none."
+          "name": "Program",
+          "description": "Compare access programs, including none."
         },
         "org": {
           "name": "Org",
@@ -6154,6 +6689,14 @@
         "token_kind": {
           "name": "Kind of token",
           "description": "Fresh input, cache read, cache write, output and reasoning."
+        },
+        "offering": {
+          "name": "Model or service",
+          "description": "The actual offering that performed the work"
+        },
+        "purpose": {
+          "name": "Purpose",
+          "description": "What the work was spent on"
         }
       },
       "buckets": {
@@ -6200,7 +6743,7 @@
           "description": "Show requests with this outcome."
         },
         "provider_busy": {
-          "name": "Rate limited",
+          "name": "Provider busy",
           "description": "Show requests with this outcome."
         },
         "provider_unreachable": {
@@ -6250,6 +6793,18 @@
         "model_refused": {
           "name": "Request refused",
           "description": "The provider filter refused this request."
+        },
+        "rate_limited": {
+          "name": "Rate limited",
+          "description": "Show requests with this outcome."
+        },
+        "overloaded": {
+          "name": "Provider overloaded",
+          "description": "Show requests with this outcome."
+        },
+        "stream_interrupted": {
+          "name": "Stream interrupted",
+          "description": "Show requests with this outcome."
         }
       },
       "member": {
@@ -6267,7 +6822,7 @@
       },
       "program": {
         "name": "{{name}}",
-        "description": "Use this access programme for the model."
+        "description": "Use this access program for the model."
       },
       "exports": {
         "series": {
@@ -6296,13 +6851,16 @@
       "empty": "No matching place. Search by its name.",
       "me": {
         "name": "Me"
-      }
+      },
+      "system": "System",
+      "adminRequired": "System admin required"
     },
     "title": {
       "me": "Your usage",
       "place": "Usage in {{name}}",
       "provider": "Usage of {{name}}",
-      "loading": "Usage"
+      "loading": "Usage",
+      "system": "System usage"
     },
     "lead": {},
     "head": {
@@ -6392,7 +6950,7 @@
       "turn": "Turn",
       "effort": "Effort",
       "tier": "Service tier",
-      "program": "Access programme",
+      "program": "Access program",
       "outcome": "Outcome",
       "org": "Org",
       "topic": "Topic",
@@ -6408,7 +6966,9 @@
       "agent": "Agent",
       "environment": "Where it ran",
       "project": "Project",
-      "thread": "Thread"
+      "thread": "Thread",
+      "service": "Service",
+      "purpose": "Purpose"
     },
     "tables": {
       "label": "The same total, divided",
@@ -6420,11 +6980,13 @@
         "environment": "By environment",
         "effort": "By effort",
         "tier": "By speed",
-        "program": "By access programme",
+        "program": "By access program",
         "org": "By org",
         "project": "By project",
         "topic": "By topic",
-        "thread": "By thread"
+        "thread": "By thread",
+        "offering": "By model or service",
+        "purpose": "By purpose"
       },
       "share": "Share",
       "turns": "Turns",
@@ -6478,7 +7040,8 @@
         "harness": "the agent",
         "forwarder": "the relay",
         "orch": "Orch itself"
-      }
+      },
+      "fromReported": "Counted from the vendor-reported total; quoted search fees are already included."
     },
     "key": {
       "rest": "Everything else",
@@ -6490,6 +7053,8 @@
       "noEnvironment": "No environment",
       "noEffort": "No effort",
       "standard": "Standard",
+      "actualTierNotReported": "Actual tier not reported",
+      "knownTier": "Known tier",
       "direct": "Directly in this org",
       "hidden": "A {{kind}} you cannot see",
       "kind": {
@@ -6668,6 +7233,50 @@
     "sections": {
       "overTime": "Over time",
       "breakdown": "Breakdown"
+    },
+    "purposes": {
+      "turn": "Turns",
+      "summary": "Summaries",
+      "review": "Reviews",
+      "embeddings": "Embeddings",
+      "web_search": "Web search",
+      "page_fetch": "Page fetch",
+      "image_generation": "Image generation",
+      "ask": "Ask"
+    },
+    "serviceUnits": {
+      "title": "Service units",
+      "price": "Unit price",
+      "applied": "Credits per unit",
+      "quote": "{{amount}} {{currency}} / {{unit}}",
+      "unknown": "{{value}} unreported",
+      "unpriced": "{{value}} unpriced requests",
+      "unit": {
+        "call": "call",
+        "page": "page",
+        "image": "image",
+        "search": "search",
+        "fetch": "fetch"
+      },
+      "quantity": {
+        "call_one": "{{value}} call",
+        "call_other": "{{value}} calls",
+        "page_one": "{{value}} page",
+        "page_other": "{{value}} pages",
+        "image_one": "{{value}} image",
+        "image_other": "{{value}} images",
+        "search_one": "{{value}} search",
+        "search_other": "{{value}} searches",
+        "fetch_one": "{{value}} fetch",
+        "fetch_other": "{{value}} fetches",
+        "call": "{{value}} call",
+        "page": "{{value}} page",
+        "image": "{{value}} image",
+        "search": "{{value}} search",
+        "fetch": "{{value}} fetch"
+      },
+      "unpriced_one": "{{value}} unpriced request",
+      "unpriced_other": "{{value}} unpriced requests"
     }
   },
   "planHosts": {
@@ -6739,7 +7348,32 @@
     "update": "Update the connector to change roles here.",
     "node": "Node runs through orch-node. Add a connector for other roles."
   },
+  "environmentTools": {
+    "codex": "Codex tools",
+    "unknownProgram": "Agent tools",
+    "anyVersion": "Any agent version",
+    "anyVersionBy": "Any agent version · {{name}}",
+    "approverUnavailable": "Name not available",
+    "configUnavailable": "The environment's current configuration is not available. Refresh the page to try again.",
+    "unknownVersion": "unknown",
+    "versionMismatch": "Codex on {{machine}} is {{programVersion}}; this agent runs {{agentVersion}}. An environment manager can allow it on the environment's page."
+  },
   "machinePrograms": {
+    "nativeTitle": "Agent programs on this machine",
+    "nativeFound": "Found",
+    "nativeConfirmed": "Confirmed",
+    "nativeUse": "Use",
+    "nativeRemove": "Remove",
+    "nativeRefresh": "Refresh programs",
+    "nativeUnknownVersion": "Version unknown",
+    "nativeNotReported": "This machine has not reported agent program discovery.",
+    "nativeNotSearched": "No agent program kinds were searched.",
+    "nativeEmpty": "No agent programs were found.",
+    "nativeRoleNeeded": "Agent programs need the Environment or Agent role.",
+    "nativeKept": "Agent programs are kept in this machine’s local policy.",
+    "nativeCommandNotReported": "This machine has not reported its current harness policy and command.",
+    "nativeRemoveTitle": "Remove {{name}} from confirmed programs?",
+    "nativeRemoveBody": "Executors started from this program stop. Threads are checked again before they run. The program file stays on the machine.",
     "signIns": "Sign-ins: {{methods}}",
     "noSignIn": "None",
     "noModels": "No models listed",
@@ -6763,7 +7397,6 @@
     "remove": "Delete",
     "empty": "No external programs are registered.",
     "needsAttention": "Needs attention",
-    "installedHarnesses": "Installed agent programs",
     "invalidCommand": "Close the quoted path or argument. Commands are run directly, without a shell.",
     "roleNeeded": "Agent and provider programs need those connector roles. Change the roles on Overview, or add a connector.",
     "kept": "Kept on this machine · {{file}}",
@@ -6887,8 +7520,7 @@
   "providerPolicy": {
     "notAllowed": "Not allowed by {{place}}",
     "settingTitle": "Providers allowed",
-    "settingHelp": "Patterns of Orch provider addresses. Every contributing place must allow a choice; an empty list allows none. Leaving this unset permits all providers you may otherwise use.",
-    "askInChat": "Ask in chat"
+    "settingHelp": "Patterns of Orch provider addresses. Every contributing place must allow a choice; an empty list allows none. Leaving this unset permits all providers you may otherwise use."
   },
   "screenReview": {
     "startTopic": "Start topic",
@@ -6955,6 +7587,23 @@
     "readChoices": "Check choices",
     "skills": "Add skill"
   },
+  "agentDetection": {
+    "title": "Detected program details",
+    "fromMachine": "From machine",
+    "fromCatalogue": "From catalogue",
+    "yourChoice": "Your choice",
+    "chooseMachine": "Choose a machine to detect",
+    "accounts": "Accounts",
+    "accountsUnknown": "No account reported",
+    "programSupports": "Program supports",
+    "machineAllows": "Machine allows",
+    "notReported": "Not reported",
+    "none": "None",
+    "arrangement": "Arrangement",
+    "automatic": "Automatic",
+    "threadDefaults": "From thread defaults",
+    "unavailable": "This program is no longer available"
+  },
   "agentCreation": {
     "register": "Add an adapter program…",
     "offline": "This machine is offline.",
@@ -7013,6 +7662,9 @@
     "openCreated": "Open provider"
   },
   "providerDetails": {
+    "notSupplied": "Not supplied by this source",
+    "notSuppliedMembers": "Not supplied: {{members}}",
+    "needsAdminKeyMembers": "Needs an admin key: {{members}}",
     "notReadOnce": "Not read yet",
     "verifiedShort": "Verified",
     "notVerifiedShort": "Not verified",
@@ -7080,6 +7732,10 @@
     }
   },
   "providerSources": {
+    "needsAdminKey": "Not offered · needs an admin key",
+    "adminKeyHelp": "Used only by this facts source. Model calls keep their own credential.",
+    "removeSavedKey": "Remove saved key",
+    "keyWillBeRemoved": "Removed when saved",
     "described": "Described",
     "creationLead": "The defaults follow the credential and endpoints. Choose another registered program or address here when its details come from elsewhere.",
     "defaultModels": "The credential’s keeper or endpoints list models when they offer discovery; models can always be added by name.",
@@ -7291,8 +7947,23 @@
     "future": "Inherited rules change here. Each later input uses its author's current access and limits; held inputs stay held."
   },
   "running": {
+    "endReasons": {
+      "interact_required": "Thread Interact required",
+      "unsupported": "Ending work unsupported",
+      "offline": "Native session offline",
+      "unavailable": "End state unavailable",
+      "no_current_target": "Refresh to review current work"
+    },
+    "endChecking": "Checking background work…",
+    "endReadFailed": "Background work unavailable",
+    "endBusy": "Ending…",
+    "endSelection": "Select work to end",
+    "endIncomplete": "Complete review required",
+    "endAllUnknown": "End all",
+    "openPanel": "Open in panel",
+    "about": "This thread’s native background commands and subagents, with their current reviewed state and End controls",
     "refresh": "Refresh",
-    "title": "Running commands",
+    "title": "Background work",
     "count": "{{count}} running",
     "end": "End",
     "endSelected": "End selected ({{count}})",
@@ -7312,21 +7983,29 @@
     "loading": "Reading current native commands…",
     "offline": "Native session offline. Its running commands are not known.",
     "unavailable": "Native command control is unavailable.",
-    "empty": "No native commands are running.",
+    "unavailableWithReason": "Unavailable: {{reason}}",
+    "empty": "No native background work is running.",
     "partial": "This list is incomplete. End all is unavailable; narrow the list in the native program.",
-    "confirmTitle": "End reviewed commands",
-    "confirm": "End {{count}} commands",
-    "confirmDetail": "Ends only these {{count}} reviewed commands. Commands started afterwards are kept. Each command's actual result is shown.",
+    "confirmTitle": "End reviewed tasks",
+    "confirm": "End {{count}} tasks",
+    "confirmDetail": "Ends only these {{count}} reviewed tasks. Tasks started afterwards are kept. Each task's actual result is shown. Orch sends no model prompt; the harness may tell the model the work ended.",
     "job": "Ending reviewed commands · {{percent}}%",
     "results": "Command end results",
     "result_ended": "Ended",
     "result_already_ended": "Already ended",
     "result_still_running": "Still running",
     "result_unknown": "End not known",
-    "cleanup": "Commands: {{ended}} ended · {{still}} still running · {{unknown}} end not known"
+    "cleanup": "Commands: {{ended}} ended · {{still}} still running · {{unknown}} end not known",
+    "confirm_one": "End {{count}} task",
+    "confirm_other": "End {{count}} tasks",
+    "confirmDetail_one": "Ends only this reviewed task. Tasks started afterwards are kept. Its actual result is shown. Orch sends no model prompt; the harness may tell the model the work ended.",
+    "confirmDetail_other": "Ends only these {{count}} reviewed tasks. Tasks started afterwards are kept. Each task's actual result is shown. Orch sends no model prompt; the harness may tell the model the work ended."
   },
   "largeTree": {
+    "liveTitle": "Live file listing",
+    "liveCost": "Directory listings are read from disk when requested. Whole-directory restore is unavailable; Restore files can still use the files the agent changed.",
     "reasons": {
+      "entriesWithLimit": "This tree crossed the file-index entry limit ({{count}}). Files are listed live; no complete file index is kept.",
       "chosen": "Files are listed live because this workspace was set to use live listing. No complete file index is kept.",
       "entries": "This tree crossed the file-index entry limit. Files are listed live; no complete file index is kept.",
       "watches": "The machine could not watch the whole tree. Files are listed live; no complete file index is kept.",
@@ -7431,6 +8110,7 @@
     "whenSent": "when sent",
     "chatFiles": "Chat files",
     "history": {
+      "first": "First",
       "files": "Uploaded files",
       "unknownPerson": "Someone",
       "complete": "uploaded",
@@ -7462,6 +8142,7 @@
       "move": "Move to {{path}}"
     },
     "pasteDelivery": "Pasted text delivery",
+    "pasteSuggested": "Suggested",
     "readingPasteDelivery": "Reading paste delivery defaults…",
     "inMessage": "In the message",
     "asFile": "As a file",
@@ -7560,9 +8241,32 @@
     "tryAgain": "Try again",
     "copied": "Copied",
     "copyRefused": "The browser did not allow copying",
-    "linkCopied": "Link copied"
+    "linkCopied": "Link copied",
+    "refresh": "Refresh"
   },
   "ui": {
+    "read": {
+      "retrying": "Taking longer than usual · retrying",
+      "failed": "Could not load"
+    },
+    "unavailable": {
+      "saving": "Saving…",
+      "deciding": "Sending the decision…",
+      "queueChanging": "Changing the queue…",
+      "senderOnly": "Only the sender can edit this message",
+      "first": "Already first",
+      "last": "Already last",
+      "checkingFork": "Checking the fork…",
+      "forkUnavailable": "The fork could not be checked",
+      "recipient": "Choose who to give access to",
+      "noUnread": "Everything is read",
+      "modeChanging": "Changing admin mode…",
+      "signingIn": "Signing in…",
+      "checkingCode": "Checking the code…",
+      "sendingEmail": "Sending the email…",
+      "requiredFields": "Complete the required fields",
+      "planWords": "Say what to change"
+    },
     "statusUnknown": "Status unavailable",
     "nameUnknown": "Name unavailable",
     "filterBar": {
@@ -7630,6 +8334,11 @@
       "modelBusy": "The model is busy. Try again shortly.",
       "providerSignIn": "The provider's sign-in was refused. Check its sign-in and keys.",
       "quota": "The provider has reached its usage limit. Wait for its reset or choose another provider.",
+      "imageGenerationLimit": "Image generation has reached its usage limit.",
+      "imageGenerationFailed": "The image could not be generated.",
+      "imageResultUnavailable": "The returned image could not be retained.",
+      "nativeWebActionFailed": "The web action failed.",
+      "nativeWebActionUnproven": "The web action could not be verified.",
       "cancelled": "The operation was cancelled.",
       "afterStart": "The environment's startup command failed. Review that command before starting again.",
       "mcpStopped": "The MCP server stopped. Check its failure reason and restart that server.",
@@ -7649,8 +8358,12 @@
       "workspaceConfiguration": "The agent found a configuration of its own in the workspace. Whoever manages the environment decides whether it may use it.",
       "providerNetwork": "The provider cannot be reached.",
       "modelUnavailable": "This model is unavailable.",
+      "creditProgramRestricted": "The provider's API credit benefit blocks this program. A provider organization owner must cancel the benefit in its billing settings.",
       "modelRefused": "The provider refused this request.",
-      "modelRerouted": "The agent program ran this turn on another model than the one chosen. The turn’s usage names the model that ran."
+      "modelRerouted": "The agent program ran this turn on another model than the one chosen. The turn’s usage names the model that ran.",
+      "harnessDiverged": "The program reported behavior or settings that differ from Orch’s request. Review its change in this thread.",
+      "mcpServerFailedNamed": "MCP server {{server}} could not start. Check its connection and sign-in settings.",
+      "modelReroutedNamed": "The agent program ran this turn on {{to}} instead of {{from}}."
     },
     "toast": {
       "label": "Notice"
@@ -7708,11 +8421,18 @@
       "proceed": "Proceed anyway"
     },
     "combobox": {
+      "minimumQuery_one": "Type at least {{count}} character to search.",
       "search": "Search choices…",
-      "empty": "No matching choices."
+      "empty": "No matching choices.",
+      "minimumQuery_other": "Type at least {{count}} characters to search."
     },
     "detailCard": {
       "inspect": "Inspect {{name}}"
+    },
+    "receipt": {
+      "title": "Accepted",
+      "accepted": "The operation was accepted. Existing content was not returned. Read the current state with the required access; do not send the operation again.",
+      "readback": "Read current state"
     }
   },
   "state": {
@@ -7918,7 +8638,10 @@
       "start_failed": "The display could not start or be reached. Look again or try again."
     },
     "chat": {
-      "not_allowed": "A chat is not possible here. Choose a place you may chat in or ask its manager."
+      "not_allowed": "A chat is not possible here. Choose a place you may chat in or ask its manager.",
+      "manager_required": "Only a current chat manager may do that.",
+      "last_manager": "A chat must keep a manager.",
+      "move_crosses_org": "A chat stays in its organization. Make a new chat there and share a link."
     },
     "policy": {
       "mcp_import_disabled": "This machine does not allow importing MCP servers. Ask its owner to review its policy.",
@@ -7932,6 +8655,7 @@
       "too_large": "This would take the document past a limit. Remove some content or split it into separate documents."
     },
     "invitation": {
+      "terms_not_accepted": "Accept the organization’s current terms before joining.",
       "not_allowed": "This org does not allow that kind of invitation. Choose an allowed invitation method or ask its manager."
     },
     "not_found": "This does not exist, was deleted, or is not open to you. Return to a place you can open or ask its manager.",
@@ -7942,7 +8666,8 @@
     "conflict": {
       "stale_revision": "Somebody changed this in the meantime. Look at how it stands now and try again.",
       "exists": "That name or value is taken already. Choose another.",
-      "idempotency_mismatch": "This request was repeated in a different form. Reload and try again."
+      "idempotency_mismatch": "This request was repeated in a different form. Reload and try again.",
+      "confirmation_required": "This needs your confirmation first. Review what it will share or change, then confirm."
     },
     "node": {
       "archived": "This lies under something that is archived. Bring that back first.",
@@ -8039,6 +8764,9 @@
     "goal": {
       "exists": "A goal is under way here already. Edit or clear it first.",
       "limit_reached": "A limit of the goal is reached. Raise the limit first, then resume."
+    },
+    "tunnel": {
+      "gateway_unreachable": "The machines cannot reach a shared gateway. Check their network connections and try again."
     }
   },
   "auth": {
@@ -8072,6 +8800,9 @@
       "reset": "Reset the password",
       "backToSignIn": "Back to sign-in"
     },
+    "creation": {
+      "alreadyCreated": "Account already created"
+    },
     "setup": {
       "title": "Create the first administrator",
       "lead": "This system has no user yet. Whoever you create here administers it: they can add people, providers and hosts.",
@@ -8080,6 +8811,7 @@
       "alreadyDone": "This system has its administrator already. Sign in instead."
     },
     "login": {
+      "sessionEnded": "Your session ended. Sign in again.",
       "title": "Sign in",
       "submit": "Sign in",
       "wrong": "Wrong name or password.",
@@ -8491,6 +9223,12 @@
     },
     "storage": {
       "about": "See what Orch keeps, why it is kept and when it can be cleaned up"
+    },
+    "uploads": {
+      "title": "Uploads"
+    },
+    "administratorMessage": {
+      "about": "Read a message from an organization or system administrator"
     }
   },
   "navigation": {
@@ -8510,6 +9248,7 @@
     "pathJoin": " / ",
     "starred": "Starred",
     "recent": "Recent",
+    "recentShortcuts": "Recent shortcuts",
     "inside": "Inside {{org}}",
     "notKept": "Your choice was not saved",
     "unread": "Unread",
@@ -8635,7 +9374,9 @@
     "arrangement": {
       "label": "Navigation view",
       "tree": "Tree",
-      "recent": "Recent"
+      "recent": "Recent",
+      "treeView": "Tree view",
+      "recentView": "Recent items"
     },
     "recentOrder": {
       "label": "Recent order",
@@ -8651,6 +9392,7 @@
       "earlier": "Earlier"
     },
     "recentAll": "All",
+    "recentAllItems": "All recent items",
     "showInTree": "Show in tree",
     "openEverything": "Open in Everything",
     "noActivity": "No recent activity"
@@ -9165,9 +9907,14 @@
       "openChanges": "Workspace: {{workspace}}. Open Changes",
       "limitNear": "{{name}} nearly full",
       "limitReached": "{{name}} reached",
+      "providerLimit": "Provider limit",
+      "usageLimit": "Usage limit",
       "shells_one": "{{count}} shell",
       "shells_other": "{{count}} shells",
       "shellsHint": "Your shells in this environment. Open Terminal.",
+      "connecting": "Connecting…",
+      "connectingHint": "Connecting to live updates.",
+      "reconnectingSince": "Reconnecting… · {{time}}",
       "reconnecting": "Reconnecting…",
       "reconnectingHint": "What is on screen stays and can be read. Approving and steering wait for the connection; typing does not.",
       "slow": "Slow connection · {{ms}} ms",
@@ -9723,10 +10470,6 @@
       "cannotShare": "Sharing {{name}} with agents takes holding something here to share.",
       "nothing": "Nothing of {{name}} is shared with agents.",
       "repeat": "Anyone who can talk to one of these agents can ask it to repeat what it reads, and to write or send what it may.",
-      "policy": {
-        "topic": "The agents of this topic can read each other’s threads, by {{place}}’s setting.",
-        "project": "The agents of this project can read each other’s threads, by {{place}}’s setting."
-      },
       "placeAlone": "only {{name}} itself",
       "copy": "A copy · {{date}} · {{state}}",
       "state": {
@@ -9740,21 +10483,21 @@
       "expiresLabel": "Ends on",
       "takeCopyBack": "Take the copy for {{name}} back",
       "stopFor": "Stop sharing with the agents of {{name}}",
-      "notYoursToChange": "Whoever shared this, or whoever could share the same now, changes it.",
+      "notYoursToChange": "The source page’s managers, or the original giver while they may still give this access, can change this contribution.",
       "by": "by {{name}}, {{date}}",
       "area": {
-        "timeline": "Conversations",
+        "timeline": "Threads",
         "chat": "Chats",
         "documents": "Documents"
       },
       "step": {
-        "none": "Not shared",
-        "read": "Read",
-        "write": "Read and write",
-        "edit": "Read and edit",
-        "manage": "Manage"
+        "none": "—",
+        "read": "Can view",
+        "edit": "Can edit",
+        "manage": "Can manage",
+        "post": "Can post",
+        "send": "Can send"
       },
-      "manageNote": "They can also remove documents here and move them. Nothing is destroyed: what they remove can be brought back until it is purged (30 days, as shipped), by them or by you.",
       "makeNote": "They can also make new documents there.",
       "change": {
         "title": "Change what {{who}} may do?",
@@ -9763,7 +10506,7 @@
       },
       "stop": {
         "title": "Stop sharing with {{who}}?",
-        "body": "They find it gone at their next call. What they already read stays read.",
+        "body": "Only this contribution is removed. Other contributions and ordinary grants remain. Information already read is not withdrawn.",
         "confirm": "Stop sharing"
       },
       "takeBack": {
@@ -9782,7 +10525,6 @@
       },
       "dialog": {
         "title": "Share “{{name}}” with agents",
-        "lead": "Agents read what is shared like a folder they can walk, read and search. They find it when they work.",
         "whose": "Whose agents",
         "whosePlaceholder": "A thread, or a place…",
         "whoseGroup": "Threads and places",
@@ -9793,7 +10535,6 @@
         "what": "What they can do",
         "byArea": "Permissions",
         "byAreaLabel": "Permissions",
-        "custom": "The areas are at different levels, so no one of the three choices names them.",
         "notYours": "Not yours to give",
         "copyReadOnly": "A copy is read only",
         "kind": "How it is shared",
@@ -9801,7 +10542,6 @@
         "message": "Message to send along",
         "messageHint": "Sent to the agent as an input, so that its turn starts now.",
         "until": "Ends on",
-        "history": "What an agent changes shows under its name and in the document’s history, like anybody’s.",
         "tooLarge": "This copy is over the limit",
         "of": "of",
         "tooLargeWays": "Share less, share it so that it stays shared, or raise the limit.",
@@ -9829,7 +10569,9 @@
         },
         "namesFailed": "Names cannot be looked up just now. The agents of this place can still be chosen with the button below."
       },
-      "whoIs": "the agents of {{place}}"
+      "whoIs": "the agents of {{place}}",
+      "fork": "Fork",
+      "archive": "Archive"
     },
     "menu": {
       "share": "Share…"
@@ -9917,7 +10659,9 @@
       "memory_swap_mb": "Memory and swap, in MiB",
       "blkio_weight": "Disk priority",
       "pids": "Processes",
-      "disk_gb": "Disk, in GiB"
+      "disk_gb": "Disk, in GiB",
+      "services": "Services",
+      "servicesHint": "Use service names, families or @groups. Leave empty to include every enabled service."
     },
     "who": {
       "title": "Who may use it",
@@ -9927,7 +10671,8 @@
     "newPage": {
       "ownerOnly": "only its owner works with it",
       "machine": "On a person’s machine, only the machine’s owner works with a thread until a default says otherwise.",
-      "forkLabel": "Which page the fork starts with"
+      "forkLabel": "Which page the fork starts with",
+      "audienceSummary": "People: {{summary}}"
     },
     "gallery": {
       "field": "Whom to name",
@@ -10089,6 +10834,8 @@
     },
     "waiting": {
       "title": "Waiting for you",
+      "review": "Review access requests",
+      "empty": "There are no decisions for you in these requests.",
       "deny": "Deny",
       "state": {},
       "stateBy": {}
@@ -10147,6 +10894,11 @@
         "browser": "They drive its browsers, and act at every site as whoever signed in to it there",
         "vnc": "They work in whatever its displays show"
       }
+    },
+    "ownerReads": {
+      "notice": "This thread includes {{count}} results read with your own access; the people you share it with will see them.",
+      "title": "Share personal read results?",
+      "confirm": "Share these results"
     }
   },
   "permissions": {
@@ -10479,6 +11231,9 @@
       "hours_other": "{{count}} hours"
     },
     "invite": {
+      "alreadyCreated": "Invitation already created",
+      "revokeAndAnother": "Revoke and make another",
+      "created": "Invitation created",
       "title": "Invite to {{org}}",
       "form": "Form of the invitation",
       "forms": {
@@ -10547,6 +11302,7 @@
       "revokeBodyShared": "The shared link stops working. Nobody who has not used it can join with it."
     },
     "providerDefault": {
+      "selected": "Provider selected",
       "choose": "Choose a provider",
       "loading": "Loading provider name",
       "unavailable": "Provider unavailable",
@@ -10628,7 +11384,7 @@
     },
     "board": {
       "done": "Done",
-      "emptyColumn": "Nothing here",
+      "emptyColumn": "No topics in {{state}}",
       "drag": {
         "instructions": "To move a topic, press Space to pick it up, move it to the Done column or out of it with the arrow keys, and press Space again to drop it. Escape puts it back.",
         "pickedUp": "Picked up {{name}}.",
@@ -10746,6 +11502,7 @@
     }
   },
   "documents": {
+    "referenceReadFailed": "Could not load places and documents.",
     "pdf": {
       "invalidBundle": "The document export could not be read. Try exporting it again.",
       "tooBig": "This document is too large to typeset here. Print it or export its source instead.",
@@ -11186,7 +11943,6 @@
     "privateThread": "a private thread",
     "nextPost": "Next post allowed: {{time}}",
     "privateReference": "Unavailable reference",
-    "policyUnavailable": "The current document policy is unavailable.",
     "openMaterial": "Open",
     "closeMaterial": "Close",
     "noMaterial": "No material under the current access",
@@ -11240,7 +11996,6 @@
     "readersUnknown": "Open Share to see who can read this chat.",
     "withFile": "With a file",
     "import": "Import…",
-    "duplicate": "Duplicate",
     "newFrom": "New from…",
     "copyTitle": "Start from another document",
     "copyAbout": "Your copy keeps text and files, without comments, history or the original access.",
@@ -11255,13 +12010,6 @@
     "templates": "Start from a document",
     "readFirst": "Read first",
     "readFirstHint": "The agent reads this material with its tools. Its text is not inserted as instructions.",
-    "documentsPolicy": "Documents beside this topic",
-    "policyWrite": "Agents here can read, edit and make public documents beside this topic and its main threads.",
-    "policyRead": "Agents here can read public documents beside this topic and its main threads.",
-    "policyNone": "Agents here have no document access from this policy.",
-    "privateExcluded": "Private documents stay private.",
-    "conversationsSeparate": "Other conversations use their own policy. Chats need a share. Managing and Export need their own permission.",
-    "policySetting": "Document policy setting",
     "recentReactions": "Often used",
     "agentChoices": "Agents",
     "blocksCount": "{{count}} blocks",
@@ -11331,6 +12079,48 @@
     "archived": "Restore this archived topic before starting a thread.",
     "incomplete": "Some defaults are not set or cannot be used here.",
     "notAllowed": "Ask {{owner}} for permission to start threads here."
+  },
+  "agentSchedules": {
+    "title": "Schedules",
+    "about": "Future inputs from people and the agent, with their outcomes and cancellation",
+    "pending": "Agent schedules",
+    "continueAt": "The agent will continue at",
+    "cancelled": "Cancelled",
+    "controlNeeded": "Thread control required",
+    "name": "Name",
+    "agentFor": "Agent for",
+    "next": "Next run",
+    "state": "State",
+    "runs": "{{done}} / {{total}} runs",
+    "until": "Until",
+    "empty": "No schedules for this thread",
+    "woken": "Woken by its schedule",
+    "states": {
+      "active": "Active",
+      "paused": "Paused",
+      "finished": "Finished",
+      "deleted": "Cancelled"
+    },
+    "outcomes": {
+      "queued": "Queued",
+      "blocked": "Held",
+      "started": "Started",
+      "failed": "Could not start",
+      "skipped": "Skipped"
+    },
+    "repeat": {
+      "daily": "Daily",
+      "weekly": "Weekly"
+    },
+    "weekdays": {
+      "1": "Mon",
+      "2": "Tue",
+      "3": "Wed",
+      "4": "Thu",
+      "5": "Fri",
+      "6": "Sat",
+      "7": "Sun"
+    }
   },
   "chat": {
     "controls": "Chat controls",
@@ -11447,24 +12237,44 @@
       "about": "You may have left it, somebody may have changed who can read it, or it was deleted."
     },
     "group": {
+      "join": "Join",
+      "joining": "Joining…",
+      "joined": "Joined the group",
+      "joinFailed": "Could not join the group",
+      "message": "Message…",
+      "home": "Home",
+      "moveHome": "Move to another home…",
+      "move": "Move",
+      "homeUnknown": "Home unavailable",
+      "directs": "Direct messages",
       "menu": "Actions",
-      "people": "People in this group",
-      "peopleHint_one": "{{count}} person is in this group.",
-      "peopleHint_other": "{{count}} people are in this group.",
+      "people": "Members",
       "add": "Add people…",
-      "addHint": "Anyone in the org, or somebody from outside by their exact username or address, who then joins as a guest.",
       "addButton_one": "Add {{count}} person",
       "addButton_other": "Add {{count}} people",
       "addFailed": "Could not add them",
       "rename": "Rename…",
-      "renameHint": "Leave the name empty to name the group after its people again.",
       "renameButton": "Save name",
       "remove": "Remove",
       "leave": "Leave group",
       "leaveTitle": "Leave this group?",
       "leaveBody": "You will not see its messages any more. Someone in the group can add you again.",
       "addTitle": "Add people",
-      "renameTitle": "Rename the group"
+      "renameTitle": "Rename the group",
+      "manager": "Manager",
+      "member": "Member",
+      "publicIn": "Public in",
+      "private": "Private",
+      "public": "Public",
+      "visibility": "Visibility",
+      "managerNeeded": "Manager access required",
+      "noMembers": "No members",
+      "person": "Person",
+      "role": "Role",
+      "memberRole": "Role for {{name}}",
+      "removePerson": "Remove {{name}}",
+      "keepManager": "Keep at least one manager",
+      "choosePeople": "Choose people first"
     },
     "newLabel": "New",
     "jumpLatest": "Jump to latest",
@@ -11492,14 +12302,16 @@
       "closed": "{{name}} is no longer here."
     },
     "new": {
+      "asGroup": "Group",
+      "multipleGroup": "Several recipients make a group",
+      "nameTooLong": "Up to {{number}} characters",
+      "rootHome": "Root organization",
       "title": "New message",
-      "description": "Choose one person for a direct chat, or several for a group.",
       "button": "Start",
       "direct": "Message {{name}}",
       "group_one": "Start a group of {{count}}",
       "group_other": "Start a group of {{count}}",
       "name": "Name",
-      "nameHint": "Without a name, the group is called after its people.",
       "failed": "Could not start the chat",
       "external": "You may not bring in somebody from outside this org. Ask one of its Developers or admins."
     },
@@ -11661,7 +12473,20 @@
     }
   },
   "timeline": {
+    "capabilityHelper": "Helper turn",
+    "capabilityHelperPrivate": "Private helper",
+    "capabilityHelperOwner": "Private to <owner/> by default",
     "permissionReview": {
+      "title": "Permission review",
+      "status": {
+        "reviewing": "Reviewing",
+        "approved": "Approved",
+        "denied": "Denied",
+        "timedOut": "Review timed out",
+        "aborted": "Review stopped",
+        "failed": "Review failed",
+        "other": "Reported {{outcome}}"
+      },
       "outcome": "{{model}}: {{outcome}}",
       "declared": "The agent program has not reported its reviewer model; this is the adapter’s declared model.",
       "action": "Action reviewed",
@@ -11669,6 +12494,7 @@
     },
     "failure": {
       "resets": "It ends",
+      "reportedLimit": "Limit: {{limit}}",
       "incomplete": "The answer above may have been cut short.",
       "continue": "Continue",
       "continueText": "Continue where you stopped.",
@@ -11741,6 +12567,8 @@
       "proposed": "Proposed plan"
     },
     "planLine": {
+      "done_one": "Plan complete · {{number}} step",
+      "done_other": "Plan complete · {{number}} steps",
       "step": "Step {{index}} of {{total}}"
     },
     "error": {
@@ -11794,6 +12622,11 @@
       "editedMany_other": "Edited {{count}} files",
       "changed": "+{{added}} −{{removed}}",
       "webSearch": "Searched the web: {{query}}",
+      "webOpen": "Open page: {{address}}",
+      "webOpenUnknown": "Open page",
+      "webFind": "Find in page: {{pattern}}",
+      "webFindUnknown": "Find in page",
+      "webAction": "Web action",
       "webFetch": "Fetched {{address}}",
       "image": "Looked at {{name}}",
       "imageUnnamed": "An image",
@@ -11876,9 +12709,10 @@
       "cut": "The list was cut."
     },
     "web": {
-      "noResults": "Nothing was found.",
+      "noResults": "No result links were reported.",
       "newTab": "(opens in a new tab)",
-      "showAll": "Show all"
+      "showAll": "Show all",
+      "noAddress": "No page address was reported"
     },
     "mcp": {
       "arguments": "Arguments",
@@ -11904,6 +12738,10 @@
       "output": "What came back",
       "copyInput": "Copy raw input",
       "copyOutput": "Copy raw output",
+      "copyInputShown": "Copy shown input",
+      "copyOutputShown": "Copy shown output",
+      "fullInput": "Full input",
+      "fullOutput": "Full output",
       "cut": "Only part of this is held.",
       "error": "The agent program marked this result as an error.",
       "running": "Nothing has come back yet.",
@@ -11912,7 +12750,9 @@
     "status": {
       "compacting": "Compacting the conversation for {{time}}",
       "starting": "Starting {{name}} for {{time}}",
-      "waitingApproval": "Waiting for an answer for {{time}}"
+      "waitingApproval": "Waiting for an answer for {{time}}",
+      "retrying": "Retrying the model call",
+      "retryingAttempt": "Retrying the model call · attempt {{attempt}}"
     },
     "footer": {
       "failed": "Failed",
@@ -12025,7 +12865,12 @@
       "queueReleased": "Nothing held by Stop waits any more",
       "ruleAllowed": "{{by}} allowed an action for this thread",
       "ruleRevoked": "{{by}} took back an action allowed for this thread",
-      "ruleEnded": "An action allowed for this thread ended: what the thread runs on changed"
+      "ruleEnded": "An action allowed for this thread ended: what the thread runs on changed",
+      "agentForkedFrom": "An agent forked this from {{thread}} for {{by}}",
+      "agentForked": "An agent forked this into {{into}} for {{by}}",
+      "environmentOn": "{{environment}} on {{location}}",
+      "environmentLocationUnrecorded": "{{environment}} (location not recorded)",
+      "mountsDetached": "Detached mounts: {{mounts}}"
     },
     "selection": {
       "label": "Selected items",
@@ -12040,8 +12885,7 @@
       "side": "Side thread from here",
       "copyAs": "Copy as…",
       "copyPlain": "As plain text",
-      "copyJson": "As JSON",
-      "copyLink": "Link to this selection"
+      "copyJson": "As JSON"
     },
     "chatRefs": {
       "label_one": "{{count}} chat message quotes this item",
@@ -12096,7 +12940,12 @@
       "lead": "Actions a person allowed for this thread: a later request that asks for the same is answered once each, while the thread runs on the same agent, provider, environment and directory.",
       "none": "Nothing is allowed for this thread beyond what each request asks.",
       "takeBack": "Take back",
-      "inactive": "No longer answers"
+      "inactive": "No longer answers",
+      "checking": "Checking rules",
+      "unavailable": "Rules unavailable",
+      "reasonRevoked": "Taken back",
+      "reasonBindingChanged": "Setup changed",
+      "reasonUnavailable": "Reason unavailable"
     },
     "deny": "Deny",
     "tabs": {
@@ -12149,7 +12998,8 @@
       "would": "If you approve it",
       "notGranted": "Approved; not granted",
       "applying": "Applying approved capability",
-      "liveEffect": "This capability becomes available without stopping work when its live application succeeds. If application fails, the grant is not made and the environment may restart to restore its previous permissions; the failure is reported with the decision."
+      "liveEffect": "This capability becomes available without stopping work when its live application succeeds. If application fails, the grant is not made and the environment may restart to restore its previous permissions; the failure is reported with the decision.",
+      "gatewayEffect": "This capability becomes available without stopping anything. Existing processes and all files are kept."
     },
     "scope": {
       "host": "Decided by whoever manages the host",
@@ -12218,10 +13068,29 @@
     "heldInput": "Waiting for model use",
     "sourceNotice": {},
     "answerMismatch": "Reload the request: this answer does not match what the agent asked.",
-    "answerOptionGone": "Reload the request: this option is no longer offered."
+    "answerOptionGone": "Reload the request: this option is no longer offered.",
+    "batch": {
+      "open": "Decide together…",
+      "title": "Decide access requests",
+      "review": "Approve gives the selected access as requested, with each request decided separately.",
+      "needSeveral": "At least two requests must still need your decision",
+      "choose": "Select requests to decide",
+      "select": "Select",
+      "selectNamed": "Select {{name}}",
+      "request": "Request",
+      "deciding": "Deciding…",
+      "selected": "Selected: {{number}}",
+      "approve": "Approve selected",
+      "deny": "Deny selected",
+      "finished": "All requests decided",
+      "unavailable": "Request no longer available"
+    }
   },
   "composer": {
     "row": {
+      "provider": "Provider: {{name}}",
+      "archived": "Thread archived",
+      "sideBinding": "Change the parent thread’s binding",
       "label": "Message controls",
       "agent": "Agent: {{name}}. Change binding",
       "unbound": "Choose an agent",
@@ -12251,7 +13120,13 @@
       "about": {},
       "applies": "Used for the next turn. A running turn keeps its mode. Capability, port and access requests follow their own policies.",
       "stale": "The mode changed to {{mode}}. Choose again if you want another mode.",
-      "changedBy": "{{name}} changed the mode to {{mode}}. Choose again if you want another mode."
+      "changedBy": "{{name}} changed the mode to {{mode}}. Choose again if you want another mode.",
+      "placeDefault": "Approval default",
+      "nativeChoice": "A mode offered by this agent program.",
+      "saving": "Saving this mode…",
+      "unavailable": "The current modes could not be read. Try opening this control again.",
+      "reported": "{{program}}: {{mode}}",
+      "lastReported": "{{program}} last reported {{mode}} at {{time}}."
     },
     "plus": {
       "label": "Add to message",
@@ -12268,6 +13143,7 @@
     },
     "model": {
       "change": "Model and effort: {{model}}. Change",
+      "current": "Model and effort: {{model}}",
       "efforts": "Efforts of {{model}}",
       "find": "Find a model",
       "list": "Models",
@@ -12314,6 +13190,7 @@
         "thread": "the thread"
       },
       "lockedBy": "{{place}} decides this for its threads, so it cannot be changed here.",
+      "notAmongAllowedValues": "Not among allowed values",
       "speed": {
         "title": "Speed",
         "standard": "Standard",
@@ -12342,6 +13219,8 @@
         "lineNone": "None: no access program is asked for."
       },
       "context": {
+        "unreportedLimits": "Limits not reported",
+        "unreportedAdjustment": "No adjustment reported in this view",
         "title": "Context",
         "another": "Another size, in tokens",
         "range": "Between {{least}} and {{largest}}, the largest open for this model.",
@@ -12476,12 +13355,122 @@
       "runItLabel": "Run message {{number}} on your access"
     },
     "plan": {
+      "placeDefault": "Plan default",
       "label": "Plan",
       "on": "Planning: the agent proposes a plan and changes nothing until somebody proceeds. The approval mode stays as it is.",
-      "off": "Plan first: the agent proposes a plan and changes nothing until somebody proceeds."
+      "off": "Plan first: the agent proposes a plan and changes nothing until somebody proceeds.",
+      "checking": "Checking the place’s Plan default…"
+    },
+    "confinement": {
+      "placeDefault": "Sandbox default",
+      "title": "Sandbox",
+      "label": "Sandbox: {{mode}}",
+      "readOnly": "Changing the sandbox is for whoever manages this thread: {{who}}",
+      "notOffered": "The agent program has not offered a sandbox choice here."
     }
   },
   "thread": {
+    "audience": {
+      "kinds": {
+        "role_one": "{{number}} role",
+        "role_other": "{{number}} roles",
+        "group_one": "{{number}} group",
+        "group_other": "{{number}} groups",
+        "agents_one": "agents",
+        "agents_other": "agents in {{number}} places",
+        "members_one": "members",
+        "members_other": "members in {{number}} places",
+        "node_one": "work",
+        "node_other": "work in {{number}} places"
+      },
+      "reads": {
+        "title": "Personal reads",
+        "on": "On · Reads use the owner’s access; results are visible to the thread’s audience.",
+        "off": "Off in this thread’s settings.",
+        "unavailable": "Current setting unavailable.",
+        "loading": "Checking current setting…",
+        "shared": "Shared reads: list_shared, read_shared, search_shared.",
+        "guide": "About personal reads"
+      },
+      "title": "Thread audience",
+      "shared": "Shared with {{audience}}",
+      "people_one": "{{number}} person",
+      "people_other": "{{number}} people",
+      "senders": "Can send: {{audience}}",
+      "canSend": "Can send",
+      "canView": "Can view",
+      "personal": "Reads with your access are visible to them",
+      "owner": "Reads with the owner’s access are visible here",
+      "sharing": "Audience sharing",
+      "unavailable": "Audience unavailable"
+    },
+    "changeScopes": {
+      "label": "Changes scope",
+      "thread": "Since the thread started",
+      "git": "Uncommitted in Git",
+      "repositoryUnknown": "The environment has not reported a repository yet.",
+      "chooseTurn": "Use Review beside a turn to choose its changes.",
+      "checkRepository": "Open the scope selector to check whether this workspace has a repository.",
+      "shortcut": "Show the thread’s Changes view"
+    },
+    "undo": {
+      "action": "Undo this change…",
+      "title": "Undo the change to {{path}}",
+      "confirm": "Undo this change",
+      "review": "Review the inverse patch before saving. A newer file version refuses the save.",
+      "done": "The recorded edit was undone.",
+      "changed": "These lines have changed since this edit. Nothing will be overwritten.",
+      "textOnly": "This action needs a complete UTF-8 text file within the editor’s size limit. Open the file or use a recorded checkpoint.",
+      "unavailable": "The current file is unavailable. Bring the environment online and try again.",
+      "incomplete": "A complete text patch was not recorded. Use a recorded checkpoint or review the file manually.",
+      "structural": "Creating, deleting or renaming a file needs a recorded checkpoint; it cannot be reversed as a text save."
+    },
+    "turnActions": {
+      "restoreBefore": "Restore files before this message…",
+      "turnRunning": "This turn is still running. Review its individual file changes instead.",
+      "noCheckpoint": "A complete checkpoint was not recorded before this message. Review and undo individual file changes.",
+      "retryMiddle": "Only the last completed turn can be tried again. Fork from here to take this turn in another direction.",
+      "retryHandled": "Automatic recovery is already handling this input.",
+      "noInput": "The original input is not available in this view.",
+      "noItems": "This turn has no loaded item to copy or link to.",
+      "forkUnavailable": "Forking is not available for this thread.",
+      "copy": "Copy turn as Markdown",
+      "copyAbout": "Copies the part of this turn that is loaded.",
+      "copied": "Copied the loaded turn.",
+      "more": "More turn actions"
+    },
+    "turnFiles": {
+      "list": "Files changed in this turn",
+      "review": "Review",
+      "thisTurn": "This turn"
+    },
+    "pinnedApprovals": "Waiting for approval",
+    "now": {
+      "compacting": "Shortening the conversation",
+      "approval": "Waiting for approval",
+      "approvalFor": "Waiting for approval: {{target}}",
+      "running": "Running {{command}}",
+      "writing": "Writing {{path}}",
+      "thinking": "Thinking",
+      "answering": "Writing the answer",
+      "starting": "Starting the turn",
+      "working": "Working",
+      "approvals_one": "{{count}} approval waiting",
+      "approvals_other": "{{count}} approvals waiting"
+    },
+    "viewModes": {
+      "label": "Detail",
+      "focused": "Focused",
+      "full": "Full",
+      "live": "Live",
+      "focusedAbout": "Keep inputs, answers and waiting approvals visible; fold the other work.",
+      "fullAbout": "Show the work step by step, with tool output closed until opened.",
+      "liveAbout": "Open current tool output as it arrives and follow the latest work until you scroll up.",
+      "toolCalls_one": "{{count}} tool call",
+      "toolCalls_other": "{{count}} tool calls",
+      "files_one": "{{count}} file changed",
+      "files_other": "{{count}} files changed"
+    },
     "agent": {
       "context": "Context {{percent}} % used"
     },
@@ -12547,12 +13536,17 @@
       "quota_exceeded": "A usage cap holds this thread{{detail}}",
       "attachments": "Only messages whose files cannot reach the agent wait. Their senders can try again or send them without the files.",
       "familyChoose": "Go on with another model of the plan",
+      "familyChecking": "Checking available models",
+      "familyReadFailed": "Models unavailable",
       "familyNoOther": "No other model of the plan may be used here.",
       "workspace_trust": "{{agent}} found a configuration of its own in the workspace of {{machine}}. Whoever manages the environment says whether it may use it; your messages wait until then.",
       "switching": "This thread is being switched. What you send now is delivered when it is done.",
       "error": "The thread stopped because of an error{{detail}}",
       "proceed": "Proceed anyway…",
-      "manager": "Whoever manages this thread can change this: {{who}}"
+      "manager": "Whoever manages this thread can change this: {{who}}",
+      "offlineDeadline": "If the machine stays offline, this turn ends at {{when}}.",
+      "offlineDeadlineDuration": "This turn ends after {{seconds}} seconds offline, counted from {{since}}.",
+      "offlineDeadlineBeyondCalendar": "The configured deadline extends beyond the calendar. This outage began {{since}}."
     },
     "blockedWhy": {
       "provider_not_allowed": "provider not allowed",
@@ -12584,6 +13578,7 @@
       "progress": "Progress"
     },
     "header": {
+      "shareThread": "Share thread",
       "label": "Thread",
       "quickActions": "Thread actions",
       "importedHistory": "Imported history",
@@ -12592,6 +13587,7 @@
       "view": "View",
       "organize": "Organize",
       "placement": "Agent and environment",
+      "waitingOnApproval": "Waiting on an approval",
       "waitingForAnswer": "Waiting for an answer",
       "rename": "Rename the thread",
       "titleField": "Title",
@@ -12606,16 +13602,12 @@
     "detail": {},
     "description": {
       "add": "Add a description",
-      "updated": "Updated automatically {{when}}",
       "field": "Description",
       "edit": "Edit the description",
       "save": "Save",
       "cancel": "Cancel",
       "expand": "Show the whole description",
-      "collapse": "Hide the description",
-      "replaces": "Your text replaces the automatic one",
-      "resume": "Resume the automatic description",
-      "refresh": "Refresh now"
+      "collapse": "Hide the description"
     },
     "bell": {
       "label": "Notifications for this thread",
@@ -12639,15 +13631,16 @@
       "who": "Whoever manages it can bring it back: {{who}}"
     },
     "watching": {
-      "title": "You can watch this thread. To work with it you also need:",
-      "talk": "{{name}} · to talk to its agent",
+      "title": "You can watch this thread",
+      "missing": "Missing: {{access}}",
+      "talk": "Interact on {{name}}",
       "use": "{{name}} · the model {{model}}",
       "useAt": "{{name}} · the model {{model}} at effort {{effort}}",
-      "closed": "{{name}} is {{owner}}'s own, and the place keeps it to its owner.",
       "askWho": "Can give access: {{names}}",
+      "askOthers": "Others can give access.",
       "nobody": "Nobody can give this from here.",
       "person": "On {{owner}}'s machine, as {{thread}} decides, only its owner works with it until they name somebody.",
-      "label": "You can watch this thread",
+      "label": "Access needed",
       "thisThread": "This thread"
     },
     "connection": {
@@ -12658,6 +13651,49 @@
       "more_one": "Show {{count}} more",
       "more_other": "Show {{count}} more"
     }
+  },
+  "implicitAvailability": {
+    "rateSettingsFailed": "Could not read rate settings",
+    "noKeptLayers": "No kept installed files",
+    "sharingChecking": "Checking sharing",
+    "sharingFailed": "Could not read sharing",
+    "sharingUnavailable": "Sharing unavailable here",
+    "noHostDrivers": "No drivers listed",
+    "noHostStorages": "No storage listed",
+    "usageFailed": "Could not read usage",
+    "noneSelected": "Nothing selected",
+    "noShareable": "Selection cannot be shared",
+    "sharingSubset_one": "Share {{number}} of {{total}}",
+    "sharingSubset_other": "Share {{number}} of {{total}}",
+    "docEdit": "Document Edit required",
+    "docArchived": "Document archived",
+    "docDeleted": "Document deleted",
+    "placeUnavailable": "Place unavailable",
+    "placeManage": "Place Manage required",
+    "templatesFailed": "Could not read templates",
+    "templatesUnavailable": "Templates unavailable here",
+    "linksOff": "Link sections off",
+    "docManage": "Document Manage required",
+    "orgUnavailable": "Organization unavailable",
+    "membersManage": "Members Manage required",
+    "portsManage": "Ports Manage required",
+    "noPortRequests": "No pending port requests",
+    "detailsUnavailable": "Details unavailable here",
+    "roleFailed": "Could not read role",
+    "roleUnavailable": "Role unavailable",
+    "roleUnreported": "No role reported",
+    "threadUnavailable": "Thread unavailable",
+    "threadInteract": "Thread Interact required",
+    "archived": "Thread archived",
+    "noChangedLines": "No changed lines",
+    "linkLimit": "Link limit reached"
+  },
+  "arrangementAvailability": {
+    "owner": "Not allowed by provider",
+    "machine": "Blocked by machine policy",
+    "program": "Not supported by this program",
+    "none": "No setup available",
+    "unreported": "No setup reported"
   },
   "start": {
     "title": "New thread in {{parent}}",
@@ -12691,7 +13727,10 @@
     "agent": {
       "title": "Agent",
       "none": "This provider offers no agent you can use.",
-      "unreported": "its agent program has not reported yet"
+      "unreported": "its agent program has not reported yet",
+      "programFailed": "The agent program reported an error. Choose another program.",
+      "programDetails": "Error reported by {{agent}}",
+      "openProgramReports": "Open the provider’s program reports"
     },
     "model": {
       "model": "Model",
@@ -12702,9 +13741,36 @@
     },
     "where": {
       "title": "Where it runs",
-      "topicDefault": "Topic default",
-      "none": "You manage no environment yet. Register a directory of a connected machine below.",
       "noMachines": "No machine of yours is connected, so no directory can be registered. Connect a computer first.",
+      "filesFrom": "Start with files from…",
+      "managers": "Who manages it",
+      "fileThread": "Thread",
+      "findThread": "Find a thread…",
+      "noThreads": "No matching thread",
+      "fileState": "Files to start with",
+      "currentFiles": "Current files",
+      "recordedFiles": "Recorded state",
+      "snapshot": "Recorded state",
+      "chooseSnapshot": "Choose a recorded state",
+      "noSnapshots": "No recorded states",
+      "chooseFileThread": "Choose a thread",
+      "useFiles": "Use these files",
+      "clearFiles": "Start empty",
+      "choice": "Environment setup",
+      "useExisting": "Use existing",
+      "createNew": "Create new",
+      "noExisting": "No existing environment",
+      "noHost": "No host can make the default environment here",
+      "chooseExisting": "Choose an environment",
+      "more": "More…",
+      "moreTitle": "More environments",
+      "search": "Find an environment…",
+      "noMatches": "No matching environment",
+      "used": {
+        "project": "In this project",
+        "elsewhere": "Elsewhere",
+        "unused": "Not used"
+      },
       "machineTitle": "A directory on one of your machines",
       "machineAbout": "Registering a directory makes it an environment of yours, which this thread then joins. Whoever runs a machine can read what is on it.",
       "allOffline": "Your machines are all offline.",
@@ -12715,11 +13781,14 @@
       "use": "Use this directory",
       "directory": "Directory in that environment",
       "directoryHint": "Where in the environment this thread works, relative to its root. Left empty, the server chooses.",
+      "directoryChecking": "Checking directory…",
+      "directoryNotChecked": "Directory not checked",
+      "directoryOffline": "Environment offline",
+      "directoryNoAccess": "Files access refused",
       "directoryExists": "Exists",
       "directoryNew": "Will be created",
       "directoryIsFile": "This is not a directory",
       "closed": "It cannot be used now.",
-      "newAbout": "Made for this thread from the defaults of {{place}}.",
       "hosts": "Where it would be made",
       "hostChosen": "chosen unless you pick",
       "hostClosed": "cannot be used",
@@ -12735,18 +13804,16 @@
       "askAccess": "Ask for access"
     },
     "arrangement": {
-      "noneAllowed": "{{provider}} allows no way of placing an agent that a harness there can take.",
       "asChosen": "As its place and the provider decide",
       "asChosenAbout": "Use the first available setup allowed by this place and the provider.",
       "label": "Where the agent runs",
       "pickProvider": "Choose a provider first.",
       "notAvailable": "This way cannot be used with this provider and environment.",
       "pickAgent": "Choose an agent first.",
-      "waiting": "The machine has not reported what this agent can do yet, so how it would be placed is not known. This asks again by itself.",
+      "waiting": "Waiting for the agent’s capabilities",
       "unknown": "Nothing says yet how {{agent}} would be placed here.",
       "unknownShort": "nothing says how it would be placed here",
       "nothingOpen": "No way of placing {{agent}} on {{provider}} works here",
-      "default": "Default",
       "tools": {
         "own": "The agent runs its own tools in the environment."
       },
@@ -12824,7 +13891,7 @@
       "providerNone": "There is no provider you can run work on here yet. Whoever manages providers can give you one.",
       "providerUnusable": "{{provider}} is the default here, and {{why}}.",
       "provider": "No provider is chosen for new threads in {{place}}.",
-      "agentUnreported": "The machine has not reported what {{agent}} can do yet. This asks again by itself.",
+      "agentUnreported": "{{agent}} has not reported its capabilities",
       "agentNone": "{{provider}} offers no agent you can use.",
       "agent": "No agent is chosen for new threads in {{place}}.",
       "modelNone": "{{provider}} lists no model you may use.",
@@ -13066,7 +14133,8 @@
       "nextKey": "Add the key",
       "nextModels": "Models",
       "nextSignIn": "Sign in",
-      "switchThreads": "Switch its threads…"
+      "switchThreads": "Switch its threads…",
+      "manageRequired": "Manage required"
     },
     "bulk": {
       "label": "Acts on the ticked rows",
@@ -13092,6 +14160,8 @@
     }
   },
   "settings": {
+    "sectionUnavailable": "Settings section unavailable",
+    "chooseSection": "Choose a section",
     "resourceChoice": {
       "choose": "Choose by name",
       "unavailable": "Selection unavailable",
@@ -13138,6 +14208,7 @@
       "undone": "Undone",
       "undo": "Undo",
       "undoNamed": "Undo the change to {{name}}",
+      "aboveStricter": "The setting above is stricter. Your value is saved.",
       "undoStale": "This value changed again. Review its current value before making another change.",
       "invalidValue": "Check this value before it can be saved.",
       "example": "Example",
@@ -13466,6 +14537,8 @@
       "atLeast": "at least {{min}}",
       "atMost": "at most {{max}}",
       "orderEmpty": "Nothing is chosen. Add from below.",
+      "autoUnavailable": "No program supports Auto approval",
+      "choiceUnavailable": "Unavailable for this view",
       "earlier": "Move {{name}} earlier",
       "later": "Move {{name}} later",
       "up": "Up",
@@ -13591,7 +14664,11 @@
           "intersect": "Only what every place allows stays",
           "map": "Entries are joined by name, a place below wins",
           "append": "What a place below writes is added after it",
-          "min": "The least of the places holds"
+          "min": "The least of the places holds",
+          "max": "The greatest minimum set in the hierarchy holds",
+          "all": "Allowed only where every setting scope allows it",
+          "any": "Protection stays on when any setting scope requires it",
+          "stricter": "The strictest choice set in the hierarchy holds"
         },
         "scope": {
           "system": "the system",
@@ -13608,6 +14685,7 @@
       }
     },
     "secrets": {
+      "showNames": "Show secret names",
       "title": "Secrets",
       "lead": "Given to the environments made under this place, sealed to their machines. Their values are never shown.",
       "add": "New secret…",
@@ -13713,41 +14791,6 @@
       "removeConfirm": "Delete {{name}}",
       "removeBody": "Nothing from {{name}} is sent there any more.",
       "removed": "{{name}} was deleted",
-      "kinds": {
-        "turn": {
-          "completed": "A turn ends",
-          "failed": "A turn fails"
-        },
-        "thread": {
-          "blocked": "A thread is blocked"
-        },
-        "approval": {
-          "requested": "An approval is asked for"
-        },
-        "milestone": "A milestone",
-        "announcement": "An announcement",
-        "provider": {
-          "exhausted": "A provider is used up"
-        },
-        "machine": {
-          "offline": "A machine goes offline"
-        },
-        "environment": {
-          "idle_stop": "An idle environment stops",
-          "attention": "An environment needs attention"
-        },
-        "cap": {
-          "warning": "A cap is nearly reached",
-          "reached": "A cap is reached"
-        },
-        "job": {
-          "finished": "A job finishes"
-        },
-        "doc": {
-          "mention": "Somebody is mentioned in a document",
-          "comment": "A comment on a document"
-        }
-      },
       "tickOne": "Tick at least one kind of event, or choose \"Every kind\"."
     },
     "gallery": {
@@ -13992,7 +15035,8 @@
       "authenticatorAbout": "Asked every time you sign in with your password.",
       "mail": "Code by mail",
       "mailAbout": "We send a code to {{email}}. This protects you from somebody who has your password, not from somebody who reads your mail.",
-      "mailNeedsAddress": "A code by mail needs a confirmed address. Confirm yours on the Profile page first.",
+      "mailPolicyBlocked": "Not allowed by sign-in policy",
+      "mailAddressRequired": "Confirmed email address required",
       "lost": "Lost your phone? Use a saved recovery code. Without one, ask a system admin for a link that resets your password and second step.",
       "authenticatorOnTitle": "Set up an authenticator app",
       "authenticatorOffTitle": "Switch off the authenticator app",
@@ -14099,11 +15143,9 @@
   },
   "tokens": {
     "lead": "Keys for programs and scripts that act as you.",
-    "about": "A token acts as you, narrowed to what you tick, for as long as you say. Its secret is shown once, when it is made.",
     "new": {
       "button": "New token…",
       "title": "New API token",
-      "lead": "Choose what it may do and for how long.",
       "name": "Name",
       "nameHint": "What it is for, so that you know it again.",
       "password": "Your password",
@@ -14388,6 +15430,10 @@
       "lastSeen": "Last seen",
       "from": "from {{address}}",
       "link": "Its link, as last measured",
+      "linkPending": "Link",
+      "notMeasured": "Not measured yet",
+      "linkTrip": "{{value}} ms",
+      "linkPartial": "Round trip: {{trip}} · Up: {{up}} · Down: {{down}}",
       "linkValue": "{{trip}} ms · {{up}} up · {{down}} down",
       "slow": "Slow link",
       "slowWhy": "A round trip above {{ms}} ms is why a file or a shell on this machine can feel slow.",
@@ -14937,6 +15983,7 @@
       "anotherSpeed": "Another speed, by its name",
       "anotherProgram": "Another program, by its name",
       "switchOn": "Switch on",
+      "switchOnIn": "Switch on in {{area}}",
       "rateTitle": "Rate",
       "rateLead": "Credits per million tokens. Without a rate the use is counted in tokens and is counted by no cap in credits.",
       "rateInput": "Input",
@@ -15265,9 +16312,7 @@
       "noTemplate": "No template to make it from",
       "noTemplateLead": "A template for environments that is switched on is needed. Write one under Templates.",
       "submit": "Add environment",
-      "done": "{{name}} is being made",
-      "hostNoDriver": "its driver does not make environments",
-      "hostClosed": "takes no new environments"
+      "done": "{{name}} is being made"
     },
     "edit": {
       "runsWhy": "Where it runs is chosen when it is made: a directory stays on its machine, and one made from a template stays on its host until it is moved.",
@@ -15382,6 +16427,7 @@
       "pinHint": "Default follows the environment or runtime policy; an exact pin wins",
       "json": "Profile (JSON)",
       "jsonHint": "An object. The version above is written into it as harness_version.",
+      "configKeys": "Configuration keys",
       "jsonInvalid": "This is not a JSON object.",
       "save": "Save profile",
       "saved": "{{name}} was saved",
@@ -15473,6 +16519,18 @@
           "docker_inside": {
             "name": "Docker inside",
             "description": "Let tools run Docker of their own inside the environment."
+          },
+          "port_place": {
+            "name": "$t(capabilityWords.port_place.name)",
+            "description": "$t(capabilityWords.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(capabilityWords.port_host.name)",
+            "description": "$t(capabilityWords.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(capabilityWords.port_link.name)",
+            "description": "$t(capabilityWords.port_link.description)"
           }
         }
       },
@@ -15513,6 +16571,18 @@
           "docker_inside": {
             "name": "$t(templates.choices.base_capabilities.*.docker_inside.name)",
             "description": "$t(templates.choices.base_capabilities.*.docker_inside.description)"
+          },
+          "port_place": {
+            "name": "$t(templates.choices.base_capabilities.*.port_place.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_place.description)"
+          },
+          "port_host": {
+            "name": "$t(templates.choices.base_capabilities.*.port_host.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_host.description)"
+          },
+          "port_link": {
+            "name": "$t(templates.choices.base_capabilities.*.port_link.name)",
+            "description": "$t(templates.choices.base_capabilities.*.port_link.description)"
           }
         }
       },
@@ -16793,15 +17863,15 @@
       },
       "agents-whose": {
         "title": "Whose agents",
-        "what": "The agents of a place are every agent thread in it, those started later among them. Sharing with one thread’s agent reaches that thread alone."
+        "what": "A place’s agents include its current and future agent threads; sharing with one thread’s agent reaches that thread alone. This is an actual share, which a parent’s creation preset does not rewrite."
       },
       "agents-areas": {
-        "title": "What they know",
-        "what": "Conversations are what the agents did, chats are what people said, and documents are what people wrote. Each is shared apart: not at all, to read, or to read and write."
+        "title": "What they can access",
+        "what": "Choose Documents, Chats and Threads separately: Edit, Post and Send include reading; Manage adds that area’s management acts, with Fork and Archive available separately in Advanced. Each act stays within its giver’s current sharing rights."
       },
       "agents-manage": {
         "title": "Can manage",
-        "what": "Agents that manage documents may also remove them, move them and bring them back. Nothing is destroyed: what they remove can be brought back until it is purged."
+        "what": "Manage permits document moves, deletion and restoration, deleting anyone’s chat message, and archiving, unarchiving, forking or deleting threads; a fork’s first owner is its giver. Only document deletion and thread or chat management need preview and confirmation; folder creation, copying, moving and restoring run directly, while places, permission pages and ownership remain outside the share."
       },
       "agents-copy": {
         "title": "A copy",
@@ -16809,12 +17879,12 @@
         "which": "To hand an agent a snapshot to work from: give a copy. To let it read what is written later too: keep it shared."
       },
       "agents-live": {
-        "title": "Keep it shared",
-        "what": "The agents read it through Orch whenever they work, what is written later included, until you end it. Nothing is copied."
+        "title": "A live contribution",
+        "what": "Contributions combine, with each act bounded by its giver’s current sharing rights and the chosen maximum; lost rights can reduce or pause a contribution, and regained rights can restore it while it remains valid. A pure grant sends no instruction and starts no work."
       },
       "agents-download": {
-        "title": "They may download it",
-        "what": "Downloading is taking away: the agents write what they read into their workspace as files. Untick it to let them read and search it and not copy it."
+        "title": "Export",
+        "what": "This choice includes Export where ordinary checks allow it; unticking does not erase information already read or prevent quoting and permitted writes. Document moves still follow their ordinary access and inheritance rules."
       },
       "line-custom": {
         "title": "Custom",
@@ -16957,6 +18027,7 @@
     },
     "search": {
       "label": "Search the help",
+      "results": "Help search results",
       "placeholder": "Search the help",
       "nothing": "Nothing in the help for “{{query}}”",
       "nothingAbout": "Try other words. Settings and commands are found with the finder.",
@@ -16973,6 +18044,16 @@
       "hints": "Hints on this screen",
       "articles": "Articles for this screen",
       "tipsBack": "Show closed tips again"
+    },
+    "articleGroups": {
+      "getting-started": "Getting started",
+      "work": "Work and collaboration",
+      "access": "Access and people",
+      "resources": "Resources",
+      "providers": "Providers",
+      "operations": "Operations",
+      "settings": "Settings and finding things",
+      "other": "More articles"
     },
     "articles": {
       "back": "All articles",
@@ -17392,7 +18473,17 @@
       "provider_disabled": "Provider switched off",
       "provider_removed": "Provider removed"
     },
-    "indexPaused": "Index paused"
+    "indexPaused": "Index paused",
+    "org": {
+      "label": "Search org",
+      "in": "In {{org}}",
+      "all": "All my orgs",
+      "searchAll": "Search all my orgs",
+      "searchAllCount": "Search all my orgs ({{number}})",
+      "unavailable": "Org unavailable",
+      "outsidePlace": "This place is outside the search org",
+      "clearPlace": "Clear place"
+    }
   },
   "export": {
     "downloadButton": "Download",
@@ -17402,7 +18493,8 @@
       "notAllowed": "Taking this away as a file is for people {{name}} names",
       "notAllowedNoOwner": "Taking this away as a file is for people its owner names",
       "request": "Request access",
-      "onlyThePeople": "Only the people in this chat can take it away as a file"
+      "onlyThePeople": "Only the people in this chat can take it away as a file",
+      "checking": "Checking export access"
     },
     "format": {
       "label": "Format"
@@ -17573,6 +18665,7 @@
     },
     "job": {
       "started": "Making the archive of {{place}}…",
+      "cancelled": "Export cancelled",
       "ready": "{{place}}: export ready",
       "failed": "{{place}}: export failed",
       "failedAbout": "The archive could not be written.",
@@ -18189,7 +19282,8 @@
         "environment": "Directory {{path}}",
         "url": "{{url}}",
         "draft": "Published draft",
-        "gitReference": "<repository>{{repository}}</repository> at <reference>{{reference}}</reference>"
+        "gitReference": "<repository>{{repository}}</repository> at <reference>{{reference}}</reference>",
+        "copy": "Copied in Orch"
       },
       "form": {
         "from": "From",
@@ -18277,10 +19371,17 @@
       "truncated": "This branch has more entries than can be shown. Open a smaller branch.",
       "share": "Share something with this agent…",
       "copy": "Copy shared by {{name}}",
-      "policy": {
-        "none": "No wider reach is given by policy.",
-        "topic": "The agents of this topic can read each other’s threads.",
-        "project": "The agents of this project can read each other’s threads."
+      "personalSkills": {
+        "checking": "Checking personal skills",
+        "allowed": "Personal skills allowed",
+        "off": "Personal skills off here",
+        "notReported": "Personal skills not reported",
+        "unsupported": "Personal skills not supported",
+        "failed": "Personal skills could not be checked",
+        "denied": "Personal skills access denied",
+        "private": "Personal skills unavailable in this view",
+        "sourceNotReported": "Source not reported",
+        "retry": "Try again"
       }
     },
     "given": {
@@ -18545,17 +19646,21 @@
       "notReported": "Not reported",
       "reviewer": "Reviewer: {{model}}",
       "reviewUseApart": "Review usage is counted separately to this thread.",
-      "reviewUseInside": "Review usage is included in the agent program’s totals.",
+      "reviewUseInside": "Separate review usage is not reported. Totals are reported by the agent program.",
       "subagentsAtOnce": "Sub-agents at once: {{count}}",
       "subagentDepth": "Sub-agent depth: {{count}} (1 allows no nesting)",
       "subagentsUnsupported": "Does not apply: this agent program offers no control for it.",
+      "imageGenerationUnsupported": "Not offered by {{program}}",
+      "imageGenerationUnavailable": "This agent program has not offered image generation.",
       "subagentsApply": "The shortest value along the hierarchy applies before the next turn.",
       "group": {
         "model": "Model parameters",
         "behaviour": "Behaviour",
         "safety": "Safety",
-        "advanced": "Advanced"
-      }
+        "advanced": "Advanced",
+        "provider": "Request options"
+      },
+      "optionsGuide": "Request options guide"
     }
   },
   "processes": {
@@ -18805,8 +19910,10 @@
       "member_moved": "Moved to another org",
       "sign_in_attention": "Sign-in",
       "route_attention": "Notification route",
-      "goal_ended": "Goal ended"
-    }
+      "goal_ended": "Goal ended",
+      "admin_message": "Admin message"
+    },
+    "otherKinds": "Other notifications"
   },
   "notifications": {
     "lead": "How and when you are told. The Inbox is always told; whether anything leaves Orch for you is your choice.",
@@ -18938,7 +20045,13 @@
       "removeWhat": "Nothing is sent through it any more, and every route through it ends.",
       "removed": "Deleted {{name}}"
     },
-    "kinds": "Kinds"
+    "kinds": "Kinds",
+    "kindAreas": {
+      "work": "Work updates",
+      "access": "Access",
+      "resources": "Resources",
+      "account": "Account"
+    }
   },
   "isolation": {
     "runsOn": "Runs on",
@@ -19109,7 +20222,10 @@
     "sentenceSettingReset": "Reset {{setting}} to its inherited value",
     "previousValue": "Before",
     "lockState": "Locked",
+    "sentenceHarnessChanged": "{{program}} reported a change to {{setting}}.",
     "actionThings": {
+      "content": "Content",
+      "harness": "Agent program",
       "access": "Access",
       "person": "Person",
       "admin": "Administrator access",
@@ -19135,6 +20251,7 @@
       "identity_provider": "Identity provider",
       "input": "Input",
       "input_schedule": "Input schedule",
+      "schedule": "Agent schedule",
       "invite": "Invitation",
       "machine": "Machine",
       "mcp": "MCP server",
@@ -19171,6 +20288,7 @@
       "skill": "Skill"
     },
     "actionVerbs": {
+      "copied_out": "{{thing}} copy to another org accepted",
       "recovery_codes_replaced": "{{thing}} recovery codes replaced",
       "other_sessions_revoked": "{{thing}} signed out of all other browsers",
       "accepted": "{{thing}} accepted",
@@ -19206,6 +20324,7 @@
       "email_code_disabled": "{{thing}} email codes disabled",
       "email_code_enabled": "{{thing}} email codes enabled",
       "enabled": "{{thing}} enabled",
+      "ended": "{{thing}} ended",
       "enrolled": "{{thing}} enrolled",
       "exec_changed": "{{thing}} execution settings changed",
       "exported": "{{thing}} exported",
@@ -19326,7 +20445,9 @@
       "goal_set": "{{thing}} goal set",
       "goal_changed": "{{thing}} goal changed",
       "goal_cleared": "{{thing}} goal cleared",
-      "goal_ended": "{{thing}} goal ended"
+      "goal_ended": "{{thing}} goal ended",
+      "manager_changed": "{{thing}} manager role changed",
+      "visibility_changed": "{{thing}} visibility changed"
     },
     "includeParent": "Include {{name}}",
     "sentencePermissionAdded": "Added a page entry for {{holder}}",
@@ -19499,6 +20620,33 @@
     "sentenceObjectAction": "{{action}} · {{name}}"
   },
   "ports": {
+    "tools": {
+      "title": "Port tools",
+      "unreported": "Port tool availability not reported",
+      "none": "No port tools requested",
+      "available": "Available",
+      "inactive": "Inactive",
+      "reasonUnknown": "Reason not reported",
+      "reasons": {
+        "noEnvironment": "No current environment",
+        "environment": "Environment unavailable",
+        "noMachine": "No current machine",
+        "unsupported": "Port discovery unsupported",
+        "owner": "Thread owner needs Ports View",
+        "policy": "Ports off by policy",
+        "local": "Ports off on the machine",
+        "audience": "No audience can be opened",
+        "program": "Program cannot receive Orch tools",
+        "environmentTools": "Orch tools off in this environment",
+        "continuation": "Unavailable for this continuation"
+      }
+    },
+    "view": {
+      "checking": "Checking access",
+      "denied": "Ports View required",
+      "noEnvironment": "No environment",
+      "noThread": "No thread selected"
+    },
     "udpDrops": "UDP datagrams dropped",
     "dropOversized": "Oversized",
     "dropFull": "Buffer full",
@@ -19560,6 +20708,15 @@
       "policy": "Opened without asking: the policy of {{place}} allows this kind"
     },
     "grants": {
+      "reasons": {
+        "manage": "Ports Manage required",
+        "notOffered": "Not offered by this environment",
+        "policy": "Denied by capability policy",
+        "granted": "Already granted",
+        "noGrant": "No grant to take back",
+        "approver": "Capability approver required",
+        "unknown": "Unavailable · reason not reported"
+      },
       "title": "Who agents may let in without asking",
       "about": "Each kind of opening is a capability of this environment. Where it is granted here, given by the template or allowed by a place’s policy, an agent’s request opens at once; otherwise a person who manages Ports decides each request.",
       "notOffered": "This environment’s template does not allow it.",
@@ -20323,6 +21480,18 @@
     "unknown": "Other saved view choice",
     "kinds": {
       "global": "All screens",
+      "document": "Documents",
+      "page": "List filters and tabs",
+      "approvals": "Approvals",
+      "ports": "Ports",
+      "storage": "Storage",
+      "trace": "Trace",
+      "navigation": "Navigation",
+      "onboarding": "First steps",
+      "links": "Links",
+      "import-review": "Import review",
+      "import-report": "Import reports",
+      "usage": "Usage",
       "thread": "Threads",
       "org": "Orgs",
       "project": "Projects and folders",
@@ -20402,7 +21571,7 @@
       "none": "In no group",
       "add": "Put it in a group",
       "addHint": "Name one of your own, such as frontier or small. Press Enter to add it.",
-      "full": "A model is in at most {{most}} groups.",
+      "full": "{{most}} groups reached",
       "put": "Add to group",
       "others": "Other groups of this provider",
       "othersLead": "This provider's other groups:",
@@ -20411,7 +21580,12 @@
       "noneYet": "No model is in a group yet. Put models in groups from their editor, and a limit can then name the group.",
       "count_one": "{{count}} model",
       "count_other": "{{count}} models",
-      "limit": "Limit this group…"
+      "limit": "Limit this group…",
+      "options": "Options…",
+      "optionsTitle": "Options · {{name}}",
+      "optionsSaved": "{{name}} options saved",
+      "optionsGuide": "Request options",
+      "off": "No new groups"
     },
     "limits": {
       "title": "Limits on this model",
@@ -20461,7 +21635,11 @@
       "lead": "{{name}} ({{routing}}) on {{provider}}. Models differ in all of this, and the same model differs between two providers.",
       "theEndpoint": "the endpoint",
       "thePlan": "this plan",
-      "startsWith": "Threads start with",
+      "defaultSearch": "Starting web search mode",
+      "defaultEffort": "Starting effort",
+      "defaultSpeed": "Starting speed",
+      "defaultProgram": "Starting access program",
+      "defaultContext": "Starting context",
       "standard": "Standard",
       "noProgram": "None",
       "typedIn": "Typed in here: {{source}} does not list it",
@@ -20751,6 +21929,14 @@
       "settings": {
         "title": "Settings",
         "lead": "Every setting at system scope."
+      },
+      "gateways": {
+        "title": "Gateways",
+        "lead": "Advertised regions and entrances."
+      },
+      "tokens": {
+        "title": "Tokens",
+        "lead": "System API tokens"
       }
     },
     "refusal": {
@@ -20884,6 +22070,7 @@
         "note": "The link is shown now and not again. If it is lost, make a new one from the user's menu."
       },
       "link": {
+        "alreadyShown": "This link was already shown. Make a new link if you need another.",
         "entry": "Reset link…",
         "title": "Reset link for {{name}}",
         "lead": "Makes the address at which they set a new password.",
@@ -21565,6 +22752,38 @@
       "made": "The plan was older than 15 minutes and has been made again. Look it over, then confirm."
     },
     "runs": {
+      "modelUnknown": "Model not reported",
+      "unavailable": {
+        "profileDisabled": "Profile disabled",
+        "keeper": "Provider requires its keeper profile",
+        "modelDisabled": "Disabled at provider"
+      },
+      "automatic": {
+        "profile": {
+          "keeper": "Automatic · provider’s keeper",
+          "retained": "Automatic · current profile kept",
+          "first": "Automatic · first reported profile"
+        },
+        "previousProfile": {
+          "disabled": "Previous profile disabled",
+          "unreported": "Previous program not reported",
+          "keeper": "Previous profile is not this provider’s keeper",
+          "unavailable": "Previous profile unavailable here"
+        },
+        "model": {
+          "retained": "Automatic · current model kept",
+          "first": "Automatic · first enabled model"
+        },
+        "previousModel": "Previous model unavailable here",
+        "previousEffort": "Previous effort cannot carry over",
+        "effort": {
+          "retained": "Automatic · kept previous effort",
+          "default": "Automatic · model default",
+          "first": "Automatic · first supported effort",
+          "unreported": "Automatic · effort not reported",
+          "none": "Automatic · no effort choices offered"
+        }
+      },
       "provider": "Provider",
       "agent": "Agent",
       "model": "Model",
@@ -21678,7 +22897,9 @@
       "processes_other": "{{count}} processes of this thread in {{name}} end",
       "oldSession": "The old session is closed",
       "endsNothing": "Nothing ends",
-      "endsNothingFork": "Nothing ends"
+      "endsNothingFork": "Nothing ends",
+      "program": "Program: {{to}} instead of {{from}}",
+      "startsIn": "Works in {{environment}}"
     },
     "hint": {
       "history": {},
@@ -21780,7 +23001,9 @@
       "cancel": "Cancel and undo",
       "environmentUpdate": "Updating the environment",
       "environmentMove": "Moving the environment",
-      "providerUpdate": "Updating the provider’s runtime"
+      "providerUpdate": "Updating the provider’s runtime",
+      "switchingEnvironment": "Switching to {{environment}}",
+      "switchingEnvironmentOn": "Switching to {{environment}} on {{machine}}"
     },
     "cancel": {
       "title": "Cancel and undo?",
@@ -21838,6 +23061,10 @@
       "notify_people": {
         "short": "Notify",
         "doing": "Notifying people"
+      },
+      "after_up": {
+        "short": "After start",
+        "doing": "Running after-start commands"
       }
     },
     "check": {
@@ -21861,7 +23088,8 @@
       "doneGeneric": "“{{name}}” goes on on its new side.",
       "oldBeingRemoved": "{{name}} is being removed. Nobody has to wait for that.",
       "forked": "The new thread is made, and it is yours.",
-      "switched": "This thread now runs on {{provider}}, with {{model}}."
+      "switched": "This thread now runs on {{provider}}, with {{model}}.",
+      "environmentSwitched": "This thread now runs in {{environment}}."
     },
     "failure": {
       "wait_timeout": "The turn was still running after {{minutes}} minutes. Nothing was changed.",
@@ -21887,12 +23115,11 @@
       "failed": "The fork could not be made"
     },
     "menu": {
-      "fork": "Fork to…",
       "forkNow": "Fork",
       "switch": "Switch provider or agent…",
       "move": "Move to another environment…",
       "progress": "Show progress",
-      "switchTopic": "Switch provider for all threads…",
+      "switchTopic": "Switch threads…",
       "switchThreads": "Switch threads…",
       "recycle": "Recycle idle…"
     },
@@ -21982,8 +23209,8 @@
       "menu": {
         "update": "Update…",
         "recreate": "Recreate…",
-        "move": "Move…",
-        "moveThreads": "Switch every thread's provider…"
+        "move": "Move to another machine…",
+        "moveThreads": "Switch threads…"
       }
     },
     "batch": {
@@ -21996,7 +23223,7 @@
         "agent": "Switch threads of {{name}}",
         "model": "Switch threads of {{name}}"
       },
-      "about": "Give several threads another provider at once. Each has a plan of its own; the ones that cannot go are left alone.",
+      "about": "Give several threads another provider or environment at once. Each has a plan of its own; the ones that cannot go are left alone.",
       "selected": "the selected threads",
       "hiddenName": "A thread you cannot see",
       "threads": "The threads",
@@ -22063,6 +23290,17 @@
       "stopped_one": "Stopped {{count}} environment",
       "stopped_other": "Stopped {{count}} environments",
       "stoppedAbout": "Their files stay. Each starts again when a message arrives for a thread in it."
+    },
+    "directory": {
+      "change": "Change directory…",
+      "label": "Directory",
+      "browse": "Browse…",
+      "root": "Workspace root",
+      "use": "Use this directory",
+      "empty": "No subdirectories",
+      "relative": "Enter a relative directory",
+      "keep": "Keep current directory",
+      "planned": "Directory · {{path}}"
     }
   },
   "fork": {
@@ -22092,26 +23330,28 @@
     }
   },
   "side": {
-    "panelTitle": "Aside",
+    "panelTitle": "Side thread",
     "panelAbout": "A side conversation with its own messages, queue and composer.",
     "item": {
       "ask": "Side thread from here…"
     },
     "menu": {
-      "ask": "Ask on the side…",
-      "askBox": "Ask on the side",
-      "askBoxAbout": "Sends this to a side thread and leaves the turn alone."
+      "ask": "Side thread…",
+      "askBox": "Side thread",
+      "askBoxAbout": "Sends this to a side thread and leaves the turn alone.",
+      "moveOut": "Move to another org",
+      "moveOutReason": "Moves with its main thread · Keep it to move it alone"
     },
     "ask": {
-      "title": "Ask on the side",
+      "title": "Side thread",
       "about": "Starts from {{thread}}'s conversation. Replies stay in this aside.",
       "mode": "Side mode: {{mode}}",
       "unconfirmed": "The last send was not confirmed. Retry it before changing the question; it will not make a second aside.",
       "unconfirmedDraft": "An earlier aside is unconfirmed. Retry sends it once; newer words stay here.",
-      "sending": "Asking on the side…",
-      "retry": "Retry aside",
+      "sending": "Starting side thread…",
+      "retry": "Retry side thread",
       "label": "What to ask",
-      "send": "Ask",
+      "send": "Start side thread",
       "fromTurn": "It starts from the conversation up to turn {{turn}}."
     },
     "reading": {
@@ -22122,14 +23362,14 @@
     "unavailable": {
       "loading": "Checking whether this agent can answer on the side…",
       "permission": "Talking to this thread's agent needs access.",
-      "archived": "Unarchive this thread before asking on the side.",
+      "archived": "Unarchive this thread before starting a side thread.",
       "side": "An aside cannot start another aside. Fork it instead.",
       "busy": "Wait for this thread's current change to finish.",
       "policy": "Side threads are switched off here. Use Fork instead.",
       "readOnly": "This agent cannot answer without being able to change things.",
       "notReported": "This agent has not reported whether it can answer without changing things yet.",
       "agentGone": "This thread’s agent profile is no longer available.",
-      "attachments": "Remove attachments to ask on the side."
+      "attachments": "Remove attachments to start a side thread."
     },
     "limit": {
       "title_one": "{{name}} has {{count}} side thread open",
@@ -22140,10 +23380,11 @@
     "close": "Close",
     "keep": "Keep as a thread…",
     "lane": {
+      "started": "asked on the side",
       "label": "Side thread {{name}}",
       "conversation": "The side thread’s conversation",
       "box": "Message to {{name}}",
-      "placeholder": "Ask on the side…",
+      "placeholder": "Message the side thread…",
       "send": "Send",
       "queue": "Queue",
       "openPanel": "Open in panel",
@@ -22151,7 +23392,7 @@
       "empty": "The agent has not answered yet.",
       "modeUnknown": "File access for this aside has not been reported.",
       "readOnly": "You can watch this aside.",
-      "unnamed": "Aside",
+      "unnamed": "Side thread",
       "unavailable": "This aside is no longer available to you.",
       "retained": "The side conversation is not part of this retained view.",
       "closedUnknown": "{{name}} · closed",
@@ -22428,7 +23669,7 @@
       "auto": {
         "triggers": {
           "title": "Triggers",
-          "description": "When automatic titles and descriptions are written again.",
+          "description": "When automatic titles, tags and summaries are written again.",
           "keywords": "Triggers"
         }
       },
@@ -22445,6 +23686,11 @@
         }
       },
       "sharing": {
+        "allow_copy_out": {
+          "title": "Copies to other orgs",
+          "description": "Whether things here may be duplicated or moved into another org.",
+          "keywords": "duplicate move copy export other organization"
+        },
         "allow_external": {
           "title": "Owners share outside",
           "description": "Whether the owners of a thing here may themselves name somebody from outside its root org on its page.",
@@ -22463,6 +23709,20 @@
           "title": "Pasted text in the message",
           "description": "The default share of remaining context for pasted text. 0 always sends it as a file; 100 always sends it in the message. The sender can choose for each paste.",
           "keywords": "paste text file message context remaining"
+        }
+      },
+      "summary": {
+        "targets": {
+          "title": "Summary targets",
+          "description": "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.",
+          "keywords": "summaries targets refresh catch-up"
+        }
+      },
+      "services": {
+        "allowed": {
+          "title": "Allowed services",
+          "description": "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.",
+          "keywords": "services search fetch images allowed"
         }
       }
     }
@@ -22553,8 +23813,8 @@
     "words": "What should change in the plan"
   },
   "mcpPlan": {
-    "kept": "The MCP server {{name}} stays",
-    "keptBecause": "The MCP server {{name}} stays",
+    "kept": "The MCP server {{name}} is kept",
+    "keptBecause": "The MCP server {{name}} is kept",
     "new": "The MCP server {{name}} is there too",
     "newBecause": "The MCP server {{name}} is there too",
     "lost": "The MCP server {{name}} will not be there",
@@ -22576,7 +23836,6 @@
     "model": "Model",
     "parameters": "Parameters",
     "dimensions": "Embedding dimensions",
-    "invalidParameters": "Enter an object of parameters",
     "times": "Attempts",
     "delay": "Delay (seconds)",
     "backoff": "Pause multiplier",
@@ -22597,6 +23856,11 @@
     "continue": "Continue",
     "switch": "Switch",
     "retryNow": "Retry now",
+    "resumeService": "Resume service",
+    "checkingRecovery": "Checking recovery state",
+    "recoveryUnavailable": "Recovery state unavailable",
+    "servicePausedPerson": "{{service}} is paused. A person must resume it. {{kind}}.",
+    "servicePausedReset": "{{service}} is paused until {{time}}. {{kind}}.",
     "stop": "Stop retrying",
     "interactRequired": "Requires Interact",
     "configureRequired": "Requires thread management access",
@@ -22625,7 +23889,12 @@
       "provider_exhausted": "Limit reached",
       "provider_unauthorized": "Credential refused",
       "context_overflow": "Context full",
-      "harness_error": "Agent error"
+      "harness_error": "Agent error",
+      "session_lost": "Session lost",
+      "rate_limited": "Rate limited",
+      "overloaded": "Provider overloaded",
+      "stream_interrupted": "Stream interrupted",
+      "unavailable": "Capability unavailable"
     },
     "actions": {
       "retry": "Retry",
@@ -22639,7 +23908,10 @@
       "summary": "Summary",
       "description": "Description",
       "embedding": "Embedding",
-      "review": "Review"
+      "review": "Review",
+      "web_search": "Web search",
+      "page_fetch": "Page fetch",
+      "image_generation": "Image generation"
     },
     "reasons": {
       "cyber": "Cyber",
@@ -22649,6 +23921,7 @@
     },
     "details": {
       "history_changed": "Selected history changed",
+      "machine_offline": "Waiting for the machine to return",
       "author_missing": "The original author is unavailable",
       "author_lacks_interact": "The original author cannot drive this thread",
       "author_lacks_use": "The original author cannot use this model",
@@ -22669,7 +23942,9 @@
       "origin_authority": "The original submission's authority is unavailable",
       "provider_switched_off": "Provider switched off",
       "model_switched_off": "Model switched off",
-      "request_cancelled": "Request cancelled"
+      "request_cancelled": "Request cancelled",
+      "chain_exhausted": "No recovery steps remain",
+      "candidate_purpose": "Candidate does not serve this purpose"
     },
     "name": "Rule name",
     "newRule": "Rule {{ordinal}}",
@@ -22741,10 +24016,20 @@
       "provider_unauthorized": "the provider rejected the credential",
       "context_overflow": "the context was full",
       "harness_error": "the agent encountered an error",
-      "other": "the call failed"
+      "session_lost": "the session was lost",
+      "other": "the call failed",
+      "rate_limited": "the provider rate limit was reached",
+      "overloaded": "the provider was overloaded",
+      "stream_interrupted": "the response stream was interrupted"
     },
     "firstStep": "Already the first step",
-    "lastStep": "Already the last step"
+    "lastStep": "Already the last step",
+    "destination": "Destination",
+    "modelDestination": "Model",
+    "capabilityDestination": "Capability service",
+    "configuredRoute": "Configured route",
+    "route": "Run through",
+    "offering": "Model or service"
   },
   "resourceFacts": {
     "separator": " · ",
@@ -22842,11 +24127,13 @@
       "url": "Address",
       "git": "Git",
       "environment": "Environment",
-      "draft": "Draft"
+      "draft": "Draft",
+      "copy": "Copy"
     },
     "environmentState": "Environment · {{state}}"
   },
   "statusItems": {
+    "textEstimateHint": "Estimated from text length until the usage row arrives",
     "title": "Status items",
     "menu": "Status items…",
     "place": "Place",
@@ -22984,6 +24271,7 @@
     "cards": "Cards and menus"
   },
   "threadStates": {
+    "notReported": "State not reported yet",
     "queued_one": "{{figure}} message waiting",
     "queued_other": "{{figure}} messages waiting",
     "held": "Held · Resume",
@@ -23139,7 +24427,7 @@
       "medium": "Medium",
       "large": "Large"
     },
-    "imageByPath": "This model receives the image as a file",
+    "imageByPath": "Image will be sent as a file",
     "playAnimation": "Play animation",
     "sizeNeedsEdit": "Editing the document is required",
     "duration": "Duration {{value}}",
@@ -23300,6 +24588,32 @@
     "host": "Destination host",
     "dataUnavailable": "Files unavailable",
     "recoveryCount": "{{number}} to recover"
+  },
+  "providerCredits": {
+    "unavailableHere": "Usage details unavailable for this view",
+    "historyUnsupported": "Plan and history not supplied by this source",
+    "panel": "Provider usage",
+    "metric": "Provider usage metric",
+    "subscription": "Subscription",
+    "credits": "Credits / paid usage",
+    "history": "Reported credit history",
+    "quantities": "Reported amounts",
+    "observationsOnly": "Reported balance, paid usage and spending limits keep their own units. A spending limit is not a credit balance.",
+    "noAmounts": "No numeric amount reported",
+    "overridden": "Manually set",
+    "total": "Total: {{amount}}",
+    "used": "Used: {{amount}}",
+    "limit": "Spending limit: {{amount}}",
+    "previous": "Previous amounts",
+    "next": "Next amounts",
+    "quantity": {
+      "balance": "Credit balance",
+      "remaining": "Remaining",
+      "total": "Total credits",
+      "used": "Used",
+      "paid": "Paid usage",
+      "limit": "Spending limit"
+    }
   },
   "planUsage": {
     "title": "Plan",
@@ -23480,8 +24794,8 @@
     "given": "Given {{number}} {{unit}}",
     "used": "Used {{number}} {{unit}}",
     "usedTitle": "Reported use",
-    "allTime": "All time {{number}}",
-    "recent": "Last 30 days {{number}}",
+    "allTime": "{{number}} {{unit}} all time",
+    "recent": "{{number}} {{unit}} in the last 30 days",
     "lastUsed": "Last used",
     "partial": "Recorded since",
     "unrecorded": "Not recorded",
@@ -23555,6 +24869,14 @@
       "age": "Age",
       "why": "Kept for"
     },
+    "grouping": {
+      "host": "By host",
+      "kind": "By kind",
+      "place": "By place",
+      "owner": "By owner",
+      "age": "By age",
+      "why": "By retention reason"
+    },
     "whys": {
       "in_use": "In use",
       "restore": "For restore",
@@ -23577,6 +24899,8 @@
       "content": "Content",
       "upload": "Upload",
       "export": "Export",
+      "snapshot": "Snapshot",
+      "import": "Import",
       "release": "Release",
       "dump": "Backup set"
     },
@@ -23612,7 +24936,7 @@
       "borrowed_path": "Existing folder stays",
       "latest_version": "Latest version",
       "database_in_use": "Active database",
-      "upload_active": "Upload active",
+      "upload_active": "Upload completion window is open",
       "export_running": "Export running",
       "changed": "The item changed; read the plan again",
       "cleanup_unavailable": "Cleanup is unavailable for this source",
@@ -23795,7 +25119,8 @@
       "gone": "a place that is gone",
       "hidden": "a place you cannot see",
       "moreFiles": "+{{number}}",
-      "files": "Source files"
+      "files": "Source files",
+      "exports": "Your exports"
     },
     "report": {
       "title": "Import report",
@@ -24106,6 +25431,8 @@
       "clear": "Clear goal",
       "raiseFirst": "Raise the limit first",
       "driveOnly": "Only people who can drive this thread",
+      "archived": "Unarchive this thread to set a goal",
+      "sideThread": "Goals are unavailable in side threads",
       "failed": "The goal could not be changed"
     },
     "menu": {
@@ -24122,6 +25449,10 @@
       "objective": "Objective",
       "condition": "Done when",
       "limitsNone": "Limits: none",
+      "limitsChecking": "Limits: checking",
+      "limitsUnavailable": "Limits: not read",
+      "limitsInherited": "Limits: as the place decides",
+      "fromPlace": "As the place decides",
       "limitsSome": "Limits: {{summary}}",
       "turns": "Turns",
       "minutes": "Minutes",
@@ -24165,5 +25496,1206 @@
   "threadSetup": {
     "title": "Set up thread",
     "save": "Set up"
+  },
+  "agentAccess": {
+    "title": "Agent access",
+    "change": "Change agent access",
+    "scope": "Access to",
+    "where": {
+      "nothing": "Nothing",
+      "thread": "This thread",
+      "topic": "This topic",
+      "project": "This project"
+    },
+    "reach": {
+      "nothing": "No contribution from you. Other contributions and the agent’s own conversation stay separate.",
+      "thread": "Associated documents and the separate chat only. The agent already has its own conversation; other threads and environment files are separate.",
+      "topic": "The topic’s documents, chats and other threads, within the areas you choose.",
+      "project": "The project’s documents, chats and other threads, within the areas you choose."
+    },
+    "noContribution": "No contribution",
+    "confirm": "Use this choice",
+    "unavailable": "You cannot currently give all of these rights. Choose an available level or Nothing.",
+    "preset": "This is a creation preset. The creator confirms the choice; changing it does not rewrite existing grants.",
+    "giverBound": "Each contribution is bounded by its giver’s current sharing rights. Creation presets apply only when a thread is created; changing them does not rewrite existing contributions.",
+    "checking": "Checking agent access…",
+    "presetUnavailable": "The creation preset or its giving limits are unavailable. You can choose Nothing and still create a thread.",
+    "forkTitle": "Agent access for the fork of {{name}}",
+    "forkAudience": "The fork copies {{name}}’s current audience under the existing fork rules. Use Fork to… to change human access.",
+    "forkThrough": "History through turn {{turn}}"
+  },
+  "agentContributions": {
+    "requested": "Requested maximum",
+    "current": "Current contribution",
+    "proposed": "Proposed contribution",
+    "none": "None",
+    "unassessed": "Not assessed for this material and recipient.",
+    "giverUnavailable": "Unavailable giver",
+    "previousToProposed": "Your requested maximum: before → proposed",
+    "viewerChoice": "Also give the thread’s viewers Read",
+    "viewerHint": "Ordinary Read includes current and future thread viewers. It follows normal grant rules separately from the agent’s loan. Unticking does not remove existing Read entries.",
+    "viewerStanding": "Separate viewer Read entries stay in place when this agent contribution is removed.",
+    "viewerEntries": "Separate viewer Read entries",
+    "state": {
+      "active": "Active for this material and recipient",
+      "reduced": "Reduced by current limits",
+      "inactive": "Inactive now",
+      "unassessed": "Assessed per material or recipient"
+    },
+    "reason": {
+      "giver_unavailable": "The giver is unavailable or cannot currently supply a contribution.",
+      "current_limits": "Current giver, entry, source or recipient limits apply.",
+      "per_target": "Rights are assessed for each actual material; this is not an assessment of the whole subtree.",
+      "recipient_context_required": "A concrete recipient thread is needed to assess effective rights.",
+      "source_unavailable": "The source is unavailable for this assessment."
+    },
+    "proposedState": {
+      "active": "Would supply rights for this material and recipient",
+      "reduced": "Would be reduced by current limits",
+      "inactive": "Would currently supply no rights",
+      "unassessed": "Requires assessment per material or recipient"
+    },
+    "remaining": "Other recorded shares on this source remain unchanged:",
+    "recordedFor": "{{giver}} → agents of {{recipient}}"
+  },
+  "operationKeys": {
+    "about": "Each key acts as you within its explicit targets and operations. Its secret is shown once. Your current permissions still apply.",
+    "newLead": "Choose targets, resource kinds and exact operations. No rules means this key can perform no operation.",
+    "rules": "Allowed operations",
+    "addRule": "Add target and operations",
+    "editRule": "Edit target and operations",
+    "keepRule": "Use this rule",
+    "targetKind": "Target kind",
+    "target": "Target",
+    "targetId": "Target ID",
+    "targetIdHint": "Enter the exact identifier of an existing target. This does not grant access to it.",
+    "findTarget": "Find an existing target",
+    "noTargets": "No visible targets found.",
+    "thisAccount": "Use this account",
+    "reachLabel": "Reach",
+    "reach": {
+      "self": "This target only",
+      "subtree": "This target and its hierarchy"
+    },
+    "accountSubtree": "For an account, its hierarchy includes only that account’s API keys and sessions.",
+    "resourceKinds": "Resource kinds",
+    "chooseResources": "Choose the resource kinds this rule may address.",
+    "allResources": "All resource kinds",
+    "noResources": "No resource kinds",
+    "preset": {
+      "read": "Read only",
+      "write": "Write only",
+      "readWrite": "Read and write",
+      "manage": "Read, write and manage"
+    },
+    "action": {
+      "read": "Read",
+      "write": "Write",
+      "manage": "Manage"
+    },
+    "usage": {
+      "required": "Required effect",
+      "response_content": "Optional response content"
+    },
+    "search": "Find an operation",
+    "exactReview": "Selections save these exact operation IDs and actions. Write does not include Read. A compound operation still needs every required target and action; optional response-content Read is separate.",
+    "unavailable": "These saved operation actions are outside the current catalogue or resource filter. They remain selected until you explicitly remove them or choose a preset.",
+    "currentRights": "Every use checks the key’s account permissions and all required targets. These requested limits grant no additional permissions.",
+    "legacy": "Legacy permission-scope key. Its original permission scopes and place restriction remain in force.",
+    "denyAll": "No operations are allowed. This creates a key that denies all operations.",
+    "denyAllShort": "No operations",
+    "ruleCount_one": "{{count}} target rule",
+    "ruleCount_other": "{{count}} target rules",
+    "boundTargets": "Targets listed in scope review",
+    "review": "Review scope",
+    "reviewTitle": "Scope of {{name}}",
+    "ceilings": "Inherited issuance ceilings",
+    "ceilingsHint": "Every ceiling below also applies. These server-retained limits do not add permissions.",
+    "placeLimits": "Retained place limits",
+    "refused": "Excluded place",
+    "maxDays_one": "At most {{count}} day",
+    "maxDays_other": "At most {{count}} days",
+    "kind": {
+      "org": "Org",
+      "project": "Project",
+      "topic": "Topic",
+      "thread": "Thread",
+      "document": "Document",
+      "document_container": "Document folder",
+      "provider": "Provider",
+      "agent": "Agent",
+      "environment": "Environment",
+      "host": "Host",
+      "machine": "Machine",
+      "template": "Template",
+      "mcp_server": "MCP server",
+      "mount": "Mount",
+      "skill": "Skill",
+      "chat": "Chat",
+      "group": "Group",
+      "account": "Account",
+      "key": "API key",
+      "session": "Session",
+      "job": "Job",
+      "export": "Export",
+      "import": "Import",
+      "upload": "Upload",
+      "invitation": "Invitation",
+      "approval": "Approval",
+      "schedule": "Schedule",
+      "notification": "Notification",
+      "system": "System-level operations"
+    },
+    "byId": "Use an exact ID without reading its name",
+    "removeUnavailable": "Remove these selections",
+    "removeUnavailableFor": "Remove unavailable selections for {{operation}}",
+    "activity": {
+      "title": "Recent activity",
+      "view": "Key details",
+      "forKey": "Recent activity of {{name}}",
+      "retention": "At most the latest 100 calls from the past 7 days. Names and IP addresses follow your current access.",
+      "refresh": "Refresh activity",
+      "operation": "Operation",
+      "time": "Time",
+      "outcome": "Outcome",
+      "status": "Status {{status}}",
+      "replayed": "Replayed",
+      "durationLabel": "Duration",
+      "duration": "{{duration}} ms",
+      "details": "Call details",
+      "requestId": "Request ID",
+      "ip": "IP address",
+      "undisclosedName": "Name not disclosed",
+      "undisclosedIp": "Not disclosed",
+      "none": "No recent calls",
+      "page": "Page {{page}}"
+    },
+    "editRuleButton": "Edit rule",
+    "removeRule": "Remove rule"
+  },
+  "providerFields": {
+    "protocol": "Request format",
+    "parameterFormat": "Parameter format",
+    "agentParameters": "Agent parameters",
+    "originalCall": "From the original request",
+    "preview": "Preview format",
+    "protocolHelp": "Agent recovery uses agent parameters. Other calls keep their original format when the target offers it; otherwise the completion fallback is {{fallback}}. The preview does not change the rule.",
+    "raw": "Raw JSON",
+    "inherit": "No explicit rule",
+    "constrain": "Constrain",
+    "block": "Block",
+    "fixed": "Replace text",
+    "remove": "Strip",
+    "custom": "Custom JSON",
+    "ruleFor": "Rule for {{name}}",
+    "required": "Required",
+    "closed": "Closed by this schema",
+    "fixedFor": "Value for {{name}}",
+    "allowed": "Allowed values",
+    "either": "Either",
+    "limitValues": "Choose allowed values",
+    "limitItems": "Choose allowed items",
+    "valuesFor": "Allowed values for {{name}}",
+    "defaultFor": "Default for {{name}}",
+    "noDefault": "No default",
+    "fieldHelp": "This edits the request schema. Endpoint and model rules still apply. A documented value is not automatically enabled or selected. Custom schema stays in Raw JSON.",
+    "extensionHelp": "A documented endpoint extension. Support depends on the configured service. This does not enable it on an endpoint that does not offer it.",
+    "headers": "Headers",
+    "headersHelp": "Fixed nonsecret headers of this endpoint. Secret header values keep their separate control. Other header names remain in Advanced.",
+    "headerFor": "Value for {{name}}",
+    "fields": {
+      "safetyIdentifier": "Safety identifier",
+      "user": "User identifier",
+      "metadata": "Metadata",
+      "cacheKey": "Cache key",
+      "cacheRetention": "Cache retention",
+      "cacheMode": "Cache mode",
+      "cacheLifetime": "Cache lifetime",
+      "routingOrder": "Provider order",
+      "routingOnly": "Allowed providers",
+      "routingIgnore": "Excluded providers",
+      "routingFallbacks": "Provider fallbacks",
+      "routingRequired": "Require parameter support",
+      "routingData": "Data collection",
+      "routingSort": "Provider order by",
+      "models": "Fallback models",
+      "plugins": "Plugins",
+      "transforms": "Transforms",
+      "tier": "Service tier",
+      "verbosity": "Verbosity",
+      "store": "Store response",
+      "googleSafety": "Safety settings",
+      "googleCache": "Cached content",
+      "speed": "Speed",
+      "cacheType": "Cache type",
+      "metadataUser": "Metadata user identifier"
+    }
+  },
+  "providerOptions": {
+    "title": "Request options",
+    "fixedByProvider": "Fixed by the provider",
+    "fixedValue": "Fixed value",
+    "unavailable": "This option cannot be changed here",
+    "schemaTitle": "Allowed request options",
+    "invalidSchema": "Enter an object of protocol names and JSON Schema objects."
+  },
+  "webSearch": {
+    "title": "Web search",
+    "modeSwitch": "{{mode}} web search",
+    "managerHint": "Enable native search only for models your endpoint or harness supports. Offering a mode does not enable it.",
+    "perUseHint": "Search the public web through the program's supported native mode or the selected service. Search fees may be additional to tokens.",
+    "offered": "Offered by {{source}}; enabled only by a provider manager.",
+    "declared": "The protocol supports this mode. Confirm that this model supports it before enabling it.",
+    "defaultHint": "New uses start here; each use may choose another allowed mode. A default is not a lock.",
+    "price": "Credits per web search",
+    "priceNamed": "{{price}} credits per web search",
+    "enabledModes": "Web search: {{modes}}",
+    "modeNamed": "Web search ({{mode}})",
+    "guide": "How provider web search works",
+    "count": "Web searches",
+    "unknown": "Unknown",
+    "optionsHint": "Configure domain filters, location and search limits in the endpoint request defaults. The guide lists the fields each protocol supports."
+  },
+  "regionalGateways": {
+    "title": "Gateways",
+    "gateway": "Gateway",
+    "catalogue": "Gateway catalogue",
+    "automatic": "Automatic",
+    "selected": "Selected",
+    "selection": "Selection",
+    "primary": "Primary gateway",
+    "connector": "Connector",
+    "connection": "Connection",
+    "connected": "Connected",
+    "offline": "Offline",
+    "notReported": "Not reported",
+    "notMeasured": "Not measured",
+    "measurements": "Measured round trips",
+    "measured": "Measured",
+    "milliseconds": "{{value}} ms",
+    "unavailable": "Unavailable ({{id}})",
+    "toolConnection": "Tool connection",
+    "unreachable": "$t(errors.tunnel.gateway_unreachable)",
+    "attempted": "Attempted gateways",
+    "tunnelState": {
+      "local": "Local",
+      "pending": "Connecting",
+      "attached": "Not reported",
+      "unavailable": "Unavailable",
+      "unknown": "Not reported"
+    },
+    "revision": "Revision {{revision}}",
+    "edit": "Edit",
+    "editTitle": "Edit gateways",
+    "empty": "No gateways advertised",
+    "endpointsFor": "Endpoints for {{label}}",
+    "id": "ID",
+    "label": "Label",
+    "region": "Region",
+    "trustLabel": "Trust",
+    "trust": {
+      "pinned": "Pinned",
+      "public": "Public"
+    },
+    "gatewayNumber": "Gateway {{number}}",
+    "endpointNumber": "Endpoint {{number}}",
+    "removeEndpointNumber": "Remove endpoint {{number}} from {{label}}",
+    "remove": "Remove",
+    "addEndpoint": "Add endpoint",
+    "removeGateway": "Remove {{label}}",
+    "addGateway": "Add gateway",
+    "loadFailed": "Could not load gateways",
+    "statusFailed": "Could not load the gateway status",
+    "choiceHelp": "Automatic measures on the machine at installation and reconnect. A selected gateway stays selected while it is unavailable.",
+    "primaryHelp": "The primary gateway carries this connector’s control connection. Its choice is changed in the installer or local console.",
+    "tunnelHelp": "Each tool tunnel uses one attached gateway. It can differ from the primary gateway without changing either machine’s selection.",
+    "catalogueHelp": "Advertise gateways by label and region. Editing changes the advertised choices; it does not move a connected machine.",
+    "refresh": "Refresh",
+    "refreshConnector": "Refresh connector gateways",
+    "up": "Up",
+    "down": "Down",
+    "moveUp": "Move {{label}} up",
+    "moveDown": "Move {{label}} down",
+    "placement": "Gateway choice",
+    "placementRule": {
+      "lowest_combined_rtt": "Lowest combined round trip",
+      "executor_pinned": "Executor’s gateway · place setting",
+      "executor_samples_unavailable": "Executor’s gateway · measurements unavailable",
+      "executor_peer_capability": "Executor’s gateway · peer attachment unavailable"
+    },
+    "combinedRoundTrip": "Combined {{value}} ms",
+    "sampleLimit": "Sample limit {{duration}}",
+    "sourceMeasured": "Source measured",
+    "executorMeasured": "Executor measured",
+    "fallback": "Fallback gateway",
+    "plannedGateway": "Planned gateway",
+    "bothMeasured": "Both measured"
+  },
+  "backgroundWake": {
+    "overlapBilling": "Overlapping usage is counted to the thread's first owner",
+    "work": "Background work",
+    "willWake": "Will wake when these finish",
+    "nextInput": "Results arrive with the next input",
+    "lost": "Lost with the session",
+    "settingTitle": "Background wake",
+    "settingOn": "Background wake: On",
+    "settingOff": "Background wake: Off",
+    "pendingOn": "Next session: On",
+    "pendingOff": "Next session: Off",
+    "deferred": "Changes apply when the running tasks finish",
+    "held_one": "{{count}} finished task waiting",
+    "held_other": "{{count}} finished tasks waiting",
+    "endNamed": "End {{name}}",
+    "cannotEnd": "Cannot be ended from here",
+    "unnamedCommand": "Background command",
+    "unnamedSubagent": "Subagent",
+    "finished": "{{label}} finished",
+    "failed": "{{label}} failed",
+    "wokenBy": "Woken by: {{causes}}",
+    "waitingBy": "Finished tasks waiting: {{causes}}",
+    "reviewChanged": "This task changed or finished. Review the current list.",
+    "wakeOffHold": "Background wake is off; results arrive with the next input.",
+    "refreshHold": "Session changes apply when the running tasks finish",
+    "authorLostHold": "{{name}} can no longer direct this agent",
+    "states": {
+      "running": "Running",
+      "completed": "Finished",
+      "failed": "Failed",
+      "stopped": "Ended",
+      "lost": "Lost"
+    }
+  },
+  "usageRequest": {
+    "uncached": "Uncached input",
+    "cached": "Cached input",
+    "cacheWrite": "Cache write",
+    "reason": "Reason",
+    "status": "Upstream status",
+    "attempt": "Attempt",
+    "tools": "Tool calls",
+    "toolTime": "Tool time",
+    "providerId": "Provider request ID",
+    "adapterId": "Request reference",
+    "owner": "Thread owner",
+    "reasons": {
+      "credit_program": "API credit benefit blocks this program; a provider organization owner must cancel the benefit in billing",
+      "cyber": "Cyber policy",
+      "safety": "Safety policy",
+      "other": "Other refusal",
+      "access": "Model access"
+    },
+    "measurement": "Measurement",
+    "nativeAggregate": "Native capability usage",
+    "vendorTotal": "Vendor-reported total",
+    "countedCredits": "Counted credits",
+    "unknownUnit": "Unit not reported",
+    "costNotReported": "Not reported"
+  },
+  "resourceChoices": {
+    "disabled": "Disabled",
+    "hostUse": "Host Use required",
+    "templateUse": "Template Use required",
+    "unschedulable": "Not accepting new units",
+    "driver": "Required driver unavailable"
+  },
+  "resourceGroups": {
+    "label": "Group by",
+    "none": "None",
+    "home": "Home",
+    "owner": "Owner",
+    "machine": "Machine",
+    "tag": "Tag",
+    "noHome": "No home",
+    "noOrigin": "No origin machine",
+    "noTag": "No visible tags",
+    "collapse": "Collapse {{name}}",
+    "expand": "Expand {{name}}",
+    "sharingPolicy": "Sharing policy",
+    "from": "From",
+    "current": "Group by: {{name}}",
+    "noOwner": "Owner unavailable",
+    "selectionUnavailable": "Selection unavailable",
+    "noMatches": "No matching resources",
+    "reasons": {
+      "otherMachine": "Definition is on another machine",
+      "otherEnvironment": "Belongs to another environment",
+      "disabled": "Switched off",
+      "noMachine": "No machine has a ready copy",
+      "importPolicy": "Machine does not allow imported tool servers",
+      "addPolicy": "Machine does not allow added tool servers",
+      "nameTaken": "An enabled server has this name",
+      "sourceUse": "The person who enabled it no longer has Use",
+      "capability": "Environment lacks a required capability"
+    },
+    "sharingOf": "Sharing policy of {{name}}",
+    "mcpAdd": "Choose tool server",
+    "mcpEnabled": "Enable {{name}}",
+    "mcpRemove": "Remove override for {{name}}",
+    "policyDefaults": "Home defaults ·",
+    "policyCustom": "Custom home defaults",
+    "policyNone": "No default sharing",
+    "policyVerbs": {
+      "view": "can view",
+      "interact": "can use",
+      "manage": "can manage"
+    },
+    "machineHome": "Machine home",
+    "machineHomeNamed": "Machine home: {{name}}"
+  },
+  "harnessChanges": {
+    "environmentConnected": "connected",
+    "environmentDisconnected": "disconnected",
+    "bufferingVisible": "notice shown",
+    "bufferingHidden": "notice hidden",
+    "hookReported": "Hook {{name}} reported a result.",
+    "hookReportedUnnamed": "A hook reported a result.",
+    "pinsReported": "{{program}} reported its managed launch settings.",
+    "pinsDiffer": "{{program}} reported different managed launch settings.",
+    "pinsIncomplete": "{{program}} did not report all managed launch settings.",
+    "notReported": "Not reported by the program",
+    "event": "{{program}}: {{value}}.",
+    "programEvent": "Program event",
+    "events": {
+      "informational": "Notice",
+      "notification": "Notification",
+      "local_command_output": "Local command completed",
+      "control_request_progress": "Control request progress",
+      "commands_changed": "Available commands changed",
+      "files_persisted": "Files saved",
+      "memory_recall": "Memory recalled",
+      "mirror_error": "Session synchronization problem",
+      "model_refusal_fallback": "Trying another response after refusal",
+      "model_refusal_no_fallback": "Response refused",
+      "plugin_install": "Plugin installation",
+      "session_state_changed": "Session state changed",
+      "session_writes_lost": "Session changes could not be saved",
+      "thinking_tokens": "Thinking usage reported",
+      "worker_shutting_down": "Worker stopping",
+      "hook_started": "Hook started",
+      "hook_progress": "Hook progress",
+      "hook_response": "Hook completed",
+      "elicitation_complete": "MCP request completed",
+      "mcp_status": "MCP server status",
+      "mcp_server_status": "MCP server status",
+      "mcp_servers_changed": "MCP servers changed",
+      "mcp_connection_status": "MCP connection status"
+    },
+    "hookRunning": "Running hook {{name}}.",
+    "hookRunningUnnamed": "A hook is running.",
+    "hookRan": "Ran hook {{name}}.",
+    "hookRanUnnamed": "A hook ran.",
+    "hookFailed": "Hook {{name}} failed.",
+    "hookFailedUnnamed": "A hook failed.",
+    "hookBlocked": "Hook {{name}} blocked the action.",
+    "hookBlockedUnnamed": "A hook blocked the action.",
+    "hookStopped": "Hook {{name}} stopped.",
+    "hookStoppedUnnamed": "A hook stopped.",
+    "hookEvents": {
+      "preModelRequest": "Before model request",
+      "postModelRequest": "After model request",
+      "preToolUse": "Before tool use",
+      "permissionRequest": "Permission request",
+      "postToolUse": "After tool use",
+      "preCompact": "Before compaction",
+      "postCompact": "After compaction",
+      "sessionStart": "Session start",
+      "sessionEnd": "Session end",
+      "userPromptSubmit": "Input submitted",
+      "subagentStart": "Subagent start",
+      "subagentStop": "Subagent stop",
+      "stop": "Stop",
+      "interrupt": "Interrupt"
+    },
+    "changed": "{{program}} changed its {{setting}} to {{value}}.",
+    "reported": "{{program}} reported its {{setting}} as {{value}}.",
+    "future": "Applies to future turns.",
+    "setting": "setting",
+    "subject": "{{program}} · {{subject}}",
+    "roots": "Writable folders: {{roots}}",
+    "separator": "; ",
+    "settings": {
+      "environment_connection": "environment connection",
+      "reply_buffering": "reply buffering notice",
+      "native_goal": "native goal",
+      "managed_setting": "managed setting",
+      "managed_settings_readback": "managed setting",
+      "session_lifecycle": "session",
+      "approval_policy": "approval policy",
+      "program_status": "program status",
+      "hook": "hook execution",
+      "context_compaction": "conversation context",
+      "approval_review": "permission review",
+      "approval_mode": "approval mode",
+      "sandbox_mode": "sandbox policy",
+      "model": "model",
+      "effort": "effort",
+      "collaboration_mode": "collaboration mode",
+      "collaboration_instructions": "collaboration instructions",
+      "mcp_startup": "MCP server status",
+      "session_status": "session status"
+    },
+    "values": {
+      "default": "Model default",
+      "ask": "Ask before actions",
+      "onRequest": "Ask when needed",
+      "onFailure": "Ask after a failure",
+      "bypass": "Bypass program prompts",
+      "automatic": "Automatic review",
+      "custom": "Custom settings",
+      "readOnly": "Read only",
+      "workspace": "Workspace writes",
+      "open": "Open",
+      "external": "External sandbox",
+      "networkAllowed": "network access allowed",
+      "networkBlocked": "network access blocked",
+      "noFoldersListed": "none listed",
+      "systemTmpExcluded": "system temporary folder excluded",
+      "systemTmpIncluded": "system temporary folder included",
+      "tmpExcluded": "/tmp excluded",
+      "tmpIncluded": "/tmp included",
+      "plan": "Plan",
+      "work": "Work",
+      "on": "On",
+      "off": "Off",
+      "privateInstructions": "Private contents",
+      "noAddedInstructions": "No added instructions"
+    },
+    "mcpStates": {
+      "disabled": "Disabled",
+      "starting": "Starting",
+      "ready": "Ready",
+      "failed": "Failed",
+      "cancelled": "Cancelled"
+    },
+    "sessionStates": {
+      "working": "Working",
+      "notLoaded": "Not loaded",
+      "idle": "Idle",
+      "systemError": "Program error",
+      "active": "Active"
+    },
+    "rateLimit": "{{provider}} rate limit: {{message}}",
+    "provider": "Provider",
+    "rateLimitStates": {
+      "allowed": "Requests allowed",
+      "warning": "Usage warning",
+      "rejected": "Requests rejected",
+      "updated": "Rate-limit update reported"
+    },
+    "mcpSignIn": "Sign in to this MCP server again",
+    "waitingApproval": "Waiting for approval",
+    "waitingInput": "Waiting for input",
+    "closed": "{{program}} closed the session.",
+    "resumed": "Resumed {{program}}.",
+    "unrecognized": "Unrecognized {{program}} event {{name}}",
+    "unrecognizedCount": "Unrecognized {{program}} event {{name}} · {{number}}"
+  },
+  "startImplicit": {
+    "origin": {
+      "manual": "Your choice",
+      "suggested": "Suggested",
+      "last_used": "Last used",
+      "shared_default": "Shared default"
+    },
+    "effort": "Effort {{value}}",
+    "name": "Name {{value}}",
+    "message": "Message {{value}}",
+    "sourceUnreported": "Source not reported",
+    "viewerDefault": "Default · {{key}} · {{source}}",
+    "checkingViewerDefault": "Checking the environment access default…",
+    "sourceSystem": "The system",
+    "reducedTo": "Reduced to",
+    "byAvailableAccess": "by available access",
+    "checkingMissing": "Checking what is missing…",
+    "catalogueFailed": "Access choices could not be loaded",
+    "chooseAccess": "Choose available access",
+    "checkAccessEnd": "Check the access expiry",
+    "grantedSelected": "Access granted · selected"
+  },
+  "harnessFailures": {
+    "session_lost": "The agent program lost its session. Let recovery finish; if the thread stays stopped, continue it.",
+    "harness_error": "The agent program could not finish its work. Retry the turn, or switch to another agent.",
+    "upstream_retrying": "The model service is not answering normally; the agent is retrying. Wait for the retry, or stop the turn.",
+    "permission_denied": "An operation was refused permission. Review access and approval settings before trying it again.",
+    "mcp_server_failed": "A tool server could not start or authenticate. Check the named server’s connection and sign-in, then retry.",
+    "fast_mode_paused": "Fast mode reached its limit and work continued at normal speed. Wait for the limit to reset before using fast mode again.",
+    "programMessage": "Agent program message"
+  },
+  "promptCacheTtl": {
+    "nativeDefault": "Program's own default",
+    "notUsedBy": "Not used by {{program}}.",
+    "notUsedUnknown": "Not used by the selected program."
+  },
+  "summaryBox": {
+    "historical": "Live summary does not describe this historical version",
+    "reading": "Reading summary",
+    "viewUnavailable": "Summary unavailable for this view",
+    "inspection": "Read-only inspection",
+    "manualModel": "No permitted API model is available. Check provider access and model allowlists.",
+    "manualCap": "Your summary limit is reached. Review your usage or wait for its reset.",
+    "resultsUnavailable": "Results unavailable for Ask",
+    "askIn": "Ask in {{name}}",
+    "resultsRootPending": "The results’ organization cannot be opened",
+    "model": "Model summarizer",
+    "details": "Summary details",
+    "inputFacts": "Source items: {{included}} included · {{shortened}} shortened · {{omitted}} omitted",
+    "baseRates": "Configured model base rates",
+    "noRates": "No base rates reported",
+    "perMillion": "{{amount}} credits per million tokens",
+    "rateInput": "Input",
+    "rateCachedInput": "Cached input",
+    "rateCacheWrite": "Cache writes",
+    "rateOutput": "Output",
+    "title": "Summary",
+    "catchUp": "Catch up",
+    "catchUpActions": {
+      "details": "Catch-up details",
+      "ask": "Ask about catch-up",
+      "refresh": "Refresh catch-up",
+      "choose": "Choose catch-up summarizer"
+    },
+    "chatTitleActions": {
+      "details": "Chat title details",
+      "ask": "Ask about chat title",
+      "refresh": "Refresh chat title",
+      "choose": "Choose title summarizer"
+    },
+    "subjectState": "{{subject}} · {{state}}",
+    "state": {
+      "fresh": "Fresh",
+      "updating": "Updating",
+      "failed": "Failed",
+      "no_summarizer": "No summarizer",
+      "empty": "No summary yet",
+      "stale": "Out of date",
+      "scheduled": "Scheduled"
+    },
+    "empty": "No summary yet",
+    "written": "Written",
+    "refresh": "Refresh summary",
+    "choose": "Choose summarizer",
+    "ask": "Ask about this",
+    "askResults": "Ask about these results",
+    "wait": {
+      "interval": "Minimum interval",
+      "recovery": "Waiting to retry",
+      "queue": "Waiting for a worker"
+    }
+  },
+  "capabilityRoutes": {
+    "title": "Capabilities",
+    "help": "How capabilities run",
+    "unavailable": "Unavailable",
+    "programDefault": "Program default",
+    "noPrice": "Price not reported",
+    "quote": "{{amount}} {{currency}} / {{unit}}",
+    "creditUnit": "credits",
+    "names": {
+      "generation": "Generation",
+      "image_input": "Image input",
+      "web_search": "Web search",
+      "page_fetch": "Page fetch",
+      "image_generation": "Image generation",
+      "embeddings": "Embeddings",
+      "provider_facts": "Provider facts",
+      "summary": "Summarization"
+    },
+    "routes": {
+      "native-model": "Model tool",
+      "native-program": "Program tool",
+      "service": "Provider service",
+      "delegation": "Delegated session"
+    },
+    "unknownRoute": "Declared route",
+    "reasons": {
+      "native_image_sign_in_required": "ChatGPT sign-in required; unavailable on Free",
+      "route_not_declared": "Route no longer available",
+      "route_does_not_carry_capability": "Route does not offer this capability",
+      "explicit_choice_required": "Choose a service to enable it",
+      "program_cannot_carry_tools": "Program cannot use these tools",
+      "executor_not_installed": "Service is not available here",
+      "backend_not_selected": "Choose a provider service",
+      "provider_not_declared": "Provider is unavailable",
+      "offering_not_declared": "Model or service is unavailable",
+      "offering_not_enabled": "Model or service is disabled",
+      "current_authority_unavailable": "Current access could not be confirmed",
+      "current_authority_refused": "You cannot use this provider here",
+      "interface_not_declared": "Endpoint format is unavailable",
+      "credential_role_unavailable": "Required sign-in is unavailable",
+      "endpoint_not_declared": "Endpoint facts are unavailable",
+      "offering_not_selected": "Choose a model or service",
+      "route_not_applicable": "Unavailable for this thread",
+      "program_does_not_carry_interface": "Program does not support this endpoint",
+      "program_does_not_carry_mode": "Program does not support this mode",
+      "program_support_not_applicable": "Unavailable with this sign-in or model",
+      "offering_does_not_enable_mode": "Mode is not enabled on this model",
+      "offering_support_not_applicable": "Unavailable on this model",
+      "native_tool_not_declared": "Endpoint does not offer this tool",
+      "native_tool_not_applicable": "Tool is unavailable on this model",
+      "program_default_unreported": "Program default",
+      "mode_not_declared": "Saved mode is unavailable",
+      "disabled": "Off",
+      "route_unavailable": "Unavailable",
+      "interface_not_installed": "Endpoint interface is not available here",
+      "provider_missing": "Provider is no longer available",
+      "sign_in_unavailable": "Sign in on the provider page",
+      "program_missing": "Provider has no agent program",
+      "program_unavailable": "Agent program is disabled or unavailable",
+      "program_unreported": "Agent program has not reported its capabilities",
+      "native_program_mismatch": "Sign-in belongs to a different program",
+      "model_unavailable": "Model is disabled or unavailable",
+      "capability_not_offered": "Program does not offer this capability",
+      "capability_not_declared": "Capability is not installed",
+      "capability_has_no_backend": "Capability has no service route",
+      "backend_not_available": "Backend is unavailable",
+      "native_capability_unavailable": "Capability is unavailable on the reported plan"
+    },
+    "units": {
+      "search": "search",
+      "page": "page",
+      "image": "image",
+      "token": "token",
+      "call": "call"
+    },
+    "fallback": "On {{when}} · Falls back to <provider/> · Rule: {{rule}} · {{source}}",
+    "scopeUnknown": "Inherited rule",
+    "scopes": {
+      "default": "Default",
+      "system": "System",
+      "org": "Organization",
+      "project": "Project",
+      "topic": "Topic",
+      "thread": "Thread"
+    }
+  },
+  "modelReport": {
+    "title": "Model report",
+    "source": "Reported by {{source}}",
+    "lifecycle": "Availability",
+    "inputMax": "Maximum input tokens",
+    "outputMax": "Maximum output tokens",
+    "line": "Model line",
+    "deprecated_at": "Deprecated since",
+    "retires_at": "Scheduled retirement",
+    "supported": "Supported",
+    "unsupported": "Not supported",
+    "stages": {
+      "active": "Active",
+      "deprecated": "Deprecated",
+      "retired": "Retired"
+    },
+    "capabilities": {
+      "image_input": "Image input",
+      "pdf_input": "PDF input",
+      "server_tools": "Server tools",
+      "web_search": "Web search",
+      "code_execution": "Code execution",
+      "effort": "Effort",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra high",
+      "max": "Maximum",
+      "thinking": "Thinking",
+      "types": "Modes",
+      "adaptive": "Adaptive",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "between_tools": "Between tools",
+      "structured_outputs": "Structured output",
+      "context_management": "Context management",
+      "citations": "Citations",
+      "batch": "Batch requests"
+    }
+  },
+  "summaryOptions": {
+    "fields": {
+      "thread": "Thread",
+      "topic": "Topic",
+      "document": "Document",
+      "chat": "Chat",
+      "chat_title": "Chat title",
+      "help": "Help",
+      "search_results": "Search results",
+      "automatic": "Refresh automatically",
+      "on": "Refresh on",
+      "min_interval_secs": "Minimum interval",
+      "context_tokens": "Input tokens",
+      "output_chars": "Output characters"
+    },
+    "document": {
+      "menu": "Summary options",
+      "title": "Summary options",
+      "inherited": "Place defaults",
+      "own": "This document",
+      "locked": "Locked",
+      "readOnly": "Read only",
+      "useDefault": "Use place defaults",
+      "reload": "Reload options",
+      "unavailable": "Summary options unavailable",
+      "interval": "Minimum interval: {{seconds}} s"
+    }
+  },
+  "providerFill": {
+    "key": "Key",
+    "role": "Key role",
+    "modelKey": "Model key",
+    "adminKey": "Admin key",
+    "sources": {
+      "format": "From key format",
+      "catalogue": "From catalogue",
+      "choice": "Your choice",
+      "default": "Default",
+      "vendor": "From the vendor"
+    },
+    "use": "Use {{name}}",
+    "unknown": "Unknown key format",
+    "ambiguous": "Ambiguous key format",
+    "review": "Credential review",
+    "adminSourceRequired": "Choose a facts source with an admin key field",
+    "chooseRole": "Choose a key role",
+    "reportedValues": "Reported values",
+    "unconfirmed": "Source not confirmed",
+    "vendorDiffers": "Vendor differs: {{fields}}",
+    "timeUnknown": "Time not reported",
+    "sourceGuide": "Reported values guide",
+    "yes": "Yes",
+    "no": "No",
+    "none": "None",
+    "fields": {
+      "name": "Name",
+      "window": "Context window",
+      "context": "Context offered",
+      "images": "Image input",
+      "efforts": "Efforts",
+      "search": "Web search offered",
+      "output": "Output limit",
+      "line": "Family",
+      "lifecycle": "Status",
+      "inputPrice": "Input price",
+      "outputPrice": "Output price",
+      "cachedPrice": "Cached input price",
+      "cachePrice": "Cache write price",
+      "hourCachePrice": "One-hour cache write price",
+      "twelveHourCachePrice": "Twelve-hour cache write price",
+      "searchPrice": "Search price",
+      "fetchPrice": "Page fetch price"
+    },
+    "groupProposal": "Add {{name}} group…"
+  },
+  "adminCredentials": {
+    "created": "Created",
+    "used": "Last used",
+    "expires": "Expires",
+    "noTokens": "No tokens",
+    "revokeToken": "Revoke {{name}}? Calls using it will be refused.",
+    "browser": "Browser",
+    "endAll": "Sign out all",
+    "endAllBody": "Ends every session of this person, including this browser when it belongs to them. They will need to sign in again.",
+    "endOneBody": "Ends this browser session. They will need to sign in again.",
+    "noSessions": "No sessions",
+    "sessions": "Sessions"
+  },
+  "adminArtifacts": {
+    "open": "Open",
+    "updated": "Updated",
+    "uploads": "Uploads",
+    "noUploads": "No unattached uploads",
+    "snapshots": "Snapshots",
+    "noSnapshots": "No workspace exports",
+    "unattached": "Not attached",
+    "attached": "Attached to {{number}}",
+    "reference": "Reference",
+    "moreReferences": "And {{number}} more",
+    "cannotDeleteUpload": "This upload cannot be deleted now",
+    "deleteUpload": "Delete {{name}}?",
+    "cancelUploadBody": "Cancels this unfinished upload.",
+    "releaseUploadBody": "Removes this upload from your uploads. Attached files are kept.",
+    "noManifest": "No manifest recorded",
+    "missingFiles": "{{number}} files missing",
+    "uploadStates": {
+      "complete": "Complete",
+      "partial": "Partial",
+      "expired": "Expired"
+    },
+    "snapshotStates": {
+      "running": "Creating",
+      "complete": "Complete",
+      "partial": "Partial",
+      "failed": "Failed",
+      "unavailable": "Unavailable",
+      "expired": "Expired"
+    },
+    "delete": "Delete"
+  },
+  "providerServices": {
+    "title": "Services",
+    "empty": "No services are declared for these endpoints.",
+    "edit": "Edit service",
+    "enable": "Enable this service",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "unavailable": "This service is unavailable on this runtime.",
+    "groups": "Service groups",
+    "inheritGroups": "Use declared groups",
+    "price": "Price per {{unit}}",
+    "cataloguePrice": "Use catalogue price",
+    "creditsPrice": "Set a price in Orch credits",
+    "savedPrice": "Keep the saved {{currency}} price",
+    "credits": "Orch credits per {{unit}}",
+    "invalidAmount": "Enter a nonnegative decimal amount.",
+    "saved": "Service saved",
+    "guide": "Service backends",
+    "estimate": "Catalogue estimate",
+    "providerPrice": "Saved price",
+    "currencyCredits": "Orch credits",
+    "units": {
+      "search": "search",
+      "page": "page",
+      "image": "image",
+      "call": "call"
+    }
+  },
+  "adminMessages": {
+    "messages": "Messages",
+    "messageMembers": "Message all members…",
+    "messageEveryone": "Message everyone…",
+    "title": "Title",
+    "body": "Body",
+    "write": "Write",
+    "preview": "Preview",
+    "sendsToMembers": "Sends to {{number}} members",
+    "sendsToPeople": "Sends to {{number}} people",
+    "send": "Send",
+    "sent": "Sent",
+    "empty": "No messages sent",
+    "sender": "Sender",
+    "recipients": "Recipients",
+    "fromOrg": "From the admins of {{org}}",
+    "fromSystem": "From the system admins",
+    "fromAdmins": "From the admins",
+    "showBanner": "Also show as the banner until",
+    "until": "Until",
+    "tellMembers": "Tell the members…",
+    "termsChanged": "The terms of {{org}} changed",
+    "sentToMembers": "Sent to {{number}} members",
+    "sentToPeople": "Sent to {{number}} people",
+    "sendsToMembers_other": "Sends to {{number}} members",
+    "sendsToMembers_one": "Sends to {{number}} member",
+    "sendsToPeople_other": "Sends to {{number}} people",
+    "sendsToPeople_one": "Sends to {{number}} person",
+    "sentToMembers_other": "Sent to {{number}} members",
+    "sentToMembers_one": "Sent to {{number}} member",
+    "sentToPeople_other": "Sent to {{number}} people",
+    "sentToPeople_one": "Sent to {{number}} person"
+  },
+  "duplicate": {
+    "setup": {
+      "unknown": "Copy setup details unavailable",
+      "before": {
+        "credentials_not_copied": "Owner credentials are not copied",
+        "sign_in_not_copied": "Sign in on the copy",
+        "source_consent_reset": "Credential sending needs new consent"
+      },
+      "after": {
+        "credentials_not_copied": "Copied without owner credentials",
+        "sign_in_not_copied": "Copied signed out",
+        "source_consent_reset": "Credential-sending consent reset"
+      }
+    },
+    "now": "Duplicate",
+    "to": "Duplicate to…",
+    "draft": "Duplicate draft",
+    "title": "Duplicate {{name}}",
+    "destination": "Destination",
+    "name": "Name",
+    "machine": "Machine",
+    "sameMachine": "Same machine",
+    "counting": "Counting…",
+    "notifyLimit": "Notify up to {{number}} people",
+    "homeRequired": "Choose an org or project",
+    "readRequired": "Read access required",
+    "filesRequired": "Read access to the environment and its files required",
+    "making": "Duplicating…",
+    "move": "Move…",
+    "moveConfirm": "Move",
+    "moveTitle": "Move {{name}}",
+    "manageRequired": "Manage access required",
+    "homeUnknown": "Home unavailable",
+    "moveOtherOrgUnavailable": "Move to another org unavailable",
+    "homeSaved": "Home saved",
+    "forkStarted": "Copy started",
+    "reviewAgain": "Review again",
+    "checking": "Checking…",
+    "judgeFailed": "Destination check unavailable",
+    "reviewDestination": "Requirements for {{name}}",
+    "reviewAccess": "Review access",
+    "causes": {
+      "source_policy": "Copies to other orgs are disabled here",
+      "export_permission": "Export access required",
+      "destination_creation": "Creation access required here",
+      "owners_only": "Only owners can move this to another org",
+      "not_available": "Unavailable",
+      "delete_refused": "Deletion is blocked here",
+      "registration_only": "This registration can only be moved"
+    },
+    "choices": {
+      "environment_placement": "Choose the environment placement",
+      "mcp_machine": "Choose a usable machine",
+      "fork_plan": "Review the fork destination",
+      "document_tree_preview": "Review the document destination",
+      "delete_preview": "Review deletion before moving",
+      "native_operation_scope": "Access checked when you continue",
+      "in_org_move": "Move within this org"
+    },
+    "placement": "Placement",
+    "samePlacement": "Same placement",
+    "managedPlacement": "Managed environment",
+    "machinePlacement": "Connected machine",
+    "deletePreviewUnavailable": "Deletion preview unavailable",
+    "moveAcross": "Copy to {{org}}, then delete",
+    "deletePlan": "Deletion plan",
+    "effect": "Effect",
+    "movePreviewFailed": "Deletion preview unavailable",
+    "typeName": "Type the source name",
+    "movedAcross": "Moved to the chosen org",
+    "moveEffects": {
+      "remove_source": "Remove the source",
+      "stop_bound_work": "Stop bound work",
+      "end_group_and_history": "End this group and its history",
+      "keep_registration": "Keep the registration"
+    },
+    "folderOptional": "Folder (optional)",
+    "deletePlanReady": "Deletion plan ready",
+    "files": "Files",
+    "versions": "Versions",
+    "restorableUntil": "Restorable until",
+    "samePlace": "Choose another place or name",
+    "folderInsideSource": "Choose a folder outside the source"
+  },
+  "fleetMoves": {
+    "title": "Environment changes",
+    "confirm_one": "Move {{number}} environment",
+    "confirm_other": "Move {{number}} environments",
+    "running": "Changing environments",
+    "done": "Environment changes finished",
+    "accepted": "Move accepted",
+    "progressUnavailable": "Progress unavailable",
+    "noPermission": "Needs environment management",
+    "notMovable": "Cannot move this environment",
+    "files_one": "{{number}} file · {{size}}",
+    "files_other": "{{number}} files · {{size}}"
+  },
+  "envTransfer": {
+    "copy": "Switch with a copy",
+    "copyTitle": "Switch with a copy · {{name}}",
+    "copyHeading": "Switching {{name}} with a copy to {{destination}}",
+    "copyDone": "{{name}} switched with a copy to {{destination}}",
+    "copyPlan": "Switch with a copy · {{from}} → {{to}}",
+    "title": "Environment change · {{name}}",
+    "changing": "Changing {{name}}",
+    "finished": "{{name}} change finished",
+    "finishedGeneric": "Environment change finished",
+    "done": "{{name}} now runs on {{destination}}",
+    "cleanup": "Finishing transfer",
+    "cleanupUnit": "Retiring the old unit",
+    "cleanupSource": "Keeping source data",
+    "oldKept": "Source data kept",
+    "operation": "Environment change",
+    "copyCount_one": "Switch {{number}} environment with a copy",
+    "copyCount_other": "Switch {{number}} environments with copies",
+    "changeCount_one": "Change {{number}} environment",
+    "changeCount_other": "Change {{number}} environments"
+  },
+  "sendLater": {
+    "title": "Send later…",
+    "editTitle": "Edit scheduled input",
+    "message": "Message",
+    "native": "Native selection",
+    "removeNative": "Remove native selection",
+    "name": "Name",
+    "when": "When",
+    "once": "Once",
+    "repeat": "Repeat",
+    "date": "Date",
+    "time": "Time",
+    "zone": "Time zone",
+    "next": "Next",
+    "frequency": "Frequency",
+    "daily": "Daily",
+    "weekly": "Weekly",
+    "weekdays": "Weekdays",
+    "fold": "Clock occurrence",
+    "choose": "Choose…",
+    "first": "First occurrence",
+    "second": "Second occurrence",
+    "destination": "Destination",
+    "thisThread": "This thread",
+    "newThread": "New thread each time",
+    "topicDefaults": "Topic defaults",
+    "configure": "Configure…",
+    "useSetup": "Use these choices",
+    "authority": "Runs as <person/> with their access and limits then",
+    "skipped": "{{time}} · skipped clock change",
+    "current": "Current version",
+    "useRevision": "Keep my edits",
+    "draftLoading": "Load the complete draft first",
+    "reviewUnsupported": "Review comments need Send now",
+    "edit": "Edit",
+    "pause": "Pause",
+    "resume": "Resume",
+    "history": "Run history",
+    "list": "Scheduled inputs",
+    "empty": "No scheduled inputs",
+    "actions": "Actions",
+    "errors": {
+      "missing": "Choose a date and time",
+      "invalid": "Choose a valid time in this zone",
+      "future": "Choose a future time",
+      "ambiguous": "Choose which clock occurrence",
+      "weekdays": "Choose at least one weekday"
+    },
+    "authorOnly": "Only the author can resume"
+  },
+  "machineData": {
+    "title": "Data directory",
+    "unavailable": "Directory inventory unavailable",
+    "incomplete": "Incomplete",
+    "unlisted": "{{number}} unlisted",
+    "name": "Name",
+    "kind": "Kind",
+    "size": "Size",
+    "state": "State",
+    "observed": "Observed",
+    "empty": "Directory empty",
+    "parts": "Directory parts",
+    "sealed": "Sealed store",
+    "kinds": {
+      "environment_data": "Environment data",
+      "provider_homes": "Provider homes",
+      "mcp_copies": "MCP copies",
+      "storage_bindings": "Storage bindings",
+      "logs": "Logs",
+      "sealed_store": "Sealed store",
+      "state": "State",
+      "other": "Other"
+    },
+    "problems": {
+      "unreadable": "Unreadable",
+      "link": "Link not followed",
+      "size_overflow": "Size unavailable"
+    }
+  },
+  "capabilityBackend": {
+    "provider": "Provider",
+    "route": "Route",
+    "choose": "Choose a route",
+    "providerFirst": "Choose a provider first",
+    "delegated": "Service · {{program}} (delegated)",
+    "unavailable": "Provider or route is unavailable",
+    "failed": "Capability failed",
+    "allowance": "Allowance: {{window}}",
+    "resets": "Resets <time/>",
+    "example": "A provider and its declared route"
   }
 }

@@ -6,7 +6,7 @@
  * moves it is given from outside, so that a tab knows nothing of where it can go.
  */
 import { Ellipsis, Pin, X } from 'lucide-react';
-import type { HTMLAttributes, ReactNode, Ref } from 'react';
+import { type HTMLAttributes, type ReactNode, type Ref, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { ContextMenu } from '@/ui/ContextMenu';
@@ -70,17 +70,26 @@ export function ViewTab({
   handleProps,
 }: ViewTabProps) {
   const { t } = useTranslation();
+  const menuStrip = useRef<HTMLElement | null>(null);
+  const rememberMenuStrip = (open: boolean) => {
+    if (open) menuStrip.current = document.getElementById(id)?.closest<HTMLElement>('[role="tablist"]') ?? null;
+  };
+  const restoreMenuFocus = (event: Event) => {
+    const destination = document.getElementById(id)
+      ?? menuStrip.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    if (destination?.isConnected) { event.preventDefault(); destination.focus(); }
+  };
   const said = about === undefined ? title : `${title} · ${about}`;
   // A narrow tab keeps its title and moves its close mark to the menu.
   const marks = !compact && (closable || unsaved || kept || pinned);
   return (
     // The menu belongs to the whole tab: a right click anywhere on it opens it, and so do the menu
     // key and Shift+F10 while the tab has the keyboard.
-    <ContextMenu entries={menu} label={t('workbench.tab.menu', { title })}>
+    <ContextMenu entries={menu} label={t('workbench.tab.menu', { title })} onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus}>
       <div
         role="presentation"
         className={cx(
-          'group/tab relative flex h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
+          'group/tab relative flex snap-start snap-always h-(--tab-strip-height) min-w-0 max-w-full shrink-0 items-stretch border-r border-border',
           active ? 'bg-bg text-text' : 'text-text-muted hover:bg-bg-muted hover:text-text',
           carried && 'opacity-50',
         )}
@@ -94,6 +103,7 @@ export function ViewTab({
             id={id}
             aria-selected={active}
             aria-controls={panelId}
+            aria-haspopup={menu.length === 0 ? undefined : 'menu'}
             aria-label={unsaved ? t('workbench.tab.unsaved', { title }) : undefined}
             tabIndex={tabbable ? 0 : -1}
             {...handleProps}
@@ -163,7 +173,7 @@ export function ViewTab({
           </span>
         )}
         {active && <span aria-hidden className="absolute inset-x-0 top-0 h-0.5 bg-accent" />}
-        {!compact && <Menu label={t('workbench.tab.menu', { title })} entries={menu} trigger={<button type="button" tabIndex={-1} aria-label={t('workbench.tab.menu', { title })}
+        {!compact && <Menu label={t('workbench.tab.menu', { title })} entries={menu} onOpenChange={rememberMenuStrip} onCloseAutoFocus={restoreMenuFocus} trigger={<button type="button" tabIndex={-1} aria-hidden aria-label={t('workbench.tab.menu', { title })}
           className={cx('flex w-5 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-bg-muted hover:text-text', !active && 'opacity-0 group-hover/tab:opacity-100 group-focus-within/tab:opacity-100')}><Ellipsis className="size-4" aria-hidden /></button>} />}
       </div>
     </ContextMenu>

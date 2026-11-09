@@ -32,7 +32,7 @@ export function Storage() {
 
   if (storage.isPending) {
     return (
-      <div className="@container"><SkeletonGroup className={FIGURE_GRID}>
+      <div className="@container"><SkeletonGroup read={storage} className={FIGURE_GRID}>
         {[0, 1, 2, 3, 4].map((at) => (
           <Skeleton key={at} className="h-16 w-full" />
         ))}

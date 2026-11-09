@@ -7,7 +7,7 @@ import { errorRate, errorsText, relativeSpeed, speedText, timeText } from '@/fea
 import { changeOf } from '@/features/usage/figures';
 import { ChangeLine } from '@/features/usage/Figures';
 import { accessProgramDisplayName, effortDisplayName, modelDisplayName } from '@/features/models/names';
-import { offeredChoice } from '@/i18n/choices';
+import { tierFilter, tierLabel, type TierFilter } from './tier';
 import { useFormatContext } from '@/lib/appearance';
 import { boxClasses,Section } from '@/shell/Page';
 import { formatNumber } from '@/lib/format';
@@ -73,13 +73,13 @@ function value(row: UsageComparison, sort: Sort): string | number | null {
   }
 }
 
-export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: readonly UsageComparison[]; modelNames: ReadonlyMap<string, string>; onFilter: (patch: { model: string; tier: string; effort: string; program: string }) => void }) {
+export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: readonly UsageComparison[]; modelNames: ReadonlyMap<string, string>; onFilter: (patch: { model: string; effort: string; program: string } & TierFilter) => void }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const [sort, setSort] = useListChoice<{ key: Sort; descending: boolean }>('performance', 'sort', { key: 'requests', descending: true });
   const modelName=(row:UsageComparison)=>modelDisplayName(modelNames.get(row.model),t);
   const ordered = [...rows].sort((a, b) => {
-    const sortValue = (row: UsageComparison) => sort.key === 'model' ? modelName(row) : sort.key === 'program' && row.program !== null ? accessProgramDisplayName(row.program, t) : value(row, sort.key);
+    const sortValue = (row: UsageComparison) => sort.key === 'model' ? modelName(row) : sort.key === 'tier' ? tierLabel(row, t) : sort.key === 'program' && row.program !== null ? accessProgramDisplayName(row.program, t) : value(row, sort.key);
     const x = sortValue(a), y = sortValue(b);
     if (x === null) return y === null ? 0 : 1;
     if (y === null) return -1;
@@ -97,7 +97,7 @@ export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: re
         : key === 'firstToken' || key === 'firstTokenP90' ? timeText(value(row, key) as number | null, locale, t)
         : key === 'errors' ? errorsText(p,locale,t)
         : key === 'requests' ? new Intl.NumberFormat(locale).format(p.requests)
-        : key === 'tier' ? row.tier===null?t('usage.key.standard'):offeredChoice(t,'serviceTier',row.tier)?.name??row.tier : key === 'effort' ? row.effort===null?t('usage.key.noEffort'):effortDisplayName(row.effort,t) : row.program === null ? t('usagePerf.noProgram') : accessProgramDisplayName(row.program,t);
+        : key === 'tier' ? tierLabel(row, t) : key === 'effort' ? row.effort===null?t('usage.key.noEffort'):effortDisplayName(row.effort,t) : row.program === null ? t('usagePerf.noProgram') : accessProgramDisplayName(row.program,t);
       if (key !== 'model') return <span className="tabular-nums">{text}</span>;
       const compact = [
         !shown.has(REQUESTS_COLUMN) ? t('usagePerf.compactRequests', { count: p.requests, value: new Intl.NumberFormat(locale).format(p.requests) }) : null,
@@ -107,11 +107,11 @@ export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: re
         !shown.has(FIRST_TAIL_COLUMN) ? t('usagePerf.compactFirstP90', { value: timeText(p.first_token_p90_ms, locale, t) }) : null,
       ].filter((part):part is string=>part!==null);
       const choices=[
-          ...(row.tier===null?[]:[{label:t('usage.chip.tier'),value:offeredChoice(t,'serviceTier',row.tier)?.name??row.tier}]),
+          ...(row.tier===null && row.tier_unknown !== true?[]:[{label:t('usage.chip.tier'),value:tierLabel(row,t)}]),
           ...(row.effort===null?[]:[{label:t('usage.chip.effort'),value:effortDisplayName(row.effort,t)}]),
           ...(row.program===null?[]:[{label:t('usage.chip.program'),value:accessProgramDisplayName(row.program,t)}]),
       ];
-      const filter=()=>onFilter({ model: row.model, tier: row.tier ?? 'none', effort: row.effort ?? 'none', program: row.program ?? 'none' });
+      const filter=()=>onFilter({ model: row.model, ...tierFilter(row), effort: row.effort ?? 'none', program: row.program ?? 'none' });
       return <button type="button" onClick={filter} className="min-w-0 text-left text-accent-text hover:underline">
         <span className="block font-medium wrap-anywhere">{modelName(row)}</span>
         <span className="flex flex-col gap-1 text-xs text-text-muted">{choices.map((part)=><span key={part.label} className="flex flex-wrap gap-x-2"><span>{part.label}</span><span>{part.value}</span></span>)}</span>
@@ -126,7 +126,7 @@ export function PerformanceComparison({ rows, modelNames, onFilter }: { rows: re
     <Button size="sm" variant="ghost" icon={<ArrowDownUp aria-hidden />} onClick={()=>setSort((before)=>({...before,descending:!before.descending}))}>{t('usagePerf.reverseSort')}</Button>
   </>}>
     <p aria-live="polite" className="sr-only">{t('usagePerf.sorted',{column:labels[sort.key],direction:t(sort.descending ? 'usagePerf.descending' : 'usagePerf.ascending')})}</p>
-    <Table label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.effort,row.program])} />
+    <Table label={t('usagePerf.comparison')} rows={ordered} columns={columns} rowKey={(row)=>JSON.stringify([row.model,row.tier,row.tier_unknown === true,row.effort,row.program])} />
   </Section>;
 }
 

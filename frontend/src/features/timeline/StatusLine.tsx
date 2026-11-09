@@ -39,6 +39,14 @@ export function StatusLine() {
     }
     return undefined;
   });
+  const pausedService = useThreadPart(threadId, (view) => view.order.some((id) => {
+    const item = view.items.get(id);
+    if (item?.kind !== 'tool_call' || item.payload.tool.kind !== 'orch') return false;
+    const tool = item.payload.tool;
+    if (tool.tool !== 'web_search' && tool.tool !== 'web_fetch') return false;
+    const result = tool.result;
+    return result !== null && typeof result === 'object' && !Array.isArray(result) && 'state' in result && result.state === 'paused';
+  }));
   // A thread that starts has done so for as long as the turn it starts, or the message that asked for it, has waited.
   const askedAt = useThreadPart(threadId, (view) => waitingInputs(view)[0]?.created_at);
   const now = useRunningClock(readOnly !== true && thread !== null && (thread.state === 'running' || thread.state === 'starting' || thread.state === 'waiting_approval'));
@@ -59,7 +67,8 @@ export function StatusLine() {
         ? t('timeline.status.compacting', { time: since(turn.phase.since) })
         : `${t('statusItems.generating')}${step === undefined ? '' : `: ${describeStep(step, t).text}`}`;
   }
-  if (line === null) return null;
+  const serviceRecovery = pausedService ? <ThreadCallRecovery thread={thread} serviceOnly /> : null;
+  if (line === null) return serviceRecovery;
   const status = (
     <div data-status-line className="flex min-w-0 items-center justify-center gap-2 py-1 text-center text-sm text-text-muted">
       <StatusPlace place="live" threadId={threadId} activeLabel={line} role="status" fixed={[
@@ -68,5 +77,5 @@ export function StatusLine() {
       ]} />
     </div>
   );
-  return thread.lock?.phase === 'history' ? <HandoffRecoveryLine job={thread.lock.id} fallback={status} /> : status;
+  return <>{thread.lock?.phase === 'history' ? <HandoffRecoveryLine job={thread.lock.id} fallback={status} /> : status}{serviceRecovery}</>;
 }
