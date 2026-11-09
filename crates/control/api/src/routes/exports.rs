@@ -8,7 +8,7 @@
 //! given, a thread as the API shows it) are written by [`ApiForms`], which the engine asks, so that a thing in an
 //! archive is the very bytes of its single export.
 
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::documents::export::single_form;
@@ -21,26 +21,53 @@ use chrono::{DateTime, Utc};
 use http::{StatusCode, header};
 use orch_api_contract::common::{ErrorCode, Page, PageQuery};
 use orch_api_contract::exports::{
-    Export, ExportDelete, ExportDownload, ExportGet, ExportPlan, ExportRequest, MeExportList,
-    NodeExportCreate, NodeExportPreflight,
+    Export, ExportDelete, ExportDownload, ExportGet, ExportRequest, MeExportList, NodeExportCreate,
+    NodeExportPreflight,
 };
 use orch_api_contract::nodes::Node;
 use orch_api_contract::threads::Thread;
-use orch_api_contract::workspace::Job;
 use orch_authz::{Policy, Principal};
 use orch_db::Conn;
 use orch_engine::exports::{Blocked, DocumentForm, DocumentHow, ExportError, Forms, FormsFault};
 use orch_types::Id;
 
+mod byte_sources;
+mod creation;
+mod planning_sources;
+mod read_sources;
+mod removal_sources;
+
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(NodeExportPreflight, preflight)
-        .on(NodeExportCreate, create)
-        .on(MeExportList, list)
-        .on(ExportGet, get)
-        .on_raw(ExportDownload, download)
-        .on(ExportDelete, delete);
+        .creation(NodeExportCreate, creation::replay_binding())
+        .on_snapshot_body_read_with_optional_operation(
+            NodeExportPreflight,
+            crate::key_operations::native::selected_body::<planning_sources::Plan, (), ExportRequest>,
+            crate::key_operations::native::selected_body_read::<planning_sources::Plan, (), ExportRequest>,
+        )
+        .on_with_operation(NodeExportCreate,
+            crate::key_operations::native::effects::prepare::<creation::Create>, creation::run)
+        .on_snapshot_read_with_optional_operation(
+            MeExportList,
+            crate::key_operations::native::selected::<read_sources::Archives>,
+            crate::key_operations::native::selected_read::<read_sources::Archives>,
+        )
+        .on_snapshot_read_with_optional_operation(
+            ExportGet,
+            crate::key_operations::native::selected::<read_sources::Archive>,
+            crate::key_operations::native::selected_read::<read_sources::Archive>,
+        )
+        .on_raw_read_with_operation(
+            ExportDownload,
+            crate::key_operations::native::effects::prepare::<byte_sources::Open>,
+            byte_sources::download,
+        )
+        .on_with_operation(
+            ExportDelete,
+            crate::key_operations::native::effects::prepare::<removal_sources::Delete>,
+            delete,
+        );
 }
 
 // ---------------------------------------------------------------- what only this layer writes
@@ -56,6 +83,52 @@ fn fault(error: &ApiError) -> FormsFault {
 
 #[async_trait]
 impl Forms for ApiForms {
+    async fn sources(
+        &self,
+        conn: &mut Conn,
+        asker: &Principal,
+        form: orch_engine::exports::Form,
+    ) -> Result<Option<orch_engine::exports::FormSources>, FormsFault> {
+        use orch_access_contract::permissions::ObjectKind;
+        use orch_engine::exports::{Form, FormReference, FormSources};
+        let references = match form {
+            Form::Thread { id } => {
+                let prepared = crate::routes::nodes::content_sources::prepare(conn, asker, id)
+                    .await
+                    .map_err(|error| fault(&error))?;
+                let side = orch_engine::views::thread_metadata_sources(conn, id)
+                    .await
+                    .map_err(|error| FormsFault(error.to_string()))?
+                    .and_then(|source| source.side_of);
+                prepared
+                    .objects
+                    .into_iter()
+                    .map(|(object, id)| {
+                        if side == Some(id)
+                            || matches!(
+                                object,
+                                ObjectKind::Agent
+                                    | ObjectKind::Provider
+                                    | ObjectKind::Machine
+                                    | ObjectKind::Host
+                                    | ObjectKind::Environment
+                            )
+                        {
+                            FormReference::Published { object, id }
+                        } else {
+                            FormReference::Object { object, id }
+                        }
+                    })
+                    .collect()
+            }
+            Form::Document { id, json, comments } => {
+                crate::routes::documents::export::form_sources(conn, asker, id, json, comments)
+                    .await
+                    .map_err(|error| fault(&error))?
+            }
+        };
+        Ok(Some(FormSources { references }))
+    }
     async fn thread(
         &self,
         conn: &mut Conn,
@@ -136,76 +209,6 @@ pub(crate) async fn failed(conn: &mut Conn, error: ExportError) -> ApiError {
 
 // ---------------------------------------------------------------- the requests
 
-/// What an archive of a place would hold for the caller.
-async fn preflight(ctx: Ctx, (): (), body: ExportRequest) -> ApiResult<ExportPlan> {
-    let place = ctx.id("id")?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    match ctx.app.engine.plan_export(&caller, place, &body).await {
-        Ok(plan) => Ok(plan),
-        Err(error) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(failed(&mut conn, error).await)
-        }
-    }
-}
-
-/// Asks for an archive of a place: the job that writes it.
-async fn create(ctx: Ctx, (): (), body: ExportRequest) -> ApiResult<Job> {
-    let place = ctx.id("id")?;
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let made = ctx
-        .app
-        .engine
-        .make_export(&caller, &origin(&ctx), place, &body)
-        .await;
-    let mut conn = ctx.app.db.acquire().await?;
-    match made {
-        Ok(made) => job_view::view(&mut conn, &made.job).await,
-        Err(error) => Err(failed(&mut conn, error).await),
-    }
-}
-
-/// The caller's own archives, newest first.
-async fn list(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<Export>> {
-    let user = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let engine = &ctx.app.engine;
-    let (rows, next_cursor) = match engine
-        .exports_of(
-            &mut conn,
-            user,
-            query.cursor.as_deref(),
-            i64::from(query.limit()),
-        )
-        .await
-    {
-        Ok(found) => found,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    match engine.export_views(&mut conn, &principal, &rows).await {
-        Ok(items) => Ok(Page { items, next_cursor }),
-        Err(error) => Err(failed(&mut conn, error).await),
-    }
-}
-
-/// One of the caller's archives.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Export> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let engine = &ctx.app.engine;
-    let row = match engine.export_of(&mut conn, user, id).await {
-        Ok(row) => row,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    match engine.export_views(&mut conn, &principal, &[row]).await {
-        Ok(mut views) => views.pop().ok_or_else(ApiError::not_found),
-        Err(error) => Err(failed(&mut conn, error).await),
-    }
-}
-
 /// A name that can be put in a header: the characters a header takes, the rest an underscore, and the name as the
 /// browser should save it in the form that carries any character.
 fn attachment(name: &str) -> String {
@@ -225,41 +228,10 @@ fn attachment(name: &str) -> String {
     format!("attachment; filename=\"{plain}\"; filename*=UTF-8''{encoded}")
 }
 
-/// Fetches an archive. It is not used up: it can be fetched again until it is removed.
-async fn download(ctx: Ctx, (): (), _body: Body) -> ApiResult<Response> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    let engine = &ctx.app.engine;
-    let opened = engine.open_export(&origin(&ctx), user, id).await;
-    let mut conn = ctx.app.db.acquire().await?;
-    let (row, read) = match opened {
-        Ok(opened) => opened,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    let name = match engine.export_file_name(&mut conn, &row).await {
-        Ok(name) => name,
-        Err(error) => return Err(failed(&mut conn, error).await),
-    };
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, attachment(&name))
-        .header(header::CONTENT_LENGTH, read.meta.size)
-        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
-        .header(header::CACHE_CONTROL, "private, no-store")
-        .body(Body::from_stream(read.body))
-        .map_err(ApiError::internal)
-}
-
 /// Removes an archive now; a job still writing it is cancelled.
 async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let user = ctx.user()?.id();
-    match ctx.app.engine.remove_export(user, id).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(failed(&mut conn, error).await)
-        }
-    }
+    let (tx, _guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    crate::key_operations::native::effects::apply_owned::<removal_sources::Delete>(&ctx, tx)
+        .await?;
+    Ok(())
 }

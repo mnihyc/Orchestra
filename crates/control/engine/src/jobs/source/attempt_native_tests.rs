@@ -311,7 +311,11 @@ impl Commands for IssueTap {
     ) -> Result<Option<crate::commands::RetainedCommand>, CommandsError> {
         self.inner.retained_command(id).await
     }
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<crate::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if matches!(
             command.kind,
             CommandKind::GitWorktreeCleanup | CommandKind::GitPrepareCleanup
@@ -319,7 +323,7 @@ impl Commands for IssueTap {
             self.cleanups.fetch_add(1, Ordering::SeqCst);
             self.changed.notify_waiters();
         }
-        self.inner.issue(command).await
+        self.inner.issue_prepared(command, before).await
     }
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {
         self.inner.status(id).await
@@ -329,6 +333,9 @@ impl Commands for IssueTap {
     }
     async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
         self.inner.cancel(id).await
+    }
+    async fn stopped(&self, id: Id) -> Result<bool, CommandsError> {
+        self.inner.stopped(id).await
     }
     fn hears_behind(&self, machine: Id, stream: &Stream) -> bool {
         self.inner.hears_behind(machine, stream)

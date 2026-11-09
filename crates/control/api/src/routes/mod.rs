@@ -6,6 +6,7 @@
 
 pub mod access;
 pub mod admin;
+pub mod admin_messages;
 pub mod approvals;
 pub mod auth;
 pub mod browsers;
@@ -17,13 +18,18 @@ pub mod displays;
 pub mod document_tree;
 pub mod documents;
 pub mod downloads;
+pub mod duplicates;
 pub mod environments;
 pub mod everything;
 pub mod exports;
 pub mod first_steps;
 pub mod fleet;
 pub mod forks;
+pub mod gateways;
 pub mod imports;
+mod interactive_close;
+mod interactive_creation;
+pub(crate) mod interactive_tickets;
 pub mod links;
 pub mod loss;
 pub mod meta;
@@ -40,6 +46,7 @@ pub mod search;
 pub mod settings;
 pub mod share;
 pub mod storage;
+pub mod summaries;
 pub mod terminals;
 pub mod threads;
 pub mod topics;
@@ -73,7 +80,9 @@ pub fn install_master_key(key: &MasterKey) {
 
 /// Binds every request that has a handler.
 pub fn mount(registry: &mut Registry) {
+    crate::ask::mount(registry);
     meta::mount(registry);
+    gateways::mount(registry);
     auth::mount(registry);
     nodes::mount(registry);
     access::mount(registry);
@@ -94,7 +103,9 @@ pub fn mount(registry: &mut Registry) {
     document_tree::mount(registry);
     topics::mount(registry);
     admin::mount(registry);
+    admin_messages::mount(registry);
     downloads::mount(registry);
+    duplicates::mount(registry);
     notifications::mount(registry);
     terminals::mount(registry);
     browsers::mount(registry);
@@ -104,6 +115,7 @@ pub fn mount(registry: &mut Registry) {
     capabilities::mount(registry);
     usage::mount(registry);
     storage::mount(registry);
+    summaries::mount(registry);
     workspace::mount(registry);
     processes::mount(registry);
     search::mount(registry);

@@ -5,14 +5,30 @@
 //! archive outside any transaction, and the version is then recorded, with the caller's right asked
 //! again, in the transaction that writes it.
 
+mod creation;
+mod creation_sources;
+pub(crate) mod draft_creation;
+mod draft_replay;
+mod read;
 mod source_url;
+mod version_replay;
+
+pub(crate) async fn after_single_response(
+    ctx: &Ctx,
+    read: &crate::key_operations::native::resource_reply::ResponseRead,
+) -> ApiResult<()> {
+    self::read::maintain_single(ctx, read).await
+}
 
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::{NameBounds, NameSources};
 use crate::routes::nodes::{invalid, placed, policy_at, view as node_view};
 use crate::routes::resources::providers::{home_policies, refused_making};
-use crate::routes::resources::view::{Holding, accesses, addresses};
+use crate::routes::resources::view::{
+    Holding, PreparedAccess, accesses, accesses_prepared, addresses, prepare_accesses,
+};
 use crate::routes::resources::{Home, begin_mutation, record, require};
 use crate::routes::workspace::live;
 use crate::routes::workspace::paths;
@@ -90,23 +106,42 @@ async fn abandon_source(ctx: &Ctx, skill: Id, staged: Option<&SecretName>) {
 
 /// Binds the skills' requests.
 pub fn mount(registry: &mut Registry) {
+    read::mount(registry);
     registry
-        .on(api::SkillList, list)
-        .on(api::SkillCreate, create)
-        .on(api::SkillGet, get)
+        .creation(api::SkillCreate, creation::replay_binding())
+        .on_with_operation(api::SkillCreate, creation::resolve, creation::create)
         .on(api::SkillUpdate, update)
-        .on(api::SkillDelete, delete)
-        .on(api::SkillVersionList, version_list)
-        .on(api::SkillVersionGet, version_get)
+        .on_with_operation(
+            api::SkillDelete,
+            crate::key_operations::direct::declared,
+            delete,
+        )
+        .on_with_operation(
+            api::SkillVersionList,
+            crate::key_operations::direct::declared,
+            version_list,
+        )
+        .on_with_operation(
+            api::SkillVersionGet,
+            crate::key_operations::direct::declared,
+            version_get,
+        )
         .on_raw(api::SkillVersionFileGet, version_file)
+        .creation(api::SkillVersionCreate, version_replay::create_binding())
         .on(api::SkillVersionCreate, version_create)
         .on(api::SkillReimport, reimport)
         .on(api::SkillDraftGet, draft_get)
+        .creation(api::SkillDraftCreate, draft_replay::binding())
         .on(api::SkillDraftCreate, draft_create)
-        .on(api::SkillDraftDelete, draft_delete)
+        .on_with_operation(
+            api::SkillDraftDelete,
+            crate::key_operations::direct::declared,
+            draft_delete,
+        )
         .on_raw(api::SkillDraftFileGet, draft_file_get)
         .on(api::SkillDraftFilePut, draft_file_put)
         .on(api::SkillDraftFileDelete, draft_file_delete)
+        .creation(api::SkillDraftPublish, version_replay::publish_binding())
         .on(api::SkillDraftPublish, draft_publish);
 }
 
@@ -154,8 +189,67 @@ pub(crate) async fn views(
     principal: &Principal,
     holdings: &[Holding<'_>],
 ) -> ApiResult<Vec<Skill>> {
-    let ids: Vec<Id> = holdings.iter().map(|holding| holding.id).collect();
+    views_prepared(conn, principal, holdings, None).await
+}
+
+pub(crate) struct PreparedInventory {
+    seen: Vec<resources::Seen>,
+    skills: Vec<SkillRow>,
+    access: PreparedAccess,
+    sources: NameSources,
+    bounds: NameBounds,
+}
+
+impl PreparedInventory {
+    pub(crate) fn name_sources(&self) -> &NameSources {
+        &self.sources
+    }
+    pub(crate) fn bound_names(&mut self, bounds: NameBounds) {
+        self.bounds = bounds;
+    }
+}
+
+pub(crate) async fn prepare_inventory(
+    conn: &mut Conn,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedInventory> {
+    let holdings: Vec<_> = seen.iter().map(Holding::from_seen).collect();
+    let ids: Vec<_> = holdings.iter().map(|holding| holding.id).collect();
     let skills = rows::skills(conn, &ids).await?;
+    let access = prepare_accesses(conn, &holdings).await?;
+    let mut sources = access.names.clone();
+    sources
+        .nodes
+        .extend(skills.iter().map(|skill| skill.home_id));
+    Ok(PreparedInventory {
+        seen: seen.to_vec(),
+        skills,
+        access,
+        sources,
+        bounds: NameBounds::default(),
+    })
+}
+
+pub(crate) async fn show_inventory_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedInventory,
+) -> ApiResult<Vec<Skill>> {
+    let holdings: Vec<_> = prepared.seen.iter().map(Holding::from_seen).collect();
+    views_prepared(conn, principal, &holdings, Some(prepared)).await
+}
+
+async fn views_prepared(
+    conn: &mut Conn,
+    principal: &Principal,
+    holdings: &[Holding<'_>],
+    prepared: Option<&PreparedInventory>,
+) -> ApiResult<Vec<Skill>> {
+    let ids: Vec<Id> = holdings.iter().map(|holding| holding.id).collect();
+    let skills = match prepared {
+        Some(prepared) => prepared.skills.clone(),
+        None => rows::skills(conn, &ids).await?,
+    };
     let latest: Vec<Id> = skills
         .iter()
         .filter_map(|skill| skill.latest_version_id)
@@ -188,15 +282,25 @@ pub(crate) async fn views(
     people.extend(latest.values().filter_map(|row| row.created_by));
     people.extend(drafts.values().map(|row| row.updated_by));
     let people = refusals::user_refs(conn, &people).await?;
-    let homes = node_view::refs(
-        conn,
-        principal,
-        &skills.iter().map(|skill| skill.home_id).collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
+    let home_ids: Vec<_> = skills.iter().map(|skill| skill.home_id).collect();
+    let homes = match prepared {
+        Some(prepared) => prepared.bounds.refs(conn, principal, &home_ids).await?,
+        None => node_view::refs(conn, principal, &home_ids, Policy::default()).await?,
+    };
     let addresses = addresses(conn, &ids).await?;
-    let access = accesses(conn, principal, holdings).await?;
+    let access = match prepared {
+        Some(prepared) => {
+            accesses_prepared(
+                conn,
+                principal,
+                holdings,
+                &prepared.access,
+                Some(&prepared.bounds),
+            )
+            .await?
+        }
+        None => accesses(conn, principal, holdings).await?,
+    };
     let enabled_places: HashMap<Id, i64> = sqlx::query_as::<_, (Id, i64)>(
         "SELECT wanted.id, count(s.node_id) FROM unnest($1::uuid[]) wanted(id)
          LEFT JOIN settings s ON s.key='agents.skills' AND s.node_id IN (SELECT id FROM nodes WHERE deleted_at IS NULL)
@@ -222,6 +326,7 @@ pub(crate) async fn views(
                 ApiError::internal("the home of a skill the caller may see was not read")
             })?;
             Ok(Skill {
+                provenance: Default::default(),
                 enabled_places: Some(if skill.enabled {
                     enabled_places.get(&skill.id).copied().unwrap_or_default()
                 } else {
@@ -260,24 +365,21 @@ pub(crate) async fn inventory(
     principal: &Principal,
     seen: &[resources::Seen],
 ) -> ApiResult<Vec<Skill>> {
-    let holdings: Vec<Holding<'_>> = seen
-        .iter()
-        .map(|each| Holding {
-            admin_only: &each.admin_only,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            participating: each.participating,
-            id: each.resource.id,
-            owner: each.owner,
-            administers: each.administers,
-            held: &each.held,
-        })
-        .collect();
+    let holdings: Vec<_> = seen.iter().map(Holding::from_seen).collect();
     views(conn, principal, &holdings).await
 }
 
 /// One skill as the caller may read it, with what they hold on it.
-pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Skill> {
+pub(crate) async fn prepare_single_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+) -> ApiResult<PreparedInventory> {
+    let seen = single_seen(conn, principal, id).await?;
+    prepare_inventory(conn, &[seen]).await
+}
+
+async fn single_seen(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<resources::Seen> {
     require(
         conn,
         principal,
@@ -286,77 +388,38 @@ pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiR
         Permission::SkillView,
     )
     .await?;
-    source_url::migrate_many(conn, &[id], principal.now().get()).await?;
     let found = resources::effective_among(conn, principal, &[id], Policy::default())
         .await
         .map_err(ApiError::internal)?;
-    let holdings: Vec<Holding<'_>> = found
-        .iter()
-        .map(|each| Holding {
-            admin_only: &each.admin_only,
-            admin_access: each.admin_access,
-            admin_place: each.admin_place,
-            participating: each.participating,
-            id: each.object.id,
-            owner: each.owner,
-            administers: each.administers,
-            held: &each.held,
-        })
-        .collect();
-    views(conn, principal, &holdings)
+    let effective = found.into_iter().next().ok_or_else(ApiError::not_found)?;
+    let (_, resource, _) = resources::site(
+        conn,
+        ObjectRef {
+            kind: ResourceKind::Skill.into(),
+            id,
+        },
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(resources::Seen {
+        resource,
+        admin_only: effective.admin_only,
+        admin_access: effective.admin_access,
+        admin_place: effective.admin_place,
+        participating: effective.participating,
+        owner: effective.owner,
+        administers: effective.administers,
+        held: effective.held,
+    })
+}
+
+/// One skill uses the same native preparation and renderer as compound individual reads.
+pub(crate) async fn show(conn: &mut Conn, principal: &Principal, id: Id) -> ApiResult<Skill> {
+    let prepared = prepare_single_projection(conn, principal, id).await?;
+    show_inventory_prepared(conn, principal, &prepared)
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)
-}
-
-async fn list(ctx: Ctx, query: api::SkillListQuery, (): ()) -> ApiResult<Vec<Listed<Skill>>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let mut seen = Vec::new();
-    let mut after = None;
-    loop {
-        let page = resources::visible(
-            &mut conn,
-            &principal,
-            ResourceKind::Skill,
-            orch_authz::nodes::Page {
-                after,
-                limit: super::LIST_LIMIT,
-            },
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        seen.extend(page.items);
-        after = page.next;
-        if after.is_none() {
-            break;
-        }
-    }
-    if let Some(org) = query.org_id {
-        let homes: Vec<_> = seen.iter().filter_map(|each| each.resource.home).collect();
-        let inside =
-            orch_db::queries::resources::routes::homes_under(&mut conn, org, &homes).await?;
-        seen.retain(|each| {
-            each.resource
-                .home
-                .is_some_and(|home| inside.contains(&home))
-        });
-    }
-    let private = super::hidden_items(&mut conn, &principal, &mut seen).await?;
-    let ids: Vec<_> = seen.iter().map(|each| each.resource.id).collect();
-    source_url::migrate_many(&mut conn, &ids, ctx.now).await?;
-    Ok(super::listed(
-        inventory(&mut conn, &principal, &seen).await?,
-        private,
-    ))
-}
-
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Skill> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    show(&mut conn, &principal, id).await
 }
 
 /// The answer to a version that was not made.
@@ -446,6 +509,18 @@ async fn prepare(
     limits: Limits,
     existing_secret: Option<Id>,
 ) -> ApiResult<ReadySource> {
+    prepare_with(ctx, principal, skill, source, limits, existing_secret, None).await
+}
+
+async fn prepare_with(
+    ctx: &Ctx,
+    principal: &Principal,
+    skill: Id,
+    source: &SkillSource,
+    limits: Limits,
+    existing_secret: Option<Id>,
+    mut opening: Option<&mut creation::Opening>,
+) -> ApiResult<ReadySource> {
     match source {
         SkillSource::Upload { blob, name, folder } => Ok(ReadySource::plain(
             prepare_upload(ctx, principal.user(), blob, folder.clone(), limits).await?,
@@ -459,7 +534,15 @@ async fn prepare(
             path,
         } => {
             let path = paths::clean("from.path", path, true)?;
-            let files = read_directory(ctx, principal, *environment_id, &path, limits).await?;
+            let files = read_directory(
+                ctx,
+                principal,
+                *environment_id,
+                &path,
+                limits,
+                opening.as_deref_mut(),
+            )
+            .await?;
             let store = ctx.app.blobs.store();
             let prepared = versions::prepare_files(&store, files, limits)
                 .await
@@ -500,6 +583,7 @@ async fn prepare(
                     folder: folder.clone(),
                 },
                 limits,
+                opening.as_deref_mut(),
             )
             .await?;
             let store = ctx.app.blobs.store();
@@ -543,8 +627,12 @@ async fn prepare(
                 }
                 (source_url::public_url(url).0, None)
             } else {
-                let mut conn = ctx.app.db.acquire().await?;
-                source_url::stage(&mut conn, skill, url, principal.user(), ctx.now).await?
+                if let Some(opening) = opening.as_deref_mut() {
+                    opening.stage_url(ctx, url).await?
+                } else {
+                    let mut conn = ctx.app.db.acquire().await?;
+                    source_url::stage(&mut conn, skill, url, principal.user(), ctx.now).await?
+                }
             };
             let source_secret = existing_secret.or_else(|| staged.as_ref().map(|secret| secret.id));
             let wire_url = match source_secret {
@@ -558,6 +646,7 @@ async fn prepare(
                     *host_id,
                     SkillFetchSource::Url { url: wire_url },
                     limits,
+                    opening.as_deref_mut(),
                 )
                 .await?;
                 let store = ctx.app.blobs.store();
@@ -599,6 +688,7 @@ async fn fetch_on_host(
     host: Id,
     source: SkillFetchSource,
     limits: Limits,
+    mut opening: Option<&mut creation::Opening>,
 ) -> ApiResult<(bytes::Bytes, Option<String>)> {
     let machine = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -616,35 +706,41 @@ async fn fetch_on_host(
             .machine_id
     };
     let limit = i64::try_from(limits.archive_bytes()).unwrap_or(i64::MAX);
-    let fetched: NodeSkillFetchResult = ctx
-        .app
-        .link
-        .dispatcher()
-        .run(
-            machine,
-            &SerialKey::None,
-            &NodeSkillFetch {
-                source,
-                max_bytes: limit,
-            },
-        )
-        .await
-        .map_err(|error| match live::command_failure(error) {
-            // What the host met (Git's or the address's own words) goes beside the sentence.
-            crate::routes::workspace::problems::Failure::Machine(error) => {
-                refused_value("from", "The host could not fetch it").with("about", [error.detail])
-            }
-            other => live::refused(other, Doing::Reading),
-        })?;
-    {
-        let mut conn = ctx.app.db.acquire().await?;
-        storage::register_blob(
-            &mut conn,
-            &fetched.archive.hash,
-            fetched.archive.size,
-            ctx.now,
-        )
-        .await?;
+    let body = NodeSkillFetch {
+        source,
+        max_bytes: limit,
+    };
+    let fetched: NodeSkillFetchResult = if let Some(opening) = opening.as_deref_mut() {
+        opening.rpc(ctx, machine, &body).await?
+    } else {
+        ctx.app
+            .link
+            .dispatcher()
+            .run(machine, &SerialKey::None, &body)
+            .await
+            .map_err(|error| match live::command_failure(error) {
+                crate::routes::workspace::problems::Failure::Machine(error) => {
+                    refused_value("from", "The host could not fetch it")
+                        .with("about", [error.detail])
+                }
+                other => live::refused(other, Doing::Reading),
+            })?
+    };
+    if let Some(opening) = opening.as_deref_mut() {
+        opening
+            .register(ctx, fetched.archive.hash, fetched.archive.size)
+            .await?;
+    } else {
+        {
+            let mut conn = ctx.app.db.acquire().await?;
+            storage::register_blob(
+                &mut conn,
+                &fetched.archive.hash,
+                fetched.archive.size,
+                ctx.now,
+            )
+            .await?;
+        }
     }
     let bytes = ctx
         .app
@@ -652,6 +748,9 @@ async fn fetch_on_host(
         .read_whole(&fetched.archive.hash, limit)
         .await
         .map_err(ApiError::internal)?;
+    if let Some(opening) = opening {
+        opening.check(ctx).await?;
+    }
     Ok((bytes, fetched.commit))
 }
 
@@ -696,6 +795,7 @@ async fn read_directory(
     environment: Id,
     root: &str,
     limits: Limits,
+    mut opening: Option<&mut creation::Opening>,
 ) -> ApiResult<Vec<File>> {
     let machine = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -724,25 +824,25 @@ async fn read_directory(
     while let Some(directory) = pending.pop() {
         let mut cursor = None;
         loop {
-            let listed = live::run(
-                ctx,
-                machine,
-                SerialKey::None,
-                &FsList {
-                    environment_id: environment,
-                    mount: None,
-                    path: directory.clone(),
-                    watch_id: None,
-                    watch_instance: None,
-                    page: Some(FsListPage {
-                        cursor: cursor.take(),
-                        limit: None,
-                        generation: None,
-                    }),
-                },
-            )
-            .await
-            .map_err(|failure| live::refused(failure, Doing::Reading))?;
+            let body = FsList {
+                environment_id: environment,
+                mount: None,
+                path: directory.clone(),
+                watch_id: None,
+                watch_instance: None,
+                page: Some(FsListPage {
+                    cursor: cursor.take(),
+                    limit: None,
+                    generation: None,
+                }),
+            };
+            let listed = if let Some(opening) = opening.as_deref_mut() {
+                opening.rpc(ctx, machine, &body).await?
+            } else {
+                live::run(ctx, machine, SerialKey::None, &body)
+                    .await
+                    .map_err(|failure| live::refused(failure, Doing::Reading))?
+            };
             for entry in listed.entries {
                 let Some(relative) = entry.path.strip_prefix(&prefix) else {
                     continue;
@@ -790,23 +890,28 @@ async fn read_directory(
     let dispatcher = ctx.app.link.dispatcher();
     let mut files = Vec::with_capacity(found.len());
     for (relative, full, executable) in found {
-        let fetched: FsFetchResult = dispatcher
-            .run(
-                machine,
-                &SerialKey::None,
-                &FsFetch {
-                    environment_id: environment,
-                    mount: None,
-                    path: full,
-                    expect: None,
-                    max_bytes: Some(i64::try_from(limits.max_bytes).unwrap_or(i64::MAX)),
-                },
-            )
-            .await
-            .map_err(|error| live::refused(live::command_failure(error), Doing::Reading))?;
-        {
-            let mut conn = ctx.app.db.acquire().await?;
-            storage::register_blob(&mut conn, &fetched.hash, fetched.size, ctx.now).await?;
+        let body = FsFetch {
+            environment_id: environment,
+            mount: None,
+            path: full,
+            expect: None,
+            max_bytes: Some(i64::try_from(limits.max_bytes).unwrap_or(i64::MAX)),
+        };
+        let fetched: FsFetchResult = if let Some(opening) = opening.as_deref_mut() {
+            opening.rpc(ctx, machine, &body).await?
+        } else {
+            dispatcher
+                .run(machine, &SerialKey::None, &body)
+                .await
+                .map_err(|error| live::refused(live::command_failure(error), Doing::Reading))?
+        };
+        if let Some(opening) = opening.as_deref_mut() {
+            opening.register(ctx, fetched.hash, fetched.size).await?;
+        } else {
+            {
+                let mut conn = ctx.app.db.acquire().await?;
+                storage::register_blob(&mut conn, &fetched.hash, fetched.size, ctx.now).await?;
+            }
         }
         let data = ctx
             .app
@@ -814,6 +919,9 @@ async fn read_directory(
             .read_whole(&fetched.hash, fetched.size)
             .await
             .map_err(ApiError::internal)?;
+        if let Some(opening) = opening.as_deref_mut() {
+            opening.check(ctx).await?;
+        }
         files.push(File {
             path: relative,
             data: data.to_vec(),
@@ -833,7 +941,7 @@ fn new_access(choice: Option<NewResourceAccess>) -> NewAccess {
 }
 
 /// Whether the caller may make a skill at `home`, which must be an org or a project.
-async fn may_make_at(conn: &mut Conn, principal: &Principal, home: Id) -> ApiResult<()> {
+pub(crate) async fn may_make_at(conn: &mut Conn, principal: &Principal, home: Id) -> ApiResult<()> {
     let (_, kind) = placed(conn, home).await?;
     if !matches!(kind, NodeKind::Org | NodeKind::Project) {
         return Err(invalid(
@@ -859,81 +967,13 @@ async fn may_make_at(conn: &mut Conn, principal: &Principal, home: Id) -> ApiRes
     }
 }
 
-async fn create(ctx: Ctx, (): (), body: api::SkillCreateBody) -> ApiResult<Skill> {
-    if let SkillSource::New { name, description } = &body.from {
-        return create_new(&ctx, &body, name, description).await;
-    }
-    let (principal, limits) = {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        may_make_at(&mut conn, &principal, body.home_id).await?;
-        let limits = versions::limits_at(&mut conn, body.home_id)
-            .await
-            .map_err(ApiError::internal)?;
-        (principal, limits)
-    };
-    let id = orch_types::new_id();
-    let ready = prepare(&ctx, &principal, id, &body.from, limits, None).await?;
-    let result = async {
-        let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
-        may_make_at(&mut tx, &principal, body.home_id).await?;
-        may_read_directory(&mut tx, &principal, &body.from).await?;
-        let Made { skill, version } = versions::record(
-            &mut tx,
-            Target::NewSkill {
-                id,
-                home: body.home_id,
-                owner: principal.user(),
-            },
-            &ready.prepared,
-            &ready.origin,
-            Some(principal.user()),
-            Time::new(ctx.now),
-        )
-        .await
-        .map_err(|error| refused("from", error))?;
-        if ready.origin.can_be_taken_again() {
-            rows::set_source_url_secret(&mut tx, id, ready.source_secret).await?;
-        }
-        ownership::start_resource(
-            &mut tx,
-            ObjectRef {
-                kind: ResourceKind::Skill.into(),
-                id,
-            },
-            principal.user(),
-            new_access(body.access),
-            Time::new(ctx.now),
-        )
-        .await
-        .map_err(ApiError::internal)?;
-        record(
-            &ctx,
-            &mut tx,
-            orch_db::audit::action!(AuditAction::SkillCreated),
-            id,
-            home(&skill),
-            "Added a skill",
-            json!({"skill": id, "name": skill.name, "version": version.id}),
-        )
-        .await?;
-        let result = show(&mut tx, &principal, id).await?;
-        tx.commit().await.map_err(DbError::from)?;
-        Ok(result)
-    }
-    .await;
-    if result.is_err() {
-        abandon_source(&ctx, id, ready.staged.as_ref()).await;
-    }
-    result
-}
-
 async fn update(ctx: Ctx, (): (), body: api::SkillUpdateBody) -> ApiResult<Skill> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
     let row = rows::lock(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    source_url::migrate_many(&mut tx, &[id], ctx.now).await?;
     if row.revision != body.expected_revision {
         return Err(ApiError::new(
             ErrorCode::ConflictStaleRevision,
@@ -973,22 +1013,28 @@ async fn update(ctx: Ctx, (): (), body: api::SkillUpdateBody) -> ApiResult<Skill
 async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let id = ctx.id("id")?;
     let (ctx, mut tx, _principal) = begin_mutation(&ctx).await?;
-    source_url::migrate_many(&mut tx, &[id], ctx.now).await?;
     let row = rows::lock(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    rows::delete(&mut tx, id, ctx.now).await?;
+    delete_native(&ctx, &mut tx, &row).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+/// The original native source-URL bookkeeping, deletion and audit in the caller's action transaction.
+pub(crate) async fn delete_native(ctx: &Ctx, conn: &mut Conn, row: &SkillRow) -> ApiResult<()> {
+    source_url::migrate_many(conn, &[row.id], ctx.now).await?;
+    rows::delete(conn, row.id, ctx.now).await?;
     record(
-        &ctx,
-        &mut tx,
+        ctx,
+        conn,
         orch_db::audit::action!(AuditAction::SkillDeleted),
-        id,
-        home(&row),
+        row.id,
+        home(row),
         "Deleted a skill",
-        json!({"skill": id, "name": row.name}),
+        json!({"skill":row.id,"name":row.name}),
     )
     .await?;
-    tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
 
@@ -1013,6 +1059,15 @@ async fn version_list(
         })
         .transpose()?;
     let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    require(
+        &mut conn,
+        &principal,
+        ResourceKind::Skill,
+        id,
+        Permission::SkillView,
+    )
+    .await?;
     source_url::migrate_many(&mut conn, &[id], ctx.now).await?;
     let found = rows::versions(&mut conn, id, before, i64::from(limit) + 1).await?;
     let more = found.len() > limit as usize;
@@ -1051,6 +1106,15 @@ async fn version_of(conn: &mut Conn, skill: Id, version: Id) -> ApiResult<Versio
 async fn version_get(ctx: Ctx, (): (), (): ()) -> ApiResult<SkillVersion> {
     let (id, version) = (ctx.id("id")?, ctx.id("version_id")?);
     let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    require(
+        &mut conn,
+        &principal,
+        ResourceKind::Skill,
+        id,
+        Permission::SkillView,
+    )
+    .await?;
     source_url::migrate_many(&mut conn, &[id], ctx.now).await?;
     let row = version_of(&mut conn, id, version).await?;
     let creators =
@@ -1137,7 +1201,7 @@ async fn version_create(
     ctx: Ctx,
     (): (),
     body: api::SkillVersionCreateBody,
-) -> ApiResult<SkillVersion> {
+) -> ApiResult<api::SkillVersionWriteResponse> {
     let id = ctx.id("id")?;
     let (principal, limits) = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -1156,15 +1220,25 @@ async fn version_create(
     let result = async {
         let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
         may_read_directory(&mut tx, &principal, &body.from).await?;
-        let Made { skill, version } = versions::record(
+        let recording = versions::prepare_record(
             &mut tx,
             Target::Skill(id),
             &ready.prepared,
             &ready.origin,
             Some(principal.user()),
-            Time::new(ctx.now),
         )
         .await
+        .map_err(|error| refused("from", error))?;
+        let (ctx, guard) = crate::middleware::transaction_guard::after_wait(&ctx, &mut tx).await?;
+        may_read_directory(&mut tx, guard.principal(), &body.from).await?;
+        let Made { skill, version } = versions::apply_record(
+            &mut tx,
+            Some(guard.principal().user()),
+            recording,
+            Time::new(ctx.now),
+            || guard.check_deadline(&ctx),
+        )
+        .await?
         .map_err(|error| refused("from", error))?;
         if ready.origin.can_be_taken_again() {
             rows::set_source_url_secret(&mut tx, id, ready.source_secret).await?;
@@ -1179,19 +1253,29 @@ async fn version_create(
             json!({"skill": id, "name": skill.name, "version": version.id, "number": version.number, "origin": version.origin}),
         )
         .await?;
-        let creators = refusals::user_refs(&mut tx, &[principal.user()]).await?;
-        let result = SkillVersion {
-            version: version_info(&version, &creators)?,
-            files: files_of(&version)?,
-        };
+        orch_db::idempotency::creation::observe_with(
+            &mut tx,
+            Some(guard.principal().user()),
+            "skill_version",
+            version.id,
+            json!({"skill":id}),
+        )
+        .await?;
+        guard.check_deadline(&ctx)?;
+        let accepted = guard.principal().caller().clone();
         tx.commit().await.map_err(DbError::from)?;
-        Ok(result)
+        Ok((ctx, accepted, version.id))
     }
     .await;
-    if result.is_err() {
-        abandon_source(&ctx, id, ready.staged.as_ref()).await;
+    match result {
+        Err(error) => {
+            abandon_source(&ctx, id, ready.staged.as_ref()).await;
+            Err(error)
+        }
+        Ok((current, accepted, version)) => {
+            version_replay::response(&current, &accepted, id, version, false).await
+        }
     }
-    result
 }
 
 /// The `SKILL.md` a new skill's draft begins with: its name and description, and a heading.
@@ -1206,102 +1290,6 @@ fn new_skill_file(name: &str, description: &str) -> String {
 }
 
 /// Makes a skill begun in Orch: no version yet, and a draft whose `SKILL.md` names it.
-async fn create_new(
-    ctx: &Ctx,
-    body: &api::SkillCreateBody,
-    name: &str,
-    description: &str,
-) -> ApiResult<Skill> {
-    let name = name.trim();
-    if let Some(why) = front_matter::name_fault(name) {
-        return Err(invalid("from.name", why));
-    }
-    let description = description.trim();
-    let chars = description.chars().count();
-    if chars == 0 || chars > front_matter::DESCRIPTION_MAX_CHARS {
-        return Err(invalid(
-            "from.description",
-            "a description has one to 1,024 characters",
-        ));
-    }
-    {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(ctx, &mut conn).await?;
-        may_make_at(&mut conn, &principal, body.home_id).await?;
-    }
-    let text = new_skill_file(name, description);
-    let meta = ctx
-        .app
-        .blobs
-        .put_bytes(bytes::Bytes::from(text))
-        .await
-        .map_err(ApiError::internal)?;
-    let (ctx, mut tx, principal) = begin_mutation(ctx).await?;
-    may_make_at(&mut tx, &principal, body.home_id).await?;
-    if rows::named(&mut tx, body.home_id, name).await?.is_some() {
-        return Err(ApiError::new(
-            ErrorCode::ConflictExists,
-            format!("another skill here is named {name:?} already"),
-        )
-        .with("name", name));
-    }
-    let id = orch_types::new_id();
-    rows::insert(
-        &mut tx,
-        &rows::NewSkill {
-            id,
-            home_id: body.home_id,
-            owner_id: principal.user(),
-            name: name.to_owned(),
-        },
-        ctx.now,
-    )
-    .await?;
-    ownership::start_resource(
-        &mut tx,
-        ObjectRef {
-            kind: ResourceKind::Skill.into(),
-            id,
-        },
-        principal.user(),
-        new_access(body.access),
-        Time::new(ctx.now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    storage::register_blob(&mut tx, &meta.hash, meta.size, ctx.now).await?;
-    rows::start_draft(
-        &mut tx,
-        id,
-        None,
-        &[DraftFile {
-            path: SKILL_FILE.to_owned(),
-            blob: meta.hash,
-            size: meta.size,
-            executable: false,
-        }],
-        principal.user(),
-        ctx.now,
-    )
-    .await?;
-    let skill = rows::lock(&mut tx, id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    record(
-        &ctx,
-        &mut tx,
-        orch_db::audit::action!(AuditAction::SkillCreated),
-        id,
-        home(&skill),
-        "Added a skill",
-        json!({"skill": id, "name": skill.name}),
-    )
-    .await?;
-    let result = show(&mut tx, &principal, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
-}
-
 async fn reimport(ctx: Ctx, (): (), (): ()) -> ApiResult<SkillReimportReply> {
     let id = ctx.id("id")?;
     let (principal, limits, source, source_secret) = {
@@ -1435,7 +1423,15 @@ async fn draft_view(conn: &mut Conn, skill: Id) -> ApiResult<SkillDraft> {
     let mut people: Vec<Id> = files.iter().map(|file| file.updated_by).collect();
     people.push(info.updated_by);
     let people = refusals::user_refs(conn, &people).await?;
-    Ok(SkillDraft {
+    Ok(draft_shown(&info, &files, &people))
+}
+
+fn draft_shown(
+    info: &rows::DraftInfoRow,
+    files: &[rows::DraftFileRow],
+    people: &HashMap<Id, orch_api_contract::users::UserRef>,
+) -> SkillDraft {
+    SkillDraft {
         info: SkillDraftInfo {
             based_on: info.based_on,
             file_count: info.file_count,
@@ -1444,16 +1440,16 @@ async fn draft_view(conn: &mut Conn, skill: Id) -> ApiResult<SkillDraft> {
             updated_at: Time::new(info.updated_at),
         },
         files: files
-            .into_iter()
+            .iter()
             .map(|file| SkillDraftFile {
                 updated_by: people.get(&file.updated_by).cloned(),
                 updated_at: Time::new(file.updated_at),
-                path: file.path,
+                path: file.path.clone(),
                 size: file.size,
                 executable: file.executable,
             })
             .collect(),
-    })
+    }
 }
 
 /// The refusal of a change made against a draft that changed since it was read.
@@ -1501,7 +1497,11 @@ async fn version_files(ctx: &Ctx, row: &VersionRow, limits: Limits) -> ApiResult
         .map_err(ApiError::internal)
 }
 
-async fn draft_create(ctx: Ctx, (): (), body: api::SkillDraftCreateBody) -> ApiResult<SkillDraft> {
+async fn draft_create(
+    ctx: Ctx,
+    (): (),
+    body: api::SkillDraftCreateBody,
+) -> ApiResult<api::SkillDraftCreateResponse> {
     let id = ctx.id("id")?;
     let (version, files) = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -1539,7 +1539,7 @@ async fn draft_create(ctx: Ctx, (): (), body: api::SkillDraftCreateBody) -> ApiR
             meta,
         ));
     }
-    let (ctx, mut tx, principal) = begin_mutation(&ctx).await?;
+    let (ctx, mut tx, _initial) = begin_mutation(&ctx).await?;
     source_url::migrate_many(&mut tx, &[id], ctx.now).await?;
     rows::lock(&mut tx, id)
         .await?
@@ -1550,22 +1550,39 @@ async fn draft_create(ctx: Ctx, (): (), body: api::SkillDraftCreateBody) -> ApiR
             "the skill has a draft already; publish or discard it first",
         ));
     }
+    orch_db::queries::uploads::lock_blobs(
+        &mut tx,
+        &kept.iter().map(|(_, meta)| meta.hash).collect::<Vec<_>>(),
+    )
+    .await?;
+    let (ctx, guard) = crate::middleware::transaction_guard::after_wait(&ctx, &mut tx).await?;
     for (_, meta) in &kept {
+        guard.check_deadline(&ctx)?;
         storage::register_blob(&mut tx, &meta.hash, meta.size, ctx.now).await?;
     }
     let files: Vec<DraftFile> = kept.into_iter().map(|(file, _)| file).collect();
+    guard.check_deadline(&ctx)?;
     rows::start_draft(
         &mut tx,
         id,
         Some(version.id),
         &files,
-        principal.user(),
+        guard.principal().user(),
         ctx.now,
     )
     .await?;
-    let result = draft_view(&mut tx, id).await?;
+    orch_db::idempotency::creation::observe_with(
+        &mut tx,
+        Some(guard.principal().user()),
+        "skill_draft",
+        id,
+        serde_json::Value::Null,
+    )
+    .await?;
+    guard.check_deadline(&ctx)?;
+    let accepted = guard.principal().caller().clone();
     tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
+    draft_replay::response(&ctx, &accepted, id).await
 }
 
 async fn draft_delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
@@ -1749,7 +1766,7 @@ async fn draft_publish(
     ctx: Ctx,
     (): (),
     body: api::SkillDraftPublishBody,
-) -> ApiResult<SkillVersion> {
+) -> ApiResult<api::SkillVersionWriteResponse> {
     let id = ctx.id("id")?;
     let (based_on, files, limits) = {
         let mut conn = ctx.app.db.acquire().await?;
@@ -1803,15 +1820,24 @@ async fn draft_publish(
     if draft.revision != body.expected_revision {
         return Err(stale_draft(&mut tx, id).await);
     }
-    let Made { skill, version } = versions::record(
+    let recording = versions::prepare_record(
         &mut tx,
         Target::Skill(id),
         &prepared,
         &SkillOrigin::Draft { based_on },
         Some(principal.user()),
-        Time::new(ctx.now),
     )
     .await
+    .map_err(|error| refused("draft", error))?;
+    let (ctx, guard) = crate::middleware::transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let Made { skill, version } = versions::apply_record(
+        &mut tx,
+        Some(guard.principal().user()),
+        recording,
+        Time::new(ctx.now),
+        || guard.check_deadline(&ctx),
+    )
+    .await?
     .map_err(|error| refused("draft", error))?;
     rows::discard_draft(&mut tx, id).await?;
     record(
@@ -1824,11 +1850,16 @@ async fn draft_publish(
         json!({"skill": id, "name": skill.name, "version": version.id, "number": version.number, "origin": version.origin}),
     )
     .await?;
-    let creators = refusals::user_refs(&mut tx, &[principal.user()]).await?;
-    let result = SkillVersion {
-        version: version_info(&version, &creators)?,
-        files: files_of(&version)?,
-    };
+    orch_db::idempotency::creation::observe_with(
+        &mut tx,
+        Some(guard.principal().user()),
+        "skill_published_version",
+        version.id,
+        json!({"skill":id}),
+    )
+    .await?;
+    guard.check_deadline(&ctx)?;
+    let accepted = guard.principal().caller().clone();
     tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
+    version_replay::response(&ctx, &accepted, id, version.id, true).await
 }

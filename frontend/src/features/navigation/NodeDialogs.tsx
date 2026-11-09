@@ -465,7 +465,7 @@ function WithNode({
   children: (node: Node) => ReactNode;
 }) {
   const query = useQuery(nodeQuery(place.id));
-  if (query.isPending) return <SkeletonRows rows={3} className="py-2" />;
+  if (query.isPending) return <SkeletonRows read={query} rows={3} className="py-2" />;
   if (query.isError) {
     return <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   }
@@ -587,7 +587,7 @@ function ArchiveDialog({ place, open, onClose }: DialogProps & { place: PlaceRef
       error={archive.error ?? undefined}
       onConfirm={() => archive.mutate()}
     >
-      {plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : plan.data === undefined ? <SkeletonRows rows={4} /> : <ArchiveConsequences plan={plan.data} />}
+      {plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : plan.data === undefined ? <SkeletonRows read={plan} rows={4} /> : <ArchiveConsequences plan={plan.data} />}
     </ConfirmDialog>
   );
 }

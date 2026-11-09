@@ -1,0 +1,11 @@
+# Central runs on diag-27 = batch-27-pre e67775eb4 + the lane heads of 18:00Z (pre-split). Leading NAME=value words are settings.
+# ladder-ext D26A: the whole imports program after its four new commits
+test -p orch-api-core --test imports -- --test-threads=2
+# scope-map-a D26A: the provider copy case after 0452c1577
+test ORCH_TEST_PROVIDER_COPY_ERRORS=1 ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test provider_duplicates -- --nocapture --test-threads=1
+# scope-map-b D26A: the fork groups and the duplicate chain after 14fff1ca9
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test forks -- batch_cancel_scopes:: side_native_scopes:: preflight_native_scopes:: file_native_scopes:: immediate_native_scopes:: recovery_lifecycle:: confirmation_scopes:: moving_routes:: batch_native_scopes:: --nocapture --test-threads=1
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test chat_duplicates --test copy_out_ask -- --nocapture --test-threads=1
+# ci-browser D26B and held-plan-ws D26B
+test -p orch-node --test lifecycle -- --nocapture
+test -p orch-adapter-claude-code --test background_wake -- --nocapture

@@ -43,7 +43,7 @@ use orch_link_contract::backplane::{
     ApiHello, AuthQuery, AuthReply, BackplaneData, BackplaneFrame, Down, DownFrame, Kick,
     MachineDown, MachineUp, STATS_EVERY_SECS, Stats, UpFrame,
 };
-use orch_link_contract::commands::{Cmd, CmdRes, SerialKey, SessionResync};
+use orch_link_contract::commands::{Cmd, CommandError, ErrorCode, SerialKey, SessionResync};
 use orch_link_contract::events::{Event, EventKind};
 use orch_link_contract::frames::{self, Text};
 use orch_link_contract::session::Role;
@@ -59,6 +59,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 use tokio::sync::{OnceCell, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+
+mod tunnel_routing;
 
 /// How the oldest connector the system accepts is named when nothing says
 /// otherwise: the first release, which spoke this protocol.
@@ -168,6 +170,17 @@ pub trait EventApplier: Send + Sync {
     /// A committed physical update fence ended, successfully or with a refusal/failure.
     fn component_update_finished(&self, _machine: Id) {}
 
+    /// Retains factual accounting from an actual machine reply before its journal
+    /// is acknowledged, including replies to already cancelled commands.
+    async fn command_reply(
+        &self,
+        _tx: &mut Conn,
+        _machine: Id,
+        _reply: &orch_link_contract::commands::CmdRes,
+    ) -> Result<(), ApplyError> {
+        Ok(())
+    }
+
     /// Applies the events of one delivery, in their order.
     async fn apply(
         &self,
@@ -215,6 +228,10 @@ pub struct Report {
 /// What the link states to gateways and machines.
 #[derive(Debug, Clone)]
 pub struct LinkSettings {
+    /// Placement samples expire on the existing live-link silence horizon.
+    pub gateway_sample_max_age_secs: u64,
+    /// Close unused auxiliary transports after this operator-selected interval.
+    pub tunnel_session_idle_secs: u64,
     /// The limits every session states.
     pub limits: Limits,
     /// The connector builds the system accepts and prefers.
@@ -236,6 +253,8 @@ impl LinkSettings {
             ports: orch_link::ports::limits_of(&config.link),
         };
         Self {
+            gateway_sample_max_age_secs: config.link.dead_after_secs,
+            tunnel_session_idle_secs: config.link.tunnel_session_idle_secs,
             limits,
             versions: ConnectorVersions {
                 min: FIRST_CONNECTOR_VERSION.to_owned(),
@@ -258,6 +277,27 @@ enum Outbound {
     },
 }
 
+#[cfg(feature = "test-observers")]
+impl Outbound {
+    fn observed_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES)
+                .ok()
+                .map(|text| text.len()),
+            Self::Data(bytes) => Some(bytes.len()),
+            Self::Datagram { machine, packet } => {
+                orch_link_contract::ports::BackplanePortDatagram {
+                    machine_id: *machine,
+                    datagram: packet.frame.clone(),
+                }
+                .encode()
+                .ok()
+                .map(|bytes| bytes.len())
+            }
+        }
+    }
+}
+
 /// One connection of a gateway to the system.
 pub(crate) struct GatewayConn {
     generation: u64,
@@ -266,6 +306,8 @@ pub(crate) struct GatewayConn {
     stats: Mutex<Option<Stats>>,
     /// When the gateway's process started, as its hello said; when it connected, where it did not.
     started_at: orch_types::Time,
+    #[cfg(feature = "test-observers")]
+    observed: Arc<orch_link::test_observers::QueueGauge>,
 }
 
 impl std::fmt::Debug for GatewayConn {
@@ -278,19 +320,30 @@ impl std::fmt::Debug for GatewayConn {
 
 impl GatewayConn {
     fn send_datagram(&self, machine: Id, packet: orch_link::ports::Datagram) -> bool {
-        self.out
-            .send(Outbound::Datagram { machine, packet })
-            .is_ok()
+        self.send_outbound(Outbound::Datagram { machine, packet })
     }
     fn send(&self, frame: BackplaneFrame) -> bool {
-        self.out.send(Outbound::Frame(Box::new(frame))).is_ok()
+        self.send_outbound(Outbound::Frame(Box::new(frame)))
     }
 
     fn send_data(&self, data: &BackplaneData) -> bool {
         match data.encode() {
-            Ok(bytes) => self.out.send(Outbound::Data(bytes)).is_ok(),
+            Ok(bytes) => self.send_outbound(Outbound::Data(bytes)),
             Err(_) => false,
         }
+    }
+
+    fn send_outbound(&self, message: Outbound) -> bool {
+        #[cfg(feature = "test-observers")]
+        let bytes = message.observed_bytes();
+        #[cfg(feature = "test-observers")]
+        self.observed.enqueue(bytes);
+        let sent = self.out.send(message).is_ok();
+        #[cfg(feature = "test-observers")]
+        if !sent {
+            self.observed.failed_enqueue(bytes);
+        }
+        sent
     }
 }
 
@@ -333,8 +386,10 @@ struct Tracked {
 
 #[derive(Default)]
 struct EntryState {
+    gateway_samples: Option<tunnel_routing::GatewaySamples>,
     route: Option<SessionRoute>,
     pending_fingerprint: Option<String>,
+    supports_tunnel_attachments: bool,
     tracked: HashMap<Id, Tracked>,
     /// Explicit request-owned observations have no durable queue row or replay body.
     observations: HashSet<Id>,
@@ -454,12 +509,15 @@ type PortQuery = (
 );
 
 pub(crate) struct LinkInner {
+    tunnel_attachments: Mutex<HashMap<Id, tunnel_routing::PendingAttachment>>,
+    tool_gateways: Mutex<HashMap<Id, tunnel_routing::ToolGateway>>,
     port_queries: Mutex<HashMap<Id, PortQuery>>,
     pub(crate) db: Db,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) settings: LinkSettings,
     store_metrics: bool,
     machine_requests: Mutex<Option<Arc<dyn crate::machine_requests::Handler>>>,
+    pub(crate) read_tools: Mutex<Option<Arc<dyn orch_engine::tools::read_tools::ReadTools>>>,
     machine_request_slots: Arc<tokio::sync::Semaphore>,
     port_local_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) certificates: CertificateService,
@@ -471,6 +529,8 @@ pub(crate) struct LinkInner {
     generations: AtomicU64,
     terminals: TerminalHub,
     terminal_out: Mutex<Option<mpsc::UnboundedReceiver<ApiOut>>>,
+    #[cfg(feature = "test-observers")]
+    terminal_observed: Mutex<Option<orch_link::test_observers::ReceiverLifetime>>,
     terminal_channels: Mutex<HashMap<Id, HashSet<u32>>>,
     pub(crate) finished: tokio::sync::Notify,
     /// The commands somebody waits for ([`crate::dispatch::Dispatcher::wait`]), each told by the mirror
@@ -512,6 +572,12 @@ pub struct LinkParts {
 }
 
 impl Link {
+    pub(crate) fn serve_read_tools(
+        &self,
+        tools: Arc<dyn orch_engine::tools::read_tools::ReadTools>,
+    ) {
+        *lock(&self.inner.read_tools) = Some(tools);
+    }
     pub(crate) fn serve_machine_requests(
         &self,
         handler: Arc<dyn crate::machine_requests::Handler>,
@@ -531,6 +597,12 @@ impl Link {
             master_key,
         } = parts;
         let (terminal_tx, terminal_rx) = mpsc::unbounded_channel();
+        #[cfg(feature = "test-observers")]
+        let observed_terminal = orch_link::test_observers::QueueGauge::new("api.terminal_out");
+        let terminals = TerminalHub::new(terminal_tx)
+            .with_port_limits(orch_link::ports::limits_of(&config.link));
+        #[cfg(feature = "test-observers")]
+        let terminals = terminals.with_observer(Arc::clone(&observed_terminal));
         let (reports, _) = broadcast::channel(REPORT_BACKLOG);
         let certificates = CertificateService::new(
             db.clone(),
@@ -541,11 +613,14 @@ impl Link {
         let secrets: Arc<dyn SecretSource> = Arc::new(StoredSecrets::new(db.clone(), master_key));
         Self {
             inner: Arc::new(LinkInner {
+                tunnel_attachments: Mutex::new(HashMap::new()),
+                tool_gateways: Mutex::new(HashMap::new()),
                 port_queries: Mutex::new(HashMap::new()),
                 tickets: Tickets::generate(Arc::clone(&clock)),
                 settings: LinkSettings::from_config(&config, &release_version),
                 store_metrics: config.metrics.store,
                 machine_requests: Mutex::new(None),
+                read_tools: Mutex::new(None),
                 machine_request_slots: Arc::new(tokio::sync::Semaphore::new(
                     orch_link_contract::mcp_import::MAX_PENDING,
                 )),
@@ -560,9 +635,10 @@ impl Link {
                 machines: Mutex::new(HashMap::new()),
                 gateways: Mutex::new(HashMap::new()),
                 generations: AtomicU64::new(1),
-                terminals: TerminalHub::new(terminal_tx)
-                    .with_port_limits(orch_link::ports::limits_of(&config.link)),
+                terminals,
                 terminal_out: Mutex::new(Some(terminal_rx)),
+                #[cfg(feature = "test-observers")]
+                terminal_observed: Mutex::new(Some(observed_terminal.receiver())),
                 terminal_channels: Mutex::new(HashMap::new()),
                 finished: tokio::sync::Notify::new(),
                 ended: Mutex::new(HashMap::new()),
@@ -610,6 +686,7 @@ impl Link {
             }
             *started = true;
         }
+        self.inner.certificates.load_gateway_catalogue().await?;
         {
             let mut conn = self.inner.db.acquire().await?;
             resources::reset_presence(&mut conn).await?;
@@ -617,8 +694,40 @@ impl Link {
         let link = self.clone();
         tokio::spawn(async move { link.tick_loop().await });
         if let Some(out) = lock(&self.inner.terminal_out).take() {
+            #[cfg(feature = "test-observers")]
+            let observed = lock(&self.inner.terminal_observed).take();
             let link = self.clone();
-            tokio::spawn(async move { link.terminal_loop(out).await });
+            tokio::spawn(async move {
+                link.terminal_loop(
+                    out,
+                    #[cfg(feature = "test-observers")]
+                    observed,
+                )
+                .await
+            });
+        }
+        Ok(())
+    }
+
+    /// Advertise new entrances to primary control sessions, without requesting a reconnect.
+    pub(crate) async fn publish_gateway_catalogue(&self) -> Result<(), DbError> {
+        let machines: Vec<Id> = lock(&self.inner.machines).keys().copied().collect();
+        let advertisement = self.inner.certificates.gateway_advertisement();
+        let mut conn = self.inner.db.acquire().await?;
+        for machine in machines {
+            let endpoints = crate::certificates::endpoints_for_machine(
+                &mut conn,
+                machine,
+                &advertisement.endpoints,
+            )
+            .await?;
+            self.send_primary(
+                machine,
+                DownFrame::Gateways(orch_link_contract::gateways::GatewayAdvertisement {
+                    gateways: advertisement.gateways.clone(),
+                    endpoints,
+                }),
+            );
         }
         Ok(())
     }
@@ -709,6 +818,45 @@ impl Link {
         let result = tokio::time::timeout(
             WAIT,
             handle.wait_for::<orch_link_contract::commands::SessionNativeActions>(),
+        )
+        .await;
+        if result.is_err() {
+            entry.controller.commands().cancel(id);
+        }
+        entry.controller.commands().forget_ended();
+        result
+            .map_err(|_| EntryError::Database)?
+            .map_err(|_| EntryError::Database)
+    }
+
+    /// Rebinds an open session's model transport without a durable API command or replay.
+    pub(crate) async fn session_transport(
+        &self,
+        machine: Id,
+        body: &orch_link_contract::commands::SessionOpen,
+    ) -> Result<orch_link_contract::commands::SessionOpenResult, EntryError> {
+        // Like a roster read, this changes only the live session and makes no vendor request.
+        const WAIT: Duration = Duration::from_secs(15);
+        let entry = self.entry(machine).await?;
+        if entry.route().is_none() {
+            return Err(EntryError::Unknown);
+        }
+        let deadline = Time::new(self.inner.clock.now() + chrono::Duration::seconds(15));
+        let observation = entry.observation();
+        let mut handle = entry
+            .controller
+            .commands()
+            .issue_typed(
+                observation.id,
+                &SerialKey::Thread(body.thread_id),
+                deadline,
+                body,
+            )
+            .map_err(|_| EntryError::Database)?;
+        let id = handle.id();
+        let result = tokio::time::timeout(
+            WAIT,
+            handle.wait_for::<orch_link_contract::commands::SessionOpen>(),
         )
         .await;
         if result.is_err() {
@@ -985,10 +1133,26 @@ impl Link {
         }
         let link = self.clone();
         let for_notices = Arc::clone(&entry);
-        tokio::spawn(async move { link.notice_loop(for_notices, outputs.notices).await });
+        tokio::spawn(async move {
+            link.notice_loop(
+                for_notices,
+                outputs.notices,
+                #[cfg(feature = "test-observers")]
+                outputs.observed_notices,
+            )
+            .await
+        });
         let link = self.clone();
         let for_down = Arc::clone(&entry);
-        tokio::spawn(async move { link.down_loop(for_down, outputs.down).await });
+        tokio::spawn(async move {
+            link.down_loop(
+                for_down,
+                outputs.down,
+                #[cfg(feature = "test-observers")]
+                outputs.observed_down,
+            )
+            .await
+        });
         let link = self.clone();
         let for_mirror = Arc::clone(&entry);
         tokio::spawn(async move { link.mirror_loop(for_mirror).await });
@@ -1028,16 +1192,17 @@ impl Link {
     /// Lets a machine whose revocation was committed go: a session it holds is ended at once, and
     /// what was asked of it is cancelled.
     pub async fn let_go(&self, machine: Id) {
+        // Auxiliary presence is deliberately not a routing table; every live gateway is kicked.
+        for gateway in lock(&self.inner.gateways).values() {
+            gateway.send(BackplaneFrame::Kick(Kick {
+                machine_id: machine,
+                code: ByeCode::Revoked,
+            }));
+        }
         let entry = lock(&self.inner.machines)
             .get(&machine)
             .and_then(|cell| cell.get().cloned());
         if let Some(entry) = entry {
-            if let Some(route) = entry.route() {
-                route.gateway.send(BackplaneFrame::Kick(Kick {
-                    machine_id: machine,
-                    code: ByeCode::Revoked,
-                }));
-            }
             let open: Vec<Id> = lock(&entry.state).tracked.keys().copied().collect();
             for id in open {
                 entry.controller.commands().cancel(id);
@@ -1054,8 +1219,10 @@ impl Link {
     // ------------------------------------------------------------ authorizing a session
 
     /// Whether a machine may have a session, as a gateway asks.
-    async fn authorize(&self, query: &AuthQuery) -> AuthReply {
+    pub(crate) async fn authorize(&self, query: &AuthQuery) -> AuthReply {
         let refused = |code: RejectCode| AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -1068,7 +1235,20 @@ impl Link {
             return refused(RejectCode::Busy);
         }
         match self.try_authorize(query).await {
-            Ok((cursors, placement, update_permit)) => {
+            Ok((cursors, placement, pending_update)) => {
+                if !query.purpose.is_primary() {
+                    return AuthReply {
+                        tunnel_session_idle_secs: self.inner.settings.tunnel_session_idle_secs,
+                        gateways: Vec::new(),
+                        endpoints: None,
+                        update_permit: None,
+                        n: query.n,
+                        ok: true,
+                        code: None,
+                        cursors: Some(BTreeMap::new()),
+                        placement: Some(placement),
+                    };
+                }
                 let needs_update = query.roles.contains(&Role::Node)
                     && matches!(
                         self.inner
@@ -1077,14 +1257,30 @@ impl Link {
                             .standing(&query.connector_version),
                         Ok(orch_link_contract::version::Standing::TooOld)
                     );
-                let endpoints = match self.connection_addresses(query, !needs_update).await {
+                let advertisement = self.inner.certificates.gateway_advertisement();
+                let endpoints = match self
+                    .connection_addresses(query, !needs_update, &advertisement.endpoints)
+                    .await
+                {
                     Ok(endpoints) => endpoints,
                     Err(error) => {
                         tracing::warn!(%error, "the machine's address list could not be read");
                         return refused(RejectCode::Busy);
                     }
                 };
+                let update_permit = match pending_update {
+                    Some(grant) => match self.finish_minimum_component_update(grant).await {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            tracing::warn!(%error,"the physical update grant could not be checked");
+                            return refused(RejectCode::Busy);
+                        }
+                    },
+                    None => None,
+                };
                 AuthReply {
+                    tunnel_session_idle_secs: self.inner.settings.tunnel_session_idle_secs,
+                    gateways: advertisement.gateways,
                     endpoints: Some(endpoints),
                     update_permit,
                     n: query.n,
@@ -1102,16 +1298,17 @@ impl Link {
         &self,
         query: &AuthQuery,
         keep: bool,
+        system: &[orch_link_contract::enrollment::Endpoint],
     ) -> Result<Vec<orch_link_contract::enrollment::Endpoint>, DbError> {
         use orch_db::queries::settings::{self, Stored};
         let mut conn = self.inner.db.acquire().await?;
-        let system = self.inner.certificates.advertised_endpoints();
         if keep && query.roles.contains(&Role::Node) {
             let effective = query
                 .hosted_endpoints
                 .as_ref()
                 .or(query.endpoints.as_ref())
-                .unwrap_or(&system);
+                .map(Vec::as_slice)
+                .unwrap_or(system);
             let value = serde_json::to_value(effective)
                 .map_err(|error| DbError::Other(sqlx::Error::Decode(error.into())))?;
             settings::put(
@@ -1128,7 +1325,7 @@ impl Link {
             )
             .await?;
         }
-        crate::certificates::endpoints_for_machine(&mut conn, query.machine_id, &system).await
+        crate::certificates::endpoints_for_machine(&mut conn, query.machine_id, system).await
     }
 
     async fn try_authorize(
@@ -1138,7 +1335,7 @@ impl Link {
         (
             BTreeMap<String, Seq>,
             String,
-            Option<orch_link_contract::session::UpdatePermit>,
+            Option<crate::component_updates::MinimumGrant>,
         ),
         RejectCode,
     > {
@@ -1182,6 +1379,30 @@ impl Link {
                 return Err(RejectCode::Revoked);
             }
         }
+        if !query.purpose.is_primary() {
+            let roles_hold = query
+                .roles
+                .iter()
+                .all(|role| row.roles.iter().any(|known| known == &role_name(role)));
+            let version_holds = matches!(
+                self.inner
+                    .settings
+                    .versions
+                    .standing(&query.connector_version),
+                Ok(orch_link_contract::version::Standing::Behind
+                    | orch_link_contract::version::Standing::Current)
+            );
+            if !roles_hold || !version_holds {
+                conn.rollback().await.map_err(DbError::from).map_err(busy)?;
+                return Err(if roles_hold {
+                    RejectCode::UpgradeRequired
+                } else {
+                    RejectCode::Revoked
+                });
+            }
+            conn.commit().await.map_err(DbError::from).map_err(busy)?;
+            return Ok((BTreeMap::new(), row.placement, None));
+        }
         let roles: Vec<String> = query.roles.iter().map(role_name).collect();
         let changed_roles = roles != row.roles;
         let minimum_node = row.roles.iter().any(|role| role == "node")
@@ -1216,7 +1437,7 @@ impl Link {
             }
             false
         };
-        let update_permit = if minimum_node {
+        let pending_update = if minimum_node {
             let recommended = &self.inner.settings.versions.recommended;
             self.request_automatic_component_update(
                 &mut conn,
@@ -1226,19 +1447,9 @@ impl Link {
             )
             .await
             .map_err(busy)?;
-            if !orch_db::queries::component_updates::busy(&mut conn, row.id)
+            self.begin_minimum_component_update(&mut conn, row.id)
                 .await
                 .map_err(busy)?
-            {
-                orch_db::queries::component_updates::grant_minimum(&mut conn, row.id, now)
-                    .await
-                    .map_err(busy)?;
-                Some(orch_link_contract::session::UpdatePermit {
-                    recommended: recommended.clone(),
-                })
-            } else {
-                None
-            }
         } else {
             None
         };
@@ -1255,14 +1466,34 @@ impl Link {
             EntryError::Database => RejectCode::Busy,
         })?;
         lock(&entry.state).pending_fingerprint = Some(query.fingerprint.clone());
-        Ok((entry.controller.cursors(), row.placement, update_permit))
+        lock(&entry.state).supports_tunnel_attachments = query
+            .capabilities
+            .iter()
+            .any(|capability| capability == orch_link_contract::gateways::TUNNEL_CAPABILITY);
+        Ok((entry.controller.cursors(), row.placement, pending_update))
     }
 
     // ------------------------------------------------------------ what a gateway says
 
     async fn machine_up(&self, gateway: &Arc<GatewayConn>, up: MachineUp) {
+        if !up.purpose.is_primary() {
+            return;
+        }
         self.attach(gateway, up.machine_id, up.session_id, Some(up.ip))
             .await;
+        if let Some(entry) = lock(&self.inner.machines)
+            .get(&up.machine_id)
+            .and_then(|cell| cell.get().cloned())
+        {
+            let mut state = lock(&entry.state);
+            if state.route.as_ref().is_some_and(|route| {
+                route.session_id == up.session_id && Arc::ptr_eq(&route.gateway, gateway)
+            }) {
+                state.supports_tunnel_attachments = up.capabilities.iter().any(|capability| {
+                    capability == orch_link_contract::gateways::TUNNEL_CAPABILITY
+                });
+            }
+        }
     }
 
     /// Records that a gateway holds a session of a machine, and tells the
@@ -1333,6 +1564,9 @@ impl Link {
     }
 
     async fn machine_down(&self, down: MachineDown) {
+        if !down.purpose.is_primary() {
+            return;
+        }
         let entry = lock(&self.inner.machines)
             .get(&down.machine_id)
             .and_then(|cell| cell.get().cloned());
@@ -1378,6 +1612,9 @@ impl Link {
         if entry.route().is_none_or(|route| {
             route.session_id != session || !Arc::ptr_eq(&route.gateway, gateway)
         }) {
+            return;
+        }
+        if self.tunnel_control(machine, session, &frame).await {
             return;
         }
         match frame {
@@ -1673,17 +1910,17 @@ impl Link {
                 gateway.send(BackplaneFrame::Down(Down {
                     machine_id: machine,
                     frame: DownFrame::McpImportAnswer(crate::machine_requests::unavailable(
-                        request.request_id,
-                        "the system is busy with local imports",
+                        request.request_id(),
+                        "the system is busy with local tool requests",
                     )),
                 }));
                 return;
             };
-            // Copying uses the ordinary command path on this very link. Never wait for it in
+            // Copying and removal use the ordinary command path on this very link. Never wait for it in
             // the backplane reader, which must keep receiving that command's answer.
             tokio::spawn(async move {
                 let _permit = permit;
-                let id = request.request_id;
+                let id = request.request_id();
                 let answer = match handler {
                     Some(handler) => match tokio::time::timeout(
                         std::time::Duration::from_secs(
@@ -1696,12 +1933,12 @@ impl Link {
                         Ok(answer) => answer,
                         Err(_) => crate::machine_requests::unavailable(
                             id,
-                            "the import is unconfirmed; inspect Tools before retrying",
+                            "the tool-server request is unconfirmed; inspect Tools before retrying",
                         ),
                     },
                     None => crate::machine_requests::unavailable(
                         id,
-                        "the system is not ready to file local imports",
+                        "the system is not ready to handle local tool-server requests",
                     ),
                 };
                 if let Some(route) = entry.route() {
@@ -1832,6 +2069,8 @@ impl Link {
                     )
                     .await?;
                 }
+                let applier = Arc::clone(&lock(&self.inner.applier));
+                applier.command_reply(&mut tx, entry.id, result).await?;
                 sqlx::query(
                     "UPDATE commands SET stop_confirmed_at=$3 WHERE id=$1 AND machine_id=$2
                     AND stop_confirmed_at IS NULL",
@@ -1840,13 +2079,17 @@ impl Link {
                 .bind(entry.id)
                 .bind(self.inner.clock.now())
                 .execute(&mut *tx)
-                .await?;
+                .await
+                .map_err(DbError::from)?;
                 tx.commit().await.map_err(DbError::from)?;
-                Ok::<_, DbError>(())
+                Ok::<_, ApplyError>(())
             }
             .await;
             if let Err(error) = confirmed {
                 tracing::warn!(%error, "a machine stop acknowledgement could not be saved");
+                // Its journal keeps the reply until acknowledgement. Let it
+                // resend rather than losing accounting after a transient failure.
+                return;
             }
         }
         entry.controller.up(session, frame);
@@ -1861,6 +2104,7 @@ impl Link {
         &self,
         entry: Arc<MachineEntry>,
         mut notices: mpsc::UnboundedReceiver<Notice>,
+        #[cfg(feature = "test-observers")] observed: orch_link::test_observers::ReceiverLifetime,
     ) {
         loop {
             let notice = tokio::select! {
@@ -1869,6 +2113,8 @@ impl Link {
                 notice = notices.recv() => notice,
             };
             let Some(notice) = notice else { return };
+            #[cfg(feature = "test-observers")]
+            let mut flight = Some(observed.selected(notice.observed_bytes()));
             match notice {
                 Notice::Deliver(delivery) => {
                     // Deliveries of different streams are applied side by side, a few at a time: the link
@@ -1880,10 +2126,16 @@ impl Link {
                     };
                     let link = self.clone();
                     let for_delivery = Arc::clone(&entry);
+                    #[cfg(feature = "test-observers")]
+                    let delivery_flight = flight.take();
                     tokio::spawn(async move {
                         let _permit = permit;
                         link.apply_delivery(for_delivery.id, &for_delivery.controller, delivery)
                             .await;
+                        #[cfg(feature = "test-observers")]
+                        if let Some(flight) = delivery_flight {
+                            flight.processed();
+                        }
                     });
                 }
                 Notice::Reset(notice) => self.apply_reset(&entry, &notice).await,
@@ -1906,6 +2158,10 @@ impl Link {
                             && let Ok(stream) = eph.stream.parse::<Stream>()
                         {
                             self.record_report_refusal(entry.id, &stream, 1).await;
+                        }
+                        #[cfg(feature = "test-observers")]
+                        if let Some(flight) = flight.take() {
+                            flight.processed();
                         }
                         continue;
                     }
@@ -1931,6 +2187,10 @@ impl Link {
                         self.write_presence(entry.id, false, None).await;
                     }
                 }
+            }
+            #[cfg(feature = "test-observers")]
+            if let Some(flight) = flight {
+                flight.processed();
             }
         }
     }
@@ -2036,6 +2296,7 @@ impl Link {
         let ended = std::time::Instant::now();
         match result {
             Ok(Taken::Applied(boundary)) => {
+                self.committed_gateway_samples(machine, &delivery);
                 let kind = delivery.stream.family().prefix();
                 metrics::counter!("orch_link_events_total","stream_kind"=>kind)
                     .increment(delivery.events.len() as u64);
@@ -2184,8 +2445,8 @@ impl Link {
                 }
                 continue;
             }
-            // A new registration needs the owner's personal home; without one the owner chooses its home with
-            // "Use here", and nothing is placed in another org on their behalf.
+            // Discovery defaults to the machine's registered home. With no usable home,
+            // the owner chooses one through the existing registration action.
             let Some(home) = home else {
                 continue;
             };
@@ -2362,6 +2623,7 @@ impl Link {
         &self,
         entry: Arc<MachineEntry>,
         mut down: mpsc::UnboundedReceiver<DownFrame>,
+        #[cfg(feature = "test-observers")] observed: orch_link::test_observers::ReceiverLifetime,
     ) {
         loop {
             let frame = tokio::select! {
@@ -2370,11 +2632,20 @@ impl Link {
                 frame = down.recv() => frame,
             };
             let Some(frame) = frame else { return };
+            #[cfg(feature = "test-observers")]
+            let flight = observed.selected(
+                frames::encode(&frame, usize::MAX)
+                    .ok()
+                    .map(|text| text.len()),
+            );
             let Some(route) = entry.route() else {
                 // The machine has no session: what was meant for it is sent
                 // again when it has, as the rules of the link have it.
+                #[cfg(feature = "test-observers")]
+                flight.processed();
                 continue;
             };
+            let mut current_callers = Vec::new();
             let frame = match frame {
                 DownFrame::Cmd(cmd) => {
                     let id = cmd.id;
@@ -2387,15 +2658,25 @@ impl Link {
                         Err(error) => Err(error),
                     };
                     match admitted {
-                        Ok(Some(cmd)) => DownFrame::Cmd(cmd),
-                        Ok(None) => continue,
+                        Ok(Some((cmd, callers))) => {
+                            current_callers = callers;
+                            DownFrame::Cmd(cmd)
+                        }
+                        Ok(None) => {
+                            #[cfg(feature = "test-observers")]
+                            flight.processed();
+                            continue;
+                        }
                         Err(error) => {
                             tracing::warn!(%error, command = %id, "a command cannot be put on the wire");
-                            entry.controller.commands().on_cmd_res(&CmdRes {
-                                id,
-                                outcome: Err(error),
-                            });
-                            entry.mirror.notify_one();
+                            // The native ACK reaches the controller before its DB mirror.
+                            // Atomically preserve that acknowledgement (or a native result)
+                            // when a queued duplicate fails preparation or scope admission.
+                            self.refuse_unaccepted_publication(&entry, id, &error);
+                            #[cfg(test)]
+                            crate::backplane::command_admission_tests::local_refused(id).await;
+                            #[cfg(feature = "test-observers")]
+                            flight.processed();
                             continue;
                         }
                     }
@@ -2404,7 +2685,22 @@ impl Link {
             };
             // Publication is synchronous and holds no database lease. Rebuild/route
             // replacement cannot let an older output task publish after its successor.
-            self.send_current(&entry, &route, frame);
+            let command = match &frame {
+                DownFrame::Cmd(command) => Some(command.id),
+                _ => None,
+            };
+            let sent = self.send_current(&entry, &route, frame, &current_callers);
+            if let Err(error) = &sent
+                && let Some(id) = command
+            {
+                self.refuse_unaccepted_publication(&entry, id, error);
+            }
+            #[cfg(feature = "test-observers")]
+            if matches!(sent, Ok(true)) {
+                flight.complete();
+            } else {
+                flight.processed();
+            }
         }
     }
 
@@ -2413,24 +2709,47 @@ impl Link {
         entry: &Arc<MachineEntry>,
         route: &SessionRoute,
         frame: DownFrame,
-    ) -> bool {
+        callers: &[(Option<orch_authz::Caller>, Option<Time>)],
+    ) -> Result<bool, CommandError> {
         let machines = lock(&self.inner.machines);
         let current = machines.get(&entry.id).and_then(|cell| cell.get());
         if !current.is_some_and(|current| Arc::ptr_eq(current, entry))
             || entry.retired.is_cancelled()
         {
-            return false;
+            return Ok(false);
         }
         let mut state = lock(&entry.state);
         if !state.route.as_ref().is_some_and(|current| {
             current.session_id == route.session_id && Arc::ptr_eq(&current.gateway, &route.gateway)
         }) {
-            return false;
+            return Ok(false);
         }
         let command = match &frame {
             DownFrame::Cmd(command) => Some(command.id),
             _ => None,
         };
+        if let Some(id) = command {
+            // Actual native acknowledgement/result custody is factual reconciliation, not
+            // new forwarding authority. New work checks every real caller deadline and
+            // every raw ownership/source deadline, including credential-free owned cleanup.
+            let progress = entry.controller.commands().progress(id);
+            if progress.as_ref().is_some_and(Progress::is_final) {
+                return Ok(false);
+            }
+            let accepted = matches!(progress, Some(Progress::Accepted));
+            if !accepted
+                && callers.iter().any(|(caller, source_deadline)| {
+                    caller.as_ref().is_some_and(|caller| {
+                        !caller.key_deadline_allows(self.inner.clock.as_ref())
+                    }) || source_deadline.is_some_and(|end| end.get() <= self.inner.clock.now())
+                })
+            {
+                return Err(CommandError::new(
+                    ErrorCode::Conflict,
+                    "the originating operation expired before native publication",
+                ));
+            }
+        }
         let sent = route.gateway.send(BackplaneFrame::Down(Down {
             machine_id: entry.id,
             frame,
@@ -2439,7 +2758,12 @@ impl Link {
             state.handed_over.push(id);
             entry.mirror.notify_one();
         }
-        sent
+        Ok(sent)
+    }
+
+    fn refuse_unaccepted_publication(&self, entry: &MachineEntry, id: Id, error: &CommandError) {
+        entry.controller.commands().refuse_unaccepted(id, error);
+        entry.mirror.notify_one();
     }
 
     /// Puts what the issuer follows into the rows: the commands handed to a gateway, and the states a
@@ -2472,7 +2796,15 @@ impl Link {
                         }
                     }
                     for (id, progress, before) in changes {
-                        if let Err(error) = write_progress(&mut conn, id, &progress, now).await {
+                        #[cfg(test)]
+                        crate::backplane::command_admission_tests::before_mirror_progress(
+                            id, &progress,
+                        )
+                        .await;
+                        if let Err(error) =
+                            write_progress(&mut conn, id, &progress, self.inner.clock.as_ref())
+                                .await
+                        {
                             tracing::warn!(%error, command = %id, "the state of a command could not be written");
                             if let Some(tracked) = lock(&entry.state).tracked.get_mut(&id) {
                                 tracked.mirrored = before;
@@ -2507,7 +2839,7 @@ impl Link {
         }
     }
 
-    /// What a caller that waits for command `id` is told by ([`Link::command_ended`]); kept while
+    /// What a caller that waits for command `id` is told by (`Link::command_ended`); kept while
     /// somebody waits.
     pub(crate) fn end_signal(&self, id: Id) -> EndSignal<'_> {
         let notify = Arc::clone(
@@ -2534,6 +2866,7 @@ impl Link {
                 _ = interval.tick() => {}
             }
             ticks = ticks.wrapping_add(1);
+            self.expire_tool_gateway_reports();
             if let Err(error) = self.advance_component_updates().await {
                 tracing::warn!(%error, "physical component updates could not be advanced");
             }
@@ -2582,19 +2915,35 @@ impl Link {
 
     // ------------------------------------------------------------ terminals
 
-    async fn terminal_loop(&self, mut out: mpsc::UnboundedReceiver<ApiOut>) {
+    async fn terminal_loop(
+        &self,
+        mut out: mpsc::UnboundedReceiver<ApiOut>,
+        #[cfg(feature = "test-observers")] observed: Option<
+            orch_link::test_observers::ReceiverLifetime,
+        >,
+    ) {
         loop {
             let item = tokio::select! {
                 () = self.inner.shutdown.cancelled() => return,
                 item = out.recv() => item,
             };
             let Some(item) = item else { return };
+            #[cfg(feature = "test-observers")]
+            let flight = observed
+                .as_ref()
+                .map(|observed| observed.selected(item.observed_bytes()));
             let machine = match &item {
                 ApiOut::Text(frame) => machine_of(frame),
                 ApiOut::Data(data) => Some(data.machine_id),
                 ApiOut::Datagram { machine, .. } => Some(*machine),
             };
-            let Some(machine) = machine else { continue };
+            let Some(machine) = machine else {
+                #[cfg(feature = "test-observers")]
+                if let Some(flight) = flight {
+                    flight.processed();
+                }
+                continue;
+            };
             self.note_terminal_frame(&item);
             let gateway = lock(&self.inner.machines)
                 .get(&machine)
@@ -2603,7 +2952,22 @@ impl Link {
                 .map(|route| route.gateway);
             if let ApiOut::Datagram { machine, packet } = item {
                 if let Some(gateway) = gateway {
-                    gateway.send_datagram(machine, packet);
+                    let sent = gateway.send_datagram(machine, packet);
+                    #[cfg(feature = "test-observers")]
+                    if let Some(flight) = flight {
+                        if sent {
+                            flight.complete();
+                        } else {
+                            flight.processed();
+                        }
+                    }
+                    #[cfg(not(feature = "test-observers"))]
+                    let _ = sent;
+                } else {
+                    #[cfg(feature = "test-observers")]
+                    if let Some(flight) = flight {
+                        flight.processed();
+                    }
                 }
                 continue;
             }
@@ -2613,6 +2977,14 @@ impl Link {
                 (Some(_), ApiOut::Datagram { .. }) => false,
                 (None, _) => false,
             };
+            #[cfg(feature = "test-observers")]
+            if let Some(flight) = flight {
+                if delivered {
+                    flight.complete();
+                } else {
+                    flight.processed();
+                }
+            }
             if !delivered
                 && let ApiOut::Text(frame) = &item
                 && let BackplaneFrame::TunOpen(open) = frame.as_ref()
@@ -2691,6 +3063,8 @@ impl Link {
             started_at: hello
                 .started_at
                 .unwrap_or_else(|| orch_types::Time::new(self.inner.clock.now())),
+            #[cfg(feature = "test-observers")]
+            observed: orch_link::test_observers::QueueGauge::new("api.backplane"),
         });
         let replaced =
             lock(&self.inner.gateways).insert(hello.gateway_id.clone(), Arc::clone(&gateway));
@@ -2707,34 +3081,59 @@ impl Link {
         self.heartbeat(&hello.version, &gateway).await;
 
         let writer_closed = gateway.closed.clone();
+        #[cfg(feature = "test-observers")]
+        let writer_observed = Arc::clone(&gateway.observed);
         let writer = tokio::spawn(async move {
+            #[cfg(feature = "test-observers")]
+            let _receiver_lifetime = writer_observed.receiver();
             let mut ping = tokio::time::interval(PING_EVERY);
             ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
+                #[cfg(feature = "test-observers")]
+                let mut observed_send = None;
                 let message = tokio::select! {
                     () = writer_closed.cancelled() => break,
                     _ = ping.tick() => Message::Ping(Bytes::new()),
                     item = queued.recv() => match item {
                         None => break,
-                        Some(Outbound::Frame(frame)) => match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
+                        Some(Outbound::Frame(frame)) => {
+                            #[cfg(feature = "test-observers")]
+                            {
+                                observed_send = Some(writer_observed.selected(frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES).ok().map(|text| text.len())));
+                                orch_link::test_observers::api_sending(frame.as_ref());
+                            }
+                            match frames::encode(frame.as_ref(), MAX_BACKPLANE_FRAME_BYTES) {
                             Ok(text) => Message::Text(text.into()),
                             Err(error) => {
                                 tracing::error!(%error, "a frame of the backplane cannot be written");
                                 continue;
                             }
+                        }},
+                        Some(Outbound::Data(bytes)) => {
+                            #[cfg(feature = "test-observers")]
+                            { observed_send = Some(writer_observed.selected(Some(bytes.len()))); }
+                            Message::Binary(bytes)
                         },
-                        Some(Outbound::Data(bytes)) => Message::Binary(bytes),
                         Some(Outbound::Datagram {machine,packet}) => {
                             let data=orch_link_contract::ports::BackplanePortDatagram {machine_id:machine,datagram:packet.frame.clone()};
-                            let Ok(bytes)=data.encode() else {continue;};
+                            let encoded = data.encode();
+                            #[cfg(feature = "test-observers")]
+                            { observed_send = Some(writer_observed.selected(encoded.as_ref().ok().map(|bytes| bytes.len()))); }
+                            let Ok(bytes)=encoded else {continue;};
                             if sink.send(Message::Binary(bytes)).await.is_err() {break;}
                             packet.delivered();
+                            #[cfg(feature = "test-observers")]
+                            if let Some(flight) = observed_send.take() { flight.complete(); }
                             continue;
                         },
                     },
                 };
                 if sink.send(message).await.is_err() {
                     break;
+                }
+                #[cfg(feature = "test-observers")]
+                if let Some(flight) = observed_send.take() {
+                    flight.complete();
                 }
             }
             let _ = sink.close().await;
@@ -2760,6 +3159,8 @@ impl Link {
                     match frames::decode::<BackplaneFrame>(text.as_str(), MAX_BACKPLANE_FRAME_BYTES)
                     {
                         Ok(Text::Known(frame)) => {
+                            #[cfg(feature = "test-observers")]
+                            orch_link::test_observers::api_received(&frame);
                             self.on_frame(&gateway, &hello.version, frame).await
                         }
                         Ok(Text::Unknown(kind)) => {
@@ -2833,6 +3234,9 @@ impl Link {
             BackplaneFrame::MachineUp(up) => self.machine_up(gateway, up).await,
             BackplaneFrame::MachineDown(down) => self.machine_down(down).await,
             BackplaneFrame::Up(up) => {
+                if !up.purpose.is_primary() {
+                    return;
+                }
                 self.route_up(gateway, up.machine_id, up.session_id, up.frame)
                     .await
             }
@@ -3045,12 +3449,58 @@ impl Drop for PortQueryRegistration<'_> {
 
 /// Writes one state of a command into its row, on a connection the caller holds. Each write moves a row
 /// only forward, whatever was written before it.
-async fn write_progress(
+pub(crate) async fn write_progress(
     conn: &mut Conn,
     id: Id,
     progress: &Progress,
-    now: DateTime<Utc>,
+    clock: &dyn orch_types::Clock,
 ) -> Result<(), DbError> {
+    let now = clock.now();
+    if matches!(progress, Progress::Succeeded(_)) {
+        let copy = orch_engine::jobs::provider_provision::recorded_credential_copy(conn, id)
+            .await
+            .map_err(native_import_error)?;
+        if let Some(copy) = copy {
+            use sqlx::Connection as _;
+            let mut tx = conn.begin().await.map_err(DbError::from)?;
+            copy.lock_source(&mut tx)
+                .await
+                .map_err(native_import_error)?;
+            let Progress::Succeeded(result) = progress else {
+                return Ok(());
+            };
+            queries::finish_command(&mut tx, id, &queries::Ending::Succeeded(result), now).await?;
+            copy.reconcile(&mut tx, clock)
+                .await
+                .map_err(native_import_error)?;
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(());
+        }
+        let source = orch_engine::environment_mcp::existing::recorded_command(conn, id)
+            .await
+            .map_err(native_import_error)?;
+        if let Some(source) = source {
+            use sqlx::Connection as _;
+            let mut tx = conn.begin().await.map_err(DbError::from)?;
+            if source.changes_authority() {
+                orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
+            }
+            source
+                .lock_source(&mut tx)
+                .await
+                .map_err(native_import_error)?;
+            let Progress::Succeeded(result) = progress else {
+                return Ok(());
+            };
+            queries::finish_command(&mut tx, id, &queries::Ending::Succeeded(result), now).await?;
+            source
+                .reconcile(&mut tx, clock)
+                .await
+                .map_err(native_import_error)?;
+            tx.commit().await.map_err(DbError::from)?;
+            return Ok(());
+        }
+    }
     match progress {
         Progress::Queued => {
             queries::mark_queued(conn, id, now).await?;
@@ -3075,6 +3525,13 @@ async fn write_progress(
         }
     }
     Ok(())
+}
+
+fn native_import_error(error: orch_engine::EngineError) -> DbError {
+    match error {
+        orch_engine::EngineError::Db(error) => error,
+        error => DbError::Other(sqlx::Error::Protocol(error.to_string())),
+    }
 }
 
 /// A caller's wait for one command to end ([`Link::end_signal`]): told by the mirror that writes its end,
@@ -3111,6 +3568,10 @@ mod component_update_tests;
 #[cfg(test)]
 #[path = "backplane/reenrollment_tests.rs"]
 mod reenrollment_tests;
+
+#[cfg(test)]
+#[path = "backplane/rate_presence_tests.rs"]
+mod rate_presence_tests;
 
 #[cfg(test)]
 #[path = "backplane/binding_tests.rs"]

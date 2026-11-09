@@ -5,7 +5,7 @@
  * never differ.
  *
  * An entry the reader may not use, and would look for, stays in the list: greyed, reachable by the
- * arrow keys, with the reason under its name. Entries that destroy come last, apart, in the colour
+ * arrow keys, with the reason under its name or, when explicitly chosen, in a short tooltip. Entries that destroy come last, apart, in the colour
  * of danger. Each entry shows its shortcut.
  */
 import { Check, ChevronRight } from 'lucide-react';
@@ -21,6 +21,7 @@ import { cardClasses, floatingAttachment, floatingClasses, useFloatingSubmenu } 
 import { useScrolls } from '@/ui/useScrolls';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
+import { Tooltip } from '@/ui/Tooltip';
 
 export type MenuEntry =
   | (ChoiceName<string> & ChoiceDetails & {
@@ -36,6 +37,8 @@ export type MenuEntry =
       danger?: boolean;
       /** Why the reader may not use it; the entry is then shown greyed with these words. */
       disabled?: string | false;
+      /** A short, explicitly chosen refusal can stay in a tooltip instead of an explanatory row. */
+      disabledPresentation?: 'tooltip';
       onSelect: () => void;
     })
   | { type: 'separator'; id: string }
@@ -167,7 +170,8 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
             const off = typeof entry.disabled === 'string';
             const name = choiceName(entry);
             const action = entry.action ?? actionForLabel(name);
-            const description = off ? <span className="flex flex-col gap-0.5">
+            const tooltip = off && entry.disabledPresentation === 'tooltip';
+            const description = off && !tooltip ? <span className="flex flex-col gap-0.5">
               {entry.description !== undefined && <span>{entry.description}</span>}
               {' '}<span>{entry.disabled}</span>
             </span> : entry.description;
@@ -181,12 +185,13 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
                   {content}
                   {entry.shortcut !== undefined && <Kbd shortcut={entry.shortcut} className="ml-4" />}
                 </>;
-                return <ChoiceCard preview={entry.preview} renderInspect={(button) => <parts.Item asChild onSelect={(event) => event.preventDefault()}>{button}</parts.Item>}><parts.Item {...control} asChild={entry.href !== undefined && !off} textValue={name}
+                const item = <parts.Item {...control} asChild={entry.href !== undefined && !off} textValue={name}
                 {...(off ? { 'aria-disabled': true } : {})}
                 onSelect={(event) => { if (off) event.preventDefault(); else if (entry.href === undefined) entry.onSelect(); }}
                 className={cx(ROW, 'min-w-0 flex-1', off ? 'text-text-muted' : entry.danger === true ? 'text-danger-text data-[highlighted]:bg-danger-subtle' : 'text-text')}>
                 {entry.href !== undefined && !off ? <a href={entry.href}>{row}</a> : row}
-              </parts.Item></ChoiceCard>;
+              </parts.Item>;
+                return <ChoiceCard preview={entry.preview} renderInspect={(button) => <parts.Item asChild onSelect={(event) => event.preventDefault()}>{button}</parts.Item>}>{tooltip ? <Tooltip content={entry.disabled} side="right">{item}</Tooltip> : item}</ChoiceCard>;
               }}</Choice>
             );
           }

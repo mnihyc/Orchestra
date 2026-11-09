@@ -9,7 +9,7 @@
 //! there; when it is away, a listing and the names of files are read from the last list of its tree
 //! that it uploaded, and everything else says that the source is offline ([`live`]). The requests
 //! are in [`files`] (listing, describing, bringing a file to the store and reading it, writing),
-//! [`looking`] (what agents changed, searching, archives, repositories) and [`snapshots`] (a
+//! `looking` (what agents changed, searching, archives, repositories) and `snapshots` (a
 //! thread's directory kept as of a moment, and the jobs).
 
 pub mod door;
@@ -21,6 +21,7 @@ pub(crate) mod pages;
 pub mod paths;
 pub mod problems;
 pub mod restores;
+pub(crate) mod snapshot_read;
 pub mod snapshots;
 pub mod source;
 

@@ -5,19 +5,27 @@
 //! it runs the job waits queued. A capability is granted by a request of an agent that its policy allows or a
 //! person of its scope approves (see the engine's `capabilities`), and decided through the approvals.
 
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use orch_api_contract::environment::EnvironmentCapabilityRevoke;
+use orch_api_contract::environment::{
+    CapabilityRevokeReceipt, CapabilityRevokeResponse, EnvironmentCapabilityRevoke,
+};
 use orch_api_contract::nodes::JobState;
 use orch_api_contract::workspace::{Job, JobProgress};
 use orch_db::queries::environments::capabilities::RecreateJob;
 use orch_engine::capabilities::RevokeError;
-use orch_types::Time;
+use orch_types::{Id, Time};
+
+mod sources;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(EnvironmentCapabilityRevoke, revoke);
+    registry.on_with_operation(
+        EnvironmentCapabilityRevoke,
+        crate::key_operations::native::effects::prepare::<sources::Revocations>,
+        revoke,
+    );
 }
 
 /// The job as it waits: queued, with nothing done.
@@ -55,31 +63,39 @@ fn queued(job: &RecreateJob, by: Option<orch_api_contract::users::UserRef>) -> J
 }
 
 /// Takes a capability back from an environment.
-async fn revoke(ctx: Ctx, (): (), (): ()) -> ApiResult<Option<Job>> {
-    let environment = ctx.id("id")?;
-    let key = ctx.param("key")?.to_owned();
-    let caller = authorization::caller_of(ctx.user()?)?;
-    let made = ctx
-        .app
-        .engine
-        .revoke_capability(&caller, environment, &key)
-        .await;
-    let job = match made {
-        Ok(Some(job)) => job,
-        Ok(None) => return Ok(None),
-        Err(RevokeError::NotFound | RevokeError::NotGranted) => return Err(ApiError::not_found()),
-        Err(RevokeError::Denied(refusal)) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            return Err(refusals::denied(&mut conn, *refusal).await?);
+async fn revoke(ctx: Ctx, (): (), (): ()) -> ApiResult<CapabilityRevokeResponse> {
+    let (tx, _) = crate::middleware::transaction_guard::begin(&ctx).await?;
+    let done =
+        crate::key_operations::native::effects::apply_owned::<sources::Revocations>(&ctx, tx)
+            .await?;
+    let receipt = CapabilityRevokeReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        environment_id: done.output.environment,
+        key: done.output.key.clone(),
+        job_id: done.output.job.as_ref().map(|job| job.id),
+    };
+    crate::key_operations::publication::receipt(&done.ctx, &receipt)?;
+    let full = match crate::key_operations::native::reply::render::<sources::Content>(
+        &done.ctx,
+        &done.accepted,
+        done.output,
+    )
+    .await
+    {
+        Ok(full) => full,
+        Err(error)
+            if matches!(
+                error.code(),
+                orch_api_contract::common::ErrorCode::AuthzDenied
+                    | orch_api_contract::common::ErrorCode::NotFound
+            ) =>
+        {
+            None
         }
-        Err(RevokeError::Internal(error)) => return Err(ApiError::internal(error)),
+        Err(error) => return Err(error),
     };
-    let mut conn = ctx.app.db.acquire().await?;
-    let by = match job.created_by {
-        Some(person) => refusals::user_refs(&mut conn, &[person])
-            .await?
-            .remove(&person),
-        None => None,
-    };
-    Ok(Some(queued(&job, by)))
+    Ok(match full {
+        Some(job) => CapabilityRevokeResponse::Full(job.map(Box::new)),
+        None => CapabilityRevokeResponse::Receipt(receipt),
+    })
 }

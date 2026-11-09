@@ -4,6 +4,7 @@ mod continuation_diagnostics;
 mod places;
 mod rig;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::{
     auth::{ApiTokenCreateBody, MeTokenCreate, SensitiveProof},
@@ -23,6 +24,57 @@ use std::{
 };
 
 type Proof<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+#[tokio::test]
+async fn a_creation_header_replays_the_native_prompt_acknowledgement_without_spent_write_or_new_work()
+-> Proof {
+    let (scene, thread, input, _) = scene(false).await?;
+    let baseline = current(&scene, thread).await;
+    let request = edit(&baseline, "one-header-edit")?;
+    let idempotency = orch_types::new_id().to_string();
+    let first = scene
+        .rig
+        .world
+        .app
+        .call(ThreadPromptVersionCreate, &[&thread, &input])
+        .token(&scene.ada.token)
+        .header("Idempotency-Key", &idempotency)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        first.status.as_u16(),
+        202,
+        "{}",
+        String::from_utf8_lossy(&first.raw)
+    );
+    let accepted: orch_types::Json = serde_json::from_slice(&first.raw)?;
+    let after = counts(&scene, thread).await?;
+    let actor = operation_key(&scene, scene.ada.id(), thread, "NodeGet", &["read"]).await?;
+    let replay = scene
+        .rig
+        .world
+        .app
+        .call(ThreadPromptVersionCreate, &[&thread, &input])
+        .token(&actor)
+        .header("Idempotency-Key", &idempotency)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        replay.status.as_u16(),
+        202,
+        "{}",
+        String::from_utf8_lossy(&replay.raw)
+    );
+    let replay: orch_types::Json = serde_json::from_slice(&replay.raw)?;
+    assert_eq!(
+        replay, accepted,
+        "this native type is already a content-free acknowledgement"
+    );
+    assert_eq!(counts(&scene, thread).await?, after);
+    Ok(())
+}
 
 async fn scene(
     running: bool,
@@ -79,17 +131,19 @@ async fn token(scene: &rig::Scene, thread: Id, scopes: &[&str]) -> Proof<String>
         .call(MeTokenCreate, &[])
         .token(&scene.ada.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: format!("Scoped continuation {}", scopes.len()),
             scopes: Some(scopes.iter().map(|scope| (*scope).to_owned()).collect()),
             node_id: Some(thread),
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(support::PASSWORD.into()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .ok_or_else(|| "new synthetic token has no returned secret".into())
@@ -286,7 +340,10 @@ async fn ordinary_input_and_prompt_edit_require_provider_scope_without_narrowing
         .send()
         .await;
     assert_eq!(accepted.status, http::StatusCode::CREATED);
-    let accepted = accepted.ok();
+    let accepted = accepted
+        .ok()
+        .into_full()
+        .expect("the legacy key retains its full input response");
     assert_eq!(
         accepted.input.state,
         orch_api_contract::threads::InputState::Pending
@@ -1204,6 +1261,477 @@ async fn narrowing_only_provider_use_before_effects_or_activation_keeps_original
             viewed.thread.active_continuation_id,
             baseline.thread.active_continuation_id
         );
+    }
+    Ok(())
+}
+
+async fn operation_key(
+    scene: &rig::Scene,
+    actor: Id,
+    thread: Id,
+    operation: &str,
+    actions: &[&str],
+) -> Proof<String> {
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    let scope: orch_access_contract::key_scope::KeyScope = serde_json::from_value(
+        json!({"rules":[{"target":{"kind":"thread","id":thread,"reach":"self"},"resources":["thread"],"allow":[{"operation":operation,"actions":actions}]}]}),
+    )?;
+    assert!(scope.validate().is_empty());
+    let secret = new_token(API_TOKEN_PREFIX);
+    orch_db::queries::identity::create_api_token_scoped(
+        &mut *scene.rig.world.conn().await,
+        &orch_db::queries::identity::NewApiToken {
+            id: orch_types::new_id(),
+            user_id: actor,
+            name: "Native prompt transition",
+            token_hash: &token_hash(&secret),
+            scopes: &[],
+            node_id: None,
+            at: scene.rig.world.now(),
+            expires_at: Some(scene.rig.world.now() + chrono::Duration::hours(1)),
+        },
+        Some(&serde_json::to_value(scope)?),
+    )
+    .await?;
+    Ok(secret)
+}
+#[tokio::test]
+async fn operation_scoped_prompt_edit_keeps_native_authorship_replay_and_exact_accepted_provenance()
+-> Proof {
+    let (scene, thread, input, _) = scene(false).await?;
+    let baseline = current(&scene, thread).await;
+    let before = counts(&scene, thread).await?;
+    let request = edit(&baseline, "native-operation-scope-edit")?;
+    for (actor, target, operation, actions) in [
+        (
+            scene.ada.id(),
+            thread,
+            "ThreadPromptVersionCreate",
+            vec!["read"],
+        ),
+        (
+            scene.ada.id(),
+            thread,
+            "ThreadPromptVersionCreate",
+            vec!["write"],
+        ),
+        (
+            scene.ada.id(),
+            orch_types::new_id(),
+            "ThreadPromptVersionCreate",
+            vec!["read", "write"],
+        ),
+        (
+            scene.ada.id(),
+            thread,
+            "ThreadContinuationActivate",
+            vec!["read", "write"],
+        ),
+        (
+            scene.dan.id(),
+            thread,
+            "ThreadPromptVersionCreate",
+            vec!["read", "write"],
+        ),
+    ] {
+        let secret = operation_key(&scene, actor, target, operation, &actions).await?;
+        let response = scene
+            .rig
+            .world
+            .app
+            .call(ThreadPromptVersionCreate, &[&thread, &input])
+            .token(&secret)
+            .body(&request)
+            .send_bytes()
+            .await;
+        assert!(!response.status.is_success());
+        assert_eq!(
+            counts(&scene, thread).await?,
+            before,
+            "scope cannot create author or source authority"
+        );
+    }
+    let secret = operation_key(
+        &scene,
+        scene.ada.id(),
+        thread,
+        "ThreadPromptVersionCreate",
+        &["read", "write"],
+    )
+    .await?;
+    let response = scene
+        .rig
+        .world
+        .app
+        .call(ThreadPromptVersionCreate, &[&thread, &input])
+        .token(&secret)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        response.status,
+        202,
+        "{}",
+        String::from_utf8_lossy(&response.raw)
+    );
+    let accepted: orch_api_contract::threads::ThreadContinuationAccepted =
+        serde_json::from_slice(&response.raw)?;
+    let replay_head = orch_db::queries::threads::thread(&mut *scene.rig.world.conn().await, thread)
+        .await?
+        .ok_or("native prompt thread absent")?;
+    let replay_counts = counts(&scene, thread).await?;
+    let replay = scene
+        .rig
+        .world
+        .app
+        .call(ThreadPromptVersionCreate, &[&thread, &input])
+        .token(&secret)
+        .body(&request)
+        .send_bytes()
+        .await;
+    assert_eq!(replay.status, 202);
+    let replay: orch_api_contract::threads::ThreadContinuationAccepted =
+        serde_json::from_slice(&replay.raw)?;
+    assert_eq!(replay.operation_id, accepted.operation_id);
+    assert_eq!(replay.continuation_id, accepted.continuation_id);
+    assert_eq!(replay.input_id, accepted.input_id);
+    assert_eq!(replay.job, accepted.job);
+    assert_eq!(replay.seq, replay_head.seq());
+    assert!(replay.seq >= accepted.seq);
+    assert_eq!(counts(&scene, thread).await?, replay_counts);
+    let plan: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
+        .bind(accepted.job.id)
+        .fetch_one(scene.rig.db.pool())
+        .await?;
+    let origin: orch_authz::CapturedOperation =
+        serde_json::from_value(plan["recipe"]["operation_origin"].clone())?;
+    assert_eq!(origin.operation(), "ThreadPromptVersionCreate");
+    assert_eq!(origin.user(), scene.ada.id());
+    assert!(!String::from_utf8_lossy(&response.raw).contains("Actual original prompt"));
+    assert_eq!(
+        current(&scene, thread).await.thread.active_continuation_id,
+        baseline.thread.active_continuation_id,
+        "admission keeps native deferred selection"
+    );
+    Ok(())
+}
+#[tokio::test]
+async fn operation_scoped_prompt_edit_rechecks_after_its_real_thread_lock_before_native_first_effect()
+-> Proof {
+    for expire in [false, true] {
+        let (scene, thread, input, _) = scene(false).await?;
+        let baseline = current(&scene, thread).await;
+        let request = edit(&baseline, "native-operation-scope-row")?;
+        let secret = operation_key(
+            &scene,
+            scene.ada.id(),
+            thread,
+            "ThreadPromptVersionCreate",
+            &["read", "write"],
+        )
+        .await?;
+        let before = counts(&scene, thread).await?;
+        let mut held = scene.rig.db.begin().await?;
+        sqlx::query("SELECT node_id FROM threads WHERE node_id=$1 FOR UPDATE")
+            .bind(thread)
+            .fetch_one(&mut *held)
+            .await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *held)
+            .await?;
+        let app = scene.rig.world.app.clone();
+        let mut pending = tokio::spawn(async move {
+            let call = app
+                .call(ThreadPromptVersionCreate, &[&thread, &input])
+                .token(&secret)
+                .body(&request);
+            call.send_bytes().await
+        });
+        let observed=tokio::time::timeout(std::time::Duration::from_secs(30),async {loop {
+            if pending.is_finished(){return Ok::<_,orch_db::DbError>(false);}
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE '%threads%FOR UPDATE%')").bind(pid).fetch_one(scene.rig.db.pool()).await.map_err(orch_db::DbError::from)?;if blocked{return Ok(true);}tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }}).await;
+        if !matches!(observed, Ok(Ok(true))) {
+            pending.abort();
+            held.rollback().await?;
+            let drained = pending.await;
+            return Err(format!("native prompt row wait not reached: {drained:?}").into());
+        }
+        if expire {
+            scene.rig.world.advance(chrono::Duration::hours(2));
+        }
+        held.rollback().await?;
+        let response = match tokio::time::timeout(std::time::Duration::from_secs(30), &mut pending)
+            .await
+        {
+            Ok(result) => result?,
+            Err(error) => {
+                pending.abort();
+                let drained = pending.await;
+                return Err(format!("native prompt did not finish: {error}; {drained:?}").into());
+            }
+        };
+        assert_eq!(
+            response.status,
+            if expire { 401 } else { 202 },
+            "{}",
+            String::from_utf8_lossy(&response.raw)
+        );
+        if expire {
+            assert_eq!(
+                counts(&scene, thread).await?,
+                before,
+                "no version/input/operation/command precedes current first-effect admission"
+            );
+        }
+    }
+    Ok(())
+}
+#[tokio::test]
+async fn operation_scoped_activation_accepts_the_actual_retained_native_branch_without_a_prompt_operation_loan()
+-> Proof {
+    use orch_api_contract::threads::{
+        ContinuationActiveTurn, ContinuationRunningAction, ThreadContinuationActivate,
+        ThreadContinuationActivateBody,
+    };
+    let (scene, thread, input, _) = scene(true).await?;
+    // The prefix worker must run; its selected replacement input must remain held
+    // while the refusal/activation controls take their no-new-turn observations.
+    sqlx::query("UPDATE threads SET queue_held=true WHERE node_id=$1")
+        .bind(thread)
+        .execute(scene.rig.db.pool())
+        .await?;
+    let original = current(&scene, thread).await;
+    let edit_key = operation_key(
+        &scene,
+        scene.ada.id(),
+        thread,
+        "ThreadPromptVersionCreate",
+        &["read", "write"],
+    )
+    .await?;
+    let accepted = scene
+        .rig
+        .world
+        .app
+        .call(ThreadPromptVersionCreate, &[&thread, &input])
+        .token(&edit_key)
+        .body(&edit(&original, "native-activation-fixture")?)
+        .send()
+        .await
+        .ok();
+    rig::eventually(
+        "the genuine native prefix was prepared and selected",
+        || async {
+            sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE id=$1")
+                .bind(accepted.job.id)
+                .fetch_optional(scene.rig.db.pool())
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|state| state == "succeeded")
+        },
+    )
+    .await;
+    scene.rig.engine.stop();
+    let now = current(&scene, thread).await;
+    let projected = now
+        .projection
+        .as_ref()
+        .ok_or("selected native projection absent")?;
+    assert_ne!(
+        projected.active_continuation_id,
+        original
+            .projection
+            .as_ref()
+            .ok_or("original projection absent")?
+            .active_continuation_id
+    );
+    let target = original
+        .projection
+        .as_ref()
+        .ok_or("original projection absent")?
+        .active_continuation_id;
+    let active_turn = orch_db::queries::threads::thread(&mut *scene.rig.world.conn().await, thread)
+        .await?
+        .ok_or("native thread absent")?
+        .current_turn_id
+        .map(|turn_id| ContinuationActiveTurn {
+            turn_id,
+            action: ContinuationRunningAction::Wait,
+        });
+    let body = ThreadContinuationActivateBody {
+        client_id: "native-operation-activate".into(),
+        expected_active_continuation_id: projected.active_continuation_id,
+        expected_execution_revision: projected.execution_revision,
+        expected_queue_revision: now.thread.queue.revision,
+        active_turn,
+        content: None,
+    };
+    let wrong = scene
+        .rig
+        .world
+        .app
+        .call(ThreadContinuationActivate, &[&thread, &target])
+        .token(&edit_key)
+        .body(&body)
+        .send_bytes()
+        .await;
+    assert_eq!(wrong.status, 403);
+    let secret = operation_key(
+        &scene,
+        scene.ada.id(),
+        thread,
+        "ThreadContinuationActivate",
+        &["read", "write"],
+    )
+    .await?;
+    let head = orch_db::queries::threads::thread(&mut *scene.rig.world.conn().await, thread)
+        .await?
+        .ok_or("native activation thread absent")?;
+    assert_eq!(
+        head.active_continuation_id,
+        projected.active_continuation_id
+    );
+    let body = ThreadContinuationActivateBody {
+        expected_active_continuation_id: head.active_continuation_id,
+        expected_execution_revision: head.execution_revision,
+        expected_queue_revision: head.queue_revision,
+        active_turn: head.current_turn_id.map(|turn_id| ContinuationActiveTurn {
+            turn_id,
+            action: ContinuationRunningAction::Wait,
+        }),
+        ..body
+    };
+    let before_stale = counts(&scene, thread).await?;
+    let stale = scene
+        .rig
+        .world
+        .app
+        .call(ThreadContinuationActivate, &[&thread, &target])
+        .token(&secret)
+        .body(&ThreadContinuationActivateBody {
+            expected_execution_revision: head.execution_revision + 1,
+            ..body.clone()
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(stale.status, 409);
+    let stale: serde_json::Value = serde_json::from_slice(&stale.raw)?;
+    assert_eq!(stale["code"], "conflict.stale_revision");
+    assert_eq!(counts(&scene, thread).await?, before_stale);
+    let response = scene
+        .rig
+        .world
+        .app
+        .call(ThreadContinuationActivate, &[&thread, &target])
+        .token(&secret)
+        .body(&body)
+        .send_bytes()
+        .await;
+    assert_eq!(
+        response.status,
+        202,
+        "{}",
+        String::from_utf8_lossy(&response.raw)
+    );
+    let receipt: orch_api_contract::threads::ThreadContinuationAccepted =
+        serde_json::from_slice(&response.raw)?;
+    assert_eq!(receipt.continuation_id, target);
+    let plan: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
+        .bind(receipt.job.id)
+        .fetch_one(scene.rig.db.pool())
+        .await?;
+    let origin: orch_authz::CapturedOperation =
+        serde_json::from_value(plan["recipe"]["operation_origin"].clone())?;
+    assert_eq!(origin.operation(), "ThreadContinuationActivate");
+    Ok(())
+}
+#[tokio::test]
+async fn operation_scoped_native_continuation_worker_rechecks_narrowing_and_preserves_owned_recovery()
+-> Proof {
+    use orch_link_contract::commands::CommandKind;
+    for after_creation in [false, true] {
+        let (scene, thread, input, _) = scene(true).await?;
+        let baseline = current(&scene, thread).await;
+        let secret = operation_key(
+            &scene,
+            scene.ada.id(),
+            thread,
+            "ThreadPromptVersionCreate",
+            &["read", "write"],
+        )
+        .await?;
+        let hold = if after_creation {
+            CommandKind::SessionPrefixOpen
+        } else {
+            CommandKind::SessionPrefixInspect
+        };
+        scene.rig.machine.handler.hold(hold);
+        let accepted = scene
+            .rig
+            .world
+            .app
+            .call(ThreadPromptVersionCreate, &[&thread, &input])
+            .token(&secret)
+            .body(&edit(
+                &baseline,
+                if after_creation {
+                    "native-scope-recovery"
+                } else {
+                    "native-scope-withdrawal"
+                },
+            )?)
+            .send()
+            .await
+            .ok();
+        let commands = orch_engine::continuations::recipe::Commands::of(accepted.operation_id);
+        let held = if after_creation {
+            commands.open_prefix
+        } else {
+            commands.preinspect
+        };
+        tokio::time::timeout(rig::PATIENCE, scene.rig.machine.handler.started(held)).await?;
+        let authority = scene
+            .rig
+            .commands
+            .issued_authority(held)
+            .ok_or("native source command lacks captured authority")?;
+        let encoded = serde_json::to_value(authority)?;
+        assert_eq!(encoded["kind"], "continuation");
+        sqlx::query("UPDATE api_tokens SET operation_scope=$2 WHERE token_hash=$1").bind(orch_api_core::middleware::authentication::token_hash(&secret)).bind(json!({"rules":[{"target":{"kind":"thread","id":thread,"reach":"self"},"resources":["thread"],"allow":[{"operation":"ThreadPromptVersionCreate","actions":["read"]}]}]})).execute(scene.rig.db.pool()).await?;
+        scene.rig.machine.handler.release();
+        rig::eventually(
+            "the scoped native continuation settles after withdrawal",
+            || async {
+                sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE id=$1")
+                    .bind(accepted.job.id)
+                    .fetch_optional(scene.rig.db.pool())
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|state| matches!(state.as_str(), "failed" | "cancelled"))
+            },
+        )
+        .await;
+        assert_eq!(
+            current(&scene, thread).await.thread.active_continuation_id,
+            baseline.thread.active_continuation_id
+        );
+        if after_creation {
+            assert!(
+                scene
+                    .rig
+                    .machine
+                    .handler
+                    .executions()
+                    .iter()
+                    .any(|entry| entry.id == commands.restore_active),
+                "already changed native work recovers its exact original lane without reauthorizing new work"
+            );
+        } else {
+            assert_eq!(scene.rig.machine.handler.runs_of(commands.open_prefix), 0);
+        }
     }
     Ok(())
 }

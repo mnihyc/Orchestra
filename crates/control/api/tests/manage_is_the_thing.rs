@@ -10,6 +10,7 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullMoveReply as _;
 use desk::Desk;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::documents::{
@@ -60,12 +61,21 @@ async fn delete(world: &World, who: &Who, node: Id) -> Reply<NodeDeleted> {
 }
 
 async fn restore(world: &World, who: &Who, node: Id) -> Reply<Node> {
-    world
+    let reply = world
         .app
         .call(NodeRestore, &[&node])
         .token(&who.token)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary restoration keeps the full native Node")
+        }),
+    }
 }
 
 async fn revision(world: &World, who: &Who, id: Id) -> i64 {
@@ -90,6 +100,7 @@ async fn move_project(world: &World, who: &Who, project: Id, under: Id) -> Reply
         .body(&body)
         .send()
         .await
+        .full_move()
 }
 
 async fn move_org(world: &World, who: &Who, org: Id, under: Id) -> Reply<Org> {
@@ -105,6 +116,7 @@ async fn move_org(world: &World, who: &Who, org: Id, under: Id) -> Reply<Org> {
         .body(&body)
         .send()
         .await
+        .full_move()
 }
 
 #[tokio::test]
@@ -224,7 +236,9 @@ async fn a_document_is_deleted_brought_back_moved_and_put_back_to_an_earlier_ver
         .body(&DocumentMoveBody { node_id: elsewhere })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let gone = world
         .app
         .call(DocumentDelete, &[&id])
@@ -250,7 +264,9 @@ async fn a_document_is_deleted_brought_back_moved_and_put_back_to_an_earlier_ver
         .raw_body(&serde_json::json!({}))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(!back.base.deleted);
 }
 

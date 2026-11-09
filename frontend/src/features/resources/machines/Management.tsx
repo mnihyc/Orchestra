@@ -72,7 +72,7 @@ function ManagementOverride({ machine, onClose, onGranted }: { machine: Machine;
   return <ConfirmDialog open onOpenChange={(open) => !open && onClose()}
     title={<span className="break-words">{t('machineManagement.overrideTitle', { name: machine.name })}</span>}
     confirmLabel={t('machineManagement.continue')} pending={grant.isPending} disabled={!ready}
-    override={{ hint: t('machineManagement.audit'), additions: [<span className="inline-flex min-w-0 flex-wrap items-center gap-2">{me.data === undefined ? <SkeletonRows rows={1} /> : <UserChip user={me.data} />}{t('machineManagement.adds')}</span>] }}
+    override={{ hint: t('machineManagement.audit'), additions: [<span className="inline-flex min-w-0 flex-wrap items-center gap-2">{me.data === undefined ? <SkeletonRows read={me} rows={1} /> : <UserChip user={me.data} />}{t('machineManagement.adds')}</span>] }}
     onConfirm={() => grant.mutate()}>
     <span className="break-words">{t('machineManagement.effect', { name: machine.name })}</span>
     {error !== null && <ErrorAlert error={error} action={<Button size="sm" onClick={review}>{t('common.tryAgain')}</Button>} />}

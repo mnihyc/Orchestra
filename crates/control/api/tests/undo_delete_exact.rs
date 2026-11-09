@@ -39,7 +39,7 @@ async fn delete(world: &World, by: &Who, node: Id) -> Id {
 }
 
 async fn undo(world: &World, by: &Who, node: Id, group: Id) -> orch_api_core::testing::Reply<Node> {
-    world
+    let reply = world
         .app
         .call(NodeRestore, &[&node])
         .token(&by.token)
@@ -48,7 +48,16 @@ async fn undo(world: &World, by: &Who, node: Id, group: Id) -> orch_api_core::te
             expected_deletion_id: None,
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary restoration keeps the full native Node")
+        }),
+    }
 }
 
 async fn gone(world: &World, by: &Who, node: Id) -> bool {

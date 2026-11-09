@@ -48,7 +48,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     page.on('request',(request)=>{
       if(new URL(request.url()).pathname.endsWith('/settings/calls.rules') && request.method()==='PUT') counts.settingsWrites++;
     });
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=calls.rules`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=calls.rules`);
     const setting=page.locator('[data-setting="calls.rules"]');
     await expect(setting).toBeVisible();
     await setting.locator('[data-setting-editor-trigger]').click();
@@ -122,7 +122,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(counts.recoveryReads).toBeLessThanOrEqual(2);
     expect(counts.settingsWrites).toBe(1);
     const beforeReopen=counts.recoveryReads;
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=calls.rules`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=calls.rules`);
     recovery={...recovery,state:'scheduled',rule_id:'refused',attempt:1,continuing:true,failure:{...recovery.failure,code:'model_refused',reason:'cyber',message:'Synthetic vendor filter refusal',incomplete:true},step:{type:'continue',times:3},due_at:new Date(Date.now()+30_000).toISOString(),detail:null,count:null,window_secs:null};
     await failedTurn(recovery,2);
     await page.goto(`/thread/${ACME.mainThread}`);

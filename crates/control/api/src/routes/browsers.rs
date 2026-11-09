@@ -4,7 +4,8 @@ use crate::middleware::authentication::Caller;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard::{self, Guard};
-use crate::registry::{Answer, Ctx, Registry};
+use crate::registry::{Answer, Ctx, OperationFuture, Registry};
+use crate::routes::access::page::NameBounds;
 use crate::state::App;
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{ObjectKind, Permission};
@@ -14,7 +15,7 @@ use orch_api_contract::environment::{EnvironmentRef, EnvironmentSupport, Through
 use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_authz::{Policy, Principal};
 use orch_db::Conn;
-use orch_db::queries::browsers::{self as rows, BrowserRow};
+use orch_db::queries::browsers as rows;
 use orch_engine::browsers::{BrowserFailure, Browsers, CLOSED_LIST_KEPT, OpenBrowser, Requester};
 use orch_link_contract::browser::BrowserProfileAction;
 use orch_types::{Id, Json, Time};
@@ -22,16 +23,35 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
 
+mod profiles;
+
 /// A place may replace the shipped limit of four owned browsers.
 const DEFAULT_MAX: i64 = 4;
 
 /// Installs the eight declared browser and profile requests.
 pub fn mount(registry: &mut Registry) {
     registry
+        .creation(
+            EnvironmentBrowserCreate,
+            super::interactive_creation::browser_binding(),
+        )
         .on(EnvironmentBrowserList, list)
-        .on(EnvironmentBrowserCreate, open)
-        .on(BrowserClose, close)
-        .on(BrowserTicketCreate, ticket)
+        .on_with_optional_operation(
+            EnvironmentBrowserCreate,
+            crate::key_operations::native::stored_deferred::<
+                super::interactive_creation::Creation,
+                _,
+                _,
+            >,
+            open,
+        )
+        .on_with_operation(BrowserClose, close_operation, close)
+        .creation(
+            BrowserTicketCreate,
+            super::interactive_tickets::creation::<super::interactive_tickets::BrowserTickets>(),
+        )
+        .on_with_operation(BrowserTicketCreate, ticket_operation, ticket)
+        .creation(BrowserProfileCreate, profiles::binding())
         .on(BrowserProfileCreate, create_profile)
         .on(BrowserProfileUpdate, rename_profile)
         .on(BrowserProfileDelete, delete_profile)
@@ -91,6 +111,16 @@ pub(crate) async fn current(
     conn: &mut Conn,
     principal: Option<&Principal>,
     environment: Id,
+) -> ApiResult<EnvironmentBrowsers> {
+    current_with_names(app, conn, principal, environment, None).await
+}
+
+async fn current_with_names(
+    app: &App,
+    conn: &mut Conn,
+    principal: Option<&Principal>,
+    environment: Id,
+    names: Option<&NameBounds>,
 ) -> ApiResult<EnvironmentBrowsers> {
     let site = rows::site(conn, environment)
         .await?
@@ -160,11 +190,14 @@ pub(crate) async fn current(
     for row in found {
         let thread = match (row.thread_id, principal) {
             (Some(id), Some(principal)) => {
-                crate::routes::nodes::view::refs(conn, principal, &[id], Policy::default())
-                    .await?
-                    .get(&id)
-                    .filter(|r| !r.redacted)
-                    .cloned()
+                let visible = match names {
+                    Some(names) => names.refs(conn, principal, &[id]).await?,
+                    None => {
+                        crate::routes::nodes::view::refs(conn, principal, &[id], Policy::default())
+                            .await?
+                    }
+                };
+                visible.get(&id).filter(|r| !r.redacted).cloned()
             }
             (Some(id), None) => {
                 let name = rows::node_name(conn, id).await?;
@@ -308,14 +341,19 @@ async fn list(
     Ok(current)
 }
 
-async fn browser(ctx: &Ctx, row: &BrowserRow) -> ApiResult<Browser> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    current(&ctx.app, &mut conn, Some(&principal), row.environment_id)
+pub(super) async fn browser_in(
+    app: &App,
+    conn: &mut Conn,
+    principal: &Principal,
+    environment: Id,
+    id: Id,
+    names: Option<&NameBounds>,
+) -> ApiResult<Browser> {
+    current_with_names(app, conn, Some(principal), environment, names)
         .await?
         .browsers
         .into_iter()
-        .find(|b| b.id == row.id)
+        .find(|b| b.id == id)
         .ok_or_else(ApiError::not_found)
 }
 
@@ -330,11 +368,12 @@ async fn open(
     ctx: Ctx,
     query: ThroughThreadQuery,
     body: EnvironmentBrowserCreateBody,
-) -> ApiResult<Answer<Browser>> {
+) -> ApiResult<Answer<BrowserCreateResponse>> {
     let environment = ctx.id("id")?;
     let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
     let ctx = action_context(ctx, &guard);
     let principal = guard.principal();
+    let caller = principal.caller().clone();
     require(&mut conn, principal, environment, Permission::BrowserManage).await?;
     if let Some(thread) = query.thread {
         crate::routes::workspace::door::beside(&mut conn, principal, environment, thread).await?;
@@ -352,7 +391,7 @@ async fn open(
         .browsers()
         .open(OpenBrowser {
             environment,
-            requester: Requester::Person(authorization::caller_of(ctx.user()?)?),
+            requester: Requester::Person(caller.clone()),
             thread: query.thread,
             profile: body.profile,
             create: body.create.unwrap_or(false),
@@ -372,48 +411,194 @@ async fn open(
     } else {
         http::StatusCode::OK
     };
-    Ok(Answer::from(browser(&ctx, &opened.row).await?).status(status))
+    Ok(Answer::from(
+        super::interactive_creation::browser_created(&ctx, &caller, &opened.row).await?,
+    )
+    .status(status))
 }
 
-async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<Browser> {
-    let id = ctx.id("browser_id")?;
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    let ctx = action_context(ctx, &guard);
-    let requester = Requester::Person(authorization::caller_of(ctx.user()?)?);
-    let result = ctx
-        .app
-        .engine
-        .browsers()
-        .close(id, "quit", requester, &crate::sign_in::origin(&ctx))
-        .await;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    match result {
-        Ok(Some(row)) => browser(&ctx, &row).await,
-        Ok(None) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            let row = rows::get(&mut conn, id)
-                .await?
-                .ok_or_else(ApiError::not_found)?;
-            drop(conn);
-            browser(&ctx, &row).await
-        }
-        Err(error) => Err(failure(&ctx.app, error).await),
+fn close_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a orch_authz::Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("browser_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        Ok(super::interactive_close::plan(
+            ctx,
+            conn,
+            caller,
+            row.environment_id,
+            row.thread_id,
+            true,
+        )
+        .await?
+        .0
+        .with_data(row.environment_id))
+    })
+}
+
+async fn close_content(
+    ctx: &Ctx,
+    caller: &orch_authz::Caller,
+    environment: Id,
+    id: Id,
+) -> ApiResult<Option<Browser>> {
+    if ctx.key_receipt_required() {
+        return Ok(None);
     }
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let now = orch_types::Time::new(ctx.app.clock.now());
+    let Some(current) = crate::key_operations::admission::response_caller(
+        ctx,
+        &mut conn,
+        caller,
+        ctx.route.name,
+        now,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Some(row) = rows::get(&mut conn, id).await? else {
+        ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+        return Ok(None);
+    };
+    let (plan, names) = match super::interactive_close::plan(
+        ctx,
+        &mut conn,
+        &current.caller,
+        environment,
+        row.thread_id,
+        false,
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(error) if matches!(error.problem.status, 403 | 404 | 410) => {
+            ctx.complete_disclosure(crate::key_operations::resolver::Disclosure::Denied);
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    #[cfg(test)]
+    crate::realtime::history_read_tests::close_name_sources_cut(&plan).await?;
+    let app = ctx.app.clone();
+    let result = plan
+        .read_response(ctx, &mut conn, caller, move |conn, reader| {
+            Box::pin(async move {
+                require(conn, reader, environment, Permission::BrowserView).await?;
+                browser_in(&app, conn, reader, environment, id, Some(&names)).await
+            })
+        })
+        .await;
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    super::interactive_close::projection(ctx, result)
+}
+
+async fn close(ctx: Ctx, (): (), (): ()) -> ApiResult<BrowserCloseResponse> {
+    let id = ctx.id("browser_id")?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let caller = guard.principal().caller().clone();
+    let environment = *guard.operation_data::<Id>()?;
+    let ctx = action_context(ctx, &guard).with_admitted_caller(caller.clone())?;
+    let closer = ctx.app.engine.browsers();
+    let result = closer
+        .close_in(
+            &mut tx,
+            id,
+            "quit",
+            Requester::Person(caller.clone()),
+            &crate::sign_in::origin(&ctx),
+            Some(environment),
+        )
+        .await;
+    let closed = match result {
+        Ok(closed) => {
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            closed
+        }
+        Err(error) => {
+            tx.rollback().await.map_err(orch_db::DbError::from)?;
+            let disclose = super::interactive_close::may_disclose(
+                &ctx,
+                &caller,
+                environment,
+                Permission::BrowserView,
+            )
+            .await;
+            return Err(super::interactive_close::error(
+                &ctx,
+                failure(&ctx.app, error).await,
+                disclose,
+            ));
+        }
+    };
+    // The actual effect and its audit are committed before best-effort native cleanup.
+    // No database lease or later key revocation can strand this accepted close.
+    let Some((row, site)) = closed else {
+        return Err(ApiError::not_found());
+    };
+    let receipt = BrowserCloseReceipt {
+        projection: orch_api_contract::common::ReceiptProjection::Receipt,
+        browser_id: id,
+        environment_id: environment,
+        closed: true,
+    };
+    crate::key_operations::publication::receipt(&ctx, &receipt)?;
+    closer.finish_close(id, &site, row.is_some()).await;
+    let projected = crate::key_operations::completed_projection::run(
+        &ctx,
+        close_content(&ctx, &caller, environment, id),
+    )
+    .await;
+    match super::interactive_close::projection(&ctx, projected)? {
+        Some(full) if !ctx.key_receipt_required() => Ok(BrowserCloseResponse::Full(Box::new(full))),
+        _ => Ok(BrowserCloseResponse::Receipt(receipt)),
+    }
+}
+
+fn ticket_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    _caller: &'a orch_authz::Caller,
+    (): (),
+    body: BrowserTicketCreateBody,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let row = rows::get(conn, ctx.id("browser_id")?)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let selection = if body.control.unwrap_or(false) {
+            "BrowserTicketCreate.control"
+        } else {
+            "BrowserTicketCreate.view"
+        };
+        super::interactive_tickets::plan(ctx, conn, selection, row.environment_id).await
+    })
 }
 
 async fn ticket(
     ctx: Ctx,
     (): (),
     body: BrowserTicketCreateBody,
-) -> ApiResult<BrowserTicketCreateReply> {
+) -> ApiResult<BrowserTicketCreateResponse> {
     let id = ctx.id("browser_id")?;
     let control = body.control.unwrap_or(false);
     let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
-    let ctx = action_context(ctx, &guard);
+    let ctx =
+        action_context(ctx, &guard).with_admitted_caller(guard.principal().caller().clone())?;
     let row = rows::get(&mut conn, id)
         .await?
         .filter(|r| r.state == "open")
         .ok_or_else(ApiError::not_found)?;
+    if row.environment_id != *guard.operation_data::<Id>()? {
+        return Err(ApiError::not_found());
+    }
     let principal = guard.principal();
     require(
         &mut conn,
@@ -443,27 +628,45 @@ async fn ticket(
                 .with("reason", off),
         );
     }
-    let result = ctx.app.realtime.browsers().ticket(&ctx, id, control)?;
+    let mut result = ctx.app.realtime.browsers().ticket_pending(
+        &ctx,
+        id,
+        control,
+        row.environment_id,
+        site.machine_id,
+        row.env_generation,
+    )?;
+    super::interactive_tickets::record::<super::interactive_tickets::BrowserTickets>(
+        &mut result,
+        &ctx,
+        &mut conn,
+    )
+    .await?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(result)
+    Ok(BrowserTicketCreateResponse::Full(Box::new(
+        result.publish()?,
+    )))
 }
 
 async fn change_profile(
     ctx: &Ctx,
+    command: Option<Id>,
     action: BrowserProfileAction,
     name: String,
     to: Option<String>,
-) -> ApiResult<Vec<BrowserProfile>> {
+) -> ApiResult<(Vec<BrowserProfile>, orch_authz::Caller)> {
     let environment = ctx.id("id")?;
     let (tx, guard) = transaction_guard::begin(ctx).await?;
+    let accepted = guard.principal().caller().clone();
     let ctx = action_context(ctx.clone(), &guard);
     let result = ctx
         .app
         .engine
         .browsers()
-        .profile(
+        .profile_with_id(
+            command.unwrap_or_else(orch_types::new_id),
             environment,
-            Requester::Person(authorization::caller_of(ctx.user()?)?),
+            Requester::Person(accepted.clone()),
             action,
             name.clone(),
             to,
@@ -472,16 +675,19 @@ async fn change_profile(
         .await;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     match result {
-        Ok(result) => Ok(result
-            .profiles
-            .into_iter()
-            .map(|p| BrowserProfile {
-                name: p.name,
-                size_bytes: p.size_bytes,
-                used_at: p.used_at,
-                browser: p.browser,
-            })
-            .collect()),
+        Ok(result) => Ok((
+            result
+                .profiles
+                .into_iter()
+                .map(|p| BrowserProfile {
+                    name: p.name,
+                    size_bytes: p.size_bytes,
+                    used_at: p.used_at,
+                    browser: p.browser,
+                })
+                .collect(),
+            accepted,
+        )),
         Err(error) => {
             let in_use =
                 matches!(&error,BrowserFailure::Command(command) if command.code=="in_use");
@@ -502,12 +708,21 @@ async fn create_profile(
     ctx: Ctx,
     (): (),
     body: BrowserProfileCreateBody,
-) -> ApiResult<BrowserProfile> {
-    change_profile(&ctx, BrowserProfileAction::Create, body.name.clone(), None)
-        .await?
+) -> ApiResult<BrowserProfileCreateResponse> {
+    let command = orch_types::new_id();
+    let (profiles, accepted) = change_profile(
+        &ctx,
+        Some(command),
+        BrowserProfileAction::Create,
+        body.name.clone(),
+        None,
+    )
+    .await?;
+    let profile = profiles
         .into_iter()
         .find(|p| p.name == body.name)
-        .ok_or_else(ApiError::not_found)
+        .ok_or_else(ApiError::not_found)?;
+    profiles::first(&ctx, &accepted, command, profile).await
 }
 
 async fn rename_profile(
@@ -517,11 +732,13 @@ async fn rename_profile(
 ) -> ApiResult<BrowserProfile> {
     change_profile(
         &ctx,
+        None,
         BrowserProfileAction::Rename,
         ctx.param("name")?.to_owned(),
         Some(body.name.clone()),
     )
     .await?
+    .0
     .into_iter()
     .find(|p| p.name == body.name)
     .ok_or_else(ApiError::not_found)
@@ -532,7 +749,7 @@ async fn delete_profile(ctx: Ctx, query: BrowserProfileDeleteQuery, (): ()) -> A
     if query.confirm != name {
         return Err(ApiError::invalid("confirm", "must be the profile's name"));
     }
-    change_profile(&ctx, BrowserProfileAction::Delete, name, None).await?;
+    change_profile(&ctx, None, BrowserProfileAction::Delete, name, None).await?;
     Ok(())
 }
 

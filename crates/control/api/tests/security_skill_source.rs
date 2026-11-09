@@ -9,6 +9,8 @@ mod places;
 mod resources;
 mod support;
 
+use crate::support::FullSkillVersionReply as _;
+use futures::FutureExt as _;
 use std::io::Write;
 
 use orch_api_contract::access::NewResourceAccess;
@@ -125,7 +127,9 @@ async fn a_skill_reader_is_not_given_the_secret_query_used_to_import_its_archive
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     answering.await.unwrap();
     resources::name_person(&world, "skill", skill.id, "skill.view", admin.id()).await;
     let reply = world
@@ -240,6 +244,7 @@ async fn a_skill_reader_is_not_given_the_secret_query_used_to_import_its_archive
             },
         })
         .send()
+        .map(|reply| reply.full_skill_version())
         .await
         .ok();
     newer.await.unwrap();

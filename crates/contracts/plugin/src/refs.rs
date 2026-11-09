@@ -73,6 +73,17 @@ pub struct NodeRef {
     pub redacted: bool,
 }
 
+/// Coverage of the current authorized material actually selected for a summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SummaryInputFacts {
+    /// Items represented by text in the prompt, including shortened ones.
+    pub included_items: u64,
+    /// Included items whose text was shortened; their retained cut stays fixed for caching.
+    pub shortened_items: u64,
+    /// Eligible source items not represented in this prompt.
+    pub omitted_items: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -154,7 +154,9 @@ async fn a_cluster_reports_its_limits_removes_only_its_unit_and_restores_the_sam
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary retained lifecycle result stays full");
     host.wait_for(CommandKind::NodeRuntimeStart, 2).await;
     let recovered = host.started().unwrap();
     assert_ne!(recovered, original);

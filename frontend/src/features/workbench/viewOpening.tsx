@@ -46,6 +46,25 @@ function subscribe(listener: () => void): () => void {
   return () => { listeners.delete(listener); };
 }
 
+/** Read only an existing displayed slot, never a saved layout's intended position. */
+export function shownViewOpening(view: string): string | null {
+  const entry = openings.get(view);
+  return entry?.visible === true ? entry.nonce : null;
+}
+
+/** The first actual matching slot supplies its own logical opening identity. */
+export function useShownViewOpening(views: readonly string[]): { view: string; nonce: string } | null {
+  const value = useSyncExternalStore(subscribe, () => {
+    for (const view of views) {
+      const nonce = shownViewOpening(view);
+      if (nonce !== null) return `${view}\0${nonce}`;
+    }
+    return '';
+  }, () => '');
+  const separator = value.indexOf('\0');
+  return separator < 0 ? null : { view: value.slice(0, separator), nonce: value.slice(separator + 1) };
+}
+
 function reconcile(key: string): void {
   if (pending.has(key)) return;
   pending.add(key);

@@ -176,7 +176,7 @@ pub async fn may_name_groups(
     }
     let policy = orch_settings::get::<String>(
         conn,
-        Place::Node(chat.row.node_id.unwrap_or(chat.row.org_id)),
+        Place::Node(chat.row.home()),
         keys::CHAT_GROUP_MENTIONS,
     )
     .await?
@@ -184,7 +184,7 @@ pub async fn may_name_groups(
     Ok(match policy.as_str() {
         "writers" => true,
         "managers" if chat.row.node_id.is_some() => chat.standing.moderate,
-        "managers" => chat.row.created_by == Some(act.user()),
+        "managers" => chat.is_manager(act.user()) || chat.standing.manage,
         _ => return Err(Error::Internal("unknown group mention policy".into())),
     })
 }
@@ -281,7 +281,7 @@ pub async fn list(
         return Ok(humans);
     }
     let reader_set: HashSet<Id> = people.into_iter().collect();
-    let scope = chat.row.node_id.unwrap_or(chat.row.org_id);
+    let scope = chat.row.home();
     let graph = Graph::load(conn, &[scope]).await?;
     let site = graph.site_of(scope).ok_or(Error::NotFound)?;
     let frame = Frame::load(
@@ -334,7 +334,7 @@ pub async fn list(
     let ids: Vec<Id> = groups.iter().map(|group| group.id).collect();
     // This deliberate act resolves the whole audience, independently of roster pagination.
     let mut members: HashMap<Id, Vec<Id>> = HashMap::new();
-    for (group, user) in access::group_people(conn, &ids, i64::MAX, act.now).await? {
+    for (group, user) in holders::group_people(conn, &ids, Time::new(act.now)).await? {
         if reader_set.contains(&user) {
             members.entry(group).or_default().push(user);
         }

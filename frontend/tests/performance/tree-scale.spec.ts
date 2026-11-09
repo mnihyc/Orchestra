@@ -249,14 +249,15 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
   // Everything is open on this device, so that every thread is a row; the page notes when the last row is in.
   const wanted = seeded.nodes.length + acmeTree().length - 1;
   await page.addInitScript(
-    ({ key, open, wanted, documents }) => {
+    ({ key, open, wanted, documents, selector }) => {
+      if (location.href === 'about:blank') return;
       performance.setResourceTimingBufferSize(10_000);
       localStorage.setItem(key, JSON.stringify(open));
       const note = { lastRow: null as number | null, lastDocument: null as number | null };
       (window as unknown as { __tree: typeof note }).__tree = note;
       // The rows stand in runs, children of the tree: counting what the runs hold is cheap enough to do at every change of the page.
       const observer = new MutationObserver(() => {
-        const tree = document.querySelector('[role="tree"]');
+        const tree = document.querySelector(selector);
         if (tree === null) return;
         let rows = 0;
         for (const run of Array.from(tree.children)) rows += run.childElementCount;
@@ -269,17 +270,42 @@ test('a tree of two thousand nodes with folders three deep and documents beside 
       });
       observer.observe(document, { childList: true, subtree: true });
     },
-    { key: `orch.${fixtureId(1, 1)}.tree.${ACME.org}`, open: seeded.open, wanted, documents },
+    { key: `orch.${fixtureId(1, 1)}.tree.${ACME.org}`, open: seeded.open, wanted, documents,
+      selector: '[role="tree"][aria-label="Orgs, projects, topics and threads"]' },
   );
   await signIn(page);
   const slow = await slowdown(page);
   test.setTimeout(TEST_MS * Math.max(1, slow));
+  // Setup reads cannot supply witnesses for the next document's native admission.
+  await page.goto('about:blank');
+  const nativeRead = (method: string, path: string) => test.step(`${method} ${path} completes before the tree sample`, async () => {
+    const response = await page.waitForResponse((response) => response.request().method() === method
+      && new URL(response.url()).pathname === path, { timeout: WAIT_MS * slow });
+    expect(response.status(), `${method} ${path} must admit the native fixture`).toBe(200);
+    expect(await response.finished(), `${method} ${path} must finish its response`).toBeNull();
+    if (path === '/api/v1/me/bootstrap') {
+      const data: unknown = await response.json();
+      expect(data, 'The actual admitted aggregate supplies both current Meta and the session reader').toMatchObject({
+        meta: { needs_setup: false, name: expect.any(String), may_create_org: expect.any(Boolean) },
+        person: { id: expect.any(String) }, admin_mode: { as_admin: expect.any(Boolean) },
+      });
+    }
+  });
+  const opened = Promise.all([
+    nativeRead('GET', '/api/v1/me/bootstrap'),
+    nativeRead('POST', '/api/v1/auth/session'),
+    nativeRead('GET', `/api/v1/orgs/${ACME.org}/tree`),
+  ]);
   // The screen is a small one, so that the tree is what is large on the page.
-  await page.goto(`/project/${ACME.shop}`);
-  await page.waitForFunction(() => (window as unknown as { __tree?: { lastRow: number | null } }).__tree?.lastRow !== null, undefined, { timeout: WAIT_MS * slow });
+  await Promise.all([page.goto(`/project/${ACME.shop}`).then(async () => {
+    // A closed or refused navigation view cannot produce the required tree response.
+    // Report that visible fixture failure without spending the native read's whole deadline.
+    await expect(page.getByRole('tree', { name: 'Orgs, projects, topics and threads', exact: true })).toBeVisible();
+  }), opened]);
+  await page.waitForFunction(() => typeof (window as unknown as { __tree?: { lastRow: number | null } }).__tree?.lastRow === 'number', undefined, { timeout: WAIT_MS * slow });
   // The documents of every open place have come, and no place still says that its documents are on their way.
   await page.waitForFunction(
-    () => (window as unknown as { __tree?: { lastDocument: number | null } }).__tree?.lastDocument !== null && document.querySelectorAll('[role="tree"] [data-tree-row^="docs:"]').length === 0,
+    () => typeof (window as unknown as { __tree?: { lastDocument: number | null } }).__tree?.lastDocument === 'number' && document.querySelectorAll('[role="tree"] [data-tree-row^="docs:"]').length === 0,
     undefined,
     { timeout: WAIT_MS * slow },
   );

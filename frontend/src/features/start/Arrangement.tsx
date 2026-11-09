@@ -9,16 +9,18 @@
  */
 import { TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { EmptyState } from '@/ui/EmptyState';
 import { choiceOption } from '@/i18n/choices';
+import { providerArrangementReason } from '@/features/resources/providers/arrangementReasons';
 
 import type { ArrangementType, Provider } from '@/generated/api-types';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RadioGroup, type RadioOption } from '@/ui/RadioGroup';
+import { useHelpOpener } from '@/features/help/open';
 import { ChoiceField } from '@/ui/ChoiceField';
 import { cx } from '@/ui/cx';
 
 import type { Resolved } from './choices';
+import { ChoiceOriginMark } from './ChoiceOrigin';
 import { agentWhy, arrangementWhy, describeIsolation } from './words';
 
 /** The ways that let the credential, or the whole sign-in, out of the provider. */
@@ -26,6 +28,7 @@ const SENSITIVE: readonly ArrangementType[] = ['credential_shared', 'handed_over
 
 /** The value of the choice that leaves the arrangement to what the thread's place and the provider allow. */
 const AS_CHOSEN = '';
+const ARRANGEMENT_GUIDE = { article: 'register-your-program', heading: 'choose-an-arrangement' } as const;
 
 /**
  * The arrangement a thread moved to another provider asks for, among those its owner allows and some harness there
@@ -34,18 +37,22 @@ const AS_CHOSEN = '';
  */
 export function ProviderArrangementChoice({ provider, value, onChange }: { provider: Provider; value: ArrangementType | null; onChange: (type: ArrangementType | null) => void }) {
   const { t } = useTranslation();
-  const offered = provider.arrangements.filter((consent) => consent.allowed && consent.available);
-  if (offered.length === 0) return <EmptyState compact title={t('start.arrangement.noneAllowed', { provider: provider.name })} />;
+  const openHelp = useHelpOpener();
+  const more = { label: t('help.hint.more'), onOpen: () => openHelp(ARRANGEMENT_GUIDE.article, ARRANGEMENT_GUIDE.heading) };
+  const choices = provider.arrangements.map((consent) => ({ consent, reason: providerArrangementReason(consent, t) }));
+  const defaultReason = choices.length === 0 ? t('arrangementAvailability.unreported')
+    : choices.some((choice) => choice.reason === null) ? undefined : t('arrangementAvailability.none');
   const options: RadioOption<ArrangementType | typeof AS_CHOSEN>[] = [
-    { value: AS_CHOSEN, ...choiceOption(t, 'arrangement.default'), description: `${t('start.arrangement.asChosen')} · ${t('start.arrangement.asChosenAbout')}` },
-    ...offered.map((consent) => ({
+    { value: AS_CHOSEN, ...choiceOption(t, 'arrangement.default'), description: `${t('start.arrangement.asChosen')} · ${t('start.arrangement.asChosenAbout')}`, disabled: defaultReason },
+    ...choices.map(({ consent, reason }) => ({
       value: consent.type,
       ...choiceOption(t, `arrangement.${consent.type}`),
       icon: SENSITIVE.includes(consent.type) ? <TriangleAlert className="text-warning" aria-hidden /> : undefined,
+      disabled: reason,
     })),
   ];
   return (
-    <ChoiceField label={t('start.arrangement.label')} options={options}>
+    <ChoiceField label={t('start.arrangement.label')} options={options} guide={ARRANGEMENT_GUIDE} more={more}>
     <RadioGroup
       variant="list"
       label={t('start.arrangement.label')}
@@ -59,6 +66,8 @@ export function ProviderArrangementChoice({ provider, value, onChange }: { provi
 
 export function ArrangementSection({ resolved, refreshing, onChange }: { resolved: Resolved; refreshing: boolean; onChange: (type: ArrangementType) => void }) {
   const { t } = useTranslation();
+  const openHelp = useHelpOpener();
+  const more = { label: t('help.hint.more'), onOpen: () => openHelp(ARRANGEMENT_GUIDE.article, ARRANGEMENT_GUIDE.heading) };
   const { provider, agent } = resolved;
   if (provider === null) return <p className="text-sm text-text-muted">{t('start.arrangement.pickProvider')}</p>;
   if (agent === null) {
@@ -79,7 +88,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
     value: row.type,
     ...choiceOption(t, `arrangement.${row.type}`),
     icon: SENSITIVE.includes(row.type) ? <TriangleAlert className="text-warning" aria-hidden /> : undefined,
-    note: row.open && row.type === resolved.defaultArrangement ? t('start.arrangement.default') : undefined,
+    note: row.open && row.type === resolved.arrangement && resolved.origins.arrangement !== null ? <ChoiceOriginMark origin={resolved.origins.arrangement} /> : undefined,
     description: describeIsolation(row.entry.isolation, t),
     ...(row.open ? {} : { disabled: arrangementWhy(row.entry, t) }),
   }));
@@ -90,7 +99,7 @@ export function ArrangementSection({ resolved, refreshing, onChange }: { resolve
           {arrangementWhy(first.entry, t)}
         </InlineAlert>
       )}
-      <ChoiceField label={t('start.arrangement.label')} options={options}><RadioGroup
+      <ChoiceField label={t('start.arrangement.label')} options={options} guide={ARRANGEMENT_GUIDE} more={more}><RadioGroup
         variant="list"
         label={t('start.arrangement.label')}
         value={resolved.arrangement}

@@ -1,13 +1,20 @@
 //! Guarded future-input definitions, private drafts, safe occurrence views and the API's due sweep.
 
+mod agent;
+mod authority;
+mod creation_replay;
+mod cron;
+mod operation;
 mod runner;
 mod timing;
 
+use crate::key_operations::targets;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::{authorization, transaction_guard};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::view;
 use orch_access_contract::audit::AuditAction;
+use orch_access_contract::key_scope::KeyResolvedTarget;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::{ErrorCode, Page, PageQuery};
 use orch_api_contract::input_schedules::*;
@@ -23,17 +30,29 @@ use serde::de::DeserializeOwned;
 use serde_json::json;
 use sqlx::Acquire;
 
+pub use agent::install;
 pub use runner::{run_due, start};
 
 /// Binds the ordinary schedule metadata, authored edit and controller routes.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(TopicInputScheduleList, list)
-        .on(TopicInputScheduleCreate, create)
-        .on(InputScheduleGet, get)
-        .on(InputScheduleRunList, runs)
-        .on(InputScheduleUpdate, update)
-        .on(InputScheduleDelete, delete);
+        .creation(TopicInputScheduleCreate, creation_replay::binding())
+        .on_with_operation(TopicInputScheduleList, operation::read, list)
+        .on_with_initial_operation(
+            TopicInputScheduleCreate,
+            operation::initial_create,
+            operation::create,
+            create,
+        )
+        .on_with_operation(InputScheduleGet, operation::read, get)
+        .on_with_operation(InputScheduleRunList, operation::read, runs)
+        .on_with_initial_operation(
+            InputScheduleUpdate,
+            operation::initial_update,
+            operation::update,
+            update,
+        )
+        .on_with_operation(InputScheduleDelete, operation::delete, delete);
 }
 
 fn decode<T: DeserializeOwned>(raw: Json) -> ApiResult<T> {
@@ -60,11 +79,17 @@ fn name(value: &str) -> ApiResult<String> {
     Ok(name.to_owned())
 }
 
-fn browser(ctx: &Ctx) -> ApiResult<()> {
-    if !ctx.user()?.is_session() {
+/// Original tokens retain the session-only authoring restriction; explicit operation keys
+/// use the same writer after complete current admission, never a browser reconstruction.
+fn authored(ctx: &Ctx, caller: &Caller) -> ApiResult<()> {
+    if !ctx.user()?.is_session()
+        && caller
+            .grant()
+            .is_none_or(|grant| grant.requires_legacy_compatibility())
+    {
         return Err(ApiError::new(
             ErrorCode::AuthSessionRequired,
-            "a browser sign-in is needed to create, edit or resume future work",
+            "this credential cannot author or resume future work",
         ));
     }
     Ok(())
@@ -167,14 +192,13 @@ async fn run_view(
     conn: &mut Conn,
     principal: &Principal,
     row: rows::RunRow,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<InputScheduleRun> {
-    let refs = view::refs(
-        conn,
-        principal,
-        &row.thread_id.into_iter().collect::<Vec<_>>(),
-        Policy::default(),
-    )
-    .await?;
+    let ids = row.thread_id.into_iter().collect::<Vec<_>>();
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &ids).await?,
+        None => view::refs(conn, principal, &ids, Policy::default()).await?,
+    };
     let thread = row
         .thread_id
         .and_then(|id| refs.get(&id).filter(|item| !item.redacted).cloned());
@@ -220,13 +244,24 @@ async fn present(
     principal: &Principal,
     row: rows::ScheduleRow,
 ) -> ApiResult<InputSchedule> {
+    present_bounded(conn, principal, row, None).await
+}
+async fn present_bounded(
+    conn: &mut Conn,
+    principal: &Principal,
+    row: rows::ScheduleRow,
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<InputSchedule> {
     let selected = target(&row)?;
     let thread = match selected {
         InputScheduleTarget::Thread { thread_id } => Some(thread_id),
         InputScheduleTarget::NewThread { .. } => None,
     };
     let ids: Vec<Id> = std::iter::once(row.topic_id).chain(thread).collect();
-    let refs = view::refs(conn, principal, &ids, Policy::default()).await?;
+    let refs = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &ids).await?,
+        None => view::refs(conn, principal, &ids, Policy::default()).await?,
+    };
     let definition = if row.author_id == principal.user() {
         Some(InputScheduleDefinition {
             target: target(&row)?,
@@ -242,11 +277,13 @@ async fn present(
             .map_err(ApiError::internal)?,
     )?;
     let last_run = match rows::runs(conn, row.id).await?.into_iter().next() {
-        Some(run) => Some(run_view(conn, principal, run).await?),
+        Some(run) => Some(run_view(conn, principal, run, bounds).await?),
         None => None,
     };
     Ok(InputSchedule {
         id: row.id,
+        kind: agent::metadata(&row)?.map(|_| InputScheduleKind::Agent),
+        agent: agent::metadata(&row)?,
         topic: refs
             .get(&row.topic_id)
             .filter(|item| !item.redacted)
@@ -312,42 +349,100 @@ pub(crate) async fn for_topic(
     Ok(items)
 }
 
+/// Stored pending rows, with their exact response sources and publication identities.
+pub(crate) struct PreparedThreadPending {
+    pub(crate) value: ThreadPendingAgentSchedules,
+    pub(crate) sources: Vec<KeyResolvedTarget>,
+    pub(crate) witness: Vec<(Id, i64)>,
+}
+
+/// Uses the same stored rows and native agent-origin classifier as the topic snapshot.
+/// Private definitions, people-authored work and other destinations never enter the result.
+pub(crate) async fn prepare_thread_pending(
+    conn: &mut Conn,
+    principal: &Principal,
+    topic: Id,
+    thread: Id,
+) -> ApiResult<PreparedThreadPending> {
+    if !allowed(conn, principal, topic, Permission::TopicView).await? {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the schedule topic is not readable",
+        ));
+    }
+    let seq: Seq = sqlx::query_scalar("SELECT topic_seq FROM topics WHERE node_id=$1")
+        .bind(topic)
+        .fetch_optional(&mut *conn)
+        .await
+        .map_err(DbError::from)?
+        .ok_or_else(ApiError::not_found)?;
+    let mut sources = vec![targets::node(conn, topic).await?];
+    let mut items = Vec::new();
+    let mut witness = Vec::new();
+    for row in rows::topic(conn, topic, None).await? {
+        if row.deleted_at.is_some() || row.state != "active" {
+            continue;
+        }
+        let Some(at) = row.next_run_at else {
+            continue;
+        };
+        if target(&row)? != (InputScheduleTarget::Thread { thread_id: thread }) {
+            continue;
+        }
+        let Some(origin) = agent::metadata(&row)? else {
+            continue;
+        };
+        if origin.thread_id != thread || !readable(conn, principal, &row).await? {
+            continue;
+        }
+        sources.push(operation::subject(conn, &row).await?);
+        witness.push((row.id, row.revision));
+        items.push(ThreadPendingAgentSchedule {
+            id: row.id,
+            name: row.name,
+            state: InputScheduleState::Active,
+            next_run_at: Time::new(at),
+        });
+    }
+    witness.sort_unstable();
+    Ok(PreparedThreadPending {
+        value: ThreadPendingAgentSchedules { seq, items },
+        sources,
+        witness,
+    })
+}
+
 async fn list(ctx: Ctx, query: InputScheduleListQuery, (): ()) -> ApiResult<Page<InputSchedule>> {
-    let topic = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let items = for_topic(&mut conn, &principal, topic, None)
-        .await?
-        .into_iter()
-        .filter(|row| query.state.is_none_or(|state| row.state == state))
-        .collect();
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let guard = transaction_guard::check(&ctx, &mut tx).await?;
+    let data = guard.operation_data::<operation::Reading>()?;
+    let principal = guard.into_principal();
+    let mut items = Vec::new();
+    for row in &data.rows {
+        let state: InputScheduleState = decode(json!(row.state))?;
+        if query.state.is_some_and(|wanted| wanted != state) {
+            continue;
+        }
+        items.push(present_bounded(&mut tx, &principal, row.clone(), Some(&data.names)).await?);
+    }
     page(items, &query.page, |row| row.id)
 }
-
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<InputSchedule> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = rows::schedule(&mut conn, ctx.id("id")?, false)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if !readable(&mut conn, &principal, &row).await? {
-        return Err(ApiError::not_found());
-    }
-    present(&mut conn, &principal, row).await
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let guard = transaction_guard::check(&ctx, &mut tx).await?;
+    let data = guard.operation_data::<operation::Reading>()?;
+    let principal = guard.into_principal();
+    let row = data.rows.first().cloned().ok_or_else(ApiError::not_found)?;
+    present_bounded(&mut tx, &principal, row, Some(&data.names)).await
 }
-
 async fn runs(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<InputScheduleRun>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = rows::schedule(&mut conn, ctx.id("id")?, false)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if !readable(&mut conn, &principal, &row).await? {
-        return Err(ApiError::not_found());
-    }
+    let mut tx = ctx.app.db.begin_snapshot().await?;
+    let guard = transaction_guard::check(&ctx, &mut tx).await?;
+    let data = guard.operation_data::<operation::Reading>()?;
+    let principal = guard.into_principal();
     let mut items = Vec::new();
-    for run in rows::runs(&mut conn, row.id).await? {
-        items.push(run_view(&mut conn, &principal, run).await?);
+    for run in &data.runs {
+        items.push(run_view(&mut tx, &principal, run.clone(), Some(&data.names)).await?);
     }
     page(items, &query, |row| row.id)
 }
@@ -380,6 +475,9 @@ async fn record(
     );
     entry.node_id = Some(row.topic_id);
     entry.history = true;
+    if matches!(actor, Actor::Agent(_)) {
+        entry.for_user_id = Some(row.author_id);
+    }
     entry.details =
         json!({"schedule":row.id,"author":row.author_id,"name":row.name,"revision":row.revision});
     if let Some(extra) = extra.as_object() {
@@ -396,22 +494,23 @@ async fn creation_check(
     tx: &mut orch_db::Tx,
     caller: &Caller,
     row: &rows::ScheduleRow,
+    operands: Option<&orch_engine::inputs::InputSourceOperands>,
 ) -> ApiResult<()> {
     let mut trial = tx.begin().await.map_err(DbError::from)?;
-    let result = runner::accept(app, &mut trial, caller, row, "validation", None).await;
+    let result = runner::validate(app, &mut trial, caller, row, operands).await;
     trial.rollback().await.map_err(DbError::from)?;
     result.map(|_| ())
 }
 
-async fn create(ctx: Ctx, (): (), body: InputScheduleCreateBody) -> ApiResult<InputSchedule> {
-    browser(&ctx)?;
-    if body.native_action.is_some()
-        && let InputScheduleTarget::Thread { thread_id } = &body.target
-    {
-        crate::routes::threads::native::refresh_for_input(&ctx, *thread_id).await?;
-    }
+async fn create(
+    ctx: Ctx,
+    (): (),
+    body: InputScheduleCreateBody,
+) -> ApiResult<InputScheduleWriteResponse> {
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let operands = guard.operation_data::<orch_engine::inputs::InputSourceOperands>()?;
     let principal = guard.into_principal();
+    authored(&ctx, principal.caller())?;
     let now = principal.now().get();
     let next = timing::next(&body.timing, now)?;
     let mut row = rows::ScheduleRow {
@@ -422,6 +521,7 @@ async fn create(ctx: Ctx, (): (), body: InputScheduleCreateBody) -> ApiResult<In
         target: encode(&body.target)?,
         content: encode(&body.content)?,
         native_action: body.native_action.as_ref().map(encode).transpose()?,
+        definition_authority: None,
         timing: encode(&body.timing)?,
         state: "active".to_owned(),
         next_run_at: Some(next.due),
@@ -431,7 +531,8 @@ async fn create(ctx: Ctx, (): (), body: InputScheduleCreateBody) -> ApiResult<In
         updated_at: now,
         deleted_at: None,
     };
-    creation_check(&ctx.app, &mut tx, principal.caller(), &row).await?;
+    row.definition_authority = Some(authority::capture(&row, principal.caller())?);
+    creation_check(&ctx.app, &mut tx, principal.caller(), &row, Some(&operands)).await?;
     row.topic_seq = stamp(&mut tx, row.topic_id).await?;
     rows::insert(&mut tx, &row).await?;
     storage::schedule_pins(
@@ -451,20 +552,29 @@ async fn create(ctx: Ctx, (): (), body: InputScheduleCreateBody) -> ApiResult<In
         now,
     )
     .await?;
-    let result = present(&mut tx, &principal, row).await?;
+    orch_db::idempotency::creation::observe_with(
+        &mut tx,
+        Some(principal.user()),
+        "input_schedule",
+        row.id,
+        json!({"revision":row.revision,"topic_seq":row.topic_seq,"topic":row.topic_id}),
+    )
+    .await?;
+    let receipt = operation::receipt(&row);
+    let result = operation::full(&ctx, &mut tx, principal.caller(), row).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
+    Ok(match result {
+        Some(row) if !ctx.key_receipt_required() => InputScheduleWriteResponse::full(row),
+        _ => InputScheduleWriteResponse::Receipt(receipt),
+    })
 }
 
-async fn update(ctx: Ctx, (): (), body: InputScheduleUpdateBody) -> ApiResult<InputSchedule> {
-    let definition = body.name.is_some()
-        || body.target.is_some()
-        || body.content.is_some()
-        || body.native_action.is_some()
-        || body.timing.is_some();
-    if definition || body.state == Some(InputScheduleState::Active) {
-        browser(&ctx)?;
-    }
+async fn update(
+    ctx: Ctx,
+    (): (),
+    body: InputScheduleUpdateBody,
+) -> ApiResult<InputScheduleWriteResponse> {
+    let definition = operation::definition(&body);
     if body.state.is_some_and(|state| {
         !matches!(
             state,
@@ -474,18 +584,32 @@ async fn update(ctx: Ctx, (): (), body: InputScheduleUpdateBody) -> ApiResult<In
         return Err(ApiError::invalid("state", "choose active or paused"));
     }
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let prepared_operands =
+        definition.then(|| guard.operation_data::<orch_engine::inputs::InputSourceOperands>());
     let principal = guard.into_principal();
+    if definition || body.state == Some(InputScheduleState::Active) {
+        authored(&ctx, principal.caller())?;
+    }
     let now = principal.now().get();
     let mut row = rows::schedule(&mut tx, ctx.id("id")?, true)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    if definition && agent::metadata(&row)?.is_some() {
+        return Err(ApiError::invalid(
+            "definition",
+            "control or cancel the agent's schedule; create a personal schedule to author another definition",
+        ));
+    }
     controller(&mut tx, &principal, &row).await?;
     if row.revision != body.revision {
-        return Err(ApiError::new(
+        let mut error = ApiError::new(
             ErrorCode::ConflictStaleRevision,
             "the schedule changed since it was read",
-        )
-        .with("current", present(&mut tx, &principal, row).await?));
+        );
+        if let Some(current) = operation::full(&ctx, &mut tx, principal.caller(), row).await? {
+            error = error.with("current", current);
+        }
+        return Err(error);
     }
     if row.state == "deleted" {
         return Err(ApiError::not_found());
@@ -497,20 +621,9 @@ async fn update(ctx: Ctx, (): (), body: InputScheduleUpdateBody) -> ApiResult<In
         ));
     }
     let previous = row.state.clone();
-    if let Some(value) = body.name {
-        row.name = name(&value)?;
-    }
-    if let Some(value) = body.target {
-        row.target = encode(&value)?;
-    }
-    if let Some(value) = body.content {
-        row.content = encode(&value)?;
-    }
-    if let Some(value) = body.native_action {
-        row.native_action = value.as_ref().map(encode).transpose()?;
-    }
-    if let Some(value) = body.timing {
-        row.timing = encode(&value)?;
+    operation::apply(&mut row, &body)?;
+    if definition {
+        row.definition_authority = Some(authority::capture(&row, principal.caller())?);
     }
     if let Some(state) = body.state {
         row.state = match state {
@@ -522,7 +635,18 @@ async fn update(ctx: Ctx, (): (), body: InputScheduleUpdateBody) -> ApiResult<In
     if definition || (previous != "active" && row.state == "active") {
         let next = timing::next(&timing_of(&row)?, now)?;
         row.next_run_at = Some(next.due);
-        creation_check(&ctx.app, &mut tx, principal.caller(), &row).await?;
+        agent::check_resume(&mut row, now)?;
+        let operands = prepared_operands.transpose()?;
+        if row.state == "active" {
+            creation_check(
+                &ctx.app,
+                &mut tx,
+                principal.caller(),
+                &row,
+                operands.as_deref(),
+            )
+            .await?;
+        }
     }
     if row.state != "active" {
         row.next_run_at = None;
@@ -567,9 +691,13 @@ async fn update(ctx: Ctx, (): (), body: InputScheduleUpdateBody) -> ApiResult<In
         )
         .await?;
     }
-    let result = present(&mut tx, &principal, row).await?;
+    let receipt = operation::receipt(&row);
+    let result = operation::full(&ctx, &mut tx, principal.caller(), row).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(result)
+    Ok(match result {
+        Some(row) if !ctx.key_receipt_required() => InputScheduleWriteResponse::full(row),
+        _ => InputScheduleWriteResponse::Receipt(receipt),
+    })
 }
 
 async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
@@ -593,7 +721,11 @@ async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
             &mut tx,
             &row,
             Actor::User(principal.user()),
-            orch_db::audit::action!(AuditAction::InputScheduleDeleted),
+            if agent::metadata(&row)?.is_some() {
+                orch_db::audit::action!(AuditAction::ScheduleCancelled)
+            } else {
+                orch_db::audit::action!(AuditAction::InputScheduleDeleted)
+            },
             &crate::sign_in::origin(&ctx),
             json!({}),
             now,

@@ -1,3 +1,4 @@
+import { DOCS } from './documents-support';
 /** A thread at work: a turn streamed from frames (text in pieces, a command and its output, a change and its diff, an approval, the end with its usage), a message sent while the agent works, Stop, a connection lost and found with a gap, a thread that is blocked and why, and somebody who may only watch. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
@@ -270,20 +271,36 @@ test('a thread that is blocked has a compact state and says why above the box, a
   expect((await threadHeld(ACME.idleThread)).inputs.map((input) => [input.state, input.content[0]?.text])).toEqual([['pending', 'Try again when the limit is over']]);
 });
 
-test('somebody who may only watch sees the conversation, no composer, and what they would need to work with the thread', async ({ page }) => {
+for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) test(`somebody who may only watch keeps the disabled composer, model and effort, and a clickable access request (${width}px ${theme})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 1000 });
+  await page.emulateMedia({ colorScheme: theme });
   await playScene(MAIN, 'waiting');
   await open(page, PEOPLE.vera);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   await expect(conversation(page).getByText('Please fix it, and run the tests.')).toBeVisible();
-  await expect(composer(page)).toHaveCount(0);
-  const watching = page.getByRole('region', { name: 'You can watch this thread' });
+  await expect(composer(page)).toBeVisible();
+  await expect(composer(page)).toBeDisabled();
+  await expect(composer(page)).toHaveAttribute('placeholder', 'You can watch this thread');
+  const watching = page.getByRole('group', { name: 'Access needed', exact: true });
   await expect(watching).toBeVisible();
-  await expect(watching).toContainText('to talk to its agent');
+  await expect(watching).toContainText('Interact on');
   await expect(watching.getByRole('button', { name: 'Try again', exact: true })).toHaveCount(0);
   await expect(watching.getByRole('button', { name: 'Request access', exact: true })).toBeVisible();
   const controls = page.getByRole('group', { name: 'Message controls' });
-  await expect(controls).toHaveCount(0);
+  await expect(controls).toBeVisible();
+  await expect(controls.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
+  const model = controls.getByRole('button', { name: /^Model and effort:/ });
+  await expect(model).toBeDisabled();
+  await expect(model).not.toContainText('No model set');
+  await controls.getByRole('button', { name: 'Send', exact: true }).hover();
+  await expect(page.getByRole('tooltip')).toContainText(english.composer.row.readOnly);
+  await watching.getByRole('button', { name: 'Request access', exact: true }).click();
+  const request = page.getByRole('dialog', { name: 'Request access', exact: true });
+  await expect(request.getByRole('textbox', { name: 'Why do you need it?', exact: true })).toBeEnabled();
+  await page.keyboard.press('Escape');
   await expect(header(page).getByText('Waiting for an answer', { exact: true })).toBeVisible();
   await expect(header(page).getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await info.attach(`viewer-composer-${width}-${theme}`, { body: await page.screenshot(), contentType: 'image/png' });
 });
 
 for (const viewer of [false, true]) {
@@ -712,3 +729,113 @@ test('an item that messages of the thread’s chat quote carries their number, w
   await count.click();
   await expect(page.getByRole('region', { name: 'Right bar' }).getByRole('textbox', { name: /^Message / })).toBeVisible();
 });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`opens the ordinary composer and sends through its bound profile (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await open(page);
+    await queueLanguage(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    const box = page.getByRole('textbox', { name: words.composer.label, exact: true });
+    await expect(box).toBeVisible();
+    await expect(box).toBeEnabled();
+    const text = locale === 'en' ? 'Review the redirect safely' : '请检查重定向是否安全';
+    await box.fill(text);
+    const send = page.getByRole('button', { name: words.composer.send, exact: true });
+    await expect(send).toBeEnabled();
+    const accepted = page.waitForResponse((response) => response.request().method() === 'POST'
+      && new URL(response.url()).pathname.endsWith(`/threads/${MAIN}/inputs`));
+    await send.click();
+    const response = await accepted;
+    expect(response.ok()).toBe(true);
+    expect(await bodySent(response.request())).toEqual(expect.objectContaining({ content: [{ type: 'text', text }] }));
+    await expect(box).toHaveValue('');
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`names the offline read cause and retries its resource view (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await open(page);
+    await queueLanguage(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    let offline = true;
+    await page.route('**/*', async (route) => {
+      const request = route.request();
+      if (offline && request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/everything')) await route.abort('internetdisconnected');
+      else await route.continue();
+    });
+    await page.addInitScript(() => Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }));
+    await page.goto('/resources/mounts');
+    // The resource operation fails while application scripts and the signed-in frame remain available.
+    await page.evaluate(() => Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false }));
+    const failure = page.locator('[data-main-area]').getByRole('alert').filter({ hasText: words.network.offline });
+    await expect(failure).toBeVisible();
+    await expect(failure.getByRole('button')).toHaveCount(1);
+    offline = false;
+    await page.evaluate(() => Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true }));
+    const recovered = page.waitForResponse((response) => response.request().method() === 'GET'
+      && new URL(response.url()).pathname.endsWith('/everything') && response.ok());
+    await failure.getByRole('button', { name: words.common.tryAgain, exact: true }).click();
+    expect((await recovered).ok()).toBe(true);
+    await expect(failure).toHaveCount(0);
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`enters the person's available quick action by keyboard (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await emit(MAIN, {
+      turns: [turn('keyboard-person-turn', { ordinal: 1, state: 'completed', inputId: 'keyboard-person-input' })],
+      items: [userMessage('keyboard-person', 'Please review this result', { author: GRACE, turn: 'keyboard-person-turn', inputId: 'keyboard-person-input', at: now() })],
+    });
+    await open(page);
+    await queueLanguage(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    const author = page.locator('[data-item="keyboard-person"]').getByRole('button', { name: GRACE.display_name, exact: true });
+    await author.focus();
+    const notify = page.getByRole('button', { name: words.people.quick.notify, exact: true });
+    await expect(notify).toBeVisible();
+    await author.press('Tab');
+    await expect(notify).toBeFocused();
+    await notify.press('Enter');
+    await expect(page.getByRole('textbox', { name: words.people.quick.note, exact: true })).toBeFocused();
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`asks to review sharing facts that changed before Send (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    let changed = false;
+    await page.route('**/api/v1/me/state', async (route) => {
+      if (route.request().method() !== 'GET') { await route.continue(); return; }
+      const response = await route.fetch();
+      const state: unknown = await response.json();
+      if (typeof state !== 'object' || state === null) throw new Error('The sharing preference belongs to the current reader state.');
+      const timeline = 'timeline' in state && typeof state.timeline === 'object' && state.timeline !== null ? state.timeline : {};
+      await route.fulfill({ response, json: { ...state, timeline: { ...timeline, share_on_link: !changed } } });
+    });
+    const submitted: string[] = [];
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith(`/threads/${MAIN}/inputs`)) submitted.push(request.url());
+    });
+    await open(page); await queueLanguage(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    const draft = `[Review](/doc/${DOCS.private})`;
+    const box = page.getByRole('textbox', { name: words.composer.label, exact: true });
+    await box.fill(draft);
+    const send = page.getByRole('button', { name: words.composer.send, exact: true });
+    await expect(send).toBeEnabled();
+    changed = true;
+    await send.click();
+    const review = page.getByRole('alert').filter({ hasText: words.linkSharing.changed });
+    await expect(review).toBeVisible();
+    await expect(review.getByRole('button', { name: words.common.tryAgain, exact: true })).toBeVisible();
+    await expect(box).toHaveValue(draft);
+    expect(submitted).toEqual([]);
+  });
+}

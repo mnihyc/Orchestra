@@ -61,7 +61,7 @@ function answer(page: Page, path: string, method = 'GET', match: (query: URLSear
 async function prepare(page: Page, request: APIRequestContext, locale: 'en' | 'zh-CN', width: number, theme: 'light' | 'dark') {
   await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme }); await signIn(page);
   expect((await request.post(`${double}/__double/first-steps/appearance`, { data: { locale, theme: 'system' } })).ok()).toBe(true);
-  await page.goto(`/project/${ACME.web}/settings?section=policies&setting=${KEY}`);
+  await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=${KEY}`);
   await expect(page.locator('html')).toHaveAttribute('lang', locale); await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const words = locale === 'en' ? english : chinese;
   const row = page.locator(`[data-setting="${KEY}"]`), field = row.getByRole('combobox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });

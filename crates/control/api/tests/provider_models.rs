@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "provider_models/creation_replays.rs"]
+mod creation_replays;
 mod places;
 mod resources;
 mod support;
@@ -59,6 +61,8 @@ async fn provider(world: &World, by: &Who, home: Id, key_machine: Option<Id>) ->
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
 }
 
@@ -82,6 +86,8 @@ async fn add(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model")
 }
 
 #[tokio::test]
@@ -106,7 +112,9 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(
         sol.model_name, "openai/gpt-6-sol",
         "the routing name is taken as it is given"
@@ -166,7 +174,9 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert!(!off.enabled);
     let renamed = world
         .app
@@ -178,7 +188,9 @@ async fn models_are_added_listed_changed_and_removed_by_whoever_manages_the_prov
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(renamed.display_name, "GPT-6 Luna");
     assert_eq!(
         renamed.model_name, "gpt-6-luna",
@@ -255,7 +267,12 @@ async fn two_models_of_one_provider_never_go_by_one_routing_name_or_show_under_o
         "a display name clashes whatever its case"
     );
     // Routing names differ by their letters: the one rule is the name as it is written.
-    let upper = call("GPT-6-SOL", None).send().await.ok();
+    let upper = call("GPT-6-SOL", None)
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(upper.model_name, "GPT-6-SOL");
     let second = add(&world, &c.boss, id, "gpt-6-luna", Some("GPT-6 Luna")).await;
     let clash = world
@@ -290,7 +307,9 @@ async fn two_models_of_one_provider_never_go_by_one_routing_name_or_show_under_o
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full model");
     assert_eq!(
         changed.parameters.access_programs,
         Some(vec!["early".to_owned()])
@@ -425,7 +444,9 @@ async fn a_program_source_lists_models_before_any_is_enabled_and_acceptance_retu
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full suggestion acceptance");
     native.await.unwrap();
     assert_eq!(accepted.added.len(), 2);
     assert!(accepted.added.iter().all(|model| model.enabled));
@@ -672,7 +693,9 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         .body(&accept(&["gpt-6-sol", "gpt-6-luna"]))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full suggestion acceptance");
     machine_says.await.unwrap();
     assert_eq!(
         added.provider.models.len(),
@@ -751,7 +774,9 @@ async fn accepted_suggestions_are_added_with_what_they_offer_and_none_of_it_enab
         .body(&accept(&["gpt-6-sol"]))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary caller receives the full suggestion acceptance");
     machine_says.await.unwrap();
     assert!(again.added.is_empty());
     assert_eq!(again.provider.models.len(), 2);

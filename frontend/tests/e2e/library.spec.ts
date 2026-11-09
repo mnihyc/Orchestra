@@ -40,11 +40,12 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'] 
     await page.getByRole('button',{name:t('library.given',{number:'3',unit:t('library.units.threads',{count:3})}),exact:true}).click();
     await expect(page.getByText('Visible destination',{exact:true})).toBeVisible();await expect(page.getByText(t('library.more',{number:'2'}),{exact:true})).toBeVisible();
     await page.screenshot({path:info.outputPath(`given-${locale}-${theme}-${width}.png`)});await page.keyboard.press('Escape');
-    await page.getByRole('button',{name:t('library.usedTitle'),exact:true}).click();await expect(page.getByText(t('library.recent',{number:'12'}),{exact:true})).toBeVisible();
+    await page.getByRole('button',{name:t('library.usedTitle'),exact:true}).click();await expect(page.getByText(t('library.recent',{number:'12',unit:t('library.units.turns',{count:12})}),{exact:true})).toBeVisible();
+    await expect(page.getByText(t('library.allTime',{number:'120',unit:t('library.units.turns',{count:120})}),{exact:true})).toBeVisible();
     await page.getByRole('button',{name:t('library.people',{number:'2',count:2}),exact:true}).click();await expect(page.getByText('Ada Lovelace',{exact:true}).last()).toBeVisible();
     await expect(page.getByText(t('ui.avatarStack.andMore',{count:1}),{exact:true})).toBeVisible();expect(peopleReads).toBe(1);
     await page.screenshot({path:info.outputPath(`used-people-${locale}-${theme}-${width}.png`)});await page.keyboard.press('Escape');
-    await expect(page.getByText(t('library.recent',{number:'12'}),{exact:true})).toBeVisible();await page.keyboard.press('Escape');
+    await expect(page.getByText(t('library.recent',{number:'12',unit:t('library.units.turns',{count:12})}),{exact:true})).toBeVisible();await page.keyboard.press('Escape');
     await view.click();const options=page.getByRole('option');await expect(options.nth(0)).toHaveText(t('library.views.mine'));await expect(options.nth(1)).toHaveText(t('library.views.managed'));await expect(options.nth(2)).toHaveText(t('library.views.usable'));await expect(options.nth(3)).toHaveText(t('library.views.viewable'));
     await page.getByRole('option',{name:t('library.views.managed'),exact:true}).click();await expect(view).toHaveText(t('library.views.managed'));
     await page.getByRole('button',{name:t('resources.controls.sort'),exact:true}).click();await page.getByRole('combobox',{name:t('everything.sortBy'),exact:true}).click();await page.getByRole('option',{name:t('inventoryChoices.everything.columns.use.name'),exact:true}).click();await expect(page.getByRole('combobox',{name:t('everything.direction'),exact:true})).toHaveText(t('inventoryChoices.everything.directions.desc.name'));await page.keyboard.press('Escape');

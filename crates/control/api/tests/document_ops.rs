@@ -374,6 +374,8 @@ async fn a_batch_sent_twice_is_applied_once_and_answers_as_the_first_time_did() 
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("the browser session receives the full document reply")
     };
     let first = send().await;
     let again = send().await;
@@ -396,7 +398,9 @@ async fn a_batch_sent_twice_is_applied_once_and_answers_as_the_first_time_did() 
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full document reply");
     assert_eq!(theirs.seq, first.seq + 1);
 }
 
@@ -725,4 +729,256 @@ async fn naming_people_in_a_block_does_not_notify_them() {
     .await
     .ok();
     assert!(notices(&desk, desk.ada.id()).await.is_empty());
+}
+
+// ---------------------------------------------------------------- operation-scoped write receipts
+
+/// A real secret key uses the same stored identity/authentication path as automation. The fixture
+/// writes no legacy scope fallback; one hour fits ordinary place lifetime bounds without moving time.
+async fn document_operation_key(desk: &Desk, document: Id, allow: serde_json::Value) -> String {
+    use orch_access_contract::key_scope::KeyScope;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity::{NewApiToken, create_api_token_scoped};
+
+    let scope: KeyScope = serde_json::from_value(json!({
+        "rules": [{
+            "target": {"kind":"document", "id":document, "reach":"self"},
+            "allow": allow
+        }]
+    }))
+    .unwrap();
+    assert!(
+        scope.validate().is_empty(),
+        "a valid bound operation policy"
+    );
+    let stored = serde_json::to_value(scope).unwrap();
+    let secret = new_token(API_TOKEN_PREFIX);
+    let hash = token_hash(&secret);
+    let now = desk.world.now();
+    let mut conn = desk.world.conn().await;
+    create_api_token_scoped(
+        &mut conn,
+        &NewApiToken {
+            id: new_id(),
+            user_id: desk.ada.id(),
+            name: "Document receipt control",
+            token_hash: &hash,
+            scopes: &[],
+            node_id: None,
+            at: now,
+            expires_at: Some(now + chrono::Duration::hours(1)),
+        },
+        Some(&stored),
+    )
+    .await
+    .unwrap();
+    secret
+}
+
+fn receipt_of(
+    reply: orch_api_core::testing::Reply<orch_api_contract::documents::DocumentOpsCreateResponse>,
+    document: Id,
+) -> i64 {
+    use orch_api_contract::documents::DocumentOpsCreateResponse;
+    let raw: serde_json::Value = serde_json::from_slice(&reply.raw).unwrap();
+    assert_eq!(reply.status, 200);
+    let DocumentOpsCreateResponse::Receipt(receipt) = reply.ok() else {
+        panic!("a write-only operation returned existing document content");
+    };
+    assert_eq!(receipt.document_id, document);
+    assert_eq!(
+        raw,
+        json!({"projection":"receipt", "document_id":document, "seq":receipt.seq}),
+        "the declared receipt contains no title, names, blocks or prior content"
+    );
+    receipt.seq
+}
+
+#[tokio::test]
+async fn a_write_only_document_key_gets_a_receipt_on_creation_and_replay_without_reading_later_content()
+ {
+    let desk = Desk::new().await;
+    let doc = desk.make(&desk.ada, "Existing private title").await;
+    let initial = desk
+        .paragraphs(&desk.ada, doc.base.id, &["Existing private block"])
+        .await;
+    let key = document_operation_key(
+        &desk,
+        doc.base.id,
+        json!([{ "operation":"DocumentOpsCreate", "actions":["write"] }]),
+    )
+    .await;
+    let body = DocumentOpsCreateBody {
+        expected_seq: None,
+        client_id: new_id().to_string(),
+        ops: vec![rewrite(&initial[0], "Written through the scoped key")],
+    };
+    let first = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&key)
+        .body(&body)
+        .send()
+        .await;
+    let seq = receipt_of(first, doc.base.id);
+    assert_eq!(
+        desk.words(&desk.ada, doc.base.id).await,
+        ["Written through the scoped key"],
+        "ordinary user authority and the exact scoped write really applied"
+    );
+    let live = desk.sync(&desk.ada, doc.base.id).await;
+    assert_eq!(live.seq, seq);
+    let later = desk
+        .write(
+            &desk.ada,
+            doc.base.id,
+            vec![rewrite(&live.blocks[0], "A later private edit")],
+        )
+        .await
+        .ok();
+    assert!(
+        later.seq > seq,
+        "the session's full response remains available"
+    );
+    let repeated = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&key)
+        .body(&body)
+        .send()
+        .await;
+    assert_eq!(receipt_of(repeated, doc.base.id), seq);
+    let current = desk.sync(&desk.ada, doc.base.id).await;
+    assert_eq!(current.seq, later.seq, "a replay performs no second write");
+    assert_eq!(
+        desk.words(&desk.ada, doc.base.id).await,
+        ["A later private edit"]
+    );
+    let read = desk
+        .world
+        .app
+        .call(orch_api_contract::documents::DocumentGet, &[&doc.base.id])
+        .token(&key)
+        .send()
+        .await
+        .problem();
+    assert_eq!(read.code, ErrorCode::AuthzDenied);
+}
+
+#[tokio::test]
+async fn document_reply_content_requires_this_operation_read_not_an_unrelated_read_grant() {
+    let desk = Desk::new().await;
+    let doc = desk.make(&desk.ada, "The title is existing content").await;
+    desk.paragraphs(&desk.ada, doc.base.id, &["A prior block"])
+        .await;
+    let unrelated_read = document_operation_key(
+        &desk,
+        doc.base.id,
+        json!([
+            {"operation":"DocumentOpsCreate", "actions":["write"]},
+            {"operation":"DocumentGet.read", "actions":["read"]}
+        ]),
+    )
+    .await;
+    let own_read = document_operation_key(
+        &desk,
+        doc.base.id,
+        json!([{ "operation":"DocumentOpsCreate", "actions":["read","write"] }]),
+    )
+    .await;
+    let post = |client: String| DocumentOpsCreateBody {
+        expected_seq: None,
+        client_id: client,
+        ops: vec![put(paragraph("New supplied content"))],
+    };
+    let restricted = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&unrelated_read)
+        .body(&post(new_id().to_string()))
+        .send()
+        .await;
+    receipt_of(restricted, doc.base.id);
+    let allowed = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&own_read)
+        .body(&post(new_id().to_string()))
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the operation's own Read facet and current owner authority allow content");
+    assert_eq!(allowed.document.title, "The title is existing content");
+    assert_eq!(allowed.blocks.len(), 1);
+    assert_eq!(said(&allowed.blocks[0]), "New supplied content");
+}
+
+#[tokio::test]
+async fn a_write_only_document_conflict_keeps_current_blocks_out_of_its_problem() {
+    let desk = Desk::new().await;
+    let doc = desk.make(&desk.ada, "Confidential conflict").await;
+    let initial = desk.paragraphs(&desk.ada, doc.base.id, &["Original"]).await;
+    let live = desk.sync(&desk.ada, doc.base.id).await;
+    desk.write(
+        &desk.ada,
+        doc.base.id,
+        vec![rewrite(&initial[0], "Current material must remain private")],
+    )
+    .await
+    .ok();
+    let denied_content = document_operation_key(
+        &desk,
+        doc.base.id,
+        json!([{ "operation":"DocumentOpsCreate", "actions":["write"] }]),
+    )
+    .await;
+    let allowed_content = document_operation_key(
+        &desk,
+        doc.base.id,
+        json!([{ "operation":"DocumentOpsCreate", "actions":["read","write"] }]),
+    )
+    .await;
+    let body = DocumentOpsCreateBody {
+        expected_seq: Some(live.seq),
+        client_id: new_id().to_string(),
+        ops: vec![rewrite(&initial[0], "This stale write must not apply")],
+    };
+    let restricted = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&denied_content)
+        .body(&body)
+        .send()
+        .await;
+    let raw = String::from_utf8(restricted.raw.to_vec()).unwrap();
+    let problem = restricted.problem();
+    assert_eq!(problem.code, ErrorCode::ConflictStaleRevision);
+    assert!(!problem.extra.contains_key("current"));
+    assert!(!raw.contains("Current material must remain private"));
+    assert!(!raw.contains("Confidential conflict"));
+    let readable = desk
+        .world
+        .app
+        .call(DocumentOpsCreate, &[&doc.base.id])
+        .token(&allowed_content)
+        .body(&body)
+        .send()
+        .await
+        .problem();
+    assert_eq!(readable.code, ErrorCode::ConflictStaleRevision);
+    let blocks: Vec<orch_api_contract::documents::DocumentBlock> =
+        serde_json::from_value(readable.extra["current"].clone()).unwrap();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(said(&blocks[0]), "Current material must remain private");
+    assert_eq!(
+        desk.words(&desk.ada, doc.base.id).await,
+        ["Current material must remain private"],
+        "both failed batches leave the current state alone"
+    );
 }

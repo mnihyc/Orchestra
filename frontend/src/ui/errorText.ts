@@ -2,7 +2,7 @@
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
-import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { ApiError, ReceiptAcknowledged, invitationIssuerAuthorityLost } from '@/api/client';
 import type { TranslationKey } from '@/i18n';
 import { apiErrorSentence, hasErrorSentence } from '@/i18n/errors';
 import { useAppearance } from '@/lib/appearance';
@@ -13,6 +13,8 @@ import nativeAliases from '@/i18n/error-aliases.json';
 export interface ErrorText {
   /** What happened and what to do, as one or two sentences. */
   message: string;
+  /** The native source’s own safe words, shown below the localized explanation. */
+  diagnostic?: string;
   /** The stable code of the error, for the "Details": the API's own, or a name for what the page met. */
   code: string;
   /** The id of the request, by which the server's logs find it. */
@@ -21,6 +23,8 @@ export interface ErrorText {
   status: number | null;
   /** Whether asking again could help. */
   retryable: boolean;
+  /** A successful write with a bounded receipt is not a failure or permission to resend. */
+  acknowledged?: true;
 }
 
 const FAILURE_WORDS: Readonly<Record<string, string | undefined>> = nativeAliases;
@@ -38,6 +42,10 @@ export function errorText(
   t: TFunction,
   context: { locale: string; timeZone?: string | undefined },
 ): ErrorText {
+  if (error instanceof ReceiptAcknowledged) return {
+    message: t('ui.receipt.accepted'), code: 'receipt.acknowledged', requestId: error.requestId === '' ? null : error.requestId,
+    status: error.status, retryable: false, acknowledged: true,
+  };
   if (error instanceof ApiError) {
     const at = error.retryAt === null ? null : formatTimeOfDay(error.retryAt, context);
     const message = invitationIssuerAuthorityLost(error) ? t('auth.invite.issuerAuthorityLost')
@@ -61,6 +69,22 @@ export function errorText(
     };
   }
   if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') {
+    const nativeDetails = 'details' in error && typeof error.details === 'object' && error.details !== null ? error.details : null;
+    const reason = 'reason' in error && typeof error.reason === 'string' ? error.reason
+      : nativeDetails !== null && 'reason' in nativeDetails && typeof nativeDetails.reason === 'string' ? nativeDetails.reason : null;
+    if (error.code === 'model_unavailable' && reason === 'credit_program') {
+      return { message: t('ui.error.creditProgramRestricted'), code: error.code, requestId: null, status: null, retryable: false };
+    }
+    if(error.code==='model_rerouted' && 'details' in error && typeof error.details==='object' && error.details!==null && 'from_model' in error.details && 'to_model' in error.details && typeof error.details.from_model==='string' && typeof error.details.to_model==='string' && error.details.from_model.trim()!=='' && error.details.to_model.trim()!=='') {
+      const fromModel=error.details.from_model,toModel=error.details.to_model,details=error.details;
+      const from='from_display' in details && typeof details.from_display==='string' ? details.from_display : fromModel;
+      const to='to_display' in details && typeof details.to_display==='string' ? details.to_display : toModel;
+      return {message:t('ui.error.modelReroutedNamed',{from,to}),code:error.code,requestId:null,status:null,retryable:false};
+    }
+    if(error.code==='mcp_server_failed' && 'details' in error && typeof error.details==='object' && error.details!==null && 'server' in error.details && typeof error.details.server==='string') {
+      const diagnostic='message' in error.details && typeof error.details.message==='string' && error.details.message!=='' ? error.details.message : undefined;
+      return {message:t('ui.error.mcpServerFailedNamed',{server:error.details.server}),...(diagnostic===undefined?{}:{diagnostic}),code:error.code,requestId:null,status:null,retryable:false};
+    }
     const mapped = sentence(error.code, t, context.locale);
     // Native programs and jobs retain their diagnostics. A newer code still gets translated
     // recovery copy rather than an unreviewed program sentence in the wrong language.

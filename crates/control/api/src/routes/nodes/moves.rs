@@ -24,8 +24,8 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::forks::PlanBlocker;
 use orch_api_contract::nodes::{
     MoveAddresses, MovePreviewBody, MoveRoles, MoveSetting, Node, NodeMoveBody, NodeMovePlan,
-    NodeOrSystem, NodeRef, Org, OrgMove, OrgMovePreview, Project, ProjectMove, ProjectMovePreview,
-    Topic, TopicMove, TopicMovePreview,
+    NodeOrSystem, NodeRef, OrgMove, OrgMovePreview, ProjectMove, ProjectMovePreview, TopicMove,
+    TopicMovePreview,
 };
 use orch_authz::{Act, Policy, Principal, epoch, orgs};
 use orch_db::Conn;
@@ -35,6 +35,7 @@ use orch_types::Id;
 use serde_json::json;
 use std::collections::HashMap;
 
+mod operation;
 mod review;
 pub mod thread;
 
@@ -42,12 +43,16 @@ pub mod thread;
 pub fn mount(registry: &mut Registry) {
     thread::mount(registry);
     registry
-        .on(ProjectMovePreview, project_preview)
-        .on(ProjectMove, project_move)
-        .on(OrgMovePreview, org_preview)
-        .on(OrgMove, org_move)
-        .on(TopicMovePreview, topic_preview)
-        .on(TopicMove, topic_move);
+        .on_with_operation(
+            ProjectMovePreview,
+            operation::project_preview,
+            project_preview,
+        )
+        .on_with_operation(ProjectMove, operation::project_move, project_move)
+        .on_with_operation(OrgMovePreview, operation::org_preview, org_preview)
+        .on_with_operation(OrgMove, operation::org_move, org_move)
+        .on_with_operation(TopicMovePreview, operation::topic_preview, topic_preview)
+        .on_with_operation(TopicMove, operation::topic_move, topic_move);
 }
 
 /// What stops a move for the shape of the tree.
@@ -187,7 +192,11 @@ async fn plan_of(
         wrong("a root org does not become a department");
     }
     if to.org_id != moved.org_id {
-        wrong("it can only be moved within its own tree");
+        wrong(if kind == NodeKind::Thread {
+            "Use Move to another org to copy there and delete here."
+        } else {
+            "it can only be moved within its own tree"
+        });
     }
     if to.path.contains(&moved.id) {
         wrong("it cannot be moved into itself or below itself");
@@ -404,6 +413,7 @@ async fn plan_reply(
             review::effects(ctx, conn, principal, plan.moved.id, plan.to.id).await?
         } else {
             PagePreview {
+                owner_reads: None,
                 pages,
                 orgs: None,
                 gaining: Vec::new(),
@@ -519,9 +529,14 @@ async fn roles_changed(
     Ok(MoveRoles { gaining, losing })
 }
 
-async fn preview(ctx: &Ctx, kind: NodeKind, body: &MovePreviewBody) -> ApiResult<NodeMovePlan> {
+async fn preview(
+    ctx: &Ctx,
+    kind: NodeKind,
+    body: &MovePreviewBody,
+) -> ApiResult<orch_api_contract::nodes::NodeMovePreviewResponse> {
     let node = ctx.id("id")?;
-    let (current, mut conn, principal) = super::action(ctx).await?;
+    let (current, mut conn, guard) = operation::action(ctx).await?;
+    let principal = guard.principal().clone();
     let ctx = &current;
     let (_, found) = placed(&mut conn, node).await?;
     if found != kind {
@@ -531,23 +546,34 @@ async fn preview(ctx: &Ctx, kind: NodeKind, body: &MovePreviewBody) -> ApiResult
     let plan = plan_of(ctx, &mut conn, kind, node, body.parent_id).await?;
     let reply = plan_reply(ctx, &mut conn, &principal, &plan).await?;
     let reply = review::keep(ctx, &mut conn, &principal, reply).await?;
+    let reply = operation::review(ctx, &mut conn, &principal, &guard, reply).await?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(reply)
 }
 
 /// Shows what moving a project would change.
-async fn project_preview(ctx: Ctx, (): (), body: MovePreviewBody) -> ApiResult<NodeMovePlan> {
-    preview(&ctx, NodeKind::Project, &body).await
+async fn project_preview(
+    ctx: Ctx,
+    (): (),
+    body: MovePreviewBody,
+) -> ApiResult<orch_api_contract::nodes::NodeMovePreviewResponse> {
+    authorization::projected_result(ctx.clone(), preview(&ctx, NodeKind::Project, &body), false)
+        .await
 }
 
 /// Shows what moving an org that lies in another would change.
-async fn org_preview(ctx: Ctx, (): (), body: MovePreviewBody) -> ApiResult<NodeMovePlan> {
-    preview(&ctx, NodeKind::Org, &body).await
+async fn org_preview(
+    ctx: Ctx,
+    (): (),
+    body: MovePreviewBody,
+) -> ApiResult<orch_api_contract::nodes::NodeMovePreviewResponse> {
+    authorization::projected_result(ctx.clone(), preview(&ctx, NodeKind::Org, &body), false).await
 }
 
-async fn carry_out(ctx: &Ctx, kind: NodeKind, body: &NodeMoveBody) -> ApiResult<Node> {
+async fn carry_out(ctx: &Ctx, kind: NodeKind, body: &NodeMoveBody) -> ApiResult<operation::Moved> {
     let node = ctx.id("id")?;
-    let (current, mut tx, principal) = super::action(ctx).await?;
+    let (current, mut tx, guard) = operation::action(ctx).await?;
+    let principal = guard.principal().clone();
     let ctx = &current;
     let (place, found) = placed(&mut tx, node).await?;
     if found != kind {
@@ -557,20 +583,54 @@ async fn carry_out(ctx: &Ctx, kind: NodeKind, body: &NodeMoveBody) -> ApiResult<
     // Moves of one tree are made one after the other, so that none is planned on a tree that
     // another is changing.
     hierarchy::lock_tree_for_moves(&mut tx, place.org).await?;
+    let from = hierarchy::with_ancestors(&mut tx, &[node])
+        .await?
+        .into_iter()
+        .find(|row| row.id == node)
+        .ok_or_else(ApiError::not_found)?
+        .parent_id;
+    if from != Some(body.parent_id)
+        && !hierarchy::lock_move_rows(&mut tx, node, body.parent_id).await?
+    {
+        return Err(ApiError::not_found());
+    }
+    let (current, guard) = crate::middleware::transaction_guard::after_wait(ctx, &mut tx).await?;
+    let ctx = &current;
+    let principal = guard.principal().clone();
+    may_move(&mut tx, &principal, kind, node, body.parent_id).await?;
     let plan = plan_of(ctx, &mut tx, kind, node, body.parent_id).await?;
     if let Some(blocker) = plan.blockers.first() {
         return Err(refuse(&mut tx, blocker).await);
     }
     let before = shown(ctx, &mut tx, &principal, node).await?;
     if plan.moved.revision != body.expected_revision {
-        return Err(stale(&before));
+        let current = operation::node(ctx, &mut tx, &principal, &guard, node).await?;
+        return Err(match current {
+            Some(current) if !ctx.key_receipt_required() => stale(&current),
+            _ => ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "the node was changed since it was read",
+            ),
+        });
     }
     if let Some(preflight) = body.preflight_id {
         let current = plan_reply(ctx, &mut tx, &principal, &plan).await?;
         if let Some(current) = review::changed(ctx, &mut tx, &principal, preflight, current).await?
         {
+            let current = operation::review(ctx, &mut tx, &principal, &guard, current).await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
-            return Err(ApiError::new(ErrorCode::ConflictStaleRevision, "The move's subtree or consequences changed. Nothing moved; review the current plan.").with("current", current));
+            let error = ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "The move's subtree or consequences changed. Nothing moved; review the current plan.",
+            );
+            return Err(match current {
+                orch_api_contract::nodes::NodeMovePreviewResponse::Full(current)
+                    if !ctx.key_receipt_required() =>
+                {
+                    error.with("current", current)
+                }
+                _ => error,
+            });
         }
     }
     let from = plan
@@ -578,7 +638,9 @@ async fn carry_out(ctx: &Ctx, kind: NodeKind, body: &NodeMoveBody) -> ApiResult<
         .parent_id
         .ok_or_else(|| ApiError::internal("a node that is moved has a parent"))?;
     if from != plan.to.id {
-        hierarchy::lock(&mut tx, node).await?;
+        // move_under's first statement is the native bulk UPDATE; no awaited
+        // preparation separates this exact boundary from its first SQL attempt.
+        guard.check_deadline(ctx)?;
         hierarchy::move_under(&mut tx, node, plan.to.id, ctx.now).await?;
         epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
         let who = actor_name(ctx)?;
@@ -627,36 +689,94 @@ async fn carry_out(ctx: &Ctx, kind: NodeKind, body: &NodeMoveBody) -> ApiResult<
         .await?;
         hierarchy::stamp_subtree(&mut tx, node).await?;
     }
-    let moved = shown(ctx, &mut tx, &principal, node).await?;
+    let moved = operation::node(ctx, &mut tx, &principal, &guard, node).await?;
+    let moved = match moved {
+        Some(node) if !ctx.key_receipt_required() => operation::Moved::Full(Box::new(node)),
+        _ => operation::Moved::Receipt(
+            operation::receipt(&mut tx, node, body.parent_id, kind).await?,
+        ),
+    };
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(moved)
 }
 
 /// Moves a project under another org, or into another project, of its root org.
-async fn project_move(ctx: Ctx, (): (), body: NodeMoveBody) -> ApiResult<Project> {
-    match carry_out(&ctx, NodeKind::Project, &body).await? {
-        Node::Project(project) => Ok(project),
-        _ => Err(ApiError::internal("a project was moved and is not one")),
+async fn project_move(
+    ctx: Ctx,
+    (): (),
+    body: NodeMoveBody,
+) -> ApiResult<orch_api_contract::nodes::ProjectMoveResponse> {
+    let moved = authorization::projected_result(
+        ctx.clone(),
+        carry_out(&ctx, NodeKind::Project, &body),
+        false,
+    )
+    .await?;
+    match moved {
+        operation::Moved::Full(node) => match *node {
+            Node::Project(project) => Ok(orch_api_contract::nodes::ProjectMoveResponse::Full(
+                Box::new(project),
+            )),
+            _ => Err(ApiError::internal("a project was moved and is not one")),
+        },
+        operation::Moved::Receipt(receipt) => Ok(
+            orch_api_contract::nodes::ProjectMoveResponse::Receipt(receipt),
+        ),
     }
 }
 
 /// Moves an org that lies in another under another org of the same tree.
-async fn org_move(ctx: Ctx, (): (), body: NodeMoveBody) -> ApiResult<Org> {
-    match carry_out(&ctx, NodeKind::Org, &body).await? {
-        Node::Org(org) => Ok(org),
-        _ => Err(ApiError::internal("an org was moved and is not one")),
+async fn org_move(
+    ctx: Ctx,
+    (): (),
+    body: NodeMoveBody,
+) -> ApiResult<orch_api_contract::nodes::OrgMoveResponse> {
+    let moved =
+        authorization::projected_result(ctx.clone(), carry_out(&ctx, NodeKind::Org, &body), false)
+            .await?;
+    match moved {
+        operation::Moved::Full(node) => match *node {
+            Node::Org(org) => Ok(orch_api_contract::nodes::OrgMoveResponse::Full(Box::new(
+                org,
+            ))),
+            _ => Err(ApiError::internal("an org was moved and is not one")),
+        },
+        operation::Moved::Receipt(receipt) => {
+            Ok(orch_api_contract::nodes::OrgMoveResponse::Receipt(receipt))
+        }
     }
 }
 
 /// Shows what moving a topic to another project or folder would change.
-async fn topic_preview(ctx: Ctx, (): (), body: MovePreviewBody) -> ApiResult<NodeMovePlan> {
-    preview(&ctx, NodeKind::Topic, &body).await
+async fn topic_preview(
+    ctx: Ctx,
+    (): (),
+    body: MovePreviewBody,
+) -> ApiResult<orch_api_contract::nodes::NodeMovePreviewResponse> {
+    authorization::projected_result(ctx.clone(), preview(&ctx, NodeKind::Topic, &body), false).await
 }
 
 /// Moves a topic, with its threads, to another project or folder of its root org.
-async fn topic_move(ctx: Ctx, (): (), body: NodeMoveBody) -> ApiResult<Topic> {
-    match carry_out(&ctx, NodeKind::Topic, &body).await? {
-        Node::Topic(topic) => Ok(topic),
-        _ => Err(ApiError::internal("a topic was moved and is not one")),
+async fn topic_move(
+    ctx: Ctx,
+    (): (),
+    body: NodeMoveBody,
+) -> ApiResult<orch_api_contract::nodes::TopicMoveResponse> {
+    let moved = authorization::projected_result(
+        ctx.clone(),
+        carry_out(&ctx, NodeKind::Topic, &body),
+        false,
+    )
+    .await?;
+    match moved {
+        operation::Moved::Full(node) => match *node {
+            Node::Topic(topic) => Ok(orch_api_contract::nodes::TopicMoveResponse::Full(Box::new(
+                topic,
+            ))),
+            _ => Err(ApiError::internal("a topic was moved and is not one")),
+        },
+        operation::Moved::Receipt(receipt) => Ok(
+            orch_api_contract::nodes::TopicMoveResponse::Receipt(receipt),
+        ),
     }
 }

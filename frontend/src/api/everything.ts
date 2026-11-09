@@ -2,6 +2,7 @@
 import { infiniteQueryOptions } from '@tanstack/react-query';
 
 import { api, ok } from '@/api/client';
+import type { ReadOptions } from '@/api/query';
 import type { EverythingDirection, EverythingKind, EverythingRowPage, EverythingScope, EverythingSort, ProviderListScope } from '@/generated/api-types';
 
 /** Kind-specific predicates belong to the shared server pager, rather than a loaded browser slice. */
@@ -55,11 +56,16 @@ async function inTurn<T>(signal: AbortSignal | undefined, read: () => Promise<T>
 }
 
 /** Only name search crosses every level. Other filters keep the tree's branches available. */
-export const everythingQuery = (reader: string, parent: string | null, filter: EverythingFilter, cacheRoot = 'everything') => infiniteQueryOptions({
+export const everythingQuery = (reader: string, parent: string | null, filter: EverythingFilter, cacheRoot = 'everything', options: ReadOptions = {}) => infiniteQueryOptions({
   // A resource list retains its mutation invalidation root while sharing this request and pager.
   queryKey: [cacheRoot, reader, parent, filter] as const,
   initialPageParam: null as string | null,
-  queryFn: ({ pageParam, signal }): Promise<EverythingRowPage> => inTurn(signal, () => ok(api.GET('/everything', {
+  queryFn: (context): Promise<EverythingRowPage> => {
+    const pageParam = context.pageParam;
+    // A kept navigation opening owns this read through transient slot mounts.
+    // Explicit query cancellation and the existing reader cache boundary still retire it.
+    const signal = options.keepReading === true ? undefined : context.signal;
+    return inTurn(signal, () => ok(api.GET('/everything', {
     params: { query: {
       scope: filter.scope,
       ...(filter.recent === undefined ? {} : { recent: filter.recent }),
@@ -85,6 +91,7 @@ export const everythingQuery = (reader: string, parent: string | null, filter: E
       sort: filter.sort, direction: filter.direction, limit: EVERYTHING_PAGE,
       ...(pageParam === null ? {} : { cursor: pageParam }),
     } }, signal,
-  }))),
+    })));
+  },
   getNextPageParam: (page) => page.next_cursor,
 });
