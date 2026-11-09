@@ -5,9 +5,41 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "runtime_updates/creation_replays.rs"]
+mod creation_replays;
+#[path = "runtime_updates/environment_batch_scopes.rs"]
+mod environment_batch_scopes;
+#[path = "runtime_updates/lifecycle_scopes.rs"]
+mod lifecycle_scopes;
+#[path = "runtime_updates/node_create_scopes.rs"]
+mod node_create_scopes;
+#[path = "runtime_updates/node_move_scopes.rs"]
+mod node_move_scopes;
+#[path = "runtime_updates/node_preflight_scopes.rs"]
+mod node_preflight_scopes;
 mod places;
+#[path = "runtime_updates/provider_batch_scopes.rs"]
+mod provider_batch_scopes;
+#[path = "runtime_updates/provider_owner_host_use.rs"]
+mod provider_owner_host_use;
 mod resources;
 mod support;
+use support::FullMoveReply as _;
+
+/// Keep the server's cause beside a failed test while the HTTP answer stays generic.
+fn report_api_failures() {
+    static LOGS: std::sync::Once = std::sync::Once::new();
+    LOGS.call_once(|| {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                    tracing_subscriber::EnvFilter::new("error,orch_api::native_operations=debug")
+                }),
+            )
+            .with_test_writer()
+            .try_init();
+    });
+}
 
 use async_trait::async_trait;
 use orch_api_contract::{
@@ -197,6 +229,7 @@ async fn an_update_plan_explains_persistence_and_confirmation_makes_a_job_once()
         .body(&body)
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(job.kind, "environment_recreate");
     let reply = world
@@ -205,7 +238,8 @@ async fn an_update_plan_explains_persistence_and_confirmation_makes_a_job_once()
         .token(&team.c.admin.token)
         .body(&body)
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(reply.status.as_u16(), 404);
     let status: String = sqlx::query_scalar("SELECT status FROM environments WHERE id = $1")
         .bind(team.environment)
@@ -245,7 +279,8 @@ async fn update_and_recreate_requests_are_refused_to_somebody_without_manage() {
             options: None,
         })
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(refused.status.as_u16(), 403);
 }
 
@@ -272,7 +307,8 @@ async fn an_expired_plan_cannot_take_a_hold() {
             options: None,
         })
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(refused.problem().code, ErrorCode::Gone);
 }
 
@@ -299,7 +335,9 @@ async fn a_batch_keeps_its_scope_and_queues_each_distinct_environment_once() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary administrator reads the native batch plan");
     assert_eq!(plan.executable, 1);
     assert_eq!(plan.plans.len(), 1);
     let refused = world
@@ -325,13 +363,16 @@ async fn a_batch_keeps_its_scope_and_queues_each_distinct_environment_once() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary creator reads the native batch");
     assert_eq!(batch.jobs.len(), 1);
     assert_eq!(batch.jobs[0].job.batch_id, Some(batch.batch_id));
 }
 
 #[tokio::test]
 async fn a_cross_host_batch_rechecks_each_member_and_never_confirms_a_place_plan() {
+    report_api_failures();
     let world = World::new().await;
     let team = team(&world).await;
     let mut conn = world.conn().await;
@@ -413,7 +454,9 @@ async fn a_cross_host_batch_rechecks_each_member_and_never_confirms_a_place_plan
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary batch control expects its complete preview");
     assert_eq!(plan.executable, 2);
     assert_eq!(plan.plans.len(), 2);
     let wrong = world
@@ -440,7 +483,9 @@ async fn a_cross_host_batch_rechecks_each_member_and_never_confirms_a_place_plan
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary confirmation control expects its complete batch");
     assert_eq!(batch.jobs.len(), 2);
     assert_eq!(batch.jobs[0].job.batch_id, Some(batch.batch_id));
     let hidden = world
@@ -452,13 +497,16 @@ async fn a_cross_host_batch_rechecks_each_member_and_never_confirms_a_place_plan
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary batch control expects its complete preview");
     assert_eq!(hidden.executable, 0);
     assert!(hidden.plans.is_empty());
 }
 
 #[tokio::test]
 async fn an_update_notice_is_optional_and_reaches_a_person_once_for_several_affected_threads() {
+    report_api_failures();
     for notify in [false, true] {
         let world = World::new().await;
         let team = team(&world).await;
@@ -494,7 +542,9 @@ async fn an_update_notice_is_optional_and_reaches_a_person_once_for_several_affe
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("the ordinary batch control expects its complete preview");
         let audience = plan.notify.unwrap();
         assert_eq!(
             audience
@@ -522,7 +572,9 @@ async fn an_update_notice_is_optional_and_reaches_a_person_once_for_several_affe
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("the ordinary confirmation control expects its complete batch");
         let count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM notifications WHERE user_id=$1 AND data->>'operation'=$2",
         )
@@ -606,7 +658,13 @@ async fn the_plan_carries_the_check_of_the_exact_selected_artifact_instead_of_an
         .into_iter()
         .find(|program| program.kind == "codex")
         .unwrap();
-    assert_eq!(target.build, Some(selected));
+    assert_eq!(
+        target.build,
+        Some(HarnessBuild {
+            carry: Some(orch_api_contract::programs::CarryFallback::Handoff),
+            ..selected
+        })
+    );
     assert!(
         plan.blockers.is_empty(),
         "a completed failed check is a warning rather than a block"
@@ -629,6 +687,8 @@ async fn a_selected_target_that_changes_after_review_is_refused_before_any_unit_
                 .send()
                 .await
                 .ok()
+                .into_full()
+                .expect("the ordinary batch control expects its complete preview")
                 .preflight_id
         } else {
             world
@@ -664,6 +724,7 @@ async fn a_selected_target_that_changes_after_review_is_refused_before_any_unit_
                 .body(&body)
                 .send()
                 .await
+                .full_move()
                 .problem()
         };
         assert_eq!(error.code, ErrorCode::ConflictStaleRevision);
@@ -709,7 +770,8 @@ async fn a_provider_runtime_has_the_same_plan_and_job_with_its_state_kept() {
             options: None,
         })
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(refused.status.as_u16(), 403);
     let job = world
         .app
@@ -722,6 +784,7 @@ async fn a_provider_runtime_has_the_same_plan_and_job_with_its_state_kept() {
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(job.kind, "provider_recreate");
     let refused = world
@@ -750,7 +813,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(hidden.executable, 0);
     assert!(hidden.plans.is_empty());
     let plan = world
@@ -762,7 +827,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(plan.executable, 1);
     let body = ForkCreateBody {
         notify: None,
@@ -784,7 +851,9 @@ async fn provider_batches_recheck_permissions_and_group_their_jobs() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(batch.jobs.len(), 1);
     assert_eq!(batch.jobs[0].job.batch_id, Some(batch.batch_id));
 }
@@ -904,7 +973,9 @@ async fn recycle_skips_kept_awake_units_and_units_held_by_a_job_in_its_preview()
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary recycle retains native candidate content");
     assert!(preview.candidates.is_empty());
     assert_eq!(preview.skipped_active, 1);
     let preview = world
@@ -948,6 +1019,7 @@ async fn recycle_skips_kept_awake_units_and_units_held_by_a_job_in_its_preview()
         })
         .send()
         .await
+        .full_move()
         .ok();
     let preview = world
         .app
@@ -978,7 +1050,9 @@ async fn recycle_previews_and_stops_the_same_idle_units_and_returns_a_permission
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary recycle retains native candidate content");
     assert_eq!(preview.candidates.len(), 1);
     assert_eq!(preview.stopped, 0);
     let mut conn = world.conn().await;
@@ -1136,7 +1210,7 @@ fn file_state_count() -> serde_json::Value {
     .unwrap()
 }
 
-/// Completes the detached application's count, as the worker whose full path is tested by the engine.
+/// Drives the real count worker against the same native protocol peer used by these plans.
 async fn finish_move_count(world: &World, team: &Team, files: &FilesPlan) {
     use orch_driver_contract::volumes::OwnedVolumeSelector;
     use orch_link_contract::commands::NodeRuntimeVolumesMeasure;
@@ -1168,20 +1242,30 @@ async fn finish_move_count(world: &World, team: &Team, files: &FilesPlan) {
     assert_eq!(request.runtime_id, team.runtime);
     assert_eq!(request.volumes.len(), 1);
     assert_eq!(request.volumes[0].selector, OwnedVolumeSelector::FileStates);
-    let mut progress = row.progress;
-    progress["percent"] = json!(100);
+    drop(conn);
+    // Exercise the real measurement worker and the protocol peer's native command result.
+    // A succeeded job marker alone is not a measurement observation witness.
+    world.app.app.engine.start();
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let row = orch_db::queries::jobs::job(&mut *world.conn().await, reference.job_id)
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(row.state.as_str(), "succeeded" | "failed" | "cancelled") {
+                break row;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the real count worker and native peer must finish");
+    world.app.app.engine.stop();
+    assert_eq!(completed.state, "succeeded", "{:?}", completed.error);
+    assert_eq!(completed.result, Some(file_state_count()));
     assert!(
-        orch_db::queries::jobs::finish(
-            &mut conn,
-            row.id,
-            "succeeded",
-            &progress,
-            Some(&file_state_count()),
-            None,
-            world.now()
-        )
-        .await
-        .unwrap()
+        completed.plan["measurement_observation"]["completed"].is_object(),
+        "the worker seals its actual native answer in the real terminal transaction"
     );
 }
 
@@ -1237,6 +1321,7 @@ async fn answer_move_plans(world: &World, team: &Team, target: Id) -> tokio::tas
 
 #[tokio::test]
 async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_permission() {
+    report_api_failures();
     let world = World::new().await;
     let team = team(&world).await;
     let target = movable(&world, &team).await;
@@ -1259,7 +1344,8 @@ async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_p
         .token(&team.c.admin.token)
         .body(&request)
         .send()
-        .await;
+        .await
+        .full_move();
     assert!(plan.body.is_ok(), "{:?}", plan.body);
     let plan = plan.ok();
     assert!(
@@ -1275,6 +1361,7 @@ async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_p
         .body(&request)
         .send()
         .await
+        .full_move()
         .ok();
     assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
     assert!(plan.files.file_states.as_ref().unwrap().complete);
@@ -1296,7 +1383,8 @@ async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_p
         .token(&team.c.stranger.token)
         .body(&request)
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(refused.status.as_u16(), 403);
     let body = ForkCreateBody {
         notify: None,
@@ -1309,7 +1397,8 @@ async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_p
         .token(&team.c.stranger.token)
         .body(&body)
         .send()
-        .await;
+        .await
+        .full_move();
     assert_eq!(refused.status.as_u16(), 404);
     let job = world
         .app
@@ -1318,6 +1407,7 @@ async fn moving_one_environment_preserves_its_identity_and_requires_its_manage_p
         .body(&body)
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(job.kind, "environment_move");
     assert_eq!(job.environment_id, Some(team.environment));
@@ -1353,7 +1443,9 @@ async fn a_fleet_move_plans_and_confirms_each_distinct_unit_and_is_refused_outsi
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary mover reads the native batch observation");
     assert_eq!(plan.executable, 0);
     assert_eq!(plan.plans.len(), 1);
     assert!(
@@ -1370,7 +1462,9 @@ async fn a_fleet_move_plans_and_confirms_each_distinct_unit_and_is_refused_outsi
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary mover reads the native batch observation");
     assert_eq!(plan.executable, 1, "{:?}", plan.plans);
     assert_eq!(plan.plans.len(), 1);
     assert!(plan.plans[0].files.file_states.as_ref().unwrap().complete);
@@ -1379,6 +1473,11 @@ async fn a_fleet_move_plans_and_confirms_each_distinct_unit_and_is_refused_outsi
         preflight_id: plan.preflight_id,
         options: None,
     };
+    let before: serde_json::Value = sqlx::query_scalar("SELECT plan FROM preflights WHERE id=$1")
+        .bind(plan.preflight_id)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
     let refused = world
         .app
         .call(api::NodeEnvironmentMoveCreate, &[&team.c.acme])
@@ -1386,7 +1485,25 @@ async fn a_fleet_move_plans_and_confirms_each_distinct_unit_and_is_refused_outsi
         .body(&body)
         .send()
         .await;
-    assert_eq!(refused.status.as_u16(), 403);
+    assert_eq!(refused.status.as_u16(), 404);
+    assert_eq!(refused.problem().code, ErrorCode::NotFound);
+    let after: serde_json::Value = sqlx::query_scalar("SELECT plan FROM preflights WHERE id=$1")
+        .bind(plan.preflight_id)
+        .fetch_one(&world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "another account cannot consume or change this private review"
+    );
+    let jobs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM jobs WHERE kind='environment_move' AND environment_id=$1",
+    )
+    .bind(team.environment)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 0, "a hidden review grants no move");
     let batch = world
         .app
         .call(api::NodeEnvironmentMoveCreate, &[&team.c.acme])
@@ -1395,6 +1512,9 @@ async fn a_fleet_move_plans_and_confirms_each_distinct_unit_and_is_refused_outsi
         .send()
         .await
         .ok();
+    let batch = batch
+        .into_full()
+        .expect("the ordinary mover reads its native accepted batch");
     assert_eq!(batch.jobs.len(), 1);
     assert_eq!(batch.jobs[0].job.kind, "environment_move");
     answers.abort();
@@ -1482,6 +1602,7 @@ async fn single_updates_keep_both_notification_transports_with_explicit_query_pr
                     .body(&body)
                     .send()
                     .await
+                    .full_move()
                     .ok()
             } else {
                 world
@@ -1492,6 +1613,7 @@ async fn single_updates_keep_both_notification_transports_with_explicit_query_pr
                     .body(&body)
                     .send()
                     .await
+                    .full_move()
                     .ok()
             };
             let count: i64 = sqlx::query_scalar(

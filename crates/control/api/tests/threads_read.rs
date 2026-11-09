@@ -173,6 +173,47 @@ async fn paused_and_stopped_goals_survive_sync_and_opening() {
 }
 
 #[tokio::test]
+async fn thread_parameters_publish_the_same_native_port_tool_offer_without_private_sources() {
+    use orch_api_contract::settings::ThreadParameterGet;
+    let scene = Scene::new().await;
+    scene.rig.tools_of_agents(serde_json::json!("mcp")).await;
+    let id = scene.thread().await.base.id;
+    let native = {
+        let mut conn = scene.rig.world.conn().await;
+        let row = orch_db::queries::threads::thread(&mut conn, id)
+            .await
+            .unwrap()
+            .unwrap();
+        orch_engine::tools::port_tools_for_session(
+            &mut conn,
+            &row,
+            true,
+            orch_types::Time::new(scene.rig.world.now()),
+        )
+        .await
+        .unwrap()
+    };
+    for reader in [&scene.ada, &scene.cai] {
+        let parameters = scene
+            .rig
+            .world
+            .app
+            .call(ThreadParameterGet, &[&id])
+            .token(&reader.token)
+            .send()
+            .await
+            .ok();
+        let actual = parameters
+            .port_tools
+            .expect("a known program supplies native port-tool facts");
+        assert_eq!(actual, native);
+        let value = serde_json::to_value(actual).unwrap();
+        assert!(value.get("environment").is_none() && value.get("machine").is_none());
+        assert!(value.get("grant").is_none() && value.get("audience").is_none());
+    }
+}
+
+#[tokio::test]
 async fn opening_carries_the_native_screen_projections_and_only_the_readers_own_draft() {
     use orch_api_contract::settings::{NodeSettingList, ThreadParameterGet};
     use orch_api_contract::threads::{

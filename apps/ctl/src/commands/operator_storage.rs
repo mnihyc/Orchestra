@@ -412,6 +412,9 @@ fn record_copy(root: &Root, name: &str, directory: &str, at: Time) -> Result<(),
 
 fn row(id: String, kind: StorageKind, name: String, at: Time) -> KeptRecord {
     KeptRecord {
+        artifact: None,
+        physical_parts: Vec::new(),
+        upload: None,
         accounting_key: id.clone(),
         id,
         kind,

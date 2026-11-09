@@ -8,13 +8,16 @@
 mod places;
 mod rig;
 mod support;
+use support::FullApprovalReply;
 
 use orch_api_contract::approvals::{
     Approval, ApprovalDecide, ApprovalDecision, ApprovalList, ApprovalListQuery, ApprovalState,
     CapabilityDecision,
 };
 use orch_api_contract::common::{ErrorCode, Page};
-use orch_api_contract::environment::EnvironmentCapabilityRevoke;
+use orch_api_contract::environment::{
+    EnvironmentCapabilityRevoke, EnvironmentGet, EnvironmentUpdate, EnvironmentUpdateBody,
+};
 use orch_api_contract::threads::{AnnouncementCategory, Delivery};
 use orch_api_contract::topics::{
     Announcement, AnnouncementCreateBody, AnnouncementDelivery, AnnouncementSendAudience,
@@ -63,6 +66,8 @@ async fn tell_the_topic(s: &Scene, by: &Who, body: &AnnouncementCreateBody) -> A
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary announcement control returns its full native result")
         .announcements
         .into_iter()
         .next()
@@ -146,8 +151,91 @@ async fn somebody_who_cannot_start_work_in_the_topic_is_refused_and_told_what_th
     assert_eq!(nothing, 0);
 }
 
+async fn assert_posting_metadata_is_not_execution_authority(
+    s: &Scene,
+    recipient: Id,
+    announcement: Id,
+) {
+    let (input, author, run_as, saved): (Id, Option<Id>, Option<Id>, serde_json::Value) =
+        sqlx::query_as(
+            "SELECT id,author_id,run_as,submission_authority FROM thread_inputs
+             WHERE thread_id=$1 AND source='announcement'",
+        )
+        .bind(recipient)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert!(author.is_none());
+    assert!(run_as.is_none());
+    assert_eq!(saved.as_object().unwrap().len(), 1);
+    let provenance = &saved["announcement_provenance"];
+    assert_eq!(provenance["announcement_id"], json!(announcement));
+    assert_eq!(provenance["sender_id"], json!(s.ada.id()));
+    assert_eq!(provenance["original_input_id"], json!(input));
+    assert_eq!(provenance["original_recipient_id"], json!(recipient));
+
+    for (source, author, value) in [
+        ("announcement", None, json!({})),
+        ("announcement", None, json!({"announcement_provenance":{}})),
+        (
+            "announcement",
+            None,
+            json!({"announcement_provenance":provenance,"credentials":[]}),
+        ),
+        ("announcement", Some(s.ada.id()), saved.clone()),
+        ("user", Some(s.ada.id()), saved.clone()),
+        ("system", None, saved.clone()),
+    ] {
+        let mut tx = s.rig.db.pool().begin().await.unwrap();
+        let error = sqlx::query(
+            "UPDATE thread_inputs SET source=$2,author_id=$3,submission_authority=$4 WHERE id=$1",
+        )
+        .bind(input)
+        .bind(source)
+        .bind(author)
+        .bind(value)
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(|error| error.constraint()),
+            Some("thread_inputs_submission_authority_check"),
+            "{error}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    let mut tx = s.rig.db.pool().begin().await.unwrap();
+    let error = sqlx::query("UPDATE thread_inputs SET run_as=$2,run_as_authority=$3 WHERE id=$1")
+        .bind(input)
+        .bind(s.ada.id())
+        .bind(&saved)
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("thread_inputs_run_as_authority_check"),
+        "posting metadata cannot approve model use: {error}"
+    );
+    tx.rollback().await.unwrap();
+}
+
 #[tokio::test]
 async fn an_announcement_to_the_active_threads_leaves_the_others_without_even_a_notice() {
+    if std::env::var_os("ORCH_TEST_ANNOUNCEMENT_ERRORS").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_ansi(false)
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+            )
+            .try_init();
+    }
     let s = Scene::new().await;
     let (working, idle) = (
         s.thread_by(&s.ada, "Working").await,
@@ -181,6 +269,7 @@ async fn an_announcement_to_the_active_threads_leaves_the_others_without_even_a_
             .await
             .unwrap();
     assert_eq!(notices, json!([]));
+    assert_posting_metadata_is_not_execution_authority(&s, working.base.id, made.id).await;
 }
 
 #[tokio::test]
@@ -217,7 +306,9 @@ async fn a_project_announcement_needs_interact_and_goes_to_every_open_topic() {
         .body(&announcement("To the project"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary project announcement control returns its full native result");
     assert_eq!(
         made.announcements.len(),
         2,
@@ -282,6 +373,7 @@ async fn what_an_agent_announced_to_one_thread_or_to_followers_is_listed_only_wh
         .say(
             build.base.id,
             Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: turn,
                 call_ref: call_ref.clone(),
                 attempt: None,
@@ -343,7 +435,7 @@ async fn what_an_agent_announced_to_one_thread_or_to_followers_is_listed_only_wh
 // ---------------------------------------------------------------- capabilities
 
 /// The scene's environment, made from a template that allows `kvm` and `ptrace`, and the catalogue.
-async fn with_capabilities(s: &Scene) {
+async fn with_capabilities(s: &Scene) -> Id {
     // A prospective unit learns its capabilities from an available driver's report. No host is
     // selected yet, so this report gives it no physical machine's policy or host manager.
     let mut conn = s.rig.db.acquire().await.unwrap();
@@ -403,6 +495,7 @@ async fn with_capabilities(s: &Scene) {
     .await
     .unwrap();
     s.rig.tools_of_agents(json!("mcp")).await;
+    host
 }
 
 async fn pending_for(s: &Scene, who: &Who) -> Page<Approval> {
@@ -421,18 +514,52 @@ async fn pending_for(s: &Scene, who: &Who) -> Page<Approval> {
 async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_decided_by_them_alone()
  {
     let s = Scene::new().await;
-    with_capabilities(&s).await;
+    let host = with_capabilities(&s).await;
     let thread = s.thread().await.base.id;
     // Whoever decides is there before the agent asks: a change of who may do what while the
     // machine's events are applied refuses them, and the machine sends them again only after its
     // stall time.
     let admin = places::admin(&s.rig.world, "root").await;
+    // An available driver is not a host selection or its authority. Select the request's actual host.
+    let environment = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentGet, &[&s.on.environment])
+        .token(&admin.token)
+        .send()
+        .await
+        .ok();
+    let mut config = environment.config;
+    config["env.host_id"] = json!(host);
+    s.rig
+        .world
+        .app
+        .call(EnvironmentUpdate, &[&s.on.environment])
+        .token(&admin.token)
+        .body(&EnvironmentUpdateBody {
+            name: None,
+            config: Some(config),
+            data_sources: None,
+            remote_write: None,
+            terminal: None,
+            browser: None,
+            vnc: None,
+            home_node_id: None,
+            expected_revision: environment.revision,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     let turn = running_turn(&s, thread).await;
     let call_ref = new_id().to_string();
     s.rig
         .say(
             thread,
             Event::OrchToolCall(OrchToolCall {
+                    deadline: None,
                 turn_id: turn,
                 call_ref: call_ref.clone(),
                 attempt: None,
@@ -453,6 +580,11 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         "the system's admin decides what is decided on a machine's side"
     );
     assert_eq!(approval.thread_id, Some(thread));
+    let orch_api_contract::approvals::ApprovalRequest::Capability(request) = &approval.request
+    else {
+        panic!("the approval describes a capability");
+    };
+    assert_eq!(request.host.id, host);
     // The owner of the thread, the topic and the environment is neither sent it nor allowed to decide it.
     assert!(pending_for(&s, &s.ada).await.items.is_empty());
     let refused = s
@@ -467,6 +599,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         }))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     let decided = s
@@ -481,6 +614,7 @@ async fn a_request_for_a_capability_is_listed_for_the_people_of_its_scope_and_de
         }))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let granted: Vec<String> =

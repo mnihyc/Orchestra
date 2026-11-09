@@ -73,6 +73,7 @@ async fn a_report_is_kept_whole_and_orch_estimates_what_filled_a_context_the_har
     let (start, _) = world.running_turn(thread, "Fix the login redirect").await;
     let share = serde_json::from_value(tokens(2_000, 0, 500)).unwrap();
     let report = TurnUsageReport {
+        counters_only: false,
         api_time_ms: None,
         subagents: Some(share),
         by_subagent: vec![StreamTokens {

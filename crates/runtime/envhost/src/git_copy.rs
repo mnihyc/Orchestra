@@ -631,6 +631,8 @@ mod tests {
         let source = temp.path().join("source");
         let target = temp.path().join("target");
         std::fs::create_dir_all(source.join("repo")).unwrap();
+        // Git and Workspace both report canonical roots, including host aliases.
+        let source = std::fs::canonicalize(source).unwrap();
         git(&source.join("repo"), &["init", "-b", "main"]);
         std::fs::write(source.join("repo/code"), "base\n").unwrap();
         git(&source.join("repo"), &["add", "code"]);
@@ -687,6 +689,7 @@ mod tests {
         );
         let parsed = manifest::parse(&manifest::build(&header, entries).unwrap().bytes).unwrap();
         copy(&source, &target);
+        let target = std::fs::canonicalize(target).unwrap();
         (temp, source, target, parsed)
     }
 

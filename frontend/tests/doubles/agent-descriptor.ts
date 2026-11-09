@@ -13,7 +13,7 @@ export function agentDescriptor(name: string, fields: Partial<AgentDescriptor> =
       discover_sessions: false, effort: 'none', export_native: false, fork_native: false, import_native: false,
       import_neutral: false, input_images: false, instruction_root_marker: false, interrupt: false,
       mcp: { stdio: false, http: false, reload: false, strict: false }, mcp_discovery: false, memory: 'none',
-      model_discovery: false, orch_tools: 'none', phases: false, plan: false, plan_mode: false,
+      model_discovery: false, prompt_cache_ttl: false, orch_tools: 'none', phases: false, plan: false, plan_mode: false,
       provider_facts: [], reasoning_summary: false, resume: false, session_reload: 'on_change', skills: 'none',
       steer: false, subagents: false, telemetry_off: false, title: false, usage_context: 'none', usage_tokens: false,
       ...fields.capabilities, ...capabilities,

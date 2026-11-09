@@ -6,6 +6,7 @@
  * opens by a right click anywhere in the block. The "+" beside it opens the block menu for a new block
  * under this one.
  */
+import { linkTo, referenceTo } from '@/lib/links';
 import type { Editor } from '@tiptap/core';
 import type { Node as PmNode } from '@tiptap/pm/model';
 import type { NestedOptions } from '@tiptap/extension-drag-handle';
@@ -143,11 +144,16 @@ export function blockEntries(editor: Editor, target: Target, t: TFunction, docId
       label: t('documents.handle.comment'),
       onSelect: () => marksOf(editor).setState({ compose: { block: String(container.attrs.id), quote: '' } }),
     },
+    { id: 'reference', label: t('people.reference.copy'), onSelect: () => {
+      let number: number | undefined;
+      editor.state.doc.forEach((node, _offset, index) => { if (node.attrs.id === container.attrs.id) number = index + 1; });
+      void copyText(referenceTo({ kind: 'document', id: docId, name: container.textContent || docId }, number === undefined ? {} : { number }), t('people.reference.copied'));
+    } },
     {
       id: 'link',
       label: t('documents.handle.copyLink'),
       onSelect: () => {
-        const url = `${location.origin}/doc/${docId}?block=${String(container.attrs.id)}`;
+        const url = linkTo({ kind: 'document', id: docId }, { block: String(container.attrs.id) });
         void copyText(url, t('common.linkCopied'));
       },
     },

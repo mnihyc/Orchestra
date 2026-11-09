@@ -18,6 +18,7 @@ use crate::middleware::transaction_guard;
 use crate::registry::Ctx;
 use crate::sign_in;
 use orch_access_contract::audit::AuditAction;
+use orch_access_contract::key_scope::{KeyIdentityKind, KeyTargetKind};
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::nodes::{NodeKind, NodeRef};
@@ -48,6 +49,11 @@ use orch_worker_core::channels::{
 use orch_worker_core::routes as route_logic;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+pub(super) mod list_read;
+pub(super) mod operation;
+pub(super) mod test_operation;
+pub(super) mod update_operation;
 
 /// Whose a channel being set up is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,8 +239,17 @@ async fn may_change(
             Ok(held)
         }
         (None, Some(person)) => Ok(person == principal.user()),
-        (None, None) => Ok(principal.is_system_admin()),
+        (None, None) => Ok(system_channel_admin(principal)),
     }
+}
+
+/// Ordinary authority for the system's own channels, under this operation's current
+/// admission. Org/person channels continue through their existing permission branches.
+fn system_channel_admin(principal: &Principal) -> bool {
+    orch_authz::system_administration::on_system(
+        principal,
+        KeyTargetKind::Identity(KeyIdentityKind::System),
+    )
 }
 
 /// Refuses the caller who may not change the channel, with what asks them to
@@ -254,7 +269,7 @@ async fn require_change(conn: &mut Conn, principal: &Principal, row: &ChannelRow
         }
         (None, Some(person)) if person == principal.user() => Ok(()),
         (None, Some(_)) => Err(ApiError::not_found()),
-        (None, None) if principal.is_system_admin() => Ok(()),
+        (None, None) if system_channel_admin(principal) => Ok(()),
         (None, None) => Err(refusals::system_admin_only(
             "only a system admin changes a channel of the system",
         )),
@@ -287,15 +302,113 @@ async fn secret_names(
     Ok(names)
 }
 
-/// The channels as the caller reads them, each with their own route.
-async fn views_for(
+/// Native selected channel operands, including the exact own-route association and cut.
+pub(super) struct PreparedChannel {
+    pub(super) row: ChannelRow,
+    can_edit: bool,
+    owner: orch_api_contract::notifications::NotificationChannelOwner,
+    secrets_set: Vec<String>,
+    enabled_route_count: i64,
+    route_channel: orch_api_contract::notifications::NotificationRouteChannel,
+    route: Option<route_rows::RouteRow>,
+    needs: Option<orch_notifier_contract::descriptor::Needs>,
+    waiting_count: i64,
+    link: Option<orch_api_contract::notifications::NotificationRouteLink>,
+}
+pub(super) struct PreparedViews {
+    pub(super) rows: Vec<PreparedChannel>,
+    pub(super) private_routes: bool,
+}
+impl PreparedViews {
+    pub(super) fn render(&self) -> Vec<NotificationChannel> {
+        self.rows
+            .iter()
+            .map(|ready| {
+                views::channel_view(ChannelFacts {
+                    row: &ready.row,
+                    owner: ready.owner.clone(),
+                    can_edit: ready.can_edit,
+                    secrets_set: ready.secrets_set.clone(),
+                    enabled_route_count: ready.enabled_route_count,
+                    route: views::route_view(views::RouteFacts {
+                        channel_id: Some(ready.row.id),
+                        channel: Some(ready.route_channel.clone()),
+                        route: ready.route.as_ref(),
+                        needs: ready.needs,
+                        waiting_count: ready.waiting_count,
+                        link: ready.link.clone(),
+                    }),
+                })
+            })
+            .collect()
+    }
+    pub(super) fn preserves(&self, opened: &Self) -> bool {
+        if opened.private_routes && !self.private_routes {
+            return false;
+        }
+        let fresh = self
+            .rows
+            .iter()
+            .map(|row| (row.row.id, row))
+            .collect::<BTreeMap<_, _>>();
+        opened.rows.iter().all(|old| {
+            fresh.get(&old.row.id).is_some_and(|new| {
+                old.row.org_id == new.row.org_id
+                    && old.row.user_id == new.row.user_id
+                    && old.row.kind == new.row.kind
+                    && (!old.can_edit || new.can_edit)
+                    && old.route.as_ref().is_none_or(|route| {
+                        new.route.as_ref().is_some_and(|current| {
+                            route.id == current.id
+                                && route.user_id == current.user_id
+                                && route.channel_id == current.channel_id
+                        })
+                    })
+                    && old
+                        .link
+                        .as_ref()
+                        .is_none_or(|link| new.link.as_ref() == Some(link))
+            })
+        })
+    }
+}
+
+fn own_route_read(principal: &Principal) -> bool {
+    let caller = principal.caller();
+    if !crate::key_operations::native::modern(caller) {
+        return true;
+    }
+    let account = KeyTargetKind::Identity(KeyIdentityKind::Account);
+    caller.admitted_facets().is_some_and(|facets| {
+        facets.iter().any(|facet| {
+            Some(facet.operation.as_str()) == caller.admitted_operation()
+                && facet.action == orch_access_contract::key_scope::KeyAction::Read
+                && facet.resource_kind == account
+                && facet.target.object.kind == account
+                && facet.target.object.id == Some(principal.user())
+                && caller.permits_facets(std::slice::from_ref(facet))
+        })
+    })
+}
+
+/// The same native producer for lists and singleton replies. Private caller-route facts
+/// are loaded only under that actual account's admitted same-operation Read.
+pub(super) async fn prepare_views(
     conn: &mut Conn,
     principal: &Principal,
     channels: &[ChannelRow],
-) -> ApiResult<Vec<NotificationChannel>> {
-    let person = people::recipient(conn, principal.user())
-        .await?
-        .ok_or_else(ApiError::not_found)?;
+    private_routes: bool,
+) -> ApiResult<PreparedViews> {
+    let private_routes = private_routes && own_route_read(principal);
+    let person = if private_routes {
+        Some(
+            people::recipient(conn, principal.user())
+                .await?
+                .ok_or_else(ApiError::not_found)?,
+        )
+    } else {
+        None
+    };
     let mut managed: HashMap<Id, bool> = HashMap::new();
     let mut editable: Vec<bool> = Vec::with_capacity(channels.len());
     for row in channels {
@@ -330,20 +443,26 @@ async fn views_for(
             )
         })
         .collect();
-    let mut routes: HashMap<Id, route_rows::RouteRow> = pages::routes_of(conn, principal.user())
-        .await?
-        .into_iter()
-        .filter_map(|route| route.channel_id.map(|channel| (channel, route)))
-        .collect();
+    let mut routes: HashMap<Id, route_rows::RouteRow> = if private_routes {
+        pages::routes_of(conn, principal.user())
+            .await?
+            .into_iter()
+            .filter_map(|route| route.channel_id.map(|channel| (channel, route)))
+            .collect()
+    } else {
+        HashMap::new()
+    };
     let edited_ids: Vec<Id> = those_edited.iter().map(|row| row.id).collect();
     let counts = pages::enabled_route_counts(conn, &edited_ids).await?;
     let mut shown = Vec::with_capacity(channels.len());
     for (row, can_edit) in channels.iter().zip(editable) {
         let route = routes.remove(&row.id);
         let declared = notifiers().get(&row.kind).map(|each| each.describe());
-        let needs = match &declared {
-            Some(declared) => route_logic::needs(conn, declared, &person, route.as_ref()).await?,
-            None => None,
+        let needs = match (&declared, &person) {
+            (Some(declared), Some(person)) => {
+                route_logic::needs(conn, declared, person, route.as_ref()).await?
+            }
+            _ => None,
         };
         let waiting_count = match &route {
             Some(route) => route_rows::waiting_count(conn, route.id).await?,
@@ -353,23 +472,34 @@ async fn views_for(
             Some(route) => own_link(conn, route, ctx_now(principal)).await?,
             None => None,
         };
-        shown.push(views::channel_view(ChannelFacts {
-            row,
+        shown.push(PreparedChannel {
             owner: views::owner_view(row, &orgs),
             can_edit,
             secrets_set: secrets.remove(&row.id).unwrap_or_default(),
             enabled_route_count: counts.get(&row.id).copied().unwrap_or(0),
-            route: views::route_view(views::RouteFacts {
-                channel_id: Some(row.id),
-                channel: Some(views::route_channel_of(row, &orgs)),
-                route: route.as_ref(),
-                needs,
-                waiting_count,
-                link,
-            }),
-        }));
+            route_channel: views::route_channel_of(row, &orgs),
+            row: row.clone(),
+            route,
+            needs,
+            waiting_count,
+            link,
+        });
     }
-    Ok(shown)
+    Ok(PreparedViews {
+        rows: shown,
+        private_routes,
+    })
+}
+
+/// Existing singleton callers use the same native preparation and renderer.
+async fn views_for(
+    conn: &mut Conn,
+    principal: &Principal,
+    channels: &[ChannelRow],
+) -> ApiResult<Vec<NotificationChannel>> {
+    Ok(prepare_views(conn, principal, channels, true)
+        .await?
+        .render())
 }
 
 /// The moment the caller's request is answered at.
@@ -403,49 +533,6 @@ pub(super) async fn own_link(
             expires_at: orch_types::Time::new(expires_at),
         },
     ))
-}
-
-/// The ways out that can reach the caller, each with their own route: the
-/// system's, those of the root orgs they belong to, and their own. With an
-/// org, for whoever holds `settings.manage` on that root org: that org's, to
-/// look after.
-pub async fn list(
-    ctx: Ctx,
-    query: NotificationChannelListQuery,
-    (): (),
-) -> ApiResult<Vec<NotificationChannel>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let channels = match query.org_id {
-        Some(org) => {
-            authorization::require(
-                &mut conn,
-                &principal,
-                org,
-                exact(Permission::SettingsManage),
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
-            root_org(&mut conn, org, &ctx).await?;
-            pages::channels_of_org(&mut conn, org).await?
-        }
-        None => {
-            let mut reaching = pages::channels_reaching(&mut conn, principal.user()).await?;
-            // Where the system's mail server may not be used by an org that has none of its own,
-            // it is no way out for the people of any org: there is no such channel in their list.
-            // The admin who set it up is shown it all the same.
-            if !principal.is_system_admin()
-                && !channels::mail_may_be_shared(&mut conn)
-                    .await
-                    .map_err(internal)?
-            {
-                reaching.retain(|row| !(row.is_the_systems() && row.kind == "email"));
-            }
-            reaching
-        }
-    };
-    views_for(&mut conn, &principal, &channels).await
 }
 
 /// Makes sure the node is a root org: nothing else has channels of its own.
@@ -496,7 +583,10 @@ struct Making<'a> {
 /// Sets a channel up: looks at what was given and at the far side, then keeps
 /// the channel, its sealed secrets and its line in the audit trail in one
 /// transaction.
-async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
+async fn make(
+    ctx: &Ctx,
+    making: Making<'_>,
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelUpdateResponse> {
     let kind = making.kind;
     let notifier = notifiers()
         .get(kind)
@@ -564,11 +654,10 @@ async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
     current.now = guard.now().get();
     let ctx = &current;
     let me = guard.user().id();
+    let accepted = guard.principal().caller().clone();
     match making.maker {
-        Maker::System if !guard.user().is_system_admin() => {
-            return Err(refusals::system_admin_only(
-                "only a system admin sets up a channel of the system",
-            ));
+        Maker::System => {
+            ctx.ordinary_system_admin_with(guard.user(), guard.principal().caller())?;
         }
         Maker::Org(org) => {
             root_org(&mut tx, org, ctx).await?;
@@ -583,7 +672,7 @@ async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
             .await?;
         }
         Maker::Person(person) if person != me => return Err(ApiError::not_found()),
-        Maker::System | Maker::Person(_) => {}
+        Maker::Person(_) => {}
     }
     if descriptor.is_single() {
         // A mail server and a bot: one for the system and one for each root
@@ -653,8 +742,17 @@ async fn make(ctx: &Ctx, making: Making<'_>) -> ApiResult<NotificationChannel> {
     let row = rows::channel(&mut tx, id)
         .await?
         .ok_or_else(|| internal("the channel vanished"))?;
+    orch_db::idempotency::creation::observe(&mut tx, Some(me), "notification_channel", id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    one_view(ctx, &row).await
+    if crate::key_operations::native::modern(&accepted) {
+        update_operation::created(ctx, &accepted, row).await
+    } else {
+        Ok(
+            orch_api_contract::notifications::NotificationChannelUpdateResponse::full(
+                one_view(ctx, &row).await?,
+            ),
+        )
+    }
 }
 
 /// What the audit line of a channel says of it.
@@ -722,12 +820,8 @@ pub async fn create_system(
     ctx: Ctx,
     (): (),
     body: NotificationChannelCreateBody,
-) -> ApiResult<NotificationChannel> {
-    if !ctx.user()?.is_system_admin() {
-        return Err(refusals::system_admin_only(
-            "only a system admin sets up a channel of the system",
-        ));
-    }
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelUpdateResponse> {
+    crate::routes::admin::admin_of(&ctx)?;
     make(
         &ctx,
         Making {
@@ -749,7 +843,7 @@ pub async fn create_org(
     ctx: Ctx,
     (): (),
     body: NotificationChannelCreateBody,
-) -> ApiResult<NotificationChannel> {
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelUpdateResponse> {
     let org = ctx.id("id")?;
     {
         let mut conn = ctx.app.db.acquire().await?;
@@ -775,7 +869,7 @@ pub async fn create_own(
     ctx: Ctx,
     (): (),
     body: MeNotificationChannelCreateBody,
-) -> ApiResult<NotificationChannel> {
+) -> ApiResult<orch_api_contract::notifications::NotificationChannelUpdateResponse> {
     let config = serde_json::to_value(&body.config).map_err(internal)?;
     let secrets = body
         .secrets
@@ -931,145 +1025,39 @@ pub(super) fn check_texts_of(
     Ok(())
 }
 
-/// Changes a channel. What is left out stays; the secrets named are replaced
-/// and the others kept, and an empty one takes the secret away.
-pub async fn update(
-    mut ctx: Ctx,
-    (): (),
-    body: NotificationChannelUpdateBody,
-) -> ApiResult<NotificationChannel> {
-    let row = {
-        let mut conn = ctx.app.db.acquire().await?;
-        let row = channel_of(&mut conn, &ctx).await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        require_change(&mut conn, &principal, &row).await?;
-        row
-    };
-    let name = body.name.as_deref().map(checked_name).transpose()?;
-    let (overrides, stored_templates) = templates_of(body.templates.as_ref())?;
-    let mut master = None;
-    let mut again: Option<Rechecked> = None;
-    if body.config.is_some() || body.secrets.is_some() {
-        let master_key = master_key()?;
-        master = Some(master_key);
-        let (current, allowed) = {
-            let mut conn = ctx.app.db.acquire().await?;
-            let current = config_of_channel(&mut conn, master_key, &row)
-                .await
-                .map_err(internal)?;
-            let allowed = if row.is_the_systems() {
-                None
-            } else {
-                Some(outbound_hosts(&mut conn).await.map_err(internal)?)
-            };
-            (current, allowed)
-        };
-        again = Some(
-            recheck(Recheck {
-                kind: &row.kind,
-                target: Target::Person,
-                stored: &row.config,
-                current: &current,
-                config: body.config.as_ref(),
-                secrets: body.secrets.as_ref(),
-                texts: &overrides,
-                allowed,
-            })
-            .await?,
-        );
-    } else if body.templates.is_some() {
-        check_texts_of(&row.kind, &overrides)?;
-    }
-
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let row = channel_of(&mut tx, &ctx).await?;
-    require_change(&mut tx, guard.principal(), &row).await?;
-    let changed = rows::update_channel(
-        &mut tx,
-        row.id,
-        &ChannelChange {
-            name: name.as_deref(),
-            config: again.as_ref().map(|again| &again.values),
-            templates: body.templates.as_ref().map(|_| &stored_templates),
-            enabled: body.enabled,
-        },
-        ctx.now,
-    )
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    let me = guard.user().id();
-    let mut sealed_names: Vec<String> = Vec::new();
-    if let Some(again) = &again {
-        match &again.unreached {
-            Some(error) => rows::record_channel_error(&mut tx, row.id, error).await?,
-            None => pages::clear_channel_error(&mut tx, row.id).await?,
-        }
-        // The fields may name another bot than the one whose links were read.
-        rows::set_link_cursor(&mut tx, row.id, None).await?;
-        for (secret_name, value) in &again.put {
-            let master = master.ok_or_else(|| internal("the key that seals secrets is missing"))?;
-            let sealed = seal_secret(master, owner::CHANNEL, row.id, secret_name, value)
-                .map_err(|_| internal("a secret could not be sealed"))?;
-            settings::put_secret(
-                &mut tx,
-                owner::CHANNEL,
-                row.id,
-                secret_name,
-                &sealed,
-                Some(me),
-                ctx.now,
-            )
-            .await?;
-            sealed_names.push(secret_name.clone());
-        }
-        for secret_name in &again.remove {
-            settings::delete_secret(&mut tx, owner::CHANNEL, row.id, secret_name).await?;
-        }
-    }
-    let maker = match (row.org_id, row.user_id) {
-        (Some(org), _) => Maker::Org(org),
-        (None, Some(person)) => Maker::Person(person),
-        (None, None) => Maker::System,
-    };
-    if !matches!(maker, Maker::Person(_)) {
-        write_audit(
-            &mut tx,
-            &ctx,
-            Audited {
-                action: orch_db::audit::action!(AuditAction::ChannelUpdated),
-                maker,
-                channel: row.id,
-                kind: &row.kind,
-                name: &changed.name,
-                values: &changed.config,
-                affected: None,
-                secrets: &sealed_names,
-            },
-        )
-        .await?;
-    }
-    let after = rows::channel(&mut tx, row.id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    tx.commit().await.map_err(DbError::from)?;
-    one_view(&ctx, &after).await
-}
-
 /// Deletes a channel, which ends every route through it: the people who had
 /// one are told on their screens.
-pub async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
+pub async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
     let row = channel_of(&mut tx, &ctx).await?;
-    require_change(&mut tx, guard.principal(), &row).await?;
+    operation::require_change_private(&mut tx, initial.principal(), &row).await?;
+    if !rows::lock_channel_removal(&mut tx, row.id).await? {
+        return Err(ApiError::not_found());
+    }
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let row = if crate::key_operations::native::modern(guard.principal().caller()) {
+        guard
+            .operation_data::<crate::key_operations::native::Prepared<ChannelRow>>()?
+            .value
+            .clone()
+    } else {
+        channel_of(&mut tx, &ctx).await?
+    };
+    operation::require_change_private(&mut tx, guard.principal(), &row).await?;
     let routed = pages::people_routed_through(&mut tx, row.id).await?;
     let affected = pages::enabled_route_counts(&mut tx, &[row.id])
         .await?
         .get(&row.id)
         .copied()
         .unwrap_or(0);
-    if !rows::delete_channel(&mut tx, row.id, ctx.now).await? {
+    if !rows::delete_channel_before(&mut tx, row.id, ctx.now, || {
+        guard
+            .check_deadline(&ctx)
+            .map_err(operation::MutationError::Before)
+    })
+    .await
+    .map_err(operation::MutationError::into_api)?
+    {
         return Err(ApiError::not_found());
     }
     let maker = match (row.org_id, row.user_id) {
@@ -1097,6 +1085,7 @@ pub async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     for person in routed {
         route_rows::tell_route_changed(&mut tx, person, row.id).await?;
     }
+    guard.check_deadline(&ctx)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }
@@ -1109,86 +1098,11 @@ pub async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 /// transaction ends before the far side is called: a slow server holds no
 /// connection. What it answered is kept afterwards, under a fresh check.
 pub async fn test(
-    mut ctx: Ctx,
+    ctx: Ctx,
     (): (),
     body: NotificationChannelTestBody,
 ) -> ApiResult<NotificationTestReply> {
-    let (prepared, editor, channel, route_id) = {
-        let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
-        ctx.now = guard.now().get();
-        let row = channel_of(&mut conn, &ctx).await?;
-        let principal = guard.principal();
-        let me = principal.user();
-        let mut managed = HashMap::new();
-        let editor = may_change(&mut conn, principal, &row, &mut managed).await?;
-        let routed = pages::is_routed(&mut conn, me, row.id).await?;
-        if row.user_id.is_some_and(|person| person != me) {
-            return Err(ApiError::not_found());
-        }
-        if !editor && !routed {
-            require_change(&mut conn, principal, &row).await?;
-            return Err(not_for_the_caller(row.id));
-        }
-        if body.to.is_some() && !editor {
-            return Err(ApiError::invalid(
-                "to",
-                "is given by whoever looks after the channel; for you it writes to you",
-            ));
-        }
-        let caller = people::recipient(&mut conn, me)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        let route = route_rows::route_for(&mut conn, me, row.id).await?;
-        let master = master_key()?;
-        let around = surroundings(&ctx);
-        let prepared = channels::prepare_test(
-            &mut conn,
-            &toolbox(master, &around),
-            &TestFor {
-                channel: &row,
-                caller: &caller,
-                route_address: route.as_ref().map(|route| &route.address),
-                to: body.to.as_deref(),
-                device: body.device_id,
-            },
-            ctx.now,
-        )
-        .await
-        .map_err(|error| match error {
-            channels::ChannelError::UnknownKind(kind) => {
-                ApiError::invalid("kind", &format!("there is no notifier named {kind}"))
-            }
-            other => internal(other),
-        })?;
-        conn.commit().await.map_err(DbError::from)?;
-        (prepared, editor, row.id, route.map(|route| route.id))
-    };
-    let outcome = match prepared {
-        channels::TestPrepared::Done(outcome) => outcome,
-        channels::TestPrepared::Ready(ready) => channels::run_test(ready).await,
-    };
-    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
-    let now = guard.now().get();
-    // What the far side answered is shown on the channel to whoever still looks after it; a
-    // member's own trouble is not the channel's. A test that was taken says when the caller's
-    // route last reached them, and sends nothing that waited and turns nothing on.
-    if let Some(row) = rows::channel(&mut conn, channel).await? {
-        let mut managed = HashMap::new();
-        if editor && may_change(&mut conn, guard.principal(), &row, &mut managed).await? {
-            match &outcome.error {
-                Some(error) => rows::record_channel_error(&mut conn, row.id, error).await?,
-                None => rows::record_channel_ok(&mut conn, row.id, now).await?,
-            }
-        }
-        if let (Some(route), true) = (route_id, outcome.ok) {
-            route_rows::record_test_taken(&mut conn, route, now).await?;
-        }
-    }
-    conn.commit().await.map_err(DbError::from)?;
-    Ok(NotificationTestReply {
-        ok: outcome.ok,
-        error: outcome.error,
-    })
+    test_operation::run(ctx, body).await
 }
 
 /// A refusal of something only whoever looks after a channel, or has a route

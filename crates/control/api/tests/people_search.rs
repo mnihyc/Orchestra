@@ -42,7 +42,9 @@ async fn a_file_filter_fills_its_first_page_and_names_the_matching_blocks_writer
         .bytes(b"file bytes")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     desk.write(
         &desk.ada,
         doc.base.id,

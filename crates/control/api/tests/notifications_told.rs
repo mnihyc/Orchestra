@@ -1,4 +1,4 @@
-//! What happens in a thread reaches the right people end to end: an approval is in the Inbox and the badge of whoever can decide it and of nobody else, a turn that failed is in its owner's Inbox with the link that opens it, opening a thread reads what it told, and a destination at a topic is sent what happens below it.
+//! A request tells its eligible human starter while other eligible people may still decide it. Failures reach subscribers and destinations, and opening a thread reads what it told.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -9,8 +9,11 @@ mod outside;
 mod places;
 mod rig;
 mod support;
+use support::FullApprovalReply;
 
-use orch_api_contract::approvals::{ApprovalDecide, ApprovalDecision, HarnessOptionDecision};
+use orch_api_contract::approvals::{
+    ApprovalDecide, ApprovalDecision, ApprovalGet, HarnessOptionDecision,
+};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{CreateThread, ThreadCreate};
 use orch_api_contract::notifications::{
@@ -37,6 +40,21 @@ async fn terminal_followup(s: &Scene, turn: Id) {
             .unwrap()
     })
     .await;
+}
+
+async fn failed_and_waiting_for_a_person(s: &Scene, thread: Id, turn: Id) {
+    s.rig.wait_turn(turn, "failed").await;
+    s.rig.wait_state(thread, "blocked").await;
+    assert_eq!(s.rig.state(thread).await.1.as_deref(), Some("error"));
+    let (detail, current): (Option<String>, Option<Id>) =
+        sqlx::query_as("SELECT blocked_detail,current_turn_id FROM threads WHERE node_id=$1")
+            .bind(thread)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(detail.as_deref(), Some("call_recovery"));
+    assert!(current.is_none(), "the failed turn is no longer running");
+    terminal_followup(s, turn).await;
 }
 
 async fn summary(s: &Scene, who: &Who) -> (i64, i64) {
@@ -84,7 +102,7 @@ async fn asking(s: &Scene, thread: Id, request_ref: &str) -> TurnStart {
 }
 
 #[tokio::test]
-async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_of_nobody_else() {
+async fn an_approval_tells_its_eligible_starter_while_other_deciders_have_no_inbox_wait() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
     // Cai may read the thread and follows it at all, and cannot decide what its agent asks.
@@ -103,7 +121,8 @@ async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_
     }
     asking(&s, thread, "r1").await;
 
-    for who in [&s.ada, &s.eve, &s.dan] {
+    {
+        let who = &s.ada;
         let told = inbox(&s, who, NotificationKind::ApprovalRequested).await;
         assert_eq!(told.len(), 1, "{}", who.person.username);
         assert_eq!(told[0].thread_id, Some(thread));
@@ -128,6 +147,25 @@ async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_
     let approval = inbox(&s, &s.ada, NotificationKind::ApprovalRequested).await[0]
         .approval_id
         .unwrap();
+    for who in [&s.eve, &s.dan] {
+        assert!(
+            inbox(&s, who, NotificationKind::ApprovalRequested)
+                .await
+                .is_empty(),
+            "only the eligible human starter is told"
+        );
+        assert_eq!(summary(&s, who).await, (0, 0));
+        let card = s
+            .rig
+            .world
+            .app
+            .call(ApprovalGet, &[&approval])
+            .token(&who.token)
+            .send()
+            .await
+            .ok();
+        assert!(card.can_decide, "other eligible people can still decide");
+    }
     {
         let mut conn = s.rig.world.conn().await;
         sqlx::query("UPDATE users SET display_name='Eve Reviewer' WHERE id=$1")
@@ -147,9 +185,11 @@ async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_
             note: None,
         }))
         .send()
-        .await;
+        .await
+        .full_approval();
     assert!(decided.status.is_success(), "{:?}", decided.body);
-    for who in [&s.ada, &s.eve, &s.dan] {
+    {
+        let who = &s.ada;
         assert_eq!(summary(&s, who).await, (0, 0), "{}", who.person.username);
         let told = inbox(&s, who, NotificationKind::ApprovalRequested).await;
         assert!(told[0].read_at.is_some(), "the row stays, read");
@@ -176,6 +216,15 @@ async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_
         assert!(
             !told[0].waiting_for_me,
             "a decided row no longer asks for a decision"
+        );
+    }
+    for who in [&s.eve, &s.dan] {
+        assert_eq!(summary(&s, who).await, (0, 0));
+        assert!(
+            inbox(&s, who, NotificationKind::ApprovalRequested)
+                .await
+                .is_empty(),
+            "settling a request does not create another notice"
         );
     }
     let grouped = s
@@ -212,11 +261,23 @@ async fn an_approval_is_in_the_inbox_and_the_badge_of_whoever_can_decide_it_and_
 }
 
 #[tokio::test]
-async fn a_turn_that_failed_is_in_the_inbox_of_its_owner_with_the_link_that_opens_it_and_opening_the_thread_reads_it()
- {
+async fn a_failed_turn_tells_its_subscriber_and_opening_the_thread_reads_it() {
     let s = Scene::new().await;
     let thread = s.thread().await;
     let id = thread.base.id;
+    {
+        let mut conn = s.rig.world.conn().await;
+        hierarchy::put_subscription(
+            &mut conn,
+            s.ada.id(),
+            id,
+            "important",
+            "manual",
+            s.rig.world.now(),
+        )
+        .await
+        .unwrap();
+    }
     let sent = s.say(&s.ada, id, "Fix it", Delivery::Queue, "go").await;
     assert!(sent.status.is_success());
     let start = s.rig.turn_start(id, 0).await;
@@ -224,8 +285,7 @@ async fn a_turn_that_failed_is_in_the_inbox_of_its_owner_with_the_link_that_open
     s.rig
         .say(id, turn_ended(start.turn_id, TurnOutcome::Failed))
         .await;
-    s.rig.wait_state(id, "idle").await;
-    terminal_followup(&s, start.turn_id).await;
+    failed_and_waiting_for_a_person(&s, id, start.turn_id).await;
 
     let failed = inbox(&s, &s.ada, NotificationKind::TurnFailed).await;
     assert_eq!(failed.len(), 1);
@@ -298,7 +358,9 @@ async fn a_destination_at_the_topic_is_sent_what_fails_below_it_and_cannot_be_se
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full destination response");
     let at_thread = s
         .rig
         .world
@@ -322,8 +384,7 @@ async fn a_destination_at_the_topic_is_sent_what_fails_below_it_and_cannot_be_se
     s.rig
         .say(thread, turn_ended(start.turn_id, TurnOutcome::Failed))
         .await;
-    s.rig.wait_state(thread, "idle").await;
-    terminal_followup(&s, start.turn_id).await;
+    failed_and_waiting_for_a_person(&s, thread, start.turn_id).await;
 
     let rows: Vec<(Option<Id>, serde_json::Value)> = sqlx::query_as(
         "SELECT destination_id, payload FROM outbox WHERE destination_id IS NOT NULL",
@@ -366,7 +427,9 @@ async fn a_thread_made_over_http_is_followed_by_its_maker() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let level: Option<(String, String)> = sqlx::query_as(
         "SELECT level, source FROM subscriptions WHERE user_id = $1 AND node_id = $2",
     )

@@ -1,24 +1,31 @@
+import { groupHomeMoveEntries } from '@/features/duplicate/move';
+import { duplicateEntries } from '@/features/duplicate/target';
 /** Add people, guests included, rename and leave.
  *
  * The menu of a group's header: who is in it (guests marked), adding people (a person from outside the
  * org joins as a guest, where the reader may bring one in), giving the group a name or taking it back,
- * and leaving. Whoever made the group may take others out. A direct chat has none of this: it is
+ * and leaving. Current managers change its membership. A direct chat has none of this: it is
  * always two people.
  */
-import { EllipsisVertical, LogOut, Pencil, UserPlus, Users } from 'lucide-react';
-import { UserChip } from '@/ui/UserChip';
+import { linkTo } from '@/lib/links';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
+import { copyText } from '@/ui/clipboard';
+import { EllipsisVertical, LogOut, Pencil, Share2, UserPlus, Users } from 'lucide-react';
 import { useFormatContext } from '@/lib/appearance';
-import { formatDateTime, formatExact } from '@/lib/time';
-import { Tooltip } from '@/ui/Tooltip';
+import { formatNumber } from '@/lib/format';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
 
 import { addMember, GROUP_NAME_MAX_CHARS, removeMember, renameChat } from '@/api/chats';
-import { ApiError } from '@/api/client';
-import { failed } from '@/features/chat/acts';
+import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
+import { acknowledgeReceipt, failed } from '@/features/chat/acts';
 import { useChatExportEntries } from '@/features/export/ChatMenu';
 import { PeoplePicker } from '@/features/chat/NewChat';
-import type { Chat, UserRef } from '@/generated/api-types';
+import { GroupAccess } from '@/features/access/GroupAccess';
+import { openAccess } from '@/features/access/AccessDialog';
+import type { Chat } from '@/api/chat-contract';
+import type { UserRef } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { chatWriter } from '@/realtime/stores/chat';
 import { Button } from '@/ui/Button';
@@ -28,14 +35,20 @@ import { useErrorText } from '@/ui/errorText';
 import { IconButton } from '@/ui/IconButton';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { Menu } from '@/ui/Menu';
+import { Menu, type MenuEntry } from '@/ui/Menu';
 import { refreshChat } from '@/realtime/stores/chat';
 
 type Which = 'people' | 'add' | 'rename' | 'leave' | null;
 
-export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null; onLeft: () => void }) {
+interface GroupMenuProps { chat: Chat; me: string | null; onLeft: () => void }
+export function GroupMenu(props: GroupMenuProps) {
+  const reader = useStore(client.session, (state) => JSON.stringify([state.userId, state.readerVersion]));
+  return <GroupMenuForReader key={`${props.chat.id}:${reader}`} {...props} />;
+}
+
+function GroupMenuForReader({ chat, me, onLeft }: GroupMenuProps) {
   const { t } = useTranslation();
-  const format = useFormatContext();
+  const { locale } = useFormatContext();
   const describe = useErrorText();
   const [which, setWhich] = useState<Which>(null);
   const [pending, setPending] = useState(false);
@@ -44,9 +57,10 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
   const [chosen, setChosen] = useState<UserRef[]>([]);
   const members = chat.members ?? [];
   const inside = members.some((member) => member.id === me);
-  const mayManage = chat.can.send && inside;
-  const made = chat.created_by?.id === me;
+  const lastManager = me !== null && (chat.managers ?? []).includes(me) && chat.managers?.length === 1;
+  const mayManage = chat.can.manage === true;
   const exporting = useChatExportEntries(chat, me);
+  const nameTooLong = Array.from(name.trim()).length > GROUP_NAME_MAX_CHARS;
 
   const close = () => {
     setWhich(null);
@@ -54,17 +68,51 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
     setChosen([]);
   };
 
-  const run = async (act: () => Promise<unknown>, done: () => void) => {
+  const run = async (act: (reader: ReturnType<typeof libraryReader>) => Promise<unknown>, done: () => void) => {
+    if (pending) return;
+    const reader = libraryReader();
     setPending(true);
     setError(null);
     try {
-      await act();
+      await act(reader);
+      if (!sameLibraryReader(reader)) return;
       done();
       refreshChat(chat.id);
     } catch (cause) {
-      setError(cause);
+      if (!sameLibraryReader(reader)) return;
+      if (acknowledgeReceipt(cause)) {
+        done();
+        refreshChat(chat.id);
+      } else setError(cause);
     } finally {
-      setPending(false);
+      if (sameLibraryReader(reader)) setPending(false);
+    }
+  };
+
+  const addChosen = async (reader: ReturnType<typeof libraryReader>) => {
+    let acknowledged: ReceiptAcknowledged | undefined;
+    let changed = false;
+    let complete = false;
+    try {
+      for (const user of chosen) {
+        if (!sameLibraryReader(reader)) return;
+        try { await addMember(chat.id, user.id); }
+        catch (cause) {
+          if (!(cause instanceof ReceiptAcknowledged)) throw cause;
+          acknowledged ??= cause;
+        }
+        if (!sameLibraryReader(reader)) return;
+        changed = true;
+        // A later refusal leaves only failed/unattempted people selected. A
+        // committed addition is never repeated just to recover a readable row.
+        setChosen((before) => before.filter((one) => one.id !== user.id));
+      }
+      complete = true;
+    } finally {
+      if (sameLibraryReader(reader)) {
+        if (acknowledged !== undefined) acknowledgeReceipt(acknowledged);
+        if (changed && !complete) refreshChat(chat.id);
+      }
     }
   };
 
@@ -76,65 +124,35 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
         align="end"
         entries={[
           { id: 'people', label: t('chat.group.people'), icon: <Users aria-hidden />, onSelect: () => setWhich('people') },
+          { id: 'share', label: t('everything.share'), icon: <Share2 aria-hidden />, onSelect: () => openAccess({ kind: 'chat', id: chat.id, name: chat.name ?? t('access.kinds.chat') }) },
           ...(mayManage
             ? [
                 { id: 'add', label: t('chat.group.add'), icon: <UserPlus aria-hidden />, onSelect: () => setWhich('add') },
                 { id: 'rename', label: t('chat.group.rename'), icon: <Pencil aria-hidden />, onSelect: () => { setName(chat.name ?? ''); setWhich('rename'); } },
               ]
             : []),
+          { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), onSelect: () => void copyText(linkTo({ kind: 'chat', id: chat.id }), t('common.linkCopied')) },
+          ...groupHomeMoveEntries(t, chat),
           ...exporting,
+          ...duplicateEntries(t, { kind: 'chat', id: chat.id, name: chat.name ?? t('chat.title.groupUnnamed') }),
           ...(inside
-            ? [
+            ? ([
                 { type: 'separator' as const, id: 'before-leave' },
-                { id: 'leave', label: t('chat.group.leave'), icon: <LogOut aria-hidden />, danger: true, onSelect: () => setWhich('leave') },
-              ]
+                { id: 'leave', label: t('chat.group.leave'), icon: <LogOut aria-hidden />, danger: true, disabled: lastManager ? t('chat.group.keepManager') : false, onSelect: () => setWhich('leave') },
+              ] satisfies MenuEntry[])
             : []),
         ]}
         trigger={<IconButton size="sm" label={t('chat.group.menu')} icon={<EllipsisVertical aria-hidden />} />}
       />
 
-      <Dialog open={which === 'people'} onOpenChange={(open) => !open && close()} title={t('chat.group.people')} description={t('chat.group.peopleHint', { count: members.length })}>
-        <ul className="flex flex-col gap-1">
-          {members.map((member) => {
-            const guest = chat.guests.includes(member.id);
-            const expires = chat.membership_expiries?.[member.id];
-            return (
-              <li key={member.id} className="flex items-center gap-2 py-1">
-                <span className="min-w-0 flex-1"><UserChip user={member} size={28} />
-                  {expires!==undefined&&<span className="flex items-center gap-1 text-sm text-text-muted">{t('chat.people.until')} <Tooltip content={formatExact(expires,format)}><time dateTime={expires}>{formatDateTime(expires,format)}</time></Tooltip></span>}
-                </span>
-                {guest && <span className="shrink-0 rounded-sm bg-bg-muted px-1 text-xs text-text-muted">{t('chat.people.guestChip')}</span>}
-                {made && member.id !== me && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    pending={pending}
-                    onClick={() =>
-                      void run(
-                        () => removeMember(chat.id, member.id),
-                        () => undefined,
-                      )
-                    }
-                  >
-                    {t('chat.group.remove')}
-                  </Button>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-        {error !== null && (
-          <InlineAlert tone="danger" className="mt-3">
-            {describe(error).message}
-          </InlineAlert>
-        )}
+      <Dialog open={which === 'people'} onOpenChange={(open) => !open && close()} title={t('chat.group.people')}>
+        <GroupAccess key={chat.id} chat={chat} membersHeading={false} />
       </Dialog>
 
       <Dialog
         open={which === 'add'}
         onOpenChange={(open) => !open && !pending && close()}
         title={t('chat.group.addTitle')}
-        description={t('chat.group.addHint')}
         footer={
           <>
             <Button variant="ghost" disabled={pending} onClick={close}>
@@ -143,12 +161,10 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
             <Button
               variant="primary"
               pending={pending}
-              blocked={chosen.length === 0}
+              blocked={chosen.length === 0 || !mayManage}
               onClick={() =>
                 void run(
-                  async () => {
-                    for (const user of chosen) await addMember(chat.id, user.id);
-                  },
+                  addChosen,
                   close,
                 )
               }
@@ -161,10 +177,11 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
         <PeoplePicker
           orgId={chat.org_id}
           chosen={chosen}
-          onToggle={(user) => setChosen((before) => (before.some((one) => one.id === user.id) ? before.filter((one) => one.id !== user.id) : [...before, user]))}
+          onToggle={(user) => { if (!pending) setChosen((before) => (before.some((one) => one.id === user.id) ? before.filter((one) => one.id !== user.id) : [...before, user])); }}
           exclude={new Set(members.map((member) => member.id))}
           guests={guestsAllowed}
           me={me}
+          disabled={pending}
         />
         {error !== null && (
           <InlineAlert tone="danger" className="mt-3" title={t('chat.group.addFailed')}>
@@ -177,7 +194,6 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
         open={which === 'rename'}
         onOpenChange={(open) => !open && !pending && close()}
         title={t('chat.group.renameTitle')}
-        description={t('chat.group.renameHint')}
         footer={
           <>
             <Button variant="ghost" disabled={pending} onClick={close}>
@@ -186,10 +202,12 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
             <Button
               variant="primary"
               pending={pending}
+              blocked={nameTooLong || !mayManage}
               onClick={() =>
                 void run(
-                  async () => {
+                  async (reader) => {
                     const next = await renameChat(chat.id, name.trim() === '' ? null : name.trim());
+                    if (!sameLibraryReader(reader)) return;
                     chatWriter.apply(chat.id, { chat: next }, next.seq);
                   },
                   close,
@@ -201,7 +219,7 @@ export function GroupMenu({ chat, me, onLeft }: { chat: Chat; me: string | null;
           </>
         }
       >
-        <Input label={t('chat.new.name')} value={name} maxLength={GROUP_NAME_MAX_CHARS} onChange={(event) => setName(event.target.value)} disabled={pending} />
+        <Input label={t('chat.new.name')} value={name} onChange={(event) => setName(event.target.value)} disabled={pending} error={nameTooLong ? t('chat.new.nameTooLong', { number: formatNumber(GROUP_NAME_MAX_CHARS, locale) }) : undefined} />
         {error !== null && (
           <InlineAlert tone="danger" className="mt-3">
             {describe(error).message}

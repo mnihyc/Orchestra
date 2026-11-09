@@ -21,11 +21,15 @@ use orch_api_contract::{
 use orch_db::queries::{thread_continuations as rows, threads};
 use orch_engine::continuations::{self, projection};
 
+mod operation;
+
 pub(super) fn mount(registry: &mut Registry) {
     registry
+        .creation(ThreadPromptVersionCreate, operation::replay_binding::<operation::Edit>())
+        .creation(ThreadContinuationActivate, operation::replay_binding::<operation::Activate>())
         .on(ThreadPromptVersionList, versions)
-        .on(ThreadPromptVersionCreate, edit)
-        .on(ThreadContinuationActivate, activate)
+        .on_with_operation(ThreadPromptVersionCreate, crate::key_operations::native::effects::prepare::<operation::Change<operation::Edit>>, edit)
+        .on_with_operation(ThreadContinuationActivate, crate::key_operations::native::effects::prepare::<operation::Change<operation::Activate>>, activate)
         .on(ThreadInputList, inputs);
 }
 
@@ -183,36 +187,33 @@ async fn versions(
 async fn edit(
     ctx: Ctx,
     (): (),
-    body: ThreadPromptVersionCreateBody,
+    _body: ThreadPromptVersionCreateBody,
 ) -> ApiResult<ThreadContinuationAccepted> {
-    let (thread, input) = (ctx.id("id")?, ctx.id("input_id")?);
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    match ctx
-        .app
-        .engine
-        .create_prompt_version_guarded(tx, guard.into_principal(), thread, input, body)
-        .await
-    {
-        Ok(result) => Ok(result),
-        Err(error) => Err(admission_refusal(&ctx, "prompt_edit_admission", error).await),
-    }
+    apply::<operation::Edit>(ctx).await
 }
-
 async fn activate(
     ctx: Ctx,
     (): (),
-    body: ThreadContinuationActivateBody,
+    _body: ThreadContinuationActivateBody,
 ) -> ApiResult<ThreadContinuationAccepted> {
-    let (thread, target) = (ctx.id("id")?, ctx.id("continuation_id")?);
-    let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    match ctx
-        .app
-        .engine
-        .activate_continuation_guarded(tx, guard.into_principal(), thread, target, body)
-        .await
-    {
+    apply::<operation::Activate>(ctx).await
+}
+async fn apply<I: operation::Intent>(ctx: Ctx) -> ApiResult<ThreadContinuationAccepted> {
+    let (tx, _guard) = transaction_guard::begin(&ctx).await?;
+    let completed =
+        crate::key_operations::native::effects::apply_owned::<operation::Change<I>>(&ctx, tx)
+            .await?;
+    crate::key_operations::publication::receipt(&completed.ctx, &completed.output)?;
+    Ok(completed.output)
+}
+async fn refused_in_result<T>(
+    conn: &mut orch_db::Conn,
+    thread: orch_types::Id,
+    result: Result<T, continuations::Error>,
+) -> ApiResult<T> {
+    match result {
         Ok(result) => Ok(result),
-        Err(error) => Err(admission_refusal(&ctx, "continuation_activate_admission", error).await),
+        Err(error) => Err(refused_in(conn, thread, error).await),
     }
 }
 

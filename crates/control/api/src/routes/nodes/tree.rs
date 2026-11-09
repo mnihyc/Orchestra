@@ -10,39 +10,49 @@
 //! the caller may not view are dropped afterwards, a batch at a time, until
 //! the page is full.
 
+use super::hierarchy_operation::{self as scope, PreparedTree};
 use super::{
     NodeKind, Placed, actor_name, invalid, placed, record, shown, threads_are_not_served_here, view,
 };
-use crate::middleware::authorization::{self, refusals, refusals::node_kind};
+use crate::key_operations::{native, targets};
+use crate::middleware::authorization::{refusals, refusals::node_kind};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
+use crate::routes::access::page::NameSources;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::{NodePermission, Permission, PermissionName};
 use orch_api_contract::common::{ErrorCode, HiddenItem, Listed, Page, PageQuery};
+use orch_api_contract::hierarchy_sources::{self as sources, Source};
 use orch_api_contract::nodes::{
     ArchivedFilter, AttentionFilter, Node, NodeTagSet, NodeTagSetBody, OrgTreeGet, OrgTreeGetQuery,
     OrgTreeGetReply, SharedList, SharedListItem, SharedListReply, TREE_SYNC_MAX_CHANGES, Topic,
     TopicList, TopicListQuery, TopicSort, TopicStatus, TopicStatusFilter, TopicUpdate,
     TopicUpdateBody, TreeChat, TreeNode, TreeThread, TreeTopic, TreeWaiting,
 };
-use orch_api_contract::routes::Endpoint;
 use orch_api_contract::users::UserRef;
+use orch_authz::Caller;
 use orch_authz::nodes as access;
 use orch_authz::{Act, Policy};
+use orch_db::Conn;
 use orch_db::queries::hierarchy::{self, ArchivedMode, TopicCursor, TopicOrder, TopicQuery};
 use orch_types::Id;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::collections::{HashMap, HashSet};
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(OrgTreeGet, org_tree)
-        .on(SharedList, shared)
-        .on(TopicList, topic_list)
-        .on(TopicUpdate, topic_update)
-        .on(NodeTagSet, tag_set);
+        .on_snapshot_read_with_optional_operation(
+            OrgTreeGet,
+            native::selected::<scope::Tree>,
+            org_tree,
+        )
+        .on_with_optional_operation(SharedList, super::shared_operation::prepare, shared)
+        .on_with_optional_operation(TopicList, super::list_operation::topics, topic_list)
+        .on_with_operation(TopicUpdate, super::metadata_mutation::topic, topic_update)
+        .on_with_operation(NodeTagSet, super::metadata_mutation::tags, tag_set);
 }
 
 fn word<T: DeserializeOwned>(text: &str) -> Option<T> {
@@ -52,11 +62,18 @@ fn word<T: DeserializeOwned>(text: &str) -> Option<T> {
 /// The nodes of an org's tree that the caller may view, whole or since a
 /// sequence.
 async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTreeGetReply> {
+    native::selected_read::<scope::Tree>(ctx, query, ()).await
+}
+/// One native producer for ordinary and bounded full/incremental tree openings.
+pub(super) async fn org_tree_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    query: &OrgTreeGetQuery,
+) -> ApiResult<(PreparedTree, Vec<native::Facts<Source>>)> {
     let root = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (place, kind) = placed(&mut conn, root).await?;
-    let is_root = hierarchy::org(&mut conn, root)
+    let (place, kind) = placed(conn, root).await?;
+    let is_root = hierarchy::org(conn, root)
         .await?
         .is_some_and(|org| org.parent_id.is_none());
     if kind != NodeKind::Org || !is_root || place.org != root {
@@ -75,9 +92,7 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
     let (seq, after) = if let Some(cursor) = query.cursor.as_deref() {
         let bad = || invalid("cursor", "is not a cursor of this tree");
         let parts: Vec<&str> = cursor.split('|').collect();
-        if parts.len() != 4
-            || parts[0] != root.to_string()
-            || parts[1] != principal.user().to_string()
+        if parts.len() != 4 || parts[0] != root.to_string() || parts[1] != caller.user().to_string()
         {
             return Err(bad());
         }
@@ -87,41 +102,81 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
         }
         (seq, Some(parts[3].parse::<Id>().map_err(|_| bad())?))
     } else {
-        (hierarchy::tree_seq(&mut conn, root).await?, None)
+        (hierarchy::tree_seq(conn, root).await?, None)
     };
+    let mut selected_targets = Vec::new();
     let mut rows = if query.since.is_some() {
-        hierarchy::tree(&mut conn, root, query.since, TREE_SYNC_MAX_CHANGES + 1).await?
+        let rows = hierarchy::tree(conn, root, query.since, TREE_SYNC_MAX_CHANGES + 1).await?;
+        if i64::try_from(rows.len()).unwrap_or(i64::MAX) > TREE_SYNC_MAX_CHANGES {
+            return Ok((
+                PreparedTree {
+                    reply: OrgTreeGetReply {
+                        settings: None,
+                        seq,
+                        since: query.since,
+                        complete: false,
+                        next_cursor: None,
+                        nodes: Vec::new(),
+                    },
+                    ids: BTreeSet::new(),
+                    visible: BTreeSet::new(),
+                    hidden: BTreeSet::new(),
+                    docs: BTreeSet::new(),
+                },
+                vec![
+                    scope::collection(Source::Results, Vec::new()),
+                    scope::collection(Source::Names, Vec::new()),
+                    scope::collection(Source::Settings, Vec::new()),
+                ],
+            ));
+        }
+        let (rows, targets) = scope::selected_rows(ctx, conn, caller, rows).await?;
+        selected_targets.extend(targets);
+        rows
     } else {
-        hierarchy::tree_page(&mut conn, root, after, limit + 1).await?
+        let mut selected = Vec::new();
+        let mut position = after;
+        'pages: loop {
+            let batch = hierarchy::tree_page(conn, root, position, limit + 1).await?;
+            let exhausted = i64::try_from(batch.len()).unwrap_or(i64::MAX) <= limit;
+            if let Some(last) = batch.last() {
+                position = Some(last.id);
+            }
+            let (batch, targets) = scope::selected_rows(ctx, conn, caller, batch).await?;
+            for (row, target) in batch.into_iter().zip(targets) {
+                selected.push(row);
+                selected_targets.push(target);
+                if i64::try_from(selected.len()).unwrap_or(i64::MAX) > limit {
+                    break 'pages;
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
+        selected
     };
-    if query.since.is_some()
-        && i64::try_from(rows.len()).unwrap_or(i64::MAX) > TREE_SYNC_MAX_CHANGES
-    {
-        return Ok(OrgTreeGetReply {
-            settings: None,
-            seq,
-            since: query.since,
-            complete: false,
-            next_cursor: None,
-            nodes: Vec::new(),
-        });
-    }
-    // Advance by scanned ids, including inaccessible rows. An empty visible
-    // page can therefore never strand the caller before later readable rows.
+    let all_ids = selected_targets
+        .iter()
+        .filter_map(|t| t.object.id)
+        .collect::<BTreeSet<_>>();
+    let primary = scope::collection(Source::Results, selected_targets);
+    let plan = native::bind_known(ctx, &sources::TREE, std::slice::from_ref(&primary))?;
+    let principal = native::preparation_principal(ctx, conn, caller, &plan).await?;
     let next_cursor =
         if query.since.is_none() && i64::try_from(rows.len()).unwrap_or(i64::MAX) > limit {
             rows.truncate(usize::try_from(limit).unwrap_or(0));
             rows.last()
-                .map(|row| format!("{root}|{}|{seq}|{}", principal.user(), row.id))
+                .map(|row| format!("{root}|{}|{seq}|{}", caller.user(), row.id))
         } else {
             None
         };
     let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-    let readable_docs = super::tree_docs::readable(&mut conn, &principal, &ids)
+    let readable_docs = super::tree_docs::readable(conn, &principal, &ids)
         .await
         .map_err(ApiError::internal)?;
     let listed: HashMap<Id, access::Listed> = access::holding(
-        &mut conn,
+        conn,
         &principal,
         &ids,
         PermissionName::OfNode(NodePermission::View),
@@ -139,7 +194,7 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
         Vec::new()
     } else {
         access::holding(
-            &mut conn,
+            conn,
             &principal,
             &unseen,
             PermissionName::Exact(Permission::AccessManage),
@@ -149,14 +204,82 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
         .await
         .map_err(ApiError::internal)?
     };
-    let people = refusals::user_refs(&mut conn, &owners_of(&rows, &managed)).await?;
+    let people = refusals::user_refs(conn, &owners_of(&rows, &managed)).await?;
     let mut hidden = hidden_rows(&rows, &managed, &people);
     let admin_ids: Vec<Id> = listed
         .values()
         .filter_map(|each| each.admin_access.and_then(|reach| reach.place.node()))
         .collect();
-    let admin_refs =
-        view::qualified_refs(&mut conn, &principal, &admin_ids, Policy::default()).await?;
+    let prepared_settings = if query.since.is_none() && query.cursor.is_none() {
+        let target = targets::node(conn, root).await?;
+        if scope::permits(
+            ctx,
+            caller,
+            &sources::TREE,
+            Source::Settings,
+            target.object.kind,
+            &target,
+        )? {
+            match crate::routes::settings::readers::prepare_settings(conn, &principal, root).await {
+                Ok(value) => Some((value, target)),
+                Err(error) if error.problem.status == 403 => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let mut wanted = NameSources::default();
+    wanted.nodes.extend(admin_ids.iter().copied());
+    if let Some((settings, _)) = &prepared_settings {
+        wanted.nodes.extend(settings.source_nodes());
+    }
+    let address_ids = rows
+        .iter()
+        .filter(|row| row.address.is_some() && !row.deleted && listed.contains_key(&row.id))
+        .map(|row| row.id)
+        .collect::<Vec<_>>();
+    let graph = orch_authz::engine::Graph::load(conn, &address_ids)
+        .await
+        .map_err(ApiError::internal)?;
+    let address_sources = address_ids
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                graph
+                    .get(*id)
+                    .into_iter()
+                    .flat_map(|n| n.path.iter())
+                    .filter(|ancestor| {
+                        graph
+                            .get(**ancestor)
+                            .is_some_and(|n| n.kind == orch_access_contract::roles::NodeKind::Org)
+                    })
+                    .copied()
+                    .collect::<BTreeSet<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    wanted
+        .nodes
+        .extend(address_sources.values().flatten().copied());
+    let (names, name_facts) =
+        scope::names(ctx, conn, &principal, caller, &sources::TREE, wanted).await?;
+    let admin_refs = names.qualified_refs(conn, &principal, &admin_ids).await?;
+    let hidden_ids = hidden.keys().copied().collect::<BTreeSet<_>>();
+    let visible = rows
+        .iter()
+        .filter(|row| !row.deleted && listed.contains_key(&row.id))
+        .map(|row| row.id)
+        .collect::<BTreeSet<_>>();
+    let docs = readable_docs
+        .iter()
+        .filter(|id| visible.contains(id))
+        .copied()
+        .collect::<BTreeSet<_>>();
     let waiting_threads: Vec<Id> = rows
         .iter()
         .filter(|row| {
@@ -168,23 +291,18 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
         })
         .map(|row| row.id)
         .collect();
-    let waiting = super::tree_work::waiting(
-        &mut conn,
-        &principal,
-        &waiting_threads,
-        ctx.now,
-        &ctx.app.engine,
-    )
-    .await?;
+    let waiting =
+        super::tree_work::waiting(conn, &principal, &waiting_threads, ctx.now, &ctx.app.engine)
+            .await?;
     let display_ids: Vec<Id> = rows
         .iter()
         .filter(|row| row.kind == "thread" && !row.deleted && listed.contains_key(&row.id))
         .map(|row| row.id)
         .collect();
     let displays = orch_engine::views::thread_displays(
-        &mut conn,
+        conn,
         &display_ids,
-        Some(principal.user()),
+        Some(caller.user()),
         principal.now(),
     )
     .await
@@ -207,7 +325,15 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
                     .admin_access
                     .and_then(|place| view::admin_access(place, &admin_refs)),
                 participating: each.participating,
-                address: row.address.clone(),
+                address: if names.limited
+                    && address_sources
+                        .get(&row.id)
+                        .is_some_and(|ids| !ids.is_subset(&names.nodes))
+                {
+                    None
+                } else {
+                    row.address.clone()
+                },
                 id: row.id,
                 kind,
                 parent_id: row.parent_id,
@@ -216,6 +342,11 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
                 custom_color: row.custom_color.clone(),
                 docs: if readable_docs.contains(&row.id) {
                     row.docs
+                } else {
+                    0
+                },
+                docs_seq: if readable_docs.contains(&row.id) {
+                    row.docs_seq
                 } else {
                     0
                 },
@@ -241,32 +372,35 @@ async fn org_tree(ctx: Ctx, query: OrgTreeGetQuery, (): ()) -> ApiResult<OrgTree
             }))
         })
         .collect();
-    // Only a full opening needs the order/defaults; incremental tree repairs keep their native cut.
-    drop(conn);
-    let settings = if query.since.is_none() && query.cursor.is_none() {
-        let mut child = ctx;
-        child.route = orch_api_contract::settings::NodeSettingList::ROUTE;
-        let read = async {
-            authorization::require_on_path(&child, "node.view").await?;
-            crate::routes::settings::setting_list(child, (), ()).await
-        }
-        .await;
-        match read {
-            Ok(settings) => Some(settings),
-            Err(error) if error.problem.status == 403 => None,
-            Err(error) => return Err(error),
-        }
-    } else {
-        None
+    let (settings, settings_facts) = match prepared_settings {
+        Some((prepared, target)) => (
+            Some(
+                crate::routes::settings::readers::show_settings(
+                    ctx, conn, &principal, &prepared, &names,
+                )
+                .await?,
+            ),
+            scope::collection(Source::Settings, vec![target]),
+        ),
+        None => (None, scope::collection(Source::Settings, Vec::new())),
     };
-    Ok(OrgTreeGetReply {
-        settings,
-        seq,
-        since: query.since,
-        complete: next_cursor.is_none(),
-        next_cursor,
-        nodes,
-    })
+    Ok((
+        PreparedTree {
+            reply: OrgTreeGetReply {
+                settings,
+                seq,
+                since: query.since,
+                complete: next_cursor.is_none(),
+                next_cursor,
+                nodes,
+            },
+            ids: all_ids,
+            visible,
+            hidden: hidden_ids,
+            docs,
+        },
+        vec![primary, name_facts, settings_facts],
+    ))
 }
 
 /// The live nodes of `rows` that the caller may not view: those an admin of a place above may still
@@ -328,7 +462,7 @@ pub(crate) fn thread_of(
     display: Option<&orch_api_contract::threads::ThreadDisplay>,
 ) -> Option<TreeThread> {
     Some(TreeThread {
-        display: Box::new(display.cloned().unwrap_or_default()),
+        display: Box::new(display.cloned()?),
         attention: row
             .attention
             .clone()
@@ -363,6 +497,7 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
         color: None,
         custom_color: None,
         docs: 0,
+        docs_seq: 0,
         archived: false,
         restricted: false,
         deleted: true,
@@ -378,14 +513,14 @@ fn gone(row: &hierarchy::TreeRow, kind: NodeKind) -> TreeNode {
 
 /// Stable descending tie order: hierarchy node, document folder, text document.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum SharedKind {
+pub(super) enum SharedKind {
     Document,
     Folder,
     Node,
 }
 
 impl SharedKind {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Node => "node",
             Self::Folder => "document_container",
@@ -396,13 +531,13 @@ impl SharedKind {
 
 /// One scanned identity in the merged creation-time order; no hidden name is retained here.
 #[derive(Clone, Copy)]
-struct SharedCandidate {
-    id: Id,
-    at: chrono::DateTime<chrono::Utc>,
-    kind: SharedKind,
+pub(super) struct SharedCandidate {
+    pub(super) id: Id,
+    pub(super) at: chrono::DateTime<chrono::Utc>,
+    pub(super) kind: SharedKind,
 }
 
-fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
+pub(super) fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
     let bad = || invalid("cursor", "is not a cursor of your shared places");
     let parts: Vec<&str> = text.split('|').collect();
     if !matches!(parts.len(), 3 | 4) || parts[0] != user.to_string() {
@@ -435,21 +570,24 @@ fn shared_cursor(text: &str, user: Id) -> ApiResult<SharedCandidate> {
 }
 
 async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let before = query
-        .cursor
-        .as_deref()
-        .map(|cursor| shared_cursor(cursor, principal.user()))
-        .transpose()?;
-    let limit = query.limit();
+    super::shared_operation::read(ctx, query).await
+}
+
+/// The original two native candidate producers and stable union ordering.
+pub(super) async fn shared_candidates(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    before: Option<SharedCandidate>,
+    limit: u32,
+) -> ApiResult<Vec<SharedCandidate>> {
     let boundary = before.map(|last| (last.at, last.id));
     let mut candidates: Vec<_> = hierarchy::named_for(
-        &mut conn,
+        conn,
         principal.user(),
         principal.groups(),
         principal.member_of(),
-        ctx.now,
+        now,
         boundary,
         i64::from(limit) + 1,
     )
@@ -461,17 +599,16 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         kind: SharedKind::Node,
     })
     .collect();
-    let holders =
-        orch_authz::holders::held(&mut conn, principal.user(), orch_types::Time::new(ctx.now))
-            .await
-            .map_err(ApiError::internal)?;
+    let holders = orch_authz::holders::held(conn, principal.user(), orch_types::Time::new(now))
+        .await
+        .map_err(ApiError::internal)?;
     candidates.extend(
         orch_db::queries::shared::documents(
-            &mut conn,
+            conn,
             &orch_db::queries::shared::DocumentQuery {
                 user: principal.user(),
                 held: &holders.held,
-                at: ctx.now,
+                at: now,
                 before: boundary,
                 after_kind: before.map_or("node", |last| last.kind.name()),
                 limit: i64::from(limit) + 1,
@@ -496,27 +633,23 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
             .then(other.id.cmp(&one.id))
             .then(other.kind.cmp(&one.kind))
     });
-    let partial = candidates.len() > usize::try_from(limit).unwrap_or(0);
-    candidates.truncate(usize::try_from(limit).unwrap_or(0));
-    let next_cursor = if partial {
-        candidates.last().map(|last| {
-            format!(
-                "{}|{}|{}|{}",
-                principal.user(),
-                last.at.timestamp_micros(),
-                last.kind.name(),
-                last.id
-            )
-        })
-    } else {
-        None
-    };
+    Ok(candidates)
+}
+
+/// The original account visibility, parent suppression and native DTO producers.
+pub(super) async fn shared_items(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    candidates: &[SharedCandidate],
+    names: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<Vec<SharedListItem>> {
     let ids: Vec<Id> = candidates
         .iter()
         .filter(|candidate| candidate.kind == SharedKind::Node)
         .map(|candidate| candidate.id)
         .collect();
-    let nodes = view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await?;
+    let nodes = view::visible(conn, principal, &ids, now, Policy::default()).await?;
     let parents: Vec<Id> = nodes
         .iter()
         .filter_map(view::parent_of)
@@ -524,8 +657,8 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         .into_iter()
         .collect();
     let seen_parents: HashSet<Id> = access::holding(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         &parents,
         PermissionName::OfNode(NodePermission::View),
         Act::Use,
@@ -546,9 +679,9 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
         .filter(|candidate| candidate.kind != SharedKind::Node)
         .map(|candidate| candidate.id)
         .collect();
-    let mut documents = shared_documents(&mut conn, &principal, &ids, ctx.now).await?;
+    let mut documents = shared_documents(conn, principal, &ids, now, names).await?;
     let items = candidates
-        .into_iter()
+        .iter()
         .filter_map(|candidate| {
             if candidate.kind == SharedKind::Node {
                 nodes.remove(&candidate.id)
@@ -557,6 +690,33 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
             }
         })
         .collect();
+    Ok(items)
+}
+
+/// The unchanged ordinary union window. Scope adapters use the same selectors.
+pub(super) async fn shared_in(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    now: chrono::DateTime<chrono::Utc>,
+    query: &PageQuery,
+) -> ApiResult<SharedListReply> {
+    let before = query
+        .cursor
+        .as_deref()
+        .map(|cursor| shared_cursor(cursor, principal.user()))
+        .transpose()?;
+    let limit = query.limit();
+    let mut candidates = shared_candidates(conn, principal, now, before, limit).await?;
+    let partial = candidates.len() > usize::try_from(limit).unwrap_or(0);
+    candidates.truncate(usize::try_from(limit).unwrap_or(0));
+    let next_cursor = if partial {
+        candidates
+            .last()
+            .map(|last| shared_cursor_text(principal.user(), *last))
+    } else {
+        None
+    };
+    let items = shared_items(conn, principal, now, &candidates, None).await?;
     Ok(SharedListReply {
         partial,
         next_cursor,
@@ -564,12 +724,23 @@ async fn shared(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<SharedListReply
     })
 }
 
+pub(super) fn shared_cursor_text(user: Id, last: SharedCandidate) -> String {
+    format!(
+        "{}|{}|{}|{}",
+        user,
+        last.at.timestamp_micros(),
+        last.kind.name(),
+        last.id
+    )
+}
+
 /// Project both document-domain kinds through their one native permission frame.
-async fn shared_documents(
+pub(super) async fn shared_documents(
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     ids: &[Id],
     now: chrono::DateTime<chrono::Utc>,
+    names: Option<&crate::routes::access::page::NameBounds>,
 ) -> ApiResult<HashMap<(SharedKind, Id), SharedListItem>> {
     use orch_access_contract::permissions::ObjectKind;
     use orch_api_contract::document_tree::{DocumentContainerMark, DocumentContainerRef};
@@ -587,12 +758,21 @@ async fn shared_documents(
         return Ok(HashMap::new());
     }
     let nodes: Vec<_> = readable.iter().map(|listed| listed.document.node).collect();
-    let paths = view::ways(conn, principal, &nodes, Policy::default()).await?;
+    let paths = match names {
+        Some(names) => {
+            view::ways_with_name_sources(conn, principal, &nodes, Policy::default(), &names.nodes)
+                .await?
+        }
+        None => view::ways(conn, principal, &nodes, Policy::default()).await?,
+    };
     let admin_ids: Vec<_> = readable
         .iter()
         .filter_map(|listed| listed.admin_access.and_then(|reach| reach.place.node()))
         .collect();
-    let admin_refs = view::qualified_refs(conn, principal, &admin_ids, Policy::default()).await?;
+    let admin_refs = match names {
+        Some(names) => names.qualified_refs(conn, principal, &admin_ids).await?,
+        None => view::qualified_refs(conn, principal, &admin_ids, Policy::default()).await?,
+    };
     let mut result = HashMap::new();
     let mut text = HashMap::new();
     for listed in readable {
@@ -656,9 +836,30 @@ async fn shared_documents(
         .iter()
         .map(|(row, listed)| (row.id, listed.participating))
         .collect();
-    let references =
-        crate::routes::documents::build::refs(conn, principal, &entries, now, Policy::default())
-            .await?;
+    let references = match names {
+        None => {
+            crate::routes::documents::build::refs(conn, principal, &entries, now, Policy::default())
+                .await?
+        }
+        Some(names) => {
+            let allowed: Vec<_> = names
+                .nodes
+                .iter()
+                .copied()
+                .map(crate::routes::documents::build::WrittenLabelSource::Node)
+                .collect();
+            crate::routes::documents::build::ProjectedDocumentRef::capture_many_allowed(
+                conn,
+                principal,
+                &entries,
+                now,
+                Policy::default(),
+                &allowed,
+            )
+            .await?
+            .0
+        }
+    };
     for document in references {
         let path = paths.get(&document.node.id).cloned().unwrap_or_default();
         result.insert(
@@ -714,6 +915,7 @@ async fn private_topics(
     project: Id,
     query: &TopicListQuery,
     archived: ArchivedMode,
+    scope: Option<&super::projection::Projection<'_>>,
 ) -> ApiResult<Vec<HiddenItem>> {
     let candidates = hierarchy::topics_of(
         conn,
@@ -732,7 +934,10 @@ async fn private_topics(
     )
     .await?;
     let ids: Vec<Id> = candidates.iter().map(|(id, _)| *id).collect();
-    private_rows(conn, principal, &ids).await
+    match scope {
+        Some(scope) => scope.private_rows(conn, &ids).await,
+        None => private_rows(conn, principal, &ids).await,
+    }
 }
 
 /// The minimal rows of the nodes `ids` that the caller administers and may not view, sorted by name
@@ -816,6 +1021,17 @@ pub(crate) async fn private_rows(
 }
 
 async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<Listed<Topic>>> {
+    super::list_operation::read_topics(ctx, query).await
+}
+
+/// The existing native topic filters, ordering and cursor/window producer.
+pub(super) async fn topic_list_in(
+    ctx: &Ctx,
+    query: &TopicListQuery,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    scope: Option<&super::projection::Projection<'_>>,
+) -> ApiResult<super::projection::Window<Topic>> {
     let project = ctx.id("id")?;
     let page = PageQuery {
         limit: query.limit,
@@ -848,13 +1064,11 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         .as_deref()
         .map(|text| topic_cursor(order, text))
         .transpose()?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let batch = i64::try_from(limit + 1).unwrap_or(i64::MAX);
     let mut items: Vec<(Topic, TopicCursor)> = Vec::new();
     loop {
         let found = hierarchy::topics_of(
-            &mut conn,
+            conn,
             &TopicQuery {
                 project,
                 status,
@@ -876,7 +1090,11 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         after = Some(last.clone());
         let ids: Vec<Id> = found.iter().map(|(id, _)| *id).collect();
         let cursors: HashMap<Id, TopicCursor> = found.into_iter().collect();
-        for node in view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await? {
+        let nodes = match scope {
+            Some(scope) => scope.visible(conn, &ids).await?,
+            None => view::visible(conn, principal, &ids, ctx.now, Policy::default()).await?,
+        };
+        for node in nodes {
             if let Node::Topic(topic) = node
                 && (!query.participating.unwrap_or(false) || topic.base.access.participating)
                 && let Some(cursor) = cursors.get(&topic.base.id)
@@ -889,33 +1107,37 @@ async fn topic_list(ctx: Ctx, query: TopicListQuery, (): ()) -> ApiResult<Page<L
         }
     }
     let more = items.len() > limit;
+    let witness = items.get(limit).map(|(topic, _)| topic.base.id);
     items.truncate(limit);
     // The private topics the caller administers stand once, on the first page, after what they may read.
     let hidden = if query.cursor.is_none() && !query.participating.unwrap_or(false) {
-        private_topics(&mut conn, &principal, project, &query, archived).await?
+        private_topics(conn, principal, project, query, archived, scope).await?
     } else {
         Vec::new()
     };
-    Ok(Page {
-        next_cursor: more
-            .then(|| items.last().map(|(_, cursor)| cursor_text(cursor)))
-            .flatten(),
-        items: items
-            .into_iter()
-            .map(|(topic, _)| Listed::visible(topic))
-            .chain(hidden.into_iter().map(Listed::hidden))
-            .collect(),
+    Ok(super::projection::Window {
+        page: Page {
+            next_cursor: more
+                .then(|| items.last().map(|(_, cursor)| cursor_text(cursor)))
+                .flatten(),
+            items: items
+                .into_iter()
+                .map(|(topic, _)| Listed::visible(topic))
+                .chain(hidden.into_iter().map(Listed::hidden))
+                .collect(),
+        },
+        more: witness,
     })
 }
 
-/// Changes a topic's status or tags.
-async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topic> {
+pub(super) async fn prepare_topic(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    body: &TopicUpdateBody,
+) -> ApiResult<super::metadata_mutation::TopicChange> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    if !hierarchy::lock(&mut tx, id).await? {
-        return Err(ApiError::not_found());
-    }
-    let (place, kind) = placed(&mut tx, id).await?;
+    let (place, kind) = placed(conn, id).await?;
     if kind != NodeKind::Topic {
         return Err(if kind == NodeKind::Thread {
             threads_are_not_served_here()
@@ -923,7 +1145,7 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
             ApiError::not_found()
         });
     }
-    let before = match shown(&ctx, &mut tx, &principal, id).await? {
+    let before = match shown(ctx, conn, principal, id).await? {
         Node::Topic(topic) => topic,
         _ => return Err(ApiError::not_found()),
     };
@@ -936,9 +1158,48 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
         )
         .with("current", &before));
     }
+    if let Some(tags) = &body.tag_ids {
+        check_tags(conn, id, tags).await?;
+    }
+    Ok(super::metadata_mutation::TopicChange { place, before })
+}
+
+pub(super) async fn prepare_tags(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    body: &NodeTagSetBody,
+) -> ApiResult<super::metadata_mutation::Tags> {
+    let id = ctx.id("id")?;
+    let (place, _) = placed(conn, id).await?;
+    let before = shown(ctx, conn, principal, id).await?;
+    let revision = match &before {
+        Node::Org(row) => row.base.revision,
+        Node::Project(row) => row.base.revision,
+        Node::Topic(row) => row.base.revision,
+        Node::Thread(row) => row.base.revision,
+    };
+    if body
+        .expected_revision
+        .is_some_and(|expected| expected != revision)
+    {
+        return Err(super::stale(&before));
+    }
+    check_tags(conn, id, &body.tag_ids).await?;
+    Ok(super::metadata_mutation::Tags { place, before })
+}
+
+/// Changes a topic's status or tags.
+async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topic> {
+    let id = ctx.id("id")?;
+    let (ctx, mut tx, _initial) = super::action(&ctx).await?;
+    let (ctx, guard) = super::lock_node_change(&ctx, &mut tx, id).await?;
+    let principal = guard.principal().clone();
+    let prepared = guard.operation_data::<super::metadata_mutation::TopicChange>()?;
+    let super::metadata_mutation::TopicChange { place, before } = prepared.as_ref().clone();
+    guard.check_deadline(&ctx)?;
     let who = actor_name(&ctx)?;
     if let Some(tags) = &body.tag_ids {
-        check_tags(&mut tx, id, tags).await?;
         hierarchy::set_node_tags(&mut tx, id, tags, ctx.now).await?;
         record_topic(
             &ctx,
@@ -982,25 +1243,12 @@ async fn topic_update(ctx: Ctx, (): (), body: TopicUpdateBody) -> ApiResult<Topi
 
 async fn tag_set(ctx: Ctx, (): (), body: NodeTagSetBody) -> ApiResult<Node> {
     let id = ctx.id("id")?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    if !hierarchy::lock(&mut tx, id).await? {
-        return Err(ApiError::not_found());
-    }
-    let (place, _) = placed(&mut tx, id).await?;
-    let before = shown(&ctx, &mut tx, &principal, id).await?;
-    let revision = match &before {
-        Node::Org(row) => row.base.revision,
-        Node::Project(row) => row.base.revision,
-        Node::Topic(row) => row.base.revision,
-        Node::Thread(row) => row.base.revision,
-    };
-    if body
-        .expected_revision
-        .is_some_and(|expected| expected != revision)
-    {
-        return Err(super::stale(&before));
-    }
-    check_tags(&mut tx, id, &body.tag_ids).await?;
+    let (ctx, mut tx, _initial) = super::action(&ctx).await?;
+    let (ctx, guard) = super::lock_node_change(&ctx, &mut tx, id).await?;
+    let principal = guard.principal().clone();
+    let prepared = guard.operation_data::<super::metadata_mutation::Tags>()?;
+    let super::metadata_mutation::Tags { place, before } = prepared.as_ref().clone();
+    guard.check_deadline(&ctx)?;
     hierarchy::set_node_tags(&mut tx, id, &body.tag_ids, ctx.now).await?;
     let who = actor_name(&ctx)?;
     record(
@@ -1034,43 +1282,10 @@ async fn record_topic(
 /// when the place that defined it is no longer above it, as it is when the topic has been moved:
 /// only a tag that is added is held to the rule.
 async fn check_tags(conn: &mut orch_db::Conn, topic: Id, tags: &[Id]) -> ApiResult<()> {
-    let mut distinct = tags.to_vec();
-    distinct.sort_unstable();
-    distinct.dedup();
-    let most = orch_settings::get::<i64>(
-        conn,
-        orch_settings::Place::Node(topic),
-        orch_settings_contract::registry::keys::TAGS_MAX_PER_PLACE,
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .unwrap_or_default();
-    if i64::try_from(distinct.len()).unwrap_or(i64::MAX) > most {
-        return Err(invalid(
-            "tag_ids",
-            &format!("a place carries at most {most} tags here"),
-        ));
-    }
-    let found = hierarchy::tags_by_id(conn, &distinct).await?;
     let carried: Vec<Id> = hierarchy::node_tags(conn, &[topic])
         .await?
         .into_iter()
         .map(|each| each.id)
         .collect();
-    let rows = hierarchy::with_ancestors(conn, &[topic]).await?;
-    let above: Vec<Id> = rows
-        .iter()
-        .find(|row| row.id == topic)
-        .map(|row| row.path.clone())
-        .unwrap_or_default();
-    for (index, tag) in distinct.iter().enumerate() {
-        let defined = found.iter().find(|each| each.id == *tag);
-        if !defined.is_some_and(|each| above.contains(&each.node_id) || carried.contains(tag)) {
-            return Err(invalid(
-                &format!("tag_ids[{index}]"),
-                "is no tag defined here or above this place",
-            ));
-        }
-    }
-    Ok(())
+    super::tags::check(conn, Some(topic), tags, &carried).await
 }

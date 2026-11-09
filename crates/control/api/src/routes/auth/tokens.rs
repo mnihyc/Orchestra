@@ -21,6 +21,7 @@ use crate::sign_in::record;
 use chrono::{DateTime, Utc};
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::Scopes;
+use orch_access_contract::key_scope::{KeyIdentityKind, KeyObjectRef, KeyScope, KeyTargetKind};
 use orch_api_contract::auth::{
     ApiTokenCreateBody, ApiTokenInfo, OrgToken, OrgTokenList, OrgTokenListQuery, OrgTokenRefuse,
     TokenCreated,
@@ -28,26 +29,38 @@ use orch_api_contract::auth::{
 use orch_api_contract::common::{
     DEFAULT_LIMIT, ErrorCode, FieldFault, IDEMPOTENCY_HEADER, MAX_LIMIT, Page, Problem,
 };
-use orch_api_contract::nodes::{NodeKind, NodeRef};
 use orch_db::Conn;
 use orch_db::audit::Actor;
 use orch_db::idempotency::{self, Replay};
 use orch_db::queries::tokens;
 use orch_settings::Place;
 use orch_settings_contract::registry::keys;
-use orch_types::{Id, Time};
+use orch_types::{Id, Json, Time};
 use serde_json::json;
+
+mod org_inventory;
 
 /// How many characters a token's name has.
 const NAME_CHARS: std::ops::RangeInclusive<usize> = 1..=80;
-/// How long a creation's key is answered again: a day, as every creating request's key.
-const KEY_KEPT_HOURS: i64 = 24;
 
 /// Mounts the org's list of tokens and the refusal.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(OrgTokenList, org_tokens)
-        .on(OrgTokenRefuse, refuse);
+        .on(
+            orch_api_contract::operations::OperationCatalogueGet,
+            operation_catalogue,
+        )
+        .on_with_operation(OrgTokenList, org_inventory::list, org_inventory::get)
+        .on_with_operation(OrgTokenRefuse, org_inventory::refusal, refuse);
+}
+
+async fn operation_catalogue(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<Vec<orch_api_contract::operations::Operation>> {
+    let _ = ctx.user()?;
+    orch_api_contract::operations::catalogue().map_err(ApiError::internal)
 }
 
 /// What a request to make a token asks for, checked.
@@ -57,6 +70,8 @@ pub struct Asked {
     pub name: String,
     /// Its scope words: none where none were given.
     pub scopes: Vec<String>,
+    /// Explicit operation mode, including server-retained issuer ceilings.
+    pub operation_scope: Option<KeyScope>,
     /// When it ends.
     pub expires_at: Option<DateTime<Utc>>,
 }
@@ -75,6 +90,29 @@ pub fn asked(body: &ApiTokenCreateBody, now: DateTime<Utc>) -> ApiResult<Asked> 
     if !NAME_CHARS.contains(&name.chars().count()) {
         fault("name", "must be 1 to 80 characters");
     }
+    if body.rules.is_some() && (body.scopes.is_some() || body.node_id.is_some()) {
+        fault("rules", "cannot be combined with legacy scopes or node_id");
+    }
+    let operation_scope = if let Some(rules) = &body.rules {
+        Some(KeyScope {
+            rules: rules.clone(),
+            ..KeyScope::default()
+        })
+    } else if body.scopes.is_none() && body.node_id.is_none() {
+        Some(KeyScope::default())
+    } else {
+        None
+    };
+    if let Some(scope) = &operation_scope {
+        for error in scope.validate() {
+            fault(&error.path, &error.message);
+        }
+        for error in
+            orch_api_contract::operations::validate_selections(scope).map_err(ApiError::internal)?
+        {
+            fault(&error.path, &error.message);
+        }
+    }
     let scopes = match Scopes::parse(body.scopes.as_deref().unwrap_or_default()) {
         Ok(parsed) => parsed.to_strings(),
         Err(error) => {
@@ -90,11 +128,116 @@ pub fn asked(body: &ApiTokenCreateBody, now: DateTime<Utc>) -> ApiResult<Asked> 
         Ok(Asked {
             name,
             scopes,
+            operation_scope,
             expires_at,
         })
     } else {
         Err(Problem::invalid(faults).into())
     }
+}
+
+impl Asked {
+    /// Applies the current guarded caller's complete policy ceiling before the same token writer
+    /// runs. The required key-management facet must already have passed the shared operation gate.
+    pub fn for_issuer(
+        mut self,
+        caller: &orch_authz::Caller,
+        route: &orch_api_contract::routes::Route,
+        account: Id,
+    ) -> ApiResult<Self> {
+        if caller.grant().is_none() {
+            return Ok(self);
+        }
+        let account = KeyObjectRef {
+            kind: KeyTargetKind::Identity(KeyIdentityKind::Account),
+            id: Some(account),
+        };
+        let operation =
+            orch_api_contract::operations::for_route(route).map_err(ApiError::internal)?;
+        if !caller.admitted_facets().is_some_and(|facets| {
+            operation.variants.iter().any(|variant| {
+                let required: Vec<_> = variant
+                    .facets
+                    .iter()
+                    .filter(|facet| {
+                        facet.usage == orch_api_contract::operations::FacetUsage::Required
+                    })
+                    .collect();
+                !required.is_empty()
+                    && required.iter().all(|required| {
+                        facets.iter().any(|facet| {
+                            facet.operation == variant.operation
+                                && facet.action == required.action
+                                && required.resources.contains(&facet.resource_kind)
+                                && facet.target.object == account
+                        })
+                    })
+            })
+        }) {
+            return Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "this key issuance has not passed its current operation scope",
+            ));
+        }
+        let Some(scope) = self.operation_scope else {
+            return Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "a key cannot issue a legacy credential outside its operation ceiling",
+            ));
+        };
+        self.operation_scope = Some(
+            caller
+                .attenuate_key_scope(scope.rules, self.expires_at.map(Time::new))
+                .map_err(|error| ApiError::new(ErrorCode::AuthzDenied, error.to_string()))?,
+        );
+        Ok(self)
+    }
+
+    /// Exact stored restriction envelope; absence is explicitly selected legacy mode.
+    pub fn stored_scope(&self) -> ApiResult<Option<Json>> {
+        self.operation_scope
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(ApiError::internal)
+    }
+
+    /// Newly written operation-mode metadata, without reading existing node names for a receipt.
+    pub fn created_info(&self, id: Id, now: DateTime<Utc>) -> ApiResult<ApiTokenInfo> {
+        let scope = self
+            .operation_scope
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("a scoped receipt needs operation-mode issuance"))?;
+        Ok(ApiTokenInfo {
+            id,
+            name: self.name.clone(),
+            scopes: self.scopes.clone(),
+            rules: Some(scope.rules.clone()),
+            constraints: scope.constraints.clone(),
+            excluded_places: scope.excluded_places.clone(),
+            node: None,
+            created_at: Time::new(now),
+            last_used_at: None,
+            expires_at: self.expires_at.map(Time::new),
+        })
+    }
+}
+
+/// Truthful owner-visible policy metadata. A malformed stored policy is never described as legacy.
+pub fn scope_info(raw: Option<Json>) -> ApiResult<Option<KeyScope>> {
+    let scope: Option<KeyScope> = raw
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(ApiError::internal)?;
+    if scope
+        .as_ref()
+        .is_some_and(|scope| !scope.validate().is_empty())
+    {
+        return Err(ApiError::internal(
+            "a stored key has an invalid operation scope",
+        ));
+    }
+    Ok(scope)
 }
 
 /// Refuses a token whose end is no longer in the future at `now`, the action's own time (an end that
@@ -147,23 +290,48 @@ fn key_of(ctx: &Ctx) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn issuance_path(ctx: &Ctx) -> ApiResult<String> {
+    let mut path = ctx.route.path.to_owned();
+    for name in ctx.route.parameters() {
+        path = path.replace(&format!("{{{name}}}"), &ctx.id(name)?.to_string());
+    }
+    Ok(path)
+}
+
 /// What was answered to the same creation asked before with this request's key, without its secret:
 /// looked at before any proof is spent. The same key on another request is a mistake of the client.
 pub async fn replayed(ctx: &Ctx, conn: &mut Conn, maker: Id) -> ApiResult<Option<TokenCreated>> {
     let Some(key) = key_of(ctx) else {
         return Ok(None);
     };
-    let since = ctx.now - chrono::Duration::hours(KEY_KEPT_HOURS);
+    let since = crate::middleware::idempotency::window_since(conn, ctx.now).await?;
     let Some(replay) = idempotency::find(conn, maker, &key, since).await? else {
         return Ok(None);
     };
-    if replay.method != "POST" || replay.path != ctx.route.path {
+    let path = issuance_path(ctx)?;
+    if replay.method != "POST" || (replay.path != path && replay.path != ctx.route.path) {
         return Err(ApiError::new(
             ErrorCode::ConflictIdempotencyMismatch,
             "the key was used for another request",
         ));
     }
     let info: ApiTokenInfo = serde_json::from_value(replay.response).map_err(ApiError::internal)?;
+    if replay.path != path {
+        // Old service-token receipts stored only the route template. Confirm the actual
+        // account from the existing credential row instead of replaying across accounts.
+        let account: Option<Id> = sqlx::query_scalar("SELECT user_id FROM api_tokens WHERE id=$1")
+            .bind(info.id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+        if account != Some(ctx.id("id")?) {
+            return Err(ApiError::new(
+                ErrorCode::ConflictIdempotencyMismatch,
+                "the key was used for another account",
+            ));
+        }
+    }
+    crate::key_operations::activity::replayed();
     Ok(Some(TokenCreated {
         token: None,
         info,
@@ -179,77 +347,12 @@ pub async fn keep(ctx: &Ctx, conn: &mut Conn, maker: Id, info: &ApiTokenInfo) ->
     };
     let replay = Replay {
         method: "POST".to_owned(),
-        path: ctx.route.path.to_owned(),
+        path: issuance_path(ctx)?,
         status: 200,
         response: serde_json::to_value(info).map_err(ApiError::internal)?,
     };
     idempotency::keep(conn, maker, &key, &replay, ctx.now).await?;
     Ok(())
-}
-
-/// Lists the tokens that can reach the org, with whether each is refused here and whether its whole
-/// life is within what the org admits. No secret, of course.
-async fn org_tokens(ctx: Ctx, query: OrgTokenListQuery, (): ()) -> ApiResult<Page<OrgToken>> {
-    let org = ctx.id("id")?;
-    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-    let after = match query.cursor.as_deref() {
-        None => None,
-        Some(text) => Some(
-            text.parse::<Id>()
-                .map_err(|_| ApiError::invalid("cursor", "is not a cursor of this list"))?,
-        ),
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let mut rows = tokens::reaching(&mut conn, org, ctx.now, after, i64::from(limit) + 1).await?;
-    let more = rows.len() > usize::try_from(limit).unwrap_or(usize::MAX);
-    rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    let bound = orch_settings::get::<i64>(&mut conn, Place::Node(org), keys::TOKENS_MAX_DAYS)
-        .await
-        .map_err(ApiError::internal)?;
-    let users: Vec<Id> = rows.iter().map(|row| row.user_id).collect();
-    let refs = authorization::refusals::user_refs(&mut conn, &users).await?;
-    let next_cursor = if more {
-        rows.last().map(|row| row.id.to_string())
-    } else {
-        None
-    };
-    let items = rows
-        .into_iter()
-        .filter_map(|row| {
-            let user = refs.get(&row.user_id)?.clone();
-            let lifetime_allowed = bound.is_none_or(|days| {
-                row.expires_at
-                    .is_some_and(|end| end - row.created_at <= chrono::Duration::days(days))
-            });
-            let node = row.node_id.map(|id| NodeRef {
-                thread_display: None,
-                id,
-                kind: row
-                    .node_kind
-                    .as_deref()
-                    .and_then(|kind| serde_json::from_value::<NodeKind>(json!(kind)).ok())
-                    .unwrap_or(NodeKind::Org),
-                name: row.node_name.clone(),
-                redacted: false,
-            });
-            Some(OrgToken {
-                info: ApiTokenInfo {
-                    id: row.id,
-                    name: row.name,
-                    scopes: row.scopes,
-                    node,
-                    created_at: Time::new(row.created_at),
-                    last_used_at: row.last_used_at.map(Time::new),
-                    expires_at: row.expires_at.map(Time::new),
-                },
-                user,
-                service: row.service,
-                refused_here: row.refused_here,
-                lifetime_allowed,
-            })
-        })
-        .collect();
-    Ok(Page { items, next_cursor })
 }
 
 /// Refuses a token in the org and everything inside, once: the token keeps working elsewhere, and
@@ -259,7 +362,7 @@ async fn refuse(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     let token = ctx.id("token_id")?;
     let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
     let reaching = tokens::reaching(&mut tx, org, ctx.now, None, i64::MAX).await?;
-    if !reaching.iter().any(|row| row.id == token) {
+    if !reaching.iter().any(|row| row.key.id == token) {
         return Err(ApiError::not_found());
     }
     if tokens::refuse(&mut tx, token, org, principal.user(), ctx.now).await? {
@@ -277,4 +380,114 @@ async fn refuse(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     }
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a boundary control fails by panicking")]
+mod tests {
+    use super::*;
+    use orch_access_contract::key_scope::{KeyAction, KeyFacet, KeyResolvedTarget};
+    use orch_api_contract::auth::MeTokenCreate;
+    use orch_api_contract::routes::Endpoint;
+    use orch_authz::{Caller, TokenGrant};
+    use orch_types::new_id;
+
+    fn body(value: Json) -> ApiTokenCreateBody {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn omitted_modes_create_explicit_deny_all_and_explicit_legacy_fields_stay_distinct() {
+        let now = orch_testkit::clock::start();
+        let blank = asked(&body(json!({"name":"empty"})), now).unwrap();
+        assert_eq!(blank.operation_scope, Some(KeyScope::default()));
+        assert!(blank.scopes.is_empty());
+        let old = asked(&body(json!({"name":"legacy","scopes":["doc.view"]})), now).unwrap();
+        assert!(old.operation_scope.is_none());
+        assert_eq!(old.scopes, ["doc.view"]);
+        assert!(
+            asked(
+                &body(json!({"name":"ambiguous","rules":[],"scopes":[]})),
+                now
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn issuance_rejects_unknown_future_selections_before_storage() {
+        let now = orch_testkit::clock::start();
+        let request = body(json!({"name":"future","rules":[{
+            "target":{"kind":"account","id":new_id(),"reach":"self"},
+            "allow":[{"operation":"UnknownFutureOperation","actions":["manage"]}]
+        }]}));
+        assert!(asked(&request, now).is_err());
+    }
+
+    #[test]
+    fn key_issuance_requires_complete_current_admission_and_cannot_issue_a_legacy_escape() {
+        let now = orch_testkit::clock::start();
+        let user = new_id();
+        let policy: KeyScope = serde_json::from_value(json!({"rules":[{
+            "target":{"kind":"account","id":user,"reach":"self"},
+            "allow":[{"operation":"MeTokenCreate","actions":["manage","read"]}]
+        }]}))
+        .unwrap();
+        let key = Caller::token(
+            user,
+            TokenGrant::from_stored_scope(&[], None, Some(policy.clone()), None).unwrap(),
+        );
+        let request = body(json!({"name":"child","rules":[]}));
+        assert!(
+            asked(&request, now)
+                .unwrap()
+                .for_issuer(&key, &MeTokenCreate::ROUTE, user)
+                .is_err()
+        );
+        let facet = |action| KeyFacet {
+            operation: "MeTokenCreate".into(),
+            action,
+            resource_kind: KeyTargetKind::Identity(KeyIdentityKind::Key),
+            target: KeyResolvedTarget {
+                object: KeyObjectRef {
+                    kind: KeyTargetKind::Identity(KeyIdentityKind::Account),
+                    id: Some(user),
+                },
+                node_ancestors: Vec::new(),
+                document_ancestors: Vec::new(),
+                credential_account: None,
+            },
+        };
+        let read_only = key
+            .admit_facets(&[facet(KeyAction::Read)])
+            .unwrap()
+            .into_caller();
+        assert!(
+            asked(&request, now)
+                .unwrap()
+                .for_issuer(&read_only, &MeTokenCreate::ROUTE, user)
+                .is_err(),
+            "the operation name without its required effect is not a complete admission"
+        );
+        let admitted = key
+            .admit_facets(&[facet(KeyAction::Manage)])
+            .unwrap()
+            .into_caller();
+        let child = asked(&request, now)
+            .unwrap()
+            .for_issuer(&admitted, &MeTokenCreate::ROUTE, user)
+            .unwrap();
+        let scope = child.operation_scope.as_ref().unwrap();
+        assert!(scope.rules.is_empty());
+        assert_eq!(scope.constraints, vec![policy.rules]);
+        let info = child.created_info(new_id(), now).unwrap();
+        assert_eq!(info.rules, Some(Vec::new()));
+        assert_eq!(info.constraints, scope.constraints);
+        let legacy = asked(&body(json!({"name":"escape","scopes":["*"]})), now).unwrap();
+        assert!(
+            legacy
+                .for_issuer(&admitted, &MeTokenCreate::ROUTE, user)
+                .is_err()
+        );
+    }
 }

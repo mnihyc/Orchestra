@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as SettingsApi from '@/api/settings';
 import type * as ThreadsApi from '@/api/threads';
+import { ViewCompactContext } from '@/features/workbench/Narrow';
 import { ModelEffort } from '@/features/composer/ModelEffort';
 import { effortDisplayName } from '@/features/models/names';
 import type { ModelOption, ResolvedSetting, Thread, ThreadParameters } from '@/generated/api-types';
@@ -141,5 +142,42 @@ it('keeps every model and effort read-only for a driver who cannot manage the th
   const menu = await within(picker).findByRole('menu', { name: i18n.t('composer.model.list') });
   expect(within(picker).getByText(i18n.t('composer.model.readOnly', { who: native.owner.display_name }))).toBeVisible();
   for (const option of within(menu).getAllByRole('menuitemradio')) { expect(option).toBeDisabled(); expect(option).toHaveAttribute('tabindex', '-1'); await user.click(option); }
+  expect(server.write).not.toHaveBeenCalled();
+});
+
+
+for (const locale of ['en', 'zh-CN'] as const) for (const compact of [false, true]) for (const readOnly of [false, true]) {
+  it(`keeps the selected effort visible beside a long model in ${locale}, narrow:${compact}, read-only:${readOnly}`, async () => {
+    await setLocale(locale);
+    const name = 'A long actual model display name';
+    const current = { ...native, model_display: name };
+    const view = show(<ViewCompactContext.Provider value={compact}><ModelEffort thread={current} variant="composer" compact readOnly={readOnly} /></ViewCompactContext.Provider>);
+    const effort = effortDisplayName('high', i18n.t);
+    const control = screen.getByRole('button', { name: i18n.t(readOnly ? 'composer.model.current' : 'composer.model.change', { model: `${name} (${effort})` }) });
+    const options = control.querySelector('[data-model-options]');
+    expect(options).toBeVisible(); expect(options).not.toHaveClass('hidden');
+    expect(options).toHaveTextContent(effort);
+    expect(control.querySelector('[data-model-name]')).toHaveTextContent(name);
+    expect(view.container.querySelector('p')).toBeNull();
+    if (readOnly) expect(control).toBeDisabled();
+    expect(server.write).not.toHaveBeenCalled();
+  });
+}
+
+it('does not invent an effort fragment for an actual model use without one', () => {
+  show(<ViewCompactContext.Provider value><ModelEffort thread={{ ...native, effort: null }} variant="composer" compact /></ViewCompactContext.Provider>);
+  expect(document.querySelector('[data-model-options]')).toBeNull();
+  expect(server.write).not.toHaveBeenCalled();
+});
+
+
+it('lets a driver inspect the model choices without borrowing model-write authority', async () => {
+  const driver = { ...native, access: { ...native.access, permissions: ['thread.view', 'thread.interact'] } };
+  show(<ModelEffort thread={driver} variant="composer" />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('composer.model.change', { model: `Alpha (${effortDisplayName('high', i18n.t)})` }) }));
+  expect(await screen.findByText(i18n.t('composer.model.readOnly', { who: driver.owner.display_name }))).toBeVisible();
+  const choices = await screen.findAllByRole('menuitemradio');
+  for (const choice of choices) expect(choice).toBeDisabled();
+  await userEvent.click(choices[0]!);
   expect(server.write).not.toHaveBeenCalled();
 });

@@ -16,26 +16,24 @@ use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{actor_name, invalid};
 use orch_access_contract::audit::AuditAction;
-use orch_api_contract::common::{Page, PageQuery};
+use orch_access_contract::permissions::Permission;
 use orch_api_contract::documents::{
-    Author, DocumentBlock, DocumentChanges, DocumentChangesGet, DocumentChangesGetQuery,
-    DocumentSync, DocumentVersion, DocumentVersionGet, DocumentVersionGetReply,
-    DocumentVersionList, DocumentVersionListQuery, DocumentVersionRestore, VersionCause,
-    VersionChanged,
+    Author, DocumentChangesGet, DocumentSync, DocumentVersion, DocumentVersionGet,
+    DocumentVersionList, DocumentVersionRestore, VersionCause, VersionChanged,
 };
 use orch_authz::Policy;
 use orch_db::queries::documents::batch::{self, Restored};
 use orch_db::queries::documents::history::{self, ByAuthor, VersionRow};
 use orch_db::queries::documents::{self as rows, BlockRow};
 use orch_db::{Conn, DbError};
-use orch_documents::changes;
 use orch_documents::versions::{Span, Writer};
 use orch_types::{Id, Json, Time};
 use serde_json::json;
-use std::collections::HashMap;
 
 use build::{Cast, Wanted};
 use limits::{DocSettings, Limit};
+
+mod readers;
 
 /// The word for the version that was last cut before the caller last had the
 /// document open.
@@ -46,9 +44,9 @@ const THREAD_PREFIX: &str = "thread:";
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(DocumentVersionList, list)
-        .on(DocumentChangesGet, changes_get)
-        .on(DocumentVersionGet, get)
+        .on_snapshot_read_with_operation(DocumentVersionList, readers::list, readers::list_get)
+        .on_snapshot_read_with_operation(DocumentChangesGet, readers::changes, readers::changes_get)
+        .on_snapshot_read_with_operation(DocumentVersionGet, readers::version, readers::version_get)
         .on(DocumentVersionRestore, restore);
 }
 
@@ -157,99 +155,10 @@ fn wrote_in(span: &Span, author: ByAuthor) -> bool {
     })
 }
 
-/// The entries of a document's history, newest first.
-async fn list(
-    ctx: Ctx,
-    query: DocumentVersionListQuery,
-    (): (),
-) -> ApiResult<Page<DocumentVersion>> {
-    let id = ctx.id("id")?;
-    let paging = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(paging.limit()).unwrap_or(usize::MAX);
-    let author = parse_author(query.author.as_deref())?;
-    let before: Option<i32> = match query.cursor.as_deref() {
-        None => None,
-        Some(text) => Some(
-            text.parse()
-                .map_err(|_| invalid("cursor", "is not a cursor of this list"))?,
-        ),
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let row = super::live(&mut conn, id).await?;
-    let span = row.span();
-    let with_open =
-        before.is_none() && !span.is_empty() && author.is_none_or(|author| wrote_in(&span, author));
-    let take = limit - usize::from(with_open);
-    let found = history::list(
-        &mut conn,
-        id,
-        author,
-        before,
-        i64::try_from(take + 1).unwrap_or(i64::MAX),
-    )
-    .await?;
-    let more = found.len() > take;
-    let shown: Vec<&VersionRow> = found.iter().take(take).collect();
-    let mut wanted = Wanted::default();
-    want_writers(&mut wanted, &span.authors);
-    for each in &shown {
-        want_writers(&mut wanted, &writers_of(&each.authors));
-    }
-    let cast = Cast::load(&mut conn, &principal, wanted, Policy::default()).await?;
-    let mut items: Vec<DocumentVersion> = Vec::new();
-    if with_open {
-        items.extend(open_span(
-            &row.title,
-            row.bytes,
-            i64::from(row.block_count),
-            &span,
-            &cast,
-        ));
-    }
-    items.extend(shown.iter().map(|each| entry(each, &cast)));
-    let next_cursor = more
-        .then(|| shown.last().map(|each| each.version.to_string()))
-        .flatten();
-    Ok(Page { items, next_cursor })
-}
-
 fn version_number(ctx: &Ctx) -> ApiResult<i32> {
     ctx.param("version")?
         .parse()
         .map_err(|_| ApiError::not_found())
-}
-
-/// A document as it stood at a version.
-async fn get(
-    ctx: Ctx,
-    _query: orch_api_contract::nodes::DeletedInspectionQuery,
-    (): (),
-) -> ApiResult<DocumentVersionGetReply> {
-    let id = ctx.id("id")?;
-    let number = version_number(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    super::live(&mut conn, id).await?;
-    let found = history::get(&mut conn, id, number)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let held: Vec<BlockRow> = history::snapshot(&mut conn, id, number)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let mut wanted = Wanted::default();
-    want_writers(&mut wanted, &writers_of(&found.authors));
-    for each in &held {
-        wanted.block(each);
-    }
-    let cast = Cast::load(&mut conn, &principal, wanted, Policy::default()).await?;
-    Ok(DocumentVersionGetReply {
-        version: entry(&found, &cast),
-        blocks: held.iter().map(|each| cast.block(each)).collect(),
-    })
 }
 
 /// The version a `from` names: a number, `0` for the empty document, or `seen`.
@@ -295,74 +204,6 @@ async fn state_at(
 }
 
 /// What differs between two states of a document, block by block.
-async fn changes_get(
-    ctx: Ctx,
-    query: DocumentChangesGetQuery,
-    (): (),
-) -> ApiResult<DocumentChanges> {
-    let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let policy = Policy::default();
-    let row = super::live(&mut conn, id).await?;
-    let from = from_version(&mut conn, principal.user(), id, &query.from).await?;
-    let to: Option<i32> = match query.to {
-        None => None,
-        Some(number) => Some(
-            i32::try_from(number)
-                .ok()
-                .filter(|number| *number >= 0)
-                .ok_or_else(|| invalid("to", "is a version number"))?,
-        ),
-    };
-    let (earlier, earlier_title) = state_at(&mut conn, id, Some(from), &row.title).await?;
-    let (later, later_title) = state_at(&mut conn, id, to, &row.title).await?;
-    let writers = history::authors_between(&mut conn, id, from, to).await?;
-    // Who took a block out is on the row that stayed behind, while it did.
-    let gone: Vec<Id> = earlier
-        .iter()
-        .map(|each| each.id)
-        .filter(|each| !later.iter().any(|kept| kept.id == *each))
-        .collect();
-    let tombstones: HashMap<Id, BlockRow> = rows::blocks_by_ids(&mut conn, id, &gone)
-        .await?
-        .into_iter()
-        .filter(|each| each.removed_at.is_some())
-        .map(|each| (each.id, each))
-        .collect();
-    let mut wanted = Wanted::default();
-    want_writers(&mut wanted, &writers);
-    for each in earlier
-        .iter()
-        .chain(later.iter())
-        .chain(tombstones.values())
-    {
-        wanted.block(each);
-    }
-    let cast = Cast::load(&mut conn, &principal, wanted, policy).await?;
-    let before: Vec<DocumentBlock> = earlier.iter().map(|each| cast.block(each)).collect();
-    let after: Vec<DocumentBlock> = later.iter().map(|each| cast.block(each)).collect();
-    let removed_by = |block: Id| -> Option<Author> {
-        let each = tombstones.get(&block)?;
-        cast.author(
-            each.updated_by,
-            each.updated_by_thread,
-            each.updated_by_agent.as_deref(),
-        )
-    };
-    let title = match (earlier_title, later_title) {
-        (Some(before), Some(after)) => changes::title(&before, &after),
-        _ => None,
-    };
-    Ok(DocumentChanges {
-        from: i64::from(from),
-        to: to.map(i64::from),
-        title,
-        blocks: changes::between(&before, &after, &removed_by),
-        authors: authors_of(&writers, &cast),
-    })
-}
-
 /// Puts a version back: the present state is cut as a version first, then the
 /// blocks of that version stand again.
 async fn restore(mut ctx: Ctx, (): (), (): ()) -> ApiResult<DocumentSync> {
@@ -372,19 +213,25 @@ async fn restore(mut ctx: Ctx, (): (), (): ()) -> ApiResult<DocumentSync> {
     ctx.now = guard.now().get();
     let principal = guard.principal().clone();
     let policy = Policy::default();
-    let row = super::live(&mut tx, id).await?;
+    let row = super::live_locked(&mut tx, id).await?;
     let settings = DocSettings::at(&mut tx, row.node_id).await?;
     let rules = settings.version_rules(ctx.app.config.documents.version_window_secs);
-    let restored = batch::restore(
+    let prepared = batch::prepare_restoration(
         &mut tx,
         id,
         number,
         &Writer::User(principal.user()),
         settings.batch_limits(),
         rules,
-        ctx.now,
     )
     .await?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let principal = guard.principal().clone();
+    authorization::require_document(&mut tx, &principal, id, Permission::DocManage, policy).await?;
+    let restored = batch::apply_restoration(&mut tx, prepared, guard.now().get(), || {
+        guard.check_deadline(&ctx)
+    })
+    .await??;
     match restored {
         Restored::Gone | Restored::NoSuchVersion => return Err(ApiError::not_found()),
         Restored::TooManyBlocks { .. } => {
@@ -398,6 +245,7 @@ async fn restore(mut ctx: Ctx, (): (), (): ()) -> ApiResult<DocumentSync> {
             );
         }
         Restored::Done(applied) => {
+            guard.check_deadline(&ctx)?;
             let who = actor_name(&ctx)?;
             record(
                 &ctx,
@@ -411,6 +259,7 @@ async fn restore(mut ctx: Ctx, (): (), (): ()) -> ApiResult<DocumentSync> {
         }
     }
     let synced = super::read_sync(&mut tx, &principal, id, None, ctx.now).await?;
+    guard.check_deadline(&ctx)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(synced)
 }

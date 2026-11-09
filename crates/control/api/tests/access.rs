@@ -7,6 +7,8 @@
 
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullRoleReply as _;
 
 use orch_api_contract::access::{
     AccessChoice, EffectiveAccessGet, EffectiveAccessGetQuery, HistoryList, HistoryListQuery,
@@ -70,6 +72,7 @@ async fn change(
         .body(change)
         .send()
         .await
+        .full_permission_page()
 }
 
 fn naming(user: Id, choice: AccessChoice) -> PageChange {
@@ -589,6 +592,7 @@ async fn a_lock_on_the_defaults_of_an_org_decides_the_row_below_it() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(
         locked
@@ -630,6 +634,7 @@ async fn a_lock_on_the_defaults_of_an_org_decides_the_row_below_it() {
         .body(&PageChange::default())
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(refused.extra["required"], "access.manage");
 }
@@ -657,7 +662,10 @@ async fn a_role_is_given_listed_changed_and_taken_away() {
             })
             .send()
     };
-    let held = give(&s.boss, s.web, eve.id(), Role::Developer).await.ok();
+    let held = give(&s.boss, s.web, eve.id(), Role::Developer)
+        .await
+        .full_role()
+        .ok();
     assert_eq!(held.role, Role::Developer);
     assert_eq!(held.node.id, s.web);
     assert_eq!(held.subject.user.as_ref().unwrap().username, "eve");
@@ -719,6 +727,7 @@ async fn a_role_is_given_listed_changed_and_taken_away() {
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(
         (changed.role, changed.note.as_str()),
@@ -843,6 +852,7 @@ async fn admin_is_given_and_taken_only_by_an_owner_or_an_admin_of_the_place() {
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert_eq!(given.role, Role::Viewer);
     assert_eq!(given.created_by.username, "dan", "a role says who gave it");
@@ -974,6 +984,7 @@ async fn a_role_given_to_somebody_outside_the_tree_is_named_by_whoever_may_name_
         })
         .send()
         .await
+        .full_role()
         .ok();
     assert!(given.outside);
     // She reads the project, and makes nobody a member.

@@ -9,11 +9,16 @@ import { cx } from '@/ui/cx';
 import { revealFloatingFocus } from '@/ui/floating';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { usePromptCovered } from '@/ui/PromptScope';
-import { isInspectionTarget } from '@/ui/inspection';
+import { isInspectionTarget, useCardPointerReopen } from '@/ui/inspection';
 import { IconButton } from '@/ui/IconButton';
 import { useCardChildren, useChildCard, useKeepParentCard } from '@/ui/CardNesting';
 
+/** Display metadata of the same native resource the inspection card names. */
+export interface ChoiceResource { kind: string; id: string; data?: unknown }
+
 export interface CardPreview {
+  /** Lets complete resource choices use the common grouped picker. Never grants an act. */
+  resource?: ChoiceResource;
   /** The full permitted name of the thing being inspected. */
   label: string;
   /** Called only while a card is visible; detail readers belong here. */
@@ -119,6 +124,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
   const keepParent = useKeepParentCard();
   const nested = useCardChildren(() => setChildKept(true));
   const [dismissed, setDismissed] = useState(false);
+  const pointer = useCardPointerReopen();
   const [lastActive, setLastActive] = useState(active);
   const [choiceSide, setChoiceSide] = useState<'right' | 'top' | 'bottom'>('right');
   const [choiceGap, setChoiceGap] = useState(CARD_GAP_PX);
@@ -187,7 +193,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     view.addEventListener('scroll', place, true);
     return () => { sizes?.disconnect(); moves?.disconnect(); if (frame !== undefined) view.cancelAnimationFrame(frame); view.removeEventListener('resize', resized); view.removeEventListener('scroll', place, true); };
   }, [choice, visible, avoidChoiceList]);
-  const close = () => { setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
+  const close = () => { pointer.dismiss(); setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
   const closePassing = () => {
     if (!choice) { close(); return; }
     flushSync(close);
@@ -210,18 +216,23 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
     onPointerUp={(event) => event.stopPropagation()}
     onClick={(event) => { event.preventDefault(); event.stopPropagation(); keep(); }} />;
-  return <Popover.Root open={kept} onOpenChange={(next) => { if (next) keepParent?.(); else setChildKept(false); setKept(next); setShown(false); setDismissed(!next); }}>
+  return <Popover.Root open={kept} onOpenChange={(next) => { if (!next) { close(); return; } keepParent?.(); setKept(true); setShown(false); setDismissed(false); }}>
       <HoverCard.Root open={passing} onOpenChange={(next) => {
         const node = passingCard.current;
         if (!next && passingContent !== undefined && node?.contains(node.ownerDocument.activeElement)) return;
         if (mounted.current && !kept) setShown(next);
       }}>
-      <HoverCard.Trigger asChild onPointerEnter={() => setDismissed(false)}
+      <HoverCard.Trigger asChild onPointerEnter={(event) => {
+        if (!pointer.allowed.current || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) { event.preventDefault(); return; }
+        setDismissed(false);
+      }} onPointerLeave={pointer.leave}
         // Options keep their primitive's focus handling; plain names need no delayed opening.
-        onFocus={(event) => { const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (!(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+        onFocus={(event) => { if (!event.currentTarget.contains(event.target)) { event.preventDefault(); return; } const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (event.currentTarget.contains(event.target) && !(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+          if (event.defaultPrevented || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
           if (choice && event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); keep(); }
           if (!choice && passingContent !== undefined && passing && (event.key === 'ArrowDown' || event.key === 'Tab' && !event.shiftKey)) {
-            const first = passingCard.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]');
+            const first = passingCard.current?.querySelector<HTMLElement>('[data-card-entry]:not([disabled])')
+              ?? passingCard.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]');
             if (first !== null && first !== undefined) { event.preventDefault(); first.focus(); }
           }
           if (event.key === 'Escape' && visible) { if (!choice || kept) { event.preventDefault(); event.stopPropagation(); } close(); }
@@ -235,7 +246,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
         onFocusCapture={() => setShown(true)}
         onBlurCapture={(event) => { if (!(event.relatedTarget instanceof Node && (passingCard.current?.contains(event.relatedTarget) || anchor.current?.contains(event.relatedTarget)))) setShown(false); }}
         aria-label={label} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); closePassing(); }}>
-        {visible && nested.wrap((passingContent ?? content)())}
+        {passing && nested.wrap((passingContent ?? content)())}
       </HoverCard.Content></HoverCard.Portal>
     </HoverCard.Root>
     {choice && (inspection === null ? renderInspect?.(inspector) ?? inspector : inspection.target === null ? null : createPortal(inspector, inspection.target))}

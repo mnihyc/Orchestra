@@ -1,7 +1,9 @@
 ---
+group: access
 title: People and mentions
 screens: /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /thread/$threadId, /workbench, /u/$username, /everything, /topic/$topicId, /org/$slug/settings/$section, /resources/environments, /resources/providers, /resources/hosts, /resources/templates, /resources/skills, /resources/mcp, /resources/mounts
 keywords: people, profile, mention, notify, share, access, comments, chat
+summary: Open people’s cards, notify them explicitly and review sharing when mentioning work.
 ---
 
 # People and mentions

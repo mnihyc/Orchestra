@@ -112,6 +112,7 @@ impl Record {
             if !server.live() {
                 self.server = None;
             }
+            #[cfg(target_os = "linux")]
             return;
         }
         // Commands serialize per environment: at most the in-flight spawn lacks its saved PID.

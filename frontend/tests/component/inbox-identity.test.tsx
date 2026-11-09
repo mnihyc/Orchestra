@@ -141,6 +141,20 @@ function LiveRows() {
   return <Rows rows={[...rows.values()]} />;
 }
 
+it.each(modes)('opens a failed provider job at its supplied provider destination in %s/%s', async (locale, theme) => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  const row: Notification = { ...notice('job', 'Unused thread', 'job.finished'), thread: null, thread_id: null, node: null, path: [],
+    title: 'Scripted model: A job failed', url: '/resources/providers/scripted-provider',
+    details: { v: 1, action: 'job.finished', parameters: { subject: 'Scripted model', state: 'failed', job: 'provider_provision' } } };
+  show(<Rows rows={[row]} />);
+  const target = screen.getByRole('listitem').querySelector('a');
+  if (target === null) throw new Error('A job notification has no destination');
+  expect(target).toHaveAttribute('href', row.url);
+  await userEvent.click(target);
+  expect(calls.navigate).toHaveBeenCalledWith({ href: row.url });
+  expect(calls.read).toHaveBeenCalledWith({ ids: [row.id] });
+});
+
 it.each(modes)('shows the requested end on an access notification in %s/%s', async (locale, theme) => {
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
   const row = notice('duration', 'Review access', 'access.requested');

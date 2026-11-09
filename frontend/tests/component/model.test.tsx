@@ -68,10 +68,10 @@ describe('the groups of one model', () => {
     expect(within(chips).queryByText('frontier')).not.toBeInTheDocument();
   });
 
-  it('stop at eight', () => {
+  it('uses the shipped eight-group default', () => {
     show(<Groups start={['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']} offered={['i']} />);
     expect(screen.getByLabelText('Put it in a group')).toBeDisabled();
-    expect(screen.getByText('A model is in at most 8 groups.')).toBeInTheDocument();
+    expect(screen.getByText('8 groups reached')).toBeInTheDocument();
   });
 
   it('are only read for somebody who may not change them', () => {
@@ -132,10 +132,10 @@ describe('the speed of a thread', () => {
     expect(screen.getByText(/chosen by Dana/)).toBeInTheDocument();
   });
 
-  it('offers no way back to Standard where the model\'s managers made Fast its start', () => {
+  it('keeps Standard available when the model starts at Fast', () => {
     show(<SpeedChoice state={speed({ ...SOL, default_service_tier: 'fast' })} writable chooser={null} rate={null} onChoose={() => undefined} />);
     expect(screen.getByRole('radio', { name: 'Fast' })).toBeChecked();
-    expect(screen.getByRole('radio', { name: 'Standard' })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Standard' })).toBeEnabled();
     expect(screen.getByText(/start with Fast, as its managers chose/)).toBeInTheDocument();
   });
 

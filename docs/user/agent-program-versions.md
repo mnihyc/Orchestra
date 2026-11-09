@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Agent program versions
 screens: /admin/$section, /resources/agents/$id, /resources/environments, /resources/environments/$id, /resources/hosts/$id, /resources/providers, /resources/providers/$id, /project/$projectId/settings, /org/$slug, /thread/$threadId, /inbox
 keywords: Codex, Claude Code, DeepSeek Harness, harness, version, compatibility, check, pin, exact, upgrade, downgrade, newest, shipped, mirror, offline, interrupt, batch
+summary: Choose agent program versions with inherited policies, exact pins and compatibility checks.
 ---
 
 # Agent program versions
@@ -14,7 +16,7 @@ build and current use together. Select a use count to see the environments
 and provider runtimes holding that build. The shipped and newest checked builds
 are separate facts; changing the default leaves the shipped build unchanged.
 
-The shipped builds are Codex 0.165.0 and Claude Code 2.1.312.
+The shipped builds are Codex 0.167.0 and Claude Code 2.1.319.
 Claude Code's Bypass also allows dangerous deletes without asking. See
 [How approvals work](how-approvals-work.md).
 
@@ -62,7 +64,7 @@ behavior does not fail a turn.
 A failed optional feature is unavailable with that build. Other features
 continue to work. An untested or failed target has a warning in its update
 plan. Operators can still choose it. A checksum mismatch is refused.
-Exact input checkpoints are unavailable for Codex 0.165.0 while its native
+Exact input checkpoints are unavailable for Codex 0.167.0 while its native
 goal-state and item-history checks remain unproved.
 
 ## Choose a policy

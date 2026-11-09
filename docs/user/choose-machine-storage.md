@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Choose where a machine keeps data
 screens: /resources/templates, /resources/templates/$id, /resources/machines/$id, /resources/environments/$id, /resources/providers/$id
 keywords: storage, disk, machine, host, template, env.storage, runtime.storage, workspace, home, state
+summary: Use a machine’s named storages for workspace, home and runtime data.
 ---
 
 # Choose where a machine keeps data
@@ -68,3 +70,10 @@ and commands after start. They inherit from the system through the resource's
 home and then its own values. Runtime limits include disk in GB, subject to the
 machine's declared quota support. Provider runtimes have no workspace, work
 mounts, environment shells or browsers, or environment idle warning.
+
+
+## Data directory inventory
+
+Machine Storage also shows the connector’s typed data-directory observation. The observation time says how old that report is; each listed component has its apparent size, or a dash when inspection could not measure it. Incomplete scans, unreadable or linked components and unlisted entries remain visible as facts. An unavailable inventory is distinct from a fully inspected empty directory. These rows do not provide filesystem operands or cleanup authority.
+
+The sealed store shows only its immediate safe name and size. It has no preview, Open, download, nested filename or credential value. Storage capacity remains a separate report from these apparent file sizes.

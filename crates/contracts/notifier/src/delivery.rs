@@ -34,6 +34,9 @@ pub const DEFAULT_RETRY_SCHEDULE: [Duration; 5] = [
 /// The kinds of notification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum NotificationKind {
+    /// An administrator's accepted message to this person.
+    #[serde(rename = "admin_message")]
+    AdminMessage,
     /// One scheduled input could not start under its author's current authority.
     #[serde(rename = "schedule.cannot_start")]
     ScheduleCannotStart,

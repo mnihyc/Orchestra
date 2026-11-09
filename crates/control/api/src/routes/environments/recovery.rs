@@ -22,15 +22,34 @@ use orch_engine::{
 use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 
+mod confirmation;
+mod operation;
+mod read_sources;
+
 /// Binds independent recovery planning and execution.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::EnvironmentRecoverPreflight, preflight)
-        .on(api::EnvironmentRecoverCreate, create)
-        .on(api::EnvironmentRecoverGet, batch_get);
+        .creation(api::EnvironmentRecoverCreate, confirmation::binding())
+        .on_with_initial_operation(
+            api::EnvironmentRecoverPreflight,
+            crate::key_operations::native::effects::initial::<operation::Preview>,
+            super::lifecycle::prepare::<operation::Preview>,
+            operation::preflight,
+        )
+        .on_with_initial_operation(
+            api::EnvironmentRecoverCreate,
+            crate::key_operations::native::effects::initial::<confirmation::Confirm>,
+            super::lifecycle::prepare::<confirmation::Confirm>,
+            confirmation::create,
+        )
+        .on_snapshot_read_with_optional_operation(
+            api::EnvironmentRecoverGet,
+            crate::key_operations::native::selected::<read_sources::Recovered>,
+            crate::key_operations::native::selected_read::<read_sources::Recovered>,
+        );
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum Member {
     Recreate {
@@ -45,7 +64,7 @@ enum Member {
         request: EnvironmentMovePreflightBody,
     },
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Stored {
     notification: api::OperationNotificationPlan,
     admin_grants: Vec<api::OperationAdminGrant>,
@@ -53,6 +72,21 @@ struct Stored {
     body: api::EnvironmentRecoverPreflightBody,
     members: Vec<Member>,
     switches: Option<StoredBatch>,
+}
+
+/// The same native affected set that supplied this saved recovery audience.
+pub(crate) fn recipient_subjects(
+    plan: &orch_types::Json,
+) -> ApiResult<Vec<orch_access_contract::decisions::ObjectRef>> {
+    let stored: Stored = serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(stored
+        .affected
+        .into_iter()
+        .map(|id| orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Environment,
+            id,
+        })
+        .collect())
 }
 
 async fn blockers(error: UpdateError) -> ApiResult<Vec<PlanBlocker>> {
@@ -66,15 +100,19 @@ async fn blockers(error: UpdateError) -> ApiResult<Vec<PlanBlocker>> {
             "environment_busy",
             "Another operation holds this environment",
         )]),
+        UpdateError::Internal(error @ orch_engine::EngineError::BeforeEffect(_)) => {
+            Err(super::lifecycle::error(error))
+        }
         other => Err(super::updates::refused(other)),
     }
 }
 
-async fn preflight(
+async fn observe_preflight(
     ctx: Ctx,
-    (): (),
+    caller: &orch_authz::Caller,
+    scope: &orch_engine::jobs::environment_move::preparation::Scope,
     body: api::EnvironmentRecoverPreflightBody,
-) -> ApiResult<api::EnvironmentRecoveryPlan> {
+) -> ApiResult<operation::Observed> {
     if body.environment_ids.is_empty() {
         return Err(crate::routes::nodes::invalid(
             "environment_ids",
@@ -85,7 +123,8 @@ async fn preflight(
     ids.sort_unstable();
     ids.dedup();
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal =
+        authorization::load_principal(&mut conn, caller.clone(), ctx.app.clock.time()).await?;
     let caller = principal.caller().clone();
     drop(conn);
     let id = new_id();
@@ -94,6 +133,7 @@ async fn preflight(
     let mut admin_grants = Vec::new();
     let mut members = Vec::new();
     let mut switches: Option<StoredBatch> = None;
+    let mut content = Vec::new();
     let mut destination = body.environment.clone();
     for environment in ids {
         let mut conn = ctx.app.db.begin().await?;
@@ -206,6 +246,23 @@ async fn preflight(
                         .await
                     {
                         Ok(draft) => {
+                            content.extend(draft.recipe.threads.iter().map(|id| {
+                                (orch_access_contract::permissions::ObjectKind::Thread, *id)
+                            }));
+                            content.extend(draft.mounts.iter().map(|m| {
+                                (
+                                    orch_access_contract::permissions::ObjectKind::Mount,
+                                    m.mount.id,
+                                )
+                            }));
+                            content.extend(draft.mcp.iter().filter(|s| !s.own && !s.imported).map(
+                                |s| {
+                                    (
+                                        orch_access_contract::permissions::ObjectKind::McpServer,
+                                        s.id,
+                                    )
+                                },
+                            ));
                             let mut conn = ctx.app.db.acquire().await?;
                             let plan = super::moves::shown_machine(
                                 &ctx, &mut conn, &principal, id, &draft,
@@ -230,6 +287,23 @@ async fn preflight(
                         .await
                     {
                         Ok(draft) => {
+                            content.extend(draft.recipe.replacement.threads.iter().map(|id| {
+                                (orch_access_contract::permissions::ObjectKind::Thread, *id)
+                            }));
+                            content.extend(draft.mounts.iter().map(|m| {
+                                (
+                                    orch_access_contract::permissions::ObjectKind::Mount,
+                                    m.mount.id,
+                                )
+                            }));
+                            content.extend(draft.mcp.iter().filter(|s| !s.own && !s.imported).map(
+                                |s| {
+                                    (
+                                        orch_access_contract::permissions::ObjectKind::McpServer,
+                                        s.id,
+                                    )
+                                },
+                            ));
                             let plan = super::moves::shown(&ctx, &mut conn, &principal, id, &draft)
                                 .await?;
                             row.blockers = plan.blockers.clone();
@@ -265,6 +339,7 @@ async fn preflight(
                     };
                     match ctx.app.engine.draft_batch(&caller, &request).await {
                         Ok(draft) => {
+                            content.extend(draft.disclosure.iter().map(|o| (o.kind, o.id)));
                             if switches.is_none() {
                                 destination = draft
                                     .members
@@ -380,7 +455,16 @@ async fn preflight(
         .filter(|row| row.blockers.is_empty())
         .map(|row| row.environment.id)
         .collect::<Vec<_>>();
-    let (ctx, mut conn, principal) = crate::routes::nodes::action(&ctx).await?;
+    let current = if scope.origin().await.environments().next().is_some() {
+        scope
+            .current(&ctx.app.engine)
+            .await
+            .map_err(super::lifecycle::error)?
+    } else {
+        caller.clone()
+    };
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::load_principal(&mut conn, current, ctx.app.clock.time()).await?;
     for row in rows.iter().filter(|row| row.blockers.is_empty()) {
         orch_engine::operation_access::review(
             &mut conn,
@@ -424,309 +508,35 @@ async fn preflight(
         .map_err(ApiError::internal)?,
     };
     let executable = affected.len() as i64;
-    jobs::forks::save_preflight(
-        &mut conn,
-        &jobs::forks::PreflightRow {
-            id,
-            kind: "recover_batch".into(),
-            node_id: None,
-            environment_id: None,
-            created_by: principal.user(),
-            plan: serde_json::to_value(Stored {
-                notification: notification.clone(),
-                admin_grants: admin_grants.clone(),
-                affected,
-                body,
-                members,
-                switches,
-            })
-            .map_err(ApiError::internal)?,
-            expires_at: updates::expires(ctx.now),
-            created_at: ctx.now,
+    let named = content
+        .iter()
+        .filter_map(|(kind, id)| {
+            (*kind == orch_access_contract::permissions::ObjectKind::Thread).then_some(*id)
+        })
+        .collect::<Vec<_>>();
+    let visible = super::lifecycle::visible_threads(&mut conn, &principal, &named).await?;
+    Ok(operation::Observed {
+        origin: scope.origin().await,
+        visible,
+        content,
+        stored: Stored {
+            notification: notification.clone(),
+            admin_grants: admin_grants.clone(),
+            affected,
+            body,
+            members,
+            switches,
         },
-    )
-    .await?;
-    orch_db::queries::notifications::operations::preview(
-        &mut conn,
-        id,
-        &audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    conn.commit().await.map_err(DbError::from)?;
-    Ok(api::EnvironmentRecoveryPlan {
-        others,
-        admin_grants,
-        notification,
-        preflight_id: id,
-        expires_at: Time::new(updates::expires(ctx.now)),
-        rows,
-        executable,
-    })
-}
-
-enum Ready {
-    Recreate(Box<recovery::Recipe>),
-    Move(Box<orch_engine::jobs::environment_move::MoveDraft>),
-    Portable(Box<orch_engine::jobs::machine_move::Draft>),
-}
-
-async fn create(ctx: Ctx, (): (), body: ForkCreateBody) -> ApiResult<EnvironmentBatch> {
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let original = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .filter(|row| row.kind == "recover_batch" && row.created_by == principal.user())
-        .ok_or_else(ApiError::not_found)?;
-    if original.expires_at <= ctx.now {
-        return Err(super::updates::refused(UpdateError::Expired));
-    }
-    let stored: Stored =
-        serde_json::from_value(original.plan.clone()).map_err(ApiError::internal)?;
-    tx.rollback().await.map_err(DbError::from)?;
-    let batch = new_id();
-    let mut ready = Vec::new();
-    for member in stored.members {
-        let environment = match &member {
-            Member::Recreate { recipe } => recipe.environment,
-            Member::Move { recipe, .. } => recipe.replacement.target.id(),
-            Member::Portable { recipe, .. } => recipe.environment,
-        };
-        let mut tx = ctx.app.db.begin().await?;
-        let named = match &member {
-            Member::Recreate { recipe } => Some(recipe.host),
-            Member::Move { recipe, .. } => Some(recipe.destination),
-            Member::Portable { .. } => None,
-        };
-        orch_engine::operation_access::preview_recovery(&mut tx, &principal, environment, named)
-            .await
-            .map_err(super::updates::refused)?;
-        let drafted = match member {
-            Member::Recreate { recipe } => {
-                let prepared = ctx
-                    .app
-                    .engine
-                    .prepare_recovery(&mut tx, &principal, environment, Some(recipe.host))
-                    .await
-                    .map_err(super::updates::refused)?;
-                tx.rollback().await.map_err(DbError::from)?;
-                let draft = ctx
-                    .app
-                    .engine
-                    .measure_recovery(prepared)
-                    .await
-                    .map_err(super::updates::refused)?;
-                if draft.recipe != *recipe {
-                    return Err(stale());
-                }
-                Ready::Recreate(recipe)
-            }
-            Member::Move { recipe, request } => {
-                let draft = ctx
-                    .app
-                    .engine
-                    .draft_move(
-                        &mut tx,
-                        &principal,
-                        environment,
-                        &request,
-                        body.options.as_ref(),
-                    )
-                    .await
-                    .map_err(super::updates::refused)?;
-                if draft.recipe.replacement.old != recipe.replacement.old
-                    || draft.recipe.destination != recipe.destination
-                    || draft.recipe.manifest != recipe.manifest
-                {
-                    return Err(stale());
-                }
-                Ready::Move(Box::new(draft))
-            }
-            Member::Portable { recipe, request } => {
-                tx.rollback().await.map_err(DbError::from)?;
-                let draft = ctx
-                    .app
-                    .engine
-                    .draft_machine_move(&principal, environment, &request, body.options.as_ref())
-                    .await
-                    .map_err(super::updates::refused)?;
-                if !recipe.same_choice(&draft.recipe) {
-                    return Err(stale());
-                }
-                Ready::Portable(Box::new(draft))
-            }
-        };
-        ready.push((environment, drafted));
-    }
-    // Measurements precede acceptance. From here every hold and queued member commits together.
-    let mut tx = ctx.app.db.begin().await?;
-    let current = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if current.plan != original.plan || current.expires_at <= ctx.now {
-        return Err(stale());
-    }
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let audience =
-        orch_engine::notifications::operation_audience(&mut tx, &principal, &stored.affected, &[])
-            .await
-            .map_err(ApiError::internal)?;
-    if !orch_db::queries::notifications::operations::matches_preview(
-        &mut tx,
-        body.preflight_id,
-        &audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?
-    {
-        return Err(stale());
-    }
-    let operation = orch_engine::notifications::NotificationOperation {
-        id: batch,
-        kind: "recover".into(),
-        name: String::new(),
-        notify: body.notify.unwrap_or(false),
-        path: "/resources/environments".into(),
-        subject: None,
-        recipients: audience,
-    };
-    orch_engine::operation_access::accept(
-        &mut tx,
-        &principal,
-        &stored.admin_grants,
-        &orch_db::audit::Origin::default(),
-    )
-    .await
-    .map_err(super::updates::refused)?;
-    let mut queued = Vec::new();
-    for (environment, ready) in ready {
-        if !updates::may_manage(
-            &mut tx,
-            &principal,
-            updates::Target::Environment(environment),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        {
-            return Err(ApiError::new(
-                orch_api_contract::common::ErrorCode::AuthzDenied,
-                "Environment management is required",
-            ));
-        }
-        let shown = super::show(&ctx, &mut tx, &principal, environment)
-            .await?
-            .base;
-        let row = match ready {
-            Ready::Recreate(recipe) => orch_engine::notifications::operation_scope(
-                Some(operation.id),
-                recovery::queue(&ctx.app.engine, &mut tx, &recipe, Some(batch), ctx.now),
-            )
-            .await
-            .map_err(super::updates::refused)?,
-            Ready::Move(draft) => orch_engine::notifications::operation_scope(
-                Some(operation.id),
-                orch_engine::jobs::environment_move::queue(&mut tx, *draft, Some(batch), ctx.now),
-            )
-            .await
-            .map_err(super::updates::refused)?,
-            Ready::Portable(draft) => orch_engine::notifications::operation_scope(
-                Some(operation.id),
-                orch_engine::jobs::machine_move::queue(
-                    &mut tx,
-                    &principal,
-                    *draft,
-                    Some(batch),
-                    ctx.now,
-                ),
-            )
-            .await
-            .map_err(super::updates::refused)?,
-        };
-        queued.push(EnvironmentBatchJob {
-            environment: shown,
-            job: super::jobs::view(&mut tx, &row).await?,
-        });
-    }
-    if let Some(switches) = stored.switches {
-        let caller = principal.caller().clone();
-        match orch_engine::notifications::operation_scope(
-            Some(operation.id),
-            ctx.app
-                .engine
-                .queue_batch_members(&mut tx, &caller, &switches, &body, batch),
-        )
-        .await
-        {
-            Ok(jobs) => {
-                for job in jobs {
-                    let environment = match job.node_id {
-                        Some(thread) => orch_db::queries::threads::thread(&mut tx, thread)
-                            .await?
-                            .and_then(|row| row.environment_id),
-                        None => None,
-                    }
-                    .or(job.environment_id);
-                    if let Some(environment) = environment {
-                        let environment = super::show(&ctx, &mut tx, &principal, environment)
-                            .await?
-                            .base;
-                        queued.push(EnvironmentBatchJob {
-                            environment,
-                            job: super::jobs::view(&mut tx, &job).await?,
-                        });
-                    }
-                }
-            }
-            Err(orch_engine::fork_plan::PlanError::NothingExecutable) => {}
-            Err(error) => {
-                return Err(ApiError::new(
-                    orch_api_contract::common::ErrorCode::PlanBlocked,
-                    error.to_string(),
-                ));
-            }
-        }
-    }
-    if queued.is_empty() {
-        return Err(ApiError::new(
-            orch_api_contract::common::ErrorCode::PlanBlocked,
-            "No recovery member can run",
-        ));
-    }
-    orch_engine::notifications::attach_operation(
-        &mut tx,
-        &queued.iter().map(|row| row.job.id).collect::<Vec<_>>(),
-        &operation,
-        ctx.now,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    for environment in &stored.affected {
-        let mut entry = orch_db::audit::Entry::new(
-            orch_db::audit::Actor::User(principal.user()),
-            orch_db::audit::name!("environment.updated"),
-            "environment",
-            Some(*environment),
-            "Requested reviewed recovery",
-        );
-        entry.environment_id = Some(*environment);
-        entry.history = true;
-        entry.r#override = !stored.admin_grants.is_empty();
-        entry.details = serde_json::json!({"operation":batch,"admin_grants":stored.admin_grants});
-        orch_db::audit::append(&mut tx, &entry, &orch_db::audit::Origin::default(), ctx.now)
-            .await?;
-    }
-    jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(EnvironmentBatch {
-        batch_id: batch,
-        jobs: queued,
+        plan: api::EnvironmentRecoveryPlan {
+            others,
+            admin_grants,
+            notification,
+            preflight_id: id,
+            expires_at: Time::new(updates::expires(ctx.now)),
+            rows,
+            executable,
+        },
+        audience,
     })
 }
 
@@ -735,42 +545,4 @@ fn stale() -> ApiError {
         orch_api_contract::common::ErrorCode::ConflictStaleRevision,
         "The source or destination changed; review recovery again",
     )
-}
-
-async fn batch_get(ctx: Ctx, (): (), (): ()) -> ApiResult<EnvironmentBatch> {
-    let batch = ctx.id("batch_id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let rows = jobs::forks::of_batch(&mut conn, batch).await?;
-    if rows.is_empty() {
-        return Err(ApiError::not_found());
-    }
-    let mut shown = Vec::new();
-    for row in rows {
-        let environment = match row.environment_id {
-            Some(id) => Some(id),
-            None => match row.node_id {
-                Some(thread) => orch_db::queries::threads::thread(&mut conn, thread)
-                    .await?
-                    .and_then(|row| row.environment_id),
-                None => None,
-            },
-        };
-        let Some(environment) = environment else {
-            continue;
-        };
-        if let Ok(view) = super::show(&ctx, &mut conn, &principal, environment).await {
-            shown.push(EnvironmentBatchJob {
-                environment: view.base,
-                job: super::jobs::read_for(&mut conn, &principal, row.id).await?,
-            });
-        }
-    }
-    if shown.is_empty() {
-        return Err(ApiError::not_found());
-    }
-    Ok(EnvironmentBatch {
-        batch_id: batch,
-        jobs: shown,
-    })
 }

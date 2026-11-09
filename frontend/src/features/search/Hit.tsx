@@ -4,6 +4,7 @@
  * the message. It is a real link, so that a click opens it here and a click with the usual key or a middle
  * click opens it in a new tab of the browser.
  */
+import { CachedHitSummary } from '@/features/summaries/SearchSummaries';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import { useRouter } from '@tanstack/react-router';
 import { FileText, MessageSquareText, PanelRightOpen } from 'lucide-react';
@@ -17,7 +18,8 @@ import type { TypedReference } from '@/features/people/references';
 import { ReferenceCard } from '@/ui/ReferenceCard';
 import { atOfHit, authorOfHit, crumbsOf, destinationOfHit } from '@/features/search/hits';
 import { openResult, targetOfHit } from '@/features/search/ResultView';
-import type { SearchHit } from '@/generated/api-types';
+import { KnownNodeChip } from '@/features/people/NamedChip';
+import type { NodeRef, SearchHit } from '@/generated/api-types';
 import { UserChip } from '@/ui/UserChip';
 import { AgentChip } from '@/ui/AgentChip';
 import { RelativeTime } from '@/ui/RelativeTime';
@@ -27,6 +29,7 @@ import { SearchFiles } from '@/features/files/MessageFiles';
 
 export interface HitProps {
   hit: SearchHit;
+  org?: NodeRef | null;
   foundBy?: 'words' | 'meaning' | 'both' | undefined;
   matchField?: string | null | undefined;
   slugOfOrg: (orgId: string) => string | null;
@@ -38,7 +41,7 @@ export function isPlainClick(event: MouseEvent): boolean {
   return event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey;
 }
 
-export function Hit({ hit, slugOfOrg, labels, foundBy, matchField }: HitProps) {
+export function Hit({ hit, slugOfOrg, labels, foundBy, matchField, org }: HitProps) {
   const { t } = useTranslation();
   const router = useRouter();
   const destination = destinationOfHit(hit, slugOfOrg);
@@ -58,6 +61,7 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField }: HitProps) {
   const named = hit.kind !== 'name' || !hit.node.redacted;
   const chipHref = href ?? (hit.kind==='name'?hit.href:`/${reference.kind==='document'?'doc':reference.kind==='chat'?'chat':'thread'}/${reference.id}`);
   const heading = <div className="flex min-w-0 flex-wrap items-center gap-x-1 pr-8 text-sm text-text-muted">
+    {org !== undefined && <span data-search-org>{org === null ? t('search.org.unavailable') : <KnownNodeChip node={org} />}</span>}
     {where !== '' && <span className="min-w-0 wrap-anywhere">{`${where}${WAY_SEPARATOR}`}</span>}
     {named ? <ReferenceCard reference={reference} label={name}>{(keep) => <a href={chipHref} title={name}
       onClick={(event) => {if(isPlainClick(event)){event.preventDefault();keep();}}}
@@ -102,6 +106,7 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField }: HitProps) {
       <li className={classes}>
         {heading}
         <div className={contentClasses}>{body}</div>
+        <CachedHitSummary hit={hit} />
         {attribution}
         <SearchFiles hit={hit} />
         {beside}
@@ -128,6 +133,7 @@ export function Hit({ hit, slugOfOrg, labels, foundBy, matchField }: HitProps) {
       >
         {body}
       </a>
+      <CachedHitSummary hit={hit} />
       {attribution}
       <SearchFiles hit={hit} />
       {beside}

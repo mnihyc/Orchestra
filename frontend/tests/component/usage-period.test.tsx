@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
 import { Period } from '@/features/usage/Period';
 import { spanOf } from '@/features/usage/search';
-import { currentLocale, setLocale } from '@/i18n';
+import { currentLocale, i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 
@@ -39,4 +39,22 @@ it.each([
     if (previousTheme === null) document.documentElement.removeAttribute('data-theme');
     else document.documentElement.setAttribute('data-theme', previousTheme);
   }
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps all six presets in the narrow selector and leaves custom dates in their existing control (${locale})`, async () => {
+  const previous = currentLocale(); await setLocale(locale); const t = i18n.getFixedT(locale); const choose = vi.fn();
+  const view = show(<Period span={spanOf({ range: '30d' }, NOW)} onSearch={choose} now={NOW} />);
+  try {
+    const picker = screen.getByRole('combobox', { name: t('usage.period.label'), exact: true });
+    await userEvent.click(picker);
+    expect(screen.getAllByRole('option')).toHaveLength(6);
+    await userEvent.click(screen.getByRole('option', { name: t('usagePerf.periodNames.all'), exact: true }));
+    expect(choose).toHaveBeenCalledExactlyOnceWith({ range: 'all' });
+    view.rerender(<Period span={spanOf({ from: '2026-10-01', to: '2026-10-08' }, NOW)} onSearch={choose} now={NOW} />);
+    expect(screen.getByRole('combobox', { name: t('usage.period.label'), exact: true })).toHaveTextContent(t('usage.period.custom'));
+    await userEvent.click(screen.getByRole('button', { pressed: true }));
+    const form = screen.getByRole('dialog', { name: t('usage.period.customLabel') });
+    expect(within(form).getByLabelText(t('usage.period.from'), { exact: true })).toHaveValue('2026-10-01');
+    expect(within(form).getByLabelText(t('usage.period.to'), { exact: true })).toHaveValue('2026-10-08');
+  } finally { view.unmount(); await setLocale(previous); }
 });

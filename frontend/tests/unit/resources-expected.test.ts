@@ -11,6 +11,7 @@ import { listAsLeft, type ResourceKind, rememberList } from '@/features/resource
 import type { Machine } from '@/generated/api-types';
 import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
+import type { Catalogue, CatalogueValue } from './catalogue-shape';
 
 const act = (id: string, extra: Partial<Act> = {}): Act => ({ id, label: id, run: vi.fn(), ...extra });
 
@@ -66,16 +67,12 @@ describe('the list that the way back returns to', () => {
   });
 });
 
-interface Catalogue {
-  [key: string]: string | Catalogue;
-}
-
 /** What the catalogue says under a dotted key, or nothing. */
 function said(catalogue: Catalogue, key: string): string | undefined {
-  let at: string | Catalogue | undefined = catalogue;
+  let at: CatalogueValue | undefined = catalogue;
   for (const part of key.split('.')) {
     if (at === undefined || typeof at === 'string') return undefined;
-    at = at[part];
+    at = Array.isArray(at) ? /^(0|[1-9]\d*)$/.test(part) ? at[Number(part)] : undefined : at[part];
   }
   return typeof at === 'string' ? at : undefined;
 }

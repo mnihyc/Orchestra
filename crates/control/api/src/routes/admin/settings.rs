@@ -7,7 +7,6 @@
 
 use super::{admin_of, invalid};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::access::page::same;
 use crate::sign_in::origin;
@@ -47,9 +46,13 @@ fn shown(view: SettingView) -> ApiResult<ResolvedSetting> {
     same(&setting).ok_or_else(|| ApiError::internal("a setting does not read as the API's"))
 }
 
-/// What the answer to a write that was refused is.
-fn refused(error: WriteError) -> ApiError {
+/// The same native setting refusal for direct settings and compound system-message writes.
+pub(crate) fn refused(error: WriteError) -> ApiError {
     match error {
+        WriteError::OperationRefused => ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the original operation no longer permits this setting write",
+        ),
         WriteError::Db(error) => error.into(),
         WriteError::NotFound | WriteError::Invalid(Invalid::UnknownKey(_)) => ApiError::not_found(),
         WriteError::Invalid(Invalid::WrongScope { key, scope }) => {
@@ -128,7 +131,7 @@ async fn reach(
 async fn set(mut ctx: Ctx, (): (), body: AdminSettingSetBody) -> ApiResult<ResolvedSetting> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     crate::routes::resources::validation::setting(&ctx.app.engine, &key, &body.value)?;
@@ -172,7 +175,7 @@ async fn delete(
 ) -> ApiResult<ResolvedSetting> {
     admin_of(&ctx)?;
     let key = ctx.param("key")?.to_owned();
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let cleared = clear(

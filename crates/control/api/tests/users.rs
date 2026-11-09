@@ -8,15 +8,18 @@
 mod desk;
 mod places;
 mod support;
+use crate::support::FullPermissionPageReply;
+use support::FullInvitationReply as _;
 
+use crate::support::FreshInvitationCreateReply as InvitationCreateReply;
 use chrono::Duration;
 use orch_api_contract::access::{PermissionPageGet, Role};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{Node, NodeGet};
 use orch_api_contract::users::{
     InvitationAccept, InvitationAcceptBody, InvitationCreate, InvitationCreateBody,
-    InvitationCreateReply, InvitationDelete, InvitationForm, InvitationKind, InvitationList,
-    InvitationListQuery, InvitationLookup, UserGet, UserSearch, UserSearchQuery,
+    InvitationDelete, InvitationForm, InvitationKind, InvitationList, InvitationListQuery,
+    InvitationLookup, UserGet, UserSearch, UserSearchQuery,
 };
 use orch_settings::Target;
 use orch_types::Id;
@@ -72,6 +75,7 @@ async fn invite(
         .body(body)
         .send()
         .await
+        .full_invitation()
 }
 
 async fn accept(
@@ -84,10 +88,12 @@ async fn accept(
         .call(InvitationAccept, &[])
         .token(&who.token)
         .body(&InvitationAcceptBody {
+            accepted_terms_hash: None,
             token: token.to_owned(),
         })
         .send()
         .await
+        .full_invitation()
 }
 
 #[tokio::test]
@@ -638,6 +644,7 @@ async fn register_accepting_invitation(
         .app
         .call(orch_api_contract::auth::AuthRegister, &[])
         .body(&orch_api_contract::auth::AuthRegisterBody {
+            accepted_terms_hash: None,
             accept_invitation: accept,
             username: name.to_owned(),
             display_name: name.to_owned(),
@@ -762,6 +769,7 @@ async fn independent_account_document_and_team(personal: bool) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let read = desk
         .world
@@ -836,6 +844,7 @@ async fn independent_account_document_and_team(personal: bool) {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         desk.world
@@ -867,10 +876,12 @@ async fn independent_account_document_and_team(personal: bool) {
         .call(InvitationAccept, &[])
         .token(&account.access_token)
         .body(&InvitationAcceptBody {
+            accepted_terms_hash: None,
             token: joining.token,
         })
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(joined.org.unwrap().base.id, desk.org);
     let (same_home, count): (Option<Id>, i64) = sqlx::query_as(
@@ -1180,9 +1191,13 @@ async fn open_registration_stays_independent_of_an_organization_offer_until_expl
         .app
         .call(InvitationAccept, &[])
         .token(&registered.auth.access_token)
-        .body(&InvitationAcceptBody { token: made.token })
+        .body(&InvitationAcceptBody {
+            accepted_terms_hash: None,
+            token: made.token,
+        })
         .send()
         .await
+        .full_invitation()
         .ok();
     assert_eq!(joined.org.unwrap().base.id, s.acme);
 }
@@ -1264,6 +1279,7 @@ async fn an_invitation_keeps_its_issuers_explicit_admin_mode_without_elevating_t
         .body(&org_invitation(s.acme))
         .send()
         .await
+        .full_invitation()
         .ok();
     let delegated: Option<bool> =
         sqlx::query_scalar("SELECT created_as_admin FROM invitations WHERE id=$1")

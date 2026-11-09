@@ -8,6 +8,7 @@
 mod places;
 mod rig;
 mod support;
+use support::FullSettingReply;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::settings::{ModelOptionReason, ThreadParameterGet};
@@ -29,7 +30,7 @@ async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_re
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
     let mut descriptor = rig::descriptor();
-    // Even an obsolete report that still claims Auto cannot bypass the pinned-harness trial.
+    // Activating Codex does not give this unproved fake program an Auto reviewer.
     descriptor["approval_modes"] = json!(["on_request", "auto"]);
     descriptor["sandbox_modes"] = json!(["read_only"]);
     {
@@ -103,26 +104,23 @@ async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_re
         .send()
         .await
         .ok();
-    assert!(
-        !defs
-            .iter()
-            .find(|def| def.key == "approval.mode")
-            .unwrap()
-            .schema["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("auto"))
-    );
-    assert!(
-        !defs
-            .iter()
-            .find(|def| def.key == "approval.allowed_modes")
-            .unwrap()
-            .schema["items"]["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("auto"))
-    );
+    let auto_possible = orch_agent_programs::Programs::builtin().auto_possible();
+    for (key, pointer) in [("approval.mode", ""), ("approval.allowed_modes", "/items")] {
+        let schema = &defs.iter().find(|def| def.key == key).unwrap().schema;
+        let choice = schema.pointer(pointer).unwrap();
+        assert_eq!(
+            choice["enum"].as_array().unwrap().contains(&json!("auto")),
+            auto_possible,
+            "the offered enum follows declared program support"
+        );
+        if !auto_possible {
+            assert_eq!(
+                choice["x-unavailable-choices"],
+                json!([{"value":"auto","reason":"program_auto_unavailable"}]),
+                "the known unsupported choice remains visible without being offered"
+            );
+        }
+    }
     let reply = s
         .rig
         .world
@@ -136,6 +134,7 @@ async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_re
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert_eq!(reply.available_values, Some(vec!["on_request".to_owned()]));
     let reply = s
@@ -149,6 +148,7 @@ async fn scope_setting_choices_use_reported_modes_and_never_offer_an_unproved_re
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert_eq!(
         reply.value,
@@ -200,6 +200,7 @@ async fn a_setting_before_the_first_turn_stamps_and_announces_the_thread_row_wit
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert_eq!(written.value, Some(json!("off")));
     let mut conn = s.rig.db.acquire().await.unwrap();
@@ -427,6 +428,7 @@ async fn a_threads_approval_picker_offers_only_declared_allowed_modes_and_a_view
         })
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(denied.code, ErrorCode::AuthzDenied);
     let still = s
@@ -832,3 +834,9 @@ async fn a_threads_parameters_list_only_what_exists_for_its_model_and_carry_the_
         Some("fast")
     );
 }
+
+#[path = "threads_settings/prompt_cache_ttl.rs"]
+mod prompt_cache_ttl;
+
+#[path = "threads_settings/provider_options.rs"]
+mod provider_options;

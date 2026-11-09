@@ -230,13 +230,13 @@ async fn a_locked_ancestor_refuses_a_write_or_a_clear_below_it_and_names_where_t
 #[tokio::test]
 async fn a_lock_at_the_system_decides_every_org() {
     let w = World::new().await;
-    w.lock(Target::System, keys::TERMINAL_ENABLED, json!(false))
+    w.lock(Target::System, keys::RETENTION_ARCHIVE_IDLE_DAYS, json!(0))
         .await;
     let Err(WriteError::Locked { by }) = w
         .try_set(
             Target::Node(w.root),
-            keys::TERMINAL_ENABLED,
-            json!(true),
+            keys::RETENTION_ARCHIVE_IDLE_DAYS,
+            json!(7),
             None,
             None,
             true,
@@ -247,7 +247,7 @@ async fn a_lock_at_the_system_decides_every_org() {
     };
     assert_eq!((by.scope, by.node), (LockScope::System, None));
     let at_system = w
-        .set(Target::System, keys::TERMINAL_ENABLED, json!(true))
+        .set(Target::System, keys::RETENTION_ARCHIVE_IDLE_DAYS, json!(7))
         .await;
     assert!(at_system.changed);
 }
@@ -255,20 +255,19 @@ async fn a_lock_at_the_system_decides_every_org() {
 #[tokio::test]
 async fn a_lock_changes_nothing_where_lower_scopes_can_only_narrow_or_nothing_lies_below() {
     let w = World::new().await;
-    let narrowing = w
-        .try_set(
-            Target::Node(w.root),
-            keys::APPROVAL_ALLOWED_MODES,
-            json!(["ask"]),
-            Some(true),
-            None,
-            true,
-        )
-        .await;
-    assert!(matches!(
-        narrowing,
-        Err(WriteError::Lock(Refusal::NotLockable))
-    ));
+    for (key, value) in [
+        (keys::APPROVAL_ALLOWED_MODES, json!(["ask"])),
+        (keys::TERMINAL_ENABLED, json!(false)),
+        (keys::CHAT_ENABLED, json!(false)),
+    ] {
+        let narrowing = w
+            .try_set(Target::Node(w.root), key, value, Some(true), None, true)
+            .await;
+        assert!(
+            matches!(narrowing, Err(WriteError::Lock(Refusal::NotLockable))),
+            "{key}"
+        );
+    }
     let at_thread = w
         .try_set(
             Target::Node(w.thread),

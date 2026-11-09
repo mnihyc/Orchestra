@@ -53,6 +53,10 @@ impl Sources {
         self.watches.retain(|thread, _| wanted.contains(thread));
         let mut conn = inner.db.acquire().await?;
         for thread in wanted {
+            #[cfg(test)]
+            if super::background_read_tests::manual_watch(thread) {
+                continue;
+            }
             let sequence = orch_db::sequences::current(&mut conn, thread)
                 .await?
                 .unwrap_or_default();
@@ -122,32 +126,153 @@ impl Sources {
     }
 }
 
+/// A current body, a changed transport origin, or the ordinary native read closure.
+pub(crate) enum Projection {
+    Current(Json),
+    Changed,
+    Closed(orch_realtime_contract::frames::FeedClosedReason),
+}
+
+fn projection_failure(error: orch_engine::background::BackgroundError) -> Result<Projection, Fail> {
+    use orch_engine::background::BackgroundError;
+    use orch_realtime_contract::frames::FeedClosedReason;
+    match error {
+        BackgroundError::NotFound
+        | BackgroundError::Internal(orch_engine::EngineError::Authz(
+            orch_authz::Error::NotFound(_),
+        )) => Ok(Projection::Closed(FeedClosedReason::Deleted)),
+        BackgroundError::Scope
+        | BackgroundError::Denied(_)
+        | BackgroundError::Internal(orch_engine::EngineError::Authz(
+            orch_authz::Error::Suspended { .. }
+            | orch_authz::Error::Archived { .. }
+            | orch_authz::Error::NoSuchUser(_),
+        )) => Ok(Projection::Closed(FeedClosedReason::Revoked)),
+        other => Err(Fail::other(other)),
+    }
+}
+
 /// Applies the source's current masking and directory rules at frame delivery, with no stored roster.
 pub(crate) async fn project(
     inner: &Arc<Inner>,
     connection: &Connection,
     thread: Id,
     data: &Json,
-) -> Result<Json, Fail> {
+) -> Result<Projection, Fail> {
+    let origin = connection.credential();
+    let Some(accepted) =
+        super::key_reads::admit(inner, connection, &Feed::ThreadBackground(thread)).await?
+    else {
+        return Ok(Projection::Closed(
+            orch_realtime_contract::frames::FeedClosedReason::Revoked,
+        ));
+    };
     let capture: Capture = serde_json::from_value(data.clone()).map_err(Fail::other)?;
+    let app = inner
+        .app()
+        .ok_or_else(|| Fail::other("the realtime application is unavailable"))?;
     let mut conn = inner.db.acquire().await?;
-    let principal = super::subscriptions::principal_for_connection(inner, &mut conn, connection)
-        .await?
-        .ok_or_else(|| Fail::other("the reader no longer exists"))?;
-    let (mut roster, _) = inner
+    let prepared = match inner
         .engine()?
-        .project_background(&mut conn, &principal, thread, &capture)
+        .prepare_background_projection(&mut conn, thread, &capture)
         .await
-        .map_err(Fail::other)?;
-    // The count belongs to the complete native observation; a realtime frame is one bounded page.
-    while serde_json::to_vec(&roster).map_err(Fail::other)?.len()
-        > orch_link_contract::background::PAGE_BYTES
     {
-        if roster.items.pop().is_none() {
-            return Err(Fail::other(
-                "the live roster metadata exceeds its frame bound",
-            ));
+        Ok(prepared) => prepared,
+        Err(error) => {
+            let identity = super::server::current_identity(&app, &mut conn, &origin)
+                .await
+                .map_err(Fail::other)?;
+            identity.check_deadline(&app).map_err(Fail::other)?;
+            return projection_failure(error);
         }
+    };
+    #[cfg(test)]
+    super::background_read_tests::at(thread, super::background_read_tests::Cut::SocketPrepared)
+        .await;
+    loop {
+        if !connection.still_current(&origin) {
+            return Ok(Projection::Changed);
+        }
+        let identity = super::server::current_identity(&app, &mut conn, &origin)
+            .await
+            .map_err(Fail::other)?;
+        let reader = match crate::key_operations::background_read::prepare(
+            &app,
+            &mut conn,
+            identity,
+            Some(&accepted),
+            thread,
+            &capture,
+        )
+        .await
+        {
+            Ok(reader) => reader,
+            Err(error) if error.code() == orch_api_contract::common::ErrorCode::AuthzDenied => {
+                return Ok(Projection::Closed(
+                    orch_realtime_contract::frames::FeedClosedReason::Revoked,
+                ));
+            }
+            Err(error) => return Err(Fail::other(error)),
+        };
+        let projected = inner
+            .engine()?
+            .render_background_projection(
+                &mut conn,
+                &reader.principal,
+                &prepared,
+                &reader.directories,
+            )
+            .await;
+        #[cfg(test)]
+        super::background_read_tests::at(
+            thread,
+            super::background_read_tests::Cut::SocketProjected,
+        )
+        .await;
+        let identity = super::server::current_identity(&app, &mut conn, &origin)
+            .await
+            .map_err(Fail::other)?;
+        let current = match crate::key_operations::background_read::prepare(
+            &app,
+            &mut conn,
+            identity,
+            Some(&accepted),
+            thread,
+            &capture,
+        )
+        .await
+        {
+            Ok(reader) => reader,
+            Err(error) if error.code() == orch_api_contract::common::ErrorCode::AuthzDenied => {
+                return Ok(Projection::Closed(
+                    orch_realtime_contract::frames::FeedClosedReason::Revoked,
+                ));
+            }
+            Err(error) => return Err(Fail::other(error)),
+        };
+        current.identity.check_deadline(&app).map_err(Fail::other)?;
+        if !connection.still_current(&origin) {
+            return Ok(Projection::Changed);
+        }
+        if !reader.live(&app) || !current.live(&app) || !reader.same_context(&current) {
+            continue;
+        }
+        let (mut roster, _) = match projected {
+            Ok(projected) => projected,
+            Err(error) => return projection_failure(error),
+        };
+        // The count belongs to the complete native observation; a realtime frame is one bounded page.
+        while serde_json::to_vec(&roster).map_err(Fail::other)?.len()
+            > orch_link_contract::background::PAGE_BYTES
+        {
+            if roster.items.pop().is_none() {
+                return Err(Fail::other(
+                    "the live roster metadata exceeds its frame bound",
+                ));
+            }
+        }
+        return serde_json::to_value(roster)
+            .map(Projection::Current)
+            .map_err(Fail::other);
     }
-    serde_json::to_value(roster).map_err(Fail::other)
 }

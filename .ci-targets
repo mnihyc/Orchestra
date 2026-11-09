@@ -1,0 +1,16 @@
+# Central runs on B24's assembled tree (D-2033). Leading NAME=value words are that check's settings (diag branch only).
+# held-page-request (threads_adopt 500s persist on B23; its requested diagnostics)
+test ORCH_NATIVE_SOURCE_DIAGNOSTIC=1 -p orch-api-core --test threads_adopt a_session_begun_by_hand_becomes_a_thread_in_the_folder_that_holds_its_directory -- --exact --nocapture
+test ORCH_NATIVE_SOURCE_DIAGNOSTIC=1 -p orch-api-core --test threads_adopt scopes::creator_source::adopting_has_its_real_native_creation_and_history_receipt_without_borrowing_get_read -- --exact --nocapture
+test -p orch-api-core --test threads_adopt --test mcp_duplicates -- --nocapture --test-threads=1
+test -p orch-engine --test agent_history adopted_native_history_is_excluded_even_in_a_managed_provider_home -- --exact --nocapture
+# bg-wake-facts (TRIAGE-FORK-DUP with its repaired fixture; RUST-B19 host and credential cases)
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test forks a_batch_makes_a_job_for_each_plan_and_is_read_by_those_who_may_and_cancelled_by_its_creator -- --exact --nocapture
+test -p orch-adapter-claude-code --test background_wake exact_end_stops_a_native_background_command_without_a_wake -- --exact --nocapture
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test host_update_scopes -- --nocapture --test-threads=1
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test admin_person_credentials per_person_tokens_use_their_own_selection_and_retained_native_activity_after_revoke -- --exact --nocapture
+# provider-ceiling (G17-LATE, RUST-B19, RUST-B20B: the trace_history collection diagnostic)
+test ORCH_TEST_PURGE_ERRORS=1 -p orch-api-core --test trace_history completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_readable -- --exact --nocapture
+# provider-ceiling reruns after 8fb35fb39 / 8e66641e1
+test ORCH_TEST_SQL_TIMINGS=1 -p orch-api-core --test provider_plan provider_window_reads_have_fixed_statement_counts_and_pages_reject_a_changed_snapshot -- --exact --nocapture
+test ORCH_TEST_PROVIDER_COPY_ERRORS=1 ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test provider_duplicates -- --nocapture --test-threads=1
