@@ -10,7 +10,7 @@
 //! page to read is answered plainly by [`subject`], never as a
 //! fault of the server.
 
-use super::page::{entries_named, same};
+use super::page::same;
 use super::subject::{self, Named};
 use crate::middleware::authorization::{self, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
@@ -28,7 +28,7 @@ use orch_api_contract::users::UserRef;
 use orch_authz::engine::{Frame, Graph, Site};
 use orch_authz::pages;
 use orch_authz::things::{self, Thing};
-use orch_authz::{Act, Caller, Policy, Principal, holders, nodes};
+use orch_authz::{Act, Policy, Principal, holders, nodes};
 use orch_db::Conn;
 use orch_db::queries::access;
 use orch_db::queries::access::everything::{self, HistoryFilter};
@@ -36,6 +36,8 @@ use orch_db::queries::hierarchy::{self, AuditCursor, AuditRow};
 use orch_engine::history;
 use orch_types::{Id, Time};
 use std::collections::HashSet;
+
+pub(super) mod native_history;
 
 /// The thing the request names, found, with where its page stands. A thing that is not there is
 /// not found.
@@ -58,63 +60,38 @@ pub async fn effective(
     query: api::EffectiveAccessGetQuery,
     (): (),
 ) -> ApiResult<api::EffectiveAccess> {
-    let named = subject::named(&ctx)?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (graph, site, policy) = found(&mut conn, &named).await?;
-    if query.user_id == principal.user() {
-        subject::require_page(&mut conn, &principal, named.thing, policy).await?;
-    } else {
-        subject::require_manage(&mut conn, &principal, named.thing, policy).await?;
-    }
-    let person = if query.user_id == principal.user() {
-        principal.clone()
-    } else {
-        Principal::load(
-            &mut conn,
-            Caller::session(query.user_id),
-            Time::new(ctx.now),
-        )
-        .await
-        .map_err(|_| ApiError::not_found())?
-    };
-    let held = things::effective_at(&mut conn, &person, graph, &site, policy)
-        .await
-        .map_err(ApiError::internal)?;
-    let entry_ids: Vec<Id> = held
-        .held
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<super::operations::PreparedEffective>()?;
+    let held = &prepared.held;
+    let entries = &prepared.entries;
+    let described = super::page::entries_named_at_bounded(
+        &mut conn,
+        &principal,
+        held.root,
+        None,
+        entries,
+        &prepared.names,
+    )
+    .await?;
+    let lists: Vec<_> = prepared
+        .paths
         .iter()
-        .flat_map(|held| held.through.iter())
-        .filter_map(|through| match through {
-            Through::Entry(via) => Some(via.entry),
-            _ => None,
-        })
+        .map(|(_, path)| path.clone())
         .collect();
-    let rows = access::entries_by_id(&mut conn, &entry_ids).await?;
-    let entries: Vec<stored::Entry> = rows
+    let lists_named = super::page::Names::holder_lists_bounded(
+        &mut conn,
+        &principal,
+        held.root,
+        prepared.role_place,
+        &lists,
+        &prepared.names,
+    )
+    .await?;
+    let by_holder: std::collections::HashMap<_, _> = prepared
+        .paths
         .iter()
-        .filter_map(|row| orch_authz::engine::entry_of(row).ok())
-        .collect();
-    let described = entries_named(&mut conn, &principal, held.root, &entries).await?;
-    // The defaults give a role one entry for each permission, and every entry of one holder has the
-    // same chain: each holder's chain is found once, and all of them are named together.
-    let mut paths: Vec<(stored::Holder, Vec<stored::Holder>)> = Vec::new();
-    for entry in &entries {
-        if paths.iter().any(|(holder, _)| *holder == entry.holder) {
-            continue;
-        }
-        let path = orch_authz::holders::chain(&mut conn, &person, entry.holder, site.role_place)
-            .await
-            .map_err(ApiError::internal)?;
-        paths.push((entry.holder, path));
-    }
-    let lists: Vec<Vec<stored::Holder>> = paths.iter().map(|(_, path)| path.clone()).collect();
-    let lists_named =
-        super::page::Names::holder_lists(&mut conn, &principal, held.root, site.role_place, &lists)
-            .await?;
-    let by_holder: std::collections::HashMap<stored::Holder, Vec<api::Holder>> = paths
-        .into_iter()
-        .map(|(holder, _)| holder)
+        .map(|(holder, _)| *holder)
         .zip(lists_named)
         .collect();
     let chains: std::collections::HashMap<Id, Vec<api::Holder>> = entries
@@ -122,7 +99,8 @@ pub async fn effective(
         .filter_map(|entry| {
             by_holder
                 .get(&entry.holder)
-                .map(|named| (entry.id, named.clone()))
+                .cloned()
+                .map(|chain| (entry.id, chain))
         })
         .collect();
     let user = refusals::user_refs(&mut conn, &[query.user_id])
@@ -149,9 +127,14 @@ pub async fn effective(
             }
         }
     }
-    let refs = view::qualified_refs(&mut conn, &principal, &places, Policy::default()).await?;
-    let container_refs =
-        crate::routes::document_tree::container_refs(&mut conn, &principal, &container_ids).await?;
+    let refs = prepared
+        .names
+        .qualified_refs(&mut conn, &principal, &places)
+        .await?;
+    let container_refs = prepared
+        .names
+        .container_refs(&mut conn, &principal, &container_ids)
+        .await?;
     let role_from = held.role.and_then(|role| match role.at {
         PlaceRef::Node(place) => refs.get(&place).cloned().map(NodeOrSystem::Node),
         PlaceRef::System => Some(NodeOrSystem::SYSTEM),
@@ -198,7 +181,7 @@ pub async fn effective(
                     .collect(),
             })
             .collect();
-    Ok(api::EffectiveAccess {
+    let answer = api::EffectiveAccess {
         admin_only: held
             .admin_only
             .iter()
@@ -209,7 +192,9 @@ pub async fn effective(
         role_from,
         administers: held.administers,
         permissions,
-    })
+    };
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(answer)
 }
 
 // ---- the people behind a holder ----
@@ -260,8 +245,8 @@ pub async fn people(
         cursor: query.cursor.clone(),
     };
     let limit = usize::try_from(page_query.limit()).unwrap_or(usize::MAX);
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let (graph, site, policy) = found(&mut conn, &named).await?;
     subject::require_page(&mut conn, &principal, named.thing, policy).await?;
     let chip = parse_chip(&query.holder).ok_or_else(ApiError::not_found)?;
@@ -352,7 +337,7 @@ pub async fn people(
         .map_err(ApiError::internal)?
         .into_iter()
         .collect();
-    Ok(api::PermissionPeopleListReply {
+    let answer = api::PermissionPeopleListReply {
         owners: items
             .iter()
             .filter(|user| owner_people.contains(&user.id))
@@ -362,7 +347,9 @@ pub async fn people(
             .then(|| items.last().map(|user| user.id.to_string()))
             .flatten(),
         items,
-    })
+    };
+    conn.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(answer)
 }
 
 // ---- what was done to a thing ----
@@ -388,20 +375,19 @@ fn thread_of(row: &AuditRow) -> Option<Id> {
     history::thread_of(&row.object_kind, row.object_id, &row.details)
 }
 
-/// The lines for the rows, newest first as they came, with who did each as the reader may know
-/// them and what each points at; a line about a thread the reader may not view is left out.
-async fn lines(
+/// The native per-line Thread View selection, independent of transport scope and names.
+async fn visible_threads(
     conn: &mut Conn,
     principal: &Principal,
     rows: &[AuditRow],
-) -> ApiResult<Vec<api::HistoryLine>> {
+) -> ApiResult<HashSet<Id>> {
     let threads: Vec<Id> = rows
         .iter()
         .filter_map(thread_of)
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    let viewable: HashSet<Id> = if threads.is_empty() {
+    Ok(if threads.is_empty() {
         HashSet::new()
     } else {
         nodes::holding(
@@ -417,8 +403,34 @@ async fn lines(
         .into_iter()
         .map(|listed| listed.id)
         .collect()
+    })
+}
+
+async fn lines(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[AuditRow],
+) -> ApiResult<Vec<api::HistoryLine>> {
+    lines_with_names(conn, principal, rows, None).await
+}
+
+async fn lines_with_names(
+    conn: &mut Conn,
+    principal: &Principal,
+    rows: &[AuditRow],
+    names: Option<&super::page::NameBounds>,
+) -> ApiResult<Vec<api::HistoryLine>> {
+    let viewable = visible_threads(conn, principal, rows).await?;
+    let threads: Vec<Id> = rows
+        .iter()
+        .filter_map(thread_of)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let named_threads = match names {
+        Some(names) => names.refs(conn, principal, &threads).await?,
+        None => view::refs(conn, principal, &threads, Policy::default()).await?,
     };
-    let named_threads = view::refs(conn, principal, &threads, Policy::default()).await?;
     let users: Vec<Id> = rows
         .iter()
         .filter(|row| row.actor_kind == "user")
@@ -426,7 +438,10 @@ async fn lines(
         .collect();
     let people = refusals::user_refs(conn, &users).await?;
     let target_ids: Vec<Id> = rows.iter().filter_map(|row| row.node_id).collect();
-    let targets = view::refs(conn, principal, &target_ids, Policy::default()).await?;
+    let targets = match names {
+        Some(names) => names.refs(conn, principal, &target_ids).await?,
+        None => view::refs(conn, principal, &target_ids, Policy::default()).await?,
+    };
     Ok(rows
         .iter()
         .filter(|row| thread_of(row).is_none_or(|thread| viewable.contains(&thread)))
@@ -466,13 +481,48 @@ pub async fn history(
     query: api::HistoryListQuery,
     (): (),
 ) -> ApiResult<Page<api::HistoryLine>> {
-    let named = subject::named(&ctx)?;
-    let page_query = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(page_query.limit()).unwrap_or(usize::MAX);
-    let after = match query.cursor.as_deref() {
+    // Preserve the native path/cursor validation before the ordinary page read gate.
+    subject::named(&ctx)?;
+    let _ = history_after_query(&query)?;
+    crate::key_operations::native::selected_read::<native_history::History>(ctx, query, ()).await
+}
+
+fn history_after_query(query: &api::HistoryListQuery) -> ApiResult<Option<AuditCursor>> {
+    if query.upload.is_some()
+        && query
+            .cursor
+            .as_deref()
+            .is_some_and(|cursor| cursor.starts_with("upload:"))
+    {
+        upload_offset(query.cursor.as_deref())?;
+        return Ok(None);
+    }
+    history_after(query.cursor.as_deref())
+}
+
+fn upload_offset(cursor: Option<&str>) -> ApiResult<Option<i64>> {
+    cursor
+        .and_then(|cursor| cursor.strip_prefix("upload:"))
+        .map(|value| {
+            value
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| ApiError::invalid("cursor", "use the upload page's continuation"))
+        })
+        .transpose()
+}
+
+fn selected_history_cursor(rows: &[AuditRow], more: bool) -> Option<String> {
+    rows.first()
+        .and_then(|row| row.details.get("upload_file_cursor"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| more.then(|| rows.last().map(history_cursor)).flatten())
+}
+
+fn history_after(cursor: Option<&str>) -> ApiResult<Option<AuditCursor>> {
+    Ok(match cursor {
         None => None,
         Some(text) => {
             let bad = || invalid("cursor", "is not a cursor of this list");
@@ -486,12 +536,57 @@ pub async fn history(
                 id: row.parse().map_err(|_| bad())?,
             })
         }
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let (_, _, policy) = found(&mut conn, &named).await?;
-    subject::require_view(&mut conn, &principal, named.thing, policy).await?;
-    let batch = i64::try_from(limit + 1).unwrap_or(i64::MAX);
+    })
+}
+
+async fn history_rows(
+    conn: &mut Conn,
+    named: Named,
+    query: &api::HistoryListQuery,
+    after: Option<AuditCursor>,
+    batch: i64,
+) -> ApiResult<Vec<AuditRow>> {
+    if let Some(line) = query.upload {
+        if query.actor.is_some()
+            || query.kinds.is_some()
+            || query.path.is_some()
+            || query.thread_id.is_some()
+        {
+            return Err(ApiError::invalid(
+                "upload",
+                "choose an upload file page or history filters",
+            ));
+        }
+        let Thing::Other(object) = named.thing else {
+            return Err(ApiError::invalid(
+                "upload",
+                "read an upload from its environment history",
+            ));
+        };
+        if object.kind != ObjectKind::Environment {
+            return Err(ApiError::invalid(
+                "upload",
+                "read an upload from its environment history",
+            ));
+        }
+        let page = orch_db::queries::upload_history::page(
+            conn,
+            object.id,
+            line,
+            after,
+            upload_offset(query.cursor.as_deref())?,
+            batch,
+        )
+        .await
+        .map_err(|error| match error {
+            orch_db::queries::upload_history::Error::Missing => ApiError::not_found(),
+            orch_db::queries::upload_history::Error::Cursor => {
+                ApiError::invalid("cursor", "use this upload page's continuation")
+            }
+            orch_db::queries::upload_history::Error::Db(error) => ApiError::from(error),
+        })?;
+        return Ok(page.rows);
+    }
     let summary = query.depth == Some(orch_api_contract::nodes::ActivityDepth::Summary);
     let meaningful: Option<Vec<String>> = summary.then(|| {
         orch_access_contract::audit::AuditAction::ALL
@@ -501,17 +596,10 @@ pub async fn history(
             .map(|action| action.as_str().to_owned())
             .collect()
     });
-    let mut rows = match named.thing {
+    Ok(match named.thing {
         Thing::Node(id) => {
-            hierarchy::node_history(
-                &mut conn,
-                id,
-                query.actor,
-                after,
-                batch,
-                meaningful.as_deref(),
-            )
-            .await?
+            hierarchy::node_history(conn, id, query.actor, after, batch, meaningful.as_deref())
+                .await?
         }
         Thing::Other(object) => {
             let environment = object.kind == ObjectKind::Environment;
@@ -526,7 +614,7 @@ pub async fn history(
                 }
             }
             everything::history_of(
-                &mut conn,
+                conn,
                 object.id,
                 environment,
                 &HistoryFilter {
@@ -540,10 +628,5 @@ pub async fn history(
             )
             .await?
         }
-    };
-    let more = rows.len() > limit;
-    rows.truncate(limit);
-    let next_cursor = more.then(|| rows.last().map(history_cursor)).flatten();
-    let items = lines(&mut conn, &principal, &rows).await?;
-    Ok(Page { next_cursor, items })
+    })
 }

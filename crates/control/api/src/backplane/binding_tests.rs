@@ -180,6 +180,81 @@ async fn a_sign_in_discovered_again_on_reconnect_keeps_one_provider_and_one_prof
 }
 
 #[tokio::test]
+async fn discovery_defaults_to_the_machines_registered_home_and_preserves_a_moved_resource() {
+    let database = TestDb::fresh().await;
+    let app = TestApp::new(
+        Db::from_pool(database.pool.clone()),
+        clock::manual(),
+        Registry::new(),
+    );
+    let (machine, owner, personal) = machine_of_new_owner(&app, "registered", true).await;
+    let registered = orch_types::new_id();
+    let chosen = orch_types::new_id();
+    {
+        let mut conn = app.app.db.acquire().await.unwrap();
+        for (id, name) in [
+            (registered, "Machine home"),
+            (chosen, "Chosen resource home"),
+        ] {
+            orch_db::queries::hierarchy::testing::insert_node(
+                &mut conn, id, "project", personal, name, owner,
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query("UPDATE machines SET home_id=$2 WHERE id=$1")
+            .bind(machine)
+            .bind(registered)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    report_sign_in(&app, machine, "first@example.test").await;
+    let before = machine_providers(&app, machine).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].1, registered);
+    let profile = before[0].2;
+    let mut conn = app.app.db.acquire().await.unwrap();
+    let profile_home: Id = sqlx::query_scalar("SELECT home_id FROM agents WHERE id=$1")
+        .bind(profile)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(profile_home, registered);
+    sqlx::query("UPDATE providers SET home_id=$2,home_overridden_at=$3 WHERE machine_id=$1")
+        .bind(machine)
+        .bind(chosen)
+        .bind(app.clock.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE agents SET home_id=$2,home_overridden_at=$3 WHERE id=$1")
+        .bind(profile)
+        .bind(chosen)
+        .bind(app.clock.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    report_sign_in(&app, machine, "second@example.test").await;
+    let after = machine_providers(&app, machine).await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].1, chosen);
+    assert_eq!(after[0].2, profile);
+    assert_eq!(after[0].3["identity"], "second@example.test");
+    assert_eq!(machine_profiles(&app, machine).await, 1);
+    let mut conn = app.app.db.acquire().await.unwrap();
+    let kept: (Id, Option<DateTime<Utc>>) =
+        sqlx::query_as("SELECT home_id,home_overridden_at FROM agents WHERE id=$1")
+            .bind(profile)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(kept, (chosen, Some(app.clock.now())));
+    app.app.link.shutdown();
+}
+
+#[tokio::test]
 async fn an_owner_without_a_personal_home_keeps_a_registration_current_and_gets_no_new_one() {
     let database = TestDb::fresh().await;
     let app = TestApp::new(
@@ -261,5 +336,85 @@ async fn a_profile_pointed_at_another_home_is_never_reused_for_the_default_sign_
         .await
         .unwrap();
     assert_eq!(kept, custom_profile);
+    app.app.link.shutdown();
+}
+
+#[tokio::test]
+async fn a_moved_default_login_profile_is_reused_without_resetting_its_display_home() {
+    let database = TestDb::fresh().await;
+    let app = TestApp::new(
+        Db::from_pool(database.pool.clone()),
+        clock::manual(),
+        Registry::new(),
+    );
+    let (machine, owner, registered) = machine_of_new_owner(&app, "moved-profile", true).await;
+    let registered = registered.unwrap();
+    let chosen = orch_types::new_id();
+    let profile = orch_types::new_id();
+    {
+        let mut conn = app.app.db.acquire().await.unwrap();
+        orch_db::queries::hierarchy::testing::insert_node(
+            &mut conn,
+            chosen,
+            "project",
+            Some(registered),
+            "Chosen profile home",
+            owner,
+        )
+        .await
+        .unwrap();
+        orch_db::queries::resources::routes::insert_agent(
+            &mut conn,
+            &orch_db::queries::resources::routes::NewAgent {
+                id: profile,
+                name: "local-harness",
+                owner_id: owner,
+                home_id: registered,
+                harness_kind: "local-harness",
+                machine_id: Some(machine),
+                profile: &json!({}),
+            },
+            app.clock.now(),
+        )
+        .await
+        .unwrap();
+        orch_authz::ownership::start_resource(
+            &mut conn,
+            orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Agent,
+                id: profile,
+            },
+            owner,
+            orch_authz::ownership::NewAccess::Defaults,
+            app.clock.time(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE agents SET home_id=$2,home_overridden_at=$3 WHERE id=$1")
+            .bind(profile)
+            .bind(chosen)
+            .bind(app.clock.now())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    report_sign_in(&app, machine, "registered@example.test").await;
+    let providers = machine_providers(&app, machine).await;
+    assert_eq!(providers.len(), 1);
+    assert_eq!(
+        providers[0].1, registered,
+        "the new provider uses the machine default"
+    );
+    assert_eq!(
+        providers[0].2, profile,
+        "the manager's existing profile is adopted"
+    );
+    assert_eq!(machine_profiles(&app, machine).await, 1);
+    let home: Id = sqlx::query_scalar("SELECT home_id FROM agents WHERE id=$1")
+        .bind(profile)
+        .fetch_one(app.app.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(home, chosen);
     app.app.link.shutdown();
 }

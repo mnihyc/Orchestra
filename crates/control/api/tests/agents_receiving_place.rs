@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::PermissionPageUpdate;
 use orch_api_contract::common::ErrorCode;
 use places::{make_org, make_project, person};
@@ -32,6 +33,7 @@ async fn a_page_change_cannot_share_into_a_place_the_sharer_cannot_drive() {
         }] }] }))
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert!(matches!(
         problem.code,

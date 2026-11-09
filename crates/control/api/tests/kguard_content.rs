@@ -9,10 +9,12 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullDiscussionCreationReply as _;
 use axum::body::Body;
 use bytes::Bytes;
 use chrono::Duration;
 use desk::{Desk, paragraph, put, text};
+use futures::FutureExt as _;
 use futures::stream;
 use http::{Request, StatusCode};
 use orch_api_contract::common::MAX_JSON_BYTES;
@@ -444,7 +446,9 @@ async fn every_document_action_refuses_authority_lost_during_arrival_and_accepts
                         .bytes(b"old file")
                         .send()
                         .await
-                        .ok();
+                        .ok()
+                        .into_full()
+                        .expect("this native creation control requires its full response");
                     Call::empty("DELETE", format!("{root}/files/{}", file.id))
                 }
                 Seen => Call::json(
@@ -470,6 +474,7 @@ async fn every_document_action_refuses_authority_lost_during_arrival_and_accepts
                             client_id: new_id().to_string(),
                         })
                         .send()
+                        .map(|reply| reply.full_discussion())
                         .await
                         .ok();
                     let comment = discussion.comments[0].id;
@@ -830,6 +835,8 @@ async fn every_channel_and_destination_action_rechecks_its_current_manager_befor
                         .send()
                         .await
                         .ok()
+                        .into_full()
+                        .expect("ordinary created notification content")
                         .id,
                 )
             } else {
@@ -849,6 +856,8 @@ async fn every_channel_and_destination_action_rechecks_its_current_manager_befor
                             .send()
                             .await
                             .ok()
+                            .into_full()
+                            .expect("ordinary destination creation returns full content")
                             .id,
                     )
                 } else {
@@ -1041,7 +1050,9 @@ async fn creating_updating_and_removing_a_cap_checks_the_authority_of_its_curren
                             .raw_body(&body)
                             .send()
                             .await
-                            .ok(),
+                            .ok()
+                            .into_full()
+                            .unwrap(),
                     )
                 };
                 let call = match (method, cap) {

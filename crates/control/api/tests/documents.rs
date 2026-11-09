@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullArchiveReply as _;
+use crate::support::FullPermissionPageReply;
 use desk::{Desk, body, paragraph, said};
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PageChangeWhole, PermissionPageGet,
@@ -21,7 +23,7 @@ use orch_api_contract::documents::{
     DocumentSyncGet, DocumentSyncGetQuery, DocumentUpdate, DocumentUpdateBody, Inline,
     NewDocumentAccess, NodeDocumentList, NodeDocumentListQuery,
 };
-use orch_api_contract::nodes::{FieldSource, NodeArchive, PageState};
+use orch_api_contract::nodes::{NodeArchive, PageState};
 use orch_settings::Target;
 use orch_types::{Id, new_id};
 use places::{make_org, missing_permissions};
@@ -339,6 +341,7 @@ async fn a_private_document_is_its_owners_alone_until_the_owner_names_somebody()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(
         shared.owner.as_ref().map(|owner| owner.username.as_str()),
@@ -357,6 +360,7 @@ async fn a_private_document_is_its_owners_alone_until_the_owner_names_somebody()
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert_eq!(reset.state, PageState::Follows);
     assert_eq!(listed(&vera).await.len(), 1);
@@ -404,6 +408,7 @@ async fn the_page_of_a_document_is_read_by_whoever_may_read_it_and_changed_by_th
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     assert_eq!(refused.extra["required"], "access.manage");
@@ -727,10 +732,9 @@ async fn an_editor_describes_a_document_and_lists_show_its_first_line_or_else_it
     assert_eq!(
         (
             made.base.description.as_str(),
-            made.base.description_source,
             made.base.description_line.as_str()
         ),
-        ("", FieldSource::Auto, ""),
+        ("", ""),
         "a new document has no description and nothing to show for one"
     );
     desk.paragraphs(
@@ -776,7 +780,6 @@ async fn an_editor_describes_a_document_and_lists_show_its_first_line_or_else_it
         described.base.description,
         "How we ship\nand how we roll back"
     );
-    assert_eq!(described.base.description_source, FieldSource::User);
     assert_eq!(described.base.description_line, "How we ship");
     assert_eq!(
         described.base.seq,
@@ -816,14 +819,9 @@ async fn an_editor_describes_a_document_and_lists_show_its_first_line_or_else_it
     assert_eq!(
         (
             cleared.base.description.as_str(),
-            cleared.base.description_source,
             cleared.base.description_line.as_str()
         ),
-        (
-            "",
-            FieldSource::User,
-            "Ship the redirect fix behind the flag."
-        ),
+        ("", "Ship the redirect fix behind the flag."),
         "taken away, the first paragraph is shown again, and automation does not write one"
     );
     assert_eq!(read(&vera).await.base.description, "");
@@ -910,7 +908,9 @@ async fn a_document_is_deleted_by_whoever_manages_it_and_brought_back_by_them() 
         .raw_body(&serde_json::json!({}))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(!back.base.deleted);
     assert!(
         desk.world
@@ -952,7 +952,9 @@ async fn a_document_moves_beside_another_node_of_its_tree_and_nowhere_else() {
         .body(&DocumentMoveBody { node_id: elsewhere })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(moved.base.node.id, elsewhere);
     assert_eq!(moved.path.last().map(|node| node.id), Some(elsewhere));
     assert!(
@@ -985,7 +987,9 @@ async fn a_document_moves_beside_another_node_of_its_tree_and_nowhere_else() {
         .body(&DocumentMoveBody { node_id: elsewhere })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(same.base.node.id, elsewhere);
 }
 
@@ -1054,7 +1058,9 @@ async fn the_preview_of_a_move_says_who_would_gain_and_who_would_lose_what() {
         .body(&DocumentMoveBody { node_id: elsewhere })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(preview.pages, 1);
     let gaining: Vec<&str> = preview
         .gaining
@@ -1104,6 +1110,7 @@ async fn under_an_archived_node_a_document_is_read_but_nothing_in_it_is_changed(
         .body(&places::archive_body(&desk.world, &desk.ada.token, desk.topic, true).await)
         .send()
         .await
+        .full_archive()
         .ok();
     let read = desk
         .world

@@ -6,8 +6,9 @@ import { enableEnvironment,startEnvironment } from '@/api/environments';
 import { openChange } from '@/features/change/target';
 import { SandboxActions } from '@/features/resources/SandboxReadiness';
 import { waitingWords } from '@/features/timeline/waiting';
+import { threadCapabilities } from '@/features/thread/cached';
+import { ResourceSentence } from '@/features/resource-facts/ResourceSentence';
 import type { Thread } from '@/generated/api-types';
-import { holds } from '@/lib/permissions';
 import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -17,7 +18,8 @@ export function EnvironmentStartRecovery({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
   const environment = thread.environment;
   const mayRetry = environment !== null && environment.status !== 'lost' && thread.environment_permissions.includes('environment.manage');
-  const mayChoose = holds(thread.access, 'thread.manage');
+  const mayChoose = threadCapabilities(thread)?.place === true;
+  const manager = environment?.owner ?? thread.owner;
   const off=environment?.status==='disabled';
   const retry = useMutation({ mutationFn: async (id: string) => { if(off) return enableEnvironment(id); return startEnvironment(id); } });
   const requested = t(off?'resourceImpact.enabling':'startRecovery.retrying', { environment: environment?.name ?? t('source.prepare.workspace') });
@@ -27,7 +29,7 @@ export function EnvironmentStartRecovery({ thread }: { thread: Thread }) {
       {mayRetry && <Button {...(off?{}:{action:'retry' as const})} size="sm" pending={retry.isPending} onClick={() => retry.mutate(environment.id)}>{t(off?'resources.act.enable':'startRecovery.retry')}</Button>}
       {mayChoose && <Button size="sm" onClick={() => openChange({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'environment' })}>{t(environment?.status === 'lost' ? 'loss.elsewhere' : 'startRecovery.elsewhere')}</Button>}
     </span> : undefined}>
-      <span data-blocked="environment_unavailable">{line}{environment?.status === 'lost' && <Hint popover id="loss-recover" />}{!mayChoose && !mayRetry && <span className="ml-1 text-text-muted">{t('thread.blocked.manager', { who: thread.owner.display_name })}</span>}</span>
+      <span data-blocked="environment_unavailable">{line}{environment?.status === 'lost' && <Hint popover id="loss-recover" />}{!mayChoose && !mayRetry && <span className="ml-1 text-text-muted"><ResourceSentence text={t(environment === null ? 'thread.blocked.manager' : 'startRecovery.environmentManager', { who: manager.display_name })} people={[manager]} /></span>}</span>
     </Banner>
     {retry.error !== null && <ErrorAlert error={retry.error} />}
     {thread.blocked?.sandbox !== null && thread.blocked?.sandbox !== undefined && <SandboxActions value={thread.blocked.sandbox} />}

@@ -19,7 +19,7 @@ use crate::engine::{Frame, Graph};
 use crate::external::{self, Naming};
 use crate::{Caller, Error, Policy, Principal};
 use orch_access_contract::decisions::{ObjectRef, Through};
-use orch_access_contract::permissions::{ObjectKind, Permission};
+use orch_access_contract::permissions::Permission;
 use orch_access_contract::roles::PlaceRef;
 use orch_db::Conn;
 use orch_db::queries::chats::{self as rows, ChatRow, MemberRow};
@@ -33,6 +33,28 @@ pub struct PeopleChatAccess {
     pub admin_access: Option<orch_access_contract::roles::AdminReach>,
     /// Native Manage is available even when an ordinary inspection row already gave View.
     pub admin_place: Option<PlaceRef>,
+}
+
+/// Native administration reaches a private group; ordinary home View or moderation never joins it.
+#[must_use]
+pub fn group_administration(frame: &Frame<'_>, chat: &ChatRow) -> Option<PeopleChatAccess> {
+    if chat.kind != rows::KIND_GROUP {
+        return None;
+    }
+    let site = frame.graph().site_of(chat.home())?;
+    if frame.principal().suspension().applies(&site.orgs)
+        || frame.ways(&site, Permission::ChatManage).is_empty()
+    {
+        return None;
+    }
+    let place = frame.admin_place(&site)?;
+    Some(PeopleChatAccess {
+        admin_access: Some(orch_access_contract::roles::AdminReach {
+            place,
+            private: true,
+        }),
+        admin_place: Some(place),
+    })
 }
 
 /// A chat's ordinary participation and native-only View, for every compact result.
@@ -68,7 +90,7 @@ pub async fn listed_access(
     nodes.extend(
         chats
             .iter()
-            .flat_map(|chat| std::iter::once(chat.org_id).chain(chat.node_id)),
+            .flat_map(|chat| std::iter::once(chat.org_id).chain(Some(chat.home()))),
     );
     let graph = Graph::load(conn, &nodes).await?;
     let sites: Vec<_> = graph
@@ -81,7 +103,11 @@ pub async fn listed_access(
         Policy::default(),
         graph,
         &sites,
-        &[Permission::ChatView, Permission::DirectsView],
+        &[
+            Permission::ChatView,
+            Permission::ChatManage,
+            Permission::DirectsView,
+        ],
     )
     .await?;
     let inspection = people_chat_access_in(conn, &frame, &people).await?;
@@ -102,7 +128,7 @@ pub async fn listed_access(
                 );
             }
         } else {
-            let Some(root) = frame.graph().site_of(chat.org_id) else {
+            let Some(root) = frame.graph().site_of(chat.home()) else {
                 continue;
             };
             if principal.suspension().applies(&root.orgs)
@@ -110,23 +136,31 @@ pub async fn listed_access(
             {
                 continue;
             }
-            let member_access = principal.caller().permits(Permission::ChatView)
-                && members.iter().any(|member| {
-                    member.id == chat.id
-                        && member
-                            .expires_at
-                            .is_none_or(|end| end > principal.now().get())
-                        && (principal.is_in_tree(member.org_id) || member.guest)
-                });
-            if member_access || inspection.contains_key(&chat.id) {
+            let member_access = members.iter().any(|member| {
+                member.id == chat.id
+                    && ordinary_participant(principal, &root, member, Permission::ChatView)
+            });
+            let public = public_reader(&frame, chat);
+            let administration = group_administration(&frame, chat);
+            if member_access
+                || public
+                || administration.is_some()
+                || inspection.contains_key(&chat.id)
+            {
                 found.insert(
                     chat.id,
                     ListedChatAccess {
-                        admin_access: if member_access {
+                        admin_access: if member_access
+                            || public
+                            || inspection
+                                .get(&chat.id)
+                                .is_some_and(|access| access.admin_access.is_none())
+                        {
                             None
                         } else {
-                            inspection
-                                .get(&chat.id)
+                            administration
+                                .as_ref()
+                                .or_else(|| inspection.get(&chat.id))
                                 .and_then(|access| access.admin_access)
                         },
                         participating: member_access && frame.follows_chat(chat.id),
@@ -136,6 +170,22 @@ pub async fn listed_access(
         }
     }
     Ok(found)
+}
+
+/// The ordinary membership right, shared by inventories and current agent-loan checks.
+pub(crate) fn ordinary_participant(
+    principal: &Principal,
+    root: &crate::engine::Site,
+    member: &orch_db::queries::search::ParticipantChat,
+    permission: Permission,
+) -> bool {
+    !principal.suspension().applies(&root.orgs)
+        && principal.caller().permits(permission)
+        && principal.caller().reaches(root.path.as_deref())
+        && member
+            .expires_at
+            .is_none_or(|end| end > principal.now().get())
+        && (principal.is_in_tree(member.org_id) || member.guest)
 }
 
 /// All ordinary or native inspection access in a batched frame. Every current
@@ -248,6 +298,8 @@ impl Default for ChatPolicy {
 pub enum Reading {
     /// By the page of the node it belongs to.
     Page,
+    /// Reading a public group through its actual home, before joining it.
+    Public,
     /// As somebody who is in it and still a member of its root org.
     Member,
     /// As a guest of a group: in it, and no member of the org.
@@ -292,10 +344,14 @@ pub struct Standing {
     pub participating: bool,
     /// How they read it; none when they may not: it does not exist for them.
     pub reading: Option<Reading>,
+    /// Ordinary public-home eligibility before membership, independent of native inspection.
+    pub join: bool,
     /// Whether they may write in it, or why not.
     pub sending: Result<(), Cannot>,
     /// Whether they may delete what others wrote.
     pub moderate: bool,
+    /// Whether this reader currently manages a group or its chat area.
+    pub manage: bool,
     /// Whether they may take it away as a file: they read a node's chat and hold its Export row (`chat.export`), or
     /// they are in a direct or a group chat. Somebody who only inspects one as an admin may not.
     pub export: bool,
@@ -327,8 +383,10 @@ fn nothing() -> Standing {
         admin_only: Vec::new(),
         participating: false,
         reading: None,
+        join: false,
         sending: Err(Cannot::NoPermission),
         moderate: false,
+        manage: false,
         export: false,
         in_chat: false,
         names_node: false,
@@ -407,8 +465,10 @@ async fn node_standing(
             .filter(|permission| permission.area() == orch_access_contract::permissions::Area::Chat)
             .collect(),
         participating: frame.participates_chat(&site),
+        join: false,
         sending,
         moderate: holds(Permission::ChatManage) && site.archived_node.is_none(),
+        manage: holds(Permission::ChatManage) && site.archived_node.is_none(),
         // Taking a chat away only reads it: it stands under an archived node as reading does.
         export: holds(Permission::ChatExport),
         in_chat: false,
@@ -427,24 +487,40 @@ async fn people_standing(
     let me = principal.user();
     let mine = members.iter().find(|row| row.user_id == me && row.is_in());
     let in_tree = principal.is_in_tree(root);
-    if let Some(closing) = principal.suspension().closing(&[root])
+    let graph = Graph::load(conn, &[chat.home()]).await?;
+    let site = graph
+        .site_of(chat.home())
+        .ok_or(Error::NotFound(chat.home()))?;
+    if let Some(closing) = principal.suspension().closing(&site.orgs)
         && (mine.is_some() || in_tree)
     {
         return Err(Error::Suspended { org: closing.org() });
     }
-    let graph = Graph::load(conn, &[root]).await?;
-    let site = graph.site_of(root).ok_or(Error::NotFound(root))?;
-    // A token reads what its user may only within its scopes and its subtree;
-    // the chats among people are the root org's, and lie in no subtree of it.
+    // Membership grants the group's chat; legacy subtree ceilings follow its actual home.
     let caller = principal.caller();
+    let frame = Frame::load(
+        conn,
+        principal,
+        Policy::default(),
+        graph,
+        std::slice::from_ref(&site),
+        &[Permission::ChatView, Permission::ChatManage],
+    )
+    .await?;
+    let administration = group_administration(&frame, chat);
+    let manager = chat.kind == rows::KIND_GROUP && mine.is_some_and(|member| member.manager);
     let token_reads = caller.permits(Permission::ChatView) && caller.reaches(site.path.as_deref());
     let reading = match mine {
         Some(_) if in_tree && token_reads => Some(Reading::Member),
         Some(row) if row.guest && !in_tree && token_reads => Some(Reading::Guest),
+        _ if public_reader(&frame, chat) => Some(Reading::Public),
         _ => None,
     };
     let Some(reading) = reading else {
-        let org = inspector_org(conn, principal, chat, members).await?;
+        let org = match administration {
+            Some(access) => Some((root, access.admin_place)),
+            None => inspector_org(conn, principal, chat, members).await?,
+        };
         let ordinary_reads = if principal.caller().as_admin() {
             let ordinary = principal.ordinary(conn).await?;
             inspector_org(conn, &ordinary, chat, members)
@@ -484,7 +560,8 @@ async fn people_standing(
                 },
                 participating: false,
                 reading: Some(Reading::Inspector { org }),
-                sending: if native_place.is_none() {
+                join: false,
+                sending: if native_place.is_none() && administration.is_none() {
                     Err(Cannot::Inspecting)
                 } else if !policy.direct {
                     Err(Cannot::DirectOff)
@@ -493,15 +570,20 @@ async fn people_standing(
                 } else {
                     Ok(())
                 },
-                moderate: native_place.is_some() && site.archived_node.is_none(),
-                export: native_place.is_some(),
+                moderate: (administration.is_some() || native_place.is_some())
+                    && site.archived_node.is_none(),
+                manage: chat.kind == rows::KIND_GROUP
+                    && (administration.is_some() || native_place.is_some())
+                    && site.archived_node.is_none(),
+                export: native_place.is_some() || administration.is_some(),
                 in_chat: false,
                 names_node: false,
             },
             None => nothing(),
         });
     };
-    let sending = if !caller.permits(Permission::ChatInteract) {
+    let in_chat = matches!(reading, Reading::Member | Reading::Guest);
+    let sending = if !in_chat || !caller.permits(Permission::ChatInteract) {
         Err(Cannot::NoPermission)
     } else if let Some(node) = site.archived_node {
         Err(Cannot::Archived { node })
@@ -512,7 +594,9 @@ async fn people_standing(
     } else {
         Ok(())
     };
-    let admin_place = if principal.caller().as_admin() {
+    let admin_place = if let Some(administration) = administration {
+        administration.admin_place
+    } else if principal.caller().as_admin() {
         inspector_org(conn, principal, chat, members)
             .await?
             .and_then(|(_, place)| place)
@@ -520,30 +604,34 @@ async fn people_standing(
         None
     };
     let native_manage = admin_place.is_some();
-    let frame = Frame::load(
-        conn,
-        principal,
-        Policy::default(),
-        graph,
-        std::slice::from_ref(&site),
-        &[Permission::ChatView],
-    )
-    .await?;
     Ok(Standing {
         admin_place,
         admin_access: None,
-        admin_only: if native_manage && site.archived_node.is_none() {
+        admin_only: if native_manage && !manager && site.archived_node.is_none() {
             vec![Permission::ChatManage]
         } else {
             Vec::new()
         },
-        participating: frame.follows_chat(chat.id),
+        participating: in_chat && frame.follows_chat(chat.id),
         reading: Some(reading),
+        join: !in_chat
+            && matches!(reading, Reading::Public)
+            && policy.direct
+            && site.archived_node.is_none(),
         sending,
-        moderate: native_manage && site.archived_node.is_none(),
+        moderate: (native_manage
+            || administration.is_some()
+            || manager
+            || chat.kind == rows::KIND_GROUP
+                && !frame.ways(&site, Permission::ChatManage).is_empty())
+            && caller.permits(Permission::ChatManage)
+            && site.archived_node.is_none(),
+        manage: chat.kind == rows::KIND_GROUP
+            && (native_manage || administration.is_some() || manager)
+            && site.archived_node.is_none(),
         // Being in a direct or a group chat is what lets one take it away, within the scopes of a token.
-        export: caller.permits(Permission::ChatExport),
-        in_chat: true,
+        export: in_chat && caller.permits(Permission::ChatExport),
+        in_chat,
         names_node: false,
     })
 }
@@ -736,8 +824,8 @@ pub async fn readers_among(
 }
 
 /// Whether the caller may bring somebody from outside the root org into a
-/// group chat, and if not who may: they hold `access.external` on the root
-/// org, or they made the chat where `sharing.allow_external` resolves true
+/// group chat, and if not who may: they hold `access.external` at its home,
+/// or are a current manager where `sharing.allow_external` resolves true
 /// (`owners_name_outsiders`).
 pub async fn may_bring_in_outsider(
     conn: &mut Conn,
@@ -745,17 +833,41 @@ pub async fn may_bring_in_outsider(
     chat: &ChatRow,
     owners_name_outsiders: bool,
 ) -> Result<Naming, Error> {
+    let graph = Graph::load(conn, &[chat.home()]).await?;
+    let home = graph
+        .site_of(chat.home())
+        .ok_or(Error::NotFound(chat.home()))?;
     let root = ObjectRef {
-        kind: ObjectKind::Org,
-        id: chat.org_id,
+        kind: home.kind,
+        id: home.id,
     };
     let naming = external::may_name(conn, principal, root, Policy::default()).await?;
-    if !naming.allowed() && owners_name_outsiders && chat.created_by == Some(principal.user()) {
+    if !naming.allowed()
+        && owners_name_outsiders
+        && rows::is_manager(conn, chat.id, principal.user(), principal.now().get()).await?
+    {
         return Ok(Naming {
-            through: vec![Through::Owner],
+            through: vec![Through::Level {
+                of: Permission::ChatManage,
+            }],
             ask: Vec::new(),
             ask_more: 0,
         });
     }
     Ok(naming)
+}
+
+/// Public groups reuse the home's ordinary ChatView frame, never membership inferred from a name.
+pub(crate) fn public_reader(frame: &Frame<'_>, chat: &ChatRow) -> bool {
+    chat.kind == rows::KIND_GROUP
+        && chat.visibility == "public"
+        && frame.principal().is_in_tree(chat.org_id)
+        && frame.graph().site_of(chat.home()).is_some_and(|site| {
+            !frame.principal().suspension().applies(&site.orgs)
+                && frame.principal().caller().reaches(site.path.as_deref())
+                && frame
+                    .admin_access_for(&site, Permission::ChatView)
+                    .is_none()
+                && !frame.ways(&site, Permission::ChatView).is_empty()
+        })
 }

@@ -9,10 +9,11 @@
  */
 import { infiniteQueryOptions, queryOptions } from '@tanstack/react-query';
 
-import { ApiError, api, done, ok, repeatable } from '@/api/client';
+import { ApiError, accepted, api, client, done, ok, repeatable } from '@/api/client';
+import { ownerReadHeaders, withOwnerReadConfirmation } from '@/api/ownerReadConfirmation';
 import type {
   AccessRequestCreateBody,
-  AccessRequestCreateReply,
+  AccessRequestWriteResponse,
   AccessRequestGetReply,
   Approval,
   EffectiveAccess,
@@ -121,7 +122,7 @@ export const defaultsKey = (nodeId: string) => ['defaults', nodeId] as const;
 export const systemDefaultsKey = ['defaults', 'system'] as const;
 
 export const readSystemDefaults = (signal?: AbortSignal): Promise<PermissionPage> => ok(api.GET('/admin/defaults', { signal }));
-export const changeSystemDefaults = (change: PageChange): Promise<PermissionPage> => ok(api.PATCH('/admin/defaults', { body: change }));
+export const changeSystemDefaults = (change: PageChange, confirmation?: string): Promise<PermissionPage> => withOwnerReadConfirmation((accepted) => ok(api.PATCH('/admin/defaults', { body: change, headers: ownerReadHeaders(accepted) })), confirmation);
 export const previewSystemDefaults = (change: PageChange): Promise<PagePreview> => ok(api.POST('/admin/defaults/preview', { body: change }));
 
 /** Reads the page of a thing: every row, what each inherits and from where, whom it names, and what the caller may change. */
@@ -143,13 +144,13 @@ export const defaultsQuery = (nodeId: string) =>
   queryOptions({ queryKey: defaultsKey(nodeId), queryFn: ({ signal }): Promise<PermissionPage> => readDefaults(nodeId, signal) });
 
 /** Changes a page, as a whole or not at all; a revision the page has moved past comes back as a stale one. */
-export function changePage(target: Pick<AccessTarget, 'kind' | 'id'>, change: PageChange, key?: string): Promise<PermissionPage> {
-  return ok(api.PATCH('/{object}/{id}/permissions', { params: { path: { object: pathOf(target.kind), id: target.id } }, body: change, ...(key === undefined ? {} : repeatable(key)) }));
+export function changePage(target: Pick<AccessTarget, 'kind' | 'id'>, change: PageChange, key?: string, confirmation?: string): Promise<PermissionPage> {
+  return withOwnerReadConfirmation((accepted) => ok(api.PATCH('/{object}/{id}/permissions', { params: { path: { object: pathOf(target.kind), id: target.id } }, body: change, ...(key === undefined ? {} : repeatable(key)), headers: { ...(key === undefined ? {} : repeatable(key).headers), ...ownerReadHeaders(accepted) } })), confirmation);
 }
 
 /** Changes the page of defaults of a place in the same way. */
-export function changeDefaults(nodeId: string, change: PageChange): Promise<PermissionPage> {
-  return ok(api.PATCH('/nodes/{id}/defaults', { params: { path: { id: nodeId } }, body: change }));
+export function changeDefaults(nodeId: string, change: PageChange, confirmation?: string): Promise<PermissionPage> {
+  return withOwnerReadConfirmation((accepted) => ok(api.PATCH('/nodes/{id}/defaults', { params: { path: { id: nodeId } }, body: change, headers: ownerReadHeaders(accepted) })), confirmation);
 }
 
 /** Says what a change would do to other people, with nothing changed. */
@@ -158,8 +159,8 @@ export function previewPage(target: Pick<AccessTarget, 'kind' | 'id'>, change: P
 }
 
 /** Reviews an ordinary page, role or agent share; it applies nothing and the write still rechecks its own authority. */
-export function previewShare(target: Pick<AccessTarget, 'kind' | 'id'>, body: SharePreviewBody): Promise<SharePreview> {
-  return ok(api.POST('/{object}/{id}/share/preview',{params:{path:{object:pathOf(target.kind),id:target.id}},body}));
+export function previewShare(target: Pick<AccessTarget, 'kind' | 'id'>, body: SharePreviewBody, signal?: AbortSignal): Promise<SharePreview> {
+  return ok(api.POST('/{object}/{id}/share/preview',{params:{path:{object:pathOf(target.kind),id:target.id}},body,...(signal === undefined ? {} : {signal})}));
 }
 
 /** The same for a change to the defaults of a place: how many pages follow the rows, and who gains or loses what. */
@@ -250,6 +251,22 @@ export const historyQuery = (target: Pick<AccessTarget, 'kind' | 'id'>, depth: '
     retry: false,
   });
 
+/** One bounded page of the actual file outcomes belonging to a stored upload history line. */
+export const uploadHistoryQuery = (environment: string, line: string, cursor: string | null) => {
+  const reader = client.session.getState();
+  return queryOptions({
+    queryKey: ['upload-history', reader.userId, reader.readerVersion ?? 0, environment, line, cursor] as const,
+    queryFn: ({ signal }): Promise<HistoryLinePage> => ok(api.GET('/{object}/{id}/history', {
+      params: { path: { object: 'environments', id: environment }, query: {
+        upload: line, limit: PEOPLE_PAGE, ...(cursor === null ? {} : { cursor }),
+      } }, signal,
+    })),
+    retry: false,
+    gcTime: 0,
+    staleTime: 0,
+  });
+};
+
 // ---------------------------------------------------------------- finding whom to name
 
 /** The fewest characters the server searches for. */
@@ -315,7 +332,7 @@ export function changeRoleDetails(
 
 /** Gives a role in a place to a person, a group or the members of an org. */
 export function giveRole(nodeId: string, body: RoleCreateBody): Promise<RoleHeld> {
-  return ok(api.POST('/nodes/{id}/roles', { params: { path: { id: nodeId } }, body }));
+  return withOwnerReadConfirmation((accepted) => ok(api.POST('/nodes/{id}/roles', { params: { path: { id: nodeId } }, body, headers: ownerReadHeaders(accepted) })));
 }
 
 /** Takes a role away. */
@@ -326,13 +343,13 @@ export function takeRole(roleId: string): Promise<void> {
 // ---------------------------------------------------------------- asking for access
 
 /** Asks for what is missing, one approval for each thing, each sent to the people who can give it. */
-export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/access-requests', { body, ...repeatable(key) }));
+export function requestAccess(body: AccessRequestCreateBody, key: string): Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/access-requests', { body, ...repeatable(key) }));
 }
 
 /** Asks to join a known group; the grant is ordinary membership. */
-export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestCreateReply> {
-  return ok(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
+export function requestJoin(chatId:string,body:{reason:string;label?:string;expires_at?:string},key:string):Promise<AccessRequestWriteResponse> {
+  return accepted(api.POST('/chats/{id}/join-requests',{params:{path:{id:chatId}},body,...repeatable(key)}));
 }
 
 /** Where a batch of requests stands. */

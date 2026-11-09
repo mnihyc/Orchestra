@@ -26,7 +26,7 @@ use support::World;
 
 /// Asks to make the team org `slug`, as `by`.
 async fn make(world: &World, by: &Who, slug: &str) -> Reply<Org> {
-    world
+    let reply = world
         .app
         .call(OrgCreate, &[])
         .token(&by.token)
@@ -35,7 +35,17 @@ async fn make(world: &World, by: &Who, slug: &str) -> Reply<Org> {
             slug: slug.to_owned(),
         })
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary created organization content")
+        }),
+    }
 }
 
 /// `by` gives `to` an invitation to make a team org.
@@ -190,6 +200,77 @@ async fn a_refused_making_keeps_the_invitation_and_two_at_once_make_one_org() {
         first.problem()
     };
     assert_eq!(refused.code, ErrorCode::OrgCreationDisabled);
+    assert_eq!(refused.status, 403);
+    assert_eq!(refused.extra["org_creation"], json!("invited"));
+    assert!(
+        !listed_as_invited(&world, &root, "ada").await,
+        "the winning creation consumed the only invitation"
+    );
+    assert_eq!(
+        said_to(&world, Some(&ada)).await,
+        (OrgCreation::Invited, false)
+    );
+    assert_eq!(
+        lines_of(&world, "node.created")
+            .await
+            .iter()
+            .filter(|line| line.actor_id == Some(ada.id()) && line.details["kind"] == "org")
+            .count(),
+        1,
+        "the refused maker left no second org or creation audit"
+    );
+}
+
+#[tokio::test]
+async fn making_an_invited_org_does_not_upgrade_another_actions_identity_lock() {
+    let world = World::new().await;
+    let root = admin(&world, "root").await;
+    let ada = person(&world, "ada").await;
+    give(&world, &root, &ada).await;
+
+    // Every ordinary action holds this actual user-row lock while it acts. Invitation fields
+    // are not identity keys, so making an org must finish while that other action stays open.
+    let mut identity = world.db.pool.begin().await.unwrap();
+    let identity_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *identity)
+        .await
+        .unwrap();
+    sqlx::query("SELECT id FROM users WHERE id=$1 FOR KEY SHARE")
+        .bind(ada.id())
+        .execute(&mut *identity)
+        .await
+        .unwrap();
+    let blocked_by_identity = async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(identity_pid)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    };
+    // Bound a broken test on a loaded runner; the deciding observation is PostgreSQL's real
+    // blocker, not a delay that guesses whether the HTTP request has reached its lock.
+    let made = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::select! {
+            made = make(&world, &ada, "invited") => made.ok(),
+            () = blocked_by_identity => panic!("the invitation maker upgraded a compatible identity lock"),
+        }
+    })
+    .await
+    .expect("the invited maker finishes while the other identity lock stays held");
+    assert_eq!(made.slug, "invited");
+    identity.rollback().await.unwrap();
+    assert!(!listed_as_invited(&world, &root, "ada").await);
+    let refused = make(&world, &ada, "another").await.problem();
+    assert_eq!(refused.code, ErrorCode::OrgCreationDisabled);
+    assert_eq!(refused.status, 403);
 }
 
 #[tokio::test]

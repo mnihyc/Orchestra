@@ -143,15 +143,19 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       expect(server.write).not.toHaveBeenCalled();
     });
 
-    it('omits model parameters for which this model offers nothing', async () => {
+    it('keeps an explicit unknown context line when the model supplies no limits', async () => {
       const answer = parameters();
       answer.parameters = modelChoices();
       server.parameters = answer;
       show(<ParametersPanel access={{ thread }} />);
       await screen.findByText(t('composer.model.exampleLarge'));
-      for (const key of ['composer.model.speed.title', 'composer.model.access.title', 'composer.model.context.title'] as const) {
+      for (const key of ['composer.model.speed.title', 'composer.model.access.title'] as const) {
         expect(screen.queryByText(t(key))).not.toBeInTheDocument();
       }
+      expect(screen.getByText(t('composer.model.context.unreportedLimits'))).toBeVisible();
+      expect(screen.getByText(t('composer.model.context.title'))).toBeVisible();
+      expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+      expect(server.write).not.toHaveBeenCalled();
       expect(screen.getByText(t('inspector.parameters.noParameters'))).toBeVisible();
     });
 
@@ -169,6 +173,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       await waitFor(() => expect(within(summary).getByText('100K')).toBeVisible());
       expect(within(summary).getByText('Priority')).toBeVisible();
       expect(within(summary).getByText('Team')).toBeVisible();
+      expect(document.querySelector('[data-context-availability]')).toBeNull();
       expect(within(summary).queryByRole('combobox')).not.toBeInTheDocument();
       expect(within(summary).queryByRole('radio')).not.toBeInTheDocument();
       expect(within(summary).queryByRole('button')).not.toBeInTheDocument();

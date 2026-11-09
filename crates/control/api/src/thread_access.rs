@@ -14,22 +14,15 @@ use orch_access_contract::decisions::{Decision, ObjectRef, Refusal};
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_agent_contract::descriptor::ArrangementType;
 use orch_authz::usable::{
-    self, Author, BindingAsk, BindingDecision, Policies, ProviderChoice, ResourcePolicy, TurnAsk,
-    TurnDecision, Usable,
+    self, Author, BindingAsk, BindingDecision, Policies, ProviderChoice, TurnAsk, TurnDecision,
+    Usable,
 };
 use orch_authz::{Caller, Principal, resources};
 use orch_db::Conn;
 use orch_db::queries::{hierarchy, resources as rows};
 use orch_engine::access::{AccessFault, Answer, Limit, ProviderUse, ResourceAccess};
-use orch_settings::Place;
 use orch_types::{Clock, Id, Time};
 use std::sync::Arc;
-
-/// The setting that says whose subscriptions other people may use.
-const SUBSCRIPTION_SHARING: &str = "providers.subscription_sharing";
-/// The setting that says whether a thing's owners may name somebody from
-/// outside its root org.
-const ALLOW_EXTERNAL: &str = "sharing.allow_external";
 
 /// The access engine, as the thread engine asks it.
 #[derive(Debug, Clone)]
@@ -85,22 +78,9 @@ impl AuthzAccess {
     /// What the settings say that decides about `resource`, resolved at its
     /// home (at the system for a resource of the system).
     pub(crate) async fn policies(conn: &mut Conn, resource: Id) -> Result<Policies, AccessFault> {
-        let facts = rows::resource_facts(conn, &[resource])
+        orch_engine::access::resource_policies(conn, resource)
             .await
-            .map_err(fault)?;
-        let home = facts.first().and_then(|facts| facts.home_id);
-        let place = home.map_or(Place::System, Place::Node);
-        let shared: Option<Vec<String>> = orch_settings::get(conn, place, SUBSCRIPTION_SHARING)
-            .await
-            .map_err(fault)?;
-        let outsiders: Option<bool> = orch_settings::get(conn, place, ALLOW_EXTERNAL)
-            .await
-            .map_err(fault)?;
-        let policy = ResourcePolicy {
-            owners_name_outsiders: outsiders.unwrap_or(false),
-            shared_subscriptions: shared,
-        };
-        Ok(Policies::everywhere(policy))
+            .map_err(fault)
     }
 
     /// The answer for one resource and one permission on its own page, for

@@ -41,7 +41,9 @@ async fn announce_bound_person_walk_accepts_1500_and_refuses_1501_without_a_seco
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary supplied-text control returns its full native result");
     let made = made.announcements.into_iter().next().unwrap();
     assert_eq!(made.body, original);
     assert_eq!(made.delivered.deferred, 2);

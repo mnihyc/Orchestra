@@ -46,6 +46,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
+mod plan_read;
+
 /// The kind of a stored removal plan.
 const PLAN_KIND: &str = "outside_removal";
 /// For how long a removal plan may be confirmed: the life of every stored change plan.
@@ -64,7 +66,11 @@ pub fn mount(registry: &mut Registry) {
         .on(OrgOutsiderList, outsider_list)
         .on(OrgOutsiderSourceList, source_list)
         .on(OrgOutsiderRemovePreview, remove_preview)
-        .on(OrgOutsiderRemovePlanGet, remove_plan_get)
+        .on_snapshot_read_with_optional_operation(
+            OrgOutsiderRemovePlanGet,
+            crate::key_operations::native::selected::<plan_read::Plans>,
+            crate::key_operations::native::selected_read::<plan_read::Plans>,
+        )
         .on(OrgOutsiderRemove, remove);
 }
 
@@ -524,46 +530,6 @@ async fn remove_preview(ctx: Ctx, (): (), (): ()) -> ApiResult<OutsideRemovalPla
     .await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(page)
-}
-
-/// The next page of a stored removal plan, for the caller who asked for it, while they may still
-/// manage the org's members. Nothing is read again: the plan is what it was.
-async fn remove_plan_get(
-    ctx: Ctx,
-    query: OrgOutsiderRemovePlanGetQuery,
-    (): (),
-) -> ApiResult<OutsideRemovalPlan> {
-    let id = ctx.id("id")?;
-    let plan = ctx.id("plan_id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let org = the_org(&mut conn, id).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    authorization::require(
-        &mut conn,
-        &principal,
-        id,
-        authorization::exact(Permission::MembersManage),
-        Act::Use,
-        Policy::default(),
-    )
-    .await?;
-    let user = outsider(&mut conn, &ctx, org.org).await?;
-    let (row, kept) = kept_plan(&mut conn, &ctx, &principal, plan, id, user).await?;
-    let limit = PageQuery {
-        limit: query.limit,
-        cursor: None,
-    }
-    .limit();
-    plan_page(
-        &mut conn,
-        &principal,
-        &row,
-        &kept,
-        id,
-        query.cursor.as_deref(),
-        limit,
-    )
-    .await
 }
 
 /// Takes a person from outside out of an org as the plan they read whole says, in one transaction:

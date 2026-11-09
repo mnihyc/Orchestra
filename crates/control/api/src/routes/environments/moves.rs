@@ -7,7 +7,6 @@ use crate::registry::{Ctx, Registry};
 use orch_api_contract::{
     environment as api,
     forks::{EnvironmentMovePlan, ForkCreateBody, MoveThreadAction, MovedThread},
-    workspace::Job,
 };
 use orch_authz::{Policy, Principal};
 use orch_db::queries::jobs::{self, forks::PreflightRow};
@@ -16,14 +15,86 @@ use orch_engine::jobs::environment_move::{MoveDraft, MoveRecipe};
 use orch_engine::jobs::machine_move;
 use orch_engine::updates;
 use orch_types::{Id, Time, new_id};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// The native batch saved for confirmation and its private audience's factual subjects.
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredMoveBatch {
+    #[serde(default)]
+    observations: orch_engine::jobs::measurement::SavedMeasurements,
+    recipes: Vec<MoveRecipe>,
+    #[serde(default)]
+    portable_recipes: Vec<machine_move::Recipe>,
+    request: api::EnvironmentMovePreflightBody,
+    notification: orch_api_contract::loss::OperationNotificationPlan,
+}
+
+pub(crate) mod batch;
+mod confirmation;
+mod operation;
+
+#[derive(Clone, PartialEq, Eq)]
+struct MoveSourceAssociation {
+    owner: Id,
+    home: Id,
+    generation: i32,
+    machine: Option<Id>,
+    runtime: Option<Id>,
+}
+
+#[derive(Clone)]
+pub(in crate::routes) struct ObservedMoveBatch {
+    node: Id,
+    stored: StoredMoveBatch,
+    plan: api::EnvironmentMoveBatchPlan,
+    audience: Vec<orch_engine::notifications::OperationRecipient>,
+    visible: Vec<Id>,
+    managed: Vec<Id>,
+    destinations: std::collections::BTreeSet<(orch_access_contract::permissions::ObjectKind, Id)>,
+    content: std::collections::BTreeSet<(orch_access_contract::permissions::ObjectKind, Id)>,
+    associations: std::collections::BTreeMap<Id, MoveSourceAssociation>,
+}
+
+pub(crate) fn recipient_subjects(
+    plan: &orch_types::Json,
+) -> ApiResult<Vec<orch_access_contract::decisions::ObjectRef>> {
+    let stored: StoredMoveBatch =
+        serde_json::from_value(plan.clone()).map_err(ApiError::internal)?;
+    Ok(stored
+        .recipes
+        .into_iter()
+        .map(|recipe| recipe.replacement.target.id())
+        .chain(
+            stored
+                .portable_recipes
+                .into_iter()
+                .map(|recipe| recipe.environment),
+        )
+        .map(|id| orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Environment,
+            id,
+        })
+        .collect())
+}
 
 /// Binds the plan and execution of one environment move.
 pub fn mount(registry: &mut Registry) {
     registry
+        .creation(api::EnvironmentMoveCreate, confirmation::binding())
         .on(api::EnvironmentMovePlaceList, places)
-        .on(api::EnvironmentMovePreflight, preflight)
-        .on(api::EnvironmentMoveCreate, create);
+        .on_with_initial_operation(
+            api::EnvironmentMovePreflight,
+            crate::key_operations::native::effects::initial::<operation::Preview>,
+            super::lifecycle::prepare::<operation::Preview>,
+            operation::preflight,
+        )
+        .on_with_initial_operation(
+            api::EnvironmentMoveCreate,
+            crate::key_operations::native::effects::initial::<confirmation::Confirm>,
+            super::lifecycle::prepare::<confirmation::Confirm>,
+            confirmation::create,
+        );
 }
 
 async fn places(
@@ -33,7 +104,7 @@ async fn places(
 ) -> ApiResult<Vec<api::EnvironmentMovePlace>> {
     let mut conn = ctx.app.db.acquire().await?;
     let principal = authorization::principal(&ctx, &mut conn).await?;
-    machine_move::places(
+    let mut places = machine_move::places(
         &ctx.app.engine,
         &mut conn,
         &principal,
@@ -41,7 +112,46 @@ async fn places(
         query.template_id,
     )
     .await
-    .map_err(refused)
+    .map_err(refused)?;
+    let subjects = places
+        .iter()
+        .map(|place| match place {
+            api::EnvironmentMovePlace::Host(host) => ("host".to_owned(), host.host.id),
+            api::EnvironmentMovePlace::Machine(machine) => {
+                ("machine".to_owned(), machine.machine.id)
+            }
+        })
+        .collect::<Vec<_>>();
+    let grouping = crate::routes::resources::grouping::Prepared::select(&mut conn, &subjects)
+        .await?
+        .choices(&ctx.app, &mut conn, &principal, None, None)
+        .await?;
+    for place in &mut places {
+        match place {
+            api::EnvironmentMovePlace::Host(host) => {
+                if let Some(meta) = grouping
+                    .iter()
+                    .find(|row| row.kind == "host" && row.id == host.host.id)
+                {
+                    // The planner already made the actual per-machine availability judgement.
+                    let availability = std::mem::take(&mut host.grouping.availability);
+                    host.grouping = meta.grouping.clone();
+                    host.grouping.availability = availability;
+                }
+            }
+            api::EnvironmentMovePlace::Machine(machine) => {
+                if let Some(meta) = grouping
+                    .iter()
+                    .find(|row| row.kind == "machine" && row.id == machine.machine.id)
+                {
+                    let availability = std::mem::take(&mut machine.grouping.availability);
+                    machine.grouping = meta.grouping.clone();
+                    machine.grouping.availability = availability;
+                }
+            }
+        }
+    }
+    Ok(places)
 }
 
 pub(crate) async fn shown_machine(
@@ -102,6 +212,8 @@ pub(crate) async fn shown_machine(
         &orch_engine::jobs::estimates::Rates::assumed(),
     );
     Ok(EnvironmentMovePlan {
+        kind: draft.recipe.transfer_kind(),
+        source_has_unit: draft.recipe.source_has_unit(),
         notification: orch_api_contract::loss::OperationNotificationPlan {
             preview_id: Some(id),
             people: orch_engine::notifications::operation_audience(
@@ -203,6 +315,8 @@ pub(crate) async fn shown(
         &orch_engine::jobs::estimates::Rates::assumed(),
     );
     Ok(EnvironmentMovePlan {
+        kind: orch_api_contract::forks::EnvironmentTransferKind::Move,
+        source_has_unit: true,
         notification: orch_api_contract::loss::OperationNotificationPlan {
             preview_id: Some(id),
             people: orch_engine::notifications::operation_audience(
@@ -240,225 +354,35 @@ pub(crate) async fn shown(
     })
 }
 
-async fn preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::EnvironmentMovePreflightBody,
-) -> ApiResult<EnvironmentMovePlan> {
-    let environment = ctx.id("id")?;
-    let (principal, portable) = {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        let portable = machine_move::needed(&mut conn, environment, &body)
-            .await
-            .map_err(ApiError::internal)?;
-        (principal, portable)
-    };
-    if portable {
-        let draft = ctx
-            .app
-            .engine
-            .draft_machine_move(&principal, environment, &body, None)
-            .await
-            .map_err(refused)?;
-        let id = new_id();
-        let mut conn = ctx.app.db.acquire().await?;
-        let plan = shown_machine(&ctx, &mut conn, &principal, id, &draft).await?;
-        jobs::forks::save_preflight(
-            &mut conn,
-            &PreflightRow {
-                id,
-                kind: "environment_move".into(),
-                node_id: None,
-                environment_id: Some(environment),
-                created_by: principal.user(),
-                plan: json!({"portable":draft.recipe,"request":body,"notification":plan.notification}),
-                expires_at: updates::expires(ctx.now),
-                created_at: ctx.now,
-            },
-        )
-        .await?;
-        save_audience(&mut conn, &principal, environment, id).await?;
-        return Ok(plan);
-    }
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let environment = ctx.id("id")?;
-    let draft = ctx
-        .app
-        .engine
-        .draft_move(&mut tx, &principal, environment, &body, None)
-        .await
-        .map_err(refused)?;
-    let id = new_id();
-    let plan = shown(&ctx, &mut tx, &principal, id, &draft).await?;
-    jobs::forks::save_preflight(
-        &mut tx,
-        &PreflightRow {
-            id,
-            kind: "environment_move".into(),
-            node_id: None,
-            environment_id: Some(environment),
-            created_by: principal.user(),
-            plan: json!({"recipe":draft.recipe,"request":body,"notification":plan.notification}),
-            expires_at: updates::expires(ctx.now),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    save_audience(&mut tx, &principal, environment, id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(plan)
-}
-
-async fn create(ctx: Ctx, (): (), body: ForkCreateBody) -> ApiResult<Job> {
-    let environment = ctx.id("id")?;
-    let (principal, original) = {
-        let mut conn = ctx.app.db.acquire().await?;
-        let principal = authorization::principal(&ctx, &mut conn).await?;
-        let row = jobs::changes::lock_plan(&mut conn, body.preflight_id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        (principal, row)
-    };
-    if original.plan.get("portable").is_some() {
-        if original.kind != "environment_move"
-            || original.environment_id != Some(environment)
-            || original.created_by != principal.user()
-        {
-            return Err(ApiError::not_found());
-        }
-        if original.expires_at <= ctx.now {
-            return Err(refused(updates::UpdateError::Expired));
-        }
-        let recipe: machine_move::Recipe =
-            serde_json::from_value(original.plan["portable"].clone())
-                .map_err(ApiError::internal)?;
-        let request: api::EnvironmentMovePreflightBody =
-            serde_json::from_value(original.plan["request"].clone()).map_err(ApiError::internal)?;
-        let draft = ctx
-            .app
-            .engine
-            .draft_machine_move(&principal, environment, &request, body.options.as_ref())
-            .await
-            .map_err(refused)?;
-        if !recipe.same_choice(&draft.recipe) {
-            return Err(ApiError::new(
-                orch_api_contract::common::ErrorCode::ConflictStaleRevision,
-                "The source, destination or promised data changed; review the move again.",
-            ));
-        }
-        let mut tx = ctx.app.db.begin().await?;
-        orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal = authorization::principal(&ctx, &mut tx).await?;
-        let current = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
-        if current.plan != original.plan || current.expires_at <= ctx.now {
-            return Err(refused(updates::UpdateError::Expired));
-        }
-        let operation = move_operation(
-            &mut tx,
-            &principal,
-            environment,
-            body.preflight_id,
-            body.notify.unwrap_or(false),
-        )
-        .await?;
-        let row = orch_engine::notifications::operation_scope(
-            Some(operation.id),
-            machine_move::queue(&mut tx, &principal, draft, None, ctx.now),
-        )
-        .await
-        .map_err(refused)?;
-        orch_engine::notifications::attach_operation(&mut tx, &[row.id], &operation, ctx.now)
-            .await
-            .map_err(ApiError::internal)?;
-        orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
-            .await
-            .map_err(ApiError::internal)?;
-        jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-        let job = super::jobs::view(&mut tx, &row).await?;
-        tx.commit().await.map_err(DbError::from)?;
-        ctx.app.engine.kick();
-        return Ok(job);
-    }
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let environment = ctx.id("id")?;
-    let row = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if row.kind != "environment_move"
-        || row.environment_id != Some(environment)
-        || row.created_by != principal.user()
-    {
-        return Err(ApiError::not_found());
-    }
-    if row.expires_at <= ctx.now {
-        return Err(refused(updates::UpdateError::Expired));
-    }
-    let recipe: MoveRecipe =
-        serde_json::from_value(row.plan["recipe"].clone()).map_err(ApiError::internal)?;
-    let request: api::EnvironmentMovePreflightBody =
-        serde_json::from_value(row.plan["request"].clone()).map_err(ApiError::internal)?;
-    let draft = ctx
-        .app
-        .engine
-        .draft_move(
-            &mut tx,
-            &principal,
-            environment,
-            &request,
-            body.options.as_ref(),
-        )
-        .await
-        .map_err(refused)?;
-    if draft.recipe.replacement.old != recipe.replacement.old {
-        return Err(ApiError::new(
-            orch_api_contract::common::ErrorCode::ConflictStaleRevision,
-            "the unit was changed after this move was planned",
-        ));
-    }
-    let operation = move_operation(
-        &mut tx,
-        &principal,
-        environment,
-        body.preflight_id,
-        body.notify.unwrap_or(false),
-    )
-    .await?;
-    let row = orch_engine::notifications::operation_scope(
-        Some(operation.id),
-        orch_engine::jobs::environment_move::queue(&mut tx, draft, None, ctx.now),
-    )
-    .await
-    .map_err(refused)?;
-    orch_engine::notifications::attach_operation(&mut tx, &[row.id], &operation, ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-    let job = super::jobs::view(&mut tx, &row).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(job)
-}
-
 /// Plans the selected visible environments of a place, without holding any unit.
-pub(crate) async fn batch_preflight(
-    ctx: Ctx,
-    (): (),
+async fn observe_batch(
+    ctx: &Ctx,
+    principal: &Principal,
     body: api::NodeEnvironmentMovePreflightBody,
-) -> ApiResult<api::EnvironmentMoveBatchPlan> {
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
+    id: Id,
+    allowed: &std::collections::BTreeSet<Id>,
+) -> ApiResult<ObservedMoveBatch> {
+    let (result, observations) = orch_engine::jobs::measurement::recording::record(
+        observe_batch_native(ctx, principal, body, id, allowed),
+    )
+    .await;
+    let mut observed = result?;
+    observed.stored.observations = observations;
+    Ok(observed)
+}
+async fn observe_batch_native(
+    ctx: &Ctx,
+    principal: &Principal,
+    body: api::NodeEnvironmentMovePreflightBody,
+    id: Id,
+    allowed: &std::collections::BTreeSet<Id>,
+) -> ApiResult<ObservedMoveBatch> {
+    use orch_access_contract::permissions::ObjectKind;
+    let mut tx = ctx.app.db.begin_snapshot().await?;
     let node = ctx.id("id")?;
     authorization::require(
         &mut tx,
-        &principal,
+        principal,
         node,
         authorization::VIEW,
         orch_authz::Act::Use,
@@ -472,8 +396,38 @@ pub(crate) async fn batch_preflight(
     if ids.iter().any(|id| !under.contains(id)) {
         return Err(ApiError::not_found());
     }
-    let views = super::environments_of(&ctx, &mut tx, &principal, &ids).await?;
-    let id = new_id();
+    let prepared = super::prepare_viewed(ctx, &mut tx, principal, &ids).await?;
+    let visible = prepared.selected_ids();
+    let views = super::show_inventory_prepared(ctx, &mut tx, principal, &prepared).await?;
+    let mut content = prepared
+        .content_sources(&mut tx)
+        .await?
+        .into_values()
+        .flatten()
+        .map(|object| (object.kind, object.id))
+        .collect::<std::collections::BTreeSet<_>>();
+    content.extend(visible.iter().map(|id| (ObjectKind::Environment, *id)));
+    let mut associations = std::collections::BTreeMap::new();
+    for id in &visible {
+        let row = orch_db::queries::environments::hosting::environment(&mut tx, *id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let runtime = orch_db::queries::environments::hosting::live_runtime(&mut tx, *id)
+            .await?
+            .map(|runtime| runtime.id);
+        associations.insert(
+            *id,
+            MoveSourceAssociation {
+                owner: row.owner_id,
+                home: row.home_node_id,
+                generation: row.generation,
+                machine: row.machine_id,
+                runtime,
+            },
+        );
+    }
+    let mut managed = Vec::new();
+    let mut destinations = std::collections::BTreeSet::new();
     let request = api::EnvironmentMovePreflightBody {
         machine_id: body.machine_id,
         template_id: body.template_id,
@@ -490,14 +444,15 @@ pub(crate) async fn batch_preflight(
     let mut skipped = Vec::new();
     let mut recipes = Vec::new();
     let mut portable_recipes = Vec::new();
-    for view in views {
-        if !updates::may_manage(
-            &mut tx,
-            &principal,
-            updates::Target::Environment(view.base.id),
-        )
-        .await
-        .map_err(ApiError::internal)?
+    for (environment, view) in visible.iter().copied().zip(views) {
+        if !allowed.contains(&environment)
+            || !updates::may_manage(
+                &mut tx,
+                principal,
+                updates::Target::Environment(environment),
+            )
+            .await
+            .map_err(ApiError::internal)?
         {
             skipped.push(api::EnvironmentMoveSkipped {
                 environment: view.base,
@@ -505,7 +460,8 @@ pub(crate) async fn batch_preflight(
             });
             continue;
         }
-        if machine_move::needed(&mut tx, view.base.id, &request)
+        managed.push(environment);
+        if machine_move::needed(&mut tx, environment, &request)
             .await
             .map_err(ApiError::internal)?
         {
@@ -514,14 +470,43 @@ pub(crate) async fn batch_preflight(
             let result = ctx
                 .app
                 .engine
-                .draft_machine_move(&principal, view.base.id, &request, None)
+                .draft_machine_move(principal, environment, &request, None)
                 .await;
-            tx = ctx.app.db.begin().await?;
+            tx = ctx.app.db.begin_snapshot().await?;
             match result {
                 Ok(draft) => {
-                    plans.push(shown_machine(&ctx, &mut tx, &principal, id, &draft).await?);
+                    destinations.extend(
+                        draft
+                            .recipe
+                            .destination_access()
+                            .into_iter()
+                            .map(|(object, _)| (object.kind, object.id)),
+                    );
+                    content.extend(
+                        draft
+                            .recipe
+                            .threads
+                            .iter()
+                            .map(|id| (ObjectKind::Thread, *id)),
+                    );
+                    content.extend(
+                        draft
+                            .mounts
+                            .iter()
+                            .map(|mount| (ObjectKind::Mount, mount.mount.id)),
+                    );
+                    content.extend(
+                        draft
+                            .mcp
+                            .iter()
+                            .filter(|server| !server.own && !server.imported)
+                            .map(|server| (ObjectKind::McpServer, server.id)),
+                    );
+                    plans.push(shown_machine(ctx, &mut tx, principal, id, &draft).await?);
                     if draft.blockers.is_empty() {
-                        portable_recipes.push(draft.recipe);
+                        let mut recipe = draft.recipe;
+                        recipe.token = None;
+                        portable_recipes.push(recipe);
                     }
                 }
                 Err(updates::UpdateError::Blocked(_)) => {
@@ -537,7 +522,7 @@ pub(crate) async fn batch_preflight(
         let draft = match ctx
             .app
             .engine
-            .draft_move(&mut tx, &principal, view.base.id, &request, None)
+            .draft_move(&mut tx, principal, environment, &request, None)
             .await
         {
             Ok(draft) => draft,
@@ -550,7 +535,30 @@ pub(crate) async fn batch_preflight(
             }
             Err(error) => return Err(refused(error)),
         };
-        plans.push(shown(&ctx, &mut tx, &principal, id, &draft).await?);
+        destinations.insert((ObjectKind::Host, draft.recipe.destination));
+        destinations.insert((ObjectKind::Template, draft.recipe.replacement.template));
+        content.extend(
+            draft
+                .recipe
+                .replacement
+                .threads
+                .iter()
+                .map(|id| (ObjectKind::Thread, *id)),
+        );
+        content.extend(
+            draft
+                .mounts
+                .iter()
+                .map(|mount| (ObjectKind::Mount, mount.mount.id)),
+        );
+        content.extend(
+            draft
+                .mcp
+                .iter()
+                .filter(|server| !server.own && !server.imported)
+                .map(|server| (ObjectKind::McpServer, server.id)),
+        );
+        plans.push(shown(ctx, &mut tx, principal, id, &draft).await?);
         if draft.blockers.is_empty() {
             recipes.push(draft.recipe);
         }
@@ -577,7 +585,7 @@ pub(crate) async fn batch_preflight(
         .chain(portable_recipes.iter().map(|recipe| recipe.environment))
         .collect::<Vec<_>>();
     let audience =
-        orch_engine::notifications::operation_audience(&mut tx, &principal, &affected, &[])
+        orch_engine::notifications::operation_audience(&mut tx, principal, &affected, &[])
             .await
             .map_err(ApiError::internal)?;
     let notification = orch_api_contract::loss::OperationNotificationPlan {
@@ -591,232 +599,35 @@ pub(crate) async fn batch_preflight(
         .await
         .map_err(ApiError::internal)?,
     };
-    jobs::forks::save_preflight(
-        &mut tx,
-        &PreflightRow {
-            id,
-            kind: "move_batch".into(),
-            node_id: Some(node),
-            environment_id: None,
-            created_by: principal.user(),
-            plan: json!({"recipes":recipes,"portable_recipes":portable_recipes,"request":request,"notification":notification}),
-            expires_at: updates::expires(ctx.now),
-            created_at: ctx.now,
-        },
-    )
-    .await?;
-    orch_db::queries::notifications::operations::preview(
-        &mut tx,
-        id,
-        &audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(api::EnvironmentMoveBatchPlan {
-        notification,
-        preflight_id: id,
-        expires_at: Time::new(updates::expires(ctx.now)),
-        plans,
-        skipped,
-        executable,
-        options,
-        estimate,
-    })
-}
-
-/// Confirms every accepted member under a shared batch limit, after checking its scope again.
-pub(crate) async fn batch_create(
-    ctx: Ctx,
-    (): (),
-    body: ForkCreateBody,
-) -> ApiResult<api::EnvironmentBatch> {
-    let mut tx = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let node = ctx.id("id")?;
-    authorization::require(
-        &mut tx,
-        &principal,
-        node,
-        authorization::VIEW,
-        orch_authz::Act::Use,
-        Policy::default(),
-    )
-    .await?;
-    let row = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if row.kind != "move_batch" || row.node_id != Some(node) || row.created_by != principal.user() {
-        return Err(ApiError::not_found());
-    }
-    if row.expires_at <= ctx.now {
-        return Err(refused(updates::UpdateError::Expired));
-    }
-    let recipes: Vec<MoveRecipe> =
-        serde_json::from_value(row.plan["recipes"].clone()).map_err(ApiError::internal)?;
-    let portable_recipes: Vec<machine_move::Recipe> = serde_json::from_value(
-        row.plan
-            .get("portable_recipes")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
-    )
-    .map_err(ApiError::internal)?;
-    let request: api::EnvironmentMovePreflightBody =
-        serde_json::from_value(row.plan["request"].clone()).map_err(ApiError::internal)?;
-    let under = orch_db::queries::environments::hosting::environments_under(&mut tx, node).await?;
-    let mut drafts = Vec::new();
-    let mut portable_drafts = Vec::new();
-    for recipe in recipes {
-        let environment = recipe.replacement.target.id();
-        if !under.contains(&environment) {
-            return Err(ApiError::not_found());
-        }
-        let draft = ctx
-            .app
-            .engine
-            .draft_move(
-                &mut tx,
-                &principal,
-                environment,
-                &request,
-                body.options.as_ref(),
-            )
-            .await
-            .map_err(refused)?;
-        if draft.recipe.replacement.old != recipe.replacement.old {
-            return Err(ApiError::new(
-                orch_api_contract::common::ErrorCode::ConflictStaleRevision,
-                "a unit changed after this batch was planned",
-            ));
-        }
-        drafts.push(draft);
-    }
-    for recipe in portable_recipes {
-        let environment = recipe.environment;
-        if !under.contains(&environment) {
-            return Err(ApiError::not_found());
-        }
-        tx.commit().await.map_err(DbError::from)?;
-        let result = ctx
-            .app
-            .engine
-            .draft_machine_move(&principal, environment, &request, body.options.as_ref())
-            .await;
-        tx = ctx.app.db.begin().await?;
-        let draft = result.map_err(refused)?;
-        if !recipe.same_choice(&draft.recipe) {
-            return Err(ApiError::new(
-                orch_api_contract::common::ErrorCode::ConflictStaleRevision,
-                "A source, destination or promised data changed; review the batch again.",
-            ));
-        }
-        portable_drafts.push(draft);
-    }
-    let current = jobs::changes::lock_plan(&mut tx, body.preflight_id)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if current.plan != row.plan || current.expires_at <= ctx.now {
-        return Err(refused(updates::UpdateError::Expired));
-    }
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let current_under =
-        orch_db::queries::environments::hosting::environments_under(&mut tx, node).await?;
-    if drafts
-        .iter()
-        .any(|draft| !current_under.contains(&draft.recipe.replacement.target.id()))
-        || portable_drafts
-            .iter()
-            .any(|draft| !current_under.contains(&draft.recipe.environment))
-    {
-        return Err(ApiError::not_found());
-    }
-    let batch_id = new_id();
-    let affected = drafts
-        .iter()
-        .map(|draft| draft.recipe.replacement.target.id())
-        .chain(portable_drafts.iter().map(|draft| draft.recipe.environment))
-        .collect::<Vec<_>>();
-    let audience =
-        orch_engine::notifications::operation_audience(&mut tx, &principal, &affected, &[])
-            .await
-            .map_err(ApiError::internal)?;
-    if !orch_db::queries::notifications::operations::matches_preview(
-        &mut tx,
-        body.preflight_id,
-        &audience
-            .iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>(),
-    )
-    .await?
-    {
-        return Err(ApiError::new(
-            orch_api_contract::common::ErrorCode::ConflictStaleRevision,
-            "The people affected changed; review the batch again",
-        ));
-    }
-    let operation = orch_engine::notifications::NotificationOperation {
-        id: batch_id,
-        kind: "move".into(),
-        name: String::new(),
-        notify: body.notify.unwrap_or(false),
-        path: "/resources/environments".into(),
-        subject: None,
-        recipients: audience,
+    tx.rollback().await.map_err(DbError::from)?;
+    content.extend(destinations.iter().copied());
+    let stored = StoredMoveBatch {
+        observations: Default::default(),
+        recipes,
+        portable_recipes,
+        request,
+        notification: notification.clone(),
     };
-    let mut jobs = Vec::new();
-    for draft in drafts {
-        let environment = super::show(
-            &ctx,
-            &mut tx,
-            &principal,
-            draft.recipe.replacement.target.id(),
-        )
-        .await?
-        .base;
-        let row = orch_engine::notifications::operation_scope(
-            Some(batch_id),
-            orch_engine::jobs::environment_move::queue(&mut tx, draft, Some(batch_id), ctx.now),
-        )
-        .await
-        .map_err(refused)?;
-        jobs.push(api::EnvironmentBatchJob {
-            environment,
-            job: super::jobs::view(&mut tx, &row).await?,
-        });
-    }
-    for draft in portable_drafts {
-        let environment = super::show(&ctx, &mut tx, &principal, draft.recipe.environment)
-            .await?
-            .base;
-        let row = orch_engine::notifications::operation_scope(
-            Some(batch_id),
-            machine_move::queue(&mut tx, &principal, draft, Some(batch_id), ctx.now),
-        )
-        .await
-        .map_err(refused)?;
-        jobs.push(api::EnvironmentBatchJob {
-            environment,
-            job: super::jobs::view(&mut tx, &row).await?,
-        });
-    }
-    orch_engine::notifications::attach_operation(
-        &mut tx,
-        &jobs.iter().map(|row| row.job.id).collect::<Vec<_>>(),
-        &operation,
-        ctx.now,
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    orch_engine::notifications::notify_operation(&mut tx, &operation, "running", ctx.now)
-        .await
-        .map_err(ApiError::internal)?;
-    jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(api::EnvironmentBatch { batch_id, jobs })
+    Ok(ObservedMoveBatch {
+        node,
+        stored,
+        audience,
+        visible,
+        managed,
+        destinations,
+        content,
+        associations,
+        plan: api::EnvironmentMoveBatchPlan {
+            notification,
+            preflight_id: id,
+            expires_at: Time::new(updates::expires(ctx.now)),
+            plans,
+            skipped,
+            executable,
+            options,
+            estimate,
+        },
+    })
 }
 
 async fn move_operation(
@@ -857,21 +668,4 @@ async fn move_operation(
         subject: Some(("environment".into(), environment)),
         recipients,
     })
-}
-
-async fn save_audience(
-    conn: &mut orch_db::Conn,
-    principal: &orch_authz::Principal,
-    environment: Id,
-    id: Id,
-) -> ApiResult<()> {
-    let users =
-        orch_engine::notifications::operation_audience(conn, principal, &[environment], &[])
-            .await
-            .map_err(ApiError::internal)?
-            .into_iter()
-            .map(|person| person.user)
-            .collect::<Vec<_>>();
-    orch_db::queries::notifications::operations::preview(conn, id, &users).await?;
-    Ok(())
 }

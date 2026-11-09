@@ -601,3 +601,112 @@ pub(crate) async fn single_form(
     let produced = produce(conn, principal, &row, &asked, now).await?;
     Ok((produced.main, produced.losses))
 }
+
+/// Native inputs of the same export form, before its protected live labels are formatted.
+pub(crate) async fn form_sources(
+    conn: &mut Conn,
+    principal: &orch_authz::Principal,
+    id: Id,
+    json: bool,
+    with_comments: bool,
+) -> ApiResult<Vec<orch_engine::exports::FormReference>> {
+    use build::WrittenLabelSource;
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_engine::exports::FormReference as Reference;
+    let row = super::live(conn, id).await?;
+    let blocks = rows::live_blocks(conn, id).await?;
+    let discussions = if with_comments {
+        discussions::changed(conn, id, 0, row.doc_seq).await?
+    } else {
+        Vec::new()
+    };
+    let mut wanted = build::Wanted::default();
+    let mut runs = Vec::new();
+    for block in &blocks {
+        wanted.block(block);
+        match orch_documents::blocks::content_from_json(&block.content) {
+            orch_api_contract::documents::BlockContent::Inline(values) => runs.extend(values),
+            orch_api_contract::documents::BlockContent::Rows(values) => runs.extend(
+                values
+                    .into_iter()
+                    .flat_map(|row| row.cells)
+                    .flat_map(|cell| cell.content),
+            ),
+        }
+    }
+    for discussion in &discussions {
+        for comment in &discussion.comments {
+            if comment.deleted_at.is_none() {
+                let content: Vec<orch_api_contract::documents::Inline> =
+                    serde_json::from_value(comment.content.clone()).map_err(ApiError::internal)?;
+                wanted.runs(&content);
+                runs.extend(content);
+            }
+        }
+    }
+    let cast = build::Cast::load(conn, principal, wanted, Policy::default()).await?;
+    let labels = cast.live_sources(&runs)?;
+    let mut sources = Vec::new();
+    for source in labels {
+        sources.push(match source {
+            WrittenLabelSource::Node(id) => {
+                let graph = orch_authz::engine::Graph::load(conn, &[id])
+                    .await
+                    .map_err(ApiError::internal)?;
+                let node = graph.get(id).ok_or_else(ApiError::not_found)?;
+                Reference::Object {
+                    object: node.kind.into(),
+                    id,
+                }
+            }
+            WrittenLabelSource::Document(id) => Reference::Object {
+                object: ObjectKind::Document,
+                id,
+            },
+            WrittenLabelSource::Chat(id) => Reference::Chat { id },
+        });
+    }
+    if json {
+        let listed = build::standing(conn, principal, id, Policy::default()).await?;
+        let mut names = build::document_name_sources(conn, &row, &listed).await?;
+        for block in &blocks {
+            if block.updated_by.is_none() {
+                names.nodes.extend(block.updated_by_thread);
+            }
+        }
+        let nodes = names.nodes.iter().copied().collect::<Vec<_>>();
+        let known = crate::routes::nodes::view::reference_visibility(
+            conn,
+            principal,
+            &nodes,
+            Policy::default(),
+        )
+        .await?;
+        let graph = orch_authz::engine::Graph::load(conn, &nodes)
+            .await
+            .map_err(ApiError::internal)?;
+        for node in known {
+            if let Some(row) = graph.get(node) {
+                sources.push(Reference::Object {
+                    object: row.kind.into(),
+                    id: node,
+                });
+            }
+        }
+        let folders = names.containers.iter().copied().collect::<Vec<_>>();
+        for folder in orch_authz::documents::listed(conn, principal, &folders, Policy::default())
+            .await
+            .map_err(ApiError::internal)?
+        {
+            if folder.holds(orch_access_contract::permissions::Permission::DocView) {
+                sources.push(Reference::Object {
+                    object: ObjectKind::DocumentContainer,
+                    id: folder.document.id,
+                });
+            }
+        }
+    }
+    sources.sort_unstable();
+    sources.dedup();
+    Ok(sources)
+}

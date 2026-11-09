@@ -4,6 +4,7 @@
  * that document: what they may not do is left out. The acts that need a dialog open it through the
  * one host of the frame, so that the dialog outlives the menu it was asked from.
  */
+import { linkTo, referenceTo } from '@/lib/links';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from '@tanstack/react-router';
 import type { TFunction } from 'i18next';
@@ -16,10 +17,11 @@ import { nodeQuery } from '@/api/nodes';
 import { openAccess } from '@/features/access/AccessDialog';
 import { useReadmeEntry } from '@/features/documents/Readme';
 import { openExport, requestExportAccess } from '@/features/export/ExportHost';
-import { exportEntries } from '@/features/export/menu';
+import { exportEntries, type ExportCheckFailure } from '@/features/export/menu';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { type DocPlace, documentPath } from '@/features/navigation/places';
 import { holds } from '@/lib/permissions';
+import { useErrorText } from '@/ui/errorText';
 import { copyText } from '@/ui/clipboard';
 import { ContextEntries, ContextMenu } from '@/ui/ContextMenu';
 import { IconButton } from '@/ui/IconButton';
@@ -35,6 +37,7 @@ export interface DocMenuActions {
   export: () => void;
   requestExport: () => void;
   copyLink: () => void;
+  copyReference: () => void;
   remove: () => void;
   readme?: MenuEntry;
 }
@@ -44,7 +47,7 @@ export interface DocMenuActions {
  * last, apart, what destroys. `held` is what the caller holds on it, `undefined` while that has not
  * arrived: then only what needs no permission is listed, with a line that says the rest is being asked.
  */
-export function docMenuEntries(doc: Pick<DocPlace, 'archived' | 'owner'>, held: Pick<Document, 'access'> | undefined, act: DocMenuActions, t: TFunction): MenuEntry[] {
+export function docMenuEntries(doc: Pick<DocPlace, 'archived' | 'owner'>, held: Pick<Document, 'access'> | undefined, act: DocMenuActions, t: TFunction, checkFailure?: ExportCheckFailure): MenuEntry[] {
   const entries: MenuEntry[] = [];
   const group = (...next: MenuEntry[]) => {
     if (next.length === 0) return;
@@ -64,23 +67,28 @@ export function docMenuEntries(doc: Pick<DocPlace, 'archived' | 'owner'>, held: 
   );
   group(
     ...(access === undefined ? [] : [{ id: 'share', label: t('access.menu.share'), icon: <Share2 aria-hidden />, onSelect: act.share }]),
-    ...exportEntries({ allowed: access === undefined ? null : holds(access, 'doc.export'), owner: doc.owner, where: 'row', onExport: act.export, onRequest: act.requestExport, t }),
+    ...exportEntries({ allowed: access === undefined ? null : holds(access, 'doc.export'), owner: doc.owner, where: 'row', onExport: act.export, onRequest: act.requestExport, t,
+      ...(checkFailure === undefined ? {} : { checkFailure }) }),
+    { id: 'copy-reference', label: t('people.reference.copy'), onSelect: act.copyReference },
     { id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: act.copyLink },
   );
   group(...(holds(access, 'doc.manage') ? [{ id: 'delete', label: t('places.menu.delete'), icon: <Trash2 aria-hidden />, danger: true, onSelect: act.remove }] : []));
-  if (access === undefined) group({ type: 'label', id: 'checking', label: t('places.menu.checking') });
+  if (access === undefined && checkFailure === undefined) group({ type: 'label', id: 'checking', label: t('places.menu.checking') });
   return entries;
 }
 
 /** The whole list of a document's menu, with its dialogs wired. Drawn only while a menu is open: it asks what the caller holds. */
 function useDocMenu(doc: DocPlace): MenuEntry[] {
   const { t } = useTranslation();
+  const describeError = useErrorText();
   const navigate = useNavigate();
-  const held = useQuery(documentQuery(doc.id)).data;
+  const read = useQuery(documentQuery(doc.id));
+  const held = read.data;
+  const failure = read.isError ? describeError(read.error) : undefined;
   const place = useQuery({ ...nodeQuery(held?.node.id ?? ''), enabled: held !== undefined }).data;
   const readme = useReadmeEntry(doc, place);
   const target = { kind: 'document' as const, id: doc.id, name: doc.title };
-  const copy = () => copyText(new URL(documentPath(doc.id), location.origin).href, t('common.linkCopied'));
+  const copy = () => copyText(linkTo({ kind: 'document', id: doc.id }), t('common.linkCopied'));
   return docMenuEntries(
     doc,
     held,
@@ -93,10 +101,12 @@ function useDocMenu(doc: DocPlace): MenuEntry[] {
       export: () => openExport(target),
       requestExport: () => requestExportAccess({ ...target, owner: doc.owner }),
       copyLink: () => void copy(),
+      copyReference: () => void copyText(referenceTo({ kind: 'document', id: doc.id, title: doc.title }), t('people.reference.copied')),
       remove: () => openNodeDialog({ type: 'delete-document', doc }),
       ...(readme === null ? {} : { readme }),
     },
     t,
+    failure === undefined ? undefined : { reason: failure.message, ...(failure.retryable ? { retry: () => { void read.refetch(); } } : {}) },
   );
 }
 

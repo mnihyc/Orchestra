@@ -192,7 +192,7 @@ docker compose exec api /opt/orchctl/orchctl doctor
 All of it is owned by the user the services run as, which is the one who ran `first-start`, so none of it needs
 privilege to copy, move or remove.
 
-The release ships Codex 0.165.0 and Claude Code 2.1.312. Bypass lets the agent act without permission prompts inside
+The release ships Codex 0.167.0 and Claude Code 2.1.319. Bypass lets the agent act without permission prompts inside
 its environment; whoever chooses it answers for those actions. See [How approvals work](../user/how-approvals-work.md).
 Codex keeps a thread's history in its own store, a page at a time. Orch never copies or rewrites it. In the home
 where a thread was made, and in a home that moves with its environment (Mount as-is or Copy), the thread resumes

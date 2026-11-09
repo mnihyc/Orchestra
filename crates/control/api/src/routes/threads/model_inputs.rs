@@ -3,19 +3,22 @@
 //!
 //! Reading takes what reading the node takes (a thread's view, which for a side thread follows its parent), which
 //! the access engine decides before the handler runs; it takes no managing, and it changes nothing: no read mark, no
-//! audit row, no notification. A record's text is whole: what the model was given, block by block, never cut.
+//! notification. A protected summary record also needs every original source's current Read;
+//! inspecting a contributed chat uses its native opening audit without joining or marking it read.
+//! A record's text is whole: what the model was given, block by block, never cut.
 
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use orch_api_contract::common::Page;
 use orch_api_contract::model_inputs::{
-    ModelInput, ModelInputListQuery, ModelTextBlock, NodeModelInputBlobGet, NodeModelInputList,
+    ModelInput, ModelTextBlock, NodeModelInputBlobGet, NodeModelInputList,
 };
 use orch_api_contract::threads::OutputRef;
-use orch_db::queries::model_inputs::{self as rows, ModelInputFilter, ModelInputRow};
+use orch_db::queries::model_inputs::ModelInputRow;
 use orch_types::Json;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+
+mod sources;
 
 /// How many records a page holds where the caller does not say: the ordinary bound of a list.
 pub const PAGE_DEFAULT: i64 = 50;
@@ -24,8 +27,16 @@ pub const PAGE_MAX: i64 = 200;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(NodeModelInputList, list);
-    registry.on_raw(NodeModelInputBlobGet, blob);
+    registry.on_snapshot_read_with_optional_operation(
+        NodeModelInputList,
+        crate::key_operations::native::selected::<sources::Reader>,
+        crate::key_operations::native::selected_read::<sources::Reader>,
+    );
+    registry.on_raw_read_with_optional_operation(
+        NodeModelInputBlobGet,
+        crate::key_operations::native::stored::<sources::Blob, (), ()>,
+        blob,
+    );
 }
 
 async fn blob(ctx: Ctx, (): (), _: axum::body::Body) -> ApiResult<axum::response::Response> {
@@ -57,89 +68,14 @@ async fn blob(ctx: Ctx, (): (), _: axum::body::Body) -> ApiResult<axum::response
     if !held {
         return Err(ApiError::not_found());
     }
-    if let Some(document) = rows::input_document(&mut conn, record).await? {
-        let live = orch_db::queries::documents::get(&mut conn, document)
-            .await?
-            .is_some_and(|row| row.deleted_at.is_none());
-        if !live {
-            return Err(ApiError::not_found());
-        }
-        let allowed = orch_authz::documents::check(
-            &mut conn,
-            guard.principal(),
-            document,
-            orch_access_contract::permissions::Permission::DocView,
-            orch_authz::Policy::default(),
-        )
-        .await
-        .map_err(|error| match error {
-            orch_authz::Error::NotFound(_) => ApiError::not_found(),
-            other => ApiError::internal(other),
-        })?
-        .is_allowed();
-        if !allowed {
-            return Err(ApiError::not_found());
-        }
-    }
+    sources::require_record(&mut conn, guard.principal(), node, record).await?;
+    sources::note_record_opened(&mut conn, guard.principal(), node, record).await?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(response)
 }
 
 /// A page of the records of a node, the newest first: one by its identifier, those of one turn, those before or
 /// after a sequence. `next_cursor` is the `before` of the page after this one.
-async fn list(ctx: Ctx, query: ModelInputListQuery, (): ()) -> ApiResult<Page<ModelInput>> {
-    let node = ctx.id("id")?;
-    let limit = match query.limit {
-        None => PAGE_DEFAULT,
-        Some(limit) if limit < 1 => return Err(ApiError::invalid("limit", "must be at least 1")),
-        Some(limit) => limit.min(PAGE_MAX),
-    };
-    let (mut conn, guard) = crate::middleware::transaction_guard::begin(&ctx).await?;
-    let documents = rows::input_documents(&mut conn, node).await?;
-    let readable: Vec<orch_types::Id> = orch_authz::documents::listed(
-        &mut conn,
-        guard.principal(),
-        &documents,
-        orch_authz::Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .into_iter()
-    .filter(|row| {
-        row.holds(orch_access_contract::permissions::Permission::DocView) && !row.document.deleted
-    })
-    .map(|row| row.document.id)
-    .collect();
-    // One more than the page, to know whether another follows.
-    let mut found = rows::list_for_documents(
-        &mut conn,
-        node,
-        &ModelInputFilter {
-            id: query.id,
-            turn: query.turn_id,
-            before: query.before,
-            after: query.after,
-            limit: limit + 1,
-        },
-        &readable,
-    )
-    .await?;
-    let page = usize::try_from(limit).unwrap_or(usize::MAX);
-    let more = found.len() > page;
-    found.truncate(page);
-    let next_cursor = if more {
-        found.last().map(|row| row.seq_created.to_string())
-    } else {
-        None
-    };
-    let items = found
-        .into_iter()
-        .map(record)
-        .collect::<ApiResult<Vec<ModelInput>>>()?;
-    conn.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(Page { items, next_cursor })
-}
-
 /// A block as the record keeps it.
 #[derive(Debug, Deserialize)]
 struct KeptBlock {
@@ -209,7 +145,9 @@ fn whole(text: String) -> OutputRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch_api_contract::model_inputs::ModelInputListQuery;
     use orch_api_contract::model_inputs::{ModelInputPurpose, ModelInputState};
+    use orch_db::queries::model_inputs as rows;
 
     #[test]
     fn a_record_is_carried_whole_with_its_words_named() {
@@ -264,7 +202,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let meta = app
             .app
             .blobs

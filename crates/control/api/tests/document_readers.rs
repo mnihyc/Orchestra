@@ -66,6 +66,8 @@ async fn the_engine_is_told_how_many_people_have_a_document_open_each_counted_on
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     let (vera, vera_token) = rig.person("vera").await;

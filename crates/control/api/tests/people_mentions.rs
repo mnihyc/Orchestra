@@ -9,6 +9,7 @@ mod chat_world;
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use chat_world::{Room, text};
 use orch_api_contract::access::{PageChange, PermissionPageUpdate, Role};
 use orch_api_contract::chats::{
@@ -139,7 +140,9 @@ async fn group(room: &Room, name: &str, members: &[Id]) -> Id {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     for member in members {
         room.world
             .app
@@ -259,7 +262,9 @@ async fn overlapping_role_and_group_targets_freeze_once_and_an_edit_tells_only_n
         .body(&ChatMessageUpdateBody { parts })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     expected.push(room.gus.id());
     expected.sort_unstable();
     assert_eq!(ids(&edited), expected);
@@ -317,12 +322,16 @@ async fn managers_policy_reserves_broad_targets_but_a_group_creator_is_its_manag
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.cai.id(), room.gus.id()],
             name: Some("Reviewers".into()),
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary chat fixture is full");
     let target = ChatMentionTarget::Role {
         node_id: room.root,
         role: Role::Viewer,
@@ -469,6 +478,7 @@ async fn a_deliberate_group_audience_is_not_cut_to_a_five_hundred_person_roster_
         .body(&change)
         .send()
         .await
+        .full_permission_page()
         .ok();
     let found = choices(&room, &room.ada, room.chat, Some("Large crew")).await;
     assert_eq!(found[0].count, 501);

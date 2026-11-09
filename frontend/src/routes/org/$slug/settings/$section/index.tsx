@@ -12,7 +12,7 @@ import { canonicalOrgAddress } from '@/features/navigation/orgAddress';
 
 export const Route = createFileRoute('/org/$slug/settings/$section/')({
   staticData: { screen: 'page' },
-  validateSearch: (search: Record<string,unknown>) => ({...traceSearch(search),...(typeof search.setting === 'string' && search.setting !== '' ? {setting:search.setting} : {})}),
+  validateSearch: (search: Record<string,unknown>) => ({...traceSearch(search),...(typeof search.group === 'string' && search.group !== '' ? {group:search.group} : {}),...(typeof search.setting === 'string' && search.setting !== '' ? {setting:search.setting} : {})}),
   loader: async ({ params, location }) => {
     const address = await canonicalOrgAddress(params.slug);
     if (address !== undefined) throw redirect({ to: '/org/$slug/settings/$section', params: { slug: address, section: params.section }, search: true, hash: location.hash, replace: true });

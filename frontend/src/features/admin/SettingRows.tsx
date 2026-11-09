@@ -109,7 +109,7 @@ export function SwitchSetting({ settingKey, label, hint, off, words = [false, tr
   const { find, settings } = useSystemSettings();
   const change = useSettingChange(settingKey);
   const setting = find(settingKey);
-  if (setting === undefined) return settings.isPending ? <SkeletonRows rows={1} /> : null;
+  if (setting === undefined) return settings.isPending ? <SkeletonRows read={settings} rows={1} /> : null;
   return (
     <Row setting={setting} change={change} className={className} name={typeof label === 'string' ? label : undefined}>
       <Switch
@@ -135,7 +135,7 @@ export function ChoiceSetting<Value extends string>({ settingKey, label, hint, o
   const { find, settings } = useSystemSettings();
   const change = useSettingChange(settingKey);
   const setting = find(settingKey);
-  if (setting === undefined) return settings.isPending ? <SkeletonRows rows={1} /> : null;
+  if (setting === undefined) return settings.isPending ? <SkeletonRows read={settings} rows={1} /> : null;
   return (
     <Row setting={setting} change={change} className={className} name={typeof label === 'string' ? label : undefined}>
       <Select
@@ -177,7 +177,7 @@ export function NumberSetting({ settingKey, label, hint, min, max, unit, off, cl
         : await clearSetting({ kind: 'system' }, settingKey, revision);
       acceptSystemSetting(cache, accepted); return { value: snapshot(accepted), revision: accepted.own?.revision ?? null };
     } });
-  if (setting === undefined) return settings.isPending ? <SkeletonRows rows={1} /> : null;
+  if (setting === undefined) return settings.isPending ? <SkeletonRows read={settings} rows={1} /> : null;
   const fault = save.dirty && !valid(save.value) ? t('admin.settingRow.range', { min, max }) : undefined;
   return (
     <div data-item data-setting={settingKey} className={cx('flex flex-col gap-1', className)}>

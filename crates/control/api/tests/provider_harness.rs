@@ -11,13 +11,14 @@ mod support;
 
 use orch_api_contract::binding::{EnvironmentChoice, ThreadBindingSet, ThreadBindingSetBody};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::nodes::{CreateThread, CreateThreadBinding, ThreadCreate};
+use orch_api_contract::nodes::{
+    CreateThread, CreateThreadBinding, ThreadCreate, ThreadCreateResponse,
+};
 use orch_api_contract::resources::{
     NativeSession, Provider, ProviderFactsOverridesSet, ProviderFactsOverridesSetBody, ProviderGet,
     ProviderHarnessRestart, ProviderHarnessSessionList, ProviderKeySet, ProviderKeySetBody,
     ProviderRefresh, ProviderStatus,
 };
-use orch_api_contract::threads::Thread;
 use orch_link_contract::commands::{
     AgentDiscoverSessionsResult, AgentStartResult, CommandKind, CommandResult, Empty,
     ProviderDiscoverModelsResult, ProviderRefreshResult,
@@ -77,7 +78,7 @@ async fn a_provider_read_keeps_the_last_program_error_beside_a_restarted_online_
     );
 }
 
-async fn try_thread(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<Thread> {
+async fn try_thread(s: &Scene, by: &Who) -> orch_api_core::testing::Reply<ThreadCreateResponse> {
     s.rig
         .world
         .app
@@ -119,7 +120,7 @@ async fn the_first_thread_on_a_profile_whose_harness_never_ran_has_the_harness_s
     forget_what_the_harness_is(&s).await;
     let made = try_thread(&s, &s.ada).await;
     assert!(made.status.is_success(), "{:?}", made.body);
-    let thread = made.ok();
+    let thread = made.ok().into_full().unwrap();
     assert_eq!(
         started(&s),
         1,
@@ -1040,4 +1041,83 @@ async fn a_harness_that_cannot_list_its_conversations_says_so_and_only_whoever_u
         .await
         .problem();
     assert_eq!(nobody.code, ErrorCode::AuthRequired);
+}
+
+#[tokio::test]
+async fn inline_key_creation_commits_before_its_first_vendor_read_and_returns_current_proposals() {
+    use orch_api_contract::resources::ProviderCreate;
+    orch_api_core::routes::resources::sealing::install_master_key(
+        orch_db::secrets::MasterKey::new([7; 32]),
+    );
+    let s = Scene::new().await;
+    s.rig
+        .lets_use(
+            "machine",
+            s.rig.machine_id,
+            "machine.use",
+            &s.ada,
+            json!({}),
+        )
+        .await;
+    let directory = orch_driver_contract::descriptor::DriverDescriptor::registered_directories(
+        "test",
+        orch_driver_contract::descriptor::EnvironmentDataStorage {
+            made_by_orch: Some(orch_driver_contract::descriptor::MadeDataKind::Directory),
+            existing_directory: true,
+            reason: None,
+        },
+    );
+    sqlx::query("UPDATE machines SET facts=jsonb_set(facts || jsonb_build_object('provider_runtime_descriptor',$2::jsonb),'{policy,provider.upstreams}',$3::jsonb) WHERE id=$1")
+        .bind(s.rig.machine_id).bind(serde_json::to_value(directory).unwrap())
+        .bind(json!(["https://model.example.test/v1"]))
+        .execute(s.rig.db.pool()).await.unwrap();
+    s.rig.machine.handler.on(CommandKind::ProviderStart, |_| {
+        Ok(CommandResult::ProviderStart(Empty {}))
+    });
+    s.rig.machine.handler.on(CommandKind::ProviderDiscoverModels, |_| {
+        Ok(CommandResult::ProviderDiscoverModels(ProviderDiscoverModelsResult {
+            source: None, suggestions: serde_json::from_value(json!([{
+                "model_name":"confirmed-after-save","display_name":"Confirmed after save","listed":true,
+                "parameters":{"input_images":false},"origins":{"/parameters/input_images":"vendor"}
+            }])).unwrap(),
+        }))
+    });
+    let secret = "inline-key-fixture-not-in-the-response";
+    let body = json!({"kind":"api","name":"Read after accepting inline key","home_id":s.tree.org.base.id,
+        "runtime_machine_id":s.rig.machine_id,"api_key":secret,
+        "upstreams":[{"protocol":"openai-responses","base_url":"https://model.example.test/v1","options":{}}]});
+    let reply = s
+        .rig
+        .world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&s.ada.token)
+        .raw_body(&body)
+        .send()
+        .await
+        .ok();
+    assert!(!serde_json::to_string(&reply).unwrap().contains(secret));
+    let provider = reply
+        .into_full()
+        .expect("the ordinary creator keeps the full current provider")
+        .provider;
+    let reported = provider
+        .facts
+        .models
+        .as_ref()
+        .expect("the first normal read finishes after acceptance");
+    assert_eq!(reported.len(), 1);
+    assert_eq!(reported[0].display_name, "Confirmed after save");
+    assert_eq!(reported[0].origins["/parameters/input_images"], "vendor");
+    assert_eq!(reported[0].parameters.input_images, Some(false));
+    assert!(
+        provider.models.is_empty(),
+        "observation does not accept or enable any model"
+    );
+    let stored: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers WHERE id=$1)")
+        .bind(provider.base.id)
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert!(stored);
 }

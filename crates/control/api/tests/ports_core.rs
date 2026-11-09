@@ -5,105 +5,44 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "ports_core/opening_operation_scopes.rs"]
+mod opening_operation_scopes;
 mod places;
 mod resources;
 mod support;
+mod thread_history_scope;
+#[path = "ports_core/thread_request_creation.rs"]
+mod thread_request_creation;
+use support::FullApprovalReply;
+
+#[path = "ports_core/approval_operation_scopes.rs"]
+mod approval_operation_scopes;
+
+#[path = "ports_core/capability_native_scopes.rs"]
+mod capability_native_scopes;
+
+#[path = "ports_core/entry_native_scopes.rs"]
+mod entry_native_scopes;
+
+#[path = "ports_core/outside_native_scopes.rs"]
+mod outside_native_scopes;
+#[path = "ports_core/review_native_scopes.rs"]
+mod review_native_scopes;
+
+#[path = "ports_core/create_native_scopes.rs"]
+mod create_native_scopes;
 
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::environment::{
-    EnvironmentGet, MachineEnvironmentCreate, MachineEnvironmentCreateBody,
-};
+use orch_api_contract::environment::EnvironmentGet;
 use orch_api_contract::ports::*;
 use orch_types::{Id, Time, new_id};
-use places::{Who, join, make_org, make_project, person};
+use places::{Who, make_project};
 use serde_json::json;
 use support::World;
+#[path = "ports_core/fixtures.rs"]
+mod fixtures;
+use fixtures::{setup, setup_with_domain};
 
-async fn setup() -> (World, Who, Who, Id, Id, Id) {
-    setup_with_domain("ports.test").await
-}
-
-async fn setup_with_domain(domain: &str) -> (World, Who, Who, Id, Id, Id) {
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
-    let mut config = orch_config::ServerConfig::default();
-    config.edge.ports_domain = Some(domain.into());
-    let mut world = World::with(config).await;
-    let mut registry = orch_api_core::registry::Registry::new();
-    orch_api_core::routes::mount(&mut registry);
-    world.app = orch_api_core::testing::TestApp::over(
-        world.app.app.clone(),
-        world.app.clock.clone(),
-        registry,
-    );
-    orch_api_core::routes::resources::sealing::install_master_key(
-        orch_db::secrets::MasterKey::new([7; 32]),
-    );
-    let manager = person(&world, "manager").await;
-    let colleague = person(&world, "colleague").await;
-    let team = make_org(&world, &manager, "Team", "ports-team")
-        .await
-        .base
-        .id;
-    join(&world, team, team, &colleague, "viewer", &manager).await;
-    let project = make_project(&world, &manager, team, "Preview")
-        .await
-        .base
-        .id;
-    let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(
-        &mut *world.conn().await,
-        manager.id(),
-        "ports fixture",
-    )
-    .await
-    .unwrap();
-    let policy = orch_link_contract::policy::LocalPolicy {
-        environment_roots: vec!["/srv/ports-core".into()],
-        ports: orch_link_contract::policy::MachinePorts {
-            allowed: vec![
-                orch_api_contract::ports::PortOpeningKind::Place,
-                orch_api_contract::ports::PortOpeningKind::Link,
-            ],
-            publish: None,
-            limits: None,
-        },
-        ..Default::default()
-    };
-    let descriptor = orch_driver_contract::descriptor::DriverDescriptor::registered_directories(
-        "test",
-        orch_driver_contract::descriptor::EnvironmentDataStorage {
-            made_by_orch: Some(orch_driver_contract::descriptor::MadeDataKind::Directory),
-            existing_directory: true,
-            reason: None,
-        },
-    );
-    sqlx::query("UPDATE machines SET facts=jsonb_build_object('policy',$2::jsonb,'environment_descriptor',$3::jsonb) WHERE id=$1")
-        .bind(machine)
-        .bind(serde_json::to_value(policy).unwrap())
-        .bind(serde_json::to_value(descriptor).unwrap())
-        .execute(&world.db.pool)
-        .await
-        .unwrap();
-    let env = world
-        .app
-        .call(MachineEnvironmentCreate, &[&machine])
-        .token(&manager.token)
-        .body(&MachineEnvironmentCreateBody {
-            data_sources: None,
-            home_id: manager.person.personal_org,
-            name: "Preview service".into(),
-            root: "/srv/ports-core".into(),
-            home_node_id: None,
-            remote_write: None,
-            terminal: None,
-            access: Some(orch_api_contract::binding::NewEnvironmentAccess::OnlyMe),
-        })
-        .send()
-        .await
-        .ok()
-        .base
-        .id;
-    (world, manager, colleague, env, project, machine)
-}
 /// Sets `capability.policy` at the system for one port capability, with its approvers the holders of
 /// Ports Manage on the environment, as shipped.
 async fn port_policy(world: &World, key: &str, decision: &str) {
@@ -153,6 +92,8 @@ async fn review(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary port review retains its full native plan")
 }
 async fn confirm(
     world: &World,
@@ -175,6 +116,8 @@ async fn confirm(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary opening confirmation retains the native full result")
 }
 async fn reconcile(world: &World, env: Id) -> Vec<Id> {
     let mut tx = world.app.app.db.begin().await.unwrap();
@@ -535,7 +478,9 @@ async fn rule_6_stop_generation_change_and_an_owned_restart_preserve_admission_b
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     let twice = world
         .app
@@ -546,7 +491,9 @@ async fn rule_6_stop_generation_change_and_an_owned_restart_preserve_admission_b
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(twice.revision, closed.revision);
     assert!(reconcile(&world, env).await.is_empty());
     let env_view = world
@@ -797,7 +744,9 @@ async fn rule_6_an_administrator_lists_stopped_outside_admission_and_closes_it_o
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(closed.state, PortOpeningState::Closed);
     let used_override: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM audit_log WHERE action='permission.added' AND override",
@@ -1048,7 +997,9 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         .body(&asked)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.opening.state, PortOpeningState::Waiting);
     assert!(made.link.is_none(), "a thread's request carries no link");
     let card = made
@@ -1062,7 +1013,9 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         .body(&asked)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         again.opening.id, made.opening.id,
         "the same request makes no second card"
@@ -1079,6 +1032,7 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let result = decided
@@ -1120,6 +1074,7 @@ async fn b3_a_threads_link_card_kept_by_its_decider_gives_the_link_in_the_decisi
         ))
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(twice.code, ErrorCode::ApprovalAlreadyDecided);
 }
@@ -1137,7 +1092,9 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         .body(&asked)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let card = made.request.clone().expect("a card");
     let denied = world
         .app
@@ -1150,6 +1107,7 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(denied.state, ApprovalState::Denied);
     let result = denied.opening_result.clone().expect("the refused opening");
@@ -1162,7 +1120,9 @@ async fn b3_a_refused_card_ends_its_opening_and_the_same_request_is_refused_agai
         .body(&asked)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         replayed.opening.id, made.opening.id,
         "a refusal stands for an hour"
@@ -1228,6 +1188,7 @@ async fn b3_the_agent_learns_an_unstarted_ports_address_and_a_persons_no_is_a_st
         .body(&port_decision(PortDecisionChoice::Deny, None, card.1))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(
         decided.opening_result.as_ref().unwrap().opening.state,
@@ -1273,8 +1234,15 @@ async fn d360_a_granted_port_place_opens_for_the_agent_without_a_card_and_only_i
         .token(&manager.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary grant retains its full native capability result");
     assert!(granted.granted && granted.can_revoke);
+    assert_eq!(
+        granted.grant_unavailable_reason,
+        Some(PortCapabilityActionReason::AlreadyGranted)
+    );
+    assert_eq!(granted.revoke_unavailable_reason, None);
     let source = granted.admission.as_ref().map(|admission| admission.source);
     assert_eq!(source, Some(PortAdmissionSource::Grant));
     let mut conn = world.conn().await;
@@ -1376,7 +1344,9 @@ async fn b3_a_late_decision_is_told_once_to_an_idle_thread_without_starting_a_tu
         .body(&request(9083, project, "a late preview"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world.advance(chrono::Duration::seconds(61));
     world
         .app
@@ -1389,6 +1359,7 @@ async fn b3_a_late_decision_is_told_once_to_an_idle_thread_without_starting_a_tu
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     orch_api_core::port_tools::tell_late(&world.app.app)
         .await
@@ -1575,6 +1546,14 @@ async fn d360_a_denied_kind_refuses_a_person_too_and_closes_what_is_open_of_it()
         !capability.can_grant,
         "a denied capability is granted by nobody"
     );
+    assert_eq!(
+        capability.grant_unavailable_reason,
+        Some(PortCapabilityActionReason::PolicyDenied)
+    );
+    assert_eq!(
+        capability.revoke_unavailable_reason,
+        Some(PortCapabilityActionReason::NoGrant)
+    );
 }
 
 #[tokio::test]
@@ -1598,7 +1577,9 @@ async fn d360_a_link_under_ask_makes_a_card_whose_grant_lets_the_next_link_open_
         .body(&link(9093))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         made.opening.state,
         PortOpeningState::Waiting,
@@ -1626,6 +1607,7 @@ async fn d360_a_link_under_ask_makes_a_card_whose_grant_lets_the_next_link_open_
         ))
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(decided.state, ApprovalState::Approved);
     let result = decided.opening_result.clone().unwrap();
@@ -1658,7 +1640,9 @@ async fn d360_a_link_under_ask_makes_a_card_whose_grant_lets_the_next_link_open_
         .body(&link(9094))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_ne!(
         next.opening.state,
         PortOpeningState::Waiting,
@@ -1698,7 +1682,9 @@ async fn d360_taking_a_grant_back_makes_the_next_request_ask_and_leaves_what_it_
         .body(&request(9096, project, "a granted preview"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_ne!(opened.opening.state, PortOpeningState::Waiting);
     // Taken back as every capability is; the gateway gives it, so no unit is made anew.
     let job = world
@@ -1729,6 +1715,11 @@ async fn d360_taking_a_grant_back_makes_the_next_request_ask_and_leaves_what_it_
         .find(|capability| capability.kind == PortOpeningKind::Place)
         .unwrap();
     assert!(!place.granted && place.admission.is_none() && place.can_grant);
+    assert_eq!(place.grant_unavailable_reason, None);
+    assert_eq!(
+        place.revoke_unavailable_reason,
+        Some(PortCapabilityActionReason::NoGrant)
+    );
     assert!(
         reconcile(&world, env).await.is_empty(),
         "what the grant opened stays open"
@@ -1748,7 +1739,9 @@ async fn d360_taking_a_grant_back_makes_the_next_request_ask_and_leaves_what_it_
         .body(&request(9097, project, "another preview"))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         asked.opening.state,
         PortOpeningState::Waiting,
@@ -1788,7 +1781,9 @@ async fn d357_no_approval_mode_decides_a_port_and_its_card_lives_the_shortest_re
         ))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         made.opening.state,
         PortOpeningState::Waiting,

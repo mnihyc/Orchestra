@@ -21,6 +21,7 @@
 //! | `tool_set` | The tool set an executor lists on every channel of the ticket. |
 //! | `environment_id` | The environment whose executor or tool server the ticket reaches. |
 //! | `environment_generation` | The generation of that environment. |
+//! | `executor_version` | The admitted build of a native executor. |
 //! | `ttl_secs` | How long channels may be opened with it. [`DEFAULT_TICKET_SECS`] when absent. |
 
 use orch_link_contract::commands::{Object, TicketWanted};
@@ -113,6 +114,7 @@ impl Tickets {
                 tool_set: None,
                 tool_environment_id: None,
                 tool_environment_generation: None,
+                tool_executor_version: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -146,6 +148,7 @@ impl Tickets {
                 tool_set: None,
                 tool_environment_id: None,
                 tool_environment_generation: None,
+                tool_executor_version: None,
                 port: Some(port),
                 exp: expires.unix_millis().div_euclid(1_000),
             })?)
@@ -262,9 +265,17 @@ impl Tickets {
                 .ok_or_else(|| {
                     TicketFault::Request("lacks a nonnegative `environment_generation`".to_owned())
                 })?;
-            Ok(self
-                .signer
-                .issue_for_tool(&request, environment, generation)?)
+            if wanted.kind == TunnelKind::Exec
+                && let Some(version) = text("executor_version")?
+            {
+                Ok(self
+                    .signer
+                    .issue_for_executor(&request, environment, generation, version)?)
+            } else {
+                Ok(self
+                    .signer
+                    .issue_for_tool(&request, environment, generation)?)
+            }
         } else {
             self.issue(&request)
         }

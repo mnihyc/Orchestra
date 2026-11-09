@@ -29,6 +29,21 @@ const appearance = useAppearance.getState();
 beforeEach(() => { sessionStorage.clear(); calls.request.mockReset().mockResolvedValue({ batch_id: 'request-errors-batch', approvals: [] }); });
 afterEach(async () => { cleanup(); useAppearance.setState(appearance); await setLocale('en'); });
 
+it.each(surfaces)('$kind accepts a request receipt without requiring approval cards', async (surface) => {
+  calls.request.mockResolvedValueOnce({ projection: 'receipt', batch_id: 'accepted-batch', approval_ids: ['accepted-approval'] });
+  const missing: MissingAccess = { object: { kind: 'thread', id: 'thread-id', name: 'Release', owner: ADA }, permissions: ['thread.view'], ask: [ADA], ask_more: 0, options: null, closed: null, override: false };
+  show(surface.kind === 'access' ? <AccessRequest missing={[missing]} objectId="thread-id" fixed />
+    : surface.kind === 'export' ? <RequestExport target={{ kind: 'thread', id: 'thread-id', name: 'Release', owner: ADA }} open onClose={vi.fn()} />
+      : <RequestDefault place={{ id: TOPIC.id, kind: 'topic', name: 'Release', parentId: 'project', archived: false, status: 'open', folder: false }} owner={ADA} open onClose={vi.fn()} />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t(surface.send) }));
+  const confirmation = surface.kind === 'access' ? i18n.t('access.request.complete')
+    : surface.kind === 'export' ? i18n.t('export.request.sent', { name: ADA.display_name })
+      : i18n.t('start.request.sent', { name: ADA.display_name });
+  expect(await screen.findByText(confirmation)).toBeVisible();
+  expect(calls.request).toHaveBeenCalledOnce();
+  expect(screen.queryByRole('button', { name: i18n.t(surface.send) })).not.toBeInTheDocument();
+});
+
 it.each(surfaces)('$kind sends a proposed duration and retains it on retry', async (surface) => {
   const missing: MissingAccess = { object: { kind: 'thread', id: 'thread-id', name: 'Release', owner: ADA }, permissions: ['thread.view'], ask: [ADA], ask_more: 0, options: null, closed: null, override: false };
   calls.request.mockRejectedValueOnce(new Error('retry'));

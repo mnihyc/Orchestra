@@ -148,7 +148,7 @@ impl Limits {
 }
 
 /// Which tabs a document shows, from its place's setting and its own choice.
-async fn tabs(
+pub(crate) async fn tabs(
     conn: &mut Conn,
     principal: &Principal,
     document: &DocumentRow,

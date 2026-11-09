@@ -9,7 +9,9 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullDiscussionCreationReply as _;
 use desk::{Desk, body, paragraph, text};
+use futures::FutureExt as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::documents::{
     BlockContent, BlockProps, BlockType, CalloutProps, CalloutTone, Document, DocumentBlock,
@@ -269,6 +271,7 @@ async fn the_discussions_are_written_after_the_text_when_they_are_asked_for_and_
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok();
     let without = text_of(
@@ -377,6 +380,7 @@ async fn the_json_export_is_what_a_sync_gives_and_holds_the_discussions_only_whe
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok();
     let plain = export(&desk, &desk.ada, made.base.id, DocumentExport::Json, false).await;

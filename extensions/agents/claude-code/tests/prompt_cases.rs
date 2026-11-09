@@ -140,7 +140,7 @@ impl Launcher for Docker {
             }
         }
         command
-            .arg("orch-dev-harness")
+            .arg(common::image())
             .arg(&spec.program)
             .args(&spec.args);
         command
@@ -775,7 +775,7 @@ async fn instructions_file_chain_claude_and_file_boundary_keep_both_forms_and_ch
             Default::default(),
         )
         .await;
-    assert_eq!(started.harness_version, "2.1.296");
+    assert_eq!(started.harness_version, "2.1.319");
     for cwd in [api.clone(), api.join("deep/leaf")] {
         rig.new_lane();
         let mut spec = rig.spec(SessionMode::New, None);
@@ -978,9 +978,10 @@ async fn server(model_url: String, result_form: bool) -> Server {
         body: Bytes,
     ) -> axum::response::Response {
         if uri.path().starts_with("/llm/") {
+            let path = uri.path().splitn(4, '/').nth(3).unwrap();
             let response = reqwest::Client::new()
-                .post(format!("{url}/v1/responses"))
-                .header("authorization", "Bearer prompt-test-token")
+                .post(format!("{url}/{path}"))
+                .header("authorization", format!("Bearer {}", common::TOKEN))
                 .header("content-type", "application/json")
                 .body(body.to_vec())
                 .send()

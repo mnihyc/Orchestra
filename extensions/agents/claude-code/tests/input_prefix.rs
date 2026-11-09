@@ -446,7 +446,7 @@ async fn fresh_native_prefix_case(first: bool) -> Proof {
     let mut rig = Rig::new()
         .await
         .ok_or("the pinned Docker harness is required for prefix acceptance")?;
-    assert_eq!(rig.start_quick().await.harness_version, "2.1.296");
+    assert_eq!(rig.start_quick().await.harness_version, "2.1.319");
     let original = rig.open().await;
     let source = NativePrefixSource {
         thread_id: rig.thread,
@@ -687,7 +687,7 @@ async fn an_actual_queued_steer_keeps_its_native_guidance_and_refuses_a_user_mes
             echoed: echoed.clone(),
         }),
     );
-    assert_eq!(rig.start_quick().await.harness_version, "2.1.296");
+    assert_eq!(rig.start_quick().await.harness_version, "2.1.319");
     let original = rig.open().await;
     let source = NativePrefixSource {
         thread_id: rig.thread,

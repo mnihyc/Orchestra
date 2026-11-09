@@ -1,8 +1,10 @@
 //! Native metadata/projection and actual subscription/outbox order, without scheduler timing.
 //! The existing real HTTP/WebSocket diagnostics retain the end-to-end delivery/quietness oracles.
 
-#[path = "../../tests/realtime_support/mod.rs"]
-mod fixture;
+use crate::realtime_support as fixture;
+
+#[path = "native_feed_key_tests.rs"]
+mod native_feed_keys;
 
 use super::server::Connection;
 use super::subscriptions::Subscription;
@@ -121,7 +123,7 @@ impl Reader {
         assert!(realtime.inner.engine.set(rig.server.engine.clone()).is_ok());
         let connection = server::epoch_test_connection(&rig.server.app, &realtime.inner, token)
             .await
-            .map_err(|(code, _)| format!("native session login refused: {code}"))?;
+            .map_err(|(code, _)| format!("native credential login refused: {code}"))?;
         Ok(Self {
             realtime,
             connection,
@@ -152,6 +154,9 @@ impl Reader {
         // are no listener/sweep/epoch loops on this manually driven process.
         self.realtime.inner.tasks.close();
         tokio::time::timeout(Duration::from_secs(10), self.realtime.inner.tasks.wait()).await?;
+        if matches!(feed, Feed::Thread(_)) {
+            self.initial_presence(id, &feed).await?;
+        }
         let sub = self
             .connection
             .subscriptions()
@@ -172,6 +177,14 @@ impl Reader {
         Ok(serde_json::from_str(&text)?)
     }
 
+    async fn initial_presence(&self, id: SubId, feed: &Feed) -> Proof {
+        let presence = self.next().await?;
+        assert_eq!(presence["op"], "presence");
+        assert_eq!(presence["id"], id);
+        assert_eq!(presence["feed"], feed.to_string());
+        Ok(())
+    }
+
     async fn epoch(&self) -> Proof<i64> {
         Ok(sync::read_epoch(&self.realtime.inner).await?)
     }
@@ -189,12 +202,18 @@ impl Reader {
 
     async fn project_resource(&self, sub: &Arc<Subscription>) -> Proof {
         let mut state = sub.state.lock().await;
-        self.realtime
-            .inner
-            .ephemeral
-            .current(&self.realtime.inner, sub, &mut state)
-            .await?;
+        self.viewing(
+            self.realtime
+                .inner
+                .ephemeral
+                .current(&self.realtime.inner, sub, &mut state),
+        )
+        .await?;
         Ok(())
+    }
+
+    async fn viewing<T>(&self, work: impl Future<Output = T>) -> T {
+        subscriptions::viewing(&self.connection, work).await
     }
 
     fn empty(&self) {
@@ -580,7 +599,10 @@ async fn a_revoked_exact_session_cannot_receive_personal_news_while_its_other_se
     let other = Reader::new(&rig, &other_token).await?;
     let sub = reader.subscribe(Feed::User).await?;
     let other_sub = other.subscribe(Feed::User).await?;
-    let session = reader.connection.session();
+    let session = reader
+        .connection
+        .browser_session()
+        .ok_or("the fixture is not a browser session")?;
     {
         let mut conn = rig.pool.acquire().await?;
         assert!(identity::revoke_session(&mut conn, session, rig.ada, rig.clock.now()).await?);
@@ -918,13 +940,14 @@ async fn deleting_an_environment_during_initial_projection_closes_only_that_ackn
             );
         }
         assert_eq!(
-            super::watches::decide(
-                &reader.realtime.inner,
-                rig.ada,
-                rig.environment,
-                orch_access_contract::permissions::Permission::VncView
-            )
-            .await?,
+            reader
+                .viewing(super::watches::decide(
+                    &reader.realtime.inner,
+                    rig.ada,
+                    rig.environment,
+                    orch_access_contract::permissions::Permission::VncView
+                ))
+                .await?,
             subscriptions::Access::Allowed,
             "phase={label}: current native display View must admit the real projection"
         );
@@ -1031,22 +1054,24 @@ async fn an_invalid_projection_on_a_live_environment_remains_an_error_not_a_dele
     let rig = Rig::with_time_held().await;
     let reader = Reader::new(&rig, &rig.token).await?;
     assert_eq!(
-        super::watches::decide(
-            &reader.realtime.inner,
-            rig.ada,
-            rig.environment,
-            orch_access_contract::permissions::Permission::TerminalManage
-        )
-        .await?,
+        reader
+            .viewing(super::watches::decide(
+                &reader.realtime.inner,
+                rig.ada,
+                rig.environment,
+                orch_access_contract::permissions::Permission::TerminalManage
+            ))
+            .await?,
         subscriptions::Access::Allowed
     );
-    let result = super::machine_views::project(
-        &reader.realtime.inner,
-        &reader.connection,
-        &Feed::EnvTerminals(rig.environment),
-        &json!({"terminals":"not a native snapshot"}),
-    )
-    .await;
+    let result = reader
+        .viewing(super::machine_views::project(
+            &reader.realtime.inner,
+            &reader.connection,
+            &Feed::EnvTerminals(rig.environment),
+            &json!({"terminals":"not a native snapshot"}),
+        ))
+        .await;
     assert!(
         result.is_err(),
         "a live source's malformed projection must retain its actual error"
@@ -1655,7 +1680,10 @@ async fn metadata_hints_use_existing_personal_readers_and_keep_exact_session_fen
         assert!(
             identity::revoke_session(
                 &mut conn,
-                revoked.connection.session(),
+                revoked
+                    .connection
+                    .browser_session()
+                    .ok_or("the fixture is not a browser session")?,
                 rig.ada,
                 rig.clock.now()
             )
@@ -1816,6 +1844,380 @@ async fn a_nodes_machine_feed_keeps_host_view_until_the_physical_machine_is_dele
     reader.empty();
     denied.finish().await;
     reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_existing_scoped_key_authenticates_realtime_as_that_key_and_revocation_ends_it() -> Proof
+{
+    use crate::middleware::authentication::{self, API_TOKEN_PREFIX, Via, new_token, token_hash};
+    use chrono::Duration as Span;
+    use http::{HeaderMap, HeaderValue, header};
+
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
+    // The same ordinary account owns both: the key's exact thread subtree is what separates them.
+    let allowed = rig.thread("Allowed key read").await;
+    let other = rig.thread("Outside key read").await;
+    let key = new_token(API_TOKEN_PREFIX);
+    let key_id = new_id();
+    let hash = token_hash(&key);
+    let scopes = vec!["thread.view".to_owned()];
+    {
+        let mut conn = rig.pool.acquire().await?;
+        identity::create_api_token(
+            &mut conn,
+            &identity::NewApiToken {
+                id: key_id,
+                user_id: rig.ada,
+                name: "scoped realtime reader",
+                token_hash: &hash,
+                scopes: &scopes,
+                node_id: Some(allowed),
+                at: rig.clock.now(),
+                expires_at: Some(rig.clock.now() + Span::minutes(5)),
+            },
+        )
+        .await?;
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {key}"))?,
+    );
+    let authenticated = authentication::authenticate(&rig.server.app, &headers, rig.clock.now())
+        .await
+        .map_err(|_| "the canonical key fixture is not a valid API credential")?;
+    let authentication::Caller::User(authed) = authenticated else {
+        return Err("the key fixture did not identify its actual account".into());
+    };
+    assert_eq!(authed.id(), rig.ada);
+    assert!(matches!(&authed.via, Via::Token { token_id, .. } if *token_id == key_id));
+
+    let opened = Reader::new(&rig, &key).await;
+    assert!(
+        opened.is_ok(),
+        "the existing auth frame must admit a valid scoped key: {:?}",
+        opened.as_ref().err()
+    );
+    let reader = opened?;
+    let live = reader.subscribe(Feed::Thread(allowed)).await?;
+    assert!(live.is_live());
+    let denied: SubFrame =
+        serde_json::from_value(json!({"id":2,"feed":Feed::Thread(other).to_string()}))?;
+    subscriptions::subscribe(&reader.realtime.inner, &reader.connection, denied).await?;
+    let denial = reader.next().await?;
+    assert_eq!(denial["op"], "error");
+    assert_eq!(denial["id"], 2);
+    assert_eq!(denial["code"], "forbidden");
+    assert!(
+        !reader
+            .connection
+            .subscriptions()
+            .iter()
+            .any(|sub| sub.tag().id == 2)
+    );
+    let mut conn = rig.pool.acquire().await?;
+    let principal = subscriptions::principal_for_connection(
+        &reader.realtime.inner,
+        &mut conn,
+        &reader.connection,
+    )
+    .await?
+    .ok_or("the authenticated key has no current principal")?;
+    let grant = principal
+        .caller()
+        .grant()
+        .ok_or("the key became an unscoped browser session")?;
+    assert_eq!(grant.token(), Some(key_id));
+    assert_eq!(grant.subtree(), Some(allowed));
+    assert!(!principal.caller().as_admin());
+    drop(conn);
+    assert!(super::watches::credential_current(&reader.realtime.inner, &reader.connection).await?);
+    {
+        let mut conn = rig.pool.acquire().await?;
+        assert!(identity::revoke_api_token(&mut conn, key_id, rig.ada, rig.clock.now()).await?);
+    }
+    assert!(!super::watches::credential_current(&reader.realtime.inner, &reader.connection).await?);
+    assert_eq!(
+        reader.connection.outbox.closing().map(|(code, _)| code),
+        Some(4401)
+    );
+    reader.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_owner_read_key_observes_its_thread_but_does_not_inherit_raw_protocol_management()
+-> Proof {
+    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use chrono::Duration as Span;
+    use orch_access_contract::key_scope::{
+        KeyAction, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget, KeyTargetKind,
+    };
+    use orch_access_contract::permissions::ObjectKind;
+
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
+    let thread = rig.thread("Ordinary owned read").await;
+    let kind = KeyTargetKind::Object(ObjectKind::Thread);
+    let scope = KeyScope {
+        rules: vec![KeyRule {
+            target: KeyTarget {
+                kind,
+                id: Some(thread),
+                reach: KeyReach::SelfOnly,
+            },
+            resources: Some(vec![kind]),
+            allow: vec![KeyOperation {
+                operation: "ThreadSyncGet.read".into(),
+                actions: vec![KeyAction::Read],
+            }],
+        }],
+        constraints: Vec::new(),
+        excluded_places: Vec::new(),
+    };
+    let key = new_token(API_TOKEN_PREFIX);
+    let id = new_id();
+    let hash = token_hash(&key);
+    let policy = serde_json::to_value(scope)?;
+    let projection = {
+        let mut conn = rig.pool.acquire().await?;
+        identity::create_api_token_scoped(
+            &mut conn,
+            &identity::NewApiToken {
+                id,
+                user_id: rig.ada,
+                name: "ordinary thread read only",
+                token_hash: &hash,
+                scopes: &[],
+                node_id: None,
+                at: rig.clock.now(),
+                expires_at: Some(rig.clock.now() + Span::minutes(5)),
+            },
+            Some(&policy),
+        )
+        .await?;
+        orch_db::queries::thread_continuations::projection(&mut conn, thread, None)
+            .await?
+            .ok_or("the owned thread has no actual continuation projection")?
+    };
+    let segment = projection
+        .viewed_segment_id
+        .ok_or("the bound thread has no actual raw segment")?;
+    let reader = Reader::new(&rig, &key).await?;
+    let owner = reader.peer(&rig, &rig.token).await?;
+    assert_eq!(
+        subscriptions::decide_for(
+            &reader.realtime.inner,
+            &owner.connection,
+            &Feed::ThreadRaw(thread)
+        )
+        .await?,
+        subscriptions::Access::Allowed,
+        "the account really has raw-management authority; the key's selection is narrower"
+    );
+    let plain: SubFrame = serde_json::from_value(json!({
+        "id":1,"feed":Feed::Thread(thread).to_string(),"sub_streams":true,
+        "continuation_id":projection.viewed_continuation_id,
+        "projection_revision":projection.projection_revision,
+    }))?;
+    subscriptions::subscribe(&reader.realtime.inner, &reader.connection, plain).await?;
+    let ack = reader.next().await?;
+    assert_eq!(ack["op"], "subscribed");
+    assert_eq!(ack["id"], 1);
+    reader.realtime.inner.tasks.close();
+    tokio::time::timeout(Duration::from_secs(10), reader.realtime.inner.tasks.wait()).await?;
+    reader.initial_presence(1, &Feed::Thread(thread)).await?;
+    assert!(
+        reader
+            .connection
+            .subscriptions()
+            .iter()
+            .any(|sub| sub.tag().id == 1 && sub.is_live())
+    );
+    let raw: SubFrame = serde_json::from_value(json!({
+        "id":2,"feed":Feed::ThreadRaw(thread).to_string(),"raw_segment_id":segment,
+        "continuation_id":projection.viewed_continuation_id,
+        "projection_revision":projection.projection_revision,
+    }))?;
+    subscriptions::subscribe(&reader.realtime.inner, &reader.connection, raw).await?;
+    let refused = reader.next().await?;
+    assert_eq!(refused["op"], "error");
+    assert_eq!(refused["id"], 2);
+    assert_eq!(refused["code"], "forbidden");
+    assert!(
+        !reader
+            .connection
+            .subscriptions()
+            .iter()
+            .any(|sub| sub.tag().id == 2)
+    );
+    reader.finish().await;
+    owner.finish().await;
+    rig.server.stop().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn topic_sync_uses_the_same_selection_for_scoped_http_and_socket_child_rows() -> Proof {
+    use crate::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use chrono::Duration as Span;
+    use orch_access_contract::key_scope::{
+        KeyAction, KeyIdentityKind, KeyOperation, KeyReach, KeyRule, KeyScope, KeyTarget,
+        KeyTargetKind,
+    };
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_api_contract::topics::{TopicSyncGet, TopicSyncGetQuery};
+    use orch_db::queries::jobs;
+
+    let rig = Rig::with_unstarted_engine_and_time_held().await;
+    let allowed = rig.thread("Allowed child").await;
+    let excluded = rig.thread("Excluded sibling").await;
+    let mut job_ids = Vec::new();
+    {
+        let mut tx = rig.pool.begin().await?;
+        for thread in [allowed, excluded] {
+            job_ids.push(
+                jobs::insert(
+                    &mut tx,
+                    &jobs::NewJob {
+                        id: new_id(),
+                        kind: jobs::forks::THREAD_FORK,
+                        node_id: Some(thread),
+                        environment_id: None,
+                        provider_id: None,
+                        plan: &json!({}),
+                        progress: &json!({}),
+                        created_by: Some(rig.ada),
+                    },
+                    rig.clock.now(),
+                )
+                .await?
+                .id,
+            );
+        }
+        tx.commit().await?;
+    }
+    let thread_kind = KeyTargetKind::Object(ObjectKind::Thread);
+    let job_kind = KeyTargetKind::Identity(KeyIdentityKind::Job);
+    // This owner can read both siblings. Only this same-operation key policy separates them.
+    let rule = |kind, id| KeyRule {
+        target: KeyTarget {
+            kind,
+            id: Some(id),
+            reach: KeyReach::SelfOnly,
+        },
+        resources: Some(vec![kind]),
+        allow: vec![KeyOperation {
+            operation: "TopicSyncGet".into(),
+            actions: vec![KeyAction::Read],
+        }],
+    };
+    let mut registry = crate::registry::Registry::new();
+    crate::routes::mount(&mut registry);
+    let app = crate::testing::TestApp::over(
+        rig.server.app.clone(),
+        orch_testkit::clock::manual(),
+        registry,
+    );
+    let ordinary = app
+        .call(TopicSyncGet, &[&rig.topic])
+        .token(&rig.token)
+        .query(&TopicSyncGetQuery { since: Some(0) })
+        .send()
+        .await
+        .ok();
+    assert!(ordinary.threads.iter().any(|row| row.base.id == excluded));
+    assert!(ordinary.jobs.iter().any(|row| row.id == job_ids[1]));
+
+    for with_thread_rows in [true, false] {
+        let mut rules = vec![
+            rule(KeyTargetKind::Object(ObjectKind::Topic), rig.topic),
+            rule(job_kind, job_ids[0]),
+        ];
+        if with_thread_rows {
+            rules.push(rule(thread_kind, allowed));
+        }
+        let scope = KeyScope {
+            rules,
+            constraints: Vec::new(),
+            excluded_places: Vec::new(),
+        };
+        let key = new_token(API_TOKEN_PREFIX);
+        let hash = token_hash(&key);
+        let policy = serde_json::to_value(scope)?;
+        {
+            let mut conn = rig.pool.acquire().await?;
+            identity::create_api_token_scoped(
+                &mut conn,
+                &identity::NewApiToken {
+                    id: new_id(),
+                    user_id: rig.ada,
+                    name: "same topic read selection",
+                    token_hash: &hash,
+                    scopes: &[],
+                    node_id: None,
+                    at: rig.clock.now(),
+                    expires_at: Some(rig.clock.now() + Span::minutes(5)),
+                },
+                Some(&policy),
+            )
+            .await?;
+        }
+        let http = app
+            .call(TopicSyncGet, &[&rig.topic])
+            .token(&key)
+            .query(&TopicSyncGetQuery { since: Some(0) })
+            .send()
+            .await
+            .ok();
+        assert_eq!(
+            http.threads
+                .iter()
+                .map(|row| row.base.id)
+                .collect::<Vec<_>>(),
+            if with_thread_rows {
+                vec![allowed]
+            } else {
+                Vec::new()
+            }
+        );
+        assert_eq!(
+            http.jobs.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![job_ids[0]],
+            "Job disclosure does not require also granting the Thread resource family"
+        );
+        assert!(http.complete);
+
+        let reader = Reader::new(&rig, &key).await?;
+        let sub = reader.subscribe(Feed::Topic(rig.topic)).await?;
+        assert!(sub.is_live());
+        let caller =
+            super::key_reads::admit(&reader.realtime.inner, &reader.connection, sub.feed())
+                .await?
+                .ok_or("the same TopicSyncGet key did not admit its socket binding")?;
+        let rows = subscriptions::viewing_admitted(
+            &reader.connection,
+            caller,
+            super::topics::read(&reader.realtime.inner, rig.ada, rig.topic, 0, http.seq),
+        )
+        .await??;
+        let sync::Rows::Frame(frame) = rows else {
+            return Err("the topic socket projection did not return its real current rows".into());
+        };
+        let orch_realtime_contract::feeds::SyncData::Topic(data) = frame.data else {
+            return Err("the topic producer returned a different feed family".into());
+        };
+        assert_eq!(
+            serde_json::to_value(data)?,
+            json!({
+                "topic":http.topic, "threads":http.threads, "jobs":http.jobs,
+                "announcements":http.announcements,
+            })
+        );
+        reader.finish().await;
+    }
     rig.server.stop().await;
     Ok(())
 }

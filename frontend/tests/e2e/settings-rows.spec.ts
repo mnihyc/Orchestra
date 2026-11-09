@@ -171,7 +171,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       } else throw new Error('The setting write has no numeric value');
       await route.fulfill({ json: current });
     });
-    await page.goto('/org/acme.research/settings/policies');
+    await page.goto('/org/acme.research/settings/defaults');
     const rows = page.locator('[data-setting-row]');
     await expect(rows).toHaveCount(146);
     await expect(page.locator('[data-read-only-settings]')).toHaveCount(1);
@@ -265,7 +265,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await row.getByRole('button', { name: chinese ? '适用位置' : 'Where it applies', exact: true }).click();
     const details = page.getByRole('region', { name: chinese ? '此值适用的位置' : 'Where this value applies' });
     await expect(details).toContainText(chinese ? '7 个线程' : '7 threads');
-    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=policies&setting=${delay.key}`);
+    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=defaults&setting=${delay.key}`);
     expect(reachReads).toBe(1);
     expect(listReads).toBe(1);
   });

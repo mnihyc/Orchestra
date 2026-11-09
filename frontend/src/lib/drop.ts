@@ -1,4 +1,5 @@
 /** Files and references entering an editor keep their origin and never turn an internal drag into a copy. */
+import { readOrchLink, referenceTo } from '@/lib/links';
 import { environmentFileReference, referenceOfAddress } from '@/features/people/references';
 
 export const ORCH_REFERENCE = 'application/x-orch-reference';
@@ -57,13 +58,13 @@ export function droppedReference(data: DataTransfer): string | null {
   const uri = data.getData('text/uri-list').split('\n').find((line) => line.trim() !== '' && !line.startsWith('#'));
   if (uri === undefined) return null;
   try {
-    const url = new URL(uri, window.location.origin);
-    if (url.origin !== window.location.origin) return null;
-    const ref = referenceOfAddress(`${url.pathname}${url.hash}`);
+    const url = readOrchLink(uri);
+    if (url === null) return null;
+    const ref = referenceOfAddress(`${url.pathname}${url.search}${url.hash}`);
     if (ref === null) return null;
     if (ref.kind === 'environment_file' && ref.path !== undefined) return environmentFileReference(ref.id, ref.path, ref.line);
     const part = ref.line ?? ref.turn ?? ref.message;
-    return `[${ref.id}](id:${ref.id}${part === undefined ? '' : `#${part}`})`;
+    return referenceTo({ ...ref, name: ref.id }, part === undefined ? {} : { number: part });
   } catch { return null; }
 }
 

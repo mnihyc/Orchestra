@@ -19,7 +19,7 @@ use support::{PASSWORD, World};
 
 /// The first administrator, made from a browser that gave `zone`.
 async fn setup(world: &World, zone: Option<&str>) -> Reply<AuthResult> {
-    world
+    let reply = world
         .app
         .call(SetupCreate, &[])
         .body(&SetupCreateBody {
@@ -30,7 +30,17 @@ async fn setup(world: &World, zone: Option<&str>) -> Reply<AuthResult> {
             timezone: zone.map(str::to_owned),
         })
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary setup returns its first session")
+        }),
+    }
 }
 
 async fn change(world: &World, token: &str, body: MeUpdateBody) -> Reply<Me> {
@@ -205,7 +215,9 @@ async fn an_admins_creation_and_password_invitation_follow_the_new_persons_devic
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("the ordinary user creation fixture receives its full native account");
         let stored: (String, String) =
             sqlx::query_as("SELECT timezone, timezone_mode FROM users WHERE id=$1")
                 .bind(made.user.base.id)
@@ -217,7 +229,14 @@ async fn an_admins_creation_and_password_invitation_follow_the_new_persons_devic
             .app
             .call(AuthRecoveryConfirm, &[])
             .body(&AuthRecoveryConfirmBody {
-                token: made.reset_url.rsplit('/').next().unwrap().to_owned(),
+                token: made
+                    .reset_url
+                    .as_deref()
+                    .expect("the first account creation provides its link")
+                    .rsplit('/')
+                    .next()
+                    .unwrap()
+                    .to_owned(),
                 password: PASSWORD.to_owned(),
             })
             .send()

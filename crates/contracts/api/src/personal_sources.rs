@@ -1,0 +1,94 @@
+//! Native account-owned personal row sources for their ordinary read operations.
+
+use crate::operation_sources::{Binding, Cardinality, Declaration};
+use crate::operations::{FacetUsage, TargetResolver};
+
+/// Shared typed source identities for native account-owned observations.
+pub use crate::account_sources::Source;
+
+const ACCOUNT: Binding<Source> = Binding {
+    source: Source::Account,
+    target: TargetResolver::CurrentAccount,
+    usage: FacetUsage::Required,
+    cardinality: Cardinality::One,
+};
+
+/// Private read positions and every actual selected thread are bound separately.
+pub const READ_STATES: Declaration<Source> = Declaration {
+    operation: "MeReadStateList",
+    bindings: &[
+        ACCOUNT,
+        Binding {
+            source: Source::ReadThreads,
+            target: TargetResolver::ResolvedCollection("read_state_threads"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+    ],
+};
+
+/// Private subscription ownership does not create ancestry for the subscribed node.
+pub const SUBSCRIPTIONS: Declaration<Source> = Declaration {
+    operation: "MeSubscriptionList",
+    bindings: &[
+        ACCOUNT,
+        Binding {
+            source: Source::Subscriptions,
+            target: TargetResolver::ResolvedCollection("subscription_nodes"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+    ],
+};
+
+/// Favorites and optional path names use their own exact operation's Read.
+pub const FAVORITES: Declaration<Source> = Declaration {
+    operation: "MeFavoriteList",
+    bindings: &[
+        ACCOUNT,
+        Binding {
+            source: Source::Favorites,
+            target: TargetResolver::ResolvedCollection("favorite_nodes"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: Source::FavoriteOrgNames,
+            target: TargetResolver::ResolvedCollection("favorite_names_orgs"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: Source::FavoriteProjectNames,
+            target: TargetResolver::ResolvedCollection("favorite_names_projects"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: Source::FavoriteTopicNames,
+            target: TargetResolver::ResolvedCollection("favorite_names_topics"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+        Binding {
+            source: Source::FavoriteThreadNames,
+            target: TargetResolver::ResolvedCollection("favorite_names_threads"),
+            usage: FacetUsage::ResponseContent,
+            cardinality: Cardinality::Collection,
+        },
+    ],
+};
+
+/// Private account state and actual selected Chat identities remain separate targets.
+pub const CHAT_STATES: Declaration<Source> = Declaration {
+    operation: "MeChatStateList",
+    bindings: &[
+        ACCOUNT,
+        Binding {
+            source: Source::Chats,
+            target: TargetResolver::ResolvedCollection("personal_state_chats"),
+            usage: FacetUsage::Required,
+            cardinality: Cardinality::Collection,
+        },
+    ],
+};

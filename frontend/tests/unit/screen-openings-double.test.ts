@@ -3,8 +3,21 @@
 import { expect, it } from 'vitest';
 import type { ChatDraft, Node } from '@/generated/api-types';
 import { ACME } from '../doubles/fixtures';
-import { chatOpening, nodeChatOpening, documentPages } from '../doubles/screen-openings';
+import { chatOpening, nodeChatOpening, documentPages, orgOverview } from '../doubles/screen-openings';
 import { Refusal, World } from '../doubles/world';
+
+it('opens the org overview through its bounded native child and recent readers', async () => {
+  const world = new World(), person = world.people.get('ada')!;
+  const result = await orgOverview(world, person, ACME.org, new URLSearchParams());
+  expect(result.children).toEqual((await world.requestFeeds.read(person, `/nodes/${ACME.org}/children?archived=exclude&limit=50`)).body);
+  expect(result.recent).toEqual((await world.requestFeeds.read(person, `/search/names?kinds=thread&limit=50&org_id=${ACME.org}`)).body);
+  expect(result.first_steps.status).toBe('ready');
+  expect(result.usage.status).toBe('ready');
+  expect(result.activity.status).toBe('ready');
+  expect(result.outside_openings.status).toBe('ready');
+  world.places.denied.set('ada', new Set(['org.view']));
+  await expect(orgOverview(world, person, ACME.org, new URLSearchParams())).rejects.toBeInstanceOf(Refusal);
+});
 
 it('admits the selected thread conversation and only the readable scopes around it', async () => {
   const world = new World(), person = world.people.get('ada')!;
