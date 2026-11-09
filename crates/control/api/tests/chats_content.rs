@@ -194,7 +194,7 @@ async fn an_edit_tells_the_people_it_names_newly_once_and_a_deleted_message_tell
             });
         async move { call.send().await.ok() }
     };
-    let named = edit("a note for @cai").await;
+    let named = edit("a note for @cai").await.into_full().unwrap();
     assert_eq!(named.mentions[0].username, "cai");
     assert_eq!(room.inbox(&room.cai, "mention").await.len(), 1);
     edit("a note for @cai, edited").await;
@@ -211,7 +211,7 @@ async fn an_edit_tells_the_people_it_names_newly_once_and_a_deleted_message_tell
             .mentions_unread,
         1
     );
-    let dropped = edit("a note for nobody").await;
+    let dropped = edit("a note for nobody").await.into_full().unwrap();
     assert!(dropped.mentions.is_empty());
     room.world
         .app
@@ -299,7 +299,9 @@ async fn text_is_masked_by_the_patterns_of_the_org_and_the_secrets_of_the_topic_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(Room::words(&edited), "again [masked]");
 }
 

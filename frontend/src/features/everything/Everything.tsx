@@ -229,7 +229,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
 /** Also embedded by an org's settings; Management links to this same page in system scope. */
 export function EverythingBrowser(props: EverythingBrowserProps) {
   const me = useQuery(meQuery);
-  if (me.isPending) return <SkeletonRows rows={4} />;
+  if (me.isPending) return <SkeletonRows read={me} rows={4} />;
   if (me.isError) return <ErrorState error={me.error} onRetry={() => void me.refetch()} />;
   return <Browser key={`${me.data.id}:${props.scope ?? 'mine'}:${props.parent ?? ''}:${props.q === undefined ? '' : 'controlled'}`} person={me.data} {...props} />;
 }

@@ -7,6 +7,26 @@ its configuration. The complete defaults and field descriptions are in the
 [server configuration](../../crates/platform/config/src/server.rs) and the deployment's
 [example file](../../deploy/config/orch.toml).
 
+## Runtime worker stacks
+
+```toml
+[api]
+worker_stack_mib = 64
+[gateway]
+worker_stack_mib = 64
+[worker]
+worker_stack_mib = 64
+[node]
+worker_stack_mib = 64
+```
+
+Each service reads its stack setting before constructing its runtime. The value is the stack
+reservation per runtime thread in MiB. The default is 64; operators may choose a smaller or larger
+positive whole number. Zero and values whose byte count overflows the platform are rejected at
+configuration loading. For example, `ORCH_API_WORKER_STACK_MIB=96` overrides the API's value.
+The node's `run` and `enroll` commands use its setting; standalone maintenance and conformance
+commands continue to work without a deployment file.
+
 ## Database watch
 
 ```toml

@@ -34,7 +34,16 @@ use orch_types::{Id, Json, Time, new_id};
 
 /// Binds a thread's port request.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::ThreadPortRequestCreate, create);
+    registry
+        .creation(
+            api::ThreadPortRequestCreate,
+            crate::routes::ports::request_operation::binding(),
+        )
+        .on_with_operation(
+            api::ThreadPortRequestCreate,
+            crate::routes::ports::request_operation::resolve,
+            create,
+        );
 }
 
 /// The card's one line.
@@ -50,32 +59,47 @@ fn title_of(request: &PortOpeningRequest) -> String {
 /// `POST /threads/{id}/port-requests`: opens the thread's request where a capability admits it,
 /// records it as a waiting opening with its card otherwise, or answers the opening the same request
 /// already has.
-async fn create(ctx: Ctx, (): (), body: PortOpeningRequest) -> ApiResult<PortOpenReply> {
+async fn create(ctx: Ctx, (): (), body: PortOpeningRequest) -> ApiResult<PortOpenResponse> {
     let thread = ctx.id("id")?;
     let (tx, guard) = transaction_guard::begin(&ctx).await?;
-    request_for_thread(&ctx, tx, guard.principal(), thread, body).await
+    let accepted = guard.principal().caller().clone();
+    let mut ctx = ctx;
+    ctx.now = guard.now().get();
+    ctx.caller =
+        crate::middleware::authentication::Caller::User(std::sync::Arc::new(guard.user().clone()));
+    let ctx = ctx.with_admitted_caller(accepted.clone())?;
+    let result = request_outcome(&ctx, tx, guard.principal(), thread, body, None).await?;
+    crate::routes::ports::request_operation::first(&ctx, &accepted, result.reply, result.created)
+        .await
 }
 
-/// Records the same thread request for HTTP and tools, after their own current authority guard.
-pub(crate) async fn request_for_thread(
+struct Requested {
+    reply: PortOpenReply,
+    created: bool,
+}
+
+/// Tools additionally fence the complete projected answer before the request's transaction commits.
+pub(crate) async fn request_for_thread_bounded(
     ctx: &Ctx,
     tx: Tx,
     principal: &Principal,
     thread: Id,
     body: PortOpeningRequest,
+    budget: Option<&Json>,
 ) -> ApiResult<PortOpenReply> {
-    request_for_thread_bounded(ctx, tx, principal, thread, body, None).await
+    Ok(request_outcome(ctx, tx, principal, thread, body, budget)
+        .await?
+        .reply)
 }
 
-/// Tools additionally fence the complete projected answer before the request's transaction commits.
-pub(crate) async fn request_for_thread_bounded(
+async fn request_outcome(
     ctx: &Ctx,
     mut tx: Tx,
     principal: &Principal,
     thread: Id,
     body: PortOpeningRequest,
     budget: Option<&Json>,
-) -> ApiResult<PortOpenReply> {
+) -> ApiResult<Requested> {
     let row = orch_db::queries::threads::thread(&mut tx, thread)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -184,8 +208,19 @@ pub(crate) async fn request_for_thread_bounded(
     {
         crate::port_tools::check_open_budget(ctx, &waited.opening, &reply, arguments)?;
     }
+    crate::routes::ports::request_operation::observe(
+        &mut tx,
+        principal.user(),
+        thread,
+        &waited.opening,
+        waited.created,
+    )
+    .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(reply)
+    Ok(Requested {
+        reply,
+        created: waited.created,
+    })
 }
 
 /// A new link's proof: what its holder is given, its copy sealed to the opening for the one intended
@@ -232,7 +267,7 @@ async fn automatic(
     full_body: &Json,
     resolved: &PortOpeningRequest,
     budget: Option<&Json>,
-) -> ApiResult<PortOpenReply> {
+) -> ApiResult<Requested> {
     let (current, revision) = rows::program(&mut tx, env.id, resolved.port).await?;
     if let Some(desired) = &resolved.program
         && *desired != current
@@ -304,11 +339,22 @@ async fn automatic(
     {
         crate::port_tools::check_open_budget(ctx, &produced.opening, &reply, arguments)?;
     }
+    crate::routes::ports::request_operation::observe(
+        &mut tx,
+        principal.user(),
+        thread,
+        &produced.opening,
+        produced.created,
+    )
+    .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     if produced.created && produced.opening.kind == "host" && produced.opening.host_allocated {
         crate::host_ports::publish_in_background(&ctx.app, produced.opening.id);
     }
-    Ok(reply)
+    Ok(Requested {
+        reply,
+        created: produced.created,
+    })
 }
 
 /// Tells everyone who may decide a new card, in the same transaction: those who hold Ports
@@ -633,6 +679,12 @@ pub(crate) async fn decide(
         }
         None => None,
     };
+    let approval =
+        crate::routes::approvals::views(&mut tx, &principal, &[settled], ctx.now, &ctx.app.engine)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(ApiError::not_found)?;
     let readers = core::port_deciders(&mut tx, env.id, principal.user(), now)
         .await
         .map_err(ApiError::internal)?;
@@ -642,18 +694,6 @@ pub(crate) async fn decide(
     if decided_opening.kind == "host" && decided_opening.host_allocated {
         crate::host_ports::publish_in_background(&ctx.app, decided_opening.id);
     }
-    let mut conn = ctx.app.db.acquire().await?;
-    let approval = crate::routes::approvals::views(
-        &mut conn,
-        &principal,
-        &[settled],
-        ctx.now,
-        &ctx.app.engine,
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(ApiError::not_found)?;
     Ok(ApprovalDecisionReply {
         approval,
         opening_result: Some(PortOpenReply {

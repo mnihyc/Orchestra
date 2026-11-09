@@ -874,6 +874,25 @@ async fn job_and_batch_waits_receive_committed_progress_with_the_same_personal_r
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_display_list_reaches_its_native_projection_even_when_the_inventory_is_empty() {
+    let rig = MachineViews::new().await;
+    let feed = Feed::EnvDisplays(rig.environment);
+    let displays: Vec<orch_api_contract::displays::Display> = Vec::new();
+    rig.server
+        .realtime
+        .publish_list(feed.clone(), json!({"displays":displays}))
+        .await
+        .unwrap();
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, &feed.to_string(), None).await;
+    client.expect("subscribed").await;
+    assert_eq!(data(&mut client, &feed).await["displays"], json!([]));
+    unsub(&mut client, 1).await;
+    drop(client);
+    rig.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_browser_list_also_pushes_changes_and_is_dropped_with_its_view() {
     let rig = MachineViews::new().await;
     let feed = Feed::EnvBrowsers(rig.environment);

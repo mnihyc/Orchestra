@@ -2,7 +2,7 @@
 import { useViewLocation } from '@/features/workbench/pageContext';
 import { Link } from '@tanstack/react-router';
 import type { TFunction } from 'i18next';
-import { ChartColumn } from 'lucide-react';
+import { ChartColumn, Upload } from 'lucide-react';
 
 import { LISTED, type SectionId } from '@/features/admin/sections';
 import { ACTIONS } from '@/ui/actions';
@@ -16,6 +16,7 @@ export const PERSONAL_PAGES = [
   { to: '/settings/security', key: 'security', Icon: ACTIONS.security.Icon },
   { to: '/settings/notifications', key: 'notifications', Icon: ACTIONS.notifications.Icon },
   { to: '/usage', key: 'settingsUsage', Icon: ChartColumn },
+  { to: '/storage', key: 'uploads', Icon: Upload },
   { to: '/settings/tokens', key: 'tokens', Icon: ACTIONS.tokens.Icon },
   { to: '/settings/exports', key: 'exports', Icon: ACTIONS.yourExports.Icon },
   { to: '/settings/imports', key: 'imports', Icon: ACTIONS.import.Icon },
@@ -27,7 +28,7 @@ export function personalTitle(page: PersonalPage, t: TFunction): string {
   return page === 'yourPage' ? t('profile.page.settingsTitle') : t(`screens.${page}.title`);
 }
 export function personalSections(t: TFunction): SectionNavItem[] {
-  return PERSONAL_PAGES.map((entry) => ({ id: entry.key, label: personalTitle(entry.key, t), icon: <entry.Icon className="size-4 shrink-0" aria-hidden />, link: <Link to={entry.to} activeOptions={{ exact: true, includeSearch: true }} /> }));
+  return PERSONAL_PAGES.map((entry) => ({ id: entry.key, label: personalTitle(entry.key, t), icon: <entry.Icon className="size-4 shrink-0" aria-hidden />, link: entry.key === 'uploads' ? <Link to="/storage" search={{ view: 'uploads' }} activeOptions={{ exact: true, includeSearch: true }} /> : <Link to={entry.to} activeOptions={{ exact: true, includeSearch: true }} /> }));
 }
 export function managementSections(t: TFunction): SectionNavItem[] {
   return LISTED.map((entry) => ({ id: entry.id, label: t(`admin.sections.${entry.id}.title`), icon: <entry.icon aria-hidden className="size-4 shrink-0" />,
@@ -40,6 +41,7 @@ export type SettingsNavigation = { kind: 'personal'; current: PersonalPage } | {
 
 /** Settings is an explicit destination; a plain topic address returns to the topic's content. */
 export function settingsNavigation(pathname: string, search: Record<string, unknown> = {}): SettingsNavigation | null {
+  if (pathname.replace(/\/$/, '') === '/storage' && search.view === 'uploads') return { kind: 'personal', current: 'uploads' };
   const personal = PERSONAL_PAGES.find((entry) => entry.to.startsWith('/settings/') && (entry.to === pathname.replace(/\/$/, '') || pathname.startsWith(`${entry.to}/`)));
   if (personal !== undefined) return { kind: 'personal', current: personal.key };
   if (pathname === '/settings/usage' || pathname === '/settings') return { kind: 'personal', current: pathname.endsWith('/usage') ? 'settingsUsage' : 'profile' };

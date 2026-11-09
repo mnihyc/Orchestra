@@ -6,17 +6,16 @@
 //! request that makes an environment does with them. The environments are listed as places a thread
 //! could be put into: those the caller manages, with what they run on and who works there.
 
-use super::{clean_config, environments_of};
-use crate::middleware::authorization::{self, refusals};
+use super::clean_config;
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::invalid;
 use crate::routes::resources::LIST_LIMIT;
-use crate::routes::resources::view::addresses;
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::environment::{
-    self as api, Environment, EnvironmentReason, EnvironmentStatus, Place, PlaceEnvironment,
-    PlaceFacts, PlaceHost, PlaceListQuery,
+    Environment, EnvironmentReason, EnvironmentStatus, PlaceEnvironment, PlaceFacts, PlaceHost,
+    PlaceListQuery,
 };
 use orch_authz::nodes::Page;
 use orch_authz::{Policy, resources};
@@ -29,43 +28,35 @@ use serde_json::json;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::NodePlaceList, node_places);
-}
-
-/// Where an environment made for an org or a project could be, for the caller.
-async fn node_places(ctx: Ctx, query: PlaceListQuery, (): ()) -> ApiResult<Vec<Place>> {
-    let node = ctx.id("id")?;
-    places_for(&ctx, node, &query).await
-}
-
-/// Where an environment made for `home` could be, for the caller: the hosts they may use, then the
-/// environments they manage.
-pub(crate) async fn places_for(
-    ctx: &Ctx,
-    home: Id,
-    query: &PlaceListQuery,
-) -> ApiResult<Vec<Place>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    let hosts = host_choices(&mut conn, &principal, home, query, ctx.now.into()).await?;
-    let mut found: Vec<Place> = hosts.into_iter().map(Place::Host).collect();
-    found.extend(
-        manageable_environments(ctx, &mut conn, &principal)
-            .await?
-            .into_iter()
-            .map(Place::Environment),
-    );
-    Ok(found)
+    crate::routes::resources::environment_places::mount(registry);
 }
 
 /// Host choices from stored reports and the caller's existing connection, without listing environments.
 pub(crate) async fn host_choices(
+    app: &crate::state::AppState,
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
     home: Id,
     query: &PlaceListQuery,
     now: Time,
 ) -> ApiResult<Vec<PlaceHost>> {
+    let request = prepare_request(conn, home, query).await?;
+    let mut hosts = prepare_hosts(conn, principal, home, &request, now).await?;
+    group_host_choices(app, conn, principal, &mut hosts, None, None).await?;
+    render_hosts(conn, hosts).await
+}
+
+/// The existing typed configuration/template input, before scope or host selection.
+pub(crate) struct Request {
+    pub own: Json,
+    pub template: host_rows::TemplateState,
+}
+
+pub(crate) async fn prepare_request(
+    conn: &mut orch_db::Conn,
+    home: Id,
+    query: &PlaceListQuery,
+) -> ApiResult<Request> {
     let own: Json = match &query.config {
         Some(text) => serde_json::from_str(text)
             .map_err(|_| invalid("config", "the environment's own values, as JSON text"))?,
@@ -83,48 +74,229 @@ pub(crate) async fn host_choices(
         .await?
         .filter(|template| template.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
-    let wanted = places::wanted(conn, home, template, &own)
+    Ok(Request { own, template })
+}
+
+/// Native resolved planner operands, shared by all host-choice readers.
+pub(crate) struct HostChoiceInput {
+    pub wanted: places::Wanted,
+    pub minutes_idle: i64,
+}
+
+pub(crate) async fn prepare_host_choices(
+    conn: &mut orch_db::Conn,
+    home: Id,
+    query: &PlaceListQuery,
+) -> ApiResult<HostChoiceInput> {
+    let request = prepare_request(conn, home, query).await?;
+    resolve_request(conn, home, &request).await
+}
+
+async fn resolve_request(
+    conn: &mut orch_db::Conn,
+    home: Id,
+    request: &Request,
+) -> ApiResult<HostChoiceInput> {
+    let wanted = places::wanted(conn, home, request.template.clone(), &request.own)
         .await
         .map_err(ApiError::internal)?;
-    let minutes_idle = places::resolved_for_new(conn, home, &own, keys::ENV_RECYCLE_IDLE_MINUTES)
-        .await
-        .map_err(ApiError::internal)?
-        .and_then(|value| value.as_i64())
-        .unwrap_or(IDLE_MINUTES_DEFAULT);
-    let mut hosts = places::host_places(
+    let minutes_idle =
+        places::resolved_for_new(conn, home, &request.own, keys::ENV_RECYCLE_IDLE_MINUTES)
+            .await
+            .map_err(ApiError::internal)?
+            .and_then(|value| value.as_i64())
+            .unwrap_or(IDLE_MINUTES_DEFAULT);
+    Ok(HostChoiceInput {
+        wanted,
+        minutes_idle,
+    })
+}
+
+pub(crate) async fn prepare_hosts(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    home: Id,
+    request: &Request,
+    now: Time,
+) -> ApiResult<Vec<places::HostPlace>> {
+    prepare_hosts_inner(conn, principal, home, request, now, None).await
+}
+
+pub(crate) async fn prepare_hosts_among(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    home: Id,
+    request: &Request,
+    now: Time,
+    selected: &[Id],
+) -> ApiResult<Vec<places::HostPlace>> {
+    prepare_hosts_inner(conn, principal, home, request, now, Some(selected)).await
+}
+
+async fn prepare_hosts_inner(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    home: Id,
+    request: &Request,
+    now: Time,
+    selected: Option<&[Id]>,
+) -> ApiResult<Vec<places::HostPlace>> {
+    let input = resolve_request(conn, home, request).await?;
+    select_hosts(
         conn,
         principal,
-        &Ask {
-            home,
-            wanted: &wanted,
-            current: None,
-            minutes_idle,
-            now: now.into(),
-        },
+        home,
+        &input,
+        now,
+        selected.map(HostChoiceSet::Window),
     )
     .await
-    .map_err(ApiError::internal)?;
-    // The people and the addresses are read by whoever can read them: the engine only knows ids.
+}
+
+pub(crate) async fn select_host_choices(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    home: Id,
+    input: &HostChoiceInput,
+    now: Time,
+    selected: Option<&[Id]>,
+) -> ApiResult<Vec<places::HostPlace>> {
+    select_hosts(
+        conn,
+        principal,
+        home,
+        input,
+        now,
+        selected.map(HostChoiceSet::Capped),
+    )
+    .await
+}
+
+enum HostChoiceSet<'a> {
+    Capped(&'a [Id]),
+    Window(&'a [Id]),
+}
+
+async fn select_hosts(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    home: Id,
+    input: &HostChoiceInput,
+    now: Time,
+    selected: Option<HostChoiceSet<'_>>,
+) -> ApiResult<Vec<places::HostPlace>> {
+    let ask = Ask {
+        home,
+        wanted: &input.wanted,
+        current: None,
+        minutes_idle: input.minutes_idle,
+        now: now.into(),
+    };
+    match selected {
+        Some(HostChoiceSet::Capped(ids)) => {
+            places::host_places_selected(conn, principal, &ask, ids).await
+        }
+        Some(HostChoiceSet::Window(ids)) => {
+            places::host_places_among(conn, principal, &ask, ids).await
+        }
+        None => places::host_places(conn, principal, &ask).await,
+    }
+    .map_err(ApiError::internal)
+}
+
+pub(crate) async fn render_hosts(
+    conn: &mut orch_db::Conn,
+    mut hosts: Vec<places::HostPlace>,
+) -> ApiResult<Vec<PlaceHost>> {
+    name_host_choices(conn, &mut hosts, None).await?;
+    Ok(hosts.into_iter().map(|host| host.place).collect())
+}
+
+pub(crate) async fn name_host_choices(
+    conn: &mut orch_db::Conn,
+    hosts: &mut [places::HostPlace],
+    bounds: Option<&crate::routes::access::page::NameBounds>,
+) -> ApiResult<()> {
     let host_ids: Vec<Id> = hosts.iter().map(|place| place.place.host.id).collect();
-    let addresses = addresses(conn, &host_ids).await?;
+    let addresses =
+        crate::routes::resources::view::addresses_with_names(conn, &host_ids, bounds).await?;
     let owners: Vec<Id> = hosts.iter().filter_map(|place| place.owner).collect();
     let people = refusals::user_refs(conn, &owners).await?;
-    for place in &mut hosts {
+    for place in hosts {
         place.place.host.address = addresses
             .get(&place.place.host.id)
             .cloned()
             .unwrap_or_default();
         place.place.owner = place.owner.and_then(|owner| people.get(&owner).cloned());
     }
-    Ok(hosts.into_iter().map(|place| place.place).collect())
+    Ok(())
 }
 
-/// The environments the caller manages, as places a thread could be put into.
-async fn manageable_environments(
-    ctx: &Ctx,
+/// Add display metadata only after the native planner has chosen and judged each Host.
+pub(crate) async fn group_host_choices(
+    app: &crate::state::AppState,
     conn: &mut orch_db::Conn,
     principal: &orch_authz::Principal,
-) -> ApiResult<Vec<PlaceEnvironment>> {
+    hosts: &mut [places::HostPlace],
+    names: Option<&crate::routes::access::page::NameBounds>,
+    machines: Option<&std::collections::BTreeSet<Id>>,
+) -> ApiResult<()> {
+    let subjects = hosts
+        .iter()
+        .map(|host| ("host".to_owned(), host.host.id))
+        .collect::<Vec<_>>();
+    let grouped = crate::routes::resources::grouping::Prepared::select(conn, &subjects)
+        .await?
+        .render(app, conn, principal, names, machines)
+        .await?;
+    for host in hosts {
+        let mut grouping = grouped
+            .get(&("host".to_owned(), host.host.id))
+            .cloned()
+            .unwrap_or_default();
+        if machines.is_none_or(|ids| ids.contains(&host.host.machine_id)) {
+            grouping.availability.push(
+                orch_api_contract::resource_groups::ResourceMachineAvailability {
+                    machine_id: host.host.machine_id,
+                    available: host.place.usable,
+                    reason: host
+                        .place
+                        .reasons
+                        .first()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(ApiError::internal)?
+                        .and_then(|value| value.as_str().map(str::to_owned)),
+                },
+            );
+        }
+        host.place.grouping = grouping;
+    }
+    Ok(())
+}
+
+/// The original manageable set with an optional factual selection before its native bound.
+pub(crate) async fn manageable_environment_ids(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    selected: Option<&[Id]>,
+) -> ApiResult<Vec<Id>> {
+    if let Some(ids) = selected {
+        let mut found = resources::effective_among(conn, principal, ids, Policy::default())
+            .await
+            .map_err(ApiError::internal)?
+            .into_iter()
+            .filter(|each| {
+                each.held
+                    .iter()
+                    .any(|held| held.permission == Permission::EnvironmentManage)
+            })
+            .map(|each| each.object.id)
+            .collect::<Vec<_>>();
+        found.sort_unstable();
+        found.truncate(LIST_LIMIT);
+        return Ok(found);
+    }
     let seen = resources::visible(
         conn,
         principal,
@@ -147,12 +319,11 @@ async fn manageable_environments(
         })
         .map(|each| each.resource.id)
         .collect();
-    let views = environments_of(ctx, conn, principal, &managed).await?;
-    Ok(views.into_iter().map(place_of).collect())
+    Ok(managed)
 }
 
 /// An environment the caller manages, as a place.
-fn place_of(view: Environment) -> PlaceEnvironment {
+pub(crate) fn place_of(view: Environment) -> PlaceEnvironment {
     let mut reasons = Vec::new();
     if matches!(
         view.base.status,
@@ -176,6 +347,26 @@ fn place_of(view: Environment) -> PlaceEnvironment {
         }
     }
     PlaceEnvironment {
+        grouping: orch_api_contract::resource_groups::ResourceGrouping {
+            home: Some(view.home.clone()),
+            home_path: Vec::new(),
+            origin_machine: view.machine.clone(),
+            availability: view
+                .machine
+                .as_ref()
+                .map(
+                    |machine| orch_api_contract::resource_groups::ResourceMachineAvailability {
+                        machine_id: machine.id,
+                        available: reasons.is_empty(),
+                        reason: reasons
+                            .first()
+                            .and_then(|reason| serde_json::to_value(reason).ok())
+                            .and_then(|value| value.as_str().map(str::to_owned)),
+                    },
+                )
+                .into_iter()
+                .collect(),
+        },
         facts: PlaceFacts {
             os: view
                 .facts
@@ -196,5 +387,171 @@ fn place_of(view: Environment) -> PlaceEnvironment {
         host: view.host,
         machine: view.machine,
         environment: view.base,
+    }
+}
+
+pub(crate) struct EnvironmentSource {
+    pub environment: Id,
+    pub host: Option<Id>,
+    pub machine: Option<Id>,
+    pub topics: std::collections::BTreeSet<Id>,
+}
+
+pub(crate) struct PreparedEnvironments {
+    inventory: super::PreparedInventory,
+    pub sources: Vec<EnvironmentSource>,
+    pub disclosure: crate::routes::nodes::view::ReferenceDisclosure,
+}
+
+/// The original managed choices, with actual per-row reference associations before rendering.
+pub(crate) async fn prepare_environments(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    seen: &[resources::Seen],
+) -> ApiResult<PreparedEnvironments> {
+    let inventory = super::prepare_inventory(ctx, conn, principal, seen).await?;
+    let mut nodes = std::collections::BTreeSet::new();
+    for thread in &inventory.threads {
+        nodes.extend([thread.thread_id, thread.topic_id]);
+    }
+    let disclosure = crate::routes::nodes::view::reference_disclosure(
+        conn,
+        principal,
+        &nodes.iter().copied().collect::<Vec<_>>(),
+        Policy::default(),
+    )
+    .await?;
+    let live = orch_db::queries::resources::routes::live_machine_ids(
+        conn,
+        inventory.physical_machine_ids(),
+    )
+    .await?;
+    let sources = inventory
+        .rows
+        .iter()
+        .map(|row| EnvironmentSource {
+            environment: row.id,
+            host: inventory
+                .hosted
+                .iter()
+                .find(|(environment, _, _)| *environment == row.id)
+                .map(|(_, host, _)| *host),
+            machine: inventory
+                .machine_facts
+                .get(&row.id)
+                .and_then(|facts| facts.machine_id)
+                .filter(|id| live.contains(id)),
+            topics: inventory
+                .threads
+                .iter()
+                .filter(|thread| {
+                    thread.environment_id == row.id
+                        && disclosure.names.contains(&thread.thread_id)
+                        && disclosure.names.contains(&thread.topic_id)
+                })
+                .map(|thread| thread.topic_id)
+                .collect(),
+        })
+        .collect();
+    Ok(PreparedEnvironments {
+        inventory,
+        sources,
+        disclosure,
+    })
+}
+
+/// The consuming projection's already resolved bounds on protected context names.
+pub(crate) struct EnvironmentNames<'a> {
+    pub limited: bool,
+    pub hosts: &'a std::collections::BTreeSet<Id>,
+    pub machines: &'a std::collections::BTreeSet<Id>,
+    pub topics: &'a std::collections::BTreeSet<Id>,
+}
+
+impl PreparedEnvironments {
+    pub(crate) async fn render(
+        &self,
+        ctx: &Ctx,
+        conn: &mut orch_db::Conn,
+        principal: &orch_authz::Principal,
+        names: EnvironmentNames<'_>,
+    ) -> ApiResult<Vec<PlaceEnvironment>> {
+        let EnvironmentNames {
+            limited,
+            hosts,
+            machines,
+            topics,
+        } = names;
+        let ids = self
+            .sources
+            .iter()
+            .flat_map(|source| source.topics.iter().copied())
+            .collect::<Vec<_>>();
+        let refs = if limited {
+            crate::routes::nodes::view::refs_with_name_sources(
+                conn,
+                principal,
+                &ids,
+                Policy::default(),
+                topics,
+            )
+            .await?
+        } else {
+            crate::routes::nodes::view::refs(conn, principal, &ids, Policy::default()).await?
+        };
+        let mut result = Vec::new();
+        for view in super::show_inventory_prepared(ctx, conn, principal, &self.inventory).await? {
+            let id = view.base.id;
+            let mut place = place_of(view);
+            let source = self
+                .sources
+                .iter()
+                .find(|source| source.environment == id)
+                .ok_or_else(ApiError::not_found)?;
+            if limited {
+                if source.host.is_some_and(|host| !hosts.contains(&host)) {
+                    place.host = None;
+                }
+                if source
+                    .machine
+                    .is_some_and(|machine| !machines.contains(&machine))
+                {
+                    place.machine = None;
+                }
+                for topic in &mut place.topics {
+                    *topic = refs
+                        .get(&topic.id)
+                        .cloned()
+                        .ok_or_else(ApiError::not_found)?;
+                }
+            }
+            result.push(place);
+        }
+        Ok(result)
+    }
+
+    pub(crate) fn preserves(
+        &self,
+        fresh: &Self,
+        hosts: &std::collections::BTreeSet<Id>,
+        machines: &std::collections::BTreeSet<Id>,
+    ) -> bool {
+        self.sources.iter().all(|old| {
+            fresh
+                .sources
+                .iter()
+                .find(|now| now.environment == old.environment)
+                .is_some_and(|now| {
+                    old.host
+                        .filter(|host| hosts.contains(host))
+                        .is_none_or(|host| now.host == Some(host))
+                        && old
+                            .machine
+                            .filter(|machine| machines.contains(machine))
+                            .is_none_or(|machine| now.machine == Some(machine))
+                        && old.topics.is_subset(&now.topics)
+                })
+        })
     }
 }

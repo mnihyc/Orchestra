@@ -57,6 +57,8 @@ async fn created(s: &Scene, topic: Id, title: &str) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id
 }
@@ -175,6 +177,18 @@ async fn read(conn: &mut PgConnection) -> (i64, i64) {
     .unwrap()
 }
 
+/// Sequential reads of the source tables, so setup validation can be excluded from measured calls.
+async fn sequential_sources(conn: &mut PgConnection) -> i64 {
+    sqlx::query_scalar(
+        "SELECT coalesce(sum(pg_stat_get_xact_tuples_returned(c.oid)),0)::bigint FROM pg_class c
+          WHERE c.relnamespace='public'::regnamespace AND c.relkind='r' AND c.relname IN
+                ('related_references','documents','document_blocks','chat_messages','items')",
+    )
+    .fetch_one(conn)
+    .await
+    .unwrap()
+}
+
 /// What a step read in rows and in index entries: the sum of both, since either would grow with the data.
 async fn cost<T>(
     conn: &mut PgConnection,
@@ -187,6 +201,163 @@ async fn cost<T>(
         result,
         (rows_after - rows_before) + (entries_after - entries_before),
     )
+}
+
+/// Capture the next planned shape of this backend's cached statement without its SQL or values.
+async fn among_failure_plan(
+    conn: &mut PgConnection,
+    members: &[rows::Whole<'_>],
+    original_spent: i64,
+) -> Result<serde_json::Value, sqlx::Error> {
+    fn plan_nodes(node: &serde_json::Value) -> serde_json::Value {
+        let mut kept = serde_json::Map::new();
+        for key in [
+            "Node Type",
+            "Parent Relationship",
+            "Relation Name",
+            "Alias",
+            "Index Name",
+            "Actual Rows",
+            "Actual Loops",
+            "Startup Cost",
+            "Total Cost",
+            "Plan Rows",
+            "Plan Width",
+            "Join Type",
+            "Rows Removed by Filter",
+            "Rows Removed by Join Filter",
+            "Shared Hit Blocks",
+            "Shared Read Blocks",
+            "Local Hit Blocks",
+            "Local Read Blocks",
+            "Temp Read Blocks",
+            "Temp Written Blocks",
+        ] {
+            if let Some(value) = node.get(key) {
+                kept.insert(key.to_owned(), value.clone());
+            }
+        }
+        if let Some(condition) = node.get("Index Cond").and_then(serde_json::Value::as_str) {
+            // Record only known column/outer-reference names, never parameter values or SQL text.
+            kept.insert(
+                "Index Bound Columns".into(),
+                json!(
+                    [
+                        "source_kind",
+                        "source_id",
+                        "target_kind",
+                        "target_id",
+                        "target_path_key"
+                    ]
+                    .into_iter()
+                    .filter(|column| condition.contains(*column))
+                    .collect::<Vec<_>>()
+                ),
+            );
+            kept.insert(
+                "Outer Pair Ids".into(),
+                json!(
+                    ["a.id", "b.id"]
+                        .into_iter()
+                        .filter(|column| condition.contains(*column))
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if let Some(children) = node.get("Plans").and_then(serde_json::Value::as_array) {
+            kept.insert("Plans".into(), children.iter().map(plan_nodes).collect());
+        }
+        kept.into()
+    }
+    let prior_statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+        .persistent(false)
+        .fetch_one(&mut *conn)
+        .await?;
+    sqlx::query("SET LOCAL statement_timeout = '2s'")
+        .persistent(false)
+        .execute(&mut *conn)
+        .await?;
+    let mut cached = sqlx::query_as::<_, (String, String, i64, i64, serde_json::Value)>(
+        "SELECT quote_ident(name),encode(sha256(convert_to(statement,'UTF8')),'hex'),
+                custom_plans,generic_plans,
+                jsonb_build_object('server_version',current_setting('server_version'),
+                 'plan_cache_mode',current_setting('plan_cache_mode'),'jit',current_setting('jit'),
+                 'statement_timeout',current_setting('statement_timeout'),
+                 'work_mem',current_setting('work_mem'),'random_page_cost',current_setting('random_page_cost'),
+                 'default_statistics_target',current_setting('default_statistics_target'),
+                 'max_parallel_workers_per_gather',current_setting('max_parallel_workers_per_gather'))
+         FROM pg_prepared_statements WHERE NOT from_sql
+           AND starts_with(statement,'SELECT DISTINCT a.kind from_kind,a.id from_id,b.kind to_kind,b.id to_id')
+           AND parameter_types=ARRAY['uuid[]','text[]']::regtype[]",
+    )
+    .persistent(false)
+    .fetch_all(&mut *conn)
+    .await?;
+    if cached.len() != 1 || members.iter().any(|(kind, _)| *kind != "document") {
+        return Ok(json!({"capture":"unavailable","matching_statements":cached.len()}));
+    }
+    let (name, hash, custom, generic, settings) = cached.pop().ok_or(sqlx::Error::RowNotFound)?;
+    let ids: Vec<Id> = members.iter().map(|(_, id)| *id).collect();
+    // Local values let EXECUTE receive the original arrays without literal identifiers in SQL.
+    sqlx::query(
+        "SELECT set_config('orch_test.links_among_ids',$1::uuid[]::text,true),
+                set_config('orch_test.links_among_kinds',$2::text[]::text,true)",
+    )
+    .bind(&ids)
+    .bind(vec!["document"; members.len()])
+    .persistent(false)
+    .execute(&mut *conn)
+    .await?;
+    let plan: serde_json::Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (FORMAT JSON) EXECUTE {name}
+         (current_setting('orch_test.links_among_ids')::uuid[],
+          current_setting('orch_test.links_among_kinds')::text[])"
+    )))
+    .persistent(false)
+    .fetch_one(&mut *conn)
+    .await?;
+    // EXPLAIN asks for the next cache decision; it does not recover the past executor.
+    let mut report = json!({
+        "capture":"same_cached_statement_explain","analyze":false,"historical_plan_recovered":false,
+        "statement_sha256":hash,"original_examined":original_spent,
+        "cache_before_explain":{"custom":custom,"generic":generic},
+        "prior_statement_timeout":prior_statement_timeout,
+        "settings":settings,"plan":plan_nodes(&plan[0]["Plan"])
+    });
+    // Retain the planned shape even if the ancillary metadata exhausts the existing capture bound.
+    eprintln!("Links among planned diagnostic: {report}");
+    let cache_after = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT custom_plans,generic_plans FROM pg_prepared_statements
+         WHERE encode(sha256(convert_to(statement,'UTF8')),'hex')=$1",
+    )
+    .bind(&hash)
+    .persistent(false)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let statistics: serde_json::Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('relations',
+          (SELECT jsonb_agg(jsonb_build_object('name',c.relname,'kind',c.relkind::text,
+             'pages',c.relpages,'tuples',c.reltuples) ORDER BY c.relname)
+           FROM pg_class c WHERE c.relnamespace='public'::regnamespace AND
+            (c.relname=ANY(ARRAY['related_references','items','threads','thread_continuation_spans','turns'])
+             OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid=ANY(ARRAY[
+                'related_references'::regclass,'items'::regclass,'threads'::regclass,
+                'thread_continuation_spans'::regclass,'turns'::regclass])))),
+          'columns',(SELECT jsonb_agg(jsonb_build_object('relation',tablename,'column',attname,
+             'null_frac',null_frac,'n_distinct',n_distinct,'avg_width',avg_width,
+             'correlation',correlation,'most_common_freqs',most_common_freqs) ORDER BY tablename,attname)
+           FROM pg_stats WHERE schemaname='public'
+             AND tablename IN ('related_references','items','threads','thread_continuation_spans','turns')
+             AND attname IN ('source_kind','source_id','target_kind','target_id','id','kind','thread_id',
+                'contains_internal_marker','continuation_id','active_continuation_id')))",
+    )
+    .persistent(false)
+    .fetch_one(conn)
+    .await?;
+    report["cache_after_explain"] =
+        json!(cache_after.map(|(custom, generic)| json!({"custom":custom,"generic":generic})));
+    report["statistics"] = statistics;
+    Ok(report)
 }
 
 fn scopes(s: &Scene) -> serde_json::Value {
@@ -206,6 +377,7 @@ async fn the_lists_and_the_graph_read_what_is_asked_for_however_often_a_document
             .await
             .unwrap();
     assert!(total > 200_000, "the hub is cited {total} times");
+    let sequential_before = sequential_sources(&mut tx).await;
 
     // The sources, newest first, are found one probe each: a page that crosses the chat of a hundred thousand
     // messages and the thread of as many items reads a few entries per source, not a hundred thousand.
@@ -336,18 +508,35 @@ async fn the_lists_and_the_graph_read_what_is_asked_for_however_often_a_document
     })
     .await;
     assert_eq!(linked.len(), 150, "each of the documents cites the hub");
+    // Freeze every SUT counter before the separate next-plan observation, including on a passing run.
+    let sequential = sequential_sources(&mut tx).await - sequential_before;
+    eprintln!(
+        "Links among measured counters: {}",
+        json!({
+            "members":drawn.len(),"edges":linked.len(),"original_examined":spent,
+            "maximum_examined":151*151*4,"final_sequential":sequential
+        })
+    );
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        among_failure_plan(&mut tx, &drawn, spent),
+    )
+    .await
+    {
+        Ok(Ok(report)) => eprintln!("Links among observation diagnostic: {report}"),
+        Ok(Err(error)) => {
+            let code = error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned());
+            eprintln!("Links among observation diagnostic unavailable: sqlstate={code:?}");
+        }
+        Err(_) => eprintln!("Links among observation diagnostic timed out"),
+    }
     assert!(
         spent <= 151 * 151 * 4,
         "the references among 151 things read {spent}"
     );
-    let sequential: i64 = sqlx::query_scalar(
-        "SELECT coalesce(sum(pg_stat_get_xact_tuples_returned(c.oid)),0)::bigint FROM pg_class c
-          WHERE c.relnamespace='public'::regnamespace AND c.relkind='r' AND c.relname IN
-                ('related_references','documents','document_blocks','chat_messages','items')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .unwrap();
     assert!(
         sequential < 5_000,
         "no table of these was scanned through: {sequential} rows read"

@@ -7,13 +7,15 @@
 
 mod places;
 mod rig;
+#[path = "machine_registration/scopes.rs"]
+mod scopes;
 mod support;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::resources::{
     Agent, MachineAgentCreate, MachineAgentCreateBody, MachineProviderCreate,
-    MachineProviderCreateBody, Provider, ProviderGet, ProviderKeySet, ProviderKeySetBody,
-    ProviderList, ProviderListQuery, ProviderStatus, Upstream,
+    MachineProviderCreateBody, MachineProviderCreateResponse, Provider, ProviderGet,
+    ProviderKeySet, ProviderKeySetBody, ProviderList, ProviderListQuery, ProviderStatus, Upstream,
 };
 use orch_link_contract::commands::{CommandKind, CommandResult, ProviderRefreshResult};
 use orch_types::Id;
@@ -103,7 +105,8 @@ async fn register_agent(
     home: Id,
     kind: &str,
 ) -> orch_api_core::testing::Reply<Agent> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineAgentCreate, &[&s.rig.machine_id])
@@ -115,7 +118,32 @@ async fn register_agent(
             profile: None,
         })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary native agent registration keeps its Full projection")
+        }),
+    }
+}
+
+// These helpers make ordinary browser requests and expect Full only on success.
+// Map the success body without consuming Problem/status/header/raw refusal evidence.
+fn full_registration(
+    reply: orch_api_core::testing::Reply<MachineProviderCreateResponse>,
+) -> orch_api_core::testing::Reply<Provider> {
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary successful machine registration has its Full projection")
+        }),
+    }
 }
 
 async fn register_login(
@@ -124,35 +152,39 @@ async fn register_login(
     home: Id,
     agent: Id,
 ) -> orch_api_core::testing::Reply<Provider> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineProviderCreate, &[&s.rig.machine_id])
         .token(&by.token)
         .body(&MachineProviderCreateBody::Subscription {
-            home_id: home,
+            home_id: Some(home),
             name: "Ada's login".to_owned(),
             agent_id: agent,
             sources: None,
         })
         .send()
-        .await
+        .await;
+    full_registration(reply)
 }
 
 async fn register_api(s: &Scene, by: &Who, home: Id) -> orch_api_core::testing::Reply<Provider> {
-    s.rig
+    let reply = s
+        .rig
         .world
         .app
         .call(MachineProviderCreate, &[&s.rig.machine_id])
         .token(&by.token)
         .body(&MachineProviderCreateBody::Api {
-            home_id: home,
+            home_id: Some(home),
             name: "Ada's key".to_owned(),
             upstreams: vec![upstream()],
             sources: None,
         })
         .send()
-        .await
+        .await;
+    full_registration(reply)
 }
 
 // ---------------------------------------------------------------- a profile for a harness the machine drives
@@ -533,17 +565,34 @@ async fn only_the_owner_of_the_machine_registers_its_login() {
     let org = s.tree.org.base.id;
     let agent = register_agent(&s, &s.ada, org, "fake").await.ok();
     the_login_is_there(&s, "ready");
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM providers")
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
     let stranger = register_login(&s, &s.bea, org, agent.base.id)
         .await
         .problem();
-    assert_eq!(stranger.code, ErrorCode::AuthzDenied);
+    assert_eq!(
+        stranger.code,
+        ErrorCode::NotFound,
+        "the Machine Use door does not disclose a stranger's private machine"
+    );
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM providers")
+        .fetch_one(s.rig.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "the refused registration creates no provider"
+    );
+    assert_eq!(s.rig.commands.issued_of("provider.refresh"), 0);
     let nobody = s
         .rig
         .world
         .app
         .call(MachineProviderCreate, &[&s.rig.machine_id])
         .body(&MachineProviderCreateBody::Subscription {
-            home_id: org,
+            home_id: Some(org),
             name: "x".to_owned(),
             agent_id: agent.base.id,
             sources: None,
@@ -649,7 +698,9 @@ async fn a_provider_on_a_key_the_server_holds_runs_on_the_machine_it_was_registe
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     s.exchange(thread.base.id, 0, "Hello", "Hi").await;
     let starts = started.lock().unwrap().clone();
     assert_eq!(
@@ -668,4 +719,57 @@ async fn a_provider_on_a_key_the_server_holds_runs_on_the_machine_it_was_registe
         1,
         "the lease of the turn is opened on the machine that runs the provider"
     );
+}
+
+#[tokio::test]
+async fn a_subscription_registered_without_a_home_uses_the_guarded_machine_project_default() {
+    let s = Scene::new().await;
+    ada_owns_the_machine(&s, reported()).await;
+    let org = s.tree.org.base.id;
+    let profile = register_agent(&s, &s.ada, org, "fake").await.ok();
+    the_login_is_there(&s, "ready");
+    let home = crate::places::make_project(&s.rig.world, &s.ada, org, "Registered machine home")
+        .await
+        .base
+        .id;
+    sqlx::query("UPDATE machines SET home_id=$2,org_id=$3 WHERE id=$1")
+        .bind(s.rig.machine_id)
+        .bind(home)
+        .bind(org)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let made = s
+        .rig
+        .world
+        .app
+        .call(MachineProviderCreate, &[&s.rig.machine_id])
+        .token(&s.ada.token)
+        .body(&MachineProviderCreateBody::Subscription {
+            home_id: None,
+            name: "Default-home subscription".into(),
+            agent_id: profile.base.id,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    assert_eq!(made.home.id, home);
+    assert_eq!(
+        made.agent.as_ref().map(|agent| agent.id),
+        Some(profile.base.id)
+    );
+    assert_eq!(
+        made.machine.as_ref().map(|machine| machine.id),
+        Some(s.rig.machine_id)
+    );
+    let pinned: bool =
+        sqlx::query_scalar("SELECT home_overridden_at IS NOT NULL FROM providers WHERE id=$1")
+            .bind(made.base.id)
+            .fetch_one(s.rig.db.pool())
+            .await
+            .unwrap();
+    assert!(!pinned);
 }

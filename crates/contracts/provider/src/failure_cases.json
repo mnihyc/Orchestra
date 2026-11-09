@@ -85,7 +85,7 @@
     "codes": [],
     "status": 429,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "429 alone proves no quota or credit problem"
   },
@@ -166,7 +166,7 @@
     "codes": [],
     "status": 500,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -175,7 +175,7 @@
     "codes": [],
     "status": 502,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -184,7 +184,7 @@
     "codes": [],
     "status": 503,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -193,7 +193,7 @@
     "codes": [],
     "status": 529,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -202,7 +202,7 @@
     "codes": [],
     "status": 599,
     "message": "",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -345,7 +345,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -356,7 +356,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -367,7 +367,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -378,7 +378,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -389,7 +389,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -400,7 +400,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -411,7 +411,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -422,7 +422,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -433,7 +433,7 @@
     ],
     "status": null,
     "message": "retry later",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -552,7 +552,7 @@
     "codes": [],
     "status": 500,
     "message": "You've hit your session limit",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "An explicit server status beats words without a typed quota"
   },
@@ -561,7 +561,7 @@
     "codes": [],
     "status": 429,
     "message": "Temporarily limiting requests (not your usage limit)",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -570,7 +570,7 @@
     "codes": [],
     "status": null,
     "message": "Model at capacity",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -579,7 +579,7 @@
     "codes": [],
     "status": null,
     "message": "Too many requests",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -588,7 +588,7 @@
     "codes": [],
     "status": null,
     "message": "Requests throttled",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -597,7 +597,7 @@
     "codes": [],
     "status": null,
     "message": "service overloaded",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Named cause wins over retry advice"
   },
@@ -673,7 +673,7 @@
     ],
     "status": null,
     "message": "unexpected error",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Anthropic api_error is a structured server failure even in a stream"
   },
@@ -750,7 +750,7 @@
     ],
     "status": null,
     "message": "Upstream failed",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Without more precise evidence a server-error wrapper retains the busy default"
   },
@@ -761,7 +761,7 @@
     ],
     "status": 429,
     "message": "Authentication is working; model at capacity",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Authentication mention without a denial cannot reject a shared credential"
   },
@@ -770,7 +770,7 @@
     "codes": [],
     "status": null,
     "message": "Model at capacity; sign in again if this continues",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "Sign-in advice cannot outweigh a named capacity cause"
   },
@@ -854,7 +854,7 @@
     ],
     "status": 429,
     "message": "API Error: Request rejected (429) · Number of request tokens has exceeded your per-minute rate limit.",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "Request-token throughput rejects the request without rejecting the credential"
   },
@@ -863,7 +863,7 @@
     "codes": [],
     "status": 429,
     "message": "The request was rejected because input tokens exceed the rate limit",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "A token count is usage evidence rather than an invalid sign-in token"
   },
@@ -872,7 +872,7 @@
     "codes": [],
     "status": null,
     "message": "The token rate limit requires a pause before the next request",
-    "expected": "provider_busy",
+    "expected": "rate_limited",
     "reason": null,
     "why": "A throughput requirement does not establish credential rejection"
   },
@@ -905,7 +905,7 @@
     ],
     "status": 500,
     "message": "Unexpected upstream failure",
-    "expected": "provider_busy",
+    "expected": "overloaded",
     "reason": null,
     "why": "An otherwise unrefined server error keeps the HTTP busy default"
   },
@@ -948,5 +948,28 @@
     "expected": "harness_error",
     "reason": null,
     "why": "Invalid model output does not by itself establish a broken API transport"
+  },
+  {
+    "name": "Anthropic account without API credit",
+    "codes": [
+      "invalid_request_error"
+    ],
+    "status": 400,
+    "message": "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+    "expected": "provider_exhausted",
+    "reason": null,
+    "why": "The account has no usable API credit; retain the provider answer naming Plans & Billing as the remedy rather than call it a bad key or a generic request failure."
+  },
+  {
+    "name": "API credit benefit restriction",
+    "classify": true,
+    "codes": [
+      "codex_byok_restricted_by_api_credit_promo"
+    ],
+    "status": 400,
+    "message": "This organization cannot be used for Codex usage because it is enrolled in the monthly API Credits benefit with ChatGPT subscriptions. To enable Codex usage, an Organization Owner must cancel the benefit on https://platform.openai.com/settings/organization/billing/overview.",
+    "expected": "model_unavailable",
+    "reason": "credit_program",
+    "why": "The credential is valid, but this organization credit benefit blocks the program. A provider organization owner must cancel that benefit in billing; it is neither an exhausted balance nor a sign-in failure."
   }
 ]

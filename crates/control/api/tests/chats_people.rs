@@ -12,10 +12,10 @@ mod support;
 use chat_world::{Room, text};
 use chrono::Duration;
 use orch_api_contract::chats::{
-    Chat, ChatCanReason, ChatGet, ChatKind, ChatLevel, ChatListScope, ChatMemberAdd,
-    ChatMemberRemove, ChatMessageKind, ChatMessageList, ChatMessageListQuery, ChatRead,
-    ChatReadBody, ChatStateSet, ChatStateSetBody, ChatSystemEvent, ChatUpdate, ChatUpdateBody,
-    OrgChatCreate, OrgChatCreateBody, OrgChatList, OrgChatListQuery,
+    Chat, ChatCanReason, ChatGet, ChatKind, ChatLevel, ChatListScope, ChatManagerSet,
+    ChatManagerSetBody, ChatMemberAdd, ChatMemberRemove, ChatMessageKind, ChatMessageList,
+    ChatMessageListQuery, ChatRead, ChatReadBody, ChatStateSet, ChatStateSetBody, ChatSystemEvent,
+    ChatUpdate, ChatUpdateBody, OrgChatCreate, OrgChatCreateBody, OrgChatList, OrgChatListQuery,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeGet;
@@ -73,13 +73,18 @@ async fn two_people_have_one_direct_chat_in_an_org_wherever_they_open_it_from() 
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.cai.id()],
             name: None,
         })
         .send()
         .await;
     assert_eq!(opened.status, 201);
-    let chat = opened.ok();
+    let chat = opened
+        .ok()
+        .into_full()
+        .expect("the ordinary opening is full");
     assert_eq!(chat.base.kind, ChatKind::Direct);
     assert_eq!(chat.base.org_id, room.root);
     assert_eq!(members_of(&chat).await, ["bea", "cai"]);
@@ -99,13 +104,23 @@ async fn two_people_have_one_direct_chat_in_an_org_wherever_they_open_it_from() 
         .call(OrgChatCreate, &[&room.root])
         .token(&room.cai.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.bea.id()],
             name: None,
         })
         .send()
         .await;
     assert_eq!(again.status, 200, "it exists already");
-    assert_eq!(again.ok().base.id, chat.base.id);
+    assert_eq!(
+        again
+            .ok()
+            .into_full()
+            .expect("the ordinary replay is full")
+            .base
+            .id,
+        chat.base.id
+    );
     assert_eq!(
         room.direct(&room.bea, &room.cai).await.base.id,
         chat.base.id
@@ -152,6 +167,8 @@ async fn a_direct_chat_is_read_and_written_by_its_two_people_and_does_not_exist_
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.bea.id()],
             name: None,
         })
@@ -555,6 +572,8 @@ async fn a_member_makes_a_group_for_the_people_they_name_and_it_has_at_most_the_
             .call(OrgChatCreate, &[&room.root])
             .token(&room.bea.token)
             .body(&OrgChatCreateBody {
+                visibility: None,
+                home_id: None,
                 user_ids: vec![room.cai.id()],
                 name: Some(name.to_owned()),
             })
@@ -572,6 +591,8 @@ async fn a_member_makes_a_group_for_the_people_they_name_and_it_has_at_most_the_
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.cai.id(), room.dee.id(), room.ada.id()],
             name: None,
         })
@@ -587,6 +608,8 @@ async fn a_member_makes_a_group_for_the_people_they_name_and_it_has_at_most_the_
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.cai.id(), room.eve.id()],
             name: None,
         })
@@ -602,6 +625,8 @@ async fn a_member_makes_a_group_for_the_people_they_name_and_it_has_at_most_the_
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![],
             name: Some("Empty".to_owned()),
         })
@@ -615,6 +640,8 @@ async fn a_member_makes_a_group_for_the_people_they_name_and_it_has_at_most_the_
         .call(OrgChatCreate, &[&room.root])
         .token(&room.eve.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.bea.id()],
             name: None,
         })
@@ -642,6 +669,8 @@ async fn where_direct_chats_are_off_nothing_new_is_started_and_what_exists_is_re
         .call(OrgChatCreate, &[&room.root])
         .token(&room.bea.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.dee.id()],
             name: None,
         })
@@ -666,7 +695,7 @@ async fn where_direct_chats_are_off_nothing_new_is_started_and_what_exists_is_re
 }
 
 #[tokio::test]
-async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes_others() {
+async fn a_manager_adds_and_removes_members_and_an_ordinary_member_may_leave() {
     let room = Room::new().await;
     let group = room
         .group(&room.bea, &[&room.cai], Some("Release"))
@@ -681,10 +710,13 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
             .token(&by.token);
         async move { call.send().await }
     };
-    // Cai, who did not make it, adds Gus.
-    let added = add(&room.cai, &room.gus).await.ok();
+    assert_eq!(
+        add(&room.cai, &room.gus).await.problem().code,
+        ErrorCode::ChatManagerRequired
+    );
+    let added = add(&room.bea, &room.gus).await.ok().into_full().unwrap();
     assert_eq!(added.members.as_ref().unwrap().len(), 3);
-    let again = add(&room.cai, &room.gus).await.ok();
+    let again = add(&room.bea, &room.gus).await.ok().into_full().unwrap();
     assert_eq!(
         again.seq, added.seq,
         "adding somebody who is in changes nothing"
@@ -697,7 +729,7 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
     );
     assert_eq!(
         add(&room.ada, &room.ada).await.problem().code,
-        ErrorCode::NotFound
+        ErrorCode::ChatManagerRequired
     );
 
     let lines: Vec<(ChatSystemEvent, Option<String>)> = room
@@ -727,7 +759,7 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
     // Only the one who made the group takes another out.
     assert_eq!(
         remove(&room.cai, &room.gus).await.problem().code,
-        ErrorCode::AuthzDenied
+        ErrorCode::ChatManagerRequired
     );
     assert_eq!(remove(&room.bea, &room.gus).await.status, 204);
     assert_eq!(
@@ -742,7 +774,14 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
         ["bea"]
     );
     assert_eq!(
-        add(&room.bea, &room.cai).await.ok().members.unwrap().len(),
+        add(&room.bea, &room.cai)
+            .await
+            .ok()
+            .into_full()
+            .unwrap()
+            .members
+            .unwrap()
+            .len(),
         2
     );
     let actions = room.audit_of(group).await;
@@ -770,7 +809,7 @@ async fn any_member_adds_another_member_a_member_may_leave_and_the_maker_removes
 }
 
 #[tokio::test]
-async fn a_group_is_renamed_by_a_member_and_null_names_it_after_its_members_again() {
+async fn a_group_is_renamed_by_a_manager_and_null_names_it_after_its_members_again() {
     let room = Room::new().await;
     let group = room
         .group(&room.bea, &[&room.cai], Some("Release"))
@@ -784,17 +823,27 @@ async fn a_group_is_renamed_by_a_member_and_null_names_it_after_its_members_agai
             .call(ChatUpdate, &[&group])
             .token(&by.token)
             .body(&ChatUpdateBody {
-                name: name.map(str::to_owned),
+                visibility: None,
+                home_id: None,
+                name: Some(name.map(str::to_owned)),
             });
         async move { call.send().await }
     };
-    let renamed = rename(&room.cai, Some("Launch")).await.ok();
+    assert_eq!(
+        rename(&room.cai, Some("Launch")).await.problem().code,
+        ErrorCode::ChatManagerRequired
+    );
+    let renamed = rename(&room.bea, Some("Launch"))
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.base.name.as_deref(), Some("Launch"));
-    let cleared = rename(&room.bea, None).await.ok();
+    let cleared = rename(&room.bea, None).await.ok().into_full().unwrap();
     assert!(cleared.base.name.is_none());
     assert_eq!(
         rename(&room.dee, Some("Mine")).await.problem().code,
-        ErrorCode::NotFound
+        ErrorCode::ChatManagerRequired
     );
     assert_eq!(
         rename(&room.bea, Some("")).await.problem().code,
@@ -817,7 +866,9 @@ async fn a_group_is_renamed_by_a_member_and_null_names_it_after_its_members_agai
         .call(ChatUpdate, &[&direct])
         .token(&room.bea.token)
         .body(&ChatUpdateBody {
-            name: Some("Us".to_owned()),
+            visibility: None,
+            home_id: None,
+            name: Some(Some("Us".to_owned())),
         })
         .send()
         .await
@@ -844,7 +895,7 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         async move { call.send().await }
     };
     // A developer holds access.external as shipped.
-    let with_guest = add(&room.cai, &room.eve).await.ok();
+    let with_guest = add(&room.cai, &room.eve).await.ok().into_full().unwrap();
     assert_eq!(with_guest.guests, [room.eve.id()]);
     assert_eq!(with_guest.members.as_ref().unwrap().len(), 3);
 
@@ -874,7 +925,7 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
     // A guest adds nobody, starts no chat, and cannot read the org's other chats.
     assert_eq!(
         add(&room.eve, &room.fay).await.problem().code,
-        ErrorCode::NotFound
+        ErrorCode::ChatManagerRequired
     );
     let starts = room
         .world
@@ -882,6 +933,8 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         .call(OrgChatCreate, &[&room.root])
         .token(&room.eve.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.bea.id()],
             name: None,
         })
@@ -895,7 +948,22 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         ErrorCode::NotFound
     );
 
-    // A viewer holds no right to name an outsider; they are told who does.
+    // Even a manager needs the home's outside-naming policy or its explicit row.
+    room.world
+        .app
+        .call(ChatManagerSet, &[&group, &room.bea.id()])
+        .token(&room.cai.token)
+        .body(&ChatManagerSetBody { manager: true })
+        .send()
+        .await
+        .ok();
+    room.world
+        .set_at(
+            orch_settings::Target::Node(room.root),
+            "sharing.allow_external",
+            json!(false),
+        )
+        .await;
     let refused = add(&room.bea, &room.fay).await.problem();
     assert_eq!(refused.code, ErrorCode::SharingExternalForbidden);
     assert!(
@@ -903,7 +971,14 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
             .as_array()
             .is_some_and(|ask| !ask.is_empty())
     );
-    // The one who made the group may where the policy lets owners.
+    room.world
+        .set_at(
+            orch_settings::Target::Node(room.root),
+            "sharing.allow_external",
+            json!(true),
+        )
+        .await;
+    // The current manager may where the policy allows it.
     let made = room
         .group(&room.bea, &[&room.cai], Some("Mine"))
         .await
@@ -916,7 +991,9 @@ async fn somebody_from_outside_joins_a_group_as_a_guest_only_when_the_one_who_br
         .token(&room.bea.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(by_maker.guests, [room.fay.id()]);
     room.world
         .set_at(
@@ -1003,6 +1080,8 @@ async fn somebody_who_left_the_org_no_longer_reads_its_chats_and_the_other_perso
         .call(OrgChatCreate, &[&room.root])
         .token(&room.cai.token)
         .body(&OrgChatCreateBody {
+            visibility: None,
+            home_id: None,
             user_ids: vec![room.bea.id()],
             name: None,
         })

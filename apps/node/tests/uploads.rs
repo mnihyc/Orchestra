@@ -1,4 +1,5 @@
 //! A Files upload cancelled after real native writes waits for the connector's stopped result and preserves the original target.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -215,7 +216,7 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
     );
     world.api.download.hold(blob);
     let id = new_id();
-    let job: Job = app
+    let orch_api_contract::workspace::JobCreationResponse::Full(job) = app
         .call(EnvironmentUploadWrite, &[&unit.environment_id, &id])
         .token(&token)
         .query(&ThroughThreadQuery::default())
@@ -227,7 +228,10 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         })
         .send()
         .await
-        .ok();
+        .ok()
+    else {
+        panic!("the first upload write answers with its full job");
+    };
     assert_eq!(job.id, id);
     world.api.download.entered().await;
     let staged = staged_files(&lab, &unit.name).await;
@@ -261,7 +265,12 @@ async fn cancelling_a_dispatched_files_write_joins_the_real_connector_before_can
         current.plan["active_command"]["machine"],
         serde_json::json!(machine)
     );
-    let stopping = app.call(JobCancel, &[&id]).token(&token).send().await.ok();
+    let stopping = app.call(JobCancel, &[&id]).token(&token).send().await;
+    assert!(stopping.status.is_success(), "{}", stopping.status);
+    let stopping = stopping
+        .ok()
+        .into_full()
+        .expect("this ordinary cancellation control expects the complete native job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     eventually(

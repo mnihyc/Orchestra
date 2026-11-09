@@ -468,8 +468,13 @@ export class WorkspaceWorld implements Part {
       const environment = found[1] ?? '';
       const thread = this.door(person, environment, query, 'files.view');
       const all = query.get('all') === 'true' || thread === null;
-      const list = (this.changes.get(environment) ?? []).filter((change) => all || change.thread_id === thread);
-      return { status: 200, body: { changes: list } };
+      const turn = query.get('turn_id');
+      const item = query.get('item_id');
+      const list = (this.changes.get(environment) ?? []).filter((change) => (all || change.thread_id === thread)
+        && (turn === null || this.world.threads.changeTurn(change.thread_id, change.item_id) === turn) && (item === null || change.item_id === item));
+      const latest = new Map<string, EnvironmentChange>();
+      for (const change of [...list].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))) latest.set(change.path, change);
+      return { status: 200, body: { changes: [...latest.values()] } };
     }
     if ((found = /^GET \/environments\/([^/]+)\/git\/status$/.exec(route))) {
       const environment = found[1] ?? '';

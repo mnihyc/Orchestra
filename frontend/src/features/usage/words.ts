@@ -54,15 +54,33 @@ export function modelsWords(patterns: readonly string[], t: TFunction): string {
   return patterns.length === 0 ? t('caps.on.all') : selectionWords(patterns, (pattern) => patternWords(pattern, t), t, i18n.resolvedLanguage ?? i18n.language);
 }
 
+/** Common purpose labels retain an unknown future id rather than dropping it. */
+export function purposeLabel(purpose:string,t:TFunction):string {
+  return t(`usage.purposes.${purpose}` as 'usage.purposes.summary',{defaultValue:purpose});
+}
+/** Service patterns share the name matcher while keeping their offering kind visible. */
+export function servicePatternWords(pattern:string,t:TFunction):string {
+  return pattern.startsWith('@')?t('caps.on.serviceGroup',{name:pattern.slice(1)}):patternWords(pattern,t);
+}
+/** The actual union of selected offering kinds; a service-only selection never says all models. */
+export function offeringsWords(cap:{models:readonly string[];services?:readonly string[];meter?:UsageCap['meter']},t:TFunction):string {
+  const services=cap.services??[];
+  if(cap.meter!=='credits' && services.length===0) return modelsWords(cap.models,t);
+  if(cap.models.length===0 && services.length===0) return t('caps.on.allOfferings');
+  const serviceWords=services.length===0?null:t('caps.on.services',{names:selectionWords(services,(name)=>servicePatternWords(name,t),t,i18n.resolvedLanguage??i18n.language)});
+  return [cap.models.length===0?null:modelsWords(cap.models,t),serviceWords].filter((part):part is string=>part!==null).join(' + ');
+}
+
 /** What a tier is called: its id, with a capital. */
 export function tierWords(tier: string): string {
   return tier.length === 0 ? tier : `${tier.charAt(0).toUpperCase()}${tier.slice(1)}`;
 }
 
 /** What else a cap narrows its models to, as phrases to follow them: the agents and the speeds. */
-export function narrowingWords(cap: { harness_kinds: readonly string[]; tiers: readonly string[]; harnesses?: readonly HarnessKindName[] }, t: TFunction, programTitle?: ProgramTitle, locale = i18n.resolvedLanguage ?? i18n.language): string[] {
+export function narrowingWords(cap: { harness_kinds: readonly string[]; tiers: readonly string[]; harnesses?: readonly HarnessKindName[];purposes?:readonly string[] }, t: TFunction, programTitle?: ProgramTitle, locale = i18n.resolvedLanguage ?? i18n.language): string[] {
   const hasNames = cap.harnesses !== undefined && cap.harnesses.length > 0;
   return [
+    ...((cap.purposes??[]).length===0?[]:[t('caps.forPurposes',{purposes:selectionWords(cap.purposes??[],(purpose)=>purposeLabel(purpose,t),t,locale)})]),
     ...(cap.harness_kinds.length === 0 ? [] : [t('caps.with', { agents: !hasNames && programTitle === undefined
       ? t('caps.programNamesUnreported', { count: cap.harness_kinds.length, total: formatNumber(cap.harness_kinds.length, locale) })
       : selectionWords(cap.harness_kinds, (kind, index) => {
@@ -89,7 +107,7 @@ export function placeWords(node: Pick<NodeRef, 'kind' | 'name' | 'redacted'>, t:
 
 /** The row names who may use which models and where, without exposing an account's address. */
 export function capTitle(cap: UsageCap, t: TFunction, programTitle?: ProgramTitle): string {
-  return t('caps.title',{who:whoWords(cap,t),models:[modelsWords(cap.models,t),...narrowingWords(cap,t,programTitle)].join(' '),where:whereWords(cap,t)});
+  return t('caps.title',{who:whoWords(cap,t),models:[offeringsWords(cap,t),...narrowingWords(cap,t,programTitle)].join(' '),where:whereWords(cap,t)});
 }
 
 /** The day a period begins on, written for the reader's language; the days are UTC. A day that is none (a server that has not got one to give) is written as it came. */
@@ -144,6 +162,8 @@ export interface SentenceParts {
   period: UsageCap['period'];
   counted_from: string | null;
   models: readonly string[];
+  services?:readonly string[];
+  purposes?:readonly string[];
   harness_kinds: readonly string[];
   harnesses?: UsageCap['harnesses'];
   tiers: readonly string[];
@@ -157,7 +177,7 @@ export interface SentenceParts {
 export function sentenceOf(parts: SentenceParts, t: TFunction, locale: string, programTitle?: ProgramTitle): string {
   const words = {
     who: parts.who,
-    on: modelsWords(parts.models, t),
+    on: offeringsWords(parts,t),
     extra: narrowingWords(parts, t, programTitle, locale)
       .map((phrase) => ` ${phrase}`)
       .join(''),

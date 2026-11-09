@@ -105,6 +105,66 @@ pub(crate) async fn generation_current(
     Ok(generation == Some(lane.environment_generation))
 }
 
+/// Immutable native admission result; generated transition identities are allocated only on apply.
+#[derive(Clone)]
+pub enum Prepared {
+    Replay {
+        thread: Id,
+        accepted: ThreadContinuationAccepted,
+    },
+    Change(Box<Change>),
+}
+#[derive(Clone)]
+pub struct Change {
+    transaction: i64,
+    actor: Id,
+    row: threads::ThreadRow,
+    thread: Id,
+    client: String,
+    request: Request,
+    hash: orch_types::Hash,
+    retry: bool,
+    needs_prefix: bool,
+    retained_prefix: Option<orch_agent_contract::history::NativeInputPrefix>,
+    chosen: rows::ContinuationRow,
+    source: rows::ContinuationRow,
+    source_lane: Lane,
+    segment: threads::SegmentRow,
+    source_turn: threads::TurnRow,
+    boundary: Option<i64>,
+    original_lane: Option<Lane>,
+    content_request: Option<InputRequest>,
+    current: Expected,
+    options: orch_api_contract::forks::AppliedChangeOptions,
+    byte_sources: Vec<(orch_types::Hash, orch_chat::following::BlobOrigin)>,
+}
+impl Prepared {
+    pub fn with_byte_sources(
+        mut self,
+        selected: Vec<(orch_types::Hash, orch_chat::following::BlobOrigin)>,
+    ) -> Self {
+        if let Self::Change(value) = &mut self {
+            value.byte_sources = selected;
+        }
+        self
+    }
+    pub fn thread(&self) -> Id {
+        match self {
+            Self::Replay { thread, .. } => *thread,
+            Self::Change(value) => value.thread,
+        }
+    }
+    pub fn content(&self) -> &[orch_api_contract::threads::ContentPart] {
+        match self {
+            Self::Replay { .. } => &[],
+            Self::Change(value) => value.request.content.as_deref().unwrap_or(&[]),
+        }
+    }
+    pub fn replay(&self) -> bool {
+        matches!(self, Self::Replay { .. })
+    }
+}
+
 pub(super) async fn accept(
     engine: &Engine,
     unit: &mut Unit<'_>,
@@ -113,6 +173,32 @@ pub(super) async fn accept(
     client: &str,
     request: Request,
 ) -> Result<ThreadContinuationAccepted, Error> {
+    let prepared = prepare(engine, unit, principal, thread, client, request).await?;
+    apply(engine, unit, principal, prepared).await
+}
+
+#[derive(Clone)]
+pub struct Header {
+    thread: Id,
+    client: String,
+    row: threads::ThreadRow,
+    hash: orch_types::Hash,
+    replay: Option<ThreadContinuationAccepted>,
+}
+impl Header {
+    pub fn replay(&self) -> bool {
+        self.replay.is_some()
+    }
+}
+
+/// The original native thread/hash/replay prefix, before consuming any content source.
+pub async fn header(
+    unit: &mut Unit<'_>,
+    principal: &Principal,
+    thread: Id,
+    client: &str,
+    request: &Request,
+) -> Result<Header, Error> {
     if client.trim().is_empty() {
         return Err(Error::Invalid(
             "A continuation request needs its replay identity.",
@@ -126,20 +212,70 @@ pub(super) async fn accept(
         return Err(Error::NotFound);
     }
     require_view(unit.conn, principal, thread).await?;
-    let hash = recipe::request_hash(&request)?;
+    let hash = recipe::request_hash(request)?;
     if let Some(found) = rows::replay(unit.conn, thread, principal.caller().user(), client).await? {
         if !found.same_body(&hash) {
             return Err(Error::Conflict(
                 "This replay identity already names different words or another continuation.",
             ));
         }
-        return Ok(ThreadContinuationAccepted {
-            operation_id: found.id,
-            continuation_id: found.target_continuation_id,
-            input_id: found.input_id,
-            job: serde_json::from_value(found.job_snapshot)?,
-            seq: row.seq(),
+        return Ok(Header {
+            thread,
+            client: client.to_owned(),
+            row: row.clone(),
+            hash,
+            replay: Some(ThreadContinuationAccepted {
+                operation_id: found.id,
+                continuation_id: found.target_continuation_id,
+                input_id: found.input_id,
+                job: serde_json::from_value(found.job_snapshot)?,
+                seq: row.seq(),
+            }),
         });
+    }
+    Ok(Header {
+        thread,
+        client: client.to_owned(),
+        row,
+        hash,
+        replay: None,
+    })
+}
+
+pub async fn prepare(
+    engine: &Engine,
+    unit: &mut Unit<'_>,
+    principal: &Principal,
+    thread: Id,
+    client: &str,
+    request: Request,
+) -> Result<Prepared, Error> {
+    let opening = header(unit, principal, thread, client, &request).await?;
+    prepare_from_header(engine, unit, principal, opening, request).await
+}
+
+/// Continue the same native preparation after its genuine replay/content source decision.
+pub async fn prepare_from_header(
+    engine: &Engine,
+    unit: &mut Unit<'_>,
+    principal: &Principal,
+    header: Header,
+    request: Request,
+) -> Result<Prepared, Error> {
+    let Header {
+        thread,
+        client,
+        row,
+        hash,
+        replay,
+    } = header;
+    if hash != recipe::request_hash(&request)? {
+        return Err(Error::Invalid(
+            "The continuation changed its native request body.",
+        ));
+    }
+    if let Some(accepted) = replay {
+        return Ok(Prepared::Replay { thread, accepted });
     }
     if row.archived_at.is_some() {
         return Err(InputError::Archived.into());
@@ -432,6 +568,81 @@ pub(super) async fn accept(
         ),
         None => None,
     };
+    let options = crate::fork_plan::applied_options(unit.conn, thread, None)
+        .await
+        .map_err(|error| Error::Internal(EngineError::unreadable(error)))?;
+    let transaction: i64 = sqlx::query_scalar("SELECT txid_current()::bigint")
+        .fetch_one(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    Ok(Prepared::Change(Box::new(Change {
+        transaction,
+        actor: principal.user(),
+        row,
+        thread,
+        client: client.to_owned(),
+        request,
+        hash,
+        retry,
+        needs_prefix,
+        retained_prefix,
+        chosen,
+        source,
+        source_lane,
+        segment,
+        source_turn,
+        boundary,
+        original_lane,
+        content_request,
+        current,
+        options,
+        byte_sources: Vec::new(),
+    })))
+}
+
+/// Apply only the exact native operands prepared on this actor's still-open transaction.
+pub async fn apply(
+    engine: &Engine,
+    unit: &mut Unit<'_>,
+    principal: &Principal,
+    prepared: Prepared,
+) -> Result<ThreadContinuationAccepted, Error> {
+    let value = match prepared {
+        Prepared::Replay { accepted, .. } => return Ok(accepted),
+        Prepared::Change(value) => *value,
+    };
+    let Change {
+        transaction,
+        actor,
+        row,
+        thread,
+        client,
+        request,
+        hash,
+        retry,
+        needs_prefix,
+        retained_prefix,
+        chosen,
+        source,
+        source_lane,
+        segment,
+        source_turn,
+        boundary,
+        original_lane,
+        content_request,
+        current,
+        options,
+        byte_sources,
+    } = value;
+    let actual: i64 = sqlx::query_scalar("SELECT txid_current()::bigint")
+        .fetch_one(&mut *unit.conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    if actual != transaction || actor != principal.user() {
+        return Err(Error::Internal(EngineError::unreadable(
+            "the continuation changed its native prepared transaction or actor",
+        )));
+    }
     let operation = new_id();
     let target = if request.kind == Kind::Edit {
         new_id()
@@ -440,9 +651,6 @@ pub(super) async fn accept(
     };
     let input_id = request.content.as_ref().map(|_| new_id());
     let segment_id = new_id();
-    let options = crate::fork_plan::applied_options(unit.conn, thread, None)
-        .await
-        .map_err(|error| Error::Internal(EngineError::unreadable(error)))?;
     let now = unit.now();
     let seq = unit.stamp(thread).await?;
     if request.kind == Kind::Edit {
@@ -576,6 +784,13 @@ pub(super) async fn accept(
         thread_id: thread,
         actor_id: principal.caller().user(),
         authorization_token: principal.caller().grant().and_then(|grant| grant.token()),
+        operation_origin: principal
+            .caller()
+            .admitted_operation()
+            .map(|_| orch_authz::CapturedOperation::capture(principal.caller()))
+            .transpose()
+            .map_err(EngineError::unreadable)?,
+        byte_sources,
         request: request.clone(),
         request_hash: hash,
         needs_prefix,

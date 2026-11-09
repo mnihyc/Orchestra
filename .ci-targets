@@ -1,0 +1,31 @@
+# Central traces for the lanes blocked on them (D-2009), on B23. One line per check; leading NAME=value words are
+# that check's settings (diag branch only). Logs come back to the lanes by case.
+# scope-map-b (RUST-B21B.md)
+test -p orch-engine --test initial_files connected_copy::an_actual_connected_move_delivers_original_bytes_before_ending_the_reviewed_source -- --exact --nocapture --test-threads=1
+test -p orch-api-core --test chat_read_all_scopes -- --nocapture --test-threads=1
+test -p orch-api-core --test chat_duplicates move_destination_ownership_follows_active_managers_and_never_creator_attribution -- --exact --nocapture
+test -p orch-api-core --test forward_operation_scopes queued_forward_ -- --nocapture --test-threads=1
+test -p orch-api-core --test chat_operation_sources an_agent_ask_rechecks_live_key_recipient_policy_and_actual_association -- --exact --nocapture
+test -p orch-api-core --test chat_operation_sources future_attachment_delivery_still_requires_a_current_complete_blob_witness -- --exact --nocapture
+test -p orch-api-core --test document_copy_scopes cross_org_document_copy_requires_export_beyond_view_and_the_source_policy -- --exact --nocapture
+test -p orch-api-core --test chats_resource_homes a_group_move_needs_chat_view_at_its_destination_and_never_changes_its_root -- --exact --nocapture
+# scope-map-b and bg-wake-facts (TRIAGE-FORK-DUP): the whole forks binary, traced
+test RUST_LOG=warn,orch_api::native_operations=debug,orch_api_core::native_operations=debug ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test forks -- --nocapture --test-threads=1
+# bg-wake-facts
+test -p orch-api-core --test kmounts_mcp import_scopes::completed_native_import_replays_current_server_without_another_copy_or_old_management -- --exact --nocapture
+test -p orch-adapter-claude-code --test background_retention --test background_wake -- --nocapture
+test -p orch-api-core --test resource_groups home_rules:: -- --nocapture
+# provider-ceiling
+test ORCH_TEST_PROVIDER_COPY_ERRORS=1 -p orch-api-core --test provider_duplicates configuration::provider_copy_rechecks_the_real_source_scope_after_its_new_models_wait_to_insert -- --exact --nocapture
+test ORCH_TEST_SQL_TIMINGS=1 -p orch-api-core --test provider_plan provider_window_reads_have_fixed_statement_counts_and_pages_reject_a_changed_snapshot -- --exact --nocapture
+test ORCH_TEST_SQL_TIMINGS=1 -p orch-api-core --test provider_read_latency a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_hundred_milliseconds -- --exact --nocapture
+test -p orch-api-core --test settings a_lock_decides_the_key_below_it_and_only_whoever_makes_the_rules_sets_or_lifts_it -- --exact --nocapture
+test -p orch-api-core --test provider_plan a_reader_without_provider_view_gets_neither_forecasts_nor_plan_points -- --exact --nocapture
+test -p orch-engine --test provider_sign_in completed_sign_ins_run_on_default_stacks_even_if_the_suite_stack_is_larger -- --exact --nocapture
+# scope-map-a (RUST-B21B.md): the provider duplicates binary traced, then the move and history cases
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test provider_duplicates -- --nocapture --test-threads=1
+test -p orch-api-core --test document_tree_operation_scopes cross_root_move_is_one_native_copy_and_retained_deletion_with_fresh_ids_and_access -- --exact --nocapture --test-threads=1
+test -p orch-api-core --test chat_duplicates moving_routes:: -- --nocapture --test-threads=1
+test -p orch-api-core --test thread_history_pages opening_is_a_window_and_old_item_pages_supply_their_own_historical_references -- --exact --nocapture --test-threads=1
+# ask-core (RUST-B19-ask): the finish-turn case alone
+test -p orch-engine --test forks a_running_turn_is_interrupted_at_once_when_the_options_say_so_and_a_wait_that_runs_out_changes_nothing -- --exact --nocapture

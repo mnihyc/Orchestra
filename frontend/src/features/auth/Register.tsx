@@ -4,7 +4,7 @@
  * invitation it first says what the invitation is. Without one it shows the form where anybody may
  * register, and otherwise says in one sentence how people get in here.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useRouter } from '@tanstack/react-router';
 import { CircleCheck, DoorClosed, MailCheck, Ticket } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -14,13 +14,15 @@ import { metaQuery, nameAvailabilityQuery, PASSWORD_MIN_CHARS, register, resendC
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
 import { invitationQuery } from '@/api/users';
 import { AuthCard } from '@/features/auth/Frame';
+import { CreatedAccount } from '@/features/auth/CreatedAccount';
+import { InvitationTermsChoice, termsRefused, useInvitationTerms } from '@/features/auth/Terms';
 import { IdentityProviders } from '@/features/auth/IdentityProviders';
 import { acceptedDestination } from '@/features/auth/accepted';
 import { useIdentityRules } from '@/features/auth/identityRules';
 import { InvitationSkeleton, InvitationSpent, InvitationSummary, isSpent } from '@/features/auth/Invitation';
 import type { InvitationAcceptReply, InvitationPreview } from '@/generated/api-types';
 import { useDebounced } from '@/lib/debounce';
-import { useForm } from '@/lib/forms';
+import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
@@ -33,13 +35,17 @@ type Ended =
   /** Signed in; the accepted reply alone supplies the permitted destination. */
   | { as: 'in'; accepted: InvitationAcceptReply | null; invited: boolean; personalOrg: boolean }
   /** The address must be confirmed first: a link went to it. */
-  | { as: 'confirm'; login: string; email: string };
+  | { as: 'confirm'; login: string; email: string }
+  /** The original account was made; sign-in is the only next act. */
+  | { as: 'already' };
 
-export function Register({ invitation }: { invitation: string | null }) {
+export function Register({ invitation, acceptedTermsHash = null }: { invitation: string | null; acceptedTermsHash?: string | null }) {
   const { t } = useTranslation();
   const router = useRouter();
   const meta = useQuery(metaQuery).data;
   const preview = useQuery({ ...invitationQuery(invitation ?? ''), enabled: invitation !== null });
+  const cache = useQueryClient();
+  const terms = useInvitationTerms(invitation, preview.data, acceptedTermsHash);
   const [ended, setEnded] = useState<Ended | null>(null);
   const invitationOnly = meta?.registration_mode === 'invite' && invitation === null;
   useEffect(() => { if (invitationOnly) void router.navigate({ to: '/login', replace: true }); }, [invitationOnly, router]);
@@ -55,6 +61,7 @@ export function Register({ invitation }: { invitation: string | null }) {
 
   if (meta === undefined || invitationOnly) return null;
   if (ended?.as === 'in') return <Welcome ended={ended} />;
+  if (ended?.as === 'already') return <AuthCard title={t('auth.register.title')}><CreatedAccount /></AuthCard>;
   if (ended?.as === 'confirm') return <ConfirmFirst login={ended.login} email={ended.email} mail={meta.mail} />;
 
   const title = t('auth.register.title');
@@ -97,9 +104,11 @@ export function Register({ invitation }: { invitation: string | null }) {
     <AuthCard title={title} foot={signIn}>
       {spent && <InvitationSpent />}
       {good !== null && <InvitationSummary preview={good} system={meta.name} />}
-      <RegisterForm invitation={good === null ? null : invitation} preview={good} onEnded={setEnded} />
+      {good !== null && <InvitationTermsChoice terms={terms.terms} org={good.org?.name ?? meta.name} checked={terms.checked} onCheckedChange={terms.setChecked} />}
+      <RegisterForm key={invitation ?? 'open'} invitation={good === null ? null : invitation} preview={good} onEnded={setEnded} termsReady={good === null || terms.ready} acceptedTermsHash={terms.hash} onTermsError={terms.handleError} />
       <IdentityProviders providers={meta.identity_providers} redirect="/" registration
-        invitation={good === null ? null : invitation} acceptInvitation={good !== null && good.kind !== 'system'} />
+        invitation={good === null ? null : invitation} acceptInvitation={good !== null && good.kind !== 'system'}
+        acceptedTermsHash={terms.hash} blocked={good !== null && !terms.ready} beforeStart={good === null || invitation === null ? undefined : async () => terms.review(await cache.query({ ...invitationQuery(invitation), staleTime: 0 }))} />
     </AuthCard>
   );
 }
@@ -109,9 +118,12 @@ interface RegisterFormProps {
   invitation: string | null;
   preview: InvitationPreview | null;
   onEnded: (ended: Ended) => void;
+  termsReady: boolean;
+  acceptedTermsHash?: string;
+  onTermsError: (error: unknown) => boolean;
 }
 
-function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
+function RegisterForm({ invitation, preview, onEnded, termsReady, acceptedTermsHash, onTermsError }: RegisterFormProps) {
   const { t } = useTranslation();
   const rules = useIdentityRules();
   const bound = preview?.email_bound === true;
@@ -125,6 +137,7 @@ function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
       password: (value, values) => rules.password(value, [values.username, values.email]),
     },
   );
+  const actKey = useActKey();
   const publicName = useDebounced(form.values.username);
   const checksName = publicName === form.values.username && USERNAME_PATTERN.test(publicName);
   const availability = useQuery({...nameAvailabilityQuery(publicName),enabled:checksName});
@@ -136,21 +149,24 @@ function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
   const create = useMutation({
     mutationFn: async (values: typeof form.values): Promise<Ended> => {
       const email = values.email.trim();
-      const outcome = await register({
+      const body = {
         username: values.username,
         display_name: values.display_name.trim(),
         password: values.password,
         ...(email === '' ? {} : { email }),
         ...(invitation === null ? {} : { invitation }),
         accept_invitation: preview !== null && preview.kind !== 'system',
-      });
+        ...(acceptedTermsHash === undefined ? {} : { accepted_terms_hash: acceptedTermsHash }),
+      };
+      const outcome = await register(body, actKey(body));
+      if (!outcome.signedIn && outcome.alreadyCreated) return { as: 'already' };
       if (!outcome.signedIn) return { as: 'confirm', login: values.username, email };
       return { as: 'in', accepted: outcome.accepted, invited: invitation !== null,
         personalOrg: outcome.result.user.personal_org_id !== null };
     },
     onSuccess: onEnded,
     onError: (error) => {
-      if (form.refuse(error)) return;
+      if (onTermsError(error) || form.refuse(error)) return;
       // The one refusal a personal link has of its own: another address than the one it was sent to.
       if (bound && error instanceof ApiError && error.is('registration.invite_required') && !invitationIssuerAuthorityLost(error)) form.focus('email');
     },
@@ -168,7 +184,7 @@ function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
       noValidate
       className="flex flex-col gap-4"
       onSubmit={form.submit((values) => {
-        if (!create.isPending) create.mutate(values);
+        if (!create.isPending && termsReady) create.mutate(values);
       })}
     >
       <Input
@@ -206,9 +222,9 @@ function RegisterForm({ invitation, preview, onEnded }: RegisterFormProps) {
         {...form.field('password')}
       />
       {error !== null && !placed && !otherAddress && (
-        <ErrorAlert error={error} message={taken ? t('auth.register.taken') : undefined} />
+        <ErrorAlert error={error} message={termsRefused(error) ? t('orgTerms.changed') : taken ? t('auth.register.taken') : undefined} />
       )}
-      <Button type="submit" variant="primary" block pending={create.isPending}>
+      <Button type="submit" variant="primary" block pending={create.isPending} disabled={!termsReady}>
         {t(preview?.kind === 'org' ? 'auth.register.submitJoin' : preview !== null && preview.kind !== 'system' ? 'auth.register.submitAccept' : 'auth.register.submit')}
       </Button>
     </form>

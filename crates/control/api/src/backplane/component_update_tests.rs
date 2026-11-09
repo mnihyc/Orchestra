@@ -5,6 +5,9 @@ use crate::{registry::Registry, testing::TestApp};
 use orch_link_contract::session::TlsMode;
 use orch_testkit::{clock, database::TestDb};
 
+#[path = "component_update_tests/scopes.rs"]
+mod scopes;
+
 #[tokio::test]
 async fn a_minimum_version_node_gets_one_audited_idle_grant_until_it_reconnects_on_the_recommendation()
  {
@@ -38,6 +41,8 @@ async fn a_minimum_version_node_gets_one_audited_idle_grant_until_it_reconnects_
         .unwrap();
     drop(conn);
     let mut query = AuthQuery {
+        purpose: Default::default(),
+        capabilities: Vec::new(),
         endpoints: None,
         hosted_endpoints: None,
         n: 1,

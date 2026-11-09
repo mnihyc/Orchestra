@@ -56,7 +56,7 @@ test('Share opens the page with the field that adds people in focus, and shows t
   // As shipped a Developer manages the topic and everybody who can see it reads it.
   await expect(line(page, 'Can manage')).toContainText('Developers');
   await expect(line(page, 'Can view')).toContainText('Everyone in Fix login');
-  await expect(line(page, 'Can view')).toContainText('as the system decides');
+  await expect(line(page, 'Can view')).toContainText('Inherited from the system');
   await expect(dialog(page).getByText('Admins of Web, Research, Acme, and the system')).toBeVisible();
 });
 

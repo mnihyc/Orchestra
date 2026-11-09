@@ -1,0 +1,146 @@
+"""Native fixture selection and the static runner's Cargo/environment handoff."""
+
+import contextlib
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+import ci_fixtures
+
+
+class NativeFixtures(unittest.TestCase):
+    def test_node_conformance_and_default_package_tests_need_a_static_runner_and_the_harness(self):
+        for arguments in (("--test", "conformance"), (), ("--tests",), ("--all-targets",)):
+            with self.subTest(arguments=arguments):
+                command = ["cargo", "test", "--locked", "-p", "orch-node", *arguments]
+                self.assertTrue(ci_fixtures.needs_conformance_runner([command]))
+                self.assertEqual(ci_fixtures.fixture_plan([command]), ([], True))
+
+    def test_library_other_targets_and_other_commands_cannot_borrow_the_conformance_requirement(self):
+        for arguments in (("--lib",), ("--doc",), ("--bins",), ("--test", "drivers"),
+                          ("--lib", "--", "--test", "conformance")):
+            with self.subTest(arguments=arguments):
+                planned = [["cargo", "test", "-p", "orch-node", *arguments],
+                           ["cargo", "test", "-p", "orch-model-contract", "--test", "conformance"]]
+                self.assertFalse(ci_fixtures.needs_conformance_runner(planned))
+                self.assertEqual(ci_fixtures.fixture_plan(planned), ([], False))
+
+    def test_a_targeted_plan_exposes_the_prerequisite_without_starting_any_tool(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            targets = Path(directory) / "targets"
+            targets.write_text("# native check\ntest -p orch-node --test conformance\nweb typecheck\n", encoding="utf-8")
+            output = io.StringIO()
+            with patch.object(sys, "argv", ["ci_fixtures.py", "--targets", str(targets), "--plan"]), \
+                    patch.object(ci_fixtures.subprocess, "run", side_effect=AssertionError("unexpected tool")), \
+                    patch.object(ci_fixtures.subprocess, "Popen", side_effect=AssertionError("unexpected build")), \
+                    contextlib.redirect_stdout(output):
+                self.assertEqual(ci_fixtures.main(), 0)
+            self.assertEqual(json.loads(output.getvalue()), {"images": [], "harness": True, "node_runner": True})
+
+    def cargo_process(self, messages, returncode=0):
+        process = MagicMock()
+        process.__enter__.return_value = process
+        process.stdout = io.StringIO("".join(json.dumps(message) + "\n" for message in messages))
+        process.wait.return_value = returncode
+        return process
+
+    def artifact(self, executable, *, name="orch-node", kind=None, tested=False):
+        return {"reason": "compiler-artifact", "target": {"name": name, "kind": kind or ["bin"]},
+                "profile": {"test": tested}, "executable": str(executable)}
+
+    def test_build_uses_the_reported_executable_and_a_native_musl_compiler(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            runner = Path(directory) / "custom target" / "runner"
+            runner.parent.mkdir()
+            runner.write_text("protocol fixture only", encoding="utf-8")
+            runner.chmod(0o755)
+            process = self.cargo_process([
+                self.artifact("/not-the-runner", name="build-script-build"),
+                self.artifact("/node-unit-tests", tested=True),
+                self.artifact("/node-library", kind=["lib"]),
+                self.artifact(runner),
+                {"reason": "build-finished", "success": True},
+            ])
+            with patch.dict(os.environ, {}, clear=True), \
+                    patch.object(ci_fixtures.platform, "machine", return_value="x86_64"), \
+                    patch.object(ci_fixtures.subprocess, "Popen", return_value=process) as build:
+                self.assertEqual(ci_fixtures.conformance_runner(), str(runner.resolve()))
+            self.assertEqual(build.call_args.args[0], [
+                "cargo", "build", "--locked", "--target", "x86_64-unknown-linux-musl",
+                "-p", "orch-node", "--bin", "orch-node", "--message-format=json",
+            ])
+            self.assertEqual(build.call_args.kwargs["env"]["CC_x86_64_unknown_linux_musl"], "musl-gcc")
+            process.wait.assert_called_once_with()
+
+    def test_build_preserves_an_explicit_compiler_and_selects_the_native_arm_target(self):
+        process = self.cargo_process([self.artifact("/reported/node")])
+        with patch.dict(os.environ, {"CC_aarch64_unknown_linux_musl": "custom-musl-cc"}, clear=True), \
+                patch.object(ci_fixtures.platform, "machine", return_value="aarch64"), \
+                patch.object(ci_fixtures.subprocess, "Popen", return_value=process) as build, \
+                patch.object(ci_fixtures, "executable_path", return_value="/reported/node"):
+            self.assertEqual(ci_fixtures.conformance_runner(), "/reported/node")
+        command = build.call_args.args[0]
+        self.assertEqual(command[command.index("--target") + 1], "aarch64-unknown-linux-musl")
+        self.assertEqual(build.call_args.kwargs["env"]["CC_aarch64_unknown_linux_musl"], "custom-musl-cc")
+
+    def test_failed_or_incomplete_builds_never_become_a_runner(self):
+        for messages, returncode, error in (([self.artifact("/stale/node")], 1, subprocess.CalledProcessError),
+                                            ([], 0, RuntimeError),
+                                            ([self.artifact("/absent/node")], 0, FileNotFoundError)):
+            with self.subTest(returncode=returncode, messages=messages), \
+                    patch.dict(os.environ, {}, clear=True), \
+                    patch.object(ci_fixtures.platform, "machine", return_value="x86_64"), \
+                    patch.object(ci_fixtures.subprocess, "Popen", return_value=self.cargo_process(messages, returncode)):
+                with self.assertRaises(error):
+                    ci_fixtures.conformance_runner()
+
+    def test_an_explicit_runner_is_reused_but_never_silently_replaced_if_missing(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            runner = Path(directory) / "runner"
+            runner.write_text("protocol fixture only", encoding="utf-8")
+            runner.chmod(0o755)
+            with patch.dict(os.environ, {"ORCH_TEST_CONFORMANCE_NODE": str(runner)}), \
+                    patch.object(ci_fixtures.subprocess, "Popen", side_effect=AssertionError("unexpected build")):
+                self.assertEqual(ci_fixtures.conformance_runner(), str(runner.resolve()))
+            with patch.dict(os.environ, {"ORCH_TEST_CONFORMANCE_NODE": str(runner / "missing")}), \
+                    patch.object(ci_fixtures.subprocess, "Popen", side_effect=AssertionError("unexpected fallback")):
+                with self.assertRaises(OSError):
+                    ci_fixtures.conformance_runner()
+
+    def test_preparation_returns_the_runner_and_still_builds_the_pinned_harness(self):
+        planned = [["cargo", "test", "-p", "orch-node", "--test", "conformance"]]
+        with patch.object(ci_fixtures.subprocess, "run") as docker, \
+                patch.object(ci_fixtures, "conformance_runner", return_value="/reported/node") as runner:
+            environment = ci_fixtures.prepare_fixtures(planned)
+        self.assertEqual(environment, {"ORCH_TEST_CONFORMANCE_NODE": "/reported/node"})
+        runner.assert_called_once_with()
+        command = docker.call_args.args[0]
+        self.assertEqual(command[:4], ["docker", "build", "--tag", "orch-dev-harness"])
+        self.assertTrue(any(argument.startswith("CODEX_VERSION=") for argument in command))
+        self.assertTrue(any(argument.startswith("CLAUDE_VERSION=") for argument in command))
+
+    def test_unrelated_tests_do_not_build_a_static_runner(self):
+        with patch.object(ci_fixtures.subprocess, "run", side_effect=AssertionError("unexpected image")), \
+                patch.object(ci_fixtures, "conformance_runner", side_effect=AssertionError("unexpected runner")):
+            self.assertEqual(ci_fixtures.prepare_fixtures([["cargo", "test", "-p", "orch-node", "--lib"]]), {})
+
+    def test_whole_ci_exports_the_prepared_runner_for_the_next_test_step(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            targets, output = Path(directory) / "targets", Path(directory) / "environment"
+            targets.write_text("test -p orch-node --test conformance\n", encoding="utf-8")
+            output.write_text("EXISTING=kept\n", encoding="utf-8")
+            with patch.object(sys, "argv", ["ci_fixtures.py", "--targets", str(targets)]), \
+                    patch.dict(os.environ, {"GITHUB_ENV": str(output)}), \
+                    patch.object(ci_fixtures, "prepare_fixtures", return_value={"ORCH_TEST_CONFORMANCE_NODE": "/reported/node"}):
+                self.assertEqual(ci_fixtures.main(), 0)
+            self.assertEqual(output.read_text(), "EXISTING=kept\nORCH_TEST_CONFORMANCE_NODE=/reported/node\n")
+
+
+if __name__ == "__main__":
+    unittest.main()

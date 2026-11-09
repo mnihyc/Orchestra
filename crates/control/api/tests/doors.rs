@@ -9,6 +9,7 @@ mod places;
 mod support;
 mod workspace;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::{PermissionPage, PermissionPageGet, PermissionPageUpdate};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{
@@ -103,13 +104,24 @@ async fn signal(site: &Site, by: &Who) -> Reply<()> {
 }
 
 async fn shell(site: &Site, by: &Who) -> Reply<EnvironmentTerminalCreateReply> {
-    site.app()
+    let reply = site
+        .app()
         .call(EnvironmentTerminalCreate, &[&site.environment])
         .token(&by.token)
         .query(&ThroughThreadQuery { thread: None })
         .raw_body(&json!({ "cols": 80, "rows": 24 }))
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary shell door retains the full native result")
+        }),
+    }
 }
 
 /// Whether the request was refused because the caller lacks a permission: not for anything else, such
@@ -151,6 +163,7 @@ async fn name_row(site: &Site, object: &str, id: Id, by: &Who, user: &Who, permi
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -165,6 +178,7 @@ async fn name_choice(site: &Site, object: &str, id: Id, by: &Who, user: &Who, ch
         }] }))
         .send()
         .await
+        .full_permission_page()
         .ok();
 }
 
@@ -574,6 +588,7 @@ async fn a_restricted_thread_keeps_its_conversation_and_not_its_files_and_its_pa
         .raw_body(&json!({ "whole": "private" }))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let closed = site
         .app()

@@ -1,4 +1,4 @@
-/** Primary navigation wraps instead of disappearing behind an overflow menu. */
+/** Tabs scroll on one row; section links keep their own complete navigation. */
 import { expect, type Locator, test } from '@playwright/test';
 
 import { ACME, scenario, signIn } from './support.ts';
@@ -25,33 +25,40 @@ async function expectVisibleControls(strip: Locator, controls: Locator) {
 test.beforeEach(async () => { await scenario(); });
 
 for (const width of [400, 768]) {
-  test(`all topic tabs are visible and reachable by pointer and keyboard at ${width}px`, async ({ page }) => {
+  test(`all topic tabs stay on one row and are reachable by pointer and keyboard at ${width}px`, async ({ page }) => {
     await signIn(page);
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`/topic/${ACME.fixLogin}`);
     const strip = page.locator('[data-navigation-strip="tabs"]').first();
     const tabs = strip.getByRole('tab');
     await expect(tabs).toHaveCount(7);
-    await expectVisibleControls(strip, tabs);
-    if (width === 400) {
-      const first = await tabs.first().boundingBox();
-      const last = await tabs.last().boundingBox();
-      expect(first).not.toBeNull();
-      expect(last).not.toBeNull();
-      if (first !== null && last !== null) expect(last.y).toBeGreaterThan(first.y);
-    }
-    for (const tab of await tabs.all()) {
+    const list = strip.getByRole('tablist');
+    const positions = await tabs.evaluateAll((items) => items.map((item) => item.getBoundingClientRect().top));
+    expect(Math.max(...positions) - Math.min(...positions)).toBeLessThan(1);
+    const overflow = await list.evaluate((element) => element.scrollWidth - element.clientWidth);
+    if (overflow > 0) { await list.hover(); await page.mouse.wheel(overflow, 0); }
+    for (const tab of (await tabs.all()).slice(0, -1)) {
       await tab.click();
       await expect(tab).toHaveAttribute('aria-selected', 'true');
     }
     await tabs.first().focus();
-    await tabs.first().press('End');
-    await expect(tabs.last()).toHaveAttribute('aria-selected', 'true');
-    await expect(tabs.last()).toBeFocused();
-    await tabs.last().press('Home');
+    await tabs.nth(5).press('Home');
     await expect(tabs.first()).toHaveAttribute('aria-selected', 'true');
     await expect(tabs.first()).toBeFocused();
-    await expectVisibleControls(strip, tabs);
+    const visible = await tabs.first().boundingBox(), viewport = await list.boundingBox();
+    expect(visible).not.toBeNull(); expect(viewport).not.toBeNull();
+    if (visible !== null && viewport !== null) {
+      expect(visible.x).toBeGreaterThanOrEqual(viewport.x - 1);
+      expect(visible.x + visible.width).toBeLessThanOrEqual(viewport.x + viewport.width + 1);
+    }
+    // End includes Settings, which opens its own section page and replaces this list.
+    await tabs.first().press('End');
+    await expect.poll(() => new URL(page.url()).searchParams.get('tab')).toBe('settings');
+    await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible();
+    await page.goto(`/topic/${ACME.fixLogin}?tab=overview`);
+    await tabs.last().scrollIntoViewIfNeeded(); await tabs.last().click();
+    await expect.poll(() => new URL(page.url()).searchParams.get('tab')).toBe('settings');
+    await expect(page.getByRole('heading', { name: 'General', exact: true })).toBeVisible();
   });
 
   test(`all settings and resource links stay visible and open their destinations at ${width}px`, async ({ page }) => {

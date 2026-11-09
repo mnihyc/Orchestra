@@ -24,6 +24,8 @@ import { ScreenError } from '@/shell/ScreenError';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { ScreenLoading } from '@/shell/ScreenLoading';
+import { OwnerReadConfirmation } from '@/features/access/OwnerReadConfirmation';
+import { cancelOwnerReadConfirmations } from '@/api/ownerReadConfirmation';
 
 /** Rows and buttons use 16 px icons with a 1.75 stroke; the navigation rail uses 20 px. */
 const ICON_SIZE = 16;
@@ -50,10 +52,11 @@ declare module '@tanstack/react-router' {
   }
 }
 
-router.subscribe('onBeforeNavigate', () => beginOpening());
+router.subscribe('onBeforeNavigate', () => { cancelOwnerReadConfirmations(); beginOpening(); });
 
 installReaderCacheBoundary(client, queryClient);
 client.onSession((event) => {
+  cancelOwnerReadConfirmations();
   if (event.type === 'signed_out') {
     // Every route is asked again whether it is for somebody who is not signed in.
     void router.invalidate();
@@ -76,6 +79,7 @@ export function App() {
         <TooltipProvider>
           <Toaster>
             <RouterProvider router={router} />
+            <OwnerReadConfirmation />
           </Toaster>
         </TooltipProvider>
       </LucideProvider>

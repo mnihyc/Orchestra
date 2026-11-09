@@ -32,6 +32,50 @@ use tokio_util::io::ReaderStream;
 /// The directory of the partial files of uploads, below the storage root.
 pub const UPLOADS_DIR: &str = "uploads";
 
+/// Unpublished incoming bytes in the existing upload staging directory.
+pub(crate) struct StagedBody {
+    path: Arc<StagedPath>,
+    meta: BlobMeta,
+}
+struct StagedPath(PathBuf);
+impl Drop for StagedPath {
+    fn drop(&mut self) {
+        let path = self.0.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                discard(&path).await;
+            });
+        } else {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+impl StagedBody {
+    pub(crate) fn meta(&self) -> BlobMeta {
+        self.meta
+    }
+    pub(crate) async fn body(&self) -> Result<axum::body::Body, BlobsError> {
+        let file = tokio::fs::File::open(&self.path.0).await?;
+        let path = self.path.clone();
+        let stream = ReaderStream::new(file).map(move |piece| {
+            let _keep = &path;
+            piece
+        });
+        Ok(axum::body::Body::from_stream(stream))
+    }
+    pub(crate) async fn json(&self) -> Result<orch_types::Json, BlobsError> {
+        if self.meta.size
+            > i64::try_from(orch_api_contract::common::MAX_JSON_BYTES).unwrap_or(i64::MAX)
+        {
+            return Err(BlobsError::TooLarge {
+                limit: i64::try_from(orch_api_contract::common::MAX_JSON_BYTES).unwrap_or(i64::MAX),
+            });
+        }
+        let bytes = tokio::fs::read(&self.path.0).await?;
+        serde_json::from_slice(&bytes).map_err(|error| BlobsError::Body(error.to_string()))
+    }
+}
+
 /// How many bytes of a file are read at a time when it is hashed or put in the store: a quarter of
 /// a mebibyte, the size the store itself reads and writes in.
 const FILE_READ_BYTES: usize = 256 * 1024;
@@ -219,25 +263,43 @@ impl Blobs {
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: std::fmt::Display,
     {
+        let staged = self.stage_stream(body, limit).await?;
+        let meta = staged.meta();
+        let result = self
+            .put_file(&staged.path.0, meta.hash, meta.size)
+            .await
+            .map(|_| meta);
+        discard(&staged.path.0).await;
+        result
+    }
+
+    /// Receive a bounded input without publishing it in the content store or catalogue.
+    pub(crate) async fn stage_stream<S, E>(
+        &self,
+        body: S,
+        limit: i64,
+    ) -> Result<StagedBody, BlobsError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin,
+        E: std::fmt::Display,
+    {
         self.make_uploads_dir().await?;
         let path = self
             .inner
             .uploads
             .join(format!("incoming-{}.part", new_id().simple()));
-        let outcome = self.write_hashing(body, limit, &path).await;
-        let stored = match outcome {
-            Ok((hash, size)) => self
-                .put_file(&path, hash, size)
-                .await
-                .map(|_| BlobMeta { hash, size }),
-            Err(error) => Err(error),
+        let path = Arc::new(StagedPath(path));
+        let (hash, size) = match self.write_hashing(body, limit, &path.0).await {
+            Ok(meta) => meta,
+            Err(error) => {
+                discard(&path.0).await;
+                return Err(error);
+            }
         };
-        if let Err(error) = tokio::fs::remove_file(&path).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%error, "a file of an upload that ended could not be removed");
-        }
-        stored
+        Ok(StagedBody {
+            path,
+            meta: BlobMeta { hash, size },
+        })
     }
 
     async fn write_hashing<S, E>(
@@ -421,23 +483,44 @@ impl Blobs {
 
 // ---------------------------------------------------------------- the files of pieces
 
-/// Writes a piece at `offset` of the file where the pieces of an upload wait: whatever lies beyond
-/// the bytes that are known to have arrived (a piece the system did not get to record) is cut off
-/// first, and the piece is on the disk before it is answered.
-pub async fn write_piece(path: &Path, offset: i64, piece: &[u8]) -> std::io::Result<()> {
-    use tokio::io::AsyncSeekExt;
-    let mut file = tokio::fs::OpenOptions::new()
+/// An opened native part file; its existing bytes remain untouched until write.
+pub struct PieceFile {
+    file: tokio::fs::File,
+    offset: u64,
+}
+
+/// Open the native file once, outside any retryable metadata resolver.
+/// Callers may refresh authority after this filesystem wait before truncating or writing bytes.
+pub async fn prepare_piece(path: &Path, offset: i64) -> std::io::Result<PieceFile> {
+    let file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(false)
         .open(path)
         .await?;
-    let offset = u64::try_from(offset).unwrap_or(0);
-    file.set_len(offset).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
-    file.write_all(piece).await?;
-    file.flush().await?;
-    file.sync_data().await
+    Ok(PieceFile {
+        file,
+        offset: u64::try_from(offset).unwrap_or(0),
+    })
+}
+
+impl PieceFile {
+    /// Preserve the native truncate/seek/write/flush/sync sequence after the caller's first-effect cut.
+    pub async fn write(mut self, piece: &[u8]) -> std::io::Result<()> {
+        use tokio::io::AsyncSeekExt;
+        self.file.set_len(self.offset).await?;
+        self.file
+            .seek(std::io::SeekFrom::Start(self.offset))
+            .await?;
+        self.file.write_all(piece).await?;
+        self.file.flush().await?;
+        self.file.sync_data().await
+    }
+}
+
+/// Writes a piece at its native offset, cutting off only unrecorded trailing bytes first.
+pub async fn write_piece(path: &Path, offset: i64, piece: &[u8]) -> std::io::Result<()> {
+    prepare_piece(path, offset).await?.write(piece).await
 }
 
 /// Removes the file of an upload that ended; a file that is not there is not a fault.
@@ -518,6 +601,71 @@ impl BlobStore for MemoryBlobs {
 mod tests {
     use super::*;
     use futures::stream;
+
+    #[tokio::test]
+    async fn a_staged_request_is_unpublished_and_its_body_owns_the_temporary_file_until_consumed() {
+        let blobs = Blobs::in_memory();
+        let supplied = Bytes::from_static(b"unpublished incoming request");
+        let staged = blobs
+            .stage_stream(
+                stream::iter([Ok::<_, std::convert::Infallible>(supplied.clone())]),
+                i64::try_from(supplied.len()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let path = staged.path.0.clone();
+        assert!(
+            blobs
+                .store()
+                .size(&staged.meta().hash)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let body = staged.body().await.unwrap();
+        drop(staged);
+        assert!(tokio::fs::try_exists(&path).await.unwrap());
+        assert_eq!(
+            axum::body::to_bytes(body, supplied.len()).await.unwrap(),
+            supplied
+        );
+        // Use the existing route-test observation budget for the asynchronous Drop cleanup.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while tokio::fs::try_exists(&path).await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparing_a_piece_keeps_existing_bytes_until_the_native_write_is_admitted() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("part");
+        tokio::fs::write(&path, b"known-unrecorded-tail")
+            .await
+            .unwrap();
+        let prepared = prepare_piece(&path, 5).await.unwrap();
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known-unrecorded-tail"
+        );
+        drop(prepared);
+        assert_eq!(
+            tokio::fs::read(&path).await.unwrap(),
+            b"known-unrecorded-tail"
+        );
+        prepare_piece(&path, 5)
+            .await
+            .unwrap()
+            .write(b" next")
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next");
+        write_piece(&path, 10, b" piece").await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"known next piece");
+    }
 
     #[tokio::test]
     async fn a_machine_runs_four_transfers_at_once_and_a_fifth_waits_for_one_to_end() {

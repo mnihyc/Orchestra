@@ -7,6 +7,7 @@
 
 mod places;
 mod support;
+use support::FullSettingReply;
 
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::settings::{
@@ -70,6 +71,7 @@ async fn put(
         .body(body)
         .send()
         .await
+        .full_setting()
 }
 
 fn value(value: Value) -> NodeSettingSetBody {
@@ -212,6 +214,7 @@ async fn a_viewer_writes_no_key_and_is_told_what_is_missing() {
         .token(&s.dan.token)
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(refused.extra["required"], "settings.manage");
 }
@@ -290,6 +293,7 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
         .token(&alice.token)
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(
         one(&settings(&world, &alice, topic).await, "agent.model")
@@ -315,21 +319,27 @@ async fn a_topic_developer_changes_parameters_but_not_policies_or_locks_and_the_
 async fn a_lock_decides_the_key_below_it_and_only_whoever_makes_the_rules_sets_or_lifts_it() {
     let world = World::new().await;
     let s = setup(&world).await;
-    let mut locked = value(json!(false));
+    let key = "retention.archive_idle_days";
+    let mut locked = value(json!(0));
     locked.locked = Some(true);
-    let at_org = put(&world, &s.boss, s.acme, "chat.enabled", &locked)
-        .await
-        .ok();
+    let at_org = put(&world, &s.boss, s.acme, key, &locked).await.ok();
     assert!(at_org.own.as_ref().unwrap().locked);
     // Below, the key is decided from above, and cannot be written.
     let below = settings(&world, &s.boss, s.web).await;
-    let chat = one(&below, "chat.enabled");
+    let inherited = one(&below, key);
     assert_eq!(
-        chat.locked_by.as_ref().unwrap().node.as_ref().unwrap().id,
+        inherited
+            .locked_by
+            .as_ref()
+            .unwrap()
+            .node
+            .as_ref()
+            .unwrap()
+            .id,
         s.acme
     );
-    assert!(!chat.writable);
-    let refused = put(&world, &s.boss, s.web, "chat.enabled", &value(json!(true)))
+    assert!(!inherited.writable);
+    let refused = put(&world, &s.boss, s.web, key, &value(json!(30)))
         .await
         .problem();
     assert_eq!(refused.code, ErrorCode::AccessLocked);
@@ -337,23 +347,22 @@ async fn a_lock_decides_the_key_below_it_and_only_whoever_makes_the_rules_sets_o
     // A lock above refuses to take a value back below it as well.
     let refused = world
         .app
-        .call(NodeSettingDelete, &[&s.web, &"chat.enabled"])
+        .call(NodeSettingDelete, &[&s.web, &key])
         .token(&s.boss.token)
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(refused.code, ErrorCode::AccessLocked);
     // Lifting the lock is done where it is set.
-    let mut open = value(json!(false));
+    let mut open = value(json!(0));
     open.locked = Some(false);
-    let lifted = put(&world, &s.boss, s.acme, "chat.enabled", &open)
-        .await
-        .ok();
+    let lifted = put(&world, &s.boss, s.acme, key, &open).await.ok();
     assert!(!lifted.own.as_ref().unwrap().locked);
-    let freed = put(&world, &s.boss, s.web, "chat.enabled", &value(json!(true)))
+    let freed = put(&world, &s.boss, s.web, key, &value(json!(30)))
         .await
         .ok();
-    assert_eq!(freed.value, Some(json!(true)));
+    assert_eq!(freed.value, Some(json!(30)));
 }
 
 #[tokio::test]
@@ -443,6 +452,7 @@ async fn a_setting_is_written_against_the_revision_the_writer_saw_and_taken_back
         .token(&s.boss.token)
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(gone.own.is_none());
     assert_eq!(gone.source.scope, SettingScope::Default);
@@ -492,6 +502,7 @@ async fn a_first_setting_write_and_a_reset_use_the_row_seen_and_omitting_a_revis
         })
         .send()
         .await
+        .full_setting()
         .problem();
     assert_eq!(stale.code, ErrorCode::ConflictStaleRevision);
     assert_eq!(stale.extra["current"]["value"], json!(true));
@@ -504,6 +515,7 @@ async fn a_first_setting_write_and_a_reset_use_the_row_seen_and_omitting_a_revis
         })
         .send()
         .await
+        .full_setting()
         .ok();
     assert!(gone.own.is_none());
 }
@@ -540,8 +552,8 @@ async fn the_list_of_settings_costs_the_same_statements_whatever_is_written_in_i
         &world,
         &s.boss,
         s.web,
-        "auto.description",
-        &value(json!("off")),
+        "auto.triggers",
+        &value(json!({"on":["turn_completed"],"min_interval_secs":120})),
     )
     .await
     .ok();

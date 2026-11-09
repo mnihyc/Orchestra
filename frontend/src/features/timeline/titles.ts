@@ -8,6 +8,8 @@
 import type { TFunction } from 'i18next';
 
 import type { Item } from '@/generated/api-types';
+import { approvalReview, reviewOutcome } from './tools/reviewFacts';
+import { webAction } from './tools/webAction';
 
 export type ToolItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -122,8 +124,13 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
       const result = tool.mode === 'name' ? t('timeline.step.files', { count }) : t('timeline.step.matches', { count });
       return { ...none, text, result: tool.truncated && tool.total === null ? `${count}+` : result };
     }
-    case 'web_search':
+    case 'web_search': {
+      const action = webAction(tool);
+      if (action.type === 'open_page') return { ...none, text: action.url === null ? t('timeline.step.webOpenUnknown') : t('timeline.step.webOpen', { address: shortAddress(action.url) }) };
+      if (action.type === 'find_in_page') return { ...none, text: action.pattern === null ? t('timeline.step.webFindUnknown') : t('timeline.step.webFind', { pattern: action.pattern }) };
+      if (action.type === 'other') return { ...none, text: t('timeline.step.webAction') };
       return { ...none, text: t('timeline.step.webSearch', { query: tool.query }) };
+    }
     case 'web_fetch':
       return { ...none, text: t('timeline.step.webFetch', { address: shortAddress(tool.url) }), result: tool.status === null ? null : String(tool.status), tone: tool.status !== null && tool.status >= 400 ? 'danger' : 'muted' };
     case 'image':
@@ -144,7 +151,10 @@ export function describeStep(item: ToolItem, t: TFunction): StepTitle {
       return { ...none, text: tool.tool === 'send_message' || tool.tool === 'send_chat_message' || tool.tool === 'send_thread_message'
         ? t('choiceCatalog.sharedTool.send_message.name')
         : item.payload.title === '' ? t('timeline.step.orch', { tool: tool.tool }) : item.payload.title };
-    case 'other':
+    case 'other': {
+      const review=tool.name==='harness/approvalReview' ? approvalReview(tool.result) : null;
+      if(review!==null) return {...none,text:t('timeline.permissionReview.title'),result:reviewOutcome(review.outcome,t),tone:item.payload.raw.is_error?'danger':'muted'};
       return { ...none, text: item.payload.title === '' ? tool.name : item.payload.title };
+    }
   }
 }

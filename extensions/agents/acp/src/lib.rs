@@ -407,6 +407,7 @@ fn probe_variables(
     variables.set("workspace", neutral);
     variables.set("skills_dir", "");
     variables.set("llm_url", format!("{}{suffix}", start.loopback.llm(&key)));
+    variables.set("web_search_url", format!("{}/v1", start.loopback.llm(&key)));
     variables.set("llm_token", start.loopback.token.expose().to_owned());
     variables.set("model", "probe");
     variables.set("models_json", "[\"probe\"]");
@@ -480,6 +481,57 @@ fn session_variables(
         variables.set("llm_token", shared.start.loopback.token.expose().to_owned());
         variables.set("api", api.to_owned());
         variables.set("protocol", protocol.clone());
+        variables.set(
+            "web_search_url",
+            format!("{}/v1", shared.start.loopback.llm(&spec.session_key)),
+        );
+        if let Some(search) = program
+            .capability_program
+            .as_ref()
+            .and_then(|declaration| declaration.access.get("forwarded"))
+            .and_then(|access| {
+                access
+                    .native
+                    .get(orch_agent_contract::parameters::WEB_SEARCH_KEY)
+            })
+        {
+            variables
+                .select_web_search_for_model(
+                    &settings.params,
+                    search.default_mode.as_deref(),
+                    program,
+                    &settings.model,
+                    settings.native_model.as_deref(),
+                )
+                .map_err(|error| AdapterError::Other {
+                    code: "invalid_input".into(),
+                    message: error.to_string(),
+                    retryable: false,
+                })?;
+        }
+    }
+    let access = match &spec.provider {
+        ProviderAccess::Native { .. } => "native",
+        ProviderAccess::Forwarded { .. } => "forwarded",
+        ProviderAccess::Shared { .. } => "shared",
+        ProviderAccess::Handover { .. } => "handover",
+    };
+    if let Some(reader) = program
+        .capability_program
+        .as_ref()
+        .and_then(|declaration| declaration.access.get(access))
+        .and_then(|access| access.native.get("page_fetch"))
+    {
+        if reader.enabled {
+            variables.select_page_fetch_for_model(
+                reader.default_mode.as_deref(),
+                program,
+                &settings.model,
+                settings.native_model.as_deref(),
+            );
+        } else {
+            variables.set("page_fetch_native", "false");
+        }
     }
     variables.set("model", settings.model.clone());
     let mut models = vec![settings.model.clone()];
@@ -579,6 +631,12 @@ fn instruction_sources(spec: &SessionSpec, program: &AcpProgram) -> Vec<Instruct
 impl AgentAdapter for AcpAdapter {
     fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    fn output_directory(&self) -> Option<PathBuf> {
+        self.running
+            .as_ref()
+            .map(|running| session::outputs_directory(&running.shared.home_root))
     }
 
     async fn start(

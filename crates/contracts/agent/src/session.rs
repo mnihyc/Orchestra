@@ -212,9 +212,82 @@ impl MemoryPlan {
     }
 }
 
+/// An explicit prompt-cache lifetime; absence leaves the program's native default alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum PromptCacheTtl {
+    /// Five minutes.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// One hour.
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl PromptCacheTtl {
+    /// The native spelling shared by the setting and its environment override.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FiveMinutes => "5m",
+            Self::OneHour => "1h",
+        }
+    }
+}
+
+/// Current admitted model metadata and the capability core's exact serialized route result.
+/// This private control data contains no credential material and is never public turn params.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NativeModelContext {
+    /// The actual selected routing name.
+    pub model: String,
+    /// Existing manager-authored model limits and native option constraints.
+    pub parameters: orch_provider_contract::models::ModelParameters,
+    /// The core's serialized per-thread resolutions, unchanged including future members.
+    pub capabilities: Json,
+    /// Future control metadata retained by adapters that do not interpret it.
+    #[serde(default, flatten)]
+    pub extensions: BTreeMap<String, Json>,
+}
+
+impl NativeModelContext {
+    /// Copies only the core's public native instructions for session-configuration comparison.
+    /// Route selection and private backend metadata remain with their original producer.
+    #[must_use]
+    pub fn native_configuration(&self) -> BTreeMap<String, Json> {
+        self.capabilities
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|resolution| resolution.get("native_config").and_then(Json::as_object))
+            .flat_map(|values| {
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+            })
+            .collect()
+    }
+
+    /// Captures an existing core result without resolving, selecting or inferring another route.
+    pub fn captured(
+        model: String,
+        parameters: orch_provider_contract::models::ModelParameters,
+        resolutions: &[orch_provider_contract::capabilities::Resolution],
+    ) -> Result<Self, serde_json::Error> {
+        Ok(Self {
+            model,
+            parameters,
+            capabilities: serde_json::to_value(resolutions)?,
+            extensions: BTreeMap::new(),
+        })
+    }
+}
+
 /// The members of a session that are the same on the link and for the adapter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct SessionSettings {
+    /// Captured model metadata and the core route result; absent on older callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_model: Option<Box<NativeModelContext>>,
     /// The agent profile.
     pub agent_id: Id,
     /// The thread.
@@ -257,6 +330,15 @@ pub struct SessionSettings {
     /// Limits over the harness's own sub-agents, resolved separately from model parameters.
     #[serde(default)]
     pub subagent_limits: SubagentLimits,
+    /// Explicit prompt-cache lifetime, or none for the program's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_ttl: Option<PromptCacheTtl>,
+    /// Whether completion of owned background work may continue the conversation.
+    #[serde(default = "background_wake_default")]
+    pub background_wake: bool,
+    /// A native image-generation override; absent keeps the program's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<bool>,
     /// What the harness's own sandbox lets commands do.
     pub sandbox_mode: SandboxMode,
     /// The preamble, then the standing instructions. Nothing of the directory's instruction file: the agent
@@ -286,6 +368,12 @@ pub struct SessionSettings {
     /// when they change, the question is asked again. A directory that holds nothing is not a configuration.
     #[serde(default)]
     pub workspace_configuration: Option<WorkspaceConfiguration>,
+}
+
+/// The shipped background completion preference, also used for older session messages.
+#[must_use]
+pub const fn background_wake_default() -> bool {
+    true
 }
 
 /// The code of the refusal of a workspace that holds a configuration of the harness's own nobody has answered for.
@@ -803,6 +891,10 @@ pub struct ImageInput {
     pub media_type: String,
     /// Its name.
     pub name: String,
+    /// The verified file delivered in the environment by the original input's file preparation.
+    /// This is separate from the connector's local blob cache and grants no new file write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<String>,
     /// Where the connector put it on this machine. Binary content is never sent inline: it is a file the
     /// adapter reads. Absent on the link.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -812,6 +904,12 @@ pub struct ImageInput {
 /// A turn to start: the body of the command `turn.start`, and what the adapter is given.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnStart {
+    /// Current model metadata and the core route result; absent on older callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_model: Option<Box<NativeModelContext>>,
+    /// Adopt a native follow-up already waiting for this controller admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_wake: Option<String>,
     /// The thread.
     pub thread_id: ThreadId,
     /// The turn.
@@ -907,6 +1005,78 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn native_model_metadata_keeps_the_core_result_and_future_members_outside_public_params()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use orch_provider_contract::capabilities::Resolution;
+        let resolutions = vec![Resolution {
+            capability: "generation".into(),
+            reason: Some("source-fact".into()),
+            ..Resolution::default()
+        }];
+        let mut metadata = serde_json::to_value(NativeModelContext::captured(
+            "opaque-model".into(),
+            Default::default(),
+            &resolutions,
+        )?)?;
+        assert_eq!(
+            metadata["capabilities"],
+            serde_json::to_value(&resolutions)?
+        );
+        metadata["x_future"] = json!({"kept":true});
+        metadata["capabilities"][0]["x_future_fact"] = json!({"kept":true});
+        let typed: NativeModelContext = serde_json::from_value(metadata.clone())?;
+        assert_eq!(serde_json::to_value(&typed)?, metadata);
+        let old = json!({"thread_id":orch_types::new_id(),"turn_id":orch_types::new_id(),
+            "text":"go","images":[],"model":"opaque-model","effort":null,"params":{},
+            "approval_mode":"bypass","sandbox_mode":"open"});
+        let old: TurnStart = serde_json::from_value(old)?;
+        assert!(old.native_model.is_none());
+        assert!(serde_json::to_value(&old)?.get("native_model").is_none());
+        let mut new = serde_json::to_value(&old)?;
+        new["native_model"] = metadata.clone();
+        let new: TurnStart = serde_json::from_value(new)?;
+        assert_eq!(serde_json::to_value(new.native_model.as_deref())?, metadata);
+        assert_eq!(
+            new.params,
+            json!({}),
+            "private model data never becomes a public chosen parameter"
+        );
+        #[derive(serde::Deserialize)]
+        struct UnawareAdapter {
+            model: String,
+        }
+        let unaware: UnawareAdapter = serde_json::from_value(serde_json::to_value(&new)?)?;
+        assert_eq!(unaware.model, "opaque-model");
+        Ok(())
+    }
+
+    #[test]
+    fn native_configuration_comparison_copies_only_the_core_projection_and_ignores_row_order() {
+        let mut native = NativeModelContext {
+            model: "opaque-offering".into(),
+            parameters: Default::default(),
+            extensions: BTreeMap::new(),
+            capabilities: json!([
+                {"capability":"generation","native_config":{"provider-setting":"v2"},"route":{"backend":{"private":"never copied"}}},
+                {"capability":"search","native_config":{"search-setting":false},"reason":"an inspector explanation"}
+            ]),
+        };
+        let expected = BTreeMap::from([
+            ("provider-setting".into(), json!("v2")),
+            ("search-setting".into(), json!(false)),
+        ]);
+        assert_eq!(native.native_configuration(), expected);
+        native.capabilities.as_array_mut().unwrap().reverse();
+        assert_eq!(
+            native.native_configuration(),
+            expected,
+            "presentation order is not a session change"
+        );
+        native.capabilities = json!([{"route":{"native_value":{"provider-setting":"v2"}}}]);
+        assert!(native.native_configuration().is_empty());
+    }
+
+    #[test]
     fn an_instruction_file_is_measured_with_what_a_bound_leaves_of_it_and_a_home_file_keeps_no_path()
      {
         let directory =
@@ -956,7 +1126,7 @@ mod tests {
           "directory": "/workspace/web", "cwd": "/workspace/web/api",
           "mounts": [ { "name": "src", "path": "/data/src", "read_only": true } ],
           "model": "gpt-6-sol", "effort": "high", "params": {}, "approval_mode": "on_request", "sandbox_mode": "workspace",
-          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "side_reading": null, "workspace_configuration": null,
+          "available_models": [], "subagent_limits": {"at_once":8,"depth":1}, "background_wake": true, "side_reading": null, "workspace_configuration": null,
           "instructions": "You are working inside Orch.",
           "memory": { "directory": "/workspace/web/.orch/memory", "kept_by": "harness" },
           "arrangement": "separated",
@@ -969,6 +1139,20 @@ mod tests {
                          "send_message", "announce", "request_capability"],
           "raw_events": true
         })
+    }
+
+    #[test]
+    fn image_generation_is_unset_for_older_opens_and_retains_explicit_choices() {
+        let old: SessionOpen = serde_json::from_value(open()).unwrap();
+        assert_eq!(old.settings.image_generation, None);
+        let mut enabled = open();
+        enabled["image_generation"] = json!(true);
+        let enabled: SessionOpen = serde_json::from_value(enabled).unwrap();
+        assert_eq!(enabled.settings.image_generation, Some(true));
+        assert_eq!(
+            serde_json::to_value(enabled).unwrap()["image_generation"],
+            json!(true)
+        );
     }
 
     #[test]

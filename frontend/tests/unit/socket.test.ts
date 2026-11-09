@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 // @vitest-environment node
 /** The live connection: who it says it is, what it does when the line goes, and how a feed stays equal to the server's rows whatever frames are lost. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -80,23 +81,7 @@ function harness(options: { token?: () => string | null; renew?: () => Promise<b
   return { socket, sockets, suspended, last };
 }
 
-const node = (id: string, seq: number, name = id): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind: 'project',
-  name,
-  parent_id: 'org',
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: null,
-  tree_seq: seq,
-});
+const node = (id: string, seq: number, name = id): TreeNode => treeNode({ id, kind: 'project', name, parent_id: 'org', tree_seq: seq });
 
 /** The server's rows of one tree, and the feed that follows them into the store. */
 function tree(orgId: string, rows: TreeNode[], seq: number) {
@@ -209,6 +194,16 @@ describe('the connection', () => {
 
     last().say({ op: 'ready', connection_id: 'c1', user_id: 'u1', server_time: '', access_expires_at: '', heartbeat_secs: 25, build: 'b7' });
     expect(socket.status.getState()).toMatchObject({ phase: 'ready', lostAt: null, build: 'b7' });
+  });
+
+  it('keeps the same ready protocol for a key with no expiry', () => {
+    const { socket, last } = harness();
+    socket.start();
+    last().accept();
+    last().say({ op: 'ready', connection_id: 'key', user_id: 'u1', server_time: '', access_expires_at: null, heartbeat_secs: 25, build: 'b1' });
+    expect(socket.status.getState().phase).toBe('ready');
+    expect(last().sent[0]).toEqual({ op: 'auth', token: 'token-1' });
+    socket.stop();
   });
 
   it('does not connect while nobody is signed in', () => {

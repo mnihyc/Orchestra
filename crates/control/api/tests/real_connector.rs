@@ -228,6 +228,7 @@ impl System {
             certificate: enrolled.certificate.clone(),
         });
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -445,8 +446,15 @@ impl SealingCommands {
 
 #[async_trait]
 impl Commands for SealingCommands {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if lock(&self.sent).contains_key(&command.id) {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
             return Ok(());
         }
         let (link, key) = lock(&self.machines)
@@ -499,6 +507,9 @@ impl Commands for SealingCommands {
             deadline,
             body,
         };
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
         lock(&self.order).push((command.machine, cmd.kind.clone()));
         let handle = link.commands().issue(cmd.clone());
         lock(&self.sent).insert(
@@ -683,6 +694,16 @@ struct Cluster {
     data: tempfile::TempDir,
     work: tempfile::TempDir,
     connector: Id,
+    appliers: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for Cluster {
+    fn drop(&mut self) {
+        self.engine.stop();
+        for task in lock(&self.appliers).drain(..) {
+            task.abort();
+        }
+    }
 }
 
 /// The people and the tree of a test: one person owns it all.
@@ -760,9 +781,8 @@ impl Cluster {
         let mut world = support::World::new().await;
         let old = world.app.app.clone();
         let db = old.db.clone();
-        // The program keeps the time of the machine it runs on, so the engine, whose commands carry
-        // deadlines the program reads, does too; the application's own clock is the world's and stands
-        // still.
+        // The program reads real time. Authentication, retained native sources, command deadlines
+        // and link delivery must use that same clock, rather than the fixture's fixed date.
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let master = MasterKey::new([5; 32]);
         let commands = Arc::new(SealingCommands {
@@ -787,11 +807,11 @@ impl Cluster {
             builtin_sources: old.builtin_sources.clone(),
             db: db.clone(),
             config: Arc::clone(&old.config),
-            clock: Arc::clone(&old.clock),
-            link: Link::detached(db.clone(), Arc::clone(&old.clock), Arc::clone(&old.config))
+            clock: Arc::clone(&clock),
+            link: Link::detached(db.clone(), Arc::clone(&clock), Arc::clone(&old.config))
                 .expect("a link without gateways can be made"),
             engine: engine.clone(),
-            realtime: orch_api_core::realtime::Realtime::new(&db, &old.clock, &old.config),
+            realtime: orch_api_core::realtime::Realtime::new(&db, &clock, &old.config),
             build: BuildInfo::new("api", "0.0.0-test", "", "1"),
             blobs: orch_api_core::blobs::Blobs::in_memory(),
             cache: orch_api_core::cache::Cache::detached(),
@@ -877,7 +897,7 @@ impl Cluster {
             arrival.link.clone(),
             RecipientKey::from_certificate(&arrival.certificate),
         );
-        spawn_applier(
+        let applier = spawn_applier(
             world.app.clone(),
             arrival.machine,
             arrival.link,
@@ -896,6 +916,7 @@ impl Cluster {
             data,
             work,
             connector: arrival.machine,
+            appliers: Mutex::new(vec![applier]),
         }
     }
 
@@ -1112,7 +1133,9 @@ impl Cluster {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let id = thread.base.id;
         assert_eq!(thread.state, ThreadState::Idle);
         let sent = self
@@ -1295,7 +1318,7 @@ impl Cluster {
             link.clone(),
             RecipientKey::from_certificate(&identity.certificate),
         );
-        spawn_applier(self.world.app.clone(), id, link, notices);
+        lock(&self.appliers).push(spawn_applier(self.world.app.clone(), id, link, notices));
         let machine = ScriptedMachine::start(
             &self.system.hub,
             &self.clock,
@@ -1373,6 +1396,8 @@ impl Cluster {
             .publish(
                 &Stream::Machine,
                 &Event::MachineFacts(MachineFacts {
+                    data_directory: None,
+                    gateway: None,
                     role_management: None,
                     programs: None,
                     installation: None,
@@ -1384,6 +1409,8 @@ impl Cluster {
                     os_version: "scripted Linux".to_owned(),
                     cpus: 1,
                     memory_bytes: 0,
+                    discovered_harnesses: None,
+                    searched_harness_kinds: None,
                     harnesses: vec![MachineFactsHarness {
                         kind: "fake".to_owned(),
                         path: handler_program.clone(),
@@ -1406,11 +1433,7 @@ impl Cluster {
                         }],
                         ..LocalPolicy::default()
                     }),
-                    rates: MachineFactsRates {
-                        up_bps: 0,
-                        down_bps: 0,
-                        round_trip_ms: 0,
-                    },
+                    rates: MachineFactsRates::default(),
                     clock_offset_ms: 0,
                 }),
             )
@@ -1781,7 +1804,7 @@ fn spawn_applier(
     machine: Id,
     link: ControllerLink,
     mut notices: mpsc::UnboundedReceiver<Notice>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(notice) = notices.recv().await {
             match notice {
@@ -1799,7 +1822,7 @@ fn spawn_applier(
                 _ => {}
             }
         }
-    });
+    })
 }
 
 /// What the system's link writes when a machine's session comes or goes: the presence and the moment of it,
@@ -2344,12 +2367,17 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
     let cluster = Cluster::new().await;
     let tree = cluster.tree().await;
     let on = cluster.everything_on_the_connector(&tree).await;
-    // Announcements wake idle threads. Port exposure is explicitly off in this fixture.
+    // New agents receive an explicit topic timeline gift; idle recipients may wake.
     {
         let mut conn = cluster.db.acquire().await.unwrap();
         for (target, key, value) in [
-            (tree.topic, "broadcast.wake_idle", true),
-            (tree.org, "ports.enabled", false),
+            (
+                tree.topic,
+                "threads.agent_access",
+                json!({"where":"topic","parts":{"documents":"edit","timeline":"write"}}),
+            ),
+            (tree.topic, "broadcast.wake_idle", json!(true)),
+            (tree.org, "ports.enabled", json!(false)),
         ] {
             orch_settings::write::write(
                 &mut conn,
@@ -2357,7 +2385,7 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
                     actor: orch_db::audit::Actor::User(tree.owner.id()),
                     target: orch_settings::Target::Node(target),
                     key,
-                    value: json!(value),
+                    value,
                     locked: None,
                     expected_revision: None,
                     may_lock: true,
@@ -2391,6 +2419,8 @@ async fn an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
 
@@ -2545,6 +2575,8 @@ async fn an_agent_on_a_real_connector_deletes_a_document_it_was_shared_to_manage
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     // The document is shared to manage with the agents of its topic, so the thread that will ask need not exist yet.
@@ -2554,6 +2586,8 @@ async fn an_agent_on_a_real_connector_deletes_a_document_it_was_shared_to_manage
         .call(ShareAgentCreate, &[])
         .token(&tree.owner.token)
         .body(&ShareWithAgents {
+            link_origin: None,
+            viewers_read: None,
             read_first: None,
             what: ShareWhat::Document(ShareWhatDocument {
                 document_id: document,
