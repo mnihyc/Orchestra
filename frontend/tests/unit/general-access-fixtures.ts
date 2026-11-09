@@ -1,5 +1,7 @@
 /** Full live pages for the general audience and local inherited-row edits. */
 import { indexCatalogue } from '@/features/access/model';
+import { areasOf, partsOfLevel } from '@/features/access/agentShares';
+import { canShareWithAgents } from '@/api/share';
 import type { AccessKind } from '@/api/access';
 import type { Entry, Holder, NodeRef, PermissionCatalogueGetReply, PermissionPage, Role, UserRef } from '@/generated/api-types';
 
@@ -26,6 +28,6 @@ export function pageFor(kind: AccessKind = 'thread'): PermissionPage {
   return {
     object: { id: '00000000-0000-4000-8003-000000000001', kind, name: 'Example' }, page: 'live', owner: ADA, owners: [named({ kind: 'user', user: ADA }, 1)],
     owners_writable: true, external: true, admins: { count: 1, of: [TOPIC, 'system'] }, rows, state: 'follows', followers: null,
-    gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], holders_share: true }, covers: null, depends: [], reaches: null, revision: 7,
+    gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], agent_parts: canShareWithAgents(kind) ? partsOfLevel('edit', areasOf(kind, 'inside')) : {}, holders_share: true }, covers: null, depends: [], reaches: null, revision: 7,
   };
 }

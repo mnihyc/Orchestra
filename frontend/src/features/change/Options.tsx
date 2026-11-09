@@ -9,7 +9,7 @@ import { RotateCcw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { type Choices, type OptionChoices } from '@/features/change/choices';
+import { type Choices, type OptionChoices, type PageChoice } from '@/features/change/choices';
 import type { AppliedChangeOptions, ForkPlan } from '@/generated/api-types';
 import { IconButton } from '@/ui/IconButton';
 import { Checkbox } from '@/ui/Checkbox';
@@ -45,9 +45,11 @@ export interface OptionsProps {
   plan: ForkPlan | null;
   /** The topic whose access defaults a fork may follow. */
   topic: string;
+  /** The source's creation default; built-in forks begin Private. */
+  defaultPage?: PageChoice;
 }
 
-export function Options({ choices, onChange, applied, plan, topic }: OptionsProps) {
+export function Options({ choices, onChange, applied, plan, topic, defaultPage = 'original' }: OptionsProps) {
   const { t } = useTranslation();
   const start = applied ?? SHIPPED;
   const set = (patch: Partial<OptionChoices>) => onChange({ options: { ...choices.options, ...patch } });
@@ -145,8 +147,8 @@ export function Options({ choices, onChange, applied, plan, topic }: OptionsProp
           title={t('fork.page.title')}
           help={<ChoiceFieldHelp label={t('fork.page.title')} options={accessOptions} />}
           resetLabel={t('changeCompact.reset.access')}
-          changed={choices.page !== 'original'}
-          onReset={() => onChange({ page: 'original' })}
+          changed={choices.page !== defaultPage}
+          onReset={() => onChange({ page: defaultPage })}
         >
             <RadioGroup
               variant="list"

@@ -41,7 +41,7 @@ afterEach(() => { client.session.setState(original); documentWriter.clear(); ret
 it('replaces comment pages, keeps author Resolve and returns to the latest replies',async() => {
   const started=performance.now(),phases:{name:string;ms:number}[]=[];
   const phase=(name:string) => phases.push({name,ms:Math.round(performance.now()-started)});
-  onTestFailed(() => { console.info('Comment paging progress',phases,calls.read.mock.calls); });
+  onTestFailed(() => { console.error('Comment paging progress',phases,calls.read.mock.calls); });
   const full=structuredClone(commentDocument);
   const doc={ ...full,access:{ ...full.access,permissions:['doc.view','doc.comment'] } };
   const makeComment=(at:number):DocumentComment => ({ id:`reply-${at}`,discussion_id:'discussion',author:DORA,content:[{type:'text',text:`Historical reply ${at}`}],reactions:[],edited_at:null,deleted:false,created_at:'2026-01-01T00:00:00Z',seq_updated:at });

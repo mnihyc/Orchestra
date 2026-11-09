@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** A mount's location on each machine: path, or volume on a storage; who may add which; removal; what its data is.
  * The machine's management authority governs changes to every kind of location; the mount's managers say what the
  * data of each location is, a hint that decides nothing.
@@ -82,7 +83,7 @@ function AddLocation({ mount, onClose }: { mount: Mount; onClose: () => void }) 
   const choice = offered.isError ? undefined : offered.data?.available.find((row) => row.mount.id === mount.id);
   const options = (machines.isError ? [] : machines.data ?? []).filter((row) =>
     (holds(row.access, 'machine.manage') || holds(row.access, 'host.manage')) && !mount.locations.some((location) => location.machine.id === row.id)
-  ).map((row) => ({ value: row.id, ...choiceOption(t, 'dynamic.resource', { name: row.host?.name ?? row.name }) }));
+  ).map((row) => ({ value: row.id, resource:{kind:'machine',id:row.id,data:row}, ...choiceOption(t, 'dynamic.resource', { name: row.host?.name ?? row.name }) }));
   const canVolume = choice !== undefined && (choice.default_storage || choice.storages.length > 0);
   const valid = options.some((option) => option.value === machine) && choice !== undefined && (kind === 'path'
     ? choice.path && source.trim() !== ''
@@ -94,7 +95,7 @@ function AddLocation({ mount, onClose }: { mount: Mount; onClose: () => void }) 
   }, onSuccess: onClose });
   return <Dialog open onOpenChange={(open) => { if (!open && !save.isPending) onClose(); }} title={t('resourceDetails.mount.addLocation')} dismissible={!save.isPending} footer={<><Button disabled={save.isPending} onClick={onClose}>{t('common.cancel')}</Button><Button variant="primary" pending={save.isPending} disabled={!valid} onClick={() => save.mutate()}>{t('resources.edit.save')}</Button></>}>
     <div className="flex flex-col gap-3">
-      <Select label={t('resourceDetails.mount.machine')} value={machine} disabled={save.isPending} onValueChange={(value) => { setMachine(value); setKind('path'); setSource(''); setStorage('default'); }} options={options} />
+      <ResourcePicker pickerKey="mount-location-machine" label={t('resourceDetails.mount.machine')} value={machine} disabled={save.isPending} onValueChange={(value) => { setMachine(value); setKind('path'); setSource(''); setStorage('default'); }} options={options} />
       {choice !== undefined && <><Select<'path' | 'volume'> label={t('resourceDetails.mount.locationKind')} value={kind} disabled={save.isPending} onValueChange={(value) => { setKind(value); setStorage(choice.default_storage ? 'default' : `named:${choice.storages[0] ?? ''}`); }}
         options={[...(choice.path ? [{ value: 'path' as const, ...choiceOption(t, 'mountLocation.path') }] : []), ...(canVolume ? [{ value: 'volume' as const, ...choiceOption(t, 'mountLocation.volume') }] : [])]} />
         {kind === 'path' ? <Input label={t('resourceDetails.mount.source')} value={source} disabled={save.isPending} onChange={(event) => setSource(event.target.value)} /> : <Select label={t('resourceDetails.mount.storage')} value={storage} disabled={save.isPending} onValueChange={setStorage}

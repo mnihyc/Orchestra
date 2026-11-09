@@ -35,6 +35,26 @@ it('opens on focus, keeps on Enter and Escape dismisses it while returning focus
   expect(screen.getByRole('button', { name: 'Environment' })).toHaveFocus();
 });
 
+it('keeps an escaped inspection closed until a new pointer entry follows a leave', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    act(() => { trigger.focus(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+  } finally { view.unmount(); vi.useRealTimers(); }
+});
+
 it('keeps a clicked card when the pointer leaves and closes it on an outside press', async () => {
   const user = userEvent.setup();
   show(<><DetailCard label="Host" content={() => <span>Host details</span>}>Host</DetailCard><button type="button">Outside</button></>);
@@ -99,7 +119,7 @@ it('opens a choice card from its own control without choosing', async () => {
 it('keeps the next option reachable when a phone picker has no room beside it', async () => {
   const previousFont = document.documentElement.style.fontSize;
   const previousWidth = window.innerWidth;
-  const original = Reflect.get(HTMLElement.prototype, 'getBoundingClientRect') as HTMLElement['getBoundingClientRect'];
+  const original = Reflect.get<HTMLElement, 'getBoundingClientRect'>(HTMLElement.prototype, 'getBoundingClientRect');
   const boxes = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
   try {
     document.documentElement.style.fontSize = '16px';

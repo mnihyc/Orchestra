@@ -61,15 +61,24 @@ facts credential declaration, so it receives no provider key through it.
 | `display_name` | `string` | required | The proposed display name; the routing name where the list has none. |
 | `parameters` | `ModelParameters` | required | What the list says of the model: its efforts and default, what it offers, its context window, whether it takes images, and a rate where the list carries prices. |
 | `listed` | `boolean` | required | Whether the list the suggestion comes from names it. |
+| `origins` | `map of string` | may be absent | Provenance of explicitly supplied values, keyed by JSON pointer in this suggestion. An unknown or absent origin never becomes vendor confirmation or enabled support. |
 
 **ModelParameters**
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `cache_lifetimes` | `array or null` | may be absent | Additional cache lifetimes enabled by a manager. Ordinary five-minute caching stays available. |
+| `native_tools` | `map of map of Binding or null` | may be absent | Optional interface/capability bindings, projected from installed declarations without rewriting older entries. |
+| `web_search` | `array or null` | may be absent | Native search modes enabled by a provider manager; absence leaves search disabled. |
+| `default_web_search` | `string or null` | may be absent | The enabled search mode used when a use makes no choice; absent means disabled. |
 | `efforts` | `array or null` | may be absent | The efforts it takes. |
 | `default_effort` | `string or null` | may be absent | The effort used when none is chosen. |
+| `reasoning_modes` | `array or null` | may be absent | Additional reasoning modes explicitly enabled by a provider manager. |
+| `default_reasoning_mode` | `string or null` | may be absent | An enabled reasoning mode used when a use makes no choice; never set by discovery. |
 | `service_tiers` | `array or null` | may be absent | The speeds a manager of the provider enabled; empty until then, whatever the harness offers. |
 | `default_service_tier` | `string or null` | may be absent | The speed a thread on this model starts with: one of `service_tiers`. Left out, the ordinary one. A manager's choice, never discovery's. |
+| `capacity_tiers` | `array or null` | may be absent | Enabled capacity selections. Absence keeps undeclared/older endpoint defaults untouched. |
+| `default_capacity_tier` | `string or null` | may be absent | An enabled capacity selection used when none is chosen, never set by discovery. |
 | `access_programs` | `array or null` | may be absent | The access programs a manager enabled, one by one, never by discovery. |
 | `default_access_program` | `string or null` | may be absent | The access program a thread on this model starts with: one of `access_programs`. Left out, none. |
 | `context_window` | `integer or null` | may be absent | The model's own window, in tokens: what its harness works with when it is told nothing, as the harness's list gives it or a manager wrote it. |
@@ -77,7 +86,53 @@ facts credential declaration, so it receives no provider key through it.
 | `default_context` | `integer or null` | may be absent | The context a thread on this model starts with, at most `context_max`. Left out, all that is open (`context_max`), and where nothing larger is open, the model's own window. Where the conversation is shortened below a context is worked out and is a member of nothing. |
 | `offered` | `ModelOffered or null` | may be absent | What the harness or the endpoint most recently reported as on offer. Being listed here does not make anything usable. |
 | `input_images` | `boolean or null` | may be absent | Whether it takes images. |
+| `request_options` | `object or null` | may be absent | Provider constraints on additional request options, keyed by wire protocol; `native` uses declared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct meanings. An omitted schema preserves the protocol's existing extension surface. |
 | `rate` | `Rate or null` | may be absent | What it costs, when a manager entered a price or discovery found one. |
+
+**Binding**
+
+| Member | JSON shape | Presence | Meaning |
+|--------|------------|----------|---------|
+| `input_schema` | `JSON; see schema` | may be absent | Input schema for this capability; null retains the existing implementation's contract. |
+| `eligible_when` | `JSON; see schema` | may be absent | A local schema over actual thread/offering facts; null imposes no extra predicate. |
+| `request` | `JSON; see schema` | may be absent | Existing native-tool declaration or service request shape. |
+| `result` | `JSON; see schema` | may be absent | Projection into the capability's existing common item. |
+| `counters` | `map of Counter` | may be absent | Named counters with actual source pointers, never inferred item counts. |
+| `prices` | `map of Price` | may be absent | Declared quotes in their own currency/unit. |
+| `discovery` | `JSON; see schema` | may be absent | Discovery mapping, which offers but never enables capabilities. |
+
+**Counter**
+
+| Member | JSON shape | Presence | Meaning |
+|--------|------------|----------|---------|
+| `pointer` | `string` | may be absent | JSON pointer in a decoded response/frame. |
+| `constant` | `integer or null` | may be absent | Explicit per-success quantity where the service bills one call rather than result count. |
+| `items` | `CountItems or null` | may be absent | Count actual completed rows only after their declared byte encoding decodes. |
+| `valid_when` | `JSON; see schema` | may be absent | The whole response must satisfy this evidence schema before absence can mean anything. |
+| `only_when` | `JSON; see schema` | may be absent | Predicate over the decoded response; null imposes no extra condition. |
+| `otherwise` | `integer or null` | may be absent | Explicit quantity when that predicate is false, such as a documented free empty answer. |
+| `optional` | `boolean` | may be absent | Capture if reported; absence does not promise this otherwise unsupported quantity. |
+| `unit` | `string` | may be absent | The capability's ledger unit. |
+| `cumulative` | `boolean` | may be absent | A new report replaces the prior cumulative snapshot rather than adding it. |
+| `reset_on_decrease` | `boolean` | may be absent | A lower cumulative snapshot explicitly starts again at zero; otherwise that interval is unknown. |
+| `successful_only` | `boolean` | may be absent | Counts successful operations rather than attempts. |
+| `reported_cost` | `boolean` | may be absent | Optional alternative vendor-reported cost, separate from an estimate. |
+
+**CountItems**
+
+| Member | JSON shape | Presence | Meaning |
+|--------|------------|----------|---------|
+| `pointer` | `string` | may be absent |  |
+| `only_when` | `JSON; see schema` | may be absent | Optional predicate selects completed outputs within a mixed native array. |
+| `base64` | `string` | may be absent | Each selected row must contain nonempty standard base64 bytes at this pointer. |
+
+**Price**
+
+| Member | JSON shape | Presence | Meaning |
+|--------|------------|----------|---------|
+| `amount` | `string` | may be absent | Decimal text, never parsed through a float. |
+| `currency` | `string` | may be absent | Original currency or the existing credits unit. |
+| `unit` | `string` | may be absent | Charged quantity, such as token, search, fetch or image. |
 
 **ServiceTier**
 
@@ -90,19 +145,40 @@ facts credential declaration, so it receives no provider key through it.
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `cache_lifetimes` | `array or null` | may be absent | Additional prompt-cache lifetimes observed without enabling them. |
+| `reasoning_modes` | `array or null` | may be absent | Additional reasoning modes observed at this offering, without enabling them. |
+| `report` | `ModelReport or null` | may be absent | Optional discovery details. These facts neither enable a capability nor constrain an old model entry. |
+| `web_search` | `array or null` | may be absent | Native search modes the source offers, without enabling them. |
 | `service_tiers` | `array or null` | may be absent | Speeds on offer. |
+| `capacity_tiers` | `array or null` | may be absent | Capacity classes observed independently of inference speed, without enabling them. |
 | `access_programs` | `array or null` | may be absent | Access programs on offer. |
 | `context_max` | `integer or null` | may be absent | The largest context, in tokens, that the harness or the endpoint says the model takes, where that is more than the window the model starts with. A manager opens it by writing it as the model's `context_max`; until then no thread can be given it. |
+
+**ModelReport**
+
+| Member | JSON shape | Presence | Meaning |
+|--------|------------|----------|---------|
+| `capabilities` | `object` | may be absent | Capability support objects in the interface's declared vocabulary; unrecognized members grant nothing. |
+| `output_max` | `integer or null` | may be absent | Reported maximum output tokens, without changing the thread's output limit. |
+| `lifecycle` | `string or null` | may be absent | Lifecycle stage as reported. Future stages remain data, not a new refusal rule. |
+| `deprecated_at` | `string or null` | may be absent | Reported deprecation time; absent means it was not reported. |
+| `retires_at` | `string or null` | may be absent | Reported retirement schedule. A past schedule does not declare that retirement happened. |
+| `line` | `string or null` | may be absent | Model line proposed by the endpoint, never inferred from a routing name or enabled as a group. |
 
 **Rate**
 
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
+| `web_search_per_call` | `string or null` | may be absent | Credits for one successful native web search, additional to token prices. |
+| `web_fetch_per_call` | `string or null` | may be absent | Credits for one successful native page fetch, separate from searches and tokens. |
 | `input_per_mtok` | `string` | required | Credits for a million input tokens. |
 | `cached_input_per_mtok` | `string` | required | Credits for a million cached input tokens. |
 | `output_per_mtok` | `string` | required | Credits for a million output tokens. |
 | `cache_write_per_mtok` | `string or null` | may be absent | Credits for a million tokens written to a prompt cache; as input when left out. |
+| `cache_write_1h_per_mtok` | `string or null` | may be absent | Credits for a million one-hour cache writes; absence leaves that price unknown. |
+| `cache_write_12h_per_mtok` | `string or null` | may be absent | Credits for a million twelve-hour cache writes; absence leaves that price unknown. |
 | `tiers` | `object or null` | may be absent | Service tiers priced as a multiple of the rate, written as a decimal string: `"2"` for double, `"0.5"` for half. |
+| `capacity_tiers` | `object or null` | may be absent | Actual reported capacity classes priced independently of inference-speed multipliers. |
 | `above` | `array or null` | may be absent | Prices that replace the ordinary ones for large prompts. |
 
 **RateAbove**
@@ -114,7 +190,17 @@ facts credential declaration, so it receives no provider key through it.
 | `cached_input_per_mtok` | `string or null` | may be absent | Credits for a million cached input tokens; as the ordinary rate when left out. |
 | `output_per_mtok` | `string` | required | Credits for a million output tokens. |
 | `cache_write_per_mtok` | `string or null` | may be absent | Credits for a million tokens written to a prompt cache. |
+| `cache_write_1h_per_mtok` | `string or null` | may be absent | Credits for a million tokens written to a one-hour prompt cache. |
+| `cache_write_12h_per_mtok` | `string or null` | may be absent | Credits for a million twelve-hour cache writes; inherits the root quote when absent. |
 <!-- END provider.models -->
+
+`cache_write_per_mtok` prices the source's ordinary cache writes. A separately quoted
+`cache_write_12h_per_mtok`, including a context-band override, prices only the independently
+measured twelve-hour subset. That subset is already included in the total writes and is
+not charged again at the ordinary price. A missing lifetime measurement or quote stays
+unknown when the charge depends on it. The [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+describes the Responses lifetime counters; the [pricing page](https://developers.openai.com/api/docs/pricing)
+supplies the model's actual rates. Reported vendor totals retain their existing precedence.
 
 Use [SourceAsk](schema/source-ask.json) and [ModelsReport](schema/models-report.json).
 The result wraps `models`; it is not a direct array or a facts report.

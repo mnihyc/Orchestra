@@ -61,6 +61,7 @@ fn response_object(
         "instructions": null,
         "max_output_tokens": null,
         "model": ctx.model,
+        "service_tier": "default",
         "output": output,
         "parallel_tool_calls": true,
         "previous_response_id": ctx.previous_response_id,
@@ -507,6 +508,7 @@ mod tests {
         assert_eq!(created["model"], "mock-large");
         let completed = &events[9].1["response"];
         assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["service_tier"], "default");
         assert_eq!(completed["output"][0]["content"][0]["text"], "Hello there");
         assert_eq!(
             completed["usage"],

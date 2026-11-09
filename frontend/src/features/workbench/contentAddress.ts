@@ -1,5 +1,6 @@
 /** Pure shared addresses for full content. Local view identities never enter a resource URL. */
 import { defaultParseSearch, defaultStringifySearch } from '@tanstack/react-router';
+import { readOrchLink } from '@/lib/orchLinks';
 import type { InspectorTarget, Tab } from './layout';
 import { locatePage, pageParam, type PageTarget } from './pageTargets';
 
@@ -7,7 +8,7 @@ export const EMPTY_WORKBENCH = '/workbench';
 export interface WorkspaceSource { environmentId: string; threadId: string | null }
 export type ContentLocation =
   | { view: 'page'; href: string }
-  | ({ view: 'file'; path: string; line?: number } & WorkspaceSource)
+  | ({ view: 'file'; path: string; line?: number; endLine?: number } & WorkspaceSource)
   | ({ view: 'difference'; path: string; kind: 'git' | 'change'; item: string; staged: boolean } & WorkspaceSource);
 
 export function relativeFilePath(path: string): boolean {
@@ -21,8 +22,7 @@ export function fileLine(value: unknown): number | undefined {
   return Number.isSafeInteger(line) && line > 0 ? line : undefined;
 }
 function internalAddress(href: string): URL | null {
-  if (!href.startsWith('/') || href.startsWith('//') || href.includes('\\')) return null;
-  try { return new URL(href, 'https://orch.invalid'); } catch { return null; }
+  return readOrchLink(href);
 }
 export function parsePageAddress(href: string): PageTarget | null {
   const url = internalAddress(href);
@@ -53,7 +53,7 @@ export function parseContentAddress(href: string): ContentLocation | null {
     return { view: 'page', href: target === null ? url.pathname + url.search + url.hash : pageHref(target) };
   }
   const query = url.searchParams;
-  for (const key of ['view', 'environment', 'thread', 'path', 'line', 'kind', 'item', 'staged']) {
+  for (const key of ['view', 'environment', 'thread', 'path', 'line', 'endLine', 'kind', 'item', 'staged']) {
     if (query.getAll(key).length > 1) return null;
   }
   const values: Record<string, unknown> = defaultParseSearch(url.search);
@@ -73,9 +73,11 @@ export function parseContentAddress(href: string): ContentLocation | null {
     if (query.has('kind') || query.has('item') || query.has('staged')) return null;
     const line = fileLine(scalar('line'));
     if (query.has('line') && line === undefined) return null;
-    return { view, ...source, path, ...(line === undefined ? {} : { line }) };
+    const endLine = fileLine(scalar('endLine'));
+    if (query.has('endLine') && (endLine === undefined || line === undefined || endLine < line)) return null;
+    return { view, ...source, path, ...(line === undefined ? {} : { line }), ...(endLine === undefined ? {} : { endLine }) };
   }
-  if (query.has('line')) return null;
+  if (query.has('line') || query.has('endLine')) return null;
   const kind = scalar('kind'), item = scalar('item') ?? '', staged = scalar('staged');
   if (kind !== 'git' && kind !== 'change' || staged !== null && staged !== '0' && staged !== '1') return null;
   if (kind === 'git' && item !== '' || kind === 'change' && staged !== null) return null;
@@ -89,6 +91,7 @@ export function contentHref(location: ContentLocation): string {
   query.path = location.path;
   if (location.view === 'file') {
     if (location.line !== undefined) query.line = location.line;
+    if (location.endLine !== undefined) query.endLine = location.endLine;
   } else {
     query.kind = location.kind;
     if (location.kind === 'git') query.staged = location.staged ? 1 : 0;
@@ -101,7 +104,7 @@ export function contentHref(location: ContentLocation): string {
 export function contentTab(location: ContentLocation): Pick<Tab, 'view' | 'of'> {
   if (location.view === 'page') return { view: 'page', of: { href: location.href } };
   const source = { env: location.environmentId, thread: location.threadId ?? '', path: location.path };
-  return location.view === 'file' ? { view: 'file', of: { ...source, ...(location.line === undefined ? {} : { line: String(location.line) }) } }
+  return location.view === 'file' ? { view: 'file', of: { ...source, ...(location.line === undefined ? {} : { line: String(location.line) }), ...(location.endLine === undefined ? {} : { endLine: String(location.endLine) }) } }
     : { view: 'difference', of: { ...source, kind: location.kind, item: location.item, staged: location.staged ? '1' : '0' } };
 }
 export function contentLocation(tab: Tab): ContentLocation | null {
@@ -112,7 +115,8 @@ export function contentLocation(tab: Tab): ContentLocation | null {
   const source = { environmentId: of.env, threadId: of.thread === '' ? null : of.thread, path: of.path };
   if (tab.view === 'file') {
     const line = fileLine(of.line);
-    return { view: 'file', ...source, ...(line === undefined ? {} : { line }) };
+    const endLine = fileLine(of.endLine);
+    return { view: 'file', ...source, ...(line === undefined ? {} : { line }), ...(line === undefined || endLine === undefined || endLine < line ? {} : { endLine }) };
   }
   return { view: 'difference', ...source, kind: of.kind === 'git' ? 'git' : 'change', item: of.item ?? '', staged: of.kind === 'git' && of.staged === '1' };
 }

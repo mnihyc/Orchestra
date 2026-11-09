@@ -33,7 +33,30 @@ pub fn completed(
     turn: Option<orch_types::Id>,
     at: orch_types::Time,
 ) -> Vec<orch_agent_contract::events::SessionEvent> {
-    let Some(id) = params.get("reviewId").and_then(Json::as_str) else {
+    observed(params, turn, at, false)
+}
+
+/// A native review start opens the same factual card its verdict will complete.
+#[must_use]
+pub fn started(
+    params: &Json,
+    turn: Option<orch_types::Id>,
+    at: orch_types::Time,
+) -> Vec<orch_agent_contract::events::SessionEvent> {
+    observed(params, turn, at, true)
+}
+
+fn observed(
+    params: &Json,
+    turn: Option<orch_types::Id>,
+    at: orch_types::Time,
+    starting: bool,
+) -> Vec<orch_agent_contract::events::SessionEvent> {
+    let Some(id) = params
+        .get("reviewId")
+        .and_then(Json::as_str)
+        .filter(|id| !id.is_empty())
+    else {
         return Vec::new();
     };
     let Some(body) = params.get("review") else {
@@ -42,7 +65,7 @@ pub fn completed(
     let Some(outcome) = body.get("status").and_then(Json::as_str) else {
         return Vec::new();
     };
-    if outcome == "inProgress" {
+    if starting != (outcome == "inProgress") {
         return Vec::new();
     }
     let model = body
@@ -54,7 +77,7 @@ pub fn completed(
         .or_else(|| params.get("usage"))
         .cloned()
         .and_then(|usage| serde_json::from_value(usage).ok());
-    review::reported(review::ReportedReview {
+    let report = review::ReportedReview {
         native_ref: format!("approval-review:{id}"),
         turn,
         at,
@@ -65,7 +88,12 @@ pub fn completed(
         action: params.get("action").cloned().unwrap_or(Json::Null),
         usage,
         raw: params,
-    })
+    };
+    if starting {
+        review::started(report)
+    } else {
+        review::reported(report)
+    }
 }
 
 #[cfg(test)]
@@ -75,7 +103,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn an_allowed_action_has_no_card_and_a_denial_shows_its_model_and_reason() {
+    fn every_native_review_verdict_is_a_factual_card_not_a_person_request() {
         let at = orch_types::Time::new(chrono::Utc::now());
         for status in ["approved", "denied", "timedOut", "aborted"] {
             let events = completed(
@@ -103,7 +131,38 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_is_part_of_the_mode_and_auto_stays_undeclared_before_the_trial() {
+    fn activated_auto_still_requires_the_fixed_reviewer_in_available_models()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut settings: SessionSettings = serde_json::from_value(json!({
+            "agent_id":orch_types::new_id(),"thread_id":orch_types::new_id(),"segment_id":orch_types::new_id(),
+            "mode":"new","native_session_ref":null,"upto_turn_ordinal":null,
+            "workspace_root":"/workspace","instruction_root_marker":false,"directory":"/workspace","cwd":"/workspace",
+            "mounts":[],"model":"mock-large","effort":null,"params":{},"approval_mode":"auto",
+            "available_models":["mock-large"],"sandbox_mode":"workspace","instructions":"","memory":null,
+            "arrangement":"together","orch_tools":[],"raw_events":false
+        }))?;
+        assert!(
+            reviewer(&settings).is_err(),
+            "the session model cannot stand in for the native reviewer"
+        );
+        settings
+            .available_models
+            .push(CODEX_REVIEW_MODEL.to_owned());
+        let declared = reviewer(&settings)?.ok_or("Auto must declare its native reviewer")?;
+        assert_eq!(declared.model, CODEX_REVIEW_MODEL);
+        assert!(!declared.reported && !declared.usage_apart);
+        settings
+            .available_models
+            .retain(|model| model != CODEX_REVIEW_MODEL);
+        assert!(
+            reviewer(&settings).is_err(),
+            "removing native reviewer access closes Auto again"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verified_auto_uses_the_native_reviewer_and_preserves_remaining_person_requests() {
         assert_eq!(
             crate::parameters::approval_policy(ApprovalMode::Auto),
             "on-request"
@@ -122,9 +181,17 @@ mod tests {
                 .any(|parameter| parameter.key == "approvals_reviewer")
         );
         assert!(
-            !crate::descriptor::descriptor("0.165.0")
+            crate::descriptor::descriptor("0.167.0")
                 .approval_modes
                 .contains(&ApprovalMode::Auto)
+        );
+        assert!(crate::descriptor::auto_proven());
+        assert!(orch_agent_programs::Programs::builtin().auto_possible());
+        assert!(!orch_agent_programs::shipped("claude-code").proves("approval_modes.auto"));
+        let declared = crate::descriptor::capabilities().approval_reviewer;
+        assert!(
+            declared
+                .is_some_and(|reviewer| reviewer.model == CODEX_REVIEW_MODEL && !reviewer.settable)
         );
         let asked = crate::approvals::translate(
             "item/commandExecution/requestApproval",

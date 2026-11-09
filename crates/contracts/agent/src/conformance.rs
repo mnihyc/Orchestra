@@ -28,6 +28,147 @@ pub struct ModelPaths {
     pub exact: Vec<String>,
 }
 
+/// The observed wire facts needed by the fixed-reviewer native case. This is test setup, not
+/// an Auto capability declaration: only the program's verified manifest can offer the mode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeNotificationReview {
+    /// Actual reviewer routing model, observed independently of the generic code-review model.
+    pub model: String,
+    /// Extra native command arguments that request review of the disposable marker command.
+    pub command_arguments: Json,
+    /// Structured JSON answer observed to approve a native review.
+    pub allow_response: Json,
+    /// Structured JSON answer observed to deny a native review.
+    pub deny_response: Json,
+    /// JSON pointer to the structured output schema on the actual reviewer request.
+    pub schema_pointer: String,
+    /// Exact native requested output schema from the pinned diagnostic.
+    pub response_schema: Json,
+    /// JSON-RPC notification identifying the start of this review.
+    pub started_method: String,
+    /// JSON-RPC notification identifying the completed review.
+    pub completed_method: String,
+}
+
+/// Evidence forms are native protocol facts, not program names or new approval authorities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a conformance fixture holds one review form per case; boxing it would only move the bytes and change every case's construction"
+)]
+pub enum NativeAutoReview {
+    /// Existing fixed-reviewer notification case, unchanged.
+    Notifications(NativeNotificationReview),
+    /// Structurally matched classifier requests and factual denial hooks.
+    Classifier(NativeClassifierReview),
+}
+
+/// A bounded predicate on the actual controlled-model request. Unknown shapes do not match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeRequestPattern {
+    pub equals: BTreeMap<String, Json>,
+    pub present: Vec<String>,
+    pub absent: Vec<String>,
+    pub contains: BTreeMap<String, Vec<String>>,
+    pub excludes: BTreeMap<String, Vec<String>>,
+}
+impl NativeRequestPattern {
+    /// Match structure and text together; a model name or queue position is never sufficient.
+    #[must_use]
+    pub fn matches(&self, body: &Json) -> bool {
+        fn text(value: &Json, output: &mut String) {
+            match value {
+                Json::String(value) => {
+                    output.push_str(value);
+                    output.push('\n');
+                }
+                Json::Array(values) => values.iter().for_each(|value| text(value, output)),
+                Json::Object(values) => values.values().for_each(|value| text(value, output)),
+                _ => {}
+            }
+        }
+        let contents = |path: &str| {
+            let mut output = String::new();
+            if let Some(value) = body.pointer(path) {
+                text(value, &mut output);
+            }
+            output
+        };
+        self.equals
+            .iter()
+            .all(|(path, value)| body.pointer(path) == Some(value))
+            && self
+                .present
+                .iter()
+                .all(|path| body.pointer(path).is_some_and(|value| !value.is_null()))
+            && self.absent.iter().all(|path| body.pointer(path).is_none())
+            && self.contains.iter().all(|(path, needles)| {
+                let value = contents(path);
+                needles.iter().all(|needle| value.contains(needle))
+            })
+            && self.excludes.iter().all(|(path, needles)| {
+                let value = contents(path);
+                needles.iter().all(|needle| !value.contains(needle))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeClassifierOutcome {
+    Allow,
+    Deny,
+    Unavailable,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeClassifierStage {
+    /// Opaque adapter-owned stage identity; repeated Stage1 fallback remains Stage1.
+    pub identity: String,
+    pub model: String,
+    pub request: NativeRequestPattern,
+    pub script: String,
+    pub status: u16,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeClassifierCase {
+    pub name: String,
+    pub session_model: String,
+    pub available_models: Vec<String>,
+    pub profile_env: BTreeMap<String, String>,
+    pub declared_reviewer: String,
+    pub outcome: NativeClassifierOutcome,
+    pub stages: Vec<NativeClassifierStage>,
+    pub initial_request: NativeRequestPattern,
+    pub continuation_request: NativeRequestPattern,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeClassifierReview {
+    /// Harmless literal command with one __ORCH_MARKER__ placeholder, replaced only by a quoted owned path.
+    pub command: String,
+    pub marker_contents: String,
+    pub command_arguments: Json,
+    pub sandbox_mode: crate::descriptor::SandboxMode,
+    pub excluded_refusal_fragment: String,
+    pub cases: Vec<NativeClassifierCase>,
+}
+#[derive(Debug, Clone, Copy)]
+pub struct NativeReviewRequest<'a> {
+    pub path: &'a str,
+    pub body: &'a Json,
+    pub status: Option<u16>,
+    pub queued: bool,
+}
+#[derive(Debug)]
+pub struct NativeClassifierEvidence<'a> {
+    pub case: &'a NativeClassifierCase,
+    pub command: &'a str,
+    pub control: bool,
+    pub turn_id: crate::session::TurnId,
+    pub native_session_ref: &'a str,
+    pub reviewer: Option<&'a crate::review::ApprovalReviewer>,
+    pub events: &'a [crate::events::SessionEvent],
+    pub requests: &'a [NativeReviewRequest<'a>],
+}
+
 /// What an adapter says of its program to the native conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCheck {
@@ -38,6 +179,8 @@ pub struct NativeCheck {
     pub profile_env: BTreeMap<String, String>,
     /// The paths of the scripted model a quiet start may reach.
     pub model_paths: ModelPaths,
+    /// Optional observed fixed-reviewer recipe; this never changes Auto admission.
+    pub auto_review: Option<NativeAutoReview>,
 }
 
 impl Default for NativeCheck {
@@ -46,6 +189,7 @@ impl Default for NativeCheck {
             approval_mode: ApprovalMode::Ask,
             profile_env: BTreeMap::new(),
             model_paths: ModelPaths::default(),
+            auto_review: None,
         }
     }
 }

@@ -42,15 +42,16 @@ export function Field({ label, optional, hint, error, hideLabel, aside, help, cl
   const errorId = `${controlId}-error`;
   const hasError = error !== undefined && error !== null && error !== false && error !== '';
   const hasHint = !hasError && hint !== undefined && hint !== null && hint !== false && hint !== '';
+  const hasLabelControl = (aside !== undefined && aside !== null && aside !== false) || (help !== undefined && help !== null && help !== false);
 
   return (
     <div className={cx('flex flex-col gap-1', className)}>
-      <div className={cx('flex items-baseline justify-between gap-2', hideLabel === true && 'sr-only')}>
-        <span className="flex min-w-0 items-center gap-1">
-          <label id={labelId} htmlFor={controlId} className="text-sm font-medium text-text">
+      <div className={cx('flex items-start justify-between gap-2', hideLabel === true && 'sr-only')}>
+        <span className="flex min-w-0 items-start gap-1">
+          <label id={labelId} htmlFor={controlId} className={cx('text-sm font-medium text-text', hasLabelControl && 'first-line:leading-(--control-sm)')}>
             {typeof label === 'string' ? label + (optional === true ? ' ' + t('ui.field.optional') : '') : <>{label}{optional === true && <> {t('ui.field.optional')}</>}</>}
           </label>
-          {help !== undefined && help !== null && help !== false && <span className="flex shrink-0 items-center">{help}</span>}
+          {help !== undefined && help !== null && help !== false && <span className="flex min-h-(--control-sm) shrink-0 items-center">{help}</span>}
         </span>
         {aside !== undefined && <span className="text-sm">{aside}</span>}
       </div>

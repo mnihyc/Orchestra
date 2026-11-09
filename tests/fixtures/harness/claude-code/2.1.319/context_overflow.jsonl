@@ -1,0 +1,1 @@
+{"direction":"from_harness","frame":{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"prompt_too_long","api_error_status":400,"result":"Prompt is too long"}}

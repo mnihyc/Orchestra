@@ -64,6 +64,8 @@ export interface TreeProps<Item> {
   onExpandedChange: (id: string, expanded: boolean) => void;
   /** Asked when a row with a box is pressed, or has the space bar pressed on it, for the state it is to be in. */
   onTick?: (row: TreeRow<Item>, on: boolean) => void;
+  /** A single-choice picker selects a row by press, Enter or Space. */
+  onPick?: (row: TreeRow<Item>) => void;
   /** The name of a row, by which a typed letter finds it. */
   nameOf: (item: Item) => string;
   /**
@@ -111,6 +113,7 @@ interface RowProps<Item> {
   wrapRow: TreeProps<Item>['wrapRow'];
   onToggle: (id: string, expanded: boolean) => void;
   onTick: TreeProps<Item>['onTick'];
+  onPick: TreeProps<Item>['onPick'];
   onFocusRow: (id: string) => void;
 }
 
@@ -144,6 +147,7 @@ function RowInner<Item>({
   wrapRow,
   onToggle,
   onTick,
+  onPick,
   onFocusRow,
 }: RowProps<Item>) {
   // Computed geometry: a step of the spacing scale for each level, and half a step for each level beyond the sixth, so that a
@@ -162,16 +166,17 @@ function RowInner<Item>({
       aria-expanded={row.expandable ? row.expanded : undefined}
       aria-selected={current}
       aria-checked={row.tick === undefined ? undefined : row.tick === 'mixed' ? 'mixed' : row.tick}
-      aria-current={current ? 'page' : undefined}
+      aria-current={current && onPick === undefined ? 'page' : undefined}
       tabIndex={tabbable ? 0 : -1}
       style={indent}
       onClick={
-        row.tick === undefined || onTick === undefined
+        onPick === undefined && (row.tick === undefined || onTick === undefined)
           ? undefined
           : (event) => {
               // A press on a link or a button in the row is theirs.
               if (row.tickLocked === true || (event.target as HTMLElement).closest('a, button') !== null) return;
-              onTick(row, row.tick !== true);
+              if (onPick !== undefined) onPick(row);
+              else onTick?.(row, row.tick !== true);
             }
       }
       className={cx(
@@ -214,6 +219,7 @@ const Row = memo(RowInner, (before, after) => {
     before.wrapRow === after.wrapRow &&
     before.onToggle === after.onToggle &&
     before.onTick === after.onTick &&
+    before.onPick === after.onPick &&
     before.onFocusRow === after.onFocusRow &&
     before.row.id === after.row.id &&
     before.row.tick === after.row.tick &&
@@ -260,6 +266,7 @@ interface RunProps<Item> {
   wrapRow: TreeProps<Item>['wrapRow'];
   onToggle: (id: string, expanded: boolean) => void;
   onTick: TreeProps<Item>['onTick'];
+  onPick: TreeProps<Item>['onPick'];
   onFocusRow: (id: string) => void;
 }
 
@@ -268,7 +275,7 @@ interface RunProps<Item> {
  * and that the browser may leave out of its layout, styling and painting while it is far out of view, and until then it keeps the
  * room its rows take (they all have the height of a row).
  */
-function RunInner<Item>({ flat, views, renderRow, wrapRow, onToggle, onTick, onFocusRow }: RunProps<Item>) {
+function RunInner<Item>({ flat, views, renderRow, wrapRow, onToggle, onTick, onPick, onFocusRow }: RunProps<Item>) {
   return (
     <div
       role="none"
@@ -288,6 +295,7 @@ function RunInner<Item>({ flat, views, renderRow, wrapRow, onToggle, onTick, onF
           wrapRow={wrapRow}
           onToggle={onToggle}
           onTick={onTick}
+          onPick={onPick}
           onFocusRow={onFocusRow}
         />
       ))}
@@ -302,6 +310,7 @@ const Run = memo(RunInner, (before, after) => {
     before.wrapRow !== after.wrapRow ||
     before.onToggle !== after.onToggle ||
     before.onTick !== after.onTick ||
+    before.onPick !== after.onPick ||
     before.onFocusRow !== after.onFocusRow ||
     before.views.length !== after.views.length
   ) {
@@ -317,6 +326,7 @@ export function Tree<Item>({
   currentId = null,
   onExpandedChange,
   onTick,
+  onPick,
   nameOf,
   renderRow,
   wrapRow,
@@ -360,6 +370,10 @@ export function Tree<Item>({
   }, [onTick]);
   const ticking = onTick !== undefined;
   const onBox = useCallback((row: TreeRow<Item>, on: boolean) => tick.current?.(row, on), []);
+  const pick = useRef(onPick);
+  useEffect(() => { pick.current = onPick; }, [onPick]);
+  const picking = onPick !== undefined;
+  const onChoice = useCallback((row: TreeRow<Item>) => { if (row.tickLocked !== true) pick.current?.(row); }, []);
 
   // Each row as what it is drawn from, the same object as before where nothing about it changed, in runs.
   const [kept] = useState(() => new Map<string, RowView<Item>>());
@@ -467,11 +481,13 @@ export function Tree<Item>({
         done();
         return;
       case 'Enter':
-        target.querySelector<HTMLElement>('a[href]')?.click();
+        if (picking) onChoice(row);
+        else target.querySelector<HTMLElement>('a[href]')?.click();
         done();
         return;
       case ' ':
-        if (row.tick !== undefined && ticking) {
+        if (picking) onChoice(row);
+        else if (row.tick !== undefined && ticking) {
           if (row.tickLocked !== true) onBox(row, row.tick !== true);
         } else if (row.expandable) onExpandedChange(row.id, !row.expanded);
         done();
@@ -507,6 +523,7 @@ export function Tree<Item>({
           wrapRow={wrapRow}
           onToggle={onToggle}
           onTick={ticking ? onBox : undefined}
+          onPick={picking ? onChoice : undefined}
           onFocusRow={setFocusId}
         />
       ))}

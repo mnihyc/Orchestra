@@ -1,5 +1,6 @@
 /** Template and host choices use readable authorized names through the native revisioned setting row. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import type { ComponentProps } from 'react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ResourcesApi from '@/api/resources';
@@ -23,7 +24,12 @@ vi.mock('@/api/resources', async (load) => { const actual = await load<typeof Re
   templatesQuery: (kind: string) => ({ queryKey: ['named-template-choices', kind], queryFn: reads.templates, staleTime: Infinity }) }; });
 vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(), putSetting: vi.fn() }));
 vi.mock('@/features/settings/sourceAddress', () => ({ useSourceOrgAddress: () => null }));
-vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(), useLocation: () => ({ pathname: '/resources/example', searchStr: '' }) }));
+vi.mock('@tanstack/react-router', async (load) => ({ ...await load<object>(),
+  useLocation: () => ({ pathname: '/resources/example', searchStr: '' }),
+  useNavigate: () => vi.fn(),
+  // This focused setting-write fixture does not mount a router; preserve its real anchors.
+  Link: ({to,params:_params,children,...props}:ComponentProps<'a'>&{to:string;params?:unknown}) => <a {...props} href={to}>{children}</a>,
+}));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 const currentId = '0199c1a0-0000-7000-8000-000000000001', nextId = '0199c1a0-0000-7000-8000-000000000002';
 const initialAppearance = useAppearance.getState(), wasDark = document.documentElement.classList.contains('dark'), previousTheme = document.documentElement.dataset.theme;
@@ -55,17 +61,47 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     const user = userEvent.setup(), view = draw(key), template = key.endsWith('.template_id');
     const choice = await screen.findByRole('combobox', { name: view.title });
-    await waitFor(() => expect(choice).toHaveTextContent(template ? 'Research template' : 'Research host'));
+    await waitFor(() => expect(choice).toHaveDisplayValue(template ? 'Research template' : 'Research host'));
     expect(reads.hosts).not.toHaveBeenCalled(); expect(reads.templates).not.toHaveBeenCalled();
     expect(view.container).not.toHaveTextContent(currentId); expect(screen.queryByRole('textbox')).not.toBeInTheDocument(); expect(putSetting).not.toHaveBeenCalled();
     await user.click(choice);
-    expect(screen.queryByRole('option', { name: template ? 'Read-only template' : 'Read-only host' })).not.toBeInTheDocument();
+    const unavailable = await screen.findByRole('option', { name: template ? 'Read-only template' : 'Read-only host' });
+    expect(unavailable).toHaveAttribute('aria-disabled', 'true');
+    expect(within(unavailable).getByText(i18n.t(template ? 'resourceChoices.templateUse' : 'resourceChoices.hostUse'))).toBeVisible();
+    await user.click(unavailable);
+    expect(putSetting).not.toHaveBeenCalled();
     await user.click(await screen.findByRole('option', { name: template ? 'Build template' : 'Build host' }));
     await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(view.target, key, { value: nextId, expectedRevision: 7 }));
     expect(await screen.findByText(i18n.t('settings.compact.saved'))).toBeVisible();
     expect(template ? reads.templates : reads.hosts).toHaveBeenCalledTimes(1); expect(template ? reads.hosts : reads.templates).not.toHaveBeenCalled();
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) it(`keeps each readable unavailable host and template with its native reason (${locale})`, async () => {
+  await setLocale(locale);
+  reads.hosts.mockResolvedValue(resourceRows([
+    { ...detailHost, id: currentId, name: 'Current host', access: { ...detailHost.access, permissions: ['host.view', 'host.use'] } },
+    { ...detailHost, id: 'closed', name: 'Closed host', schedulable: false, access: { ...detailHost.access, permissions: ['host.view', 'host.use'] } },
+    { ...detailHost, id: 'driver', name: 'Other driver', drivers: [], access: { ...detailHost.access, permissions: ['host.view', 'host.use'] } },
+  ]));
+  const user = userEvent.setup();
+  const host = draw('env.host_id');
+  await user.click(await screen.findByRole('combobox', { name: host.title }));
+  for (const [name, reason] of [['Closed host', 'unschedulable'], ['Other driver', 'driver']] as const) {
+    const option = await screen.findByRole('option', { name });
+    expect(option).toHaveAttribute('aria-disabled', 'true');
+    expect(within(option).getByText(i18n.t(`resourceChoices.${reason}`))).toBeVisible();
+  }
+  expect(screen.getByRole('option', { name: i18n.t('providerRuntime.autoHost') })).not.toHaveAttribute('aria-disabled', 'true');
+  await user.keyboard('{Escape}'); host.unmount();
+  reads.templates.mockResolvedValue(resourceRows([{ ...detailTemplate, id: currentId, name: 'Disabled template', enabled: false, access: { ...detailTemplate.access, permissions: ['template.view', 'template.use'] } }]));
+  const template = draw('env.template_id');
+  await user.click(await screen.findByRole('combobox', { name: template.title }));
+  const option = await screen.findByRole('option', { name: 'Disabled template' });
+  expect(option).toHaveAttribute('aria-disabled', 'true');
+  expect(within(option).getByText(i18n.t('resourceChoices.disabled'))).toBeVisible();
+  expect(putSetting).not.toHaveBeenCalled();
+});
 
 it('keeps a readable name read-only and conceals an unavailable identifier', async () => {
   const first = draw('runtime.template_id', false);
@@ -78,7 +114,7 @@ it('keeps a readable name read-only and conceals an unavailable identifier', asy
 it('keeps host and template inventories asleep for a minute until their actual picker opens', async () => {
   const view = draw('env.host_id');
   const choice = await screen.findByRole('combobox', { name: view.title });
-  await waitFor(() => expect(choice).toHaveTextContent('Research host'));
+  await waitFor(() => expect(choice).toHaveDisplayValue('Research host'));
   expect(reads.hostName).toHaveBeenCalledExactlyOnceWith(currentId);
   vi.useFakeTimers();
   try {
@@ -93,7 +129,7 @@ it('keeps host and template inventories asleep for a minute until their actual p
 
 it('chooses automatic host placement explicitly without sending the menu sentinel', async () => {
   const user = userEvent.setup(), view = draw('env.host_id');
-  const choice = await screen.findByRole('combobox', { name: view.title }); await waitFor(() => expect(choice).toHaveTextContent('Research host'));
+  const choice = await screen.findByRole('combobox', { name: view.title }); await waitFor(() => expect(choice).toHaveDisplayValue('Research host'));
   await user.click(choice); await user.click(screen.getByRole('option', { name: i18n.t('providerRuntime.autoHost') }));
   await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(view.target, 'env.host_id', { value: null, expectedRevision: 7 }));
 });

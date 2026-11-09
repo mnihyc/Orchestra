@@ -5,6 +5,7 @@ keywords: 启动后命令, after_up, env.after_up, runtime.after_up, runtime.sto
 heading_id.选择命令及其权限: choose-a-command-and-its-rights
 heading_id.启动重试和失败: starts-retries-and-failure
 heading_id.个人机器: a-persons-own-machine
+summary: 配置单元连接后、就绪前在其内部执行的命令。
 ---
 
 # 单元启动后运行命令

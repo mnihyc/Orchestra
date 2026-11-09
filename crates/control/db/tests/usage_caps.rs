@@ -49,6 +49,8 @@ async fn cap(
             subject_role: None,
             split: caps::split::SHARED,
             models: &models,
+            services: &[],
+            purposes: &[],
             tiers: &tiers,
             harness_kinds: &[],
             meter: caps::meter::TOKENS,
@@ -296,5 +298,90 @@ async fn what_a_cap_covers_was_used_is_added_up_by_provider_and_model_and_at_the
         2,
         "the person, once for each provider and model they used at it"
     );
-    assert!(who.iter().all(|(person, _, _)| *person == ada));
+    assert!(who.iter().all(|row| row.user_id == ada));
+}
+
+#[tokio::test]
+async fn service_and_purpose_lists_are_native_cap_identity_and_revision_dimensions() {
+    let (_test, db) = world().await;
+    let mut conn = db.acquire().await.unwrap();
+    let by = a_person(&mut conn).await;
+    let first = cap(&mut conn, by, &[], &[]).await.unwrap().unwrap();
+    let purposes = words(&["summary"]);
+    let changed = caps::update(
+        &mut conn,
+        first.id,
+        first.revision,
+        &Change {
+            purposes: Some(&purposes),
+            ..Default::default()
+        },
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let Updated::Done(summary) = changed else {
+        panic!("the new purpose is a separate identity: {changed:?}")
+    };
+    assert_eq!(summary.purposes, purposes);
+    assert_eq!(summary.revision, first.revision + 1);
+    let other = cap(&mut conn, by, &[], &[]).await.unwrap().unwrap();
+    assert!(cap(&mut conn, by, &[], &[]).await.unwrap().is_none());
+    assert!(matches!(
+        caps::update(
+            &mut conn,
+            other.id,
+            other.revision,
+            &Change {
+                purposes: Some(&purposes),
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .await
+        .unwrap(),
+        Updated::Exists
+    ));
+    let services = words(&["@images"]);
+    let changed = caps::update(
+        &mut conn,
+        other.id,
+        other.revision,
+        &Change {
+            purposes: Some(&purposes),
+            services: Some(&services),
+            ..Default::default()
+        },
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    let Updated::Done(images) = changed else {
+        panic!("a different offering remains independent: {changed:?}")
+    };
+    assert_eq!(images.services, services);
+    assert_eq!(images.purposes, purposes);
+    assert_eq!(
+        caps::siblings(&mut conn, &summary).await.unwrap(),
+        vec![(*summary).clone()]
+    );
+    assert_eq!(
+        caps::siblings(&mut conn, &images).await.unwrap(),
+        vec![(*images).clone()]
+    );
+    assert!(matches!(
+        caps::update(
+            &mut conn,
+            images.id,
+            other.revision,
+            &Change {
+                services: Some(&[]),
+                ..Default::default()
+            },
+            Utc::now()
+        )
+        .await
+        .unwrap(),
+        Updated::Stale(_)
+    ));
 }

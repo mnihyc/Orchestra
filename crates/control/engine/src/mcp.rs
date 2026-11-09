@@ -28,6 +28,8 @@ pub struct ResolvedServer {
     pub from: Option<McpFrom>,
     /// Why it cannot be started here.
     pub reason: Option<String>,
+    /// Stable presentation reason, independent of the native diagnostic language.
+    pub reason_code: Option<orch_api_contract::environment::McpReasonCode>,
 }
 
 /// Resolves every enabled preset, import and own server without starting a process.
@@ -35,6 +37,30 @@ pub async fn resolve(
     conn: &mut Conn,
     environment: Id,
     at: Time,
+) -> Result<Vec<ResolvedServer>, EngineError> {
+    resolve_in(conn, environment, at, &[]).await
+}
+
+/// Judge already selected catalogue options in an existing environment without enabling
+/// them. Candidates are independent choices: they do not collide with one another.
+/// Active definitions keep their existing settings writer and native refusal.
+pub async fn preview(
+    conn: &mut Conn,
+    environment: Id,
+    candidates: &[Id],
+    at: Time,
+) -> Result<Vec<ResolvedServer>, EngineError> {
+    let mut rows = resolve_in(conn, environment, at, candidates).await?;
+    let selected = candidates.iter().copied().collect::<HashSet<_>>();
+    rows.retain(|server| selected.contains(&server.row.id));
+    Ok(rows)
+}
+
+async fn resolve_in(
+    conn: &mut Conn,
+    environment: Id,
+    at: Time,
+    candidates: &[Id],
 ) -> Result<Vec<ResolvedServer>, EngineError> {
     let env = orch_db::queries::environments::hosting::environment(conn, environment)
         .await?
@@ -44,7 +70,7 @@ pub async fn resolve(
         .and_then(|machine| machine.policy);
     let template =
         orch_db::queries::environments::thread_engine::template_spec(conn, environment).await?;
-    resolve_where(
+    resolve_where_candidates(
         conn,
         &Where {
             environment: Some(environment),
@@ -57,6 +83,7 @@ pub async fn resolve(
             granted: &env.granted_capabilities,
         },
         at,
+        candidates,
     )
     .await
 }
@@ -178,6 +205,15 @@ async fn resolve_where(
     at_place: &Where<'_>,
     at: Time,
 ) -> Result<Vec<ResolvedServer>, EngineError> {
+    resolve_where_candidates(conn, at_place, at, &[]).await
+}
+
+async fn resolve_where_candidates(
+    conn: &mut Conn,
+    at_place: &Where<'_>,
+    at: Time,
+    candidates: &[Id],
+) -> Result<Vec<ResolvedServer>, EngineError> {
     let def = registry::get(keys::MCP_ENABLED)
         .ok_or_else(|| EngineError::unreadable("MCP enablement is not registered"))?;
     let place = match at_place.environment {
@@ -279,6 +315,17 @@ async fn resolve_where(
             .entry(row.id)
             .or_insert((true, None, at_place.owner, values.parts.len() + 1));
     }
+    let active = enabled
+        .iter()
+        .filter(|(_, (on, _, _, _))| *on)
+        .map(|(&id, _)| id)
+        .collect::<HashSet<_>>();
+    for &id in candidates {
+        enabled
+            .entry(id)
+            .and_modify(|entry| entry.0 = true)
+            .or_insert((true, None, own_writer, values.parts.len() + 1));
+    }
     let ids: Vec<Id> = enabled
         .iter()
         .filter(|(_, (on, _, _, _))| *on)
@@ -288,45 +335,59 @@ async fn resolve_where(
     let offerings = rows::offerings(conn, &ids).await?;
     servers.sort_by_key(|row| {
         (
+            !active.contains(&row.id),
             std::cmp::Reverse(enabled.get(&row.id).map_or(0, |(_, _, _, depth)| *depth)),
             row.id,
         )
     });
     let mut names = HashSet::new();
     let mut result = Vec::new();
-    for mut row in servers {
-        let offered = offerings
-            .iter()
-            .filter(|offering| offering.server_id == row.id && offering.state == "ready")
-            .collect::<Vec<_>>();
-        if row.imported {
-            row.machine_id = offered
-                .iter()
-                .find(|offering| Some(offering.machine_id) == at_place.imports_from)
-                .map(|offering| offering.machine_id)
-                .or_else(|| offered.first().map(|offering| offering.machine_id));
-        }
+    for row in servers {
+        let imported_ready = offerings.iter().any(|offering| {
+            offering.server_id == row.id
+                && offering.state == "ready"
+                && Some(offering.machine_id) == row.machine_id
+        });
         let (_, from, writer, _) = enabled
             .get(&row.id)
             .cloned()
             .ok_or_else(|| EngineError::unreadable("the MCP source is missing"))?;
-        let mut reason = if !row.enabled {
-            Some("this server is switched off".to_owned())
+        let unavailable = |code, detail: &str| Some((detail.to_owned(), code));
+        use orch_api_contract::environment::McpReasonCode as Code;
+        let mut problem = if !row.enabled {
+            unavailable(Code::Disabled, "this server is switched off")
         } else if row
             .environment_id
             .is_some_and(|id| Some(id) != at_place.environment)
         {
-            Some("this server belongs to another environment".to_owned())
-        } else if row.imported && offered.is_empty() {
-            Some("No machine".to_owned())
+            unavailable(
+                Code::OtherEnvironment,
+                "this server belongs to another environment",
+            )
+        } else if row.imported && row.machine_id.is_none() {
+            unavailable(Code::NoMachine, "No machine")
         } else if row.imported && row.machine_id != at_place.imports_from {
-            Some("its imported definition belongs to another machine".to_owned())
+            unavailable(
+                Code::OtherMachine,
+                "its imported definition belongs to another machine",
+            )
+        } else if row.imported && !imported_ready {
+            unavailable(Code::NoMachine, "No machine")
         } else if row.environment_id.is_some() && !permits_add {
-            Some("the machine permits no MCP server added from here".to_owned())
+            unavailable(
+                Code::AddDisabled,
+                "the machine permits no MCP server added from here",
+            )
         } else if row.imported && !permits_import {
-            Some("the machine permits no imported MCP server".to_owned())
-        } else if !names.insert(row.name.clone()) {
-            Some("another enabled server has the same name".to_owned())
+            unavailable(
+                Code::ImportDisabled,
+                "the machine permits no imported MCP server",
+            )
+        } else if name_conflict(&mut names, &row.name, active.contains(&row.id)) {
+            unavailable(
+                Code::NameConflict,
+                "another enabled server has the same name",
+            )
         } else {
             None
         };
@@ -335,8 +396,8 @@ async fn resolve_where(
                 Some(McpFrom::Node(node)) => node.id,
                 _ => at_place.home,
             };
-            if !source_may_use(conn, writer, row.id, place, at).await? {
-                reason = Some("whoever enabled it may no longer use it".to_owned());
+            if active.contains(&row.id) && !source_may_use(conn, writer, row.id, place, at).await? {
+                problem = unavailable(Code::AccessLost, "whoever enabled it may no longer use it");
             }
         }
         if !row.imported {
@@ -348,13 +409,31 @@ async fn resolve_where(
                 .iter()
                 .any(|capability| !at_place.granted.contains(capability))
             {
-                reason =
-                    Some("a required capability is not granted to this environment".to_owned());
+                problem = unavailable(
+                    Code::CapabilityRequired,
+                    "a required capability is not granted to this environment",
+                );
             }
         }
-        result.push(ResolvedServer { row, from, reason });
+        let (reason, reason_code) =
+            problem.map_or((None, None), |(detail, code)| (Some(detail), Some(code)));
+        result.push(ResolvedServer {
+            row,
+            from,
+            reason,
+            reason_code,
+        });
     }
     Ok(result)
+}
+
+/// A proposed option competes with active names, not other alternatives in its picker.
+fn name_conflict(names: &mut HashSet<String>, name: &str, active: bool) -> bool {
+    if active {
+        !names.insert(name.to_owned())
+    } else {
+        names.contains(name)
+    }
 }
 
 /// What becomes of each MCP server of the source and the target when a plan takes an environment elsewhere,
@@ -396,7 +475,20 @@ pub(crate) fn plan(
                     }),
                 ),
             };
+            let reason_code = if reason.is_none() {
+                None
+            } else {
+                match after {
+                    Some(server) => server.reason_code,
+                    None => Some(if row.environment_id.is_some() {
+                        orch_api_contract::environment::McpReasonCode::OtherEnvironment
+                    } else {
+                        orch_api_contract::environment::McpReasonCode::Disabled
+                    }),
+                }
+            };
             Some(PlanMcpServer {
+                reason_code,
                 id,
                 name: row.name.clone(),
                 own: row.environment_id.is_some(),
@@ -465,12 +557,12 @@ impl Engine {
         ))?))
     }
     /// Starts each resolved server once per definition and environment generation, then gives its tunnel to a session.
-    pub async fn mcp_for_session(
+    pub fn mcp_for_session(
         &self,
         environment: Id,
         thread: Id,
-    ) -> Result<Vec<SessionOpenMcp>, EngineError> {
-        self.mcp_for_session_inner(environment, thread, true).await
+    ) -> futures::future::BoxFuture<'_, Result<Vec<SessionOpenMcp>, EngineError>> {
+        Box::pin(self.mcp_for_session_inner(environment, thread, true))
     }
 
     /// Reissues only tickets for already-running servers; a refresh never starts or changes another server.
@@ -579,6 +671,7 @@ impl Engine {
                     }
                 }
                 McpStart::Given(Box::new(McpStartGiven {
+                    preset: server.row.environment_id.is_none(),
                     server_id: Some(server.row.id),
                     environment_id: environment,
                     name: server.row.name.clone(),
@@ -759,6 +852,7 @@ pub(crate) async fn restart_request(
         }
     }
     Ok(McpStart::Given(Box::new(McpStartGiven {
+        preset: server.row.environment_id.is_none(),
         server_id: Some(server.row.id),
         environment_id: environment,
         name: server.row.name.clone(),
@@ -794,6 +888,7 @@ mod tests {
             row: row.clone(),
             from: None,
             reason: reason.map(str::to_owned),
+            reason_code: None,
         }
     }
 

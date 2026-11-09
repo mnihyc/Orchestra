@@ -8,3 +8,5 @@ Shared configuration, observability, trust, transport and plugin mechanisms, and
 - [orch-link](link/README.md): Shared reliable link mechanisms; persistence of product state belongs to the API.
 - [orch-plugin](plugin/README.md): External plugin transport, supervision and trait bridges.
 - [orch-conformance](conformance/README.md): The suite every implementation of a contract passes, for tests and for orchctl plugin check.
+
+- [orch-private-file](private-file/README.md): Immutable process-private file-backed text for whole-text algorithms without heap copies.

@@ -159,7 +159,7 @@ function PageHistory({ target }: { target: AccessTarget }) {
   const { t } = useTranslation();
   const history = useInfiniteQuery(historyQuery(target));
   const nextError: unknown = history.isFetchNextPageError ? history.error : undefined;
-  if (history.isPending) return <SkeletonRows rows={3} />;
+  if (history.isPending) return <SkeletonRows read={history} rows={3} />;
   if (history.isError) return <ErrorState compact error={history.error} title={t('access.history.notLoaded')} retrying={history.isRefetching} onRetry={() => void history.refetch()} />;
   const lines = history.data.pages.flatMap((entry) => entry.items);
   if (lines.length === 0) return <EmptyState compact title={t('access.history.none')} />;

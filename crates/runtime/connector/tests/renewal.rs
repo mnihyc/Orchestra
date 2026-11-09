@@ -12,16 +12,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::TimeZone;
 use common::{PATIENCE, registry};
-use orch_connector_core::connector::{ConnectorBuilder, ConnectorParams, Supervision, run_until};
-use orch_connector_core::enrollment::{
-    DataDir, EnrollError, EnrollTransport, endpoints_of, roles_of,
+use orch_connector_core::connector::{
+    ConnectorBuilder, ConnectorParams, StartError, Supervision, run_until,
 };
+use orch_connector_core::enrollment::{
+    DataDir, EnrollError, EnrollTransport, EnrollmentRecord, RECORD_FILE, endpoints_of, roles_of,
+};
+use orch_connector_core::policy::write_atomically;
 use orch_link_contract::enrollment::{
-    Endpoint, EnrollReply, EnrollRequest, EnrollmentToken, RenewReply, RenewRequest,
+    Endpoint, EnrollReply, EnrollReplySystem, EnrollRequest, EnrollmentToken, RenewReply,
+    RenewRequest,
 };
 use orch_link_contract::session::{Arch, Os, Platform, Role};
+use orch_link_contract::version::PROTOCOL_VERSION;
 use orch_pki::ca::Holder;
 use orch_pki::certificates::CertificateRequest;
 use orch_pki::enrollment::MachineIdentity;
@@ -29,6 +36,31 @@ use orch_testkit::doubles::controller::ScriptedController;
 use orch_testkit::doubles::link::{Hub, TestPki};
 use orch_types::{Clock, ManualClock, new_id};
 use tokio_util::sync::CancellationToken;
+
+// Complete the connected machine's enrolled data directory before the renewal supervisor reads it.
+fn keep_enrollment(data: &DataDir, identity: &MachineIdentity, clock: &dyn Clock) {
+    let record = EnrollmentRecord {
+        gateway_measured_at: None,
+        gateways: Vec::new(),
+        gateway_measurements: Vec::new(),
+        server_endpoints: vec![Hub::endpoint()],
+        machine_id: identity.machine_id,
+        name: "Renewal".to_owned(),
+        system: EnrollReplySystem {
+            name: "Test".to_owned(),
+            public_url: "https://orch.test".to_owned(),
+        },
+        pin: URL_SAFE_NO_PAD.encode(identity.authority.spki_sha256()),
+        protocol_version: PROTOCOL_VERSION,
+        enrolled_at: clock.time(),
+        managed: false,
+    };
+    write_atomically(
+        &data.identity_dir().join(RECORD_FILE),
+        &serde_json::to_vec_pretty(&record).unwrap(),
+    )
+    .unwrap();
+}
 
 /// The system's side of a renewal: its authority signs the new key for the machine that asks.
 struct Renewer<'a> {
@@ -101,6 +133,7 @@ async fn a_certificate_due_after_two_thirds_of_its_life_is_renewed_and_the_conne
         authority: pki.certificate(),
     };
     first.save(&data.identity_dir()).unwrap();
+    keep_enrollment(&data, &first, clock.as_ref());
     data.update_config(|config| {
         config.connector.roles = vec!["agent".to_owned()];
         config.endpoints = vec![orch_config::connector::ConnectorEndpoint {
@@ -164,12 +197,16 @@ async fn a_certificate_due_after_two_thirds_of_its_life_is_renewed_and_the_conne
         shutdown.cancelled(),
     );
     let watching = async {
-        let first_session = loop {
-            if let Some(session) = hub.session_of(machine_id) {
-                break session;
+        let first_session = tokio::time::timeout(PATIENCE, async {
+            loop {
+                if let Some(session) = hub.session_of(machine_id) {
+                    break session;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
+        })
+        .await
+        .expect("the connector opens its first session within the existing patience");
         let first_facts = controller
             .wait_until(PATIENCE, |c| {
                 c.applied("machine")
@@ -256,8 +293,11 @@ async fn a_certificate_due_after_two_thirds_of_its_life_is_renewed_and_the_conne
         assert_eq!(renewer.renewals.load(Ordering::SeqCst), 1);
         shutdown.cancel();
     };
-    let (result, ()) = tokio::join!(running, watching);
-    result.unwrap();
+    tokio::try_join!(running, async {
+        watching.await;
+        Ok::<(), StartError>(())
+    })
+    .unwrap();
 }
 
 #[tokio::test]
@@ -281,6 +321,7 @@ async fn a_certificate_that_came_due_while_the_connector_was_off_is_renewed_befo
         authority: pki.certificate(),
     };
     first.save(&data.identity_dir()).unwrap();
+    keep_enrollment(&data, &first, clock.as_ref());
     data.update_config(|config| {
         config.connector.roles = vec!["agent".to_owned()];
         config.endpoints = vec![orch_config::connector::ConnectorEndpoint {
@@ -345,8 +386,11 @@ async fn a_certificate_that_came_due_while_the_connector_was_off_is_renewed_befo
         assert!(up);
         shutdown.cancel();
     };
-    let (result, ()) = tokio::join!(running, watching);
-    result.unwrap();
+    tokio::try_join!(running, async {
+        watching.await;
+        Ok::<(), StartError>(())
+    })
+    .unwrap();
     assert_eq!(
         renewer.renewals.load(Ordering::SeqCst),
         1,

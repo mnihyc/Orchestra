@@ -265,7 +265,7 @@ function ManagedChannels({ org, may, level = 2, system = false, embedded = false
       {!may ? (
         <EmptyState compact icon={<Mail aria-hidden />} title={t('settings.channels.readers', { name: org.name })} description={refusal} />
       ) : list.isPending || notifiers.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows reads={[list, notifiers]} rows={3} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : notifiers.isError ? (

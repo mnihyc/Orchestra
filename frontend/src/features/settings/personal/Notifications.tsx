@@ -11,8 +11,7 @@ import { useTranslation } from 'react-i18next';
 import { choiceOption } from '@/i18n/choices';
 
 import { notificationPrefsKey, notificationPrefsQuery, setNotificationPrefs } from '@/api/notifications';
-import { ALL_KINDS, KIND_LOOK } from '@/features/inbox/kinds';
-import { CheckboxList } from '@/ui/Checkbox';
+import { NotificationKinds } from './NotificationKinds';
 import { OutsideOrch } from '@/features/settings/personal/Routes';
 import { PauseControls } from './away/Pause';
 import { NotificationExceptions } from './NotificationExceptions';
@@ -102,7 +101,7 @@ export function Notifications() {
       <NotificationExceptions />
 
       {query.isPending ? (
-        <SkeletonGroup className="flex flex-col gap-3">
+        <SkeletonGroup read={query} className="flex flex-col gap-3">
           <Skeleton className="h-6 w-1/2" />
           <Skeleton className="h-10 w-full" />
           <Skeleton className="h-10 w-2/3" />
@@ -112,10 +111,7 @@ export function Notifications() {
       ) : (
         <>
           <Section id="kinds" title={t('notifications.kinds')} action={<Hint popover id="loss-notify" />}>
-            <CheckboxList label={t('notifications.kinds')} hideLabel presentation="compact"
-              options={ALL_KINDS.map((kind) => ({ value: kind, label: t(KIND_LOOK[kind].label) }))}
-              value={ALL_KINDS.filter((kind) => !prefs.disabled_kinds.includes(kind))}
-              onValueChange={(enabled) => change({ disabled_kinds: ALL_KINDS.filter((kind) => !enabled.includes(kind)) })} />
+            <NotificationKinds disabledKinds={prefs.disabled_kinds} onChange={(disabled_kinds) => change({ disabled_kinds })} />
           </Section>
           <Section id="approvals" title={t('notifications.approvals.title')}>
             <Switch presentation="compact" label={t('notifications.approvals.always')} description={t('notifications.approvals.hint')} checked={prefs.approvals_always} onCheckedChange={(on) => change({ approvals_always: on })} />

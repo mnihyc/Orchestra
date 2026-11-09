@@ -349,6 +349,41 @@ pub const APPROVAL_UNSUPPORTED: &str = "This agent does not support the selected
 /// No supported sandbox fits all the current ceilings.
 pub const SANDBOX_UNSUPPORTED: &str = "This agent and environment cannot provide the requested tool access. Choose another agent or environment, or ask a manager to change sandbox.mode and the sandbox.max or agent.max_sandbox limits.";
 
+/// Names the requested mode while preserving its catalogued unsupported explanation.
+#[must_use]
+pub fn unsupported_approval_detail(mode: ApprovalMode) -> String {
+    approval_mode_detail(mode, APPROVAL_UNSUPPORTED)
+}
+
+/// Names the requested mode while preserving its catalogued policy explanation.
+#[must_use]
+pub fn disallowed_approval_detail(mode: ApprovalMode) -> String {
+    approval_mode_detail(mode, APPROVAL_NOT_ALLOWED)
+}
+
+fn approval_mode_detail(mode: ApprovalMode, explanation: &'static str) -> String {
+    let name = match mode {
+        ApprovalMode::Ask => "Ask",
+        ApprovalMode::OnRequest => "On request",
+        ApprovalMode::Auto => "Auto",
+        ApprovalMode::Bypass => "Bypass",
+    };
+    format!("{name}: {explanation}")
+}
+
+/// Recognizes only current and retained product explanations for approval-mode recovery.
+#[must_use]
+pub fn is_approval_mode_refusal(detail: &str) -> bool {
+    matches!(detail, APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED)
+        || matches!(
+            detail.split_once(": "),
+            Some((
+                "Ask" | "On request" | "Auto" | "Bypass",
+                APPROVAL_NOT_ALLOWED | APPROVAL_UNSUPPORTED
+            ))
+        )
+}
+
 /// How the harness is confined for a turn: the approval mode and the sandbox
 /// mode, or what has to give.
 pub fn confinement(
@@ -407,6 +442,8 @@ pub fn confinement(
 /// What a turn is set up from.
 #[derive(Debug, Clone)]
 pub struct StartSnapshot {
+    /// One current offering/core resolution, shared unchanged by session and turn commands.
+    pub native_model: Option<Box<orch_agent_contract::session::NativeModelContext>>,
     /// Current topic-document policy and first-reading material paths.
     pub material: crate::material::Material,
     /// The thread.
@@ -510,7 +547,7 @@ impl StartSnapshot {
     pub fn model_parameters(&self) -> Result<ModelParameters, EngineError> {
         self.model
             .as_ref()
-            .map(binding::model_parameters)
+            .map(|row| binding::model_parameters_for(row, self.arrangement.protocol.as_deref()))
             .transpose()
             .map(Option::unwrap_or_default)
     }
@@ -540,6 +577,35 @@ impl StartSnapshot {
     pub fn session_configuration(&self) -> harnesses::SessionConfiguration {
         harnesses::SessionConfiguration {
             cwd: self.cwd(),
+            prompt_cache_ttl: self
+                .settings
+                .prompt_cache_ttl
+                .filter(|_| self.descriptor.capabilities.prompt_cache_ttl),
+            background_wake: self.settings.background_wake,
+            image_generation: self.settings.image_generation,
+            native_configuration: self
+                .native_model
+                .as_deref()
+                .filter(|native| native.model == self.turn.model)
+                .map(|native| native.native_configuration())
+                .unwrap_or_default(),
+            model_details: self
+                .native_model
+                .as_deref()
+                .filter(|native| native.model == self.turn.model)
+                .and_then(|native| native.extensions.get("model_details"))
+                .cloned(),
+            restart_sensitive: self
+                .descriptor
+                .capabilities
+                .turn_changes_require_restart
+                .then(|| {
+                    serde_json::json!({
+                        "model":self.turn.model,"effort":self.turn.effort,
+                        "params":self.adapter_params().unwrap_or_else(|_| self.turn.params.clone()),
+                        "approval_mode":self.approval,"sandbox_mode":self.sandbox,
+                    })
+                }),
             memory: self
                 .memory_plan()
                 .session_memory(&self.directory())
@@ -547,13 +613,36 @@ impl StartSnapshot {
                     directory: memory.directory,
                     kept_by: keeper(memory.kept_by),
                 }),
+            executor_version: self.executor_version(),
         }
+    }
+
+    /// The build reported by the executor this admitted snapshot selected, never a manifest fallback.
+    fn executor_version(&self) -> Option<String> {
+        let kind = self
+            .thread
+            .executor
+            .as_deref()
+            .filter(|kind| *kind != "orch-exec")?;
+        Some(
+            self.environment
+                .facts
+                .get("executors")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+                .find(|fact| fact.get("kind").and_then(Json::as_str) == Some(kind))
+                .and_then(|fact| fact.get("version"))
+                .and_then(Json::as_str)
+                .filter(|version| !version.is_empty())
+                .unwrap_or("unknown")
+                .to_owned(),
+        )
     }
 
     /// What the session's texts say of the thread's place.
     fn place<'a>(&'a self, directory: &'a str, cwd: &'a str) -> Place<'a> {
         Place {
-            documents_policy: self.material.policy,
             read_first: &self.material.paths,
             directory,
             cwd,
@@ -669,11 +758,11 @@ impl StartSnapshot {
         self.tools
             .iter()
             .map(|tool| {
-                let definition = crate::tools::definitions::definition_at(
+                let definition = crate::tools::definitions::definition_at_with_search_budgets(
                     *tool,
                     &self.settings.messages,
-                    &self.settings.broadcast_agent_scope,
                     &self.settings.broadcast_agent_options,
+                    &self.settings.search_budgets,
                 );
                 crate::model_inputs::ModelBlock::new(
                     tool.name(),
@@ -704,13 +793,19 @@ impl StartSnapshot {
     pub fn tool_schemas(&self) -> std::collections::BTreeMap<String, Json> {
         self.tools
             .iter()
-            .filter(|tool| **tool == orch_agent_contract::events::OrchTool::Announce)
+            .filter(|tool| {
+                matches!(
+                    **tool,
+                    orch_agent_contract::events::OrchTool::Announce
+                        | orch_agent_contract::events::OrchTool::SearchShared
+                )
+            })
             .map(|tool| {
-                let definition = crate::tools::definitions::definition_at(
+                let definition = crate::tools::definitions::definition_at_with_search_budgets(
                     *tool,
                     &self.settings.messages,
-                    &self.settings.broadcast_agent_scope,
                     &self.settings.broadcast_agent_options,
+                    &self.settings.search_budgets,
                 );
                 (tool.name().to_owned(), definition.input_schema)
             })
@@ -804,6 +899,7 @@ fn ticket(
     thread: Id,
     tool_set: Option<&str>,
     environment: Option<(Id, i64)>,
+    executor_version: Option<&str>,
 ) -> link::TicketSlot {
     let mut more = serde_json::Map::new();
     more.insert("service".to_owned(), Json::String(service.to_string()));
@@ -818,6 +914,9 @@ fn ticket(
             Json::String(environment.to_string()),
         );
         more.insert("environment_generation".to_owned(), Json::from(generation));
+    }
+    if let Some(version) = executor_version {
+        more.insert("executor_version".into(), Json::String(version.into()));
     }
     link::TicketSlot::Asked(link::TicketAsk {
         ticket: link::TicketWanted { kind, more },
@@ -877,6 +976,7 @@ pub fn session_open_body_importing(
                     thread,
                     None,
                     None,
+                    None,
                 ),
             }
         }
@@ -930,6 +1030,7 @@ pub fn session_open_body_importing(
                 snapshot.environment.id,
                 i64::from(snapshot.environment.generation),
             )),
+            None,
         )),
         (Some(other), Some(machine)) => Some(ticket(
             TunnelKind::Exec,
@@ -943,6 +1044,7 @@ pub fn session_open_body_importing(
                 snapshot.environment.id,
                 i64::from(snapshot.environment.generation),
             )),
+            configuration.executor_version.as_deref(),
         )),
     };
     let parameters = snapshot.adapter_params()?;
@@ -951,6 +1053,12 @@ pub fn session_open_body_importing(
         _ => serde_json::Map::new(),
     };
     Ok(link::SessionOpen {
+        native_model: snapshot.native_model.clone(),
+        transport_only: false,
+        turn_changes_require_restart: snapshot
+            .descriptor
+            .capabilities
+            .turn_changes_require_restart,
         agent_id: snapshot.agent.id,
         thread_id: thread,
         segment_id: snapshot.segment.id,
@@ -976,6 +1084,9 @@ pub fn session_open_body_importing(
         approval_mode: convert(&snapshot.approval)?,
         available_models: snapshot.available_models.clone(),
         subagent_limits: snapshot.settings.subagent_limits,
+        prompt_cache_ttl: configuration.prompt_cache_ttl,
+        background_wake: snapshot.settings.background_wake,
+        image_generation: configuration.image_generation,
         sandbox_mode: convert(&snapshot.sandbox)?,
         instructions: snapshot.instructions().text,
         memory: configuration.memory,
@@ -1160,7 +1271,8 @@ impl Engine {
         if turn.state != state {
             return Ok(StartLoad::NoTurn);
         }
-        self.snapshot_for_turn(conn, thread, turn).await
+        // Keep the snapshot future out of the enclosing turn drivers.
+        Box::pin(self.snapshot_for_turn(conn, thread, turn)).await
     }
 
     /// Prepares configuration for an idle continuation without minting a turn or a cap reservation.
@@ -1244,7 +1356,7 @@ impl Engine {
         let facts = Facts {
             descriptor: &descriptor,
             provider: &provider,
-            environment: &environment,
+            environment: Some(&environment),
             offers,
             settings: &settings,
             entry: None,
@@ -1343,13 +1455,14 @@ impl Engine {
             agent: agent.id,
             machine: machine_id,
         };
-        let tools = crate::tools::offered_for_session(
-            conn,
-            &thread,
-            descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
-            self.inner.clock.time(),
-        )
-        .await?;
+        let tools = self
+            .offered_tools_for_session(
+                conn,
+                &thread,
+                descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
+                self.inner.clock.time(),
+            )
+            .await?;
         let view = self.environment_capabilities(conn, environment.id).await?;
         let isolation = view
             .as_ref()
@@ -1380,8 +1493,10 @@ impl Engine {
             Vec::new()
         };
         let context_sent = threads::context_sent(conn, segment.id).await?;
-        let material = self.topic_material(conn, thread_id).await?;
-        Ok(StartLoad::Ready(Box::new(StartSnapshot {
+        // Keep the shared-material future out of the snapshot's accumulated state.
+        let material = Box::pin(self.topic_material(conn, thread_id)).await?;
+        let mut snapshot = StartSnapshot {
+            native_model: None,
             material,
             thread,
             pending_notice_positions: Vec::new(),
@@ -1417,7 +1532,11 @@ impl Engine {
             cut,
             unnamed_before,
             context_sent,
-        })))
+        };
+        let allowed = Box::pin(self.native_model_use_preview(conn, &snapshot)).await?;
+        snapshot.native_model =
+            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+        Ok(StartLoad::Ready(Box::new(snapshot)))
     }
 }
 
