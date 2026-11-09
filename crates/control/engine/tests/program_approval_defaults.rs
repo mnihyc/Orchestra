@@ -87,10 +87,8 @@ async fn choosing_a_supported_default_does_not_widen_the_places_allowed_modes() 
             .fetch_one(world.pool.pool())
             .await
             .unwrap();
-    assert_eq!(
-        detail.as_deref(),
-        Some(orch_engine::sessions::APPROVAL_NOT_ALLOWED)
-    );
+    let expected = format!("Ask: {}", orch_engine::sessions::APPROVAL_NOT_ALLOWED);
+    assert_eq!(detail.as_deref(), Some(expected.as_str()));
     let mut conn = world.pool.acquire().await.unwrap();
     let resolved = orch_engine::resolved::load(&mut conn, thread)
         .await

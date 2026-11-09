@@ -61,7 +61,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -229,7 +230,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -247,7 +249,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -265,7 +268,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },

@@ -1,4 +1,5 @@
 ---
+group: work
 title: Files and attachments
 screens: /thread/$threadId, /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /doc/$documentId, /workbench, /search, /inbox, /resources/environments/$id, /inspect/$kind/$id
 keywords: files, attachments, image, photo, PDF, audio, video, preview, chip, card, Show as, Small, Medium, Large, download, reference, agent, 文件, 附件, 预览, 标签大小
@@ -6,6 +7,7 @@ heading_keywords.previews-and-chip-sizes: thumbnail, Show as, Small, Medium, Lar
 heading_keywords.open-and-download: viewer, image, PDF, audio, video, code, Markdown, archive, original, reduced motion
 heading_keywords.files-for-an-agent: model, native image, path, size, shared document, download_shared
 heading_keywords.preview-states: loading, unavailable, gone, private, too large
+summary: Preview files, choose how attachments appear and see what an agent receives.
 ---
 
 # Files and attachments

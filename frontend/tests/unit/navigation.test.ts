@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** The tree of an org as the left bar lays it out, the store that keeps it, and where a visitor may be sent after signing in. */
 import { describe, expect, it } from 'vitest';
 
@@ -8,24 +9,7 @@ import { safeRedirect } from '@/routes/-access';
 import type { TreeRow } from '@/ui/Tree';
 import { display } from '../doubles/thread-display';
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 const thread = (id: string, parent: string, state: NonNullable<TreeNode['thread']>['state']): TreeNode =>
   node(id, 'thread', parent, { thread: { state, display: display(state === 'starting' ? 'running' : state), blocked_reason: null, pending_approvals: 0, activity_seq: 1, last_activity_at: null, attention: { uncommitted: null, unpushed: null, failed: false, stale: true, as_of: null, reason: null } } });

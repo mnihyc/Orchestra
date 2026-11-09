@@ -23,7 +23,7 @@ test('a project starts a topic and its settings tab keeps the section and place'
   await expect(page.getByRole('button', { name: 'Start topic', exact: true })).toBeVisible();
   await page.goto(`/project/${ACME.web}/settings`);
   await expect(page).toHaveTitle(/General · Web/);
-  await page.goto('/org/acme/settings/policies');
+  await page.goto('/org/acme/settings/defaults');
   await expect(page).toHaveTitle(/Defaults · Acme/);
   await expect(page.locator('a[aria-current="page"]').filter({ hasText: /^Defaults$/ })).toHaveCount(1);
 });

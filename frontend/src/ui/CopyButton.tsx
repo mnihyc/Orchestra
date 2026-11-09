@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { writeToClipboard } from '@/ui/clipboard';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
+import './copy-button.css';
 
 /** How long the tick stays: long enough to be seen, short enough that a second copy is confirmed anew. */
 export const COPIED_SHOWN_MS = 1_500;
@@ -41,13 +42,16 @@ export function CopyButton({ value, label, className }: CopyButtonProps) {
     <Tooltip content={said}>
       <button
         type="button"
+        data-copy-control=""
         aria-label={label}
         className={cx(
-          'inline-flex size-(--control-sm) shrink-0 items-center justify-center rounded-sm text-text transition-colors hover:bg-bg-muted',
+          'inline-grid size-(--control-sm) shrink-0 items-center justify-items-center rounded-sm text-text transition-colors hover:bg-bg-muted [&>svg]:col-start-1 [&>svg]:row-start-1',
           className,
         )}
         onClick={() => void copy()}
       >
+        {/* The control exposes the inherited text baseline while the sign stays centred in its full target. */}
+        <span aria-hidden className="invisible col-start-1 row-start-1 select-none">&nbsp;</span>
         {state === 'copied' ? (
           <Check className="text-success" aria-hidden />
         ) : state === 'refused' ? (

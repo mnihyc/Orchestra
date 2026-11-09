@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** Legacy minimal references remain parseable and evict cached content, but never become administered navigation rows. */
 import { describe, expect, it } from 'vitest';
 
@@ -7,24 +8,7 @@ import type { HiddenItem, TreeNode } from '@/generated/api-types';
 import { type OrgTree, treeWriter, useTreeStore } from '@/realtime/stores/tree';
 import type { TreeRow } from '@/ui/Tree';
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 const hidden = (id: string, kind: string, parent: string): HiddenItem => ({
   id,

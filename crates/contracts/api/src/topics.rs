@@ -8,6 +8,14 @@
 //! [`AnnouncementDelivered`]. The environments of a topic are listed beside
 //! the places where one more could be made.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::{
+    KeyIdentityKind as Identity,
+    KeyTargetKind::{Identity as IdentityTarget, Object},
+};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Seq, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -252,19 +260,77 @@ pub struct PlaceAnnouncementCreateReply {
     pub topics_skipped: i64,
 }
 
+/// The native identity and generated delivery outcome of one accepted announcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AnnouncementReceipt {
+    /// The native stored announcement.
+    pub id: Id,
+    /// The actual Topic it reached.
+    pub topic_id: Id,
+    /// What this accepted act did, without existing body or sender content.
+    pub delivered: AnnouncementDelivered,
+}
+
+/// The same accepted batch without existing announcement content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PlaceAnnouncementCreateReceipt {
+    /// This shape carries only the accepted outcome.
+    pub projection: crate::common::ReceiptProjection,
+    /// The native group, including a genuine empty outcome.
+    pub group_id: Id,
+    /// Actual announcement identities and generated delivery results.
+    pub announcements: Vec<AnnouncementReceipt>,
+    /// Native skipped-topic outcome, without names.
+    pub topics_skipped: i64,
+}
+
+crate::common::full_or_receipt! {
+    /// Full ordinary announcement results or the same batch's content-free outcome.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum PlaceAnnouncementCreateResponse {
+        /// Existing content, gated by this operation's current Read.
+        Full(PlaceAnnouncementCreateReply),
+        /// Accepted identity/outcome without existing body or sender content.
+        Receipt(PlaceAnnouncementCreateReceipt),
+    }
+}
+
 crate::endpoints! {
     /// Brings a client up to date on a topic: the topic, its threads, the jobs about them and its announcements, or what changed since a sequence.
-    TopicSyncGet: GET "/topics/{id}/sync", Permission("node.view"), query TopicSyncGetQuery, none, json TopicSync, 200;
+    TopicSyncGet: GET "/topics/{id}/sync", Permission("node.view"), query TopicSyncGetQuery, none, json TopicSync, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Topic)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("topic_threads")),
+            Facet::response_content(&[IdentityTarget(Identity::Job)], Target::ResolvedCollection("topic_jobs")),
+            Facet::response_content(&[IdentityTarget(Identity::Schedule)], Target::ResolvedCollection("topic_schedules")),
+        ]);
     /// Lists the environments that a topic's threads run in and those whose home it is, the default first, each as far as the caller may see it.
-    TopicEnvironmentList: GET "/topics/{id}/environments", Permission("node.view"), none, none, json Vec<Environment>, 200;
+    TopicEnvironmentList: GET "/topics/{id}/environments", Permission("node.view"), none, none, json Vec<Environment>, 200,
+        operation Op::facets(&[
+            Facet::required(Read,&[Object(K::Environment)],Target::ResolvedCollection("results")),
+            Facet::required(Read,&[Object(K::Template),Object(K::Host),Object(K::Machine),Object(K::Mount)],Target::ResolvedCollection("resources")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::DocumentContainer),IdentityTarget(Identity::Group)],Target::ResolvedCollection("names")),
+        ]);
     /// Names the environment that new threads of a topic join, or takes it away.
-    TopicDefaultEnvironmentSet: PUT "/topics/{id}/default-environment", Permission("topic.manage"), none, json TopicDefaultEnvironmentSetBody, json Topic, 200;
+    TopicDefaultEnvironmentSet: PUT "/topics/{id}/default-environment", Permission("topic.manage"), none, json TopicDefaultEnvironmentSetBody, json Topic, 200,
+        operation Op::returning(Manage, &[Object(K::Topic)], Target::PermissionObject);
     /// Lists where a thread of a topic could run, for the caller: the hosts they may use for a new environment, the most free memory first, then the existing environments they manage.
-    TopicPlaceList: GET "/topics/{id}/places", Permission("topic.interact"), query PlaceListQuery, none, json Vec<Place>, 200;
+    TopicPlaceList: GET "/topics/{id}/places", Permission("topic.interact"), query PlaceListQuery, none, json Vec<Place>, 200,
+        operation Op::facets(&[
+            Facet::required(Read,&[Object(K::Host),Object(K::Environment)],Target::ResolvedCollection("results")),
+            Facet::required(Read,&[Object(K::Host),Object(K::Machine),Object(K::Mount)],Target::ResolvedCollection("resources")),
+            Facet::required(Read,&[Object(K::Template)],Target::Resolved("template")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread),Object(K::DocumentContainer),IdentityTarget(Identity::Group)],Target::ResolvedCollection("names")),
+        ]);
     /// Lists announcements in the readable topics of an org, project or topic, newest first.
     NodeAnnouncementList: GET "/nodes/{id}/announcements", Permission("node.view"), query NodeAnnouncementListQuery, none, json Page<Announcement>, 200;
     /// Announces to the open topics of an org, project or topic; private branches are passed over and each topic applies its settings.
-    NodeAnnouncementCreate: POST "/nodes/{id}/announcements", Rule("node.interact; steering and interrupting reach only threads where the sender holds thread.interact"), none, json AnnouncementCreateBody, json PlaceAnnouncementCreateReply, 201;
+    NodeAnnouncementCreate: POST "/nodes/{id}/announcements", Rule("node.interact; steering and interrupting reach only threads where the sender holds thread.interact"), none, json AnnouncementCreateBody, json PlaceAnnouncementCreateResponse, 201,
+        operation Op::receipt(&Op::returning(
+            Write,
+            &[Object(K::Topic), Object(K::Thread)],
+            Target::ResolvedCollection("destinations"),
+        ));
 }
 
 #[cfg(test)]

@@ -10,6 +10,11 @@
 //! Moving an environment to another host and updating the unit of an
 //! environment or of a provider's runtime are planned the same way.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Time};
@@ -312,6 +317,10 @@ pub struct ForkRequest {
     /// over, when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<ThreadAccess>,
+    /// For a new thread: its confirmed initial agent contribution, or the destination's creation
+    /// preset when omitted. A switch keeps its existing contributions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessChoice>,
     /// How much of the history; all of it when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<ForkHistory>,
@@ -332,7 +341,8 @@ pub struct ForkRequest {
     /// behind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<bool>,
-    /// The thread's directory on the target.
+    /// The thread's directory relative to the target workspace. Omission keeps its current
+    /// relative directory; an empty string selects the workspace root, including on a machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
     /// Where the agent starts in it.
@@ -795,6 +805,9 @@ pub struct PlanMcpServer {
     pub fate: McpFate,
     /// Why it is lost or unavailable, in words; null when it is kept or new.
     pub reason: Option<String>,
+    /// Stable catalogue reason; a native explanation is kept in reason as optional detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<crate::environment::McpReasonCode>,
 }
 
 /// Whether the agent's notes travel.
@@ -808,15 +821,54 @@ pub struct ForkPlanMemory {
     pub bytes: i64,
 }
 
-/// What the source runs on now.
+/// The actual execution program of the source, with only resources it really binds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct ForkPlanFrom {
-    /// The agent profile.
-    pub agent: AgentRef,
-    /// The provider.
-    pub provider: ProviderRef,
-    /// The environment, if it has one.
-    pub environment: Option<EnvironmentRef>,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ForkPlanFrom {
+    /// A native agent profile and its provider, optionally placed in an environment.
+    Agent {
+        /// The actual agent profile.
+        agent: Box<AgentRef>,
+        /// The actual provider.
+        provider: ProviderRef,
+        /// The actual environment, when the source has one.
+        environment: Option<Box<EnvironmentRef>>,
+    },
+    /// A built-in control-plane program with its actual API provider and model.
+    Program {
+        /// The compiled program and its fixed knowledge domain.
+        program: crate::threads::BuiltinThreadProgram,
+        /// The provider that supplied the selected execution.
+        provider: ProviderRef,
+        /// The model that supplied the selected execution.
+        model: String,
+    },
+}
+
+impl ForkPlanFrom {
+    /// The source profile exists only for native execution.
+    #[must_use]
+    pub fn agent(&self) -> Option<&AgentRef> {
+        match self {
+            Self::Agent { agent, .. } => Some(agent.as_ref()),
+            Self::Program { .. } => None,
+        }
+    }
+    /// Both execution shapes retain their actual provider.
+    #[must_use]
+    pub const fn provider(&self) -> &ProviderRef {
+        match self {
+            Self::Agent { provider, .. } | Self::Program { provider, .. } => provider,
+        }
+    }
+    /// A built-in program supplies no source filesystem.
+    #[must_use]
+    pub fn environment(&self) -> Option<&EnvironmentRef> {
+        match self {
+            Self::Agent { environment, .. } => environment.as_deref(),
+            Self::Program { .. } => None,
+        }
+    }
 }
 
 /// An environment to be made, and where.
@@ -1033,6 +1085,11 @@ pub struct ForkPlan {
     pub options: AppliedChangeOptions,
     /// The page the result will have.
     pub access: ForkPlanAccess,
+    /// Initial agent gift bounds for a new thread's actual prospective human page.
+    /// Absent for a switch, an older saved plan or an unadmitted copied page;
+    /// never inferred from the parent summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessAvailability>,
     /// Whose the result is.
     pub owner: ForkPlanOwner,
     /// What the result needs on its new side to be talked to, and whether the people on its page
@@ -1155,6 +1212,26 @@ pub struct ForkBatch {
     pub counts: ForkBatchCounts,
 }
 
+/// Only the cancellation outcomes produced by this request; existing job content needs Read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkBatchCancelReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub batch_id: Id,
+    /// Queued jobs that this request ended.
+    pub cancelled: Vec<Id>,
+    /// Running jobs whose cancellation request was accepted.
+    pub requested: Vec<Id>,
+    /// False if authority closed after earlier members had already committed.
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkBatchCancelResponse {
+    Receipt(ForkBatchCancelReceipt),
+    Full(Box<ForkBatch>),
+}
+
 /// What the thread of a moved environment does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -1205,9 +1282,37 @@ pub struct MovedMount {
     pub detached_because: Option<MountDetachedBecause>,
 }
 
-/// The same environment going to another host.
+/// What the native source and destination lifecycles do with the reviewed data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentTransferKind {
+    /// A template-made environment changes the host of its unit.
+    #[default]
+    Move,
+    /// A machine directory participates: switch its execution and copy the reviewed data.
+    SwitchCopy,
+}
+
+impl EnvironmentTransferKind {
+    /// Classify the two selected native lifecycles, independently of their display placement.
+    pub const fn between_units(source_unit: bool, destination_unit: bool) -> Self {
+        if source_unit && destination_unit {
+            Self::Move
+        } else {
+            Self::SwitchCopy
+        }
+    }
+}
+
+/// The reviewed transfer of an environment to another native lifecycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMovePlan {
+    /// Chosen by the native source and destination, independent of the route's historic name.
+    #[serde(default)]
+    pub kind: EnvironmentTransferKind,
+    /// Whether an actual old unit exists. A directory has no unit to remove.
+    #[serde(default)]
+    pub source_has_unit: bool,
     /// The unique affected audience and the explicit confirmation choice.
     #[serde(default)]
     pub notification: crate::loss::OperationNotificationPlan,
@@ -1369,12 +1474,44 @@ pub struct ProviderUpdatePlan {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ForkNowBody {
+    /// Its confirmed initial agent contribution, or the topic's creation preset when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_access: Option<crate::nodes::AgentAccessChoice>,
     /// Its name; the source's with a mark when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The last turn the history takes, from a message's "Fork from here"; all of it when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_turn: Option<i64>,
+}
+
+impl ForkNowBody {
+    /// The existing immediate fork's fixed native request.
+    pub fn request(&self) -> ForkRequest {
+        ForkRequest {
+            result: ForkResult::New,
+            topic_id: None,
+            name: self.name.clone(),
+            access: None,
+            agent_access: self.agent_access,
+            history: self.to_turn.map(|to_turn| ForkHistory {
+                mode: HistoryMode::Range,
+                from_turn: None,
+                to_turn: Some(to_turn),
+            }),
+            to: None,
+            environment: None,
+            worktree: None,
+            files_at: None,
+            memory: None,
+            directory: None,
+            cwd: None,
+            options: None,
+            check_fingerprints: None,
+            fingerprint_request_id: None,
+            mounts: None,
+        }
+    }
 }
 
 /// What a fork with nothing to choose started: the job, and the thread it makes, which exists once the job has
@@ -1387,27 +1524,204 @@ pub struct ForkNowReply {
     pub thread_id: Id,
 }
 
+/// Only the actual accepted job and newly reserved Thread identities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkNowReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub job_id: Id,
+    pub thread_id: Id,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkNowResponse {
+    Receipt(ForkNowReceipt),
+    Full(Box<ForkNowReply>),
+}
+impl ForkNowResponse {
+    pub fn into_full(self) -> Result<ForkNowReply, ForkNowReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The actual accepted private plan identity and counts, without member names or content.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkPlanReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub preflight_id: Id,
+    pub planned: usize,
+    pub executable: usize,
+    pub blocked: usize,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkPlanResponse {
+    Receipt(ForkPlanReceipt),
+    Full(Box<ForkPlan>),
+}
+impl ForkPlanResponse {
+    pub fn into_full(self) -> Result<ForkPlan, ForkPlanReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// The accepted aggregate identity and native counts, without member identities or names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkBatchPlanReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub preflight_id: Id,
+    pub planned: usize,
+    pub executable: usize,
+    pub blocked: usize,
+    pub skipped: usize,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkBatchPlanResponse {
+    Receipt(ForkBatchPlanReceipt),
+    Full(Box<ForkBatchPlan>),
+}
+impl ForkBatchPlanResponse {
+    pub fn into_full(self) -> Result<ForkBatchPlan, ForkBatchPlanReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// The accepted native job without its existing source or configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkCreateReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub job_id: Id,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkCreateResponse {
+    Receipt(ForkCreateReceipt),
+    Full(Box<Job>),
+}
+impl ForkCreateResponse {
+    pub fn into_full(self) -> Result<Job, ForkCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+/// The accepted aggregate without naming its carried members.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ForkBatchCreateReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub batch_id: Id,
+    pub queued: usize,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ForkBatchCreateResponse {
+    Receipt(ForkBatchCreateReceipt),
+    Full(Box<ForkBatch>),
+}
+impl ForkBatchCreateResponse {
+    pub fn into_full(self) -> Result<ForkBatch, ForkBatchCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
 crate::endpoints! {
     /// Forks a thread at once, with nothing to choose and no plan to review: the same topic, environment, provider, profile and model, with all of the history.
-    ThreadForkNow: POST "/threads/{id}/forks/now", Rule("the same as planning a fork of it"), none, json ForkNowBody, json ForkNowReply, 202;
+    ThreadForkNow: POST "/threads/{id}/forks/now", Rule("the same as planning a fork of it"), none, json ForkNowBody, json ForkNowResponse, 202,
+        operation Op::receipt(&Op::facets(crate::fork_sources::NOW_FACETS));
     /// Plans a fork or a switch of a thread, before anything is done.
-    ThreadForkPreflight: POST "/threads/{id}/forks/preflight", Rule("what the result needs: for a new thread, manage or fork on the source and what making it takes; for a switch, what the request changes"), none, json ForkRequest, json ForkPlan, 200;
+    ThreadForkPreflight: POST "/threads/{id}/forks/preflight", Rule("what the result needs: for a new thread, manage or fork on the source and what making it takes; for a switch, what the request changes"), none, json ForkRequest, json ForkPlanResponse, 200,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::SINGLE_VARIANTS));
     /// Carries out a plan of a fork or a switch of a thread as a job; a switch locks the thread at once.
-    ThreadForkCreate: POST "/threads/{id}/forks", Rule("the same as planning it"), none, json ForkCreateBody, json Job, 202;
+    ThreadForkCreate: POST "/threads/{id}/forks", Rule("the same as planning it"), none, json ForkCreateBody, json ForkCreateResponse, 202,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::SINGLE_VARIANTS));
     /// Plans a switch of several threads together.
-    ForkBatchPreflight: POST "/forks/preflight", Rule("what a switch needs, on each thread planned"), none, json ForkBatchPreflightBody, json ForkBatchPlan, 200;
+    ForkBatchPreflight: POST "/forks/preflight", Rule("what a switch needs, on each thread planned"), none, json ForkBatchPreflightBody, json ForkBatchPlanResponse, 200,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::BATCH_VARIANTS));
     /// Carries out a plan of a batch: one job for each plan without blockers.
-    ForkBatchCreate: POST "/forks", Rule("as for each plan"), none, json ForkCreateBody, json ForkBatch, 202;
+    ForkBatchCreate: POST "/forks", Rule("as for each plan"), none, json ForkCreateBody, json ForkBatchCreateResponse, 202,
+        operation Op::receipt(&Op::variants(&crate::fork_sources::BATCH_VARIANTS));
     /// Reads where a batch stands, limited to the threads the caller may view.
-    ForkBatchGet: GET "/forks/{batch_id}", Rule("the batch's creator, or thread.manage on a listed thread"), none, none, json ForkBatch, 200;
+    ForkBatchGet: GET "/forks/{batch_id}", Rule("the batch's creator, or thread.manage on a listed thread"), none, none, json ForkBatch, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("batch_subjects")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("batch_waiting_machines")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("batch_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("batch_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("batch_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("batch_names_threads")),
+        ]);
     /// Cancels the jobs of a batch that have not passed their commit phase.
-    ForkBatchCancel: POST "/forks/{batch_id}/cancel", Rule("the batch's creator"), none, none, json ForkBatch, 200;
+    ForkBatchCancel: POST "/forks/{batch_id}/cancel", Rule("the batch's creator"), none, none, json ForkBatchCancelResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("remaining_batch_subjects")),
+            Facet::response_content(&[Object(K::Thread), Object(K::Environment)], Target::ResolvedCollection("batch_subjects")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("batch_waiting_machines")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("batch_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("batch_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("batch_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("batch_names_threads")),
+        ]));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn fork_sources_name_only_their_real_program_resources() {
+        // EN browser: kept Orch thread > Switch > choose a native profile and environment;
+        // review Orch as the source, with its provider/model and no invented agent or workspace.
+        // 中文浏览器：已保留的 Orch 会话 > 切换 > 选择原生配置和环境；
+        // 原来源应显示 Orch、提供方和模型，不显示虚构的智能体或工作区。
+        let provider = json!({
+            "id":orch_types::new_id(),"name":"API","kind":"api",
+            "harness_kind":null,"harness":null,"address":"/org/api",
+            "placement":"managed","status":"ready"
+        });
+        let program = json!({
+            "kind":"program", "program":crate::threads::BuiltinThreadProgram::orch(orch_types::new_id()),
+            "provider":provider,"model":"question-model"
+        });
+        let source: ForkPlanFrom = serde_json::from_value(program.clone()).unwrap();
+        assert!(source.agent().is_none());
+        assert!(source.environment().is_none());
+        assert_eq!(serde_json::to_value(&source).unwrap(), program);
+        for member in ["agent", "environment"] {
+            let mut fake = program.clone();
+            fake[member] = json!({"id":orch_types::new_id()});
+            assert!(serde_json::from_value::<ForkPlanFrom>(fake).is_err());
+        }
+        let native = json!({
+            "kind":"agent","provider":provider,"environment":null,
+            "agent":{"id":orch_types::new_id(),"name":"Profile","address":"/org/agent",
+                "harness_kind":"fake","harness":{"kind":"fake","name":"Fake"},
+                "machine":null,"disabled":false}
+        });
+        let source: ForkPlanFrom = serde_json::from_value(native.clone()).unwrap();
+        assert!(source.agent().is_some());
+        assert!(source.environment().is_none());
+        assert_eq!(serde_json::to_value(&source).unwrap(), native);
+        // The history marker uses the same source shape, including its discriminator.
+        let mut marker = program;
+        marker["directory"] = json!("");
+        let value: crate::threads::MarkerSwitchedFrom =
+            serde_json::from_value(marker.clone()).unwrap();
+        assert_eq!(serde_json::to_value(value).unwrap(), marker);
+    }
 
     #[test]
     fn a_switch_names_only_what_it_changes_and_the_rest_stays() {
@@ -1563,6 +1877,7 @@ mod tests {
     #[test]
     fn a_place_is_a_host_or_an_environment_by_its_kind() {
         let place: Place = serde_json::from_value(json!({
+            "home": null, "home_path": [], "origin_machine": null, "availability": [],
             "kind": "environment",
             "environment": {
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b", "name": "Main",

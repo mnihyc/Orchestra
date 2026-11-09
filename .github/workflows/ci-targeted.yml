@@ -1,0 +1,79 @@
+name: CI targeted
+
+# A branch under ci-t/ runs only what its .ci-targets file names. Rust and frontend checks use independent
+# runners, as in the whole CI, so the web typecheck has its own runner's memory. The whole CI decides a release.
+on:
+  push:
+    branches: ['ci-t/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-targeted-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  targeted:
+    name: Targeted Rust (${{ github.ref_name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    services:
+      # The database the deployment runs, by the same digest, as in the whole CI.
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+        env:
+          POSTGRES_USER: orch
+          POSTGRES_PASSWORD: orch
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U orch"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ORCH_TEST_DATABASE_URL: postgres://orch:orch@127.0.0.1:5432/postgres
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+      RUST_MIN_STACK: "33554432"
+    steps:
+      - name: Free unused runner toolchains
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the repository toolchain
+        run: rustup show
+      # The whole CI's test cache, restored and never saved from here.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: ci-tests
+          save-if: 'false'
+          cache-bin: 'false'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Plan the assigned native fixtures
+        id: native-fixtures
+        run: |
+          fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --targets .ci-targets --plan)
+          printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
+      - name: Install the native fixtures' C compiler
+        if: ${{ fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector }}
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Run the Rust checks .ci-targets names
+        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group rust
+
+  targeted-web:
+    name: Targeted web (${{ github.ref_name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Run the frontend checks .ci-targets names
+        run: python3 -I -B .github/scripts/ci_targeted.py .ci-targets --group web

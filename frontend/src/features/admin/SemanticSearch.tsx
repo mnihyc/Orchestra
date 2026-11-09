@@ -218,7 +218,7 @@ export function SemanticSearch() {
     refetchInterval: (query) => query.state.data === undefined ? false : query.state.data.interval_secs * 1000,
   });
 
-  if (overview.isPending) return <SkeletonRows rows={4} />;
+  if (overview.isPending) return <SkeletonRows read={overview} rows={4} />;
   if (overview.isError) return <ErrorState error={overview.error} retrying={overview.isRefetching} onRetry={() => void overview.refetch()} />;
 
   const data = overview.data;

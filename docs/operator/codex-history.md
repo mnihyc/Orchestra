@@ -15,6 +15,18 @@ into another home or force Codex to keep its history in the legacy format.
 A move with the home transfers the volume. It does not open every thread during
 the move. Threads open when they are next used.
 
+## Images read by tools
+
+In a Separated arrangement, a viewed image comes from the native tool's recorded
+result, not a same-named file on the provider runtime. The image uses the thread's
+ordinary image viewer, and its complete original result is available under
+**Full output**. Cold resumes, replay and adoption use the same recorded bytes.
+The environment's original file stays in place; no copy is added to Files.
+
+If the recorded result is missing, changed or contains no retainable image, the
+thread shows **The returned image could not be retained**. This notice does not
+change an otherwise completed text turn into a failed turn.
+
 ## Fork checks
 
 A native fork at a particular turn also needs a complete check of that turn's

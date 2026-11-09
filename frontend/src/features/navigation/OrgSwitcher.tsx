@@ -88,9 +88,11 @@ export interface OrgSwitcherProps {
   orgs: readonly Org[];
   /** The root org in view. */
   current: Org | null;
+  /** Choices have not arrived yet; this is not an empty organization list. */
+  loading?: boolean;
 }
 
-export function OrgSwitcher({ orgs, current }: OrgSwitcherProps) {
+export function OrgSwitcher({ orgs, current, loading = false }: OrgSwitcherProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const leaveDrawer = useContext(LeaveDrawer);
@@ -146,7 +148,8 @@ export function OrgSwitcher({ orgs, current }: OrgSwitcherProps) {
       <Avatar text={orgInitial(current)} color={orgColor(current)} kind={current.org_kind === 'personal' ? 'human' : 'org'} size={24} />
     </Link>}
     <Combobox label={t('navigation.orgs')} hideLabel fieldClassName="min-w-0 flex-1" query={query} onQueryChange={setQuery}
-      displayValue={current === null ? '' : labels.get(current.id) ?? current.name} placeholder={t('navigation.chooseOrg')} groups={groups}
+      displayValue={current === null ? loading ? t('common.loading') : '' : labels.get(current.id) ?? current.name}
+      loading={loading} placeholder={t(loading && orgs.length === 0 ? 'common.loading' : 'navigation.chooseOrg')} groups={groups}
       onSelect={(choice) => {
         const target = [...roots, ...departments].find((option) => option.value === choice.value);
         if (target === undefined) return;

@@ -113,8 +113,19 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<MountRow>, DbError> 
     .await?)
 }
 
+/// Serializes the native nullable root-org/name uniqueness tuple before creation.
+pub async fn lock_creation_name(
+    conn: &mut Conn,
+    org: Option<Id>,
+    name: &str,
+) -> Result<(), DbError> {
+    let namespace = serde_json::json!([org, name]).to_string();
+    crate::queries::chats::lock_named(conn, &format!("mount.create:{namespace}")).await
+}
+
 /// Creates a mount and its home and first owner.
 pub async fn insert(conn: &mut Conn, row: &MountRow, at: DateTime<Utc>) -> Result<(), DbError> {
+    lock_creation_name(conn, row.org_id, &row.name).await?;
     sqlx::query("INSERT INTO mounts (id,name,description,org_id,home_id,owner_id,target,read_only,default_fate,created_at,updated_at)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10)")
         .bind(row.id).bind(&row.name).bind(&row.description).bind(row.org_id).bind(row.home_id)
@@ -235,7 +246,7 @@ pub struct MachineMountData {
 }
 
 /// Last reported attachments of one current environment on the selected machine.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct MachineMountEnvironment {
     /// Its resource identifier.
     pub id: Id,

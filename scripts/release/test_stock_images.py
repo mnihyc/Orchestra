@@ -151,6 +151,14 @@ class EveryImageInput(unittest.TestCase):
             self.put(root,'crates/db/src/seed.json','{"image": "orch-env-base:0.1.0"}\n')
             self.assertEqual(self.run_check(root).returncode,1)
 
+    def test_a_schema_field_named_image_is_not_an_image_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            self.put(root,'extensions/capabilities/images/src/interfaces.json','{"fields": {"image": "image[]"}}\n')
+            self.assertEqual(self.run_check(root).returncode,0)
+            self.put(root,'extensions/capabilities/images/src/other.json','{"image": "postgres:17"}\n')
+            self.assertEqual(self.run_check(root).returncode,1,'a real unpinned reference still fails')
+
     def test_an_unknown_docker_option_cannot_hide_the_next_image(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)

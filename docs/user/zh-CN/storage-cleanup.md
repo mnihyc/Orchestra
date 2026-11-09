@@ -9,6 +9,7 @@ heading_id.卸载: uninstall
 heading_id.存储报告: storage-report
 heading_id.清理保留内容: clean-up-kept-items
 heading_id.服务器文件: server-files
+summary: 释放存储或卸载前，查看未使用缓存、保留数据和发布文件。
 ---
 
 # 存储清理

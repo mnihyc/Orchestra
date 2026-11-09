@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ViewGroup } from '@/ui/ViewGroup';
 import { ViewTab } from '@/ui/ViewTab';
 import { show } from './support';
+import { setLocale } from '@/i18n';
 
 const ids = ['start', 'providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts'];
 const titles = ['Acme', 'Providers', 'Agents', 'Machines', 'Environments', 'Templates', 'Hosts', 'MCP servers', 'Mounts'];
@@ -135,4 +136,26 @@ it('reveals a selected wrapped row within the tab viewport without scrolling its
   expect(box.strip.scrollTop).toBeGreaterThan(0); expect(body.scrollTop).toBe(91); expect(input).toHaveFocus();
   fireEvent.wheel(box.strip, { deltaY: -120 }); box.strip.scrollTop = 0;
   act(() => currentObserver().deliver()); expect(box.strip.scrollTop).toBe(0);
+});
+
+// EN: Open three rows → select the final tab → its complete row aligns to the top; browse and resize.
+// 中文：打开三行标签 → 选择最后一项 → 完整行对齐顶部；手动滚动并调整宽度。
+it.each(['en', 'zh-CN'] as const)('aligns the selected wrapped row to the top, including the final row (%s)', async (locale) => {
+  await setLocale(locale);
+  try {
+    show(<Group loaded />); const strip = screen.getByRole('tablist'); const row = 36;
+    Object.defineProperties(strip, {
+      clientWidth: { configurable: true, value: 420 }, clientHeight: { configurable: true, value: row * 2 },
+      scrollHeight: { configurable: true, get: () => row * 3 + (Number.parseFloat(strip.style.paddingBottom) || 0) },
+    });
+    vi.spyOn(strip, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 420, row * 2));
+    for (let index = 0; index < ids.length; index += 1) {
+      const tab = document.getElementById(elementId(ids[index]!)); if (tab === null) throw new Error('The tab exists');
+      vi.spyOn(tab, 'getBoundingClientRect').mockImplementation(() => new DOMRect(index % 3 * 140, Math.floor(index / 3) * row - strip.scrollTop, 140, row));
+    }
+    const body = screen.getByRole('tabpanel'); body.scrollTop = 91;
+    act(() => currentObserver().deliver());
+    expect(strip.scrollTop).toBe(row * 2); expect(strip.style.paddingBottom).toBe(`${row}px`);
+    expect(body.scrollTop).toBe(91);
+  } finally { await setLocale('en'); }
 });

@@ -300,6 +300,9 @@ pub struct MissingOptions {
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// The service offerings, independently of generation models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
     /// The efforts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efforts: Option<Vec<String>>,
@@ -1137,6 +1140,7 @@ mod tests {
         };
         let on_provider = |administers| {
             let options = MissingOptions {
+                services: None,
                 models: Some(vec!["gpt-x".into()]),
                 efforts: Some(vec!["high".into()]),
             };
@@ -1286,6 +1290,7 @@ mod tests {
                         owner: None,
                     },
                     Some(MissingOptions {
+                        services: None,
                         models: Some(vec!["gpt-x".into()]),
                         efforts: None,
                     }),

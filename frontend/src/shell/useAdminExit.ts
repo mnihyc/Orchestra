@@ -10,7 +10,7 @@ import { useTreeStore } from '@/realtime/stores/tree';
 import { useThreadStore } from '@/realtime/stores/thread';
 import { useCurrentHeading } from '@/shell/screen';
 import { mainContent } from '@/shell/areas';
-import { adminExitPlan, ordinaryDestination, type AdminExitPlan, type ExitPlace } from './adminExit';
+import { adminExitPlan, ordinaryDestination, useAdminExitNotice, type AdminExitPlan, type ExitPlace } from './adminExit';
 
 /** Exact reads use the ordinary session after the native mode answer; no role is guessed locally. */
 async function probe(place: ExitPlace, signal: AbortSignal): Promise<boolean> {
@@ -65,9 +65,11 @@ export function useAdminExit(): boolean {
       void ordinaryDestination(plan, (place) => probe(place, active.signal)).then(async (target) => {
         if (active.signal.aborted || client.session.getState().userId !== person || router.state.location.href !== href) return;
         if (target !== null && target !== href) {
-          // A lost View grant cannot leave the old page standing behind an unsaved-text blocker.
-          await router.navigate({ href: target, replace: true, ignoreBlocker: true });
-          requestAnimationFrame(() => mainContent()?.focus({ preventScroll: true }));
+          await router.navigate({ href: target, replace: true });
+          if (client.session.getState().userId === person && router.state.location.href === target) {
+            useAdminExitNotice.setState({ notice: { person, href: target } });
+            requestAnimationFrame(() => mainContent()?.focus({ preventScroll: true }));
+          }
         }
       }).catch(() => undefined).finally(() => { if (!active.signal.aborted) { controller = null; setPendingAt(null); } });
     };

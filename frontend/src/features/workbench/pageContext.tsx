@@ -1,5 +1,5 @@
 /** Typed route adapters read their own content target. There is still one application router. */
-import { defaultStringifySearch, useLocation, useNavigate, type AnyRoute, type UseNavigateResult, type ParsedLocation } from '@tanstack/react-router';
+import { defaultStringifySearch, trimPathRight, useLocation, useNavigate, type AnyRoute, type UseNavigateResult, type ParsedLocation } from '@tanstack/react-router';
 import { createContext, useContext, useMemo } from 'react';
 import type { PageTarget } from './pages';
 
@@ -20,7 +20,7 @@ export const PageContext = createContext<PageContextValue | null>(null);
 export function usePageContext(): PageContextValue | null { return useContext(PageContext); }
 function useTarget(route: { id: string }): PageContextValue {
   const context = usePageContext();
-  if (context?.target.route !== route.id) throw new Error('This page must be hosted by its addressed workbench view.');
+  if (context === null || trimPathRight(context.target.route) !== trimPathRight(route.id)) throw new Error('This page must be hosted by its addressed workbench view.');
   return context;
 }
 export function usePageParams<R extends AnyRoute>(route: R): R['types']['allParams'] {

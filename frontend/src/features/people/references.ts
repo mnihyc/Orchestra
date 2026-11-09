@@ -6,9 +6,11 @@
  * `/chats/<id>#message=12`. Copied for an agent it is the grammar agents write, `[name](id:<id>#n)`, which any
  * agent that may read the thing follows with `read_shared`.
  */
-import { placePath } from '@/features/navigation/places';
-import { contentHref } from '@/features/workbench/contentAddress';
-import type { InlineRefKind, NodeKind, ReferencePreview } from '@/generated/api-types';
+import { parseContentAddress } from '@/features/workbench/contentAddress';
+import { linkTo, referenceTo } from '@/lib/links';
+import { readOrchLink } from '@/lib/orchLinks';
+export { markdownReference } from '@/lib/links';
+import type { InlineRefKind, ReferencePreview } from '@/generated/api-types';
 
 /** What a chip names: a thing, and the part of it. */
 export interface TypedReference {
@@ -24,16 +26,23 @@ export interface TypedReference {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// These are stored reference segments, not destinations in the browser's route tree.
+// Written reference segments and the public screen addresses of the same things.
 const BASES = new Map<string, InlineRefKind>([
   ['nodes', 'node'],
   ['documents', 'document'],
   ['chats', 'chat'],
   ['files', 'file'],
+  ['org', 'node'], ['project', 'node'], ['topic', 'node'], ['thread', 'node'],
+  ['doc', 'document'], ['chat', 'chat'],
 ]);
 
 /** A typed reference read from the address a message keeps it as; null for any other address. */
 export function referenceOfAddress(href: string): TypedReference | null {
+  const url = readOrchLink(href);
+  if (url === null) return null;
+  href = `${url.pathname}${url.search}${url.hash}`;
+  const content = parseContentAddress(href);
+  if (content?.view === 'file' && UUID.test(content.environmentId)) return { kind: 'environment_file', id: content.environmentId, path: content.path, ...(content.line === undefined ? {} : { line: content.line }) };
   const [head = '', fragment = ''] = href.split('#', 2);
   const path = (head.split('?')[0] ?? '').replace(/\/+$/, '');
   const environment = /^\/environments\/([^/]+)\/files\/(.+)$/.exec(path);
@@ -46,11 +55,24 @@ export function referenceOfAddress(href: string): TypedReference | null {
     } catch { return null; }
   }
   const address = /^\/([^/]+)\/([^/]+)$/.exec(path);
-  const kind = BASES.get(address?.[1] ?? '');
-  const id = address?.[2];
+  const route = address?.[1] ?? '';
+  const kind = BASES.get(route);
+  let id: string | undefined;
+  try { id = address?.[2] === undefined ? undefined : decodeURIComponent(address[2]); } catch { return null; }
   if (kind === undefined || id === undefined || !UUID.test(id)) return null;
   const reference: TypedReference = { kind, id };
+  const query = new URLSearchParams(head.split('?')[1] ?? '');
+  const file = query.get('file'), line = query.get('line');
+  if ((route === 'doc' || route === 'chat') && file !== null && UUID.test(file)) return {
+    kind: 'file', id: file, ...(line !== null && /^[1-9]\d*$/.test(line) ? { line: Number(line) } : {}),
+  };
   const [key, value = ''] = fragment.split('=', 2);
+  const block = query.get('block');
+  if (kind === 'document' && block !== null && UUID.test(block)) reference.block = block;
+  const turn = query.get('turn');
+  if (kind === 'node' && turn !== null && /^[1-9]\d*$/.test(turn)) reference.turn = Number(turn);
+  const message = query.get('message');
+  if (kind === 'chat' && message !== null && /^[1-9]\d*$/.test(message)) reference.message = Number(message);
   const number = /^[1-9]\d*$/.test(value) ? Number(value) : undefined;
   if (kind === 'document' && key === 'block' && UUID.test(value)) reference.block = value;
   if (kind === 'node' && key === 'turn' && number !== undefined) reference.turn = number;
@@ -62,27 +84,9 @@ export function referenceOfAddress(href: string): TypedReference | null {
 /** Where a reference opens in the application, at its part: a document at its block, a thread at its turn, a chat
  * at its message. */
 export function referenceTarget(preview: ReferencePreview): string {
-  const part = preview.part;
-  const anchor = part?.anchor ?? null;
-  switch (preview.kind) {
-    case 'environment_file':
-      return contentHref({ view: 'file', environmentId: preview.id, threadId: null, path: preview.file?.path ?? '', ...(part === null ? {} : { line: part.number }) });
-    case 'file': {
-      const file = preview.file;
-      if (file?.owner_kind === 'document' && file.owner_id !== null) return `/doc/${file.owner_id}?file=${preview.id}${part === null ? '' : `&line=${part.number}`}`;
-      const message = file?.message;
-      return `/chat/${file?.owner_id ?? ''}${message === undefined || message === null ? '' : `?message=${encodeURIComponent(message)}`}`;
-    }
-    case 'document':
-      return anchor === null ? `/doc/${preview.id}` : `/doc/${preview.id}?block=${encodeURIComponent(anchor)}`;
-    case 'chat':
-      return anchor === null ? `/chat/${preview.id}` : `/chat/${preview.id}?message=${encodeURIComponent(anchor)}`;
-    default: {
-      const kind: NodeKind = preview.node_kind ?? 'thread';
-      const path = placePath({ id: preview.id, kind });
-      return part === null || kind !== 'thread' ? path : `${path}?turn=${part.number}`;
-    }
-  }
+  if (preview.kind === 'file' && (preview.file?.owner_id === null || preview.file?.owner_id === undefined)) return '';
+  const url = new URL(linkTo(preview));
+  return `${url.pathname}${url.search}${url.hash}`;
 }
 
 /** A reference as an agent writes it, `id:<id>` with the number of a part after `#` (a document's top-level block, a
@@ -96,32 +100,21 @@ export function idReferenceOf(text: string): { id: string; path?: string; number
 
 /** The reference as an agent writes and follows it: `[name](id:<id>#n)`, its words escaped as Markdown wants. */
 export function referenceText(preview: ReferencePreview): string {
-  const part = preview.part === null ? '' : `#${preview.part.number}`;
-  const path = preview.kind === 'environment_file' ? `/${preview.file?.path ?? ''}` : '';
-  const destination = `id:${preview.id}${path}${part}`;
-  return markdownReference(preview.title, destination);
+  return referenceTo(preview);
 }
 
 /** A file copied for an agent, in the same grammar a card writes. */
 export function environmentFileReference(environment: string, path: string, line?: number): string {
   const name = `${path.split('/').at(-1) ?? path}${line === undefined ? '' : `:${line}`}`;
-  const destination = `id:${environment}/${path}${line === undefined ? '' : `#${line}`}`;
-  return markdownReference(name, destination);
+  return referenceTo({ kind: 'environment_file', id: environment, path, name }, line === undefined ? {} : { line });
 }
 
 /** An attachment copied for an agent, optionally at the first selected text line. */
 export function attachmentFileReference(id: string, name: string, line?: number): string {
-  return idReferenceText(id, `${name}${line === undefined ? '' : `:${line}`}`, line);
+  return referenceTo({ kind: 'file', id, name: `${name}${line === undefined ? '' : `:${line}`}` }, line === undefined ? {} : { line });
 }
 
 /** Names a stable object and its numbered part in the shared written grammar. */
 export function idReferenceText(id: string, name: string, part?: number): string {
-  return markdownReference(name, `id:${id}${part === undefined ? '' : `#${part}`}`);
-}
-
-/** Writes the same link grammar for a saved reference and for a file's receiving path. */
-export function markdownReference(name: string, destination: string): string {
-  const label = name.replace(/[\\[\]`*_<>$~&|]/g, (character) => `\\${character}`).replace(/\s+/g, ' ');
-  const target = /[\s()<>\\]/.test(destination) ? `<${destination.replace(/[<>\\]/g, (character) => `\\${character}`)}>` : destination;
-  return `[${label}](${target})`;
+  return referenceTo({ kind: 'node', id, name }, part === undefined ? {} : { number: part });
 }

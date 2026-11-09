@@ -1,4 +1,5 @@
 //! Making an image available through the real Docker driver on a real daemon: a build tells the job how far it is with the lines the daemon prints, answers what it was built from, and when it fails keeps the end of its log on the job.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
