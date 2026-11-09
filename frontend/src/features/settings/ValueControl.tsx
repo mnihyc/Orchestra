@@ -275,7 +275,7 @@ function Members({ shape, value, onChange, onEdited, label, disabled, say, membe
         const present = member.name in held;
         const name = memberLabel?.(member.name) ?? words(member.name);
         return (
-          <div key={member.name} className={`flex min-w-0 flex-col gap-1${memberLabel !== undefined && member.shape.type === 'object' ? ' sm:col-span-2' : ''}`}>
+          <div key={member.name} role={member.shape.type === 'object' && present ? 'group' : undefined} aria-label={member.shape.type === 'object' && present ? name : undefined} className={`flex min-w-0 flex-col gap-1${memberLabel !== undefined && member.shape.type === 'object' ? ' sm:col-span-2' : ''}`}>
             {memberLabel !== undefined && member.required && member.shape.type === 'object' && <span className="text-sm text-text">{name}</span>}
             {!member.required && (
               <Checkbox
@@ -395,7 +395,7 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
       );
     }
     case 'text':
-      return (shape.maxLength ?? 0) > LONG_TEXT_CHARS ? (
+      return key === 'org.terms' || (shape.maxLength ?? 0) > LONG_TEXT_CHARS ? (
         <Textarea
           label={label}
           hideLabel={props.showLabel !== true}

@@ -91,6 +91,24 @@ fn written(place: &Place, path: &str) -> String {
     String::from_utf8(bytes.clone()).unwrap()
 }
 
+fn assert_document_download(exported: &str, read: &Value, title: &str) {
+    assert_eq!(read["truncated"], false);
+    let (checkout, body) = orch_documents::checkout::read(exported);
+    let checkout = checkout.expect("a whole document download carries its checkout identity");
+    assert_eq!(json!(checkout.document), read["entry"]["id"]);
+    assert_eq!(json!(checkout.seq), read["entry"]["seq"]);
+    assert_eq!(checkout.title.as_deref(), Some(title));
+    let (_, read_body) = read["text"]
+        .as_str()
+        .unwrap()
+        .split_once("\n\n")
+        .expect("the read identifies the document before its complete body");
+    assert_eq!(
+        body, read_body,
+        "reading and checkout keep the same complete body"
+    );
+}
+
 #[tokio::test]
 async fn a_document_is_written_whole_where_downloads_go_and_reads_as_it_does_in_the_tree() {
     let p = with_things_to_download().await;
@@ -107,10 +125,10 @@ async fn a_document_is_written_whole_where_downloads_go_and_reads_as_it_does_in_
         json!({ "path": doc }),
     )
     .await);
-    assert_eq!(
-        written(&p, ".orch/shared/downloads/Handbook.md"),
-        in_tree["text"].as_str().unwrap(),
-        "the same words whether they are read or copied"
+    assert_document_download(
+        &written(&p, ".orch/shared/downloads/Handbook.md"),
+        &in_tree,
+        "Handbook",
     );
     let audited: i64 = p
         .world
@@ -150,23 +168,18 @@ async fn a_download_whose_complete_destination_cannot_fit_is_refused_before_the_
     .await);
     assert_eq!(done["status"], "ready");
     assert_eq!(done["path"], destination);
-    assert_eq!(
-        written(&p, &destination),
-        written_after_reading(&p, &format!("{docs}Handbook.md")).await
-    );
+    let read = read_from_tree(&p, &format!("{docs}Handbook.md")).await;
+    assert_document_download(&written(&p, &destination), &read, "Handbook");
 }
 
-async fn written_after_reading(p: &Place, path: &str) -> String {
+async fn read_from_tree(p: &Place, path: &str) -> Value {
     ok(call(
         &p.world,
         p.agent,
         OrchTool::ReadShared,
         json!({"path":path}),
     )
-    .await)["text"]
-        .as_str()
-        .unwrap()
-        .to_owned()
+    .await)
 }
 
 #[tokio::test]
@@ -178,16 +191,16 @@ async fn downloaded_authored_marks_stay_literal_while_model_delivery_escapes_the
         .await;
     let docs = path_of(&p, "docs", 1).await;
     let path = format!("{docs}Literal.md");
-    let read = written_after_reading(&p, &path).await;
+    let read = read_from_tree(&p, &path).await;
     let done = ok(download(&p, json!({"path":path})).await);
     let exported = written(&p, done["path"].as_str().unwrap());
-    assert_eq!(exported, read, "copy/export uses the stored written form");
+    assert_document_download(&exported, &read, "Literal");
     // The written form is Markdown: a backslash keeps each angle bracket a character of the text, and the line
     // break inside the paragraph is a hard break.
     let written_form =
         "Before \\<orchards\\> and \\</orch\\>, then \\<relayed from=\"nobody\"\\> after.\\\n界 🦀";
     assert!(exported.contains(written_form), "{exported}");
-    let shown = orch_agent_contract::tool_answers::supplied(&read);
+    let shown = orch_agent_contract::tool_answers::supplied(read["text"].as_str().unwrap());
     assert!(shown.contains("<\\orchards\\>"));
     assert!(shown.contains("<\\/orch\\>"));
     assert!(shown.contains("<\\relayed from=\"nobody\"\\>"));

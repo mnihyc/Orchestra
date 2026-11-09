@@ -3,10 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { documentDirectoryQuery, documentTreeEntryQuery, organizeDocuments, previewDocumentDeletion } from '@/api/documentTree';
-import { documentAncestors } from '@/features/documents/treeLocation';
+import { deletionPaths, documentAncestors } from '@/features/documents/treeLocation';
+import { DocumentMoveDialog } from './DocumentMoveDialog';
 import { WAY_SEPARATOR } from '@/features/finder/destinations';
 import { NamePicker } from '@/features/search/NamePicker';
-import type { DocumentDirectory, DocumentDirectoryContext, DocumentTreeEntry, DocumentTreeListed, DocumentTreeOperationBody } from '@/generated/api-types';
+import type { DocumentDirectory, DocumentDirectoryContext, DocumentTreeListed, DocumentTreeOperationBody } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
 import { formatExact } from '@/lib/time';
@@ -31,7 +32,7 @@ function DestinationStanding({ target, onRead }: { target: Target; onRead: (valu
   const value = query.data?.directory;
   useEffect(() => { onRead(query.isSuccess && (value !== undefined && value !== null) ? value : null); }, [onRead, query.isSuccess, value]);
   if (query.isError) return <ErrorAlert error={query.error} action={<Button onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />;
-  if (query.isPending) return <SkeletonRows rows={1} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={1} />;
   if (value === undefined || value === null) return null;
   const names = [...value.path.map((step) => step.redacted ? t('ui.nameUnknown') : step.name ?? t('ui.nameUnknown')), t('documents.list.title'),
     ...documentAncestors(value.folder?.entry.parent ?? value.at, value.ancestors).map((step) => step.title ?? t('ui.nameUnknown')),
@@ -39,27 +40,17 @@ function DestinationStanding({ target, onRead }: { target: Target; onRead: (valu
   return <p className="break-words text-sm text-text-muted">{names.join(WAY_SEPARATOR)}</p>;
 }
 
-/** All preview entries are authorized. Resolve their selected-tree paths without hidden ancestors. */
-export function deletionPaths(entries: readonly DocumentTreeEntry[]): Map<string, string> {
-  const folders = new Map(entries.filter((entry) => entry.item.kind === 'container').map((entry) => [entry.item.id, entry]));
-  const result = new Map<string, string>();
-  for (const entry of entries) {
-    const parts = [entry.basename];
-    const seen = new Set([`${entry.item.kind}:${entry.item.id}`]);
-    let parent = entry.parent;
-    while (parent.kind === 'container') {
-      const ancestor = folders.get(parent.id);
-      if (ancestor === undefined || seen.has(`container:${parent.id}`)) break;
-      seen.add(`container:${parent.id}`); parts.unshift(ancestor.basename); parent = ancestor.parent;
-    }
-    result.set(`${entry.item.kind}:${entry.item.id}`, parts.join('/'));
-  }
-  return result;
-}
+export { deletionPaths } from './treeLocation';
 
-export function TreeActionDialog({ command, rows, directory, onClose, onDone }: {
+interface TreeActionDialogProps {
   command: TreeAction; rows: readonly DocumentTreeListed[]; directory?: DocumentDirectoryContext | undefined; onClose: () => void; onDone?: () => void;
-}) {
+}
+export function TreeActionDialog(props: TreeActionDialogProps) {
+  const first = props.rows[0];
+  if (props.command === 'move' && props.rows.length === 1 && first !== undefined) return <DocumentMoveDialog row={first} directory={props.directory} onClose={props.onClose} onDone={props.onDone} />;
+  return <OrdinaryTreeActionDialog {...props} />;
+}
+function OrdinaryTreeActionDialog({ command, rows, directory, onClose, onDone }: TreeActionDialogProps) {
   const { t } = useTranslation();
   const key = useActKey();
   const [previewId] = useState(newActKey);
@@ -110,7 +101,7 @@ export function TreeActionDialog({ command, rows, directory, onClose, onDone }: 
     <div className="flex flex-col gap-4">
       {command !== 'create_folder' && <p className="text-sm text-text-muted">{rows.map((row) => row.entry.basename).join(', ')}</p>}
       {takesTarget && <>
-        <NamePicker label={t('people.destination')} orgId={command === 'move' ? first?.entry.root : undefined} chosen={target?.label ?? null} kinds={['org', 'project', 'topic', 'thread', 'document_container']}
+        <NamePicker pickerKey="documents.TreeActions.people.destination" label={t('people.destination')} orgId={command === 'move' ? first?.entry.root : undefined} chosen={target?.label ?? null} kinds={['org', 'project', 'topic', 'thread', 'document_container']}
           placeholder={t('documentFolders.findDestination')} nothing={t('documents.move.none')}
           onChoose={(hit) => { setStanding(null); setTarget(hit === null ? null : { label: hit.name, at: { kind: hit.kind === 'document_container' ? 'container' : 'node_docs', id: hit.id } }); }} />
         {command === 'move' && <p className="text-sm text-text-muted">{t('documentFolders.sameOrg')}</p>}
@@ -120,7 +111,7 @@ export function TreeActionDialog({ command, rows, directory, onClose, onDone }: 
       {takesName && <Input label={t('documentFolders.name')} value={name} onChange={(event) => setName(event.target.value)}
         hint={takesTarget ? t('documentFolders.nameHint') : undefined} />}
       {command === 'delete' && <>
-        {preview.isPending ? <SkeletonRows rows={3} /> : preview.isError ? <ErrorAlert error={preview.error}
+        {preview.isPending ? <SkeletonRows read={preview} rows={3} /> : preview.isError ? <ErrorAlert error={preview.error}
           action={<Button onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : plan !== undefined && <>
           <p className="text-sm">{t('documentFolders.deleteCounts', {
             folders: t('documentFolders.folderCount', { count: plan.stamp.entries.filter((entry) => entry.item.kind === 'container').length }),

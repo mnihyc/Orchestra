@@ -46,8 +46,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`omits an unsupported side-thr
   const ask = vi.fn(); const fork = vi.fn(); const forkTo = vi.fn();
   const entries: MenuEntry[] = [
     ...(sideReadingAvailable(thread) ? [{ id: 'side-ask', label: t('side.menu.ask'), disabled: sideRefusal(thread, t), onSelect: ask }] : []),
-    { id: 'change-fork-now', label: t('change.menu.forkNow'), onSelect: fork },
-    { id: 'change-fork', label: t('change.menu.fork'), onSelect: forkTo },
+    { id: 'change-fork-now', label: t('duplicate.now'), onSelect: fork },
+    { id: 'change-fork', label: t('duplicate.to'), onSelect: forkTo },
   ];
   const commands = menuCommands(entries, () => entries, { prefix: 'thread', name: 'Main' });
   const env: Env = { t, go: vi.fn(), orgSlug: null, exists: () => true, showCard: vi.fn() };
@@ -55,7 +55,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`omits an unsupported side-thr
   expect(aside).toHaveLength(0);
   expect(sideRefusal(thread, t)).toBe(t('side.unavailable.readOnly'));
   expect(ask).not.toHaveBeenCalled();
-  const branches = commandRows(commandEntries(commands, t), locale === 'en' ? 'fork' : '分叉', env);
+  const branches = commandRows(commandEntries(commands, t), locale === 'en' ? 'duplicate' : '副本', env);
   expect(branches).toHaveLength(2);
   branches.find(({ row }) => row.id === 'commands:thread.change-fork-now')?.row.run('here');
   expect(fork).toHaveBeenCalledOnce(); expect(forkTo).not.toHaveBeenCalled();

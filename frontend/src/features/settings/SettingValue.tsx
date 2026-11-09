@@ -1,9 +1,11 @@
+import { McpSettingChoice } from '@/features/settings/McpChoice';
 /** One own contribution edited in the row; inheritance and the effective answer belong to the row's source/details. */
 import { useTranslation } from 'react-i18next';
 import { useQuery } from '@tanstack/react-query';
 import type { SettingsTarget } from '@/api/settings';
 import { nodeQuery } from '@/api/nodes';
 import { placePath } from '@/features/navigation/places';
+import { OrgTermsControl } from '@/features/settings/OrgTerms';
 import { ValueControl, type ValueControlProps } from '@/features/settings/ValueControl';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
 import type { SettingDef, SettingSource, ResolvedSetting as SettingWithParts } from '@/generated/api-types';
@@ -14,6 +16,10 @@ import { isResourceSetting, ResourceSettingChoice } from '@/features/settings/Re
 import { SKILLS_SETTING, SkillsSettingChoice } from '@/features/settings/SkillsChoice';
 import { HarnessVersionsChoice, PROGRAM_VERSIONS_KEY } from '@/features/settings/HarnessVersionsChoice';
 import { CallsRules } from '@/features/settings/CallsRules';
+import { SummarizerChoice } from '@/features/settings/SummarizerChoice';
+import { AGENT_ACCESS_SETTING, AgentAccessSetting } from '@/features/access/AgentAccessChoice';
+import { settingFieldName } from '@/features/settings/settingText';
+import { AskModelsSetting } from './AskModelsSetting';
 
 function OrgSource({ id, name }: { id: string; name: string }) {
   const node = useQuery(nodeQuery(id));
@@ -41,12 +47,23 @@ export interface SettingValueProps extends ValueControlProps {
 }
 
 export function SettingValue({ def, setting, target, ignored = false, onApply, ...control }: SettingValueProps) {
+  const { t } = useTranslation();
+  // Written/cached targets declare no knobs, so the normal form offers no empty override toggle.
+  const summaryShape = def.key === 'summary.targets' && control.shape.type === 'object'
+    ? { ...control.shape, members: control.shape.members.filter((member) => member.shape.type !== 'object' || member.shape.members.length > 0) }
+    : control.shape;
   return <SettingChoiceContext.Provider value={def.key ?? null}>
-    {ignored ? <SettingSummary def={{ ...def, display: control.display }} value={setting.value} />
+    {def.key === 'ask.models' ? <AskModelsSetting key={`${target.kind}:${target.kind === 'system' ? '' : target.id}`} {...control} disabled={control.disabled || ignored} setting={setting} target={target} />
+      : ignored ? <SettingSummary def={{ ...def, display: control.display }} value={setting.value} />
+      : def.key === 'org.terms' ? <OrgTermsControl {...control} setting={setting} target={target} hideLabel />
+      : def.key === AGENT_ACCESS_SETTING ? <AgentAccessSetting {...control} hideLabel />
       : def.key === 'agent.default_provider_id' ? <ProviderDefaultChoice {...control} hideLabel />
+      : def.key === 'auto.summarizer' ? <SummarizerChoice {...control} hideLabel />
+      : def.key === 'summary.targets' ? <ValueControl {...control} shape={summaryShape} memberLabel={(name) => settingFieldName(name, def.key, t)} hideLabel />
         : def.key === EMBEDDINGS_SETTING ? <EmbeddingsChoice {...control} hideLabel />
         : def.key === SEMANTIC_TUNING_SETTING || def.key === WORD_TUNING_SETTING ? <SemanticTuning {...control} hideLabel />
         : def.key !== undefined && isResourceSetting(def.key) ? <ResourceSettingChoice {...control} settingKey={def.key} hideLabel />
+          : def.key === 'mcp.enabled' ? <McpSettingChoice {...control} effective={setting.value} environment={target.kind==='environment'?target.id:null} hideLabel />
           : def.key === SKILLS_SETTING ? <SkillsSettingChoice {...control} hideLabel /> : def.key === PROGRAM_VERSIONS_KEY ? <HarnessVersionsChoice value={control.value} effective={setting.value} onChange={control.onChange} onApply={onApply} onEdited={control.onEdited} disabled={control.disabled} target={target} /> : def.key === 'calls.rules' ? <CallsRules {...control} hideLabel /> : <ValueControl {...control} hideLabel />}
   </SettingChoiceContext.Provider>;
 }

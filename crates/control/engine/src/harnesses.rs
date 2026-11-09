@@ -10,6 +10,8 @@
 //! `session.open` of mode `resume`, which a session already open answers
 //! with itself.
 
+pub mod preparation;
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -31,7 +33,8 @@ pub const ONLINE: &str = "online";
 pub const OFFLINE: &str = "offline";
 
 /// A harness process: a provider and an agent profile on a machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessKey {
     /// The provider it serves.
     pub provider: Id,
@@ -62,19 +65,62 @@ impl OrchToolsRevision {
 }
 
 /// Session-only values which a turn cannot replace on an already open native conversation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionConfiguration {
     /// The resolved absolute start directory.
     pub cwd: String,
+    /// Explicit cache lifetime accepted by a program which declares it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_ttl: Option<orch_agent_contract::session::PromptCacheTtl>,
+    /// The background completion preference accepted when the session opened.
+    pub background_wake: bool,
+    /// Native image generation accepted when the session opened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_generation: Option<bool>,
+    /// The core's credential-free native instructions which the opening actually accepted.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub native_configuration: std::collections::BTreeMap<String, Json>,
+    /// Native process-bound turn choices, absent for live-switchable harnesses.
+    pub restart_sensitive: Option<Json>,
     /// The resolved notes directory/keeper, or disabled native and agent notes.
     pub memory: Option<orch_link_contract::commands::SessionOpenMemory>,
+    /// The native executor build named by the accepted tool ticket.
+    pub executor_version: Option<String>,
 }
 
 impl From<&orch_link_contract::commands::SessionOpen> for SessionConfiguration {
     fn from(open: &orch_link_contract::commands::SessionOpen) -> Self {
         Self {
             cwd: open.cwd.clone(),
+            prompt_cache_ttl: open.prompt_cache_ttl,
+            background_wake: open.background_wake,
+            image_generation: open.image_generation,
+            native_configuration: open
+                .native_model
+                .as_deref()
+                .filter(|native| native.model == open.model)
+                .map(|native| native.native_configuration())
+                .unwrap_or_default(),
+            restart_sensitive: open.turn_changes_require_restart.then(|| {
+                serde_json::json!({
+                    "model":open.model,"effort":open.effort,"params":open.params,
+                    "approval_mode":open.approval_mode,"sandbox_mode":open.sandbox_mode,
+                })
+            }),
             memory: open.memory.clone(),
+            executor_version: open.exec.ticket.as_ref().and_then(|ticket| match ticket {
+                orch_link_contract::commands::TicketSlot::Asked(asked)
+                    if asked.ticket.kind == orch_link_contract::tunnels::TunnelKind::Exec =>
+                {
+                    asked
+                        .ticket
+                        .more
+                        .get("executor_version")
+                        .and_then(Json::as_str)
+                        .map(str::to_owned)
+                }
+                _ => None,
+            }),
         }
     }
 }
@@ -107,6 +153,11 @@ impl OpenSessions {
     #[must_use]
     pub fn configuration_changed(&self, segment: Id, configuration: &SessionConfiguration) -> bool {
         self.accepted_configuration.get(&segment) != Some(configuration)
+    }
+
+    /// Whether this API process observed the actual successful opening.
+    pub(crate) fn configuration_known(&self, segment: Id) -> bool {
+        self.accepted_configuration.contains_key(&segment)
     }
 
     /// Records only an actual successful SessionOpen body, never a requested or refused change.
@@ -340,12 +391,24 @@ pub(crate) async fn provider_config_of(
     conn: &mut orch_db::Conn,
     provider: Id,
 ) -> Result<Json, EngineError> {
-    let config: Option<Json> = sqlx::query_scalar("SELECT config FROM providers WHERE id = $1")
-        .bind(provider)
-        .fetch_optional(conn)
-        .await
-        .map_err(orch_db::DbError::from)?;
-    Ok(config.unwrap_or_else(|| serde_json::json!({})))
+    Ok(provider_start_options(conn, provider).await?.1)
+}
+
+/// Account kind and program configuration are selected together; no credential fields are read.
+pub(crate) async fn provider_start_options(
+    conn: &mut orch_db::Conn,
+    provider: Id,
+) -> Result<(Option<orch_agent_contract::descriptor::ProviderKind>, Json), EngineError> {
+    let row: Option<(String, Json)> =
+        sqlx::query_as("SELECT kind, config FROM providers WHERE id = $1")
+            .bind(provider)
+            .fetch_optional(conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+    match row {
+        Some((kind, config)) => Ok((Some(serde_json::from_value(Json::String(kind))?), config)),
+        None => Ok((None, serde_json::json!({}))),
+    }
 }
 
 /// Why a harness process could not be had.
@@ -360,11 +423,97 @@ pub enum Started {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct AttachCommands {
+    #[serde(
+        default,
+        deserialize_with = "preparation::present_stored",
+        skip_serializing_if = "Option::is_none"
+    )]
+    preparation: Option<preparation::Stored>,
     request: Option<AgentStart>,
     ready_before_start: bool,
     commands: Vec<orch_settings_contract::unit::NamedAfterUpCommand>,
     notice: Option<String>,
     refusal: Option<String>,
+}
+
+/// Native machine preference, shared by discovery and current preparation association checks.
+pub(crate) async fn places_on(
+    conn: &mut orch_db::Conn,
+    provider: &ProviderRow,
+    agent: Id,
+) -> Result<Vec<Id>, EngineError> {
+    let mut places: Vec<Id> = resources_binding::harness_rows(conn, provider.id, agent)
+        .await?
+        .into_iter()
+        .map(|row| row.machine_id)
+        .collect();
+    let profile = resources::agent(conn, agent).await?;
+    for machine in [profile.and_then(|row| row.machine_id), provider.machine_id]
+        .into_iter()
+        .flatten()
+    {
+        if !places.contains(&machine) {
+            places.push(machine);
+        }
+    }
+    Ok(places)
+}
+
+/// Serializes the existing native claim tuple across processes, including an absent row.
+pub(crate) async fn claim_lock(
+    conn: &mut orch_db::Conn,
+    key: HarnessKey,
+) -> Result<(), EngineError> {
+    let tuple = format!(
+        "harness.claim:{}:{}:{}",
+        key.provider, key.agent, key.machine
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(tuple)
+        .execute(conn)
+        .await
+        .map_err(orch_db::DbError::from)?;
+    Ok(())
+}
+
+/// The exact frozen native command of an actual retained attach run, never arbitrary JSON.
+pub(crate) async fn retained_attach_command(
+    conn: &mut orch_db::Conn,
+    key: HarnessKey,
+    body: &UnitAfterUp,
+) -> Result<Option<UnitAfterUp>, EngineError> {
+    let raw: Option<Json> = sqlx::query_scalar("SELECT after_up_plan FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4")
+        .bind(key.provider).bind(key.agent).bind(key.machine).bind(body.run_id).fetch_optional(conn).await.map_err(orch_db::DbError::from)?;
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let plan: AttachCommands = serde_json::from_value(raw)?;
+    let Some(entry) = usize::try_from(body.position)
+        .ok()
+        .and_then(|position| plan.commands.get(position))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(attach_command(key, body.run_id, body.position, entry)))
+}
+fn attach_command(
+    key: HarnessKey,
+    run: Id,
+    position: u32,
+    entry: &orch_settings_contract::unit::NamedAfterUpCommand,
+) -> UnitAfterUp {
+    UnitAfterUp {
+        run_id: run,
+        environment_id: None,
+        provider_id: Some(key.provider),
+        agent_id: Some(key.agent),
+        position,
+        name: entry.name.clone(),
+        run: orch_settings_contract::unit::AfterUpCommand {
+            command: entry.command.clone(),
+            timeout_secs: entry.timeout_secs,
+        },
+    }
 }
 
 impl Engine {
@@ -438,8 +587,38 @@ impl Engine {
         command: Id,
         plan: &AttachCommands,
         configuration: &str,
+        preparation: Option<&preparation::Preparation>,
     ) -> Result<Option<(Id, AttachCommands)>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
+        let mut conn = self.inner.db.begin().await?;
+        let target = preparation::Target::Harness(key);
+        // Keep the original/current minimum even across the actual native serial wait.
+        let accepted = match preparation {
+            Some(source) => {
+                let check = source
+                    .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
+                    .await?;
+                Some(source.accepted_at(&check)?)
+            }
+            None => None,
+        };
+        claim_lock(&mut conn, key).await?;
+        let mut stored_plan = serde_json::to_value(plan)?;
+        let pending = orch_types::new_id();
+        if accepted.is_some() {
+            // Transaction-local ownership marker, replaced by exact private evidence before commit.
+            stored_plan["preparation_pending"] = serde_json::to_value(pending)?;
+        }
+        let accepted = match accepted {
+            Some(source) => {
+                let check = source
+                    .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
+                    .await?;
+                let source = source.accepted_at(&check)?;
+                check.check(self.inner.clock.as_ref())?;
+                Some(source)
+            }
+            None => None,
+        };
         let row:Option<(Id,Json)>=sqlx::query_as(
             "INSERT INTO harnesses(provider_id,agent_id,machine_id,status,start_command_id,after_up_plan,updated_at)
              VALUES($1,$2,$3,'starting',$4,$5,$6)
@@ -449,10 +628,87 @@ impl Engine {
                status='starting',status_detail=NULL,updated_at=EXCLUDED.updated_at
              WHERE harnesses.status<>'online' OR harnesses.start_command_id IS NOT NULL OR harnesses.after_up_plan->>'configuration_hash' IS DISTINCT FROM $7::text
              RETURNING start_command_id,after_up_plan")
-            .bind(key.provider).bind(key.agent).bind(key.machine).bind(command).bind(serde_json::to_value(plan)?)
+            .bind(key.provider).bind(key.agent).bind(key.machine).bind(command).bind(stored_plan)
             .bind(self.inner.clock.now()).bind(configuration).fetch_optional(&mut *conn).await.map_err(orch_db::DbError::from)?;
-        row.map(|(run, plan)| Ok((run, serde_json::from_value(plan)?)))
-            .transpose()
+        let mut result = None;
+        if let Some((run, raw)) = row {
+            let own = raw.get("preparation_pending") == Some(&serde_json::to_value(pending)?);
+            if raw.get("preparation_pending").is_some() && !own {
+                return Err(EngineError::unreadable(
+                    "native startup has unfinished private source evidence",
+                ));
+            }
+            let mut plan: AttachCommands = serde_json::from_value(raw)?;
+            if own {
+                let source = accepted.as_ref().ok_or_else(|| {
+                    EngineError::unreadable("native startup claim lost its source")
+                })?;
+                let request = plan.request.as_ref().ok_or_else(|| {
+                    EngineError::unreadable("native startup claim lost its request")
+                })?;
+                let outgoing = Outgoing::new(
+                    run,
+                    key.machine,
+                    SerialKey::Harness {
+                        provider_id: key.provider,
+                        agent_id: key.agent,
+                    },
+                    request,
+                )?;
+                let mut commands = vec![
+                    source
+                        .evidence(&mut conn, self.inner.clock.as_ref(), target, &outgoing)
+                        .await?,
+                ];
+                for (position, entry) in plan.commands.iter().enumerate() {
+                    let position = u32::try_from(position).map_err(|_| {
+                        EngineError::unreadable("too many commands after provider attach")
+                    })?;
+                    let body = attach_command(key, run, position, entry);
+                    let id = crate::ids::derived(
+                        "unit.after_up",
+                        &[run.as_bytes(), &position.to_be_bytes()],
+                    );
+                    let outgoing =
+                        Outgoing::new(id, key.machine, SerialKey::Runtime(key.provider), &body)?;
+                    commands.push(
+                        source
+                            .evidence(&mut conn, self.inner.clock.as_ref(), target, &outgoing)
+                            .await?,
+                    );
+                }
+                plan.preparation = Some(preparation::Stored::commands(commands));
+                sqlx::query("UPDATE harnesses SET after_up_plan=$5 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4")
+                    .bind(key.provider).bind(key.agent).bind(key.machine).bind(run).bind(serde_json::to_value(&plan)?)
+                    .execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
+            }
+            result = Some((run, plan));
+        }
+        if let Some(source) = accepted {
+            source
+                .checkpoint(&mut conn, self.inner.clock.as_ref(), target)
+                .await?
+                .check(self.inner.clock.as_ref())?;
+        }
+        conn.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(result)
+    }
+
+    /// Release only this failed setup claim when no native command at that boundary is open.
+    /// A later independently authorized attempt follows the ordinary native error/retry path.
+    async fn end_unissued_preparation(
+        &self,
+        key: HarnessKey,
+        run: Id,
+        pending: Id,
+        error: &EngineError,
+    ) -> Result<(), EngineError> {
+        if !matches!(error, EngineError::BeforeEffect(_)) {
+            return Ok(());
+        }
+        sqlx::query("UPDATE harnesses SET status='error',status_detail='The setup request ended before its next command.' WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 AND start_command_id=$4 AND NOT EXISTS(SELECT 1 FROM commands WHERE id=$5 AND state IN ('queued','sent','accepted'))")
+            .bind(key.provider).bind(key.agent).bind(key.machine).bind(run).bind(pending).execute(&mut *self.inner.db.acquire().await?).await.map_err(orch_db::DbError::from)?;
+        Ok(())
     }
 
     /// Directory provider runtimes use the unit command journal after their actual home attaches.
@@ -471,21 +727,20 @@ impl Engine {
         for (position, entry) in plan.commands.iter().enumerate() {
             let position = u32::try_from(position)
                 .map_err(|_| EngineError::unreadable("too many commands after provider attach"))?;
-            let body = UnitAfterUp {
-                run_id: run,
-                environment_id: None,
-                provider_id: Some(key.provider),
-                agent_id: Some(key.agent),
-                position,
-                name: entry.name.clone(),
-                run: orch_settings_contract::unit::AfterUpCommand {
-                    command: entry.command.clone(),
-                    timeout_secs: entry.timeout_secs,
-                },
-            };
+            let body = attach_command(key, run, position, entry);
             let id =
                 crate::ids::derived("unit.after_up", &[run.as_bytes(), &position.to_be_bytes()]);
             let sent = Outgoing::new(id, key.machine, SerialKey::Runtime(key.provider), &body)?;
+            let sent = match &plan.preparation {
+                Some(preparation) => match preparation.command(self, key, sent).await {
+                    Ok(sent) => sent,
+                    Err(error) => {
+                        self.end_unissued_preparation(key, run, id, &error).await?;
+                        return Err(error);
+                    }
+                },
+                None => sent,
+            };
             let outcome = crate::commands::run(self.inner.commands.as_ref(), sent).await?;
             if let Outcome::Failed(error) = &outcome
                 && error
@@ -540,8 +795,23 @@ impl Engine {
         agent: &AgentRow,
         command: Id,
     ) -> Result<Started, EngineError> {
+        Box::pin(self.ensure_harness_with_preparation(key, agent, command, None)).await
+    }
+
+    pub(crate) async fn ensure_harness_with_preparation(
+        &self,
+        key: HarnessKey,
+        agent: &AgentRow,
+        command: Id,
+        preparation: Option<&preparation::Preparation>,
+    ) -> Result<Started, EngineError> {
         let serial = self.harness_serial(key);
         let _held = serial.lock().await;
+        if let Some(source) = preparation {
+            source
+                .check_selection(self, preparation::Target::Harness(key))
+                .await?;
+        }
         let was_ready = self.harness_is_online(key).await?;
         if was_ready
             && let Some(pin) = agent.profile.get("harness_version").and_then(Json::as_str)
@@ -561,10 +831,11 @@ impl Engine {
             ).retryable())));
         }
         let home = None;
-        let provider_config =
-            provider_config_of(&mut *self.inner.db.acquire().await?, key.provider).await?;
+        let (provider_kind, provider_config) =
+            provider_start_options(&mut *self.inner.db.acquire().await?, key.provider).await?;
         let body = AgentStart {
             provider_id: key.provider,
+            provider_kind,
             agent_id: key.agent,
             harness_kind: agent.harness_kind.clone(),
             profile: serde_json::from_value(agent.profile.clone())?,
@@ -586,10 +857,24 @@ impl Engine {
         if configured {
             return Ok(Started::Up);
         }
+        if was_ready
+            && crate::background_wake::live_harness_thread(
+                &mut *self.inner.db.acquire().await?,
+                key.provider,
+                key.agent,
+                Some(key.machine),
+            )
+            .await?
+            .is_some()
+        {
+            return Ok(Started::Up);
+        }
         let mut proposed = self.provider_attach_plan(key).await?;
         proposed.request = Some(body.clone());
         proposed.ready_before_start = was_ready || prior_configuration.is_some();
-        let Some((command, plan)) = self.begin_harness(key, command, &proposed, &wanted).await?
+        let Some((command, plan)) = self
+            .begin_harness(key, command, &proposed, &wanted, preparation)
+            .await?
         else {
             return Ok(Started::Up);
         };
@@ -605,6 +890,17 @@ impl Engine {
             },
             &body,
         )?;
+        let outgoing = match &plan.preparation {
+            Some(preparation) => match preparation.command(self, key, outgoing).await {
+                Ok(outgoing) => outgoing,
+                Err(error) => {
+                    self.end_unissued_preparation(key, command, command, &error)
+                        .await?;
+                    return Err(error);
+                }
+            },
+            None => outgoing,
+        };
         let outcome = crate::commands::run(self.inner.commands.as_ref(), outgoing).await?;
         let Outcome::Succeeded(result) = outcome else {
             let mut conn = self.inner.db.acquire().await?;
@@ -822,6 +1118,22 @@ impl Engine {
             now,
         )
         .await?;
+        let detail_changed = pending
+            .as_ref()
+            .and_then(|(_, _, detail)| detail.as_deref())
+            != detail;
+        if before.as_deref() != Some(effective) || detail_changed {
+            crate::audit_facts::harness_status(
+                unit,
+                provider,
+                agent,
+                machine,
+                before.as_deref(),
+                effective,
+                detail_changed,
+            )
+            .await?;
+        }
         if status.status == "error" {
             sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
                 .bind(provider).bind(agent).bind(machine).bind(now).bind(status.detail.as_deref())
@@ -829,6 +1141,26 @@ impl Engine {
         }
         if effective != ONLINE {
             lock(&self.inner.sessions).restarted(key);
+        }
+        if matches!(status.status.as_str(), "stopped" | "error")
+            || status.status == "offline" && status.sessions_open == 0
+        {
+            let sources: Vec<(Id, Id)> = sqlx::query_as(
+                r#"SELECT DISTINCT i.thread_id,i.segment_id FROM items i
+                JOIN segments s ON s.id=i.segment_id WHERE s.provider_id=$1 AND s.agent_id=$2
+                AND s.machine_id=$3 AND i.kind='tool_call'
+                AND (i.payload @? '$.background_tasks.*.task.state ? (@ == "running")'
+                  OR i.payload @? '$.background_tasks.*.awaiting_native_wake ? (@ == true)')"#,
+            )
+            .bind(provider)
+            .bind(agent)
+            .bind(machine)
+            .fetch_all(&mut *unit.conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+            for (thread, segment) in sources {
+                crate::background_wake::lost(unit, thread, segment).await?;
+            }
         }
         if status.status == ONLINE && before.as_deref() != Some(ONLINE) {
             for thread in orch_db::queries::threads::blocked_threads_of_provider(
@@ -912,28 +1244,6 @@ pub enum Discovered {
 }
 
 impl Engine {
-    /// The machine a harness of `agent` for `provider` is asked on: the first of the places it is, or
-    /// would be, run on that is there and online.
-    pub(crate) async fn harness_machine(
-        &self,
-        provider: &ProviderRow,
-        agent: Id,
-    ) -> Result<Option<Id>, EngineError> {
-        for machine in self.harness_places(provider, agent).await? {
-            let mut conn = self.inner.db.acquire().await?;
-            let place = resources::machine_place(&mut conn, machine)
-                .await?
-                .filter(|place| {
-                    place.deleted_at.is_none() && place.status == "active" && place.online
-                });
-            drop(conn);
-            if place.is_some() {
-                return Ok(Some(machine));
-            }
-        }
-        Ok(None)
-    }
-
     /// The machines a harness of `agent` for `provider` is, or would be, run on first: those that hold a
     /// process of it, the one heard of last first, then the profile's declared machine and the
     /// provider's runtime. Credential custody is independent of where an agent process runs.
@@ -942,25 +1252,7 @@ impl Engine {
         provider: &ProviderRow,
         agent: Id,
     ) -> Result<Vec<Id>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
-        let mut places: Vec<Id> = resources_binding::harness_rows(&mut conn, provider.id, agent)
-            .await?
-            .into_iter()
-            .map(|row| row.machine_id)
-            .collect();
-        let profile = resources::agent(&mut conn, agent).await?;
-        for machine in [
-            profile.and_then(|profile| profile.machine_id),
-            provider.machine_id,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !places.contains(&machine) {
-                places.push(machine);
-            }
-        }
-        Ok(places)
+        places_on(&mut *self.inner.db.acquire().await?, provider, agent).await
     }
 
     /// Brings the harness process of a profile for a provider up anew, on every machine that holds one:
@@ -969,6 +1261,11 @@ impl Engine {
     /// provider runs.
     pub async fn restart_harness(&self, provider: Id, agent: Id) -> Result<Restarted, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
+        if let Some(thread) =
+            crate::background_wake::live_harness_thread(&mut conn, provider, agent, None).await?
+        {
+            return Err(EngineError::BackgroundRunning(thread));
+        }
         let Some(keeper) = resources::provider(&mut conn, provider)
             .await?
             .filter(|row| row.deleted_at.is_none())
@@ -1147,24 +1444,46 @@ impl Engine {
         provider: Id,
         agent: Id,
     ) -> Result<Discovered, EngineError> {
+        self.discover_sessions_with_preparation(provider, agent, None)
+            .await
+    }
+
+    pub(crate) async fn discover_sessions_with_preparation(
+        &self,
+        provider: Id,
+        agent: Id,
+        preparation: Option<&crate::adoption::operation::Preparation>,
+    ) -> Result<Discovered, EngineError> {
+        self.discover_sessions_observed(provider, agent, preparation)
+            .await
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// The exact machine that supplied the observation, retained for its later native history read.
+    pub(crate) async fn discover_sessions_observed(
+        &self,
+        provider: Id,
+        agent: Id,
+        preparation: Option<&crate::adoption::operation::Preparation>,
+    ) -> Result<(Discovered, Option<Id>), EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let Some(keeper) = resources::provider(&mut conn, provider)
             .await?
             .filter(|row| row.deleted_at.is_none())
         else {
-            return Ok(Discovered::Gone);
+            return Ok((Discovered::Gone, None));
         };
         let Some(profile) = resources::agent(&mut conn, agent)
             .await?
             .filter(|row| row.deleted_at.is_none())
         else {
-            return Ok(Discovered::Gone);
+            return Ok((Discovered::Gone, None));
         };
         drop(conn);
         if descriptor_of(&profile)?
             .is_some_and(|descriptor| !descriptor.capabilities.discover_sessions)
         {
-            return Ok(Discovered::Unsupported);
+            return Ok((Discovered::Unsupported, None));
         }
         let places = self.harness_places(&keeper, agent).await?;
         let has_places = !places.is_empty();
@@ -1183,36 +1502,42 @@ impl Engine {
             }
         }
         let Some((machine, _)) = found else {
-            return Ok(if has_places {
-                Discovered::Offline
-            } else {
-                Discovered::NoMachine
-            });
+            return Ok((
+                if has_places {
+                    Discovered::Offline
+                } else {
+                    Discovered::NoMachine
+                },
+                None,
+            ));
         };
         let key = HarnessKey {
             provider,
             agent,
             machine,
         };
+        let startup = preparation.cloned().map(preparation::Preparation::new);
         let command = orch_types::new_id();
         let started = tokio::time::timeout(
             self.inner.config.start_timeout,
-            self.ensure_harness(key, &profile, command),
+            self.ensure_harness_with_preparation(key, &profile, command, startup.as_ref()),
         )
         .await;
         match started {
             Err(_elapsed) => {
                 self.inner.commands.cancel(command).await?;
-                return Ok(Discovered::Failed(
-                    "the harness did not start in time".to_owned(),
+                return Ok((
+                    Discovered::Failed("the harness did not start in time".to_owned()),
+                    Some(machine),
                 ));
             }
             Ok(Err(error)) => return Err(error),
             Ok(Ok(Started::Up)) => {}
             Ok(Ok(Started::Failed(outcome))) => {
-                return Ok(Discovered::Failed(crate::provider_setup::failure_text(
-                    &outcome,
-                )));
+                return Ok((
+                    Discovered::Failed(crate::provider_setup::failure_text(&outcome)),
+                    Some(machine),
+                ));
             }
         }
         // What the harness declared by starting is what says whether it can list its conversations.
@@ -1222,7 +1547,7 @@ impl Engine {
         let can = descriptor_of(&profile)?
             .is_some_and(|descriptor| descriptor.capabilities.discover_sessions);
         if !can {
-            return Ok(Discovered::Unsupported);
+            return Ok((Discovered::Unsupported, Some(machine)));
         }
         let asked = orch_types::new_id();
         let command = Outgoing::new(
@@ -1237,12 +1562,16 @@ impl Engine {
                 agent_id: agent,
             },
         )?;
+        let command = match preparation {
+            Some(preparation) => preparation.command(self, key, command).await?,
+            None => command,
+        };
         let outcome = tokio::time::timeout(
             self.inner.config.start_timeout,
             crate::commands::run(self.inner.commands.as_ref(), command),
         )
         .await;
-        match outcome {
+        let outcome = match outcome {
             Err(_elapsed) => {
                 self.inner.commands.cancel(asked).await?;
                 Ok(Discovered::Failed(
@@ -1264,7 +1593,8 @@ impl Engine {
                     &other,
                 ))),
             },
-        }
+        };
+        outcome.map(|outcome| (outcome, Some(machine)))
     }
 }
 
@@ -1304,7 +1634,13 @@ mod tests {
         let thread = new_id();
         let configuration = SessionConfiguration {
             cwd: "/workspace/child".into(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
+            native_configuration: Default::default(),
+            restart_sensitive: None,
             memory: None,
+            executor_version: None,
         };
         let mut sessions = OpenSessions::default();
         sessions.opened(segment, thread, process);
@@ -1314,6 +1650,43 @@ mod tests {
         );
         sessions.configuration_accepted(segment, configuration.clone());
         assert!(!sessions.configuration_changed(segment, &configuration));
+        let images = SessionConfiguration {
+            image_generation: Some(true),
+            ..configuration.clone()
+        };
+        assert!(sessions.configuration_changed(segment, &images));
+        let native = SessionConfiguration {
+            native_configuration: [("declared-switch".into(), serde_json::json!(true))]
+                .into_iter()
+                .collect(),
+            ..configuration.clone()
+        };
+        assert!(sessions.configuration_changed(segment, &native));
+        sessions.configuration_accepted(segment, native.clone());
+        assert!(!sessions.configuration_changed(segment, &native));
+        assert!(
+            sessions.configuration_changed(segment, &configuration),
+            "removing a native instruction is a session change too"
+        );
+        sessions.configuration_accepted(segment, configuration.clone());
+        assert!(
+            serde_json::to_value(&configuration)
+                .unwrap()
+                .get("image_generation")
+                .is_none()
+        );
+        assert_eq!(
+            serde_json::to_value(&images).unwrap()["image_generation"],
+            true
+        );
+        let cache = SessionConfiguration {
+            prompt_cache_ttl: Some(orch_agent_contract::session::PromptCacheTtl::OneHour),
+            ..configuration.clone()
+        };
+        assert!(
+            sessions.configuration_changed(segment, &cache),
+            "an explicit cache lifetime belongs to the accepted session opening"
+        );
         let notes = SessionConfiguration {
             memory: Some(orch_link_contract::commands::SessionOpenMemory {
                 directory: "/workspace/.orch/memory".into(),

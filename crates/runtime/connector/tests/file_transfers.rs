@@ -5,21 +5,30 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use orch_link::commands::Progress;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
     CommandBody, CommandKind, EnvDetach, ExpectedHash, FsArchiveRead, FsFetch, FsFetchResult,
     FsStat, FsWrite, Transfer,
 };
+#[cfg(target_os = "linux")]
 use orch_link_contract::content::MAX_CHUNK_BYTES;
+#[cfg(target_os = "linux")]
 use orch_types::Hash;
+#[cfg(target_os = "linux")]
 use rig_environment::EnvRig;
+#[cfg(target_os = "linux")]
 use serde_json::json;
 
 /// The tar format's 512-byte records: one header, one padded payload and two end records.
+#[cfg(target_os = "linux")]
 const TAR_RECORD_BYTES: usize = 512;
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_writes_are_off() {
     let mut rig = EnvRig::new();
@@ -75,6 +84,7 @@ async fn a_workspace_file_is_streamed_whole_at_the_exact_cap_even_when_remote_wr
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_workspace_file_above_the_callers_limit_is_refused_in_words_without_a_blob() {
     let mut rig = EnvRig::new();
@@ -111,6 +121,7 @@ async fn a_workspace_file_above_the_callers_limit_is_refused_in_words_without_a_
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environment() {
     let mut rig = EnvRig::new();
@@ -183,6 +194,7 @@ async fn a_workspace_file_read_cannot_escape_its_root_or_read_a_detached_environ
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 fn archive_of(contents: &[u8]) -> Vec<u8> {
     assert!(contents.len() <= TAR_RECORD_BYTES);
     let mut archive = vec![0; TAR_RECORD_BYTES * 4];
@@ -203,6 +215,7 @@ fn archive_of(contents: &[u8]) -> Vec<u8> {
     archive
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues_transfer_direction()
  {
@@ -249,6 +262,7 @@ async fn reading_an_archive_entry_uploads_exactly_its_bytes_under_the_catalogues
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_changed_file_is_not_overwritten_and_its_captured_stat_survives_the_connector_error_frame()
  {

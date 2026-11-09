@@ -15,7 +15,8 @@ import type { NameHit } from '@/generated/api-types';
 import { useKnownPlaces } from '@/features/navigation/placeLabels';
 import { labelOfName, labelsOfNames } from '@/features/search/labels';
 import { useDebounced } from '@/lib/debounce';
-import { Combobox, type ComboboxOption } from '@/ui/Combobox';
+import { Combobox } from '@/ui/Combobox';
+import { ResourcePickerLookup, type ResourceLookupOption } from '@/ui/ResourcePicker';
 import { IconButton } from '@/ui/IconButton';
 import { useErrorText } from '@/ui/errorText';
 import { AsAdminMark, adminAccessOf } from '@/ui/AsAdminMark';
@@ -26,6 +27,7 @@ const PAUSE_MS = 150;
 
 export interface NamePickerProps {
   label: string;
+  pickerKey?: string;
   kinds: readonly NameKind[];
   chosen: string | null;
   anything?: string | undefined;
@@ -37,7 +39,7 @@ export interface NamePickerProps {
   accepts?: (hit: NameHit) => boolean;
 }
 
-export function NamePicker({ label, kinds, chosen, anything, hideLabel, orgId, placeholder, nothing, onChoose, accepts }: NamePickerProps) {
+export function NamePicker({ label, pickerKey, kinds, chosen, anything, hideLabel, orgId, placeholder, nothing, onChoose, accepts }: NamePickerProps) {
   const { t } = useTranslation();
   const errorText = useErrorText();
   const [open, setOpen] = useState(false);
@@ -48,20 +50,23 @@ export function NamePicker({ label, kinds, chosen, anything, hideLabel, orgId, p
   const hits = open && !waiting ? (names.data ?? []).filter((hit) => accepts?.(hit) ?? true) : [];
   const known = useKnownPlaces();
   const labels = labelsOfNames(hits, known);
-  const options: ComboboxOption<string>[] = typed.trim() === '' && anything !== undefined ? [{ value: 'all', label: anything, text: anything }] : [];
+  const options: ResourceLookupOption<string>[] = typed.trim() === '' && anything !== undefined ? [{ value: 'all', label: anything, text: anything }] : [];
   for (const hit of hits) {
     const Icon = KIND_ICONS[describe(hit)];
     const name = labelOfName(hit, labels);
     const way = wayOf(hit, t, labels);
     options.push({ value: hit.id, text: name,
+      ...(['provider','agent','environment','host','machine','template','mcp_server','mount','skill'].includes(hit.kind)?{resource:{kind:hit.kind,id:hit.id,data:hit}}:{}),
       label: <span className="flex min-w-0 items-center gap-2"><span className="truncate">{name}</span><AsAdminMark of={adminAccessOf(hit)?.place} /></span>,
       icon: hit.kind === 'user' && hit.avatar !== null ? <Avatar text={hit.avatar.text} color={hit.avatar.color} size={24} /> : <Icon aria-hidden />,
       description: <span className="flex flex-wrap gap-x-2"><span>{t(`finder.kinds.${hit.kind}`)}</span>{way !== '' && <span>{way}</span>}{hit.kind === 'thread' && <ThreadIdentity id={hit.id} />}</span>,
     });
   }
+  const resources = kinds.some((kind)=>['provider','agent','environment','host','machine','template','mcp_server','mount','skill'].includes(kind));
+  const Picker = resources ? ResourcePickerLookup : Combobox;
   const pick = (hit: NameHit | null) => { onChoose(hit); setTyped(''); };
   return <div className="flex min-w-0 items-end gap-1">
-    <Combobox label={label} hideLabel={hideLabel} query={typed} onQueryChange={setTyped} onOpenChange={setOpen}
+    <Picker {...(resources ? {pickerKey} : {})} label={label} hideLabel={hideLabel} query={typed} onQueryChange={setTyped} onOpenChange={setOpen}
       displayValue={chosen ?? anything ?? ''} placeholder={placeholder} fieldClassName="min-w-0 flex-1"
       groups={[{ id: 'names', label: hideLabel ? label : '', options }]} loading={waiting || names.isFetching}
       error={names.isError ? errorText(names.error).message : undefined}

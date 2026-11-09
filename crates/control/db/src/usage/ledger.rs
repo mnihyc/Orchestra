@@ -8,6 +8,11 @@
 //! written once and is never edited or removed; its identifier is chosen by the caller from what the use is, so
 //! that a use that is reported twice makes one row ([`record`] answers whether it made one).
 //!
+//! Each counted row is priced from its own quantities and frozen quote and rounded to six decimal places
+//! once. Totals are sums of these rows. Compared with one aggregate, per-row rounding can differ by at most
+//! half a millionth of a credit (0.0000005) per counted row. A later aggregate or detail never reprices a
+//! counted row, and no reconciliation rows are added to remove that rounding difference.
+//!
 //! What counts: exactly one source is counted for a turn, so that nothing is counted twice. The caller says
 //! (`counted`) whether the row feeds the rollups or is kept as trace. Rows are read back by turn
 //! ([`events_of_turn`]) and summed for the part of them that counts ([`counted_request_totals`]).
@@ -16,6 +21,9 @@
 //! that counts is folded into them (`rollup::fold_event`) in the same transaction that writes it.
 
 use super::rollup;
+mod facts;
+pub mod native;
+pub mod tools;
 use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Id, Json};
@@ -46,6 +54,8 @@ pub mod rate_source {
     pub const RATE_CARD: &str = "rate_card";
     /// The shipped catalogue's estimate.
     pub const CATALOGUE: &str = "catalogue";
+    /// The vendor-reported total in the matching catalogue currency, converted once.
+    pub const REPORTED: &str = "reported";
 }
 
 /// What the purpose of a use was: the words of the `purpose` column.
@@ -58,6 +68,8 @@ pub mod purpose {
     pub const REVIEW: &str = "review";
     /// Vectors Orch asked a model for itself, of an org's text or of a query, for search by meaning.
     pub const EMBEDDINGS: &str = "embeddings";
+    /// A personal read-only question, attributed to the person asking.
+    pub const ASK: &str = "ask";
 }
 
 /// Tokens by kind. Cached tokens and tokens written to a cache are parts of the input, reasoning tokens are
@@ -97,8 +109,8 @@ pub struct Attribution {
     pub provider_id: Id,
     /// The entry through which the author used the provider.
     pub entry_id: Option<Id>,
-    /// The person the use is put down to: the author of the input that started the turn; nobody for an input
-    /// that no person sent.
+    /// The person the use is put down to: ordinarily the originating author, or the recorded first
+    /// owner during shared background-session work. An absent attribution is not another person's use.
     pub user_id: Option<Id>,
     /// The agent profile the turn ran.
     pub agent_id: Option<Id>,
@@ -129,7 +141,8 @@ pub async fn attribution_of_lease(
     Ok(sqlx::query_as(
         "SELECT topic.org_id AS org_id, topic.parent_id AS project_id, th.topic_id AS topic_id,
                 l.thread_id AS thread_id, t.segment_id AS segment_id, t.id AS turn_id,
-                l.provider_id AS provider_id, l.entry_id AS entry_id, i.author_id AS user_id,
+                l.provider_id AS provider_id, l.entry_id AS entry_id,
+                CASE WHEN t.background_overlap THEN t.background_charge_to ELSE i.author_id END AS user_id,
                 s.agent_id AS agent_id, a.harness_kind AS harness_kind,
                 s.environment_id AS environment_id, e.placement AS environment_kind,
                 s.arrangement AS arrangement, t.model AS turn_model, t.effort AS effort, t.params AS params
@@ -145,6 +158,26 @@ pub async fn attribution_of_lease(
             FOR SHARE OF topic",
     )
     .bind(lease)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Captures real turn/segment/place facts for an admitted own request; this is no authority proof.
+/// The selected service producer supplies its own paying provider, Use entry and captured issuer.
+pub async fn attribution_of_turn(
+    conn: &mut Conn,
+    turn: Id,
+) -> Result<Option<Attribution>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT topic.org_id AS org_id,topic.parent_id AS project_id,th.topic_id AS topic_id,
+          t.thread_id,t.segment_id,t.id AS turn_id,s.provider_id,NULL::uuid AS entry_id,
+          t.audit_for_user_id AS user_id,s.agent_id,a.harness_kind,s.environment_id,
+          e.placement AS environment_kind,s.arrangement,t.model AS turn_model,t.effort,t.params
+         FROM turns t JOIN segments s ON s.id=t.segment_id JOIN threads th ON th.node_id=t.thread_id
+         JOIN nodes topic ON topic.id=th.topic_id LEFT JOIN agents a ON a.id=s.agent_id
+         LEFT JOIN environments e ON e.id=s.environment_id WHERE t.id=$1 FOR SHARE OF topic",
+    )
+    .bind(turn)
     .fetch_optional(conn)
     .await?)
 }
@@ -185,7 +218,7 @@ pub struct NewEvent<'a> {
 /// Writes a use. The answer is whether this call wrote it: a use whose identifier is in the ledger is left as
 /// it is.
 pub async fn record(conn: &mut Conn, event: &NewEvent<'_>) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, None, None).await
+    record_as(conn, event, purpose::TURN, None, None, None, None, None).await
 }
 
 /// Records a measured request, or keeps its provisional running observation until completion.
@@ -194,7 +227,17 @@ pub async fn record_measured(
     event: &NewEvent<'_>,
     timing: &orch_api_contract::usage::RequestTiming,
 ) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, Some(timing), None).await
+    record_as(
+        conn,
+        event,
+        purpose::TURN,
+        Some(timing),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
 }
 
 /// The engine resolves programme roles from any adapter's parameter declarations.
@@ -204,52 +247,214 @@ pub async fn record_program(
     timing: Option<&orch_api_contract::usage::RequestTiming>,
     program: Option<&str>,
 ) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::TURN, timing, program).await
+    record_as(
+        conn,
+        event,
+        purpose::TURN,
+        timing,
+        program,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Keep the actual native request facts while retaining units already billed by its turn aggregate.
+pub async fn record_native_program(
+    conn: &mut Conn,
+    event: &NewEvent<'_>,
+    timing: Option<&orch_api_contract::usage::RequestTiming>,
+    program: Option<&str>,
+    covered: &std::collections::BTreeMap<String, i64>,
+) -> Result<bool, DbError> {
+    record_as(
+        conn,
+        event,
+        purpose::TURN,
+        timing,
+        program,
+        None,
+        None,
+        Some(covered),
+    )
+    .await
+}
+
+/// Records forwarder usage only after the engine has verified the lease's provider and attribution.
+/// The linkage lives privately in the existing envelope, never in the public timing projection.
+pub async fn record_lease_program(
+    conn: &mut Conn,
+    event: &NewEvent<'_>,
+    timing: Option<&orch_api_contract::usage::RequestTiming>,
+    program: Option<&str>,
+    lease: Id,
+) -> Result<bool, DbError> {
+    record_as(
+        conn,
+        event,
+        purpose::TURN,
+        timing,
+        program,
+        Some(lease),
+        None,
+        None,
+    )
+    .await
+}
+
+/// Retains only the received factual close aggregates beside the canonical cut.
+/// This runs in the cut's transaction; replay cannot replace the first snapshot.
+/// Public RequestTiming decoding deliberately ignores the private member.
+pub async fn retain_lease_close_snapshot(
+    conn: &mut Conn,
+    event: Id,
+    lease: Id,
+    usage: Option<&orch_link_contract::foreign::TokenUsage>,
+    groups: &[orch_link_contract::commands::LeaseUsageGroup],
+) -> Result<bool, DbError> {
+    #[derive(serde::Serialize)]
+    struct Facts<'a> {
+        wire_protocol: Option<&'a str>,
+        requested_service_tier: Option<&'a str>,
+        reported_service_tier: &'a orch_api_contract::usage::UsageMeasurement<String>,
+    }
+    #[derive(serde::Serialize)]
+    struct Group<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        search_usage: Option<&'a orch_link_contract::commands::LeaseSearchUsage>,
+        model: &'a str,
+        usage: &'a orch_link_contract::foreign::TokenUsage,
+        requests: i64,
+        min_context_tokens: i64,
+        max_context_tokens: i64,
+        timing: Facts<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct Snapshot<'a> {
+        usage: Option<&'a orch_link_contract::foreign::TokenUsage>,
+        usage_groups: Vec<Group<'a>>,
+    }
+    let mut ordered = groups
+        .iter()
+        .map(|group| {
+            serde_json::to_string(&group.key())
+                .map(|key| (key, group))
+                .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ordered.sort_by(|a, b| a.0.cmp(&b.0));
+    let snapshot = Snapshot {
+        usage,
+        usage_groups: ordered
+            .into_iter()
+            .map(|(_, group)| Group {
+                search_usage: group.search_usage.as_ref(),
+                model: &group.model,
+                usage: &group.usage,
+                requests: group.requests,
+                min_context_tokens: group.min_context_tokens,
+                max_context_tokens: group.max_context_tokens,
+                timing: Facts {
+                    wire_protocol: group.timing.wire_protocol.as_deref(),
+                    requested_service_tier: group.timing.requested_service_tier.as_deref(),
+                    reported_service_tier: &group.timing.reported_service_tier,
+                },
+            })
+            .collect(),
+    };
+    let snapshot = serde_json::to_value(snapshot)
+        .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))?;
+    let done = sqlx::query(
+        "UPDATE usage_events SET measurement_states=measurement_states || jsonb_build_object('_lease_close_snapshot',$3::jsonb)
+          WHERE id=$1 AND measurement_states->>'_lease_id'=$2
+            AND origin='forwarder' AND purpose='turn' AND scope='request' AND counted
+            AND request_ref='lease.close' AND NOT (measurement_states ? '_lease_close_snapshot')",
+    )
+    .bind(event)
+    .bind(lease.to_string())
+    .bind(snapshot)
+    .execute(conn)
+    .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 /// Records native permission-review use with its own model, without changing the turn's model total.
 pub async fn record_review(conn: &mut Conn, event: &NewEvent<'_>) -> Result<bool, DbError> {
-    record_as(conn, event, purpose::REVIEW, None, None).await
+    record_as(conn, event, purpose::REVIEW, None, None, None, None, None).await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the shared ledger writer keeps native timing, program, lease, service groups and covered units independent for their distinct producers"
+)]
 async fn record_as(
     conn: &mut Conn,
     event: &NewEvent<'_>,
     purpose: &str,
     timing: Option<&orch_api_contract::usage::RequestTiming>,
     program: Option<&str>,
+    lease: Option<Id>,
+    service_groups: Option<&[String]>,
+    covered: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<bool, DbError> {
+    let mut event = event.clone();
     let attribution = event.attribution;
-    let running = timing.is_some_and(|t| {
-        matches!(
-            t.outcome,
-            orch_api_contract::usage::UsageMeasurement::Unread
-        )
-    });
-    // A late running notification cannot resurrect a request already in the immutable ledger.
+    let mut measured = timing.cloned().unwrap_or_default();
+    let running = matches!(
+        measured.outcome,
+        orch_api_contract::usage::UsageMeasurement::Unread
+    );
+    // A late running notification cannot resurrect a completed request.
     if running && event_exists(conn, event.id).await? {
         return Ok(false);
     }
+    let merged = facts::reconcile(conn, &mut event, &mut measured, lease).await?;
+    if merged.handled {
+        return Ok(false);
+    }
+    if measured.attempt.is_none() && event.scope == scope::REQUEST {
+        measured.attempt = Some(sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE((SELECT (r.cursor->>'attempt')::bigint+1 FROM model_call_recovery r JOIN turns t ON t.id=$2 WHERE r.node_id=$1 AND r.purpose='agent' AND r.state='running' AND r.context->>'input_id'=t.input_id::text AND r.updated_at<=$3 AND NOT EXISTS(SELECT 1 FROM usage_events e WHERE e.turn_id=$2 AND e.scope='request' AND e.id<>$4)),1)")
+            .bind(attribution.thread_id).bind(attribution.turn_id).bind(event.at).bind(event.id).fetch_one(&mut *conn).await?);
+    }
+    let timing = Some(&measured);
     let table = if running {
         "usage_running"
     } else {
         "usage_events"
     };
     let conflict = if running {
-        "DO UPDATE SET first_token_ms=EXCLUDED.first_token_ms, generation_ms=EXCLUDED.generation_ms, request_ms=EXCLUDED.request_ms, measurement_states=EXCLUDED.measurement_states"
+        "DO UPDATE SET first_token_ms=EXCLUDED.first_token_ms, generation_ms=EXCLUDED.generation_ms, request_ms=EXCLUDED.request_ms, measurement_states=EXCLUDED.measurement_states, error_reason=EXCLUDED.error_reason, upstream_status=EXCLUDED.upstream_status, attempt=EXCLUDED.attempt, provider_request_id=EXCLUDED.provider_request_id"
     } else {
         "DO NOTHING"
     };
+    let mut states = serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default();
+    if let (Some(groups), Some(states)) = (service_groups, states.as_object_mut()) {
+        states.insert("_service_groups".into(), serde_json::json!(groups));
+    }
+    if let (Some(covered), Some(states)) = (covered, states.as_object_mut()) {
+        states.insert("_native_counter_covered".into(), serde_json::json!(covered));
+    }
+    if let (Some(lease), Some(states)) = (lease, states.as_object_mut()) {
+        states.insert("_lease_id".to_owned(), Json::String(lease.to_string()));
+    }
+    if let (Some(refs), Some(states)) = (merged.tool_refs, states.as_object_mut()) {
+        states.insert("_tool_refs".into(), refs);
+    }
+    if let (Some(adapter), Some(states)) = (merged.adapter_ref, states.as_object_mut()) {
+        states.insert("_adapter_request_ref".into(), Json::String(adapter));
+    }
     let done = sqlx::query(sqlx::AssertSqlSafe(format!(
         "INSERT INTO {table} (id, at, origin, purpose, scope, counted, org_id, project_id, topic_id,
                 thread_id, segment_id, turn_id, provider_id, entry_id, user_id, agent_id, harness_kind,
                 environment_id, environment_kind, arrangement, model, effort, tier, input_tokens,
                 cached_input_tokens, cache_write_tokens, output_tokens, reasoning_tokens, total_tokens,
                 context_tokens, request_ref, rate, rate_source, credits, first_token_ms, generation_ms,
-                request_ms, outcome, access_program, measurement_states, streamed_output_tokens, speed_milli)
+                request_ms, outcome, access_program, measurement_states, streamed_output_tokens, speed_milli, error_reason, upstream_status, attempt, provider_request_id, thread_owner_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
                  $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34::text::numeric,
-                 $35, $36, $37, $38, $39, $40, $41, $42)
+                 $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, (SELECT owner_id FROM nodes WHERE id=$10))
          ON CONFLICT (id) {conflict}"
     )))
     .bind(event.id)
@@ -291,17 +496,28 @@ async fn record_as(
     .bind(timing.and_then(|t| t.request_ms.value()).copied().filter(|n| *n >= 0))
     .bind(timing.and_then(|t| t.outcome.value()).map(String::as_str))
     .bind(program)
-    .bind(serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default())
+    .bind(states)
     .bind(timing.and_then(|t| t.streamed_tokens.value()).copied())
     .bind(timing.and_then(|t| t.speed_milli.value()).copied())
+    .bind(measured.error_reason.as_deref())
+    .bind(measured.upstream_status)
+    .bind(measured.attempt.unwrap_or(1).max(1))
+    .bind(measured.provider_request_id.as_deref())
     .execute(&mut *conn)
     .await?;
     let wrote = done.rows_affected() == 1;
     if !running {
+        if let Some(lease) = lease {
+            sqlx::query("DELETE FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND measurement_states->>'_lease_id'=$3 AND provider_request_id=$4")
+                .bind(attribution.turn_id).bind(attribution.provider_id).bind(lease.to_string()).bind(measured.provider_request_id.as_deref()).execute(&mut *conn).await?;
+        }
         sqlx::query("DELETE FROM usage_running WHERE id=$1")
             .bind(event.id)
             .execute(&mut *conn)
             .await?;
+    }
+    if wrote {
+        tools::refresh(conn, &[event.id]).await?;
     }
     if wrote && !running && (event.counted || timing.is_some()) {
         rollup::fold_event(conn, event.id).await?;
@@ -310,7 +526,7 @@ async fn record_as(
 }
 
 /// What a model call Orch made for itself is put down to: a place, the provider that paid, and the person
-/// who set the summarizer to ask it. It belongs to a topic, or to one of its threads, and to no turn.
+/// who actually issued it, or nobody for automatic work. It belongs to a topic, or to one of its threads, and to no turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummaryAttribution {
     /// The root org the work was in.
@@ -325,8 +541,38 @@ pub struct SummaryAttribution {
     pub provider_id: Id,
     /// The entry through which that person uses the provider.
     pub entry_id: Option<Id>,
-    /// Whoever last wrote the summarizer's setting.
+    /// Actual issuing person; automatic work remains unattributed.
     pub user_id: Option<Id>,
+}
+
+/// Records a selected service request through the original attribution and row/rollup writer.
+/// Its producer owns current source/admission and supplies the actual service measurement envelope.
+pub async fn record_service_measured(
+    conn: &mut Conn,
+    purpose: &str,
+    event: &NewEvent<'_>,
+    timing: &orch_api_contract::usage::RequestTiming,
+    groups: &[String],
+) -> Result<bool, DbError> {
+    if timing.service_usage.is_none()
+        || event.origin != origin::ORCH
+        || event.scope != scope::REQUEST
+    {
+        return Err(DbError::Other(sqlx::Error::Protocol(
+            "a service row needs its actual unit facts and own request source".into(),
+        )));
+    }
+    record_as(
+        conn,
+        event,
+        purpose,
+        Some(timing),
+        None,
+        None,
+        Some(groups),
+        None,
+    )
+    .await
 }
 
 /// A model call Orch made for itself, to write.
@@ -381,14 +627,50 @@ pub async fn record_own_measured(
     call: &NewSummary<'_>,
     timing: Option<&orch_api_contract::usage::RequestTiming>,
 ) -> Result<bool, DbError> {
+    record_own_measured_context(conn, purpose, call, timing, None).await
+}
+
+/// The same append-only insert with the actual retained turn and segment of owned conversation work.
+pub async fn record_own_measured_context(
+    conn: &mut Conn,
+    purpose: &str,
+    call: &NewSummary<'_>,
+    timing: Option<&orch_api_contract::usage::RequestTiming>,
+    context: Option<(Id, Id)>,
+) -> Result<bool, DbError> {
+    record_own_with_groups(conn, purpose, call, timing, context, None).await
+}
+
+/// The same standalone ledger writer with private immutable service group facts.
+pub async fn record_service_own_measured(
+    conn: &mut Conn,
+    purpose: &str,
+    call: &NewSummary<'_>,
+    timing: &orch_api_contract::usage::RequestTiming,
+    groups: &[String],
+) -> Result<bool, DbError> {
+    record_own_with_groups(conn, purpose, call, Some(timing), None, Some(groups)).await
+}
+async fn record_own_with_groups(
+    conn: &mut Conn,
+    purpose: &str,
+    call: &NewSummary<'_>,
+    timing: Option<&orch_api_contract::usage::RequestTiming>,
+    context: Option<(Id, Id)>,
+    groups: Option<&[String]>,
+) -> Result<bool, DbError> {
+    let mut states = serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default();
+    if let (Some(groups), Some(states)) = (groups, states.as_object_mut()) {
+        states.insert("_service_groups".into(), serde_json::json!(groups));
+    }
     let place = call.attribution;
     let done = sqlx::query(
         "INSERT INTO usage_events (id, at, origin, purpose, scope, counted, org_id, project_id, topic_id,
                 thread_id, provider_id, entry_id, user_id, model, tier, input_tokens, cached_input_tokens,
                 cache_write_tokens, output_tokens, reasoning_tokens, total_tokens, context_tokens, request_ref,
-                rate, rate_source, credits, first_token_ms, generation_ms, request_ms, outcome, measurement_states, streamed_output_tokens, speed_milli)
+                rate, rate_source, credits, first_token_ms, generation_ms, request_ms, outcome, measurement_states, streamed_output_tokens, speed_milli, error_reason, upstream_status, attempt, provider_request_id, thread_owner_id,turn_id,segment_id)
          VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                 $20, $21, $22, $23, $24, $25::text::numeric, $26, $27, $28, $29, $30, $31, $32)
+                 $20, $21, $22, $23, $24, $25::text::numeric, $26, $27, $28, $29, $30, $31, $32, $33, $34, COALESCE($35,(SELECT (cursor->>'attempt')::bigint+1 FROM model_call_recovery WHERE context->>'next_call'=$1::text AND state='running' ORDER BY updated_at DESC LIMIT 1),1), $36, (SELECT owner_id FROM nodes WHERE id=$9),$37,$38)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(call.id)
@@ -420,9 +702,15 @@ pub async fn record_own_measured(
     .bind(timing.and_then(|t| t.generation_ms.value()).copied())
     .bind(timing.and_then(|t| t.request_ms.value()).copied())
     .bind(timing.and_then(|t| t.outcome.value()).map(String::as_str))
-    .bind(serde_json::to_value(timing.cloned().unwrap_or_default()).unwrap_or_default())
+    .bind(states)
     .bind(timing.and_then(|t| t.streamed_tokens.value()).copied())
     .bind(timing.and_then(|t| t.speed_milli.value()).copied())
+    .bind(timing.and_then(|t| t.error_reason.as_deref()))
+    .bind(timing.and_then(|t| t.upstream_status))
+    .bind(timing.and_then(|t| t.attempt))
+    .bind(timing.and_then(|t| t.provider_request_id.as_deref()))
+    .bind(context.map(|(turn,_)|turn))
+    .bind(context.map(|(_,segment)|segment))
     .execute(&mut *conn)
     .await?;
     let wrote = done.rows_affected() == 1;
@@ -435,6 +723,21 @@ pub async fn record_own_measured(
 /// A row of the ledger as it is read back.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct EventRow {
+    /// Tool items associated with this request; absent without a proven association.
+    pub tool_calls: Option<i64>,
+    /// Sum of those items' reported durations; unknown while any duration is missing.
+    pub tool_ms: Option<i64>,
+    /// Refusal reason retained from the actual upstream error.
+    pub error_reason: Option<String>,
+    /// HTTP status, absent when no response arrived.
+    pub upstream_status: Option<i64>,
+    /// One-based request attempt within its model step.
+    pub attempt: i64,
+    /// Upstream identity distinct from the adapter reference.
+    pub provider_request_id: Option<String>,
+    /// Thread owner as captured when the request was written.
+    pub thread_owner_id: Option<Id>,
+
     /// Server-only commit-ordered cursor; it is never exposed as a global activity counter.
     pub change_seq: i64,
     /// Output whose hidden reasoning can be separated.
@@ -525,7 +828,7 @@ pub struct EventRow {
     pub credits: Option<String>,
 }
 
-const EVENT_COLUMNS: &str = "change_seq, streamed_output_tokens, speed_milli, first_token_ms, generation_ms, request_ms, outcome, access_program, measurement_states,
+const EVENT_COLUMNS: &str = "tool_calls, tool_ms, error_reason, upstream_status, attempt, provider_request_id, thread_owner_id, change_seq, streamed_output_tokens, speed_milli, first_token_ms, generation_ms, request_ms, outcome, access_program, measurement_states,
         id, at, purpose, origin, scope, counted, org_id, project_id, topic_id, thread_id, segment_id,
         turn_id, provider_id, entry_id, user_id, agent_id, harness_kind, environment_id, environment_kind,
         arrangement, model, effort, tier, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens,
@@ -546,6 +849,231 @@ pub async fn counted_request_totals(conn: &mut Conn, turn: Id) -> Result<Tokens,
     counted_request_sum(conn, turn).await
 }
 
+/// Known billed native quantities, including aggregate residuals and excluding covered request units.
+/// Aliases are trusted declaration data and remain bound JSON values, never SQL identifiers.
+pub async fn counted_capabilities(
+    conn: &mut Conn,
+    turn: Id,
+    provider: Id,
+    aliases: &std::collections::BTreeMap<String, Option<String>>,
+) -> Result<std::collections::BTreeMap<(String, String), Option<i64>>, DbError> {
+    let aliases = serde_json::to_value(aliases).unwrap_or_default();
+    let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "WITH observations AS (
+          SELECT e.model,s.key AS capability,
+            CASE WHEN e.measurement_states->'declared_counters'->s.key->>'state'='told'
+                 THEN (e.measurement_states->'declared_counters'->s.key->>'value')::numeric
+                 WHEN jsonb_typeof(s.value)='string'
+                  AND e.measurement_states->(s.value#>>'{}')->>'state'='told'
+                 THEN (e.measurement_states->(s.value#>>'{}')->>'value')::numeric
+            END - CASE WHEN e.scope='request' THEN
+              COALESCE((e.measurement_states->'_native_counter_covered'->>s.key)::numeric,0)
+              ELSE 0 END AS quantity
+          FROM usage_events e CROSS JOIN LATERAL jsonb_each($2::jsonb) s
+          WHERE e.turn_id=$1 AND e.provider_id=$3 AND e.origin='harness' AND e.purpose='turn' AND e.counted
+        ) SELECT model,capability,
+          CASE WHEN sum(quantity)<=9223372036854775807 THEN sum(quantity)::bigint END
+          FROM observations WHERE quantity>=0 GROUP BY model,capability",
+    ).bind(turn).bind(aliases).bind(provider).fetch_all(conn).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(model, capability, count)| ((model, capability), count))
+        .collect())
+}
+
+/// Already counted forwarder usage whose lease the engine verified when recording it.
+/// Grouping happens in the database; no completed-request history is retained by a lease.
+#[derive(Debug, Default)]
+pub struct CountedLeaseUsage {
+    /// Inclusive totals, including rows without actual tier facts.
+    pub totals: Tokens,
+    /// Totals with the same factual identity as a connector close group.
+    pub groups: std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Tokens>,
+    /// Successful searches already counted for each factual group; None retains an unknown contribution.
+    pub group_searches:
+        std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Option<i64>>,
+    /// Separately counted successful fetches for the same factual groups.
+    pub group_fetches:
+        std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Option<i64>>,
+    /// Complete original-unit totals already counted for each factual group; None means incomplete or mixed units.
+    pub group_reported_costs: std::collections::HashMap<
+        orch_link_contract::commands::LeaseUsageGroupKey,
+        Option<orch_api_contract::usage::ReportedCost>,
+    >,
+    /// Actual request rows already counted in each factual group.
+    pub group_requests:
+        std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, i64>,
+    /// Hourly cache subsets already charged in each group; None is an unknown old contribution.
+    pub group_cache_write_1h:
+        std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Option<i64>>,
+    /// Independently counted twelve-hour subsets; None never proves zero.
+    pub group_cache_write_12h:
+        std::collections::HashMap<orch_link_contract::commands::LeaseUsageGroupKey, Option<i64>>,
+    /// Verified-lease usage without comparable actual request/report facts.
+    pub unassigned: Tokens,
+    /// Old same-provider/model forwarder totals whose sole forwarded lease can still be proved.
+    /// These prove aggregate ownership, never membership in a factual close group.
+    pub legacy: Tokens,
+    /// Unlinked legacy rows whose lease cannot be proved from retained history.
+    pub legacy_ambiguous: bool,
+}
+
+/// Reads only this verified lease's counted request groups, bounded by the existing turn index.
+/// Historical rows without the private linkage are not assigned to an inferred lease.
+pub async fn counted_lease_usage(
+    conn: &mut Conn,
+    turn: Id,
+    lease: Id,
+    provider: Id,
+    model: &str,
+) -> Result<CountedLeaseUsage, DbError> {
+    #[derive(sqlx::FromRow)]
+    struct Group {
+        model: String,
+        requests: i64,
+        reported_amount: Option<String>,
+        reported_unit: Option<String>,
+        searches: Option<i64>,
+        fetches: Option<i64>,
+        cache_write_1h: Option<i64>,
+        cache_write_12h: Option<i64>,
+        timing: Json,
+        #[sqlx(flatten)]
+        tokens: Tokens,
+    }
+    let rows: Vec<Group> = sqlx::query_as(
+        "SELECT model, count(*)::bigint AS requests,
+                CASE WHEN bool_and(COALESCE(measurement_states#>>'{reported_cost,state}'='told' AND COALESCE(measurement_states#>>'{reported_cost,value,unit}','')<>'' AND measurement_states#>>'{reported_cost,value,amount}' ~ '^[0-9]+([.][0-9]+)?$',false)) AND count(DISTINCT measurement_states#>>'{reported_cost,value,unit}')=1
+                    THEN sum(CASE WHEN COALESCE(measurement_states#>>'{reported_cost,state}'='told' AND COALESCE(measurement_states#>>'{reported_cost,value,unit}','')<>'' AND measurement_states#>>'{reported_cost,value,amount}' ~ '^[0-9]+([.][0-9]+)?$',false) THEN (measurement_states#>>'{reported_cost,value,amount}')::numeric ELSE 0 END)::text ELSE NULL END AS reported_amount,
+                min(CASE WHEN COALESCE(measurement_states#>>'{reported_cost,state}'='told' AND COALESCE(measurement_states#>>'{reported_cost,value,unit}','')<>'' AND measurement_states#>>'{reported_cost,value,amount}' ~ '^[0-9]+([.][0-9]+)?$',false) THEN measurement_states#>>'{reported_cost,value,unit}' END) AS reported_unit,
+                CASE WHEN bool_and(COALESCE(measurement_states#>>'{web_searches,state}','unread') IN ('told','unsupported'))
+                    THEN sum(CASE WHEN measurement_states#>>'{web_searches,state}'='told'
+                        THEN (measurement_states#>>'{web_searches,value}')::bigint ELSE 0 END)::bigint ELSE NULL END AS searches,
+                CASE WHEN bool_and(COALESCE(measurement_states#>>'{web_fetches,state}','unsupported') IN ('told','unsupported'))
+                    THEN sum(CASE WHEN measurement_states#>>'{web_fetches,state}'='told'
+                        THEN (measurement_states#>>'{web_fetches,value}')::bigint ELSE 0 END)::bigint ELSE NULL END AS fetches,
+                CASE WHEN bool_and(COALESCE(measurement_states#>>'{cache_write_1h_tokens,state}','unread') IN ('told','unsupported')
+                    AND CASE WHEN measurement_states#>>'{cache_write_1h_tokens,state}'='told'
+                        THEN COALESCE((measurement_states#>>'{cache_write_1h_tokens,value}')::bigint BETWEEN 0 AND cache_write_tokens,false) ELSE true END)
+                    THEN sum(CASE WHEN measurement_states#>>'{cache_write_1h_tokens,state}'='told'
+                        THEN (measurement_states#>>'{cache_write_1h_tokens,value}')::bigint ELSE 0 END)::bigint ELSE NULL END AS cache_write_1h,
+                CASE WHEN bool_and(COALESCE(measurement_states#>>'{cache_write_12h_tokens,state}','unread') IN ('told','unsupported')
+                    AND CASE WHEN measurement_states#>>'{cache_write_12h_tokens,state}'='told'
+                        THEN COALESCE((measurement_states#>>'{cache_write_12h_tokens,value}')::bigint BETWEEN 0 AND cache_write_tokens,false) ELSE true END)
+                    THEN sum(CASE WHEN measurement_states#>>'{cache_write_12h_tokens,state}'='told'
+                        THEN (measurement_states#>>'{cache_write_12h_tokens,value}')::bigint ELSE 0 END)::bigint ELSE NULL END AS cache_write_12h,
+                jsonb_build_object('native_prices',COALESCE(measurement_states->'native_prices','{}'::jsonb),
+                    'wire_protocol',COALESCE(measurement_states->'wire_protocol','null'::jsonb),
+                    'requested_service_tier',COALESCE(measurement_states->'requested_service_tier','null'::jsonb),
+                    'reported_service_tier',COALESCE(measurement_states->'reported_service_tier','{\"state\":\"unsupported\"}'::jsonb),
+                    'requested_capacity_tier',COALESCE(measurement_states->'requested_capacity_tier','null'::jsonb),
+                    'reported_capacity_tier',COALESCE(measurement_states->'reported_capacity_tier','{\"state\":\"unsupported\"}'::jsonb)) AS timing,
+                sum(input_tokens)::bigint AS input, sum(cached_input_tokens)::bigint AS cached_input,
+                sum(cache_write_tokens)::bigint AS cache_write, sum(output_tokens)::bigint AS output,
+                sum(reasoning_tokens)::bigint AS reasoning, sum(total_tokens)::bigint AS total
+           FROM usage_events
+          WHERE turn_id=$1 AND measurement_states->>'_lease_id'=$2
+            AND origin='forwarder' AND scope='request' AND counted AND purpose='turn'
+          GROUP BY model,COALESCE(measurement_states->'native_prices','{}'::jsonb),
+                   COALESCE(measurement_states->'wire_protocol','null'::jsonb),
+                   COALESCE(measurement_states->'requested_service_tier','null'::jsonb),
+                   COALESCE(measurement_states->'reported_service_tier','{\"state\":\"unsupported\"}'::jsonb),
+                   COALESCE(measurement_states->'requested_capacity_tier','null'::jsonb),
+                   COALESCE(measurement_states->'reported_capacity_tier','{\"state\":\"unsupported\"}'::jsonb)",
+    )
+    .bind(turn)
+    .bind(lease.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut counted = CountedLeaseUsage::default();
+    for row in rows {
+        let timing: orch_api_contract::usage::RequestTiming = serde_json::from_value(row.timing)
+            .map_err(|error| DbError::from(sqlx::Error::Decode(Box::new(error))))?;
+        let key = orch_link_contract::commands::LeaseUsageGroupKey::of(&row.model, &timing);
+        let add = |sum: &mut Tokens| {
+            sum.input += row.tokens.input;
+            sum.cached_input += row.tokens.cached_input;
+            sum.cache_write += row.tokens.cache_write;
+            sum.output += row.tokens.output;
+            sum.reasoning += row.tokens.reasoning;
+            sum.total += row.tokens.total;
+        };
+        add(&mut counted.totals);
+        if key.wire_protocol.is_some()
+            || key.requested_service_tier.is_some()
+            || key.reported_service_tier != orch_api_contract::usage::UsageMeasurement::Unsupported
+            || key.requested_capacity_tier.is_some()
+            || key.reported_capacity_tier != orch_api_contract::usage::UsageMeasurement::Unsupported
+        {
+            counted.group_searches.insert(key.clone(), row.searches);
+            counted.group_fetches.insert(key.clone(), row.fetches);
+            counted.group_requests.insert(key.clone(), row.requests);
+            counted.group_reported_costs.insert(
+                key.clone(),
+                row.reported_amount
+                    .zip(row.reported_unit)
+                    .map(|(amount, unit)| orch_api_contract::usage::ReportedCost {
+                        amount,
+                        unit: Some(unit),
+                    }),
+            );
+            counted
+                .group_cache_write_1h
+                .insert(key.clone(), row.cache_write_1h);
+            counted
+                .group_cache_write_12h
+                .insert(key.clone(), row.cache_write_12h);
+            add(counted.groups.entry(key).or_default());
+        } else {
+            add(&mut counted.unassigned);
+        }
+    }
+    // Forwarded leases have no recipient (the leases_forwarded_recipient constraint).
+    // Their only deletion paths collect their thread or provider as well; unlike shared
+    // leases, machine collection cannot prune them. A present current forwarded lease,
+    // provider and thread therefore retain the relevant same-provider forwarded history.
+    let sole_forwarded: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM leases l JOIN providers p ON p.id=l.provider_id
+                       JOIN threads th ON th.node_id=l.thread_id
+                       WHERE l.id=$2 AND l.turn_id=$1 AND l.provider_id=$3 AND l.mode='forwarded'
+                         AND NOT EXISTS(SELECT 1 FROM leases sibling
+                             WHERE sibling.turn_id=$1 AND sibling.provider_id=$3
+                               AND sibling.mode='forwarded' AND sibling.id<>l.id))",
+    )
+    .bind(turn)
+    .bind(lease)
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await?;
+    #[derive(sqlx::FromRow)]
+    struct Legacy {
+        provider_id: Id,
+        model: String,
+        #[sqlx(flatten)]
+        tokens: Tokens,
+    }
+    let legacy: Vec<Legacy> = sqlx::query_as(
+        "SELECT provider_id,model,sum(input_tokens)::bigint AS input,
+                sum(cached_input_tokens)::bigint AS cached_input,sum(cache_write_tokens)::bigint AS cache_write,
+                sum(output_tokens)::bigint AS output,sum(reasoning_tokens)::bigint AS reasoning,
+                sum(total_tokens)::bigint AS total
+           FROM usage_events WHERE turn_id=$1 AND NOT (measurement_states ? '_lease_id')
+             AND origin='forwarder' AND scope='request' AND counted AND purpose='turn'
+          GROUP BY provider_id,model",
+    )
+    .bind(turn)
+    .fetch_all(conn)
+    .await?;
+    for row in legacy {
+        if sole_forwarded && row.provider_id == provider && row.model == model {
+            counted.legacy = row.tokens;
+        } else if row.tokens != Tokens::default() {
+            counted.legacy_ambiguous = true;
+        }
+    }
+    Ok(counted)
+}
+
 /// Whether the ledger has the row `id`.
 pub async fn event_exists(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     Ok(
@@ -556,9 +1084,42 @@ pub async fn event_exists(conn: &mut Conn, id: Id) -> Result<bool, DbError> {
     )
 }
 
+/// The next attempt of an explicitly named native predecessor, including its retained recovery offset.
+pub async fn attempt_after(
+    conn: &mut Conn,
+    turn: Id,
+    provider: Id,
+    predecessor: &str,
+) -> Result<Option<i64>, DbError> {
+    let attempt:Option<i64>=sqlx::query_scalar("SELECT max(attempt) FROM (SELECT attempt FROM usage_events WHERE turn_id=$1 AND provider_id=$2 AND scope='request' AND (request_ref=$3 OR measurement_states->>'_adapter_request_ref'=$3) UNION ALL SELECT attempt FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND scope='request' AND (request_ref=$3 OR measurement_states->>'_adapter_request_ref'=$3)) prior")
+        .bind(turn).bind(provider).bind(predecessor).fetch_one(conn).await?;
+    Ok(attempt.map(|attempt| attempt.saturating_add(1)))
+}
+
+/// Replaces a source's exact provisional request reference with its reported failure-event identity.
+pub async fn supersede_observation(
+    conn: &mut Conn,
+    turn: Id,
+    provider: Id,
+    previous: &str,
+) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM usage_running WHERE turn_id=$1 AND provider_id=$2 AND origin='harness' AND scope='request' AND request_ref=$3 AND provider_request_id IS NULL")
+        .bind(turn).bind(provider).bind(previous).execute(&mut *conn).await?;
+    let repaired:Vec<Id>=sqlx::query_scalar("SELECT id FROM usage_events WHERE turn_id=$1 AND provider_id=$2 AND origin='harness' AND scope='request' AND request_ref=$3 AND provider_request_id IS NULL AND measurement_states @> '{\"_closed_from_turn\":true}'::jsonb FOR UPDATE")
+        .bind(turn).bind(provider).bind(previous).fetch_all(&mut *conn).await?;
+    for id in repaired {
+        rollup::unfold_event(conn, id).await?;
+        sqlx::query("DELETE FROM usage_events WHERE id=$1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(())
+}
+
 /// Whether request-level adapter records already replace this turn's cumulative fallback.
 pub async fn has_harness_requests(conn: &mut Conn, turn: Id) -> Result<bool, DbError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM usage_events WHERE turn_id=$1 AND origin='harness' AND scope='request' AND purpose='turn')")
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM usage_events WHERE turn_id=$1 AND (origin='harness' OR measurement_states ? '_adapter_request_ref') AND scope='request' AND purpose='turn')")
         .bind(turn).fetch_one(conn).await?)
 }
 
@@ -734,10 +1295,11 @@ async fn list_live_inner(
         query.push(" AND d.running");
     }
     rollup::push_filter(&mut query, &filter);
+    rollup::push_tier_filter(&mut query, &filter, false);
     if requests_only {
         // Forwarder rows remain the token ledger, while adapter rows alone define
         // request performance for every provider kind. Legacy turns remain visible.
-        query.push(" AND (d.running OR d.origin='orch' OR (d.origin='harness' AND (d.scope='request' OR NOT EXISTS (SELECT 1 FROM usage_events r WHERE r.turn_id=d.turn_id AND r.origin='harness' AND r.scope='request'))))");
+        query.push(" AND (d.running OR (d.origin='orch' OR (d.origin='forwarder' AND d.request_ref IS DISTINCT FROM 'lease.close')) OR (d.origin='harness' AND (d.scope='request' OR d.measurement_states ? 'declared_counters' OR NOT EXISTS (SELECT 1 FROM usage_events r WHERE r.turn_id=d.turn_id AND (r.origin='harness' OR r.measurement_states ? '_adapter_request_ref') AND r.scope='request'))))");
     }
     if let Some((at, id)) = listing.after {
         query
@@ -769,11 +1331,12 @@ pub async fn finish_running(
     turn: Id,
     outcome: &str,
     error: Option<&Json>,
+    keep_subagents: bool,
 ) -> Result<Vec<EventRow>, DbError> {
     use orch_api_contract::usage::UsageMeasurement;
     // The change numbers are taken at commit by orch_commit_work: no counter is locked while this runs.
-    let rows=sqlx::query_as::<_,EventRow>(sqlx::AssertSqlSafe(format!("SELECT true AS running,{EVENT_COLUMNS} FROM usage_running WHERE turn_id=$1 ORDER BY at,id FOR UPDATE")))
-        .bind(turn).fetch_all(&mut *conn).await?;
+    let rows=sqlx::query_as::<_,EventRow>(sqlx::AssertSqlSafe(format!("SELECT true AS running,{EVENT_COLUMNS} FROM usage_running WHERE turn_id=$1 AND (NOT $2 OR NOT measurement_states @> '{{\"subagent\":true}}'::jsonb) ORDER BY at,id FOR UPDATE")))
+        .bind(turn).bind(keep_subagents).fetch_all(&mut *conn).await?;
     let columns = EVENT_COLUMNS.replace("credits::text AS credits", "credits");
     let mut written = Vec::new();
     for mut row in rows {
@@ -800,11 +1363,43 @@ pub async fn finish_running(
                 *member = UsageMeasurement::Unsupported;
             }
         }
-        let states = serde_json::to_value(&timing).unwrap_or_default();
-        sqlx::query("UPDATE usage_running SET outcome=$2,measurement_states=$3 WHERE id=$1")
+        timing.error_reason = error
+            .and_then(|error| error.get("reason"))
+            .and_then(Json::as_str)
+            .map(str::to_owned)
+            .or_else(|| timing.error_reason.clone());
+        timing.upstream_status = error
+            .and_then(|error| error.get("status"))
+            .and_then(Json::as_i64)
+            .or(timing.upstream_status);
+        if outcome == "provider_unreachable" && timing.first_output.is_some() {
+            timing.outcome = UsageMeasurement::Told {
+                value: "stream_interrupted".into(),
+            };
+        }
+        let outcome = timing
+            .outcome
+            .value()
+            .map(String::as_str)
+            .unwrap_or(outcome);
+        let mut states = row.measurement_states.clone();
+        if let Some(states) = states.as_object_mut() {
+            states.insert("_closed_from_turn".into(), Json::Bool(true));
+        }
+        if let (Some(states), Some(new)) = (
+            states.as_object_mut(),
+            serde_json::to_value(&timing)
+                .ok()
+                .and_then(|value| value.as_object().cloned()),
+        ) {
+            states.extend(new);
+        }
+        sqlx::query("UPDATE usage_running SET outcome=$2,measurement_states=$3,error_reason=$4,upstream_status=$5 WHERE id=$1")
             .bind(row.id)
             .bind(outcome)
             .bind(&states)
+            .bind(timing.error_reason.as_deref())
+            .bind(timing.upstream_status)
             .execute(&mut *conn)
             .await?;
         let done=sqlx::query(sqlx::AssertSqlSafe(format!("INSERT INTO usage_events({columns}) SELECT {columns} FROM usage_running WHERE id=$1 ON CONFLICT(id) DO NOTHING")))
@@ -815,6 +1410,8 @@ pub async fn finish_running(
             .await?;
         if done.rows_affected() == 1 {
             rollup::fold_event(conn, row.id).await?;
+            row.error_reason = timing.error_reason.clone();
+            row.upstream_status = timing.upstream_status;
             row.running = false;
             row.outcome = Some(outcome.to_owned());
             row.measurement_states = states;
@@ -829,7 +1426,10 @@ pub async fn stale_running_turns(
     conn: &mut Conn,
     limit: i64,
 ) -> Result<Vec<(Id, Option<String>, Option<Json>)>, DbError> {
-    Ok(sqlx::query_as("SELECT r.turn_id,t.state,t.error FROM usage_running r LEFT JOIN turns t ON t.id=r.turn_id WHERE r.turn_id IS NOT NULL AND (t.id IS NULL OR t.state NOT IN ('starting','running')) GROUP BY r.turn_id,t.state,t.error ORDER BY min(r.at) LIMIT $1")
+    Ok(sqlx::query_as(r#"SELECT r.turn_id,t.state,t.error FROM usage_running r LEFT JOIN turns t ON t.id=r.turn_id WHERE r.turn_id IS NOT NULL AND (t.id IS NULL OR t.state NOT IN ('starting','running'))
+        AND NOT (r.measurement_states @> '{"subagent":true}'::jsonb AND EXISTS(SELECT 1 FROM items i WHERE i.turn_id=r.turn_id AND i.kind='tool_call'
+          AND i.payload @? '$.background_tasks.*.task ? (@.kind == "subagent" && @.state == "running")'))
+        GROUP BY r.turn_id,t.state,t.error ORDER BY min(r.at) LIMIT $1"#)
         .bind(limit).fetch_all(conn).await?)
 }
 
@@ -859,6 +1459,10 @@ impl EventRow {
                 value: value.clone(),
             };
         }
+        timing.error_reason = self.error_reason.clone();
+        timing.upstream_status = self.upstream_status;
+        timing.attempt = (self.scope == scope::REQUEST).then_some(self.attempt);
+        timing.provider_request_id = self.provider_request_id.clone();
         if self.running {
             timing.outcome = UsageMeasurement::Unread;
         }

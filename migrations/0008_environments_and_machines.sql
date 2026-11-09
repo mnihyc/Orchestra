@@ -4,6 +4,7 @@ CREATE TABLE env_templates (
     id uuid NOT NULL,
     org_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     owner_id uuid,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
@@ -33,6 +34,7 @@ CREATE TABLE mounts (
     id uuid NOT NULL,
     org_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     owner_id uuid,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
@@ -104,6 +106,9 @@ CREATE TABLE commands (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     stop_confirmed_at timestamp with time zone,
     session_fact_revision bigint,
+    login_authority jsonb,
+    authority_required boolean DEFAULT false NOT NULL,
+    mcp_import_completion jsonb,
     CONSTRAINT commands_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text, 'succeeded'::text, 'failed'::text, 'expired'::text, 'cancelled'::text]))),
     CONSTRAINT commands_pkey PRIMARY KEY (id)
 );
@@ -111,6 +116,8 @@ CREATE TABLE commands (
 CREATE INDEX commands_busy_detach_idx ON commands USING btree (updated_at, id) WHERE ((kind = 'env.detach'::text) AND (state = 'failed'::text));
 
 CREATE INDEX commands_open_idx ON commands USING btree (machine_id) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
+CREATE INDEX commands_mcp_import_open_idx ON commands ((body->>'server_id'), id)
+    WHERE kind='mcp.import' AND state IN ('queued','sent','accepted');
 
 CREATE INDEX commands_open_thread_idx ON commands USING btree (((body ->> 'thread_id'::text))) WHERE (state = ANY (ARRAY['queued'::text, 'sent'::text, 'accepted'::text]));
 
@@ -177,6 +184,7 @@ CREATE TABLE environments (
     org_id uuid NOT NULL,
     placement text NOT NULL,
     home_node_id uuid NOT NULL,
+    home_overridden_at timestamp with time zone,
     workspace_root text DEFAULT '/workspace'::text NOT NULL,
     config jsonb DEFAULT '{}'::jsonb NOT NULL,
     machine_id uuid,
@@ -283,6 +291,7 @@ CREATE TABLE hosts (
     owner_id uuid,
     org_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     name text NOT NULL,
     labels text[] DEFAULT '{}'::text[] NOT NULL,
     ports jsonb,
@@ -323,6 +332,7 @@ CREATE TABLE machines (
     name text NOT NULL,
     owner_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     org_id uuid,
     revision bigint DEFAULT 1 NOT NULL,
     placement text NOT NULL,
@@ -373,6 +383,8 @@ CREATE TABLE machines (
     CONSTRAINT machines_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
 
+CREATE TRIGGER machines_revision BEFORE UPDATE ON machines FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
+
 CREATE TRIGGER agent_program_reports_write AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines FOR EACH ROW EXECUTE FUNCTION orch_project_program_reports();
 
 CREATE TRIGGER machine_resources_unavailable AFTER UPDATE OF lost_at, deleted_at ON machines FOR EACH ROW WHEN (((new.lost_at IS DISTINCT FROM old.lost_at) OR (new.deleted_at IS DISTINCT FROM old.deleted_at))) EXECUTE FUNCTION orch_machine_resources_unavailable();
@@ -382,6 +394,40 @@ CREATE TRIGGER participation_machines_delete AFTER DELETE ON machines REFERENCIN
 CREATE TRIGGER participation_machines_insert AFTER INSERT ON machines REFERENCING NEW TABLE AS participation_new_objects FOR EACH STATEMENT EXECUTE FUNCTION orch_participation_objects_changed();
 
 CREATE TRIGGER participation_machines_update AFTER UPDATE ON machines REFERENCING OLD TABLE AS participation_old_objects NEW TABLE AS participation_new_objects FOR EACH STATEMENT EXECUTE FUNCTION orch_participation_objects_changed();
+
+CREATE TRIGGER machine_program_projections AFTER INSERT OR UPDATE OF facts, status, deleted_at ON machines
+  FOR EACH ROW EXECUTE FUNCTION orch_machine_program_projections();
+ALTER TABLE machine_program_adapters ADD FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE;
+ALTER TABLE machine_harness_builds ADD FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE;
+ALTER TABLE machine_executor_reports ADD FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE;
+
+-- Each rebuildable projection is filled in one pass; stored facts and build payloads stay untouched.
+INSERT INTO machine_program_adapters(machine_id,kind)
+SELECT DISTINCT m.id,a->>'kind' FROM machines m
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(m.facts->'adapters')='array' THEN m.facts->'adapters' ELSE '[]'::jsonb END) a
+WHERE m.status='active' AND m.deleted_at IS NULL AND a->>'kind' IS NOT NULL
+ON CONFLICT DO NOTHING;
+INSERT INTO machine_harness_builds(machine_id,kind,version)
+SELECT DISTINCT m.id,h->>'kind',h->>'version' FROM machines m
+  CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(m.facts->'harnesses')='array' THEN m.facts->'harnesses' ELSE '[]'::jsonb END) h
+WHERE m.status='active' AND m.deleted_at IS NULL AND h->>'kind' IS NOT NULL AND h->>'version' IS NOT NULL
+ON CONFLICT DO NOTHING;
+INSERT INTO machine_executor_reports(machine_id,ordinal,payload)
+SELECT m.id,p.ordinal,jsonb_build_object('kind','executor','executor',p.value->'executor',
+  'state',CASE WHEN jsonb_typeof(p.value->'state')='string' THEN p.value->>'state' END)
+FROM machines m CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(m.facts->'plugins')='array' THEN m.facts->'plugins' ELSE '[]'::jsonb END)
+  WITH ORDINALITY AS p(value,ordinal)
+WHERE m.deleted_at IS NULL AND p.value->>'kind'='executor' AND jsonb_typeof(p.value->'kind')='string'
+ON CONFLICT DO NOTHING;
+WITH counts AS (
+  SELECT harness_kind AS kind,count(*) AS profiles,0::bigint AS machines,0::bigint AS builds FROM agents WHERE deleted_at IS NULL GROUP BY harness_kind
+  UNION ALL SELECT kind,0,count(*),0 FROM agent_program_reports GROUP BY kind
+  UNION ALL SELECT kind,0,0,count(*) FROM agent_program_builds GROUP BY kind
+), totals AS (
+  SELECT k.kind,COALESCE(sum(c.profiles),0)::bigint profiles,COALESCE(sum(c.machines),0)::bigint machines,
+    COALESCE(sum(c.builds),0)::bigint builds FROM agent_program_kinds k LEFT JOIN counts c USING(kind) GROUP BY k.kind
+)
+UPDATE agent_program_kinds k SET profile_count=t.profiles,machine_count=t.machines,build_count=t.builds FROM totals t WHERE k.kind=t.kind;
 
 ALTER TABLE agent_program_reports ADD CONSTRAINT agent_program_reports_machine_id_fkey FOREIGN KEY (machine_id) REFERENCES machines(id) ON DELETE CASCADE;
 
@@ -434,6 +480,7 @@ CREATE TABLE mcp_servers (
     id uuid NOT NULL,
     org_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     owner_id uuid,
     machine_id uuid,
     environment_id uuid,
@@ -719,3 +766,30 @@ CREATE TABLE terminal_sessions (
 CREATE INDEX terminal_sessions_open_idx ON terminal_sessions USING btree (environment_id, opened_by) WHERE (state <> 'closed'::text);
 
 CREATE TRIGGER terminal_sessions_live AFTER INSERT OR DELETE OR UPDATE ON terminal_sessions FOR EACH ROW EXECUTE FUNCTION machine_views_notify();
+
+
+-- Flat resources use the same place-defined tag catalogue as the hierarchy.
+CREATE TABLE resource_tags (
+    resource_kind text NOT NULL,
+    resource_id uuid NOT NULL,
+    tag_id uuid NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (resource_kind,resource_id,tag_id),
+    CHECK (resource_kind IN ('provider','agent','environment','host','machine','template','mcp_server','mount','skill'))
+);
+CREATE INDEX resource_tags_tag_idx ON resource_tags(tag_id,resource_kind,resource_id);
+
+CREATE FUNCTION orch_resource_tags_deleted() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    DELETE FROM resource_tags WHERE resource_kind=TG_ARGV[0] AND resource_id=OLD.id;
+    RETURN OLD;
+END;
+$$;
+CREATE TRIGGER resource_tags_providers_deleted AFTER DELETE ON providers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('provider');
+CREATE TRIGGER resource_tags_agents_deleted AFTER DELETE ON agents FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('agent');
+CREATE TRIGGER resource_tags_environments_deleted AFTER DELETE ON environments FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('environment');
+CREATE TRIGGER resource_tags_hosts_deleted AFTER DELETE ON hosts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('host');
+CREATE TRIGGER resource_tags_machines_deleted AFTER DELETE ON machines FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('machine');
+CREATE TRIGGER resource_tags_env_templates_deleted AFTER DELETE ON env_templates FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('template');
+CREATE TRIGGER resource_tags_mcp_servers_deleted AFTER DELETE ON mcp_servers FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mcp_server');
+CREATE TRIGGER resource_tags_mounts_deleted AFTER DELETE ON mounts FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('mount');
+CREATE TRIGGER resource_tags_skills_deleted AFTER DELETE ON skills FOR EACH ROW EXECUTE FUNCTION orch_resource_tags_deleted('skill');

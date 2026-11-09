@@ -34,6 +34,8 @@ case "$SMOKE_RUN" in
 esac
 SMOKE_RELEASES="$SMOKE_BASE/releases"
 SMOKE_DIR="$SMOKE_BASE/runs/$SMOKE_RUN"
+python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" validate --repo "$SMOKE_REPO" \
+  --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name preflight
 mkdir -p "$SMOKE_DIR"
 FAILED=0
 CHECKED=0
@@ -130,13 +132,18 @@ bridge_address() { docker network inspect bridge --format '{{(index .IPAM.Config
 new_stack() {
   local name="$1" port="${ORCH_SMOKE_PORT:-$2}" release="$3" tag
   tag="$(release_tag "$release")"
-  STACK="$SMOKE_DIR/$name/deploy"
+  SMOKE_SCENARIO="$name"
   PROJECT="${ORCH_SMOKE_PROJECT_PREFIX:-orchsmoke$SMOKE_RUN}$name"
   EDGE_PORT="$port"; GATEWAY_PORT=$((port + 1))
   EDGE="http://127.0.0.1:$EDGE_PORT"
   if docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | grep -q .; then abort "the project $PROJECT has containers still"; fi
-  rm -rf "${SMOKE_DIR:?}/$name"
-  mkdir -p "$SMOKE_DIR/$name"
+  # Refuse stale files instead of deleting them at startup. Prepare the exact
+  # literal absolute cleanup command before any stack or credential is created.
+  python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" prepare --repo "$SMOKE_REPO" \
+    --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$name"
+  SMOKE_STACK_PREPARED=1
+  STACK="$SMOKE_DIR/$name/deploy"
+  SMOKE_COMPOSE_FILES="$STACK/compose.yml"
   tar -xzf "$release/orch-deploy-$tag.tar.gz" -C "$SMOKE_DIR/$name"
   cp "$STACK/.env.example" "$STACK/.env"
   {
@@ -157,10 +164,10 @@ new_stack() {
 # update_sh ARGS...: update.sh of the stack.
 # Managed scenarios use the edge's Docker name for connector downloads. The
 # updater still checks the actual published edge from the host.
-update_sh() { (cd "$STACK" && ORCH_READY_URL="${ORCH_READY_URL:-$EDGE}" ./update.sh "$@"); }
+update_sh() { (cd "$STACK" && COMPOSE_PROJECT_NAME="$PROJECT" COMPOSE_FILE="$STACK/compose.yml" ORCH_READY_URL="${ORCH_READY_URL:-$EDGE}" ./update.sh "$@"); }
 
 # compose ARGS...: docker compose in the stack.
-compose() { (cd "$STACK" && docker compose "$@"); }
+compose() { (cd "$STACK" && COMPOSE_PROJECT_NAME="$PROJECT" COMPOSE_FILE="$SMOKE_COMPOSE_FILES" docker compose "$@"); }
 
 # doctor ARGS...: orchctl doctor in the API's container.
 doctor() { compose exec -T api /opt/orchctl/orchctl doctor "$@"; }
@@ -181,14 +188,33 @@ ready() { doctor --expect-version "${1#v}"; }
 
 # finish: takes the stack down, removes it, and exits by what failed.
 finish() {
+  SMOKE_CLEANUP_COMPLETE=0
   stop_site
   if [ "${ORCH_SMOKE_KEEP:-0}" = 1 ]; then
     say "kept: $STACK (docker compose -p $PROJECT; down -v and remove the directory to clean up)"
   else
-    compose down -v > /dev/null 2>&1 || true
-    rm -rf "$(dirname "$STACK")"
-    # The run's own directory goes with its last stack; another run's is never touched.
-    rmdir "$SMOKE_DIR" 2> /dev/null || true
+    if ! compose down -v; then
+      fail "owned Compose cleanup failed; retained $STACK for exact cleanup"
+      return 1
+    fi
+    local remaining kind
+    for kind in container network volume; do
+      case "$kind" in
+        container) remaining="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+        network) remaining="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+        volume) remaining="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+      esac
+      if [ -n "$remaining" ]; then
+        fail "owned $kind remains after Compose cleanup; retained $STACK"
+        return 1
+      fi
+    done
+    if declare -F smoke_cleanup_owned_image > /dev/null; then
+      smoke_cleanup_owned_image || return 1
+    fi
+    python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" execute --repo "$SMOKE_REPO" \
+      --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$SMOKE_SCENARIO" || return 1
+    SMOKE_CLEANUP_COMPLETE=1
   fi
   printf '\n%s: %d checks, %d failed\n' "$(basename "$0")" "$CHECKED" "$FAILED"
   [ "$FAILED" -eq 0 ]

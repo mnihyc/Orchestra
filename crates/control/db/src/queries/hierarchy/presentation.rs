@@ -31,7 +31,6 @@ pub async fn change_with_own(
     Ok(sqlx::query_scalar(
         "UPDATE nodes SET name = COALESCE($2, name), description = COALESCE($3, description),
             title_source = CASE WHEN $2::text IS NULL THEN title_source ELSE 'user' END,
-            description_source = CASE WHEN $3::text IS NULL THEN description_source ELSE 'user' END,
             color = CASE WHEN $4 THEN $5::smallint WHEN $8 THEN NULL ELSE color END,
             custom_color = CASE WHEN $4 THEN NULL WHEN $8 THEN $9::text ELSE custom_color END,
             revision = revision + 1, updated_at = $7

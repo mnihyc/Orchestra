@@ -111,7 +111,7 @@ export function Recycle({ scope, open, onClose }: RecycleProps) {
               <Checkbox label={t('change.recycle.withProcesses')} hint={t('change.recycle.withProcessesHint')} checked={withProcesses} onCheckedChange={setWithProcesses} />
             </div>
             {dry.isError && <ErrorAlert error={dry.error} action={<Button size="sm" onClick={() => void dry.refetch()}>{t('common.tryAgain')}</Button>} />}
-            {dry.isPending && <SkeletonRows rows={3} />}
+            {dry.isPending && <SkeletonRows read={dry} rows={3} />}
             {reply !== undefined && (
               <div className={stale ? 'flex flex-col gap-3 opacity-60 transition-opacity' : 'flex flex-col gap-3'} aria-busy={stale} data-recycle-list>
                 <p className="text-base text-text" data-recycle-sentence>

@@ -5,7 +5,7 @@
  * is asked to change nothing is told so ("nothing to change"), instead of being sent its own values back.
  * The request is built here and nowhere else.
  */
-import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, ThreadAccess } from '@/generated/api-types';
+import type { ArrangementType, ChangeOptions, CopyInto, FileSelection, ForkEnvironment, ForkHistory, ForkRequest, MountChoice, MountFate, PlanMount, Thread, ThreadAccess } from '@/generated/api-types';
 
 /** What the person chose for one mount; a mount without one takes its default. */
 export interface MountPick {
@@ -41,7 +41,7 @@ export type FileChoice = { mode: 'all' } | { mode: 'none' } | { mode: 'selection
 export type WhereChoice =
   | { kind: 'same' }
   | { kind: 'use'; id: string; files: FileChoice }
-  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean };
+  | { kind: 'new'; hostId: string | null; name: string; files: FileChoice; home: boolean; privateViews: boolean; onlyMe: boolean; temporary?: boolean };
 
 /** How much of the history a fork or a switch carries: all of it, up to one turn (what forking from a message asks), a range, a summary, none. */
 export type HistoryChoice = 'all' | 'upto' | 'range' | 'summary' | 'none';
@@ -104,6 +104,13 @@ export function initialChoices(result: 'new' | 'replace', toTurn: number | null 
   };
 }
 
+/** A built-in source has no current native profile or workspace to inherit. */
+export function initialThreadChoices(thread: Pick<Thread, 'program' | 'environment'>, result: 'new' | 'replace', toTurn: number | null = null): Choices {
+  const choices = initialChoices(result, toTurn);
+  if (thread.program?.id !== 'orch' || thread.environment !== null) return choices;
+  return { ...choices, where: { kind: 'use', id: '', files: { mode: 'none' } }, page: result === 'new' ? 'private' : choices.page };
+}
+
 export const ALL_FILES: FileChoice = { mode: 'all' };
 
 /** The patterns of a selection, one to a line, with the empty lines left out. */
@@ -138,6 +145,7 @@ function environmentOf(where: WhereChoice): ForkEnvironment | null {
           ...(where.home ? { home: true } : {}),
           ...(where.privateViews ? {} : { private_views: false }),
           ...(where.onlyMe ? { access: 'only_me' as const } : {}),
+          ...(where.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}),
         },
       };
   }

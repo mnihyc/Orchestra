@@ -22,7 +22,7 @@ import { amountText } from '@/features/usage/capForm';
 import { decimal, formatCredits } from '@/features/usage/figures';
 import { allowanceWords, capSentence, capTitle, startsAgain, usedWords } from '@/features/usage/words';
 import { useFormatContext } from '@/lib/appearance';
-import { formatTokens } from '@/lib/format';
+import { formatNumber, formatTokens } from '@/lib/format';
 import { boxClasses,Section } from '@/shell/Page';
 import { ForecastLine } from './ForecastLine';
 import { CapTitle,CapSetter,CapShare } from './CapPeople';
@@ -86,7 +86,7 @@ export function CapMeter({ status, label }: { status: CapStatus; label: string }
 function Waiting({ capId }: { capId: string }) {
   const { t } = useTranslation();
   const query = useQuery(waitingQuery(capId));
-  if (query.isPending) return <SkeletonRows rows={2} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={2} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   if (query.data.items.length === 0) return <EmptyState compact title={t('caps.row.waitingNone')} />;
   return (
@@ -274,6 +274,7 @@ function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: Cap
       </p>
       {running && showWaiting && <Waiting capId={cap.id} />}
 
+      {(status.left_out.unrated_services??0)>0 && <p className="text-sm text-text-muted">{t('usage.serviceUnits.unpriced',{count:status.left_out.unrated_services??0,value:formatNumber(status.left_out.unrated_services??0,locale)})}</p>}
       {status.left_out.unrated_tokens > 0 && (
         <p className="flex flex-wrap items-baseline gap-x-2 text-sm text-text-muted">
           <span>{t('caps.row.leftOut', { tokens: formatTokens(status.left_out.unrated_tokens, locale) })}</span>
@@ -318,7 +319,7 @@ function LimitsView({ of, metering, onRates, bare = false, className }: LimitsPr
   const add = () => openCap(of.kind === 'node' ? { node: { id: of.id } } : of.kind === 'provider' ? { provider: { id: of.id, name: of.name } } : {});
 
   const body = query.isPending ? (
-    <SkeletonRows rows={3} />
+    <SkeletonRows read={query} rows={3} />
   ) : query.isError ? (
     <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />
   ) : rows.length === 0 ? (

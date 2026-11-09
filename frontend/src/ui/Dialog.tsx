@@ -9,6 +9,7 @@ import { Dialog as Primitive } from 'radix-ui';
 import { type ReactNode, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { restoreFocusQuietly } from '@/ui/focus';
 import { cx } from '@/ui/cx';
 import { ContentBoundary } from '@/ui/ContentBoundary';
 import { useScrolls } from '@/ui/useScrolls';
@@ -55,13 +56,13 @@ export function useOpener(): { remember: () => void; giveBack: (event: Event) =>
         event.preventDefault();
         const current = currentPrompt();
         if (current !== null && !current.contains(document.activeElement)) {
-          (current.querySelector<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button') ?? current).focus();
+          restoreFocusQuietly(current.querySelector<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button') ?? current);
         }
         return;
       }
       opener.current = null;
       event.preventDefault();
-      element.focus();
+      restoreFocusQuietly(element);
     },
   };
 }

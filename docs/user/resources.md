@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Resources and movement
 screens: /resources, /resources/agents/$id, /resources/machines/$id, /resources/providers/$id, /resources/environments/$id, /thread/$threadId
 keywords: environment, provider, home, browser, display, port, files, terminal, folders, fork, move, connect a machine, install, service, foreground, data directory, remove, multiple connectors
+summary: Understand environments, providers, profiles and machines before changing where work runs.
 ---
 
 # Resources and movement
@@ -88,6 +90,12 @@ setups. Its declared fields provide the form, choices and help. Profiles do
 not own another runtime. Configuration trust controls whether project settings,
 hooks, plugins or servers can be loaded; instruction files do not grant that
 trust by themselves.
+
+The **Profile** tab lists saved **Configuration keys** without their values. **Show all** opens a
+long list; nested names stay distinct from a literal key containing a dot. The JSON editor keeps
+options the program does not expose as ordinary controls. Declared model parameters still obey
+the current provider's enabled choices and native limits when a turn is prepared, including on
+a program's own sign-in; a profile cannot bypass them.
 
 The profile's technical details name executors and tool sets from their declarations.
 Opening those details reads any executor names the profile does not already supply.

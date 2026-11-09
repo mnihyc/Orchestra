@@ -10,6 +10,7 @@ import { providerQuery } from '@/api/resources';
 import { clearSetting, putSetting, targetSettingsKey, type SettingsTarget } from '@/api/settings';
 import { WhereSet } from '@/features/help/WhereSet';
 import { CallHelp } from '@/features/calls/Help';
+import { TellMembers } from '@/features/admin-messages/TellMembers';
 import { SettingHint } from '@/features/help/SettingHint';
 import { ORDERED_KEYS } from '@/features/settings/ValueControl';
 import { SettingValue } from '@/features/settings/SettingValue';
@@ -17,8 +18,8 @@ import { isResourceSetting } from '@/features/settings/ResourceChoice';
 import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { emptySettingText, emptySettingValue, SettingSummary } from '@/features/settings/SettingSummary';
 import { SettingReachLine } from '@/features/settings/Reach';
-import { editableValue } from '@/features/settings/settingParts';
-import { type KeyDef, availableShape, honoursLocks, lockAbove, provenanceOf, sameValue, words } from '@/features/settings/settingsModel';
+import { editableValue, ownSource } from '@/features/settings/settingParts';
+import { type KeyDef, availableShape, honoursLocks, lockAbove, narrowsOnly, provenanceOf, sameValue, words } from '@/features/settings/settingsModel';
 import { settingShape } from '@/features/settings/settingText';
 import { memoryBelowUse, runtimeEffect } from '@/features/settings/runtimeEffects';
 import type { Access, ResolvedSetting, UserRef } from '@/generated/api-types';
@@ -90,7 +91,7 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const shape = useMemo(() => availableShape(settingShape(def), setting.available_values), [def, setting.available_values]);
   // A discrete choice commits immediately; free input commits on leaving its field/form or Enter.
   const joining = def.merge !== 'replace';
-  const instant = !joining && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || def.key === 'calls.rules' || isResourceSetting(def.key));
+  const instant = (!joining || narrowsOnly(def.merge) && def.merge !== 'intersect') && (shape.type === 'bool' || shape.type === 'choice' || def.key === 'agent.default_provider_id' || def.key === 'calls.rules' || isResourceSetting(def.key));
   const inForce = editableValue(def, setting, shape);
   // A remote ancestor or own change must not discard what this person is still writing.
   const [draft, setDraft] = useState<unknown>(inForce);
@@ -171,7 +172,11 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     reset.reset(); undo.reset(); write.mutate({ value, ...(locked === undefined ? {} : { locked }), before: baseOwn, guard: baseRevision });
   };
 
-  const provenance = provenanceOf(setting, target);
+  const stricterAbove = narrowsOnly(def.merge) && setting.own !== null
+    && !ownSource(setting.source, target) && !['default', 'environment'].includes(setting.source.scope);
+  const provenance = stricterAbove
+    ? { kind: 'inherited' as const, scope: setting.source.scope, place: setting.source.node?.name ?? null }
+    : provenanceOf(setting, target);
   const higherLock = lockAbove(setting, target);
   const lockedAbove = provenance.kind === 'locked';
   const mayLock = target.kind === 'system' || holds(place.access, 'settings.manage');
@@ -184,7 +189,7 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const fault = faults.find((entry) => entry.path === 'value' || entry.path === '')?.message ?? faults[0]?.message ?? (invalid ? t('settings.compact.invalidValue') : undefined);
 
   const lockable = honoursLocks(def) && (target.kind === 'node' || target.kind === 'system');
-  const locked = setting.own?.locked === true;
+  const locked = honoursLocks(def) && setting.own?.locked === true;
 
   const complex = joining || !['bool', 'int', 'choice', 'text', 'id', 'time'].includes(shape.type) || shape.type === 'text' && (shape.maxLength ?? 0) > 200;
   useLayoutEffect(() => {
@@ -241,7 +246,7 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
     onKeyDown={(event) => { if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); event.stopPropagation(); commit(); } }}
     onSubmit={(event) => { event.preventDefault(); commit(); }}>
     {showsDefault && !emptyDefault && <span className="text-xs text-text-muted">{t('settings.compact.defaultPrefix')}</span>}
-    <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t) : undefined}
+    <SettingValue key={attempt} shape={shape} def={def} setting={setting} target={target} display={def.display} placeholder={emptyDefault ? emptySettingText(def.key, true, t, def.display) : undefined}
       value={shown} label={def.title} disabled={busy} error={fault} onEdited={() => { setTouched(true); setInvalid(false); }} say={say}
       ordered={ORDERED_KEYS.has(def.key)} onApply={applyValue} onChange={(next) => { setDraft(next); setTouched(true); setInvalid(false); if (instant && writable) writeValue(next); }} />
     {dirty && write.isError && !stale && !ownChanged && <Button size="sm" pending={busy} onClick={() => { if (instant) writeValue(draft); else commit(); }}>{t('common.tryAgain')}</Button>}
@@ -249,12 +254,19 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
       <Button size="sm" icon={<X aria-hidden />} disabled={busy} onClick={() => { setDraft(inForce); setBase(inForce); setBaseRevision(setting.own?.revision ?? null); setBaseOwn(setting.own); setTouched(false); setInvalid(false); setAttempt((count) => count + 1); setEditorOpen(false); write.reset(); }}>{t('common.cancel')}</Button></>}
   </form>;
   const showsMemory = (def.key === 'env.resources' || def.key === 'runtime.resources') && (target.kind === 'environment' || target.kind === 'provider');
-  const applicability = typeof setting.automation_reason === 'string' ? setting.automation_reason.startsWith('calls.') ? t(setting.automation_reason, { defaultValue: t('calls.servicePaused') }) : setting.automation_reason : typeof setting.not_applicable_reason === 'string' ? t('inspector.parameters.subagentsUnsupported') : undefined;
+  const unusedProgram = setting.not_applicable_reason === 'prompt_cache_ttl_unsupported' && 'not_applicable_program' in setting && typeof setting.not_applicable_program === 'string' ? setting.not_applicable_program : null;
+  const unusedNote = setting.not_applicable_reason === 'prompt_cache_ttl_unsupported' ? unusedProgram === null ? t('promptCacheTtl.notUsedUnknown') : t('promptCacheTtl.notUsedBy', { program: unusedProgram }) : null;
+  const imageProgramPrefix = 'harness_image_generation_unavailable:';
+  const applicability = unusedNote !== null ? unusedNote : typeof setting.automation_reason === 'string' ? setting.automation_reason.startsWith('calls.') ? t(setting.automation_reason, { defaultValue: t('calls.servicePaused') }) : setting.automation_reason
+    : setting.not_applicable_reason?.startsWith(imageProgramPrefix) === true ? t('inspector.parameters.imageGenerationUnsupported', { program: setting.not_applicable_reason.slice(imageProgramPrefix.length) })
+      : setting.not_applicable_reason === 'harness_image_generation_unavailable' ? t('inspector.parameters.imageGenerationUnavailable')
+        : typeof setting.not_applicable_reason === 'string' ? t('inspector.parameters.subagentsUnsupported') : undefined;
   const example = shape.type !== 'bool' && shape.type !== 'choice' && !(shape.type === 'list' && shape.item.type === 'choice') && def.example !== null && def.example !== undefined && def.example !== '' && !sameValue(def.example, setting.value)
     ? <><p>{t('settings.compact.example')}</p><SettingSummary def={def} value={def.example} example /></> : null;
   const range = shape.type === 'int' && (shape.min !== null || shape.max !== null) ? shape.min !== null && shape.max !== null ? t('settings.editor.between', { min: shape.min, max: shape.max })
     : shape.min !== null ? t('settings.editor.atLeast', { min: shape.min }) : t('settings.editor.atMost', { max: shape.max ?? 0 }) : null;
   const semantic = def.key.startsWith('search.');
+  const agentSchedule = def.key === 'threads.agent_schedules' || def.key === 'threads.agent_schedule_hours' || def.key === 'threads.agent_schedule_runs';
   const extraHelp = semantic || joining || example !== null || range !== null || applicability !== undefined || settingGuide(def) !== null;
   const supplementaryHelp = <>
     {semantic && <p>{def.description}</p>}
@@ -268,17 +280,19 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
   const callSection = def.key === 'calls.rules' ? 'rules' : def.key === 'calls.return' ? 'candidates' : def.key.startsWith('calls.') ? 'guard' : null;
 
   const row: Omit<SettingRowLayoutProps, 'value'> = {
-      name: def.title, description: semantic ? undefined : def.description, settingKey: def.key, readOnly: !writable, reason,
+      name: def.title, description: semantic || agentSchedule || def.key === 'org.terms' ? undefined : def.description, settingKey: def.key, readOnly: !writable, reason,
       reach: (target.kind === 'node' || target.kind === 'system') ? <SettingReachLine target={target} def={def} name={def.title} snapshot={JSON.stringify([setting.value, setting.own, setting.locked_by, setting.source, setting.parts])} /> : undefined,
-      help: def.key === 'retention.agent_history_idle_days' || semantic ? <SettingHint def={def} setting={setting} target={target} /> : callSection !== null ? <CallHelp section={callSection} term={def.title} what={<><p>{t(`calls.help.${callSection}.what`)}</p>{writable && extraHelp && supplementaryHelp}</>} /> : writable && extraHelp ? <HelpHint term={def.title} what={supplementaryHelp} /> : undefined,
-      actions: <>{locked && <LockBadge label={t('settings.editor.lockedHere')} />}
+      help: def.key === 'retention.agent_history_idle_days' || semantic || agentSchedule ? <SettingHint def={def} setting={setting} target={target} /> : callSection !== null ? <CallHelp section={callSection} term={def.title} what={<><p>{t(`calls.help.${callSection}.what`)}</p>{writable && extraHelp && supplementaryHelp}</>} /> : writable && extraHelp || applicability !== undefined ? <HelpHint term={def.title} what={writable ? supplementaryHelp : <p>{applicability}</p>} /> : undefined,
+      actions: <>{def.key === 'org.terms' && target.kind === 'node' && <TellMembers id={target.id} />}{locked && <LockBadge label={t('settings.editor.lockedHere')} />}
         <Menu label={t('settings.editor.menuOf', { name: def.title })} align="end" entries={entries} trigger={<IconButton size="sm" label={t('settings.editor.menuOf', { name: def.title })} icon={<Settings2 aria-hidden />} />} /></>,
       details: detailed ? (
           <div aria-label={t('settings.editor.detailsOf', { name: def.title })} className="mt-1 flex flex-col gap-3 text-sm">
             <WhereSet additionalOnly values setting={setting} def={def} target={target} />
           </div>
       ) : undefined,
-      status: setting.automation_reason?.startsWith('calls.') === true || busy || !dirty && feedback !== null || effectNote !== undefined && effectNote !== null || effect !== null || showsMemory || invalid || ownChanged && edited || error !== null || !editorOpen && complex && edited ? <>
+      status: stricterAbove || unusedNote !== null || setting.automation_reason?.startsWith('calls.') === true || busy || !dirty && feedback !== null || effectNote !== undefined && effectNote !== null || effect !== null || showsMemory || invalid || ownChanged && edited || error !== null || !editorOpen && complex && edited ? <>
+        {stricterAbove && !edited && !busy && <p role="status" className="text-sm text-text-muted">{t('settings.compact.aboveStricter')}</p>}
+        {unusedNote !== null && <p role="status" className="text-sm text-text-muted">{unusedNote}</p>}
         {setting.automation_reason?.startsWith('calls.') === true && <p role="status" className="flex flex-wrap items-center gap-1 text-sm text-text-muted">{t(setting.automation_reason, { defaultValue: t('calls.servicePaused') })}<CallHelp section="services" /></p>}
         {busy && <p className="text-sm text-text-muted">{t('settings.editor.saving')}</p>}
         {!busy && !dirty && feedback !== null && <div role="status" className="flex items-center gap-2 text-xs text-text-muted"><span>{t(feedback === 'saved' ? 'settings.compact.saved' : 'settings.compact.undone')}</span>
@@ -303,11 +317,11 @@ export function SettingRow({ def, setting: incoming, target, place, onChanged, e
         {!editorOpen && error !== null && !stale && fault === undefined && <ErrorAlert error={error} />}
       </> : undefined,
   };
-  const summary = emptySettingValue(setting.value) ? <span>{emptySettingText(def.key, showsDefault, t)}</span>
+  const summary = emptySettingValue(setting.value) ? <span>{emptySettingText(def.key, showsDefault, t, def.display)}</span>
     : <>{showsDefault && <span className="mr-1 text-xs text-text-muted">{t('settings.compact.defaultPrefix')}</span>}<SettingSummary inControl def={def} value={setting.value} /></>;
   return complex && writable ? <SettingEditor {...row} placement="inline" summary={summary} label={t('settings.compact.editValue', { name: def.title })}
     open={editorOpen} onOpenChange={setEditorOpen} disabled={busy}>
     {controls}
     {error !== null && <ErrorAlert error={error} />}
-  </SettingEditor> : <SettingRowLayout {...row} value={writable ? controls : emptySettingValue(setting.value) ? <span>{emptySettingText(def.key, false, t)}</span> : <SettingSummary def={def} value={setting.value} />} />;
+  </SettingEditor> : <SettingRowLayout {...row} value={writable ? controls : emptySettingValue(setting.value) ? <span>{emptySettingText(def.key, false, t, def.display)}</span> : <SettingSummary def={def} value={setting.value} />} />;
 }

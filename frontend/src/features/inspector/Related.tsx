@@ -19,7 +19,7 @@ export function RelatedPanel({ documentId, seq, enabled = true }: { documentId: 
   const options = relatedQuery(documentId, seq);
   const read = useInfiniteQuery({ ...options, enabled });
   if (!enabled) return null;
-  if (read.isPending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (read.isPending) return <SkeletonRows read={read} rows={LOADING_ROWS} />;
   if (read.isError) return <ErrorAlert error={read.error} action={<Button size="sm" onClick={() => void cache.resetQueries({ queryKey: options.queryKey, exact: true })}>{t('common.tryAgain')}</Button>} />;
   const first = read.data.pages[0];
   if (first === undefined) return null;

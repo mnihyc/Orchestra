@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** What can be done with an environment, from its row in the list and from its own page: start or stop one that Orch made, enable or disable, open, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -139,7 +141,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     const edit: Act | null = manage ? { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => setAsked({ what: 'edit', environment }) } : null;
     const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', environment }) } : null;
     const share = shareAct(t, { kind: 'environment', id: environment.id, name: environment.name }, environment.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/environments/${environment.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'environment', id: environment.id }) };
     const del: Act | null = manage ? { id: 'delete', label: t('trace.removeEntry'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', environment }) } : null;
     // What changes where and on what it runs, each a plan read before anything is done: for one that Orch made.
     const changed = manage && environment.machine === null && environment.status !== 'lost';
@@ -155,7 +157,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
     return {
       primary: startAct ?? stopAct ?? enableAct ?? open,
       edit,
-      entries: entriesOf([open], [startAct, stopAct, restartAct, enableAct, disableAct], [edit, rename], [updateAct, recreateAct, environment.status === 'lost' ? null : moveAct, recover], [share, copy], [declare, del], [cleanup.act({kind:'environment',id:environment.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'environment', environment), ...resourceDuplicateEntries(t, 'environment', environment), ...entriesOf([open], [startAct, stopAct, restartAct, enableAct, disableAct], [edit, rename], [updateAct, recreateAct, environment.status === 'lost' ? null : moveAct, recover], [share, copy], [declare, del], [cleanup.act({kind:'environment',id:environment.id}, manage)])],
       keys: keysOf(rename),
       busy: where === 'row' && working,
     };
@@ -233,7 +235,7 @@ export function useEnvironmentActs(options: { onTab?: (environment: Environment,
         error={disable.error ?? undefined}
         onConfirm={() => asked !== null && disable.mutate(asked.environment)}
       >
-        <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
+        <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={pauseNote} onChange={(event)=>setPauseNote(event.target.value)} /></div>
       </ConfirmDialog>
     </>
   );

@@ -9,6 +9,7 @@
  * made, switches it off and removes it, naming it to be sure. Updating, moving and its Tools are not
  * served yet and are not offered.
  */
+import { liveIndexReason } from '@/features/files/indexWords';
 import { environmentRuntimeRows, namesRuntime, RuntimePair } from '@/features/resources/isolation/RuntimeInfo';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ENVIRONMENT_TABS, type EnvironmentTab } from '@/features/resources/tabs';
@@ -36,7 +37,7 @@ import { HarnessTrustSection } from '@/features/resources/environments/HarnessTr
 import { AgentReach } from '@/features/resources/environments/AgentReach';
 import { DataSourcesSummary } from '@/features/resources/environments/DataSources';
 import { TemporaryStatus } from '@/features/resources/environments/Temporary';
-import { McpServers } from '@/features/resources/environments/McpServers';
+import { EnvironmentTools } from '@/features/resources/environments/Tools';
 import { EnvironmentStatusText } from '@/features/resources/environments/EnvironmentList';
 import { environmentChangesVisible, environmentDisplayStatus, environmentRemovalPhase, environmentStatusDetail, holding, isBusy } from '@/features/resources/environments/words';
 import { Facts } from '@/features/resources/Facts';
@@ -45,6 +46,7 @@ import { PathValue, RuntimeChange } from '@/features/resources/TechnicalValue';
 import { EnvironmentPrograms } from '@/features/resources/agents/ProgramBuild';
 import { Hint } from '@/features/help/Hint';
 import { MachineLimits } from '@/features/resources/machines/Policy';
+import { ThreadGatewayDetails } from '@/features/gateways/ThreadGatewayStatus';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { useResourceHeading } from '@/features/resources/trail';
 import type { Environment as EnvironmentRow } from '@/generated/api-types';
@@ -58,7 +60,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 import { type Column, Table } from '@/ui/Table';
 import { SettingRow } from '@/ui/SettingRow';
@@ -71,10 +73,10 @@ function DoorPage({ children }: { children: ReactNode }) {
   return <div className="mx-auto flex h-full min-h-0 w-full max-w-(--container-page) flex-col gap-4 overflow-hidden px-4 py-4 sm:px-6">{children}</div>;
 }
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -154,6 +156,10 @@ function Overview({ environment }: { environment: EnvironmentRow }) {
           </span>
         </InlineAlert>
       )}
+      {environment.index === 'live' && <InlineAlert tone="info" title={t('largeTree.liveTitle')}>
+        <p>{liveIndexReason(t, environment.index_reason, environment.facts)}</p>
+        <p>{t('largeTree.liveCost')}</p>
+      </InlineAlert>}
       <EnvironmentPrograms id={environment.id} generation={environment.generation} />
       <Section id="environment-about" title={t('environments.overview.about')}>
         <Facts compact
@@ -197,6 +203,7 @@ function Threads({ environment, manage }: { environment: EnvironmentRow; manage:
             <Link to="/thread/$threadId" params={{ threadId: row.thread.id }} className="truncate font-medium text-text hover:underline">
               {row.thread.name ?? t('providers.threads.hiddenName')}
             </Link>
+            <ThreadGatewayDetails threadId={row.thread.id} />
             {withoutTopic && (
               <>
                 <Link to="/topic/$topicId" params={{ topicId: row.topic.id }} className="truncate text-sm text-text-muted hover:underline">
@@ -288,7 +295,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const back = useResourceHeading('environments', Boxes, query.data?.name ?? t('common.loading'), query.data?.id);
   const acts = useEnvironmentActs({ onTab: (_environment, next) => onTab(next), afterDelete: () => void navigate({ to: '/resources/environments' }) });
 
-  if (query.isPending) return <Skeletons />;
+  if (query.isPending) return <Skeletons read={query} />;
   if (query.isError) return <ErrorState className="h-full" title={t('environments.readFailed')} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const environment = query.data;
   const manage = holds(environment.access, 'environment.manage');
@@ -299,7 +306,7 @@ export function EnvironmentScreen({ environmentId, initialPort, tab, onTab, want
   const keep = acts.keepAwake(environment);
   const sectionHref = (section: string) => `/resources/environments/${encodeURIComponent(environment.id)}?tab=${section}`;
   const toolSections = [
-    { value: 'tools' as const, label: t('mcpServers.title'), panel: <McpServers environment={environment} /> },
+    { value: 'tools' as const, label: t('resourceDetails.layout.tools'), panel: <EnvironmentTools key={environment.id} environment={environment} /> },
     { value: 'terminal' as const, label: t('views.terminal.title'), panel: <EnvironmentDoor environment={environment} kind="terminal" /> },
     ...(viewPorts ? [{ value: 'ports' as const, label: t('ports.title'), panel: <PortsPanel environment={environment} initialPort={initialPort} browser={portsBrowser(environment, () => onTab('browsers'))} /> }] : []),
     ...(environment.access.permissions.includes('browser.view') ? [{ value: 'browsers' as const, label: t('browser.tab'), panel: <BrowsersPanel environment={environment} threadId={null} /> }] : []),

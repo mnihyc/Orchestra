@@ -103,11 +103,15 @@ CREATE TABLE api_tokens (
     token_hash bytea NOT NULL,
     scopes text[] DEFAULT '{}'::text[] NOT NULL,
     node_id uuid,
+    operation_scope jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     last_used_at timestamp with time zone,
     expires_at timestamp with time zone,
     revoked_at timestamp with time zone,
     CONSTRAINT api_tokens_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
+    CONSTRAINT api_tokens_operation_scope_check CHECK (operation_scope IS NULL OR
+        (cardinality(scopes) = 0 AND node_id IS NULL AND jsonb_typeof(operation_scope) = 'object'
+         AND COALESCE(jsonb_typeof(operation_scope->'rules'), '') = 'array')),
     CONSTRAINT api_tokens_pkey PRIMARY KEY (id),
     CONSTRAINT api_tokens_token_hash_key UNIQUE (token_hash),
     CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -142,6 +146,10 @@ CREATE TABLE enrollment_tokens (
     used_at timestamp with time zone,
     machine_id uuid,
     again_machine_id uuid,
+    issuer_origin jsonb,
+    issuer_required boolean DEFAULT false NOT NULL,
+    CONSTRAINT enrollment_tokens_required_issuer_check CHECK (NOT issuer_required OR issuer_origin IS NOT NULL),
+    CONSTRAINT enrollment_tokens_issuer_origin_check CHECK (issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object'),
     CONSTRAINT enrollment_tokens_access_check CHECK ((access = ANY (ARRAY['defaults'::text, 'only_me'::text, 'home'::text]))),
     CONSTRAINT enrollment_tokens_purpose_check CHECK ((purpose = ANY (ARRAY['machine'::text, 'connected'::text, 'host'::text, 'runtime'::text]))),
     CONSTRAINT enrollment_tokens_roles_check CHECK ((roles <@ ARRAY['provider'::text, 'agent'::text, 'environment'::text, 'node'::text])),
@@ -167,10 +175,12 @@ CREATE TABLE invitations (
     created_by uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     created_as_admin boolean,
+    issuer_origin jsonb,
     CONSTRAINT invitations_check CHECK (((kind = 'org'::text) = (org_id IS NOT NULL))),
     CONSTRAINT invitations_check1 CHECK (((kind = 'node'::text) = (node_id IS NOT NULL))),
     CONSTRAINT invitations_check2 CHECK (((kind = 'chat'::text) = (chat_id IS NOT NULL))),
     CONSTRAINT invitations_check3 CHECK (((email IS NULL) OR (max_uses = 1))),
+    CONSTRAINT invitations_issuer_origin_check CHECK ((issuer_origin IS NULL OR jsonb_typeof(issuer_origin) = 'object')),
     CONSTRAINT invitations_kind_check CHECK ((kind = ANY (ARRAY['system'::text, 'org'::text, 'node'::text, 'chat'::text]))),
     CONSTRAINT invitations_max_uses_check CHECK (((max_uses >= 1) AND (max_uses <= 1000))),
     CONSTRAINT invitations_role_check CHECK ((role = ANY (ARRAY['viewer'::text, 'interactor'::text, 'developer'::text, 'admin'::text]))),
@@ -178,6 +188,9 @@ CREATE TABLE invitations (
     CONSTRAINT invitations_token_hash_key UNIQUE (token_hash),
     CONSTRAINT invitations_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id)
 );
+
+COMMENT ON COLUMN invitations.issuer_origin IS
+    'Private accepted key operation and restrictions for outstanding offers; NULL retains existing browser or historical compatibility. Never public invitation content.';
 
 CREATE TABLE known_devices (
     id uuid NOT NULL,
@@ -321,6 +334,7 @@ CREATE TABLE oidc_states (
     pkce_verifier text NOT NULL,
     redirect_path text DEFAULT '/'::text NOT NULL,
     link_user_id uuid,
+    link_authority jsonb,
     invitation text,
     accept_invitation boolean DEFAULT false NOT NULL,
     session_id uuid,
@@ -329,6 +343,7 @@ CREATE TABLE oidc_states (
     browser_hash bytea NOT NULL,
     started_at timestamp with time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT oidc_states_link_authority_check CHECK (link_authority IS NULL OR (link_user_id IS NOT NULL AND jsonb_typeof(link_authority) = 'object')),
     CONSTRAINT oidc_states_check CHECK (((sensitive_purpose IS NULL) = (session_id IS NULL))),
     CONSTRAINT oidc_states_check1 CHECK (((NOT accept_invitation) OR ((invitation IS NOT NULL) AND (link_user_id IS NULL) AND (sensitive_purpose IS NULL)))),
     CONSTRAINT oidc_states_sensitive_purpose_check CHECK ((sensitive_purpose = ANY (ARRAY['token_create'::text, 'second_step_setup'::text, 'recovery_codes'::text]))),

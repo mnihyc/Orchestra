@@ -33,12 +33,14 @@ import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChan
 import type { BindingOptions, TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
+import { reachKeys, refreshReach } from '@/api/adminReach';
 
 // ---------------------------------------------------------------- what a change is
 
 /** Data the query cache keeps: the queries whose key begins with `key`, narrowed to those that name `id` anywhere in it. */
 export interface Stale {
-  key: readonly string[];
+  /** A named head with its typed query arguments, or a legacy string-only prefix. */
+  key: readonly [string, ...unknown[]] | readonly string[];
   /** Only the queries that name this identifier. */
   id?: string;
   /** A query argument at a fixed position, for views such as the finder's empty-query recents. */
@@ -66,7 +68,9 @@ export interface MissingProjection {
   containingAccount?: string;
   cancelPending?: true;
 }
-export type Change = AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number } | { approvalViews: true } | { relatedViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
+/** Bodyless administrative revocations repair their existing credential inventory suppliers. */
+export interface AdminCredentialsChanged { adminCredentials: { kind: 'tokens' } | { kind: 'sessions'; person: string } }
+export type Change = AdminCredentialsChanged | AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number } | { approvalViews: true } | { relatedViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
 
 /** The value of a parameter of the request's path, by its name in the template: `p('id')`. */
 export type PathParam = (name: string) => string;
@@ -86,6 +90,11 @@ const conversation = (id: string): Followed => ({ feed: 'thread', id });
 const blocks = (id: string): Followed => ({ feed: 'document', id });
 /** A request that changes nothing a screen reads. */
 const NOTHING: readonly Change[] = [];
+/** Ask receipts omit their views; repair each currently shown projection independently. */
+const askConversation = (id: string): Change[] => [
+  { missing: [one(id, 'ask')], cancelPending: true },
+  { missing: [every('ask-history')], cancelPending: true },
+];
 /** The views of one thing that was removed: what was read of it alone is gone; the lists it was a row of are asked again. */
 const ended = (changes: readonly Change[], id: string): Change[] => changes.map((change) => ('key' in change && change.id === id ? { ...change, gone: true } : change));
 
@@ -106,7 +115,7 @@ const placeAccess = (): Change[] => [
   { relatedViews: true },
   ...kinds('page', 'page-people', 'page-effective', 'page-history', 'defaults', 'roles', 'preview', 'agent-shares'),
   ...kinds('thread-shared', 'thread-shared-tree', 'environment-reach', AGENT_REACH, 'access-requests', 'holder-search', 'node', 'members'),
-  ...kinds('holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
+  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
   ...kinds('thread-instructions', 'model-inputs', 'model-input-block', 'user-shares'),
   TREES,
 ];
@@ -137,16 +146,18 @@ const access = (object: string, id: string): Change[] => {
     ...ones(id, 'page-people', 'page-effective', 'page-history', 'agent-shares'),
     ...(object === 'documents' ? [blocks(id)] : []),
     // Another page may say what this one gives: a thread's page says whether the people on it reach its environment.
-    ...kinds('page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
+    ...kinds('copy-destinations', 'page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
     ...views.map((head, index) => (index === 0 ? one(id, head) : every(head))),
   ];
 };
 
 /** Settings resolve down the tree: what a place sets is what every place, thread and resource inside it reads. */
 const settings = (): Change[] =>
-  kinds('settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
+  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
 
 const relatedSettings = (key: string): Change[] => key.startsWith('related.') || key.startsWith('search.semantic.') ? [{ relatedViews: true }] : [];
+/** A saved identity list omits each viewer/root's resolved model eligibility and default. Repair shown Ask reads only. */
+const askModelSetting = (key: string): Change[] => key === 'ask.models' ? [{ missing: [every('ask-models')], cancelPending: true }] : [];
 
 /** Who is in an org changed: its members, what they hold, and every list that names people of it. */
 export const people = (authority = false): Change[] => [{ people: true, ...(authority ? { authority: true } : {}) }];
@@ -240,6 +251,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /setup': () => [...me(), every('orgs')],
   'POST /auth/login': () => NOTHING,
   'POST /auth/email-code': () => NOTHING,
+  'POST /summaries/batch': () => NOTHING,
+  // These receipt-only adapters perform their separate current reads; a receipt supplies no replacement projection.
+  'POST /summaries/{kind}/{id}/refresh': () => NOTHING,
+  'PUT /documents/{id}/summary-options': () => NOTHING,
   'POST /auth/register': () => NOTHING,
   'POST /auth/recovery': () => NOTHING,
   'POST /auth/recovery/confirm': () => kinds('recovery-token'),
@@ -277,6 +292,49 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /me/state/help': () => kinds('first-steps'),
   'PUT /me/first-steps': () => kinds('first-steps', 'me-state'),
   'PUT /me/state/project_views/{project_id}': () => NOTHING,
+
+  // -- private Ask conversations; kept threads enter their ordinary live tree separately
+  'POST /ask/conversations': () => [{ missing: [every('ask-history')], cancelPending: true }],
+  'POST /ask/conversations/{id}/messages': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/stop': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/keep': (p) => askConversation(p('id')),
+
+  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options'), TREES],
+
+  'POST /hosts/{id}/move-out/preview': () => NOTHING,
+  'POST /hosts/{id}/move-out': (p) => [...access('hosts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /machines/{id}/move-out/preview': () => NOTHING,
+  'POST /machines/{id}/move-out': (p) => [...access('machines', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /agents/{id}/move-out/preview': () => NOTHING,
+  'POST /agents/{id}/move-out': (p) => [...access('agents', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mounts/{id}/move-out/preview': () => NOTHING,
+  'POST /mounts/{id}/move-out': (p) => [...access('mounts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /templates/{id}/move-out/preview': () => NOTHING,
+  'POST /templates/{id}/move-out': (p) => [...access('templates', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /providers/{id}/move-out/preview': () => NOTHING,
+  'POST /providers/{id}/move-out': (p) => [...access('providers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mcp-servers/{id}/move-out/preview': () => NOTHING,
+  'POST /mcp-servers/{id}/move-out': (p) => [...access('mcp-servers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/move-out/preview': () => NOTHING,
+  'POST /chats/{id}/move-out': (p) => [...access('chats', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/draft/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/draft/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+
+  'POST /copy-destinations/judge': () => NOTHING,
+
+  // -- native duplicates create fresh identities; their sources are not updated
+  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'everything', 'names', 'trace'),
+  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'everything', 'names', 'trace'),
+  'POST /templates/{id}/duplicate': () => kinds('templates', 'everything', 'names', 'trace'),
+  'POST /mounts/{id}/duplicate': () => kinds('mounts', 'everything', 'names', 'trace'),
+  'POST /mcp-servers/{id}/duplicate': () => kinds('mcp-servers', 'environment-mcp', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/draft/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'job', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate': () => [...kinds('chats', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate/preview': () => NOTHING,
 
   // -- notifications and the ways a person is told
   'POST /notifications/read': () => inbox(),
@@ -336,6 +394,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/tags': (p) => [one(p('id'), 'tags'), ...tags()],
   'PUT /nodes/{id}/tags': (p) => [...place(p('id')), ...tags(), ...kinds('everything')],
   'POST /nodes/{id}/announcements': (p) => [...place(p('id')), ...kinds('announcements')],
+  'POST /orgs/{id}/messages': (p) => [{ missing: [only('admin-messages', p('id'))] }],
+  'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system'), only('admin', 'settings')] }, { meta: true }],
   'PATCH /tags/{id}': () => tags(),
   'DELETE /tags/{id}': () => tags(),
   'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'environments')],
@@ -385,14 +445,15 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /orgs/{id}/tokens/{token_id}/refuse': (p) => [one(p('id'), 'org-tokens'), ...kinds('tokens', 'service-tokens')],
 
   // -- settings and secrets, at a place, of a resource, of the system
-  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
-  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
   'PUT /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'DELETE /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'PUT /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'DELETE /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
-  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
-  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'PUT /gateways': () => [{ key: ['gateway-catalogue'], exact: true }],
+  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
 
   // -- threads
   'POST /topics/{id}/threads': (p) => [...place(p('id')), ...threads()],
@@ -405,6 +466,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/inputs': (p) => [conversation(p('id')), ...ones(p('id'), 'thread-limits', 'thread-catchup'), ...usage()],
   'PATCH /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id'))],
   'DELETE /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id')), one(p('id'), 'thread-limits')],
+  'POST /topics/{id}/input-schedules': (p) => [one(p('id'), 'topic-schedules')],
+  'PATCH /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule'), one(p('id'), 'input-schedule-runs'), every('topic-schedules')],
+  // Cancellation retains schedule history; the topic list follows its native feed.
+  'DELETE /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule')],
   // A 202 admits work. Its caller selects its own read window; native scoped feeds publish the outcome.
   // Refreshing the default window here would read an unrelated active pane or race that selection.
   'POST /threads/{id}/inputs/{input_id}/versions': () => NOTHING,
@@ -463,7 +528,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /chats/{id}/draft': () => NOTHING,
   'DELETE /chats/{id}/draft': () => NOTHING,
   'POST /orgs/{id}/chats': () => kinds('chats', 'chat-states'),
-  'PATCH /chats/{id}': (p) => chat(p('id')),
+  'PATCH /chats/{id}': (p) => [...chat(p('id')), ...kinds('everything'), { feed: 'trees' }],
+  'POST /chats/{id}/join': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...kinds('everything'), { feed: 'trees' }],
+  'PUT /chats/{id}/members/{user_id}/manager': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...approvals(), ...kinds('everything'), { feed: 'trees' }],
   'PUT /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'DELETE /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'PUT /chats/{id}/agents/{thread_id}/posting': (p) => [...chat(p('id')), ...thread(p('thread_id'))],
@@ -472,7 +539,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /forward': () => [...kinds('chats', 'chat-states', 'thread-item')],
 
   // -- documents
-  'POST /document-tree/operations': () => kinds('document-directory', 'document-tree-entry'),
+  'POST /document-tree/operations': () => [...kinds('document-directory', 'document-tree-entry', 'document', 'documents', 'readme', 'names', 'trace'), TREES],
   'POST /document-tree/delete/preview': () => NOTHING,
   'POST /document-containers/{id}/documents': () => kinds('document-directory', 'document'),
   'POST /nodes/{id}/documents': (p) => [...ones(p('id'), 'documents', 'node'), ...kinds('readme', 'exports'), TREES],
@@ -480,6 +547,13 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/documents/import': (p) => [...ones(p('id'), 'documents', 'node'), TREES],
   'PATCH /documents/{id}': (p) => [...doc(p('id')), ...kinds('names', 'recents', 'node', 'user-shares'), TREES],
   'PUT /documents/{id}/links': (p) => [one(p('id'), 'document-links')],
+  'PUT /documents/{id}/summary-options': (p) => [
+    one(p('id'), 'document-summary-options'),
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: 'document' } },
+  ],
+  'POST /summaries/{kind}/{id}/refresh': (p) => [
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: p('kind') } },
+  ],
   'DELETE /documents/{id}': (p) => [gone(p('id'), 'document'), gone(p('id'), 'document-versions'), ...kinds('documents', 'readme', 'node', 'names', 'trace-deleted', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/restore': (p) => [...doc(p('id')), ...kinds('node', 'trace-deleted', 'deleted-inspection', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/move/preview': () => NOTHING,
@@ -536,6 +610,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /environments/{id}/keep-awake': (p) => environment(p('id')),
   'POST /environments/{id}/keep': (p) => environment(p('id')),
   'POST /environments/{id}/files/export': () => kinds('job'),
+  'POST /environments/{id}/mcp/imports': (p) => [one(p('id'), 'environment-mcp')],
+  'POST /environments/{id}/mcp/servers': (p) => [one(p('id'), 'environment-mcp')],
   'POST /environments/{id}/mcp/servers/{name}/restart': (p) => [one(p('id'), 'environment-mcp'), ...kinds('job', 'trace')],
   'PUT /environments/{id}/config-trust/{harness}': (p) => [...environment(p('id')), every('thread-parameters')],
   'POST /environments/updates/preflight': () => NOTHING,
@@ -690,6 +766,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/releases/check': () => [only('admin', 'installation-records')],
   'POST /admin/users': () => kinds('admin', 'trace-users'),
   'PATCH /admin/users/{id}': () => [...kinds('admin', 'trace-users', 'trace-person'), ...people()],
+  'DELETE /admin/tokens/{id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/tokens/{token_id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/sessions': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
+  'DELETE /admin/users/{id}/sessions/{session_id}': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
   'POST /admin/users/{id}/reset-link': () => NOTHING,
   'POST /admin/users/{id}/org-invitation': () => kinds('admin'),
   'DELETE /admin/users/{id}/org-invitation': () => kinds('admin'),
@@ -1044,6 +1124,10 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       if(projection!==null) await cache.refetchQueries({queryKey:projection,exact:true});
       if (client.session.getState().readerVersion !== readerVersion) return;
       await repairAgentChoices(cache, change.row, () => client.session.getState().readerVersion === readerVersion);
+    }
+    else if ('adminCredentials' in change) {
+      await refreshReach(cache, change.adminCredentials.kind === 'tokens' ? reachKeys.tokens : reachKeys.sessions(change.adminCredentials.person));
+      if (client.session.getState().readerVersion !== readerVersion) return;
     }
     else if ('rateViews' in change) await repairRateViews(cache, change.rateViews.nodeId, () => client.session.getState().readerVersion === readerVersion);
     else if ('capViews' in change) await repairCapViews(cache, change.capViews, () => client.session.getState().readerVersion === readerVersion);

@@ -30,7 +30,7 @@ export function SettingsTable({ settings, label, target, place, runtime, effectF
   const { t, i18n } = useTranslation();
   const client = useQueryClient();
   const registry = useQuery({ ...registryQuery, enabled: target !== undefined });
-  if (target !== undefined && registry.isPending) return <SkeletonRows rows={3} />;
+  if (target !== undefined && registry.isPending) return <SkeletonRows read={registry} rows={3} />;
   if (target !== undefined && registry.isError) return <ErrorState compact error={registry.error} onRetry={() => void registry.refetch()} />;
   const definitions = new Map((registry.data ?? []).map((def) => [def.key, withGroup(localizedSetting(def, i18n, i18n.resolvedLanguage))]));
   const readOnly = settings.some((row) => !row.writable || target !== undefined && lockAbove(row, target) !== null);

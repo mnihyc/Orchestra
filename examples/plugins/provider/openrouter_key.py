@@ -192,6 +192,7 @@ class OpenRouterKey:
                 continue
             seen.add(identifier)
             parameters = {}
+            origins = {"/model_name": "vendor"}
             context = row.get("context_length")
             try:
                 if isinstance(context, bool):
@@ -199,6 +200,7 @@ class OpenRouterKey:
                 context = int(context.strip()) if isinstance(context, str) else int(math.floor(float(context) + 0.5))
                 if 0 < context <= CONTEXT_MAX:
                     parameters["offered"] = {"context_max": context}
+                    origins["/parameters/offered/context_max"] = "vendor"
             except (TypeError, ValueError, OverflowError):
                 pass
             prices = row.get("pricing") or {}
@@ -212,10 +214,23 @@ class OpenRouterKey:
             if incoming is not None and outgoing is not None:
                 parameters["rate"] = {"input_per_mtok": incoming, "output_per_mtok": outgoing,
                                       "cached_input_per_mtok": price("input_cache_read") or incoming}
-                if price("input_cache_write") is not None:
-                    parameters["rate"]["cache_write_per_mtok"] = price("input_cache_write")
-            display = next((row[field].strip() for field in ("name", "display_name") if isinstance(row.get(field), str) and row[field].strip()), identifier)
-            found.append({"model_name": identifier, "display_name": display, "parameters": parameters, "listed": True})
+                for member, field in [("input_cache_write", "cache_write_per_mtok"),
+                                      ("input_cache_write_1h", "cache_write_1h_per_mtok"),
+                                      ("input_cache_write_12h", "cache_write_12h_per_mtok")]:
+                    quoted = price(member)
+                    if quoted is not None:
+                        parameters["rate"][field] = quoted
+                for member, field in [("prompt", "input_per_mtok"), ("completion", "output_per_mtok"),
+                                      ("input_cache_read", "cached_input_per_mtok"), ("input_cache_write", "cache_write_per_mtok"),
+                                      ("input_cache_write_1h", "cache_write_1h_per_mtok"),
+                                      ("input_cache_write_12h", "cache_write_12h_per_mtok")]:
+                    if price(member) is not None:
+                        origins["/parameters/rate/" + field] = "vendor"
+            display = next((row[field].strip() for field in ("name", "display_name") if isinstance(row.get(field), str) and row[field].strip()), None)
+            if display is not None:
+                origins["/display_name"] = "vendor"
+            found.append({"model_name": identifier, "display_name": display or identifier,
+                          "parameters": parameters, "listed": True, "origins": origins})
         return {"models": found}
 
     def call(self, method, params):

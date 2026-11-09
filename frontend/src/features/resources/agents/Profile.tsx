@@ -30,6 +30,7 @@ import { useHarnessTitle } from '@/features/resources/harnesses';
 import { programNameIn } from '@/features/resources/programNames';
 import { Bindings } from '@/features/resources/agents/Bindings';
 import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { ProfileConfigKeys } from '@/features/resources/agents/ProfileConfigKeys';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { ReadOnlySettingsNotice } from '@/features/settings/ReadOnlyNotice';
 import { useResourceHeading } from '@/features/resources/trail';
@@ -47,7 +48,7 @@ import { SettingRow as SettingRowLayout } from '@/ui/SettingRow';
 import { SettingEditor } from '@/ui/SettingEditor';
 import { SettingChanges } from '@/ui/SettingChanges';
 import { ValueSummary } from '@/ui/ValueSummary';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
@@ -57,10 +58,10 @@ export { AGENT_TABS, type AgentTab };
 /** The sentinel of the version menu for "the default build": a menu cannot hold an empty value. */
 const DEFAULT_BUILD = '\u0000default';
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -308,6 +309,7 @@ function ProfileForm({ agent, manage }: { agent: Agent; manage: boolean }) {
             ]}
           /> : shownPin === DEFAULT_BUILD ? t('agents.list.pinDefault') : harnessVersionWords(t, shownPin)} />
           {!manage && <SettingRowLayout name={t('agents.profile.json')} readOnly value={<ValueSummary value={agent.profile} />} />}
+          <ProfileConfigKeys profile={agent.profile} />
           <li><ResourceDetails keepMounted pauseEffects={false}><ul>
           {manage && <SettingEditor name={t('agents.profile.json')} description={`${t('agents.profile.lead')} ${t('agents.profile.jsonHint')}`}
             status={jsonOpen ? undefined : current === null ? <StateLine role="alert" tone="danger" compact message={t('agents.profile.jsonInvalid')} /> : fault === undefined ? undefined : <StateLine role="alert" tone="danger" compact message={fault} />}
@@ -382,10 +384,10 @@ export function AgentScreen({ agentId, tab, onTab }: AgentScreenProps) {
   const acts = useAgentActs({ onProfile: () => onTab('profile'), afterDelete: () => void navigate({ to: '/resources/agents' }) });
 
   const refused = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status);
-  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons />;
+  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons read={query} />;
   const agent = query.data;
   const manage = holds(agent.access, 'agent.manage');
-  const descriptor = readDescriptor(agent.descriptor);
+  const descriptor = readDescriptor(agent.descriptor, locale);
   const { edit, primary, menu } = acts.page(agent);
   const harness = declaredHarness ?? harnessTitle(agent.harness_kind);
 

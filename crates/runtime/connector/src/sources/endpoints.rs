@@ -10,7 +10,7 @@ use orch_provider_contract::source::SourceDescriptorModels;
 use orch_provider_contract::{
     ModelsReport, ModelsSource, SourceAsk, SourceDescriptor, SourceError, SourceErrorCode,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, btree_map::Entry};
 use std::sync::Arc;
 
 /// The current endpoints and their protocols as one model source, using the forwarder's bounded transport.
@@ -64,6 +64,58 @@ impl ModelsSource for Endpoints {
     }
 }
 
+/// Catalogue mappings fill missing declarations, preserving actual supplied support and its source.
+fn enrich_with_catalogue(
+    suggestion: &mut ModelSuggestion,
+    protocol: &str,
+    projected: orch_provider_contract::capabilities::EndpointProjection,
+) {
+    if let Some(binding) = projected.native_tools.get("web_search")
+        && suggestion
+            .parameters
+            .offered
+            .as_ref()
+            .and_then(|offered| offered.web_search.as_ref())
+            .is_none()
+    {
+        let modes = binding
+            .as_ref()
+            .and_then(|binding| binding.request.get("modes"))
+            .and_then(serde_json::Value::as_object)
+            .map(|modes| modes.keys().cloned().collect())
+            .unwrap_or_default();
+        suggestion
+            .parameters
+            .offered
+            .get_or_insert_with(Default::default)
+            .web_search = Some(modes);
+        suggestion
+            .origins
+            .insert("/parameters/offered/web_search".into(), "catalogue".into());
+    }
+    if !projected.native_tools.is_empty() {
+        let native = suggestion
+            .parameters
+            .native_tools
+            .entry(protocol.into())
+            .or_default();
+        for (tool, binding) in projected.native_tools {
+            if let Entry::Vacant(slot) = native.entry(tool.clone()) {
+                slot.insert(binding);
+                let pointer = |part: &str| part.replace('~', "~0").replace('/', "~1");
+                suggestion.origins.insert(
+                    format!(
+                        "/parameters/native_tools/{}/{}",
+                        pointer(protocol),
+                        pointer(&tool)
+                    ),
+                    "catalogue".into(),
+                );
+            }
+        }
+    }
+}
+
 /// Reads the lists in endpoint order without changing a provider's accepted models.
 pub async fn list(
     forwarder: &Forwarder,
@@ -91,7 +143,13 @@ pub async fn list(
                 .await
             {
                 Ok((status, body)) if status.is_success() => {
-                    for suggestion in entry.protocol().parse_models(&body) {
+                    for mut suggestion in entry.protocol().parse_models(&body) {
+                        let projected = forwarder.capability_sources().endpoint_capabilities(
+                            endpoint.protocol(),
+                            endpoint.base_url(),
+                            &suggestion.model_name,
+                        );
+                        enrich_with_catalogue(&mut suggestion, endpoint.protocol(), projected);
                         if !found
                             .iter()
                             .any(|known| known.model_name == suggestion.model_name)
@@ -135,5 +193,90 @@ pub async fn list(
     match (found.is_empty(), last_failure) {
         (true, Some(failure)) => Err(failure),
         _ => Ok(found),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch_provider_contract::{
+        capabilities::{Binding, EndpointProjection},
+        models::ModelOffered,
+    };
+    use serde_json::json;
+
+    fn catalogue() -> EndpointProjection {
+        EndpointProjection {
+            native_tools: [
+                (
+                    "web_search".into(),
+                    Some(Binding {
+                        request: json!({"modes":{"live":{}}}),
+                        ..Binding::default()
+                    }),
+                ),
+                ("future/tool".into(), None),
+            ]
+            .into_iter()
+            .collect(),
+            ..EndpointProjection::default()
+        }
+    }
+
+    #[test]
+    fn catalogue_defaults_never_replace_actual_reported_modes_or_explicit_unsupported_bindings() {
+        let mut model = ModelSuggestion::named("fixture-model", None);
+        model.parameters.offered = Some(ModelOffered {
+            web_search: Some(Vec::new()),
+            ..ModelOffered::default()
+        });
+        model
+            .parameters
+            .native_tools
+            .entry("future/wire".into())
+            .or_default()
+            .insert("web_search".into(), None);
+        model
+            .origins
+            .insert("/parameters/offered/web_search".into(), "vendor".into());
+        model.origins.insert(
+            "/parameters/native_tools/future~1wire/web_search".into(),
+            "vendor".into(),
+        );
+        enrich_with_catalogue(&mut model, "future/wire", catalogue());
+        assert_eq!(
+            model.parameters.offered.as_ref().unwrap().web_search,
+            Some(Vec::new())
+        );
+        assert_eq!(
+            model.parameters.native_tools["future/wire"]["web_search"],
+            None
+        );
+        assert_eq!(model.origins["/parameters/offered/web_search"], "vendor");
+        assert_eq!(
+            model.origins["/parameters/native_tools/future~1wire/web_search"],
+            "vendor"
+        );
+        assert_eq!(
+            model.origins["/parameters/native_tools/future~1wire/future~1tool"],
+            "catalogue"
+        );
+        assert!(model.parameters.web_search.is_none());
+    }
+
+    #[test]
+    fn missing_values_are_catalogue_proposals_and_an_empty_extension_changes_nothing() {
+        let mut model = ModelSuggestion::named("fixture-model", None);
+        let unchanged = serde_json::to_vec(&model).unwrap();
+        enrich_with_catalogue(&mut model, "future/wire", EndpointProjection::default());
+        assert_eq!(serde_json::to_vec(&model).unwrap(), unchanged);
+        enrich_with_catalogue(&mut model, "future/wire", catalogue());
+        assert_eq!(
+            model.parameters.offered.unwrap().web_search,
+            Some(vec!["live".into()])
+        );
+        assert_eq!(model.origins["/parameters/offered/web_search"], "catalogue");
+        assert!(model.parameters.web_search.is_none());
+        assert!(model.parameters.default_web_search.is_none());
     }
 }

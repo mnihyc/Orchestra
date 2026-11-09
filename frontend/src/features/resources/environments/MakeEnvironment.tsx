@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** The dialog that makes an environment from a template on a host: its name, the template, the host or the one with the most room, and who may use it; the job that makes it is followed from the page it opens on.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -21,7 +22,6 @@ import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { Select } from '@/ui/Select';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { RuntimeChoice, defaultRuntime, runtimeOffer } from '@/features/resources/isolation/RuntimeChoice';
 import { classNamed, useIsolationWords } from '@/features/resources/isolation/runtimes';
@@ -132,7 +132,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
       <form ref={formElement} id="make-environment" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => template !== null && hostAvailable && make.mutate(values.name))}>
         {make.error !== null && (!placed || unplaced) && <div ref={errorElement} tabIndex={-1}><ErrorAlert error={make.error} /></div>}
         {loading ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows reads={[templates, hosts]} rows={3} />
         ) : failed !== null ? (
           <ErrorState compact error={failed} retrying={templates.isRefetching || hosts.isRefetching} onRetry={() => void Promise.all([templates.refetch(), hosts.refetch()])} />
         ) : usable.length === 0 ? (
@@ -144,7 +144,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
             <HomePicker value={form.values.home_node_id} onChange={(value) => form.set('home_node_id', value)} error={form.field('home_node_id').error}
               places={home === undefined ? [] : [home]} disabled={make.isPending} />
             <Input label={t('environments.make.name')} {...form.field('name')} autoComplete="off" />
-            <Select
+            <ResourcePicker pickerKey="resources.environments.MakeEnvironment.environments.make.template"
               label={t('environments.make.template')}
               help={<Hint id="env-template" />}
               value={template?.id ?? form.values.template_id}
@@ -166,7 +166,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
                 return { value: entry.id, ...choiceOption(t, 'dynamic.resource', { name: entry.name }), ...choice, description: <>{choice.description}<span className="text-text-muted"> · {isolation.pair(driverTitle, title)}</span></> };
               })}
             />
-            <Select
+            <ResourcePicker pickerKey="resources.environments.MakeEnvironment.environments.make.host"
               label={t('environments.make.host')}
               help={<Hint id="env-host" />}
               hint={open.length === 0 ? t('environments.make.noHost') : undefined}
@@ -184,7 +184,7 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
             {template !== null && <RuntimeChoice template={template} hosts={host !== null && hostAvailable ? [host] : open} value={runtime} onChange={setRuntime} policy={runtimePolicy} disabled={make.isPending} />}
             {template !== null && <DataSourcesEditor machine={host?.machine.id} driver={template.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={make.isPending} />}
             <NewAccess value={access} onChange={setAccess} home={t('environments.make.yourPlace')} allowHome={false} />
-            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} />
+            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} forThread={forThread} />
           </>
         )}
       </form>

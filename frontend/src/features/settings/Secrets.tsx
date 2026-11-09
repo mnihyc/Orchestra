@@ -10,9 +10,11 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { KeyRound, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
 import { EmptyState } from '@/ui/EmptyState';
 
-import { deleteSecret, putSecret, secretsQuery, type SettingsTarget } from '@/api/settings';
+import { deleteSecret, putSecret, secretsKey, secretsQuery, type SettingsTarget } from '@/api/settings';
 import { takes } from '@/features/settings/refusals';
 import type { RowPlace } from '@/features/settings/SettingRow';
 import type { SecretInfo } from '@/generated/api-types';
@@ -97,10 +99,18 @@ function WriteSecret({ target, place, name: given, onClose }: { target: Settings
 }
 
 export function Secrets({ target, place }: { target: SettingsTarget; place: RowPlace }) {
+  const reader = useStore(client.session, (state) => `${state.userId ?? ''}:${state.readerVersion ?? 0}`);
+  return <ReaderSecrets key={JSON.stringify([reader, secretsKey(target)])} target={target} place={place} />;
+}
+
+function ReaderSecrets({ target, place }: { target: SettingsTarget; place: RowPlace }) {
   const { t } = useTranslation();
-  const list = useQuery(secretsQuery(target));
+  const [requested, setRequested] = useState(false);
+  const list = useQuery({ ...secretsQuery(target), enabled: requested });
   const [writing, setWriting] = useState<{ name: string | null } | null>(null);
   const [removing, setRemoving] = useState<SecretInfo | null>(null);
+  const openWrite = (name: string | null) => { setRequested(true); setWriting({ name }); };
+  const openRemove = (secret: SecretInfo) => { setRequested(true); setRemoving(secret); };
   const may = holds(place.access, 'settings.manage');
   const hereId = target.kind === 'system' ? null : target.id;
   const remove = useMutation({
@@ -120,15 +130,15 @@ export function Secrets({ target, place }: { target: SettingsTarget; place: RowP
           <p className="text-sm text-text-muted">{t('settings.secrets.lead')}</p>
         </div>
         <PermissionGate allowed={may} mode="block" reason={takes(t, 'settings.manage', place.name, place.owner)}>
-          <Button size="sm" icon={<Plus aria-hidden />} onClick={() => setWriting({ name: null })}>
+          <Button size="sm" icon={<Plus aria-hidden />} onClick={() => openWrite(null)}>
             {t('settings.secrets.add')}
           </Button>
         </PermissionGate>
       </div>
-      {list.isPending ? (
-        <SkeletonRows rows={2} />
+      {!requested && list.isPending ? <Button action="show" size="sm" variant="ghost" className="self-start" onClick={() => setRequested(true)}>{t('settings.secrets.showNames')}</Button> : list.isPending ? (
+        <SkeletonRows read={list} rows={2} />
       ) : list.isError ? (
-        <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
+        <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => { if (requested) void list.refetch(); else setRequested(true); }} />
       ) : list.data.length === 0 ? (
         <EmptyState compact title={t('settings.secrets.none')} />
       ) : (
@@ -150,10 +160,10 @@ export function Secrets({ target, place }: { target: SettingsTarget; place: RowP
                 <span className="text-sm text-text-subtle">{t('settings.secrets.hidden')}</span>
                 {may && here && (
                   <>
-                    <Button size="sm" variant="ghost" onClick={() => setWriting({ name: secret.name })} aria-label={t('settings.secrets.replaceNamed', { name: secret.name })}>
+                    <Button size="sm" variant="ghost" onClick={() => openWrite(secret.name)} aria-label={t('settings.secrets.replaceNamed', { name: secret.name })}>
                       {t('settings.secrets.replace')}
                     </Button>
-                    <IconButton size="sm" label={t('settings.secrets.removeNamed', { name: secret.name })} icon={<Trash2 aria-hidden />} onClick={() => setRemoving(secret)} />
+                    <IconButton size="sm" label={t('settings.secrets.removeNamed', { name: secret.name })} icon={<Trash2 aria-hidden />} onClick={() => openRemove(secret)} />
                   </>
                 )}
               </li>

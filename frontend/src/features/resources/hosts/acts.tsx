@@ -1,3 +1,4 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
 /** What can be done with a host, from its row in the list and from its own page: pause it or resume it, open, edit, rename, copy its link and delete, each only where the reader may.
  *
  * A host is paused when it should take no new environments and resumed when it should take them again; what
@@ -90,7 +91,7 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
     const edit: Act | null = manage ? { id: 'edit', label: t('resources.act.edit'), icon: <Pencil aria-hidden />, run: () => editSettings(host) } : null;
     const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', host }) } : null;
     const share = shareAct(t, { kind: 'host', id: host.id, name: host.name }, host.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/hosts/${host.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'host', id: host.id }) };
     const del: Act | null = manage ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', host }) } : null;
     // What is idle on the host, stopped to make room: the list is read first, and nothing stops before it is confirmed.
     const recycle: Act | null = manage ? { id: 'recycle', label: t('change.menu.recycle'), icon: <Recycle aria-hidden />, run: () => openChange({ kind: 'host', id: host.id, name: host.name }, { kind: 'recycle' }) } : null;
@@ -99,7 +100,7 @@ export function useHostActs(options: { afterDelete?: () => void; onSettings?: (h
     return {
       primary: updateNow ?? resume ?? open,
       edit,
-      entries: entriesOf([open], [updateNow, resume, pause], [edit, rename], [recycle, moveAll], [share, copy], [declare, del], [cleanup.act({kind:'host',id:host.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'host', host), ...entriesOf([open], [updateNow, resume, pause], [edit, rename], [recycle, moveAll], [share, copy], [declare, del], [cleanup.act({kind:'host',id:host.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(host.id),
     };

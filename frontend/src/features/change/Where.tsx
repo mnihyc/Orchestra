@@ -1,3 +1,5 @@
+import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Where the result works: the same environment, another one the person manages or a new one at a place, with the files that go along into it.
  *
  * Where the result works, as the dialog that starts a thread asks it, in the three ways a thread can be placed: the
@@ -16,13 +18,13 @@ import { FilesChoice } from '@/features/change/Files';
 import { useFocusFirst } from '@/features/change/Sentence';
 import type { MoveMachine, Place, PlaceEnvironment, PlaceHost, Thread } from '@/generated/api-types';
 import { hostNotes } from '@/features/resources/hosts/words';
+import { TemporaryChoice } from '@/features/resources/environments/Temporary';
 import { HostCapacity, ResourceHint, resourceChoice, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { Checkbox } from '@/ui/Checkbox';
 import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { Select } from '@/ui/Select';
 import { UserChip } from '@/ui/UserChip';
 
 const isEnvironment = (place: Place): place is PlaceEnvironment => 'environment' in place;
@@ -34,7 +36,7 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
   if (loading) return <p className="text-sm text-text-muted">{t('changeCompact.loadingPlaces')}</p>;
   const automatic = hosts.find((place) => place.automatic);
   return (
-    <Select
+    <ResourcePicker pickerKey="change.Where.change.where.place"
       label={t('change.where.place')}
       value={machine === null ? value ?? 'automatic' : `machine:${machine}`}
       fieldClassName="w-fit max-w-full"
@@ -55,6 +57,7 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
           return {
             value: place.host.id,
             name: place.host.name,
+            resource:{kind:'host',id:place.host.id,data:place},
             preview: resourcePreview({ kind: 'host', host: place.host, place }),
             description: <span className="flex flex-col gap-1">
               {place.usable ? <ResourceHint subject={{ kind: 'host', host: place.host, place }} /> : <HostCapacity place={place} />}
@@ -65,7 +68,7 @@ export function HostChoices({ hosts, value, onChange, loading, machines = [], ma
             disabled: !place.usable || notes.off !== null,
           };
         }),
-        ...machines.map((place) => ({ value: `machine:${place.machine.id}`, name: place.machine.name,
+        ...machines.map((place) => ({ value: `machine:${place.machine.id}`, name: place.machine.name, resource:{kind:'machine',id:place.machine.id,data:place},
           description: <span>{t('uniformMoves.directory')}{!place.usable && <>{' '}{place.reasons.length === 0 ? t('uniformMoves.unavailable') : place.reasons.join(' ')}</>}</span>,
           disabled: !place.usable })),
       ]}
@@ -88,6 +91,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
   const where = choices.where;
   const set = (next: WhereChoice) => onChange({ where: next });
   const current = thread.environment;
+  const hasSourceFiles = current !== null;
   const ref = useFocusFirst<HTMLDivElement>(focus);
 
   const list = places.data ?? [];
@@ -103,13 +107,13 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
         value={kind}
         onValueChange={(next) => {
           if (next === 'same') set({ kind: 'same' });
-          else if (next === 'use') set({ kind: 'use', id: environments.find((place) => place.usable)?.environment.id ?? '', files: { mode: 'all' } });
-          else set({ kind: 'new', hostId: null, name: '', files: { mode: 'all' }, home: false, privateViews: true, onlyMe: false });
+          else if (next === 'use') set({ kind: 'use', id: environments.find((place) => place.usable)?.environment.id ?? '', files: { mode: hasSourceFiles ? 'all' : 'none' } });
+          else set({ kind: 'new', hostId: null, name: '', files: { mode: hasSourceFiles ? 'all' : 'none' }, home: false, privateViews: hasSourceFiles, onlyMe: false });
         }}
         options={[
-          { value: 'same', name: current === null ? t('change.where.sameNone') : t(fork ? 'changeCompact.sharedEnvironment' : 'changeCompact.currentEnvironment', { name: current.name }), ...(current === null ? {} : resourceChoice({ kind: 'environment', environment: current })) },
-          { value: 'use', name: t('changeCompact.destination.use') },
-          { value: 'new', name: t('changeCompact.destination.new') },
+          ...(current === null ? [] : [{ value: 'same', name: t(fork ? 'changeCompact.sharedEnvironment' : 'changeCompact.currentEnvironment', { name: current.name }), ...resourceChoice({ kind: 'environment', environment: current }) }]),
+          { value: 'use', name: t(hasSourceFiles ? 'changeCompact.destination.use' : 'start.where.useExisting') },
+          { value: 'new', name: t(hasSourceFiles ? 'changeCompact.destination.new' : 'start.where.createNew') },
         ]}
       />
 
@@ -120,9 +124,9 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
           {places.isPending ? (
             <p className="text-sm text-text-muted">{t('changeCompact.loadingPlaces')}</p>
           ) : environments.length === 0 ? (
-            <InlineAlert tone="info">{t('change.where.noOther')}</InlineAlert>
+            <InlineAlert tone="info">{t(hasSourceFiles ? 'change.where.noOther' : 'start.where.noExisting')}</InlineAlert>
           ) : (
-            <Select
+            <ResourcePicker pickerKey="change.Where.change.where.another"
               label={t('change.where.another')}
               placeholder={t('changeCompact.chooseEnvironment')}
               fieldClassName="w-fit max-w-full"
@@ -130,6 +134,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
               onValueChange={(id) => set({ ...where, id })}
               options={environments.map((place) => ({
                 value: place.environment.id,
+                resource:{kind:'environment',id:place.environment.id,data:place},
                 preview: resourcePreview({ kind: 'environment', environment: place.environment, host: place.host }),
                 accessory: <UserChip user={place.environment.owner} />,
                 name: (
@@ -148,7 +153,7 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
               }))}
             />
           )}
-          <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />
+          {hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
         </div>
       )}
 
@@ -156,10 +161,11 @@ export function Where({ thread, choices, onChange, fork, focus = false }: WhereP
         <div className="flex flex-col gap-3">
           <HostChoices hosts={hosts} value={where.hostId} onChange={(hostId) => set({ ...where, hostId })} loading={places.isPending} />
           <Input label={t('change.where.name')} optional hint={t('change.where.nameHint')} value={where.name} onChange={(event) => set({ ...where, name: event.target.value })} autoComplete="off" />
-          <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />
-          <Checkbox label={t('fork.files.home')} checked={where.home} onCheckedChange={(home) => set({ ...where, home })} />
-          <Checkbox label={t('fork.files.privateViews')} checked={where.privateViews} onCheckedChange={(privateViews) => set({ ...where, privateViews })} />
+          {hasSourceFiles && <FilesChoice value={where.files} onChange={(files) => set({ ...where, files })} />}
+          {hasSourceFiles && <Checkbox label={t('fork.files.home')} checked={where.home} onCheckedChange={(home) => set({ ...where, home })} />}
+          {hasSourceFiles && <Checkbox label={t('fork.files.privateViews')} checked={where.privateViews} onCheckedChange={(privateViews) => set({ ...where, privateViews })} />}
           <Checkbox label={t('change.where.onlyMe')} checked={where.onlyMe} onCheckedChange={(onlyMe) => set({ ...where, onlyMe })} />
+          <TemporaryChoice checked={where.temporary === true} onChange={(temporary) => set({ ...where, temporary })} forThread />
         </div>
       )}
     </div>

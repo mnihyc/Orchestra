@@ -29,6 +29,8 @@ import type {
   ResolvedSetting,
   Segment,
   Thread,
+  ThreadBackground,
+  ThreadTunnelGatewayStatus,
   ThreadData,
   ThreadInput,
   ThreadInputUpdateReply,
@@ -39,12 +41,14 @@ import type {
 } from '../../src/generated/api-types.ts';
 import { contextOf, turnCostOf, turnUsagePage } from './context.ts';
 import { ACME, MADE_AT, MODEL_ESTIMATE, userRef } from './fixtures.ts';
-import { ACCESS_FEATURE, parameterViews, type ThreadChoices } from './model.ts';
+import { ACCESS_FEATURE, parameterViews, projectNativeParameter, providerOptionViews, type ThreadChoices } from './model.ts';
 import type { Places } from './places.ts';
 import { type Answer, type Part, type Person, Refusal, type Subscriber, type World } from './world.ts';
 
 /** The rows a test or a request puts into a thread; the fake fills in the rest. */
 export interface Rows {
+  /** A test-only native observation, delivered on its separate ephemeral feed. */
+  background?: ThreadBackground;
   thread?: Partial<Thread>;
   items?: Item[];
   turns?: Turn[];
@@ -110,6 +114,9 @@ const SEGMENT = (threadId: string) => `00000000-0000-4000-8${(0x40).toString(16)
 export class ThreadWorld implements Part {
   readonly world: World;
   private threads = new Map<string, Held>();
+  private backgrounds = new Map<string, ThreadBackground>();
+  gatewayStatuses = new Map<string, ThreadTunnelGatewayStatus>();
+  private backgroundFollowers = new Map<Subscriber, Map<number, { thread: string; person: Person }>>();
   private settingRows = new Map<string, Map<string, { value: unknown; revision: number; by: Person['me'] }>>();
   approvals = new Map<string, Approval>();
   /** Features enabled by the place for model-derived parameters. */
@@ -152,6 +159,12 @@ export class ThreadWorld implements Part {
       this.threads.set(threadId, held);
     }
     return held;
+  }
+
+  /** Workspace changes are filtered by the native file-change item's actual turn. */
+  changeTurn(threadId: string, itemId: string): string | null {
+    const item = this.threads.get(threadId)?.items.get(itemId);
+    return item?.kind === 'tool_call' && item.payload.tool.kind === 'file_change' ? item.turn_id : null;
   }
 
   private rowOf(threadId: string): TreeNode {
@@ -226,6 +239,7 @@ export class ThreadWorld implements Part {
       last_activity_at: treeThread?.last_activity_at ?? null,
       lock: null,
       memory: { kept_by: 'agent', native: true, why: null },
+      program_model: null,
       model: bound.model,
       model_display: displayOf(resources.modelsOf(bound.provider).find((entry) => entry.model_name === bound.model)?.display_name, bound.model),
       my_last_read_seq: held.read.get(person.me.username) ?? null,
@@ -298,6 +312,13 @@ export class ThreadWorld implements Part {
   emit(threadId: string, rows: Rows, lose = false): number {
     const row = this.rowOf(threadId);
     const held = this.held(threadId);
+    if (rows.background !== undefined) {
+      this.backgrounds.set(threadId, rows.background);
+      if (!lose) for (const [subscriber, subscriptions] of this.backgroundFollowers) for (const [id, source] of subscriptions) {
+        if (source.thread === threadId) this.sendBackground(subscriber, id, threadId, source.person);
+      }
+      if (Object.keys(rows).length === 1) return held.seq;
+    }
     const from = held.seq;
     // Every row that is made or changed takes the next sequence of its own, as the real system numbers them,
     // so that a thread read a page at a time by the sequence an item was made at loses none of them.
@@ -408,6 +429,28 @@ export class ThreadWorld implements Part {
   frame(subscriber: Subscriber, person: Person | undefined, frame: Record<string, unknown>): boolean {
     const id = Number(frame.id);
     const feed = typeof frame.feed === 'string' ? frame.feed : '';
+    const background = /^thread:(.+):background$/.exec(feed)?.[1];
+    if (frame.op === 'sub' && background !== undefined && this.backgrounds.has(background)) {
+      if (person === undefined || !this.places.access(person, background).permissions.includes('thread.view')) {
+        subscriber.send({ op: 'error', id, code: 'forbidden', detail: feed });
+        return true;
+      }
+      let own = this.backgroundFollowers.get(subscriber);
+      if (own === undefined) { own = new Map(); this.backgroundFollowers.set(subscriber, own); }
+      own.set(id, { thread: background, person });
+      subscriber.send({ op: 'subscribed', id, feed, seq: null, mode: 'ephemeral' });
+      this.sendBackground(subscriber, id, background, person);
+      return true;
+    }
+    if (frame.op === 'unsub') {
+      const own = this.backgroundFollowers.get(subscriber), source = own?.get(id);
+      if (source !== undefined) {
+        own?.delete(id);
+        if (own?.size === 0) this.backgroundFollowers.delete(subscriber);
+        subscriber.send({ op: 'closed', id, feed: `thread:${source.thread}:background`, reason: 'unsubscribed' });
+        return true;
+      }
+    }
     const threadId = /^thread:(.+)$/.exec(feed)?.[1];
     switch (frame.op) {
       case 'sub': {
@@ -438,8 +481,23 @@ export class ThreadWorld implements Part {
     }
   }
 
+  /** Native observations use the same current View/Interact authority as their authenticated connection. */
+  private sendBackground(subscriber: Subscriber, id: number, thread: string, person: Person): void {
+    const access = this.places.access(person, thread), feed = `thread:${thread}:background`;
+    if (!access.permissions.includes('thread.view')) {
+      const own = this.backgroundFollowers.get(subscriber);
+      own?.delete(id);
+      if (own?.size === 0) this.backgroundFollowers.delete(subscriber);
+      subscriber.send({ op: 'error', id, code: 'forbidden', detail: feed });
+      return;
+    }
+    const held = this.backgrounds.get(thread);
+    if (held !== undefined) subscriber.send({ op: 'event', id, feed, data: { ...held, can_end: held.can_end && access.permissions.includes('thread.interact') } });
+  }
+
   /** A live connection ended: it follows no thread any more. */
   gone(subscriber: Subscriber): void {
+    this.backgroundFollowers.delete(subscriber);
     this.unsubscribe(subscriber);
   }
 
@@ -580,8 +638,8 @@ export class ThreadWorld implements Part {
    * what it opens to threads and what a thread starts with. A model the provider does not have is added with the name it
    * is shown by.
    */
-  setEntry(modelName: string, display: string, parameters: ProviderModel['parameters'], groups?: string[]): void {
-    const provider = this.world.resources.bindingOf(THREAD_PROVIDER).provider;
+  setEntry(modelName: string, display: string, parameters: ProviderModel['parameters'], groups?: string[], providerId?: string): void {
+    const provider = providerId ?? this.world.resources.bindingOf(THREAD_PROVIDER).provider;
     const models = this.world.resources.modelsOf(provider);
     const entry = models.find((candidate) => candidate.model_name === modelName);
     if (entry === undefined) {
@@ -595,9 +653,14 @@ export class ThreadWorld implements Part {
 
   /** Forgets everything: a test begins from the team as it was. */
   reset(): void {
+    const closed = new Set<Subscriber>();
     for (const held of this.threads.values()) {
-      for (const subscriber of held.followers.keys()) subscriber.close(1012);
+      for (const subscriber of held.followers.keys()) { subscriber.close(1012); closed.add(subscriber); }
     }
+    for (const subscriber of this.backgroundFollowers.keys()) if (!closed.has(subscriber)) subscriber.close(1012);
+    this.backgrounds.clear();
+    this.gatewayStatuses.clear();
+    this.backgroundFollowers.clear();
     this.threads.clear();
     this.settingRows.clear();
     this.approvals.clear();
@@ -609,6 +672,13 @@ export class ThreadWorld implements Part {
   handle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
+
+    if ((found = /^GET \/threads\/([^/]+)\/gateway$/.exec(route))) {
+      const id = found[1] ?? '';
+      this.world.change.threadOf(person, id);
+      return { status: 200, body: this.gatewayStatuses.get(id) ?? { thread_id: id, state: 'unknown', source_primary_gateway_id: null,
+        destination_primary_gateway_id: null, attached_gateway_id: null, plan: null, refusal: null } };
+    }
 
     if ((found = /^POST \/topics\/([^/]+)\/threads$/.exec(route))) return { status: 200, body: this.makeThread(person, found[1] ?? '', body) };
 
@@ -731,7 +801,7 @@ export class ThreadWorld implements Part {
     if ((found = /^POST \/nodes\/([^/]+)\/auto$/.exec(route)) && this.places.rowOf(found[1] ?? '')?.kind === 'thread') {
       const threadId = found[1] ?? '';
       this.places.need(person, threadId, 'thread.manage');
-      this.emit(threadId, { thread: { title_source: body.field === 'title' ? 'auto' : 'user', description_source: body.field === 'description' ? 'auto' : 'user' } });
+      this.emit(threadId, { thread: body.field === 'tags' ? { tags_source: 'auto' } : { title_source: 'auto' } });
       return { status: 200, body: this.thread(person, this.rowOf(threadId)) };
     }
     if ((found = /^PUT \/nodes\/([^/]+)\/settings\/([^/]+)$/.exec(route)) && this.places.rowOf(found[1] ?? '')?.kind === 'thread') {
@@ -927,14 +997,17 @@ export class ThreadWorld implements Part {
     const source = { scope: 'default', node: null };
     const held = this.held(threadId);
     // Harness declarations and their stored choices use the same owner as model parameters.
+    const model = this.world.resources.modelsOf(providerId).find((entry) => entry.model_name === thread.model)?.parameters ?? {};
     const parameters = this.world.resources
       .declaredBy(thread.binding?.agent.id ?? '')
       .filter((def): def is Record<string, unknown> & { key: string } => typeof def.key === 'string' && Array.isArray(def.scopes) && def.scopes.includes('thread'))
-      .map((def) => {
+      .flatMap((def) => {
+        const projected = projectNativeParameter(def, model);
+        if (projected === null) return [];
         const own = Object.hasOwn(held.params, def.key);
-        return { apply: def.apply, def, key: def.key, locked_by: held.lockedBy ?? null,
+        return [{ apply: def.apply, def: projected, key: def.key, locked_by: held.lockedBy ?? null,
           source: own ? { scope: 'thread', node: null } : source, value: own ? held.params[def.key] : null,
-          writable: writable && (held.lockedBy === null || held.lockedBy === undefined) };
+          writable: writable && (held.lockedBy === null || held.lockedBy === undefined) }];
       });
     return {
       provider: providerId === '' ? undefined : this.world.resources.providerForFacts(person, providerId),
@@ -952,11 +1025,13 @@ export class ThreadWorld implements Part {
   private parameterViewsOf(person: Person, threadId: string, model: string | null): ParameterView[] {
     const held = this.held(threadId);
     const row = this.rowOf(threadId);
-    const providerId = this.thread(person, row).binding?.provider.id ?? '';
+    const thread = this.thread(person, row);
+    const providerId = thread.binding?.provider.id ?? '';
     const entry = this.world.resources.modelsOf(providerId).find((candidate) => candidate.model_name === model);
     if (entry === undefined) return [];
     const writable = this.places.access(person, threadId).permissions.includes('thread.manage');
-    return parameterViews(entry.parameters, { own: held.params, features: this.features, writable, lockedBy: held.lockedBy });
+    const choices = { own: held.params, features: this.features, writable, lockedBy: held.lockedBy };
+    return [...parameterViews(entry.parameters, choices), ...(thread.binding?.isolation.credential_path === 'forwarded' ? providerOptionViews(entry.parameters, choices) : [])];
   }
 
   /** The normal queued-input preparation, also read by the people preview without publishing a row. */

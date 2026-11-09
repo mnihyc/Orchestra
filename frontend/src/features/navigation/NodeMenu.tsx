@@ -1,3 +1,5 @@
+import { duplicateEntries } from '@/features/duplicate/target';
+import { threadCapabilities } from '@/features/thread/cached';
 /** Permission-aware node actions, as a row's context menu and its "⋯".
  *
  * One list for everything that can be done with a place, written once and shown wherever the place is:
@@ -9,6 +11,7 @@
  * The acts that need no dialog are carried out here and shown as pending on the place while they are
  * under way; the others open their dialog, which is drawn once for the whole application.
  */
+import { linkTo } from '@/lib/links';
 import { openPage } from '@/features/workbench/PageView';
 import { useTreeNode } from '@/realtime/stores/tree';
 import { actionName } from '@/ui/actions';
@@ -59,7 +62,7 @@ import { openImport } from '@/features/people/importHostState';
 import { exportEntries } from '@/features/export/menu';
 import { mayExportThread } from '@/features/export/pending';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
-import { type PlaceRef, placePath, placeUrl, useGoToPlace } from '@/features/navigation/places';
+import { type PlaceRef, placePath, useGoToPlace } from '@/features/navigation/places';
 import type { Access, Node, TopicStatus, UserRef } from '@/generated/api-types';
 import { abilities, canCreateIn, denial, holds } from '@/lib/permissions';
 import { copyText } from '@/ui/clipboard';
@@ -364,7 +367,7 @@ export function useQuickActs(place: PlaceRef) {
     onSettled: () => setPending(place.id, false),
   });
 
-  const copy = () => copyText(placeUrl(place), t('common.linkCopied'));
+  const copy = () => copyText(linkTo(place), t('common.linkCopied'));
 
   return {
     starred: star.starred,
@@ -430,7 +433,7 @@ export function useNodeMenu(
     ...(place.kind === 'thread' ? {} : { import: () => openImport({ id: place.id, label: importPath === undefined || importPath === '' ? place.name : importPath }) }),
     requestExport: () => requestExportAccess({ kind: place.kind, id: place.id, name: place.name, owner: node?.owner ?? null }),
   };
-  return nodeMenuEntries(
+  const entries = nodeMenuEntries(
     {
       place,
       held: node?.access,
@@ -448,6 +451,10 @@ export function useNodeMenu(
     act,
     t,
   );
+  if (place.kind !== 'thread') return entries;
+  const reason = node?.kind !== 'thread' ? t('duplicate.readRequired')
+    : node.lock !== null ? t('threadMove.jobMustEnd') : node.archived || threadCapabilities(node)?.fork !== true ? t('ui.unavailable.forkUnavailable') : undefined;
+  return [...duplicateEntries(t, { kind: 'thread', id: place.id, name: place.name, ...(reason === undefined ? {} : { refusal: reason }) }), ...entries];
 }
 
 export interface NodeMenuButtonProps {

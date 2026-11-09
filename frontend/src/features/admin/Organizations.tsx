@@ -278,7 +278,7 @@ export function Organizations({ search, onSearch }: SectionProps) {
         />
         </FilterBar>
         {list.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows read={list} rows={4} />
         ) : list.isError && orgs.length === 0 ? (
           <ErrorState error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         ) : orgs.length === 0 ? (

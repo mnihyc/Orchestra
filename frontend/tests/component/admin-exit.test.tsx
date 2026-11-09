@@ -8,6 +8,8 @@ import { client, type Act } from '@/api/client';
 import type * as ClientModule from '@/api/client';
 import { nodeKey, orgsKey } from '@/api/nodes';
 import { useAdminExit } from '@/shell/useAdminExit';
+import { AdminExitNotice } from '@/shell/AdminExitNotice';
+import { useAdminExitNotice } from '@/shell/adminExit';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { i18n, setLocale } from '@/i18n';
 import { me, org, personalHomeOf, userRef } from '../doubles/fixtures';
@@ -22,7 +24,7 @@ vi.mock('@/api/client', async (original) => {
   return { ...actual, api: { ...actual.api, GET: (path: string, options: unknown) => world.read(path, options) },
     client: { ...actual.client, onAct: (listener: (act: Act) => void | Promise<void>) => { world.acts.add(listener); return () => { world.acts.delete(listener); }; } } };
 });
-function Frame() { const pending = useAdminExit(); return <><nav aria-label="Frame">Account</nav><main>{pending ? <ScreenLoading /> : <p>Current page</p>}</main></>; }
+function Frame() { const pending = useAdminExit(); return <><nav aria-label="Frame">Account</nav><AdminExitNotice /><main>{pending ? <ScreenLoading /> : <p>Current page</p>}</main></>; }
 const caches: QueryClient[] = [];
 function setup() {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } }); caches.push(cache);
@@ -36,7 +38,7 @@ function setup() {
   return cache;
 }
 async function confirmedOff() { await act(async () => { for (const listener of world.acts) await listener({ method: 'PUT', path: '/me/admin-mode', answer: { as_admin: false } }); }); }
-afterEach(async () => { for (const cache of caches.splice(0)) cache.clear(); client.session.setState({ userId: null }); world.href = '/project/private'; vi.clearAllMocks(); await setLocale('en'); });
+afterEach(async () => { for (const cache of caches.splice(0)) cache.clear(); client.session.setState({ userId: null }); useAdminExitNotice.setState({ notice: null }); world.href = '/project/private'; vi.clearAllMocks(); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`pauses the private body and checks its nearest parent after the confirmed Off answer in ${locale}`, async () => {
   await setLocale(locale);
@@ -51,7 +53,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`pauses the private body and c
   expect(screen.queryByText('Current page')).not.toBeInTheDocument();
   expect(world.read).toHaveBeenCalledExactlyOnceWith('/nodes/{id}', expect.objectContaining({ params: { path: { id: 'root' } } }));
   await act(async () => { answer?.(); await Promise.resolve(); });
-  await waitFor(() => expect(world.navigate).toHaveBeenCalledWith({ href: '/org/root', replace: true, ignoreBlocker: true }));
+  await waitFor(() => expect(world.navigate).toHaveBeenCalledWith({ href: '/org/root', replace: true }));
 });
 
 it('handles a network-reconciled or live Off value without a second write', async () => {
@@ -59,7 +61,7 @@ it('handles a network-reconciled or live Off value without a second write', asyn
   cache.setQueryData(nodeKey('root'), { id: 'root', access: { permissions: ['org.view'] } });
   render(<QueryClientProvider client={cache}><Frame /></QueryClientProvider>);
   act(() => { cache.setQueryData(adminModeKey, { as_admin: false }); });
-  await waitFor(() => expect(world.navigate).toHaveBeenCalledWith({ href: '/org/root', replace: true, ignoreBlocker: true }));
+  await waitFor(() => expect(world.navigate).toHaveBeenCalledWith({ href: '/org/root', replace: true }));
   expect(world.read).not.toHaveBeenCalled();
 });
 
@@ -84,4 +86,20 @@ it('does not redirect a different page when the reader navigated during the pare
   await act(async () => { answer?.(); await Promise.resolve(); });
   expect(world.navigate).not.toHaveBeenCalled();
   expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('acknowledges mode exit only on its actual destination in %s', async (locale) => {
+  await setLocale(locale);
+  const cache = setup();
+  cache.setQueryData(nodeKey('root'), { id: 'root', access: { permissions: ['org.view'] } });
+  world.navigate.mockImplementationOnce(async ({ href }: { href: string }) => { world.href = href; });
+  const view = render(<QueryClientProvider client={cache}><Frame /></QueryClientProvider>);
+  expect(screen.queryByText(i18n.t('adminReach.mode.leftPage'), { exact: true })).not.toBeInTheDocument();
+  await confirmedOff();
+  expect(await screen.findByText(i18n.t('adminReach.mode.leftPage'), { exact: true })).toBeVisible();
+  expect(world.navigate).toHaveBeenCalledExactlyOnceWith({ href: '/org/root', replace: true });
+  world.href = '/settings/profile';
+  view.rerender(<QueryClientProvider client={cache}><Frame /></QueryClientProvider>);
+  expect(screen.queryByText(i18n.t('adminReach.mode.leftPage'), { exact: true })).not.toBeInTheDocument();
+  expect(useAdminExitNotice.getState().notice).toBeNull();
 });

@@ -31,6 +31,7 @@ beforeEach(() => {
     selection: { include: [], exclude: [] }, unavailable_reason: null };
   calls.read.mockResolvedValue(recorded);
   calls.plan.mockResolvedValue({ blockers: [], directory: native.directory, environment: native.environment, expires_at: '2026-10-15T10:15:00Z', generation: 1,
+    form: { kind: 'whole_directory' },
     ignore_fingerprint: 'ignore', ignored: [], namespace_fingerprint: 'namespace', options: {
       active_turn: 'wait', keep_previous: false, stop_processes: false, verify_timeout_secs: 60, wait_minutes: 10,
     },
@@ -79,17 +80,28 @@ it('offers one explicit Retry for a failed recorded-copy read, then restores tha
   expect(calls.read).toHaveBeenCalledTimes(2);
 });
 
-it.each(['en', 'zh-CN'] as const)('reads an unavailable copy only on opening and shows its reason with the keyboard-reachable Review changes action in %s', async (locale) => {
+it.each(['en', 'zh-CN'] as const)('reads an unavailable whole copy only on opening and still requests its touched plan in %s', async (locale) => {
   await setLocale(locale); calls.read.mockResolvedValue({ ...recorded, state: 'unavailable', unavailable_reason: 'store_unavailable' });
+  const plan = await calls.plan(); calls.plan.mockClear();
+  calls.plan.mockResolvedValue({ ...plan, form: { kind: 'touched_files', count: 1, whole_unavailable: 'store_unavailable' } });
   threadWriter.reset(native.id, { thread: native }, false);
   const finished = { ...turn('finished', { ordinal: 1, state: 'completed', inputId: 'input', completedAt: '2026-10-15T10:00:01Z' }), before_snapshot_id: recorded.id };
-  show(<RestoreFromTurn threadId={native.id} turn={finished} />);
+  show(<RestoreFromTurn threadId={native.id} turn={finished} hasChanges />);
   expect(calls.read).not.toHaveBeenCalled();
-  expect(screen.queryByText(i18n.t('source.restore.why.storeUnavailable'))).not.toBeInTheDocument();
   const user = userEvent.setup(); await user.click(screen.getByRole('button', { name: i18n.t('source.restore.open') }));
-  const review = await screen.findByRole('button', { name: i18n.t('source.restore.review') });
-  expect(screen.getByText(i18n.t('source.restore.why.storeUnavailable'))).toBeVisible();
-  expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.plan).not.toHaveBeenCalled();
-  act(() => review.focus()); expect(review).toHaveFocus(); await user.keyboard('{Enter}');
+  expect(await screen.findByText(i18n.t('source.restore.toolCoverage'))).toBeVisible();
+  expect(screen.getByText((text) => text.includes(i18n.t('source.restore.why.storeUnavailable')), { selector: '[data-restore-form]' })).toBeVisible();
+  expect(calls.read).toHaveBeenCalledTimes(1); expect(calls.plan).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole('button', { name: i18n.t('source.restore.confirm') })).toBeEnabled();
+});
+
+it('keeps the footer act for historic changed-file turns without inventing a missing snapshot identity', async () => {
+  threadWriter.reset(native.id, { thread: native }, false);
+  const finished = { ...turn('finished', { ordinal: 1, state: 'completed', inputId: 'input', completedAt: '2026-10-15T10:00:01Z' }), before_snapshot_id: null };
+  show(<RestoreFromTurn threadId={native.id} turn={finished} hasChanges />);
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('source.restore.open') }));
+  expect(await screen.findByText(i18n.t('source.restore.why.notRecorded'))).toBeVisible();
+  expect(calls.read).not.toHaveBeenCalled(); expect(calls.plan).not.toHaveBeenCalled();
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('source.restore.review') }));
   expect(calls.panel).toHaveBeenCalledExactlyOnceWith('changes');
 });

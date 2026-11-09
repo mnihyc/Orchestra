@@ -1,5 +1,6 @@
 /** What the settings screens decide without drawing anything: where a value in force comes from, which control a key's schema asks for, what a kind of channel's form sends, and the small rules of the personal pages. */
 import { describe, expect, it } from 'vitest';
+import { treeNode } from '../doubles/tree-node';
 
 import { testNeedsAddress } from '@/features/settings/org/Channels';
 import { ruleSources } from '@/features/settings/org/Invite';
@@ -200,7 +201,7 @@ describe('moving a member', () => {
       ['ops', 'Ops', 'acme'],
     ].map(([id, name, parent]): [string, TreeNode] => [
       id ?? '',
-      { id: id ?? '', kind: 'org', name: name ?? '', address: null, parent_id: parent ?? null, archived: false, color: null, deleted: false, docs: 0, restricted: false, participating: true, chat: { id: id ?? '', seq: 0 }, thread: null, topic: null, tree_seq: 1 },
+      treeNode({ id: id ?? '', kind: 'org', name: name ?? '', parent_id: parent ?? null, chat: { id: id ?? '', seq: 0 }, tree_seq: 1 }),
     ]),
   );
 

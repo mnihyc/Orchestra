@@ -1,3 +1,4 @@
+import { unplacedGrouping } from './resource-grouping.ts';
 /** What the fake API says of changing where and on what work runs: the plans of a fork, a switch, several switches, an update, a move and a recycle, the jobs that carry them out (and undo themselves when they fail or are stopped), and the side threads of a thread.
  *
  * Every plan is worked out from the world as it stands: what a thread runs on is the resources' to say (`Resources.bindingOf`), who may
@@ -33,9 +34,11 @@ import type {
   Job,
   JobRef,
   MissingAccess,
+  MarkerPayload,
   NodeRef,
   PendingUpdate,
   PlaceHost,
+  PlaceEnvironment,
   PlanBlocker,
   PlanMount,
   ProviderRef,
@@ -328,6 +331,12 @@ export class Change implements Part {
     return ref;
   }
 
+  private environmentLocationOf(id: string) {
+    const environment = this.environment(id);
+    return { host: environment?.host === null || environment?.host === undefined ? null : this.hostRef(environment.host),
+      machine: environment?.machine === null || environment?.machine === undefined ? null : this.machineRefOf(environment.machine) };
+  }
+
   private hostRef(hostId: string): HostRef {
     const record = this.host(hostId);
     if (record === undefined) return { id: hostId, name: 'host', address: 'system.host' };
@@ -377,7 +386,7 @@ export class Change implements Part {
   }
 
   /** The thread as the person sees it, whatever kind it is. */
-  private threadOf(person: Person, threadId: string): Thread {
+  threadOf(person: Person, threadId: string): Thread {
     const side = this.sides.get(threadId);
     if (side !== undefined) {
       const parent = this.threadOf(person, side.parent);
@@ -515,7 +524,7 @@ export class Change implements Part {
     };
   }
 
-  private placeHost(host: NonNullable<ReturnType<Change['host']>>, current: boolean, needsMb = 2_048): PlaceHost {
+  private placeHost(person: Person, host: NonNullable<ReturnType<Change['host']>>, current: boolean, needsMb = 2_048): PlaceHost {
     const running = this.resources.environments.filter((environment) => environment.host === host.id && environment.status === 'running').length;
     const idle = this.resources.environments.filter((environment) => environment.host === host.id && environment.status !== 'running').length;
     const capacity = { cpu_millis: 16_000, memory_mb: 65_536, disk_gb: 1_000 };
@@ -534,6 +543,7 @@ export class Change implements Part {
     if (!blocks && full) warnings.push('full');
     else if (!blocks && noRoom) warnings.push('no_room');
     return {
+      ...this.resources.placementMetadata(person, host.home),
       automatic: false,
       capacity,
       current,
@@ -563,16 +573,17 @@ export class Change implements Part {
     const bound = thread === null ? null : this.bindingOfAny(thread);
     const hosts = this.resources.hosts
       .filter((host) => host.uses.includes(person.me.username) || host.owner === person.me.username || host.owner === null || person.me.is_system_admin)
-      .map((host) => this.placeHost(host, bound !== null && this.environment(bound.environment)?.host === host.id));
+      .map((host) => this.placeHost(person, host, bound !== null && this.environment(bound.environment)?.host === host.id));
     const first = hosts.find((host) => host.usable);
     if (first !== undefined) first.automatic = true;
     const environments = this.resources.environments
       .filter((record) => this.mayManage(person, record.id))
-      .map((record) => {
+      .map((record): PlaceEnvironment => {
         const bound = this.resources.refsOf({ provider: '', agent: '', environment: record.id, model: '', effort: null, directory: '' }).environment;
         const reasons: ('offline' | 'disabled' | 'removing')[] = record.status === 'offline' ? ['offline'] : record.status === 'disabled' ? ['disabled'] : record.removeAt === null ? [] : ['removing'];
         const topics = [...new Set([...this.resources.bindings].filter(([, binding]) => binding.environment === record.id).map(([thread]) => this.world.places.rowOf(thread)?.parent_id ?? ''))].filter((entry) => entry !== '');
         return {
+          ...this.resources.placementMetadata(person, record.home),
           current: false,
           environment: bound!,
           facts: { cpus: record.machine === null ? null : 10, memory_mb: record.machine === null ? null : 20_000, os: record.machine === null ? 'linux' : (this.resources.machines.find((machine) => machine.id === record.machine)?.os ?? 'linux') },
@@ -673,7 +684,7 @@ export class Change implements Part {
     let place: PlaceHost | null = null;
     if (newEnvironment !== null) {
       const hosts = this.resources.hosts.filter((host) => host.schedulable || host.id === newEnvironment.hostId);
-      const chosen = newEnvironment.hostId === null ? hosts.map((host) => this.placeHost(host, false)).find((candidate) => candidate.usable) : this.placeHost(this.host(newEnvironment.hostId) ?? hosts[0] ?? this.resources.hosts[0]!, false);
+      const chosen = newEnvironment.hostId === null ? hosts.map((host) => this.placeHost(person, host, false)).find((candidate) => candidate.usable) : this.placeHost(person, this.host(newEnvironment.hostId) ?? hosts[0] ?? this.resources.hosts[0]!, false);
       if (chosen === undefined) block('no_host', 'no host takes a new environment');
       else if (!chosen.usable) block('no_capacity', `${chosen.host.name} takes nothing more now: ${Math.round(chosen.declared.memory_mb / 1024)} of ${Math.round(chosen.capacity.memory_mb / 1024)} GB declared`);
       else place = chosen;
@@ -692,7 +703,7 @@ export class Change implements Part {
       newEnvironment !== null && place !== null
         ? { new: { name: newEnvironment.name, place } }
         : newEnvironment !== null
-          ? { new: { name: newEnvironment.name, place: this.placeHost(this.host(newEnvironment.hostId ?? '') ?? this.resources.hosts[0]!, false) } }
+          ? { new: { name: newEnvironment.name, place: this.placeHost(person, this.host(newEnvironment.hostId ?? '') ?? this.resources.hosts[0]!, false) } }
           : this.environmentRef(environmentId);
 
     // What the people on its page need to go on talking to it.
@@ -1107,6 +1118,7 @@ export class Change implements Part {
     const replace = plan.result === 'replace';
     const target = { ...bound, provider: asked.provider, agent: asked.agent, model: asked.model, effort: asked.effort, directory: asked.directory };
     const before = { ...bound };
+    const sourceLocation = this.environmentLocationOf(bound.environment);
     const bytes = plan.files?.total_bytes ?? 0;
     const files = plan.files?.file_count ?? 0;
     let madeEnvironment: string | null = null;
@@ -1133,17 +1145,20 @@ export class Change implements Part {
           this.world.threads.emit(threadId, {
             thread: { lock: null, state: 'idle', blocked: null },
             segments: [segment],
-            items: [
-              marker(randomUUID(), {
-                marker: 'switched',
-                data: {
+            items: [marker(randomUUID(), !asked.providerChanged && !asked.agentChanged && (environmentId !== before.environment || asked.directory !== before.directory)
+              ? { marker: 'environment_moved', data: {
+                  by: this.user(person.me.username), from: this.environmentRef(before.environment), to: this.environmentRef(environmentId),
+                  from_host: sourceLocation.host, from_machine: sourceLocation.machine,
+                  to_host: this.environmentLocationOf(environmentId).host, to_machine: this.environmentLocationOf(environmentId).machine,
+                  mounts_detached: plan.mounts.filter((mount) => mount.action === 'detach').map((mount) => mount.mount.name),
+                  path_map: { from: before.directory, to: asked.directory },
+                } }
+              : { marker: 'switched', data: {
                   by: this.user(person.me.username),
                   from: { agent: plan.from.agent, directory: before.directory, environment: plan.from.environment, provider: plan.from.provider },
                   report: plan.history.report,
                   to: { agent: plan.to.agent, directory: asked.directory, environment: this.environmentRef(environmentId), provider: plan.to.provider },
-                },
-              }),
-            ],
+                } } satisfies MarkerPayload)],
           });
         } else {
           const topicId = asked.topic ?? (side === undefined ? (this.world.places.rowOf(threadId)?.parent_id ?? ACME.fixLogin) : (this.world.places.rowOf(side.parent)?.parent_id ?? ACME.fixLogin));
@@ -1534,7 +1549,7 @@ export class Change implements Part {
   }
 
   private movePlaces(person: Person, record: NonNullable<ReturnType<Change['environment']>>): MovePlace[] {
-    const places: MovePlace[] = this.resources.hosts.filter((host) => host.id !== record.host).map((host) => ({ kind: 'host' as const, ...this.placeHost(host, false) }));
+    const places: MovePlace[] = this.resources.hosts.filter((host) => host.id !== record.host).map((host) => ({ kind: 'host' as const, ...this.placeHost(person, host, false) }));
     for (const machine of this.resources.machines) {
       if (machine.id === record.machine) continue;
       let data: MachineEnvironmentData;
@@ -1549,7 +1564,7 @@ export class Change implements Part {
       if (data.direct.made_by_orch === null) reasons.push(data.direct.reason ?? 'The machine has not offered making data.');
       if (machine.policy['environment.remote_write'] !== true) reasons.push('The machine policy has remote writes off.');
       if (data.roots.length === 0) reasons.push('The machine policy offers no environment.roots.');
-      places.push({ kind: 'machine', machine: this.machineRefOf(machine.id), host: null, usable: reasons.length === 0, reasons });
+      places.push({ ...unplacedGrouping(), kind: 'machine', machine: this.machineRefOf(machine.id), host: null, usable: reasons.length === 0, reasons });
     }
     return places;
   }
@@ -1570,10 +1585,10 @@ export class Change implements Part {
       ? typeof body.host_id === 'string' || choices.some((place) => place.kind === 'host' && place.usable) ? null : choices.find((place) => place.kind === 'machine' && place.usable)
       : choices.find((place) => place.kind === 'machine' && place.machine.id === machineId);
     if (machineId !== null && selected?.kind !== 'machine') throw new Refusal(404, 'not_found', 'the destination machine is not available');
-    return this.movePlan(record, typeof body.host_id === 'string' ? body.host_id : null, selected?.kind === 'machine' ? selected : null, body.copy_directories === true, body);
+    return this.movePlan(person, record, typeof body.host_id === 'string' ? body.host_id : null, selected?.kind === 'machine' ? selected : null, body.copy_directories === true, body);
   }
 
-  private movePlan(record: NonNullable<ReturnType<Change['environment']>>, hostId: string | null, machine: MoveMachine | null = null, copyDirectories = false, options: Record<string, unknown> = {}): EnvironmentMovePlan {
+  private movePlan(person: Person, record: NonNullable<ReturnType<Change['environment']>>, hostId: string | null, machine: MoveMachine | null = null, copyDirectories = false, options: Record<string, unknown> = {}): EnvironmentMovePlan {
     const blockers: PlanBlocker[] = [];
     const sources = record.config?.['env.data_sources'];
     const borrowed = typeof sources === 'object' && sources !== null
@@ -1581,10 +1596,10 @@ export class Change implements Part {
     if (borrowed && !copyDirectories) blockers.push({ code: 'existing_directory_on_source_machine', message: 'Existing directories stay on their machine. Choose Copy existing directories into new storage made by Orch; the originals are kept.' });
     if (machine !== null) blockers.push(...machine.reasons.map((message: string) => ({ code: 'machine_policy', message })));
     const hosts = this.resources.hosts.filter((host) => host.id !== record.host);
-    const chosenHost = hostId === null ? hosts.find((host) => this.placeHost(host, false).usable) : this.host(hostId);
+    const chosenHost = hostId === null ? hosts.find((host) => this.placeHost(person, host, false).usable) : this.host(hostId);
     if (chosenHost === undefined && machine === null) blockers.push({ code: 'no_host', message: 'no other host takes this environment' });
     const offeredHost = chosenHost ?? this.host(record.host ?? '') ?? this.resources.hosts[0];
-    const place = machine !== null || offeredHost === undefined ? null : this.placeHost(offeredHost, false, 4_096);
+    const place = machine !== null || offeredHost === undefined ? null : this.placeHost(person, offeredHost, false, 4_096);
     if (machine === null && place === null) throw new Refusal(409, 'plan.blocked', 'no permitted destination is available');
     if (machine === null && chosenHost !== undefined && place !== null && !place.usable) blockers.push({ code: 'no_capacity', message: `${place.host.name} takes nothing more now` });
     if (this.openJobFor({ environment: record.id }) !== undefined) blockers.push({ code: 'already_running', message: 'a fork, a switch, a move or an update is under way for this environment' });
@@ -1601,6 +1616,7 @@ export class Change implements Part {
     files.bytes_to_upload += extra;
     files.bytes_to_download += extra;
     return {
+      kind: record.host !== null && machine === null ? 'move' : 'switch_copy', source_has_unit: record.host !== null,
       blockers,
       environment: this.environmentRef(record.id),
       notification: { people: 0, default_on: false },

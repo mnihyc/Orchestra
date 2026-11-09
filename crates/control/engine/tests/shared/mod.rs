@@ -7,10 +7,10 @@
 #![allow(dead_code, reason = "each test file uses some of what is here")]
 
 #[path = "../native_tools/mod.rs"]
-mod native_tools;
+pub(crate) mod native_tools;
 
 use crate::common::World;
-use orch_db::queries::access::{PageKey, testing as access_testing};
+use orch_db::queries::access::{self, NewEntry, PageKey};
 use orch_db::queries::hierarchy::testing::insert_node;
 use orch_link_contract::commands::{OrchTool, OrchToolResult};
 use orch_types::{Id, Json, new_id};
@@ -19,6 +19,14 @@ use serde_json::json;
 /// A world whose agent takes an MCP server, so that the tools are offered.
 pub async fn a_world_whose_agent_takes_tools() -> World {
     let world = World::new().await;
+    // These fixtures exercise explicit Share entries, not a creation contribution.
+    world
+        .set(
+            world.project,
+            "threads.agent_access",
+            json!({"where":"nothing","parts":{}}),
+        )
+        .await;
     the_agent_takes_tools_again(&world).await;
     native_tools::existing_workspace(&world);
     world
@@ -122,17 +130,30 @@ pub async fn share(
     place: Id,
 ) -> Id {
     let mut conn = world.pool.acquire().await.unwrap();
-    access_testing::add_entry(
+    let id = new_id();
+    // The world's ordinary owner of the source writes this contribution. Unknown-giver
+    // tests use their own raw rows instead of borrowing this fixture's person.
+    access::insert_entry(
         &mut conn,
-        &PageKey::new(kind, thing, page),
-        profile,
-        permission,
-        ("agents", Some(place), None),
-        None,
-        chrono::Utc::now(),
+        &NewEntry {
+            id,
+            page: &PageKey::new(kind, thing, page),
+            profile,
+            permission,
+            holder_kind: "agents",
+            holder_id: Some(place),
+            holder_role: None,
+            options: &json!({}),
+            expires_at: None,
+            note: "",
+            source: "page",
+            created_by: Some(world.ada),
+            at: world.clock.now(),
+        },
     )
     .await
-    .unwrap()
+    .unwrap();
+    id
 }
 
 /// Shares the conversations of what is inside a place, in both profiles of the row.
@@ -353,6 +374,14 @@ impl Places for World {
         insert_node(&mut conn, id, "project", Some(self.root), name, self.ada)
             .await
             .unwrap();
+        orch_db::queries::access::testing::name_owner(
+            &mut conn,
+            id,
+            ("user", self.ada),
+            self.clock.now(),
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -362,6 +391,14 @@ impl Places for World {
         insert_node(&mut conn, id, "topic", Some(project), name, self.ada)
             .await
             .unwrap();
+        orch_db::queries::access::testing::name_owner(
+            &mut conn,
+            id,
+            ("user", self.ada),
+            self.clock.now(),
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -371,6 +408,14 @@ impl Places for World {
         insert_node(&mut conn, id, "thread", Some(topic), name, self.ada)
             .await
             .unwrap();
+        orch_db::queries::access::testing::name_owner(
+            &mut conn,
+            id,
+            ("user", self.ada),
+            self.clock.now(),
+        )
+        .await
+        .unwrap();
         id
     }
 
@@ -479,6 +524,18 @@ impl orch_engine::sharing::Parcels for MemoryParcels {
         copy: &orch_db::queries::shares::CopyRow,
     ) -> Result<(), orch_engine::sharing::ParcelFault> {
         self.withdrawn.lock().unwrap().push(copy.id);
+        Ok(())
+    }
+
+    async fn withdraw_before(
+        &self,
+        _conn: &mut orch_db::Conn,
+        copy: &orch_db::queries::shares::CopyRow,
+        before: orch_engine::sharing::BeforeParcel<'_>,
+    ) -> Result<(), orch_engine::sharing::ParcelFailure> {
+        let mut withdrawn = self.withdrawn.lock().unwrap();
+        before().map_err(orch_authz::pages::EffectFailure::BeforeEffect)?;
+        withdrawn.push(copy.id);
         Ok(())
     }
 

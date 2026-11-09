@@ -6,7 +6,8 @@
  */
 import { QueryObserver, queryOptions } from '@tanstack/react-query';
 
-import { api, client, done, ok } from '@/api/client';
+import { accepted, api, client, done, ok, repeatable } from '@/api/client';
+import { newActKey } from '@/lib/requests';
 import { queryClient } from '@/api/query';
 import type {
   AuthEmailCodeSendBody,
@@ -38,15 +39,17 @@ export const USERNAME_PATTERN = /^[a-z0-9][a-z0-9_-]{2,31}$/;
 export const metaKey = ['meta'] as const;
 export const meKey = ['me'] as const;
 
+/** Native Meta repair remains independent of startup aggregate ownership. */
+export async function fetchMeta(signal?: AbortSignal): Promise<Meta> {
+  const reader = client.session.getState().readerVersion;
+  const meta = await ok(api.GET('/meta', { ...(signal === undefined ? {} : { signal }) }));
+  return client.session.getState().readerVersion === reader ? meta : { ...meta, may_create_org: false };
+}
+
 /** What the system says of itself to anybody: its name, who may register, the ways of signing in. */
 export const metaQuery = queryOptions({
   queryKey: metaKey,
-  queryFn: async ({ signal }): Promise<Meta> => {
-    const reader = client.session.getState().readerVersion;
-    const meta = await ok(api.GET('/meta', { signal }));
-    // All other Meta facts are public; this permission belongs to the caller.
-    return client.session.getState().readerVersion === reader ? meta : { ...meta, may_create_org: false };
-  },
+  queryFn: ({ signal }): Promise<Meta> => fetchMeta(signal),
   staleTime: META_FRESH_FOR_MS,
 });
 
@@ -108,11 +111,19 @@ function adopt(result: AuthResult): AuthResult {
   return result;
 }
 
-/** Makes the first administrator. From then on the system needs no setup. */
-export async function setUp(body: SetupCreateBody): Promise<AuthResult> {
-  const result = adopt(await ok(api.POST('/setup', { body })));
+export type SetUp = { signedIn: true; result: AuthResult } | { signedIn: false; alreadyCreated: true };
+
+/** Makes the first administrator. A completed resend continues at sign-in without another secret. */
+export async function setUp(body: SetupCreateBody, key = newActKey()): Promise<SetUp> {
+  const reply = await accepted(api.POST('/setup', { body, ...repeatable(key) }));
+  if ('sign_in_required' in reply && reply.sign_in_required === true) {
+    queryClient.setQueryData(metaKey, (meta: Meta | undefined) => meta && { ...meta, needs_setup: false });
+    return { signedIn: false, alreadyCreated: true };
+  }
+  if (!('access_token' in reply)) throw new Error('Setup did not return a session or a sign-in receipt');
+  const result = adopt(reply);
   queryClient.setQueryData(metaKey, (meta: Meta | undefined) => meta && { ...meta, needs_setup: false });
-  return result;
+  return { signedIn: true, result };
 }
 
 /** Signs in with one proof, or with two for somebody who has a second step. */
@@ -129,11 +140,12 @@ export function askEmailCode(body: AuthEmailCodeSendBody): Promise<void> {
 }
 
 /** How a registration ended: signed in, or waiting for the address to be confirmed. */
-export type Registered = { signedIn: true; result: AuthResult; accepted: InvitationAcceptReply | null } | { signedIn: false };
+export type Registered = { signedIn: true; result: AuthResult; accepted: InvitationAcceptReply | null } | { signedIn: false; alreadyCreated?: boolean };
 
 /** Registers a person. Where addresses are confirmed first, nobody is signed in yet. */
-export async function register(body: AuthRegisterBody): Promise<Registered> {
-  const reply = await ok(api.POST('/auth/register', { body }));
+export async function register(body: AuthRegisterBody & { accepted_terms_hash?: string }, key = newActKey()): Promise<Registered> {
+  const reply = await accepted(api.POST('/auth/register', { body, ...repeatable(key) }));
+  if ('sign_in_required' in reply && reply.sign_in_required === true) return { signedIn: false, alreadyCreated: true };
   if ('access_token' in reply) return { signedIn: true, result: adopt(reply), accepted: reply.accepted_invitation ?? null };
   return { signedIn: false };
 }

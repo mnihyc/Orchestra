@@ -30,7 +30,9 @@ fn recording(management: bool) -> Json {
         "is_free_tier":false,"budgets":budgets,"effective_budget":budgets[0],
         "free_model_daily_requests":{"used":8,"limit":1000,"remaining":992}}},
         "/api/v1/models":{"data":[{"id":"openai/recorded","name":"Recorded","context_length":128000,
-            "pricing":{"prompt":"0.0000002","completion":"0.0000008","input_cache_read":"0.0000001"}}]}});
+            "pricing":{"prompt":"0.0000002","completion":"0.0000008","input_cache_read":"0.0000001"}},
+            {"id":"openai/unreported-cache","pricing":{"prompt":"0.000001","completion":"0.000002"}},
+            {"id":"openai/free","name":"Free","pricing":{"prompt":"0","completion":"0","input_cache_read":"0"}}]}});
     if management {
         replies["/api/v1/credits"] = json!({"data":{"total_credits":100,"total_usage":12.5}});
     }
@@ -138,9 +140,27 @@ async fn a_key_program_and_the_builtin_have_identical_utc_windows_spend_and_opti
         let protocol = orch_protocol_openai_responses::OpenAiResponses;
         let expected =
             protocol.parse_models(&serde_json::to_vec(&replies["/api/v1/models"]).unwrap());
+        let listed =
+            serde_json::to_value(bridge.list_models(query.clone()).await.unwrap()).unwrap();
+        assert_eq!(listed, json!({"models":expected}));
+        let fallback = &listed["models"][1];
+        assert_eq!(fallback["display_name"], "openai/unreported-cache");
+        assert_eq!(fallback["parameters"]["rate"]["cached_input_per_mtok"], "1");
+        for pointer in [
+            "/display_name",
+            "/parameters/offered/context_max",
+            "/parameters/rate/cached_input_per_mtok",
+        ] {
+            assert!(
+                fallback["origins"].get(pointer).is_none(),
+                "a display or price fallback is not a vendor observation"
+            );
+        }
+        let free = &listed["models"][2];
+        assert_eq!(free["parameters"]["rate"]["cached_input_per_mtok"], "0");
         assert_eq!(
-            serde_json::to_value(bridge.list_models(query.clone()).await.unwrap()).unwrap(),
-            json!({"models":expected})
+            free["origins"]["/parameters/rate/cached_input_per_mtok"],
+            "vendor"
         );
         let endpoints = plugin
             .call("x-endpoint.describe", serde_json::to_value(&query).unwrap())

@@ -58,23 +58,28 @@ function current(nav: HTMLElement, expected: string) {
   expect(links[0]).toHaveAccessibleName(expected);
 }
 
-it.each(modes)('finds all 22 Management destinations locally and reaches the last by keyboard in %s/%s', async (locale, theme) => {
+it.each(modes)('finds all 24 Management destinations locally and reaches the last by keyboard in %s/%s', async (locale, theme) => {
   await setLocale(locale); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
   const user = userEvent.setup(); const { router, reads } = draw('/admin/overview');
   const label = i18n.t('admin.nav.label'); const nav = await screen.findByRole('navigation', { name: label });
   const field = within(nav).getByRole('combobox', { name: label });
-  expect(LISTED).toHaveLength(22);
-  expect(within(nav).getAllByRole('link')).toHaveLength(22);
+  expect(LISTED.map((entry) => entry.id)).toEqual([
+    'overview', 'users', 'tokens', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp',
+    'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search',
+    'system', 'gateways', 'pki', 'audit',
+  ]);
+  expect(LISTED).toHaveLength(24);
+  expect(within(nav).getAllByRole('link')).toHaveLength(24);
   for (const entry of LISTED) expect(within(nav).getByRole('link', { name: i18n.t(`admin.sections.${entry.id}.title`) })).toHaveAttribute('href', `/admin/${entry.id}`);
   const initial = i18n.t('admin.sections.overview.title'); const last = i18n.t('admin.sections.audit.title');
   current(nav, initial); expect(field).toHaveValue(initial); expect(reads).toHaveBeenCalledTimes(1);
-  await user.click(field); expect(screen.getAllByRole('option')).toHaveLength(22);
+  await user.click(field); expect(screen.getAllByRole('option')).toHaveLength(24);
   expect(field).toHaveAttribute('placeholder', i18n.t('ui.combobox.search'));
   await user.type(field, last);
   expect(screen.getAllByRole('option')).toHaveLength(1); expect(screen.getByRole('option', { name: last })).toBeVisible();
   expect(router.state.location.href).toBe('/admin/overview'); current(nav, initial); expect(reads).toHaveBeenCalledTimes(1);
   await user.keyboard('{Escape}'); expect(field).toHaveValue(initial); expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-  await user.keyboard('{ArrowDown}'); expect(screen.getAllByRole('option')).toHaveLength(22);
+  await user.keyboard('{ArrowDown}'); expect(screen.getAllByRole('option')).toHaveLength(24);
   await user.keyboard('{End}'); expect(screen.getByRole('option', { name: last, selected: true })).toBeVisible();
   await user.keyboard('{Enter}');
   await waitFor(() => expect(router.state.location.pathname).toBe('/admin/audit'));

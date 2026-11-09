@@ -1,3 +1,4 @@
+import type * as RouterModule from '@tanstack/react-router';
 /** A person can pause the request stream, resume it, filter its metadata and open its recorded turn. */
 import type { ReactNode } from 'react';
 import { act, screen, waitFor, within } from '@testing-library/react';
@@ -18,12 +19,17 @@ import { timingFixture } from '../doubles/performance';
 const fake = vi.hoisted(() => ({ reads: 0, narrow: false, rows: [] as UsageEvent[], older: [] as UsageEvent[], cursors: [] as string[], receive: undefined as ((frame: FeedFrame) => void) | undefined }));
 vi.mock('@/ui/Table', async (importOriginal) => {
   const actual = await importOriginal<typeof TableModule>();
-  return { ...actual, Table: (props: TableProps<UsageEvent>) => <actual.Table {...props} columns={fake.narrow ? props.columns.filter((column) => column.id === 'time') : props.columns} /> };
+  return { ...actual, Table: (props: TableProps<UsageEvent>) => {
+    const columns = fake.narrow ? props.columns.filter((column) => column.id === 'time') : props.columns.map((column) => {
+      const wide = { ...column }; delete wide.from; return wide;
+    });
+    return <actual.Table {...props} columns={columns} />;
+  } };
 });
 vi.mock('@/api/usage', () => ({ fetchEventsPage: (_params: unknown, cursor: string) => { fake.cursors.push(cursor); return Promise.resolve({ items: fake.older, next_cursor: null }); }, eventsQuery: () => ({ queryKey: ['request-log-test'], queryFn: () => { fake.reads += 1; return Promise.resolve({ items: fake.rows, next_cursor: null }); }, initialPageParam: null, getNextPageParam: () => null }) }));
 vi.mock('@/api/nodes',()=>({orgsQuery:{queryKey:['orgs'],queryFn:()=>Promise.resolve([])}}));
 vi.mock('@/realtime/live', () => ({ socket: { subscribe: (_feed: string, listener: { onFrame: (frame: FeedFrame) => void }) => { fake.receive = listener.onFrame; return { unsubscribe: () => { fake.receive = undefined; } }; } } }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ params, search, children }: { params: { threadId: string }; search: { turn: number }; children: ReactNode }) => <a href={`/thread/${params.threadId}?turn=${search.turn}`}>{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ params, search, children }: { params: { threadId: string }; search: { turn: number }; children: ReactNode }) => <a href={`/thread/${params.threadId}?turn=${search.turn}`}>{children}</a> }));
 
 beforeEach(() => { fake.reads = 0; fake.narrow = false; fake.rows = [requestRow()]; fake.older = []; fake.cursors = []; fake.receive = undefined; });
 const span = { from: '2026-10-15', to: '2026-10-15', days: 1, range: 'custom' as const };
@@ -110,7 +116,7 @@ it('names an error in words and preserves the vendor sentence once without a raw
   fake.rows=[requestRow({timing:timingFixture({outcome:{state:'told',value:'provider_busy'},error_message:'Please retry later',vendor_words:'Please retry later'})})];
   show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={()=>undefined}/>);
   const words=await screen.findByText('Please retry later');
-  expect(words).toBeVisible();expect(screen.getByText('Rate limited',{exact:true})).toBeVisible();
+  expect(words).toBeVisible();expect(screen.getByText('Provider busy',{exact:true})).toBeVisible();
   expect(screen.queryByText(/provider_busy/)).not.toBeInTheDocument();
   expect(words.textContent.match(/Please retry later/g)).toHaveLength(1);
 });
@@ -176,4 +182,74 @@ it('recovers requests between bounded snapshots by cursor while keeping a paused
   await user.click(screen.getByRole('button', {name:'Resume'}));
   expect(await screen.findByText('Middle model')).toBeInTheDocument();
   expect(screen.getByText('Newest model')).toBeInTheDocument();
+});
+
+
+for (const locale of ['en','zh-CN'] as const) for (const theme of ['light','dark'] as const) for (const phone of [false,true])
+it(`keeps cached/cold counts and failure facts visible (${locale}/${theme}/phone:${phone})`, async () => {
+  await setLocale(locale); useAppearance.setState({locale,theme}); document.documentElement.dataset.theme=theme; fake.narrow=phone;
+  fake.rows=[requestRow({tool_calls:2,tool_ms:400,timing:timingFixture({
+    reported_tokens:{input_tokens:100,cached_input_tokens:20,cache_write_tokens:10,output_tokens:64,reasoning_tokens:0,total_tokens:164},
+    outcome:{state:'told',value:'model_refused'},error_reason:'cyber',upstream_status:403,attempt:3,
+  })})];
+  show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={()=>undefined}/>);
+  const table=await screen.findByRole('table',{name:i18n.t('usagePerf.requestsView')});
+  await within(table).findByText(i18n.t('usageRequest.uncached'));
+  for (const label of ['uncached','cached','cacheWrite','reason','status','attempt','tools','toolTime'] as const) expect(within(table).getByText(i18n.t(`usageRequest.${label}`))).toBeVisible();
+  for (const value of ['70','20','10','403','3']) expect(within(table).getByText(value,{exact:true})).toBeVisible();
+  expect(within(table).getByText(i18n.t('usageRequest.reasons.cyber'))).toBeVisible();
+  expect(within(table).getByText(i18n.t('usagePerf.outcomes.model_refused'))).toBeVisible();
+  expect(table).toHaveTextContent('64');
+  expect(fake.reads).toBe(1);expect(fake.cursors).toEqual([]);
+});
+
+for (const outcome of ['rate_limited','overloaded','stream_interrupted'] as const)
+it(`filters the refined ${outcome} class by its original wire value`, async () => {
+  const changed=vi.fn();show(<Requests scope={{kind:'me'}} search={{}} span={span} onSearch={changed}/>);
+  await screen.findByText(/Model A/);await userEvent.click(screen.getByRole('combobox',{name:i18n.t('usagePerf.outcome')}));
+  await userEvent.click(screen.getByRole('option',{name:i18n.t(`usagePerf.choices.outcomes.${outcome}.name`)}));
+  expect(changed).toHaveBeenCalledWith({outcome});expect(fake.reads).toBe(1);
+});
+
+
+for(const locale of ['en','zh-CN'] as const) for(const theme of ['light','dark'] as const) for(const phone of [false,true])
+it(`keeps standalone service purpose, unit coverage and selected live filters (${locale}/${theme}/phone:${phone})`,async()=>{
+  await setLocale(locale);useAppearance.setState({locale,theme});document.documentElement.dataset.theme=theme;fake.narrow=phone;
+  const service=requestRow({id:'native-service',thread:null,turn_id:null,turn_ordinal:null,purpose:'web_search',model:'',model_display:'',effort:null,tier:null,access_program:null,
+    tokens:{input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_tokens:0,total_tokens:0},credits:'0',
+    timing:timingFixture({reported_tokens:null,first_token_ms:{state:'unsupported'},generation_ms:{state:'unsupported'},request_ms:{state:'unsupported'},speed_milli:{state:'unsupported'},
+      service_usage:{offering:'shared-name',unit:'search',quantity:{state:'told',value:0}}})});
+  const otherPurpose={...service,id:'page-service',purpose:'page_fetch' as const};
+  fake.rows=[service,otherPurpose,requestRow({id:'model-search',purpose:'web_search',model:'shared-name',model_display:'Generation model'})];
+  const changed=vi.fn();const user=userEvent.setup();
+  show(<Requests scope={{kind:'me'}} search={{service:'shared-name',purpose:'web_search'}} span={span} onSearch={changed}/>);
+  const table=await screen.findByRole('table',{name:i18n.t('usagePerf.requestsView')});
+  await within(table).findByText('shared-name');
+  expect(table).toHaveTextContent(i18n.t('usage.purposes.web_search'));
+  expect(table).toHaveTextContent(locale==='en'?'0 searches':'0 次搜索');
+  expect(table).not.toHaveTextContent(i18n.t('usage.records.summary'));
+  expect(table).not.toHaveTextContent(i18n.t('usage.purposes.page_fetch'));
+  expect(table).not.toHaveTextContent('Generation model');
+  expect(within(table).queryByRole('link')).not.toBeInTheDocument();
+  expect(within(table).queryByText(i18n.t('usageRequest.uncached'))).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button',{name:i18n.t('usagePerf.filters')}));
+  await user.click(screen.getByRole('combobox',{name:i18n.t('usage.chip.purpose')}));
+  await user.click(screen.getByRole('option',{name:i18n.t('usage.purposes.page_fetch')}));
+  expect(changed).toHaveBeenLastCalledWith({purpose:'page_fetch'});
+  expect(fake.reads).toBe(1);expect(fake.cursors).toEqual([]);
+  await user.click(screen.getByRole('button',{name:i18n.t('usagePerf.pause')}));
+  const timing=service.timing;if(timing?.service_usage===null || timing?.service_usage===undefined) throw new Error('The service fixture is missing its actual unit');
+  const arriving={...service,id:'next-service',at:'2026-10-15T04:01:00.000Z',timing:{...timing,service_usage:{...timing.service_usage,quantity:{state:'empty' as const}}}};
+  act(()=>fake.receive?.({op:'event',id:1,feed:'usage:me',data:{items:[arriving,{...otherPurpose,id:'next-page-service'},requestRow({id:'next-model',at:'2026-10-15T04:02:00.000Z',model:'shared-name',model_display:'Another generation model'})],next_cursor:null}}));
+  await screen.findByRole('button',{name:i18n.t('usagePerf.newRows',{count:1,value:'1'})});
+  expect(table).not.toHaveTextContent(locale==='en'?'– searches':'– 次搜索');
+  await user.click(screen.getByRole('button',{name:i18n.t('usagePerf.resume')}));
+  await within(table).findByText(locale==='en'?'– searches':'– 次搜索');
+  expect(table).toHaveTextContent(locale==='en'?'0 searches':'0 次搜索');
+  expect(table).not.toHaveTextContent('Another generation model');
+  expect(table).not.toHaveTextContent(i18n.t('usage.purposes.page_fetch'));
+  expect(within(table).getAllByRole('row')).toHaveLength(3);
+  act(()=>fake.receive?.({op:'closed',id:2,feed:'usage:me',reason:'revoked'}));
+  await waitFor(()=>expect(within(table).getAllByRole('row')).toHaveLength(1));
+  expect(table).not.toHaveTextContent('shared-name');
 });

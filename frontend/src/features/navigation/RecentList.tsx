@@ -13,7 +13,7 @@ import { placeOfRow, type DocPlace } from './places';
 import type { Needs, NavItem } from './treeRows';
 import { groupedRecentsOnDay, recentAt, recentDay, recentGroupOnDay, type RecentGroup } from './recent';
 import { useListingRetired, useRecentUpdates } from './useRecentUpdates';
-import type { EverythingRow } from '@/generated/api-types';
+import type { EverythingRow, TreeNode } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { useDebounced } from '@/lib/debounce';
 import { formatExact, useNow } from '@/lib/time';
@@ -27,7 +27,7 @@ import { IconButton } from '@/ui/IconButton';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { NodeIcon } from '@/ui/NodeIcon';
 import { ThreadStateIcon } from '@/ui/ThreadState';
-import { containedThreadStates } from '@/lib/threadDisplay';
+import { containedThreadStates, currentThreadDisplay } from '@/lib/threadDisplay';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { nearestPlace, RowEnd, RowPlace } from '@/ui/RowDetails';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -44,6 +44,15 @@ export interface RecentListProps {
   current: string | null;
   needs: (ids: readonly string[]) => Needs;
   onShowTree: (row: EverythingRow) => void;
+}
+
+/** A path-only list row cannot borrow old tree metadata; admitted display facts retain native ordering. */
+function recentNode(row: EverythingRow, node: TreeNode | undefined): TreeNode | undefined {
+  if (node === undefined || node.deleted || row.kind === 'chat' || row.kind === 'document') return undefined;
+  if (row.kind !== 'thread') return node;
+  if (row.my_access === 'path_only' || (row.thread_display === null || row.thread_display === undefined) || node.thread === null) return undefined;
+  const display = currentThreadDisplay(row.thread_display, node.thread.display);
+  return display === undefined ? undefined : { ...node, thread: { ...node.thread, display } };
 }
 
 /** Rows have no detail reads; their ordinary menus still load permissions only when asked. */
@@ -92,13 +101,13 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
     ...(row.href === null ? [] : [{ id: 'open', label: t('places.menu.open'), href: row.href, onSelect: () => row.href !== null && open(row.href) }]), ...extra(row),
   ], [open, t, extra]);
   const render = useCallback(({ item: { row } }: TreeRow<RecentItem>) => {
-    const node = tree.nodes.get(row.id);
+    const node = recentNode(row, tree.nodes.get(row.id));
     const at = recentAt(row, order);
     const where = nearestPlace(row);
     const time = at === null ? null : <RelativeTime compact at={at} />;
     const exact = at === null ? undefined : formatExact(at, { locale, timeZone });
     let body: ReactElement;
-    if (node !== undefined && !node.deleted && row.kind !== 'chat' && row.kind !== 'document') {
+    if (node !== undefined) {
       const held = needs([node.id]);
       const display = node.thread?.display;
       const item: Extract<NavItem, { type: 'node' }> = { type: 'node', node, folder: node.kind === 'project' && tree.nodes.get(node.parent_id ?? '')?.kind === 'project',
@@ -114,7 +123,7 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
           if (row.href === null || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
           event.preventDefault(); open(row.href);
         }}>
-        {row.kind === 'thread' ? <ThreadStateIcon display={row.my_access === 'path_only' ? undefined : row.thread_display} />
+        {row.kind === 'thread' ? <ThreadStateIcon display={row.my_access === 'path_only' ? undefined : row.thread_display ?? null} />
           : row.kind === 'chat' ? <MessageSquare className="size-4 shrink-0 text-text-muted" aria-hidden /> : <NodeIcon kind={row.kind === 'org' || row.kind === 'project' || row.kind === 'topic' ? row.kind : 'document'} />}
         <span className={cx('truncate', row.document_unread === true && 'font-semibold text-text')}>{row.name}</span>
         <RowPlace value={where} />
@@ -124,7 +133,7 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
     return body;
   }, [tree.nodes, needs, order, docOf, extra, chatEntries, open, t, locale, timeZone]);
   const wrap = useCallback(({ item: { row, heading } }: TreeRow<RecentItem>, element: ReactElement) => {
-    const node = tree.nodes.get(row.id);
+    const node = recentNode(row, tree.nodes.get(row.id));
     const doc = row.kind === 'document' ? docOf(row) : null;
     const context = node !== undefined && row.kind !== 'chat' && row.kind !== 'document'
       ? <NodeContextMenu place={placeOfRow(node, node.kind === 'project' && tree.nodes.get(node.parent_id ?? '')?.kind === 'project')} extraEntries={extra(row)}>{element}</NodeContextMenu>
@@ -133,7 +142,7 @@ export function RecentList({ reader, parent, orgId, filter, tree, current, needs
     return <Fragment>{heading !== null && <h3 className="flex min-h-(--section-heading-height) items-end px-6 pt-3 pb-1 text-sm font-medium text-text-muted">{t(`navigation.recentGroups.${heading}`)}</h3>}{context}</Fragment>;
   }, [tree.nodes, docOf, extra, chatEntries, t]);
   if (!tree.loaded && tree.error !== null) return <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(orgId)} />;
-  if (query.isPending) return <SkeletonRows rows={6} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={6} />;
   if (query.isError && (rows.length === 0 || retired)) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   if (rows.length === 0) return <StateLine compact title={t(q !== '' ? 'navigation.filter.none' : order === 'active' ? 'navigation.noActivity' : 'navigation.noRecent')} className="px-6" />;
   return <>
