@@ -1,0 +1,4997 @@
+{
+  "format": 1,
+  "program": "claude-code",
+  "version": "2.1.319",
+  "evidence": {
+    "kind": "published_protocol",
+    "references": [
+      "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.319.tgz"
+    ],
+    "package": {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.319",
+      "sha256": "6bfb9ccb6a5d15686f5c7dd12d7a7da6d7b486ca6e1331ac8a7ab98a2d302001"
+    }
+  },
+  "scenarios": {
+    "approval_checkpoint": {
+      "status": "unsupported",
+      "reason": "Claude stream-json can_use_tool has no separate command-checkpoint approval kind; real command permission and its native refusal are covered by approval_command."
+    },
+    "approval_command": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "command",
+              "detail": {}
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "approval_file_change": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "file_change",
+              "detail": {}
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "approval_mcp": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "permissions",
+              "detail": {}
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "approval_network": {
+      "status": "unsupported",
+      "reason": "Claude stream-json has no separate network-approval request with offered network rules; native command/permission approvals remain covered without inventing that protocol."
+    },
+    "approval_permissions": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "permissions",
+              "detail": {}
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "approval_plan": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "plan",
+              "detail": {}
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "approval_prompt_user_rule": {
+      "status": "unsupported",
+      "reason": "Claude stream-json does not expose Codex prompt-user rule approvals; the native can_use_tool and settings/permission observations are covered separately."
+    },
+    "approval_unknown": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "other",
+              "detail": {
+                "summary": "Fixture permission",
+                "raw": {
+                  "tool": "FutureTool",
+                  "input": {
+                    "operation": "fixture"
+                  }
+                }
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "automatic_divergence": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "agentPushNotifEnabled",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "agentPushNotifEnabled",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "autoContinueAtUsageLimit",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "autoContinueAtUsageLimit",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "awaySummaryEnabled",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "awaySummaryEnabled",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "cleanupPeriodDays",
+                "value": 0,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": 3650
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "cleanupPeriodDays",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "crossSessionInbound",
+                "value": "allow",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "refuse"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "crossSessionInbound",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "disableAgentView",
+                "value": false,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": true
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "disableAgentView",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "disableAllHooks",
+                "value": false,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": true
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "disableAllHooks",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "disableClaudeAiConnectors",
+                "value": false,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": true
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "disableClaudeAiConnectors",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "disableRemoteControl",
+                "value": false,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": true
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "disableRemoteControl",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "disableWorkflows",
+                "value": false,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": true
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "disableWorkflows",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "enableArtifact",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "enableArtifact",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "enableWorkflows",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "enableWorkflows",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+                "value": "true",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "false"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_CRON",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_CRON",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                "value": "true",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "false"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.DISABLE_AUTOUPDATER",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.DISABLE_AUTOUPDATER",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.DISABLE_ERROR_REPORTING",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.DISABLE_ERROR_REPORTING",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.DISABLE_FEEDBACK_COMMAND",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.DISABLE_FEEDBACK_COMMAND",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.DISABLE_TELEMETRY",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.DISABLE_TELEMETRY",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.DISABLE_UPDATES",
+                "value": "0",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "1"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.DISABLE_UPDATES",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+                "value": "true",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "false"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.FORCE_AUTOUPDATE_PLUGINS",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.FORCE_AUTOUPDATE_PLUGINS",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "env.MCP_DISCOVERY_CACHE",
+                "value": "1",
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": "0"
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "env.MCP_DISCOVERY_CACHE",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "idleCompaction",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "idleCompaction",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "permissions.denyInsteadOfPrompting",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "permissions.denyInsteadOfPrompting",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "precomputeCompactionEnabled",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "precomputeCompactionEnabled",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "promptSuggestionEnabled",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "promptSuggestionEnabled",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "remoteControlAtStartup",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "remoteControlAtStartup",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "switchModelsOnFlag",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "switchModelsOnFlag",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "syncClaudeAiPlugins",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "syncClaudeAiPlugins",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "syncClaudeAiSkills",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "syncClaudeAiSkills",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "workflowKeywordTriggerEnabled",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "workflowKeywordTriggerEnabled",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_settings_readback",
+                "subject": null,
+                "value": {
+                  "status": "reported",
+                  "reported": [
+                    "agentPushNotifEnabled",
+                    "autoContinueAtUsageLimit",
+                    "awaySummaryEnabled",
+                    "cleanupPeriodDays",
+                    "crossSessionInbound",
+                    "disableAgentView",
+                    "disableAllHooks",
+                    "disableClaudeAiConnectors",
+                    "disableRemoteControl",
+                    "disableWorkflows",
+                    "enableArtifact",
+                    "enableWorkflows",
+                    "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+                    "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+                    "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+                    "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+                    "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+                    "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                    "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_DISABLE_CRON",
+                    "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                    "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+                    "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+                    "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                    "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+                    "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+                    "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+                    "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+                    "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+                    "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                    "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+                    "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                    "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+                    "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+                    "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+                    "env.DISABLE_AUTOUPDATER",
+                    "env.DISABLE_ERROR_REPORTING",
+                    "env.DISABLE_FEEDBACK_COMMAND",
+                    "env.DISABLE_TELEMETRY",
+                    "env.DISABLE_UPDATES",
+                    "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+                    "env.FORCE_AUTOUPDATE_PLUGINS",
+                    "env.MCP_DISCOVERY_CACHE",
+                    "idleCompaction",
+                    "permissions.denyInsteadOfPrompting",
+                    "precomputeCompactionEnabled",
+                    "promptSuggestionEnabled",
+                    "remoteControlAtStartup",
+                    "switchModelsOnFlag",
+                    "syncClaudeAiPlugins",
+                    "syncClaudeAiSkills",
+                    "workflowKeywordTriggerEnabled"
+                  ],
+                  "missing": []
+                },
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "background_end": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "background.tasks",
+          "body": {
+            "tasks": [
+              {
+                "id": "task",
+                "run_id": "run-1",
+                "native_item_ref": "tool",
+                "origin_turn": "00000000-0000-0000-0000-000000000003",
+                "kind": "command",
+                "state": "running",
+                "can_end": true
+              }
+            ]
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "background",
+            "ok": true,
+            "value": {
+              "supported": true,
+              "state": "live",
+              "items": [
+                {
+                  "id": "[\"task\",\"run-1\"]",
+                  "turn_id": "00000000-0000-0000-0000-000000000003",
+                  "native_item_ref": "tool"
+                }
+              ]
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "end_background",
+            "ok": true,
+            "value": {
+              "id": "[\"task\",\"run-1\"]",
+              "state": "ended"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "cancelled"
+          },
+          "subset": true
+        },
+        {
+          "name": "background.tasks",
+          "body": {
+            "tasks": [
+              {
+                "id": "task",
+                "run_id": "run-1",
+                "native_item_ref": "tool",
+                "origin_turn": "00000000-0000-0000-0000-000000000003",
+                "kind": "command",
+                "state": "stopped",
+                "can_end": true
+              }
+            ]
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "background_wake": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "background.tasks",
+          "body": {
+            "tasks": [
+              {
+                "id": "task",
+                "run_id": "run-1",
+                "native_item_ref": "tool",
+                "origin_turn": "00000000-0000-0000-0000-000000000003",
+                "kind": "command",
+                "state": "running",
+                "can_end": true
+              }
+            ]
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "command",
+                "exit_code": 0
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "background.tasks",
+          "body": {
+            "tasks": [
+              {
+                "id": "task",
+                "run_id": "run-1",
+                "native_item_ref": "tool",
+                "origin_turn": "00000000-0000-0000-0000-000000000003",
+                "kind": "command",
+                "state": "completed",
+                "can_end": true
+              }
+            ]
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "broken_stream": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "failed",
+            "payload": {
+              "code": "harness_error",
+              "message": "the harness wrote a line that is not a JSON object: {broken",
+              "retryable": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "session.lost",
+          "body": {
+            "reason": "the harness process ended: exited with status 7: Fixture process exit"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "compaction_automatic": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.phase",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "compacting"
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.phase",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "working"
+          },
+          "subset": true
+        },
+        {
+          "name": "usage.updated",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "report": {
+              "shortened": {
+                "before": 100,
+                "after": 40,
+                "automatic": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "model.request"
+      ]
+    },
+    "compaction_idle": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "compacted",
+            "payload": {
+              "marker": "compacted",
+              "data": {
+                "duration_ms": 5
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "model.request"
+      ]
+    },
+    "compaction_manual": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.phase",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "compacting"
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.phase",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "working"
+          },
+          "subset": true
+        },
+        {
+          "name": "usage.updated",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "report": {
+              "shortened": {
+                "before": 100,
+                "after": 40,
+                "automatic": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "model.request"
+      ]
+    },
+    "compaction_marker": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "compacted",
+            "payload": {
+              "marker": "compacted",
+              "data": {
+                "duration_ms": 5
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "usage.updated",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "report": {
+              "shortened": {
+                "before": 100,
+                "after": 40,
+                "automatic": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "model.request"
+      ]
+    },
+    "context_overflow": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "context_overflow",
+              "retryable": false,
+              "said": "Prompt is too long",
+              "status": 400
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "fork": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "hooks": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "hook",
+                "subject": "Fixture hook",
+                "value": {
+                  "status": "completed",
+                  "duration_ms": 1000,
+                  "exit_code": 0
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "interrupt": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "interrupt",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "interrupted"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "mcp_elicitation": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "mcp_elicitation",
+              "options": [],
+              "detail": {
+                "server": "fixture",
+                "message": "Choose a fixture",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "choice": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "choice"
+                  ]
+                }
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "mcp_failure": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "mcp_startup",
+                "subject": "fixture",
+                "value": {
+                  "status": "failed",
+                  "native_status": "failed",
+                  "message": "Fixture MCP failure"
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "mcp_server_failed",
+              "retryable": false,
+              "message": "fixture: Fixture MCP failure"
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "mcp_startup": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "mcp_startup",
+                "subject": "fixture",
+                "value": {
+                  "status": "ready",
+                  "native_status": "connected"
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "model_reroute": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "model_rerouted",
+              "details": {
+                "from_model": "mock-large",
+                "to_model": "mock-small",
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "overloaded": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "overloaded",
+              "retryable": true,
+              "said": "Overloaded",
+              "status": 529
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "process_exit": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "session.lost",
+          "body": {
+            "reason": "the harness process ended: exited with status 7: Fixture process exit"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "rate_limit": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "rate_limited",
+              "retryable": true,
+              "said": "Request rejected (429)",
+              "status": 429
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "resume": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "session_lifecycle",
+                "subject": null,
+                "value": "resumed",
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "session_close": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "session_unload": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "settings_program": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_settings_readback",
+                "subject": null,
+                "value": {
+                  "status": "reported",
+                  "reported": [
+                    "agentPushNotifEnabled",
+                    "autoContinueAtUsageLimit",
+                    "awaySummaryEnabled",
+                    "cleanupPeriodDays",
+                    "crossSessionInbound",
+                    "disableAgentView",
+                    "disableAllHooks",
+                    "disableClaudeAiConnectors",
+                    "disableRemoteControl",
+                    "disableWorkflows",
+                    "enableArtifact",
+                    "enableWorkflows",
+                    "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+                    "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+                    "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+                    "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+                    "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+                    "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                    "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_DISABLE_CRON",
+                    "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                    "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+                    "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+                    "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                    "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+                    "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+                    "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+                    "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+                    "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+                    "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                    "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+                    "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                    "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+                    "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+                    "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+                    "env.DISABLE_AUTOUPDATER",
+                    "env.DISABLE_ERROR_REPORTING",
+                    "env.DISABLE_FEEDBACK_COMMAND",
+                    "env.DISABLE_TELEMETRY",
+                    "env.DISABLE_UPDATES",
+                    "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+                    "env.FORCE_AUTOUPDATE_PLUGINS",
+                    "env.MCP_DISCOVERY_CACHE",
+                    "idleCompaction",
+                    "permissions.denyInsteadOfPrompting",
+                    "precomputeCompactionEnabled",
+                    "promptSuggestionEnabled",
+                    "remoteControlAtStartup",
+                    "switchModelsOnFlag",
+                    "syncClaudeAiPlugins",
+                    "syncClaudeAiSkills",
+                    "workflowKeywordTriggerEnabled"
+                  ],
+                  "missing": []
+                },
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "system_event",
+                "subject": null,
+                "value": {
+                  "kind": "settings_changed",
+                  "message": "Fixture settings change"
+                },
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "autoContinueAtUsageLimit",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "autoContinueAtUsageLimit",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "settings_server": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_settings_readback",
+                "subject": null,
+                "value": {
+                  "status": "reported",
+                  "reported": [
+                    "agentPushNotifEnabled",
+                    "autoContinueAtUsageLimit",
+                    "awaySummaryEnabled",
+                    "cleanupPeriodDays",
+                    "crossSessionInbound",
+                    "disableAgentView",
+                    "disableAllHooks",
+                    "disableClaudeAiConnectors",
+                    "disableRemoteControl",
+                    "disableWorkflows",
+                    "enableArtifact",
+                    "enableWorkflows",
+                    "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+                    "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+                    "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+                    "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+                    "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+                    "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+                    "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+                    "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+                    "env.CLAUDE_CODE_DISABLE_CRON",
+                    "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                    "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+                    "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+                    "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                    "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+                    "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+                    "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+                    "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+                    "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+                    "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+                    "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+                    "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+                    "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+                    "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+                    "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+                    "env.DISABLE_AUTOUPDATER",
+                    "env.DISABLE_ERROR_REPORTING",
+                    "env.DISABLE_FEEDBACK_COMMAND",
+                    "env.DISABLE_TELEMETRY",
+                    "env.DISABLE_UPDATES",
+                    "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+                    "env.FORCE_AUTOUPDATE_PLUGINS",
+                    "env.MCP_DISCOVERY_CACHE",
+                    "idleCompaction",
+                    "permissions.denyInsteadOfPrompting",
+                    "precomputeCompactionEnabled",
+                    "promptSuggestionEnabled",
+                    "remoteControlAtStartup",
+                    "switchModelsOnFlag",
+                    "syncClaudeAiPlugins",
+                    "syncClaudeAiSkills",
+                    "workflowKeywordTriggerEnabled"
+                  ],
+                  "missing": []
+                },
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "system_event",
+                "subject": null,
+                "value": {
+                  "kind": "managed_settings_changed",
+                  "message": "Fixture settings change"
+                },
+                "turn_id": null
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "managed_setting",
+                "subject": "autoContinueAtUsageLimit",
+                "value": true,
+                "turn_id": null,
+                "expected": {
+                  "state": "told",
+                  "value": false
+                },
+                "diverged": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "code": "harness_diverged",
+              "retryable": false,
+              "details": {
+                "turn_id": null,
+                "setting": "autoContinueAtUsageLimit",
+                "change": "managed_setting"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "sign_in_expired": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "provider_unauthorized",
+              "retryable": false,
+              "said": "Token expired; sign in again",
+              "status": 401
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "sign_in_revoked": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "provider_unauthorized",
+              "retryable": false,
+              "said": "Token revoked; sign in again",
+              "status": 401
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "start": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "warm",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "steer": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "steer",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "steer_late": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "steer",
+            "ok": false,
+            "error": {
+              "code": "not_found",
+              "message": "the turn ended before the message was taken in",
+              "retryable": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "subagents": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "payload": {
+              "text": "Child result",
+              "text_len": 12
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "agent",
+            "payload": {
+              "tool": {
+                "kind": "subagent",
+                "child_stream": "sub:agent",
+                "state": "completed"
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tolerance_malformed": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "failed",
+            "payload": {
+              "code": "harness_error",
+              "message": "the harness wrote a line that is not a JSON object: {broken",
+              "retryable": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tolerance_optional_fields": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "session_status",
+                "subject": null,
+                "value": {
+                  "type": "working",
+                  "active_flags": []
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "unrecognized_event",
+                "subject": "future_update",
+                "value": {
+                  "count": 1
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tolerance_unknown_enum": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "session_status",
+                "subject": null,
+                "value": {
+                  "type": "future_state",
+                  "active_flags": []
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tolerance_unknown_event": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "unrecognized_event",
+                "subject": "future_update",
+                "value": {
+                  "count": 1
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003",
+                "reported_at": "2026-10-08T14:00:01Z"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "unrecognized_event",
+                "subject": "future_update",
+                "value": {
+                  "count": 1
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003",
+                "reported_at": "2026-10-08T14:00:01Z"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tolerance_unknown_fields": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "session_status",
+                "subject": null,
+                "value": {
+                  "type": "working",
+                  "active_flags": []
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tolerance_unknown_method": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "Claude Code",
+                "change": "unrecognized_event",
+                "subject": "control_request/future_method",
+                "value": {
+                  "count": 1
+                },
+                "turn_id": "00000000-0000-0000-0000-000000000003"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    },
+    "tool_command": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "command",
+                "command": "printf fixture",
+                "exit_code": 0
+              },
+              "raw": {
+                "name": "Bash",
+                "input": {
+                  "inline": "{\"command\":\"printf fixture\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_file_change": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_change"
+              },
+              "raw": {
+                "name": "Write",
+                "input": {
+                  "inline": "{\"file_path\":\"/work/fixture.txt\",\"content\":\"Fixture file\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_mcp": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "mcp",
+                "server": "fixture",
+                "tool": "read"
+              },
+              "raw": {
+                "name": "mcp__fixture__read",
+                "input": {
+                  "inline": "{\"key\":\"fixture\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_plan": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.started",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "plan",
+            "payload": {
+              "steps": [
+                {
+                  "text": "Read fixture",
+                  "status": "in_progress"
+                }
+              ]
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_read": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_read",
+                "path": "fixture.txt"
+              },
+              "raw": {
+                "name": "Read",
+                "input": {
+                  "inline": "{\"file_path\":\"/work/fixture.txt\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_search": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_search",
+                "query": "fixture"
+              },
+              "raw": {
+                "name": "Grep",
+                "input": {
+                  "inline": "{\"pattern\":\"fixture\",\"path\":\"/work\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_subagent": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "subagent",
+                "state": "completed",
+                "child_stream": "sub:tool"
+              },
+              "raw": {
+                "name": "Agent",
+                "input": {
+                  "inline": "{\"description\":\"Inspect fixture\",\"prompt\":\"Read fixture\",\"subagent_type\":\"general-purpose\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_web_fetch": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "web_fetch",
+                "url": "https://example.invalid/fixture"
+              },
+              "raw": {
+                "name": "WebFetch",
+                "input": {
+                  "inline": "{\"url\":\"https://example.invalid/fixture\",\"prompt\":\"Read fixture\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "tool_web_search": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "item.completed",
+          "body": {
+            "native_ref": "tool",
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "web_search",
+                "query": "fixture search"
+              },
+              "raw": {
+                "name": "WebSearch",
+                "input": {
+                  "inline": "{\"query\":\"fixture search\"}"
+                },
+                "output": {
+                  "inline": "Fixture result"
+                },
+                "is_error": false
+              }
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "usage_limit": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "turn.completed",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "status": "failed",
+            "error": {
+              "code": "provider_exhausted",
+              "retryable": false,
+              "said": "You've hit your limit",
+              "status": 429
+            }
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request"
+      ]
+    },
+    "user_input": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start_turn",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "turn_id": "00000000-0000-0000-0000-000000000003",
+            "request_ref": "permission",
+            "request": {
+              "request_kind": "user_input",
+              "detail": {},
+              "options": []
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "resolve",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close",
+            "ok": true,
+            "value": null
+          },
+          "subset": true
+        }
+      ],
+      "ignore_events": [
+        "item.started",
+        "item.updated",
+        "item.delta",
+        "turn.phase",
+        "usage.updated",
+        "model.request",
+        "turn.started"
+      ]
+    }
+  },
+  "managed_pins": [
+    {
+      "name": "agentPushNotifEnabled",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "autoContinueAtUsageLimit",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "awaySummaryEnabled",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "cleanupPeriodDays",
+      "value": 3650,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "crossSessionInbound",
+      "value": "refuse",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "disableAgentView",
+      "value": true,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "disableAllHooks",
+      "value": true,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "disableClaudeAiConnectors",
+      "value": true,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "disableRemoteControl",
+      "value": true,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "disableWorkflows",
+      "value": true,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "enableArtifact",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "enableWorkflows",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_AUTO_BACKGROUND_TASKS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ARTIFACT_AUTO_OPEN",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ARTIFACT_COMMENTS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_AUTO_CONNECT_IDE",
+      "value": "false",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_AUTO_MODE_SERVER",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_AGENT_VIEW",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_ARTIFACT",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_CRON",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_TERMINAL_TITLE",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_DISABLE_WORKFLOWS",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+      "value": "false",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_ENABLE_TELEMETRY",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.DISABLE_AUTOUPDATER",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.DISABLE_ERROR_REPORTING",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.DISABLE_FEEDBACK_COMMAND",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.DISABLE_TELEMETRY",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.DISABLE_UPDATES",
+      "value": "1",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.ENABLE_CLAUDEAI_MCP_SERVERS",
+      "value": "false",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.FORCE_AUTOUPDATE_PLUGINS",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "env.MCP_DISCOVERY_CACHE",
+      "value": "0",
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "idleCompaction",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "permissions.denyInsteadOfPrompting",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "precomputeCompactionEnabled",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "promptSuggestionEnabled",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "remoteControlAtStartup",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "switchModelsOnFlag",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "syncClaudeAiPlugins",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "syncClaudeAiSkills",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "workflowKeywordTriggerEnabled",
+      "value": false,
+      "divergence_scenario": "automatic_divergence"
+    }
+  ]
+}

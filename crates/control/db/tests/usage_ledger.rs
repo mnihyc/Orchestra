@@ -466,3 +466,6 @@ async fn a_lease_with_no_turn_has_nothing_to_be_put_down_to() {
             .is_some()
     );
 }
+
+#[path = "usage_ledger/request_facts.rs"]
+mod request_facts;

@@ -282,6 +282,8 @@ pub struct ParticipantChat {
     pub org_id: Id,
     /// Whether this person is a guest.
     pub guest: bool,
+    /// The current native manager flag of this membership.
+    pub manager: bool,
 }
 
 /// Current participation in a set of chats; inspection rights are never used.
@@ -290,7 +292,7 @@ pub async fn participant_chats(
     user: Id,
     ids: &[Id],
 ) -> Result<Vec<ParticipantChat>, DbError> {
-    Ok(sqlx::query_as("SELECT c.id, c.org_id, cm.guest, cm.expires_at FROM chats c JOIN chat_members cm ON cm.chat_id = c.id JOIN nodes root ON root.id = c.org_id WHERE cm.user_id = $1 AND cm.left_at IS NULL AND c.id = ANY($2) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(root.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT c.id, c.org_id, cm.guest, cm.manager, cm.expires_at FROM chats c JOIN chat_members cm ON cm.chat_id = c.id JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE cm.user_id = $1 AND cm.left_at IS NULL AND c.id = ANY($2) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(home.path) AND a.deleted_at IS NOT NULL)")
         .bind(user).bind(ids).fetch_all(conn).await?)
 }
 
@@ -318,7 +320,7 @@ pub async fn name_roots(
         SELECT 'node'::text kind,id,id place,org_id,owner_id FROM nodes WHERE deleted_at IS NULL
         UNION ALL SELECT 'document',id,node_id,org_id,owner_id FROM documents WHERE deleted_at IS NULL
         UNION ALL SELECT 'document_container',id,node_id,org_id,owner_id FROM document_containers WHERE deleted_at IS NULL
-        UNION ALL SELECT 'chat',id,COALESCE(node_id,org_id),org_id,NULL FROM chats
+        UNION ALL SELECT 'chat',id,COALESCE(node_id,home_id,org_id),org_id,NULL FROM chats
         UNION ALL SELECT 'provider',id,home_id,org_id,owner_id FROM providers WHERE deleted_at IS NULL
         UNION ALL SELECT 'agent',id,home_id,org_id,owner_id FROM agents WHERE deleted_at IS NULL
         UNION ALL SELECT 'environment',id,home_node_id,org_id,owner_id FROM environments WHERE deleted_at IS NULL
@@ -408,7 +410,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
                    NULL::text username
               FROM nodes n
               LEFT JOIN threads th ON th.node_id = n.id
-             WHERE n.deleted_at IS NULL AND th.side_of IS NULL AND (n.kind = 'org' OR __NODE_NAME__)
+             WHERE n.deleted_at IS NULL AND NOT n.unlisted AND th.side_of IS NULL AND (n.kind = 'org' OR __NODE_NAME__)
                AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)
             UNION ALL
             SELECT 'document', d.id, d.title, NULL, d.node_id, d.org_id, d.owner_id, d.updated_at, NULL, p.archived, NULL
@@ -427,7 +429,7 @@ pub async fn names(conn: &mut Conn, ask: &Names<'_>) -> Result<Vec<NameRow>, DbE
              WHERE (n.id IS NULL OR NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL))
                -- A search finds a direct or group chat by the people in it (inspecting one is an audited
                -- opening, never a hit); an exact lookup of one is asked as the reader may open it.
-               AND (c.node_id IS NOT NULL OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)
+               AND (c.node_id IS NOT NULL OR (c.kind='group' AND c.visibility='public' AND c.org_id=ANY($2::uuid[])) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)
                     OR ($12::uuid[] IS NOT NULL AND ($3 OR c.org_id=ANY($2::uuid[]))))
                AND (c.node_id IS NULL OR $12::uuid[] IS NOT NULL
                     OR EXISTS (SELECT 1 FROM recents seen WHERE seen.user_id=$1 AND seen.kind='chat' AND seen.id=c.id)
@@ -578,14 +580,14 @@ pub struct PlaceRow {
 
 /// Nodes within the scope, excluding deleted places and side threads.
 pub async fn places(conn: &mut Conn, scope: Option<Id>) -> Result<Vec<PlaceRow>, DbError> {
-    Ok(sqlx::query_as("SELECT n.id, n.kind, n.parent_id FROM nodes n LEFT JOIN threads th ON th.node_id = n.id WHERE ($1::uuid IS NULL OR $1 = ANY(n.path)) AND th.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT n.id, n.kind, n.parent_id FROM nodes n LEFT JOIN threads th ON th.node_id = n.id WHERE ($1::uuid IS NULL OR $1 = ANY(n.path)) AND NOT n.unlisted AND th.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(n.path) AND a.deleted_at IS NOT NULL)")
         .bind(scope).fetch_all(conn).await?)
 }
 
 /// One selected scope, without enumerating its descendants.
 pub async fn place(conn: &mut Conn, id: Id) -> Result<Option<PlaceRow>, DbError> {
     Ok(sqlx::query_as("SELECT n.id,n.kind,n.parent_id FROM nodes n LEFT JOIN threads t ON t.node_id=n.id
-        WHERE n.id=$1 AND t.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)")
+        WHERE n.id=$1 AND NOT n.unlisted AND t.side_of IS NULL AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)")
         .bind(id).fetch_optional(conn).await?)
 }
 
@@ -617,7 +619,7 @@ pub async fn chats_in_admin_mode(
     system_admin: bool,
     trees: &[Id],
 ) -> Result<Vec<super::chats::ChatRow>, DbError> {
-    Ok(sqlx::query_as("SELECT c.* FROM chats c JOIN nodes root ON root.id = c.org_id WHERE (c.node_id = ANY($2) OR ($4 AND ($3::uuid IS NULL OR c.org_id = $3) AND ($5 OR c.org_id=ANY($6::uuid[]) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)))) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(root.path) AND a.deleted_at IS NOT NULL)")
+    Ok(sqlx::query_as("SELECT c.* FROM chats c JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE (c.node_id = ANY($2) OR (c.kind='group' AND COALESCE(c.node_id,c.home_id,c.org_id)=ANY($2)) OR ($4 AND ($3::uuid IS NULL OR home.path @> ARRAY[$3::uuid]) AND ($5 OR c.org_id=ANY($6::uuid[]) OR EXISTS (SELECT 1 FROM chat_members cm WHERE cm.chat_id = c.id AND cm.user_id = $1 AND cm.left_at IS NULL)))) AND NOT EXISTS (SELECT 1 FROM nodes a WHERE a.id = ANY(home.path) AND a.deleted_at IS NOT NULL)")
         .bind(user).bind(nodes).bind(scope).bind(include_directs).bind(system_admin).bind(trees)
         .fetch_all(conn).await?)
 }
@@ -939,7 +941,7 @@ pub(super) fn advanced_shared_sql(selection: &str, kind: &str, source: &str) -> 
         WHEN 'item' THEN {source} WHEN 'name' THEN {source} \
         WHEN 'chat_message' THEN (SELECT node_id FROM chats WHERE id={source}) END"
     );
-    let path = format!("(SELECT path FROM nodes WHERE id=({node}))");
+    let path = format!("(SELECT path FROM nodes WHERE id=({node}))::uuid[]");
     let holders = format!(
         "jsonb_to_recordset(COALESCE({selection}->'search_holders','[]'::jsonb)) AS adv_h(kind text,id uuid,role text)"
     );
@@ -1451,12 +1453,19 @@ pub const CANDIDATE_ACCESS: &str = r#"(__ACCESS__::jsonb IS NULL
  OR (__KIND__='document' AND __SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'documents')::uuid))
  OR (__KIND__ IN ('chat','chat_message') AND __SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'chats')::uuid))
  OR (__KIND__='name' AND (__SOURCE__ IN(SELECT jsonb_array_elements_text(__ACCESS__->'names')::uuid)
-    OR (__ACCESS__->'names' IS NULL AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(__ACCESS__->'scopes')::uuid))))
+    OR (__ACCESS__->'names' IS NULL AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(__ACCESS__->'scopes')::uuid))
+    OR (__PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'thread_scopes',__ACCESS__->'scopes'))::uuid)
+      AND EXISTS(SELECT 1 FROM nodes named_thread WHERE named_thread.id=__SOURCE__ AND named_thread.kind='thread' OFFSET 0))))
  OR (__KIND__='document' AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'doc_scopes',__ACCESS__->'scopes'))::uuid))
  OR (__KIND__ IN ('item','conversation') AND __PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'thread_scopes',__ACCESS__->'scopes'))::uuid))
  OR (__KIND__ IN ('chat','chat_message') AND EXISTS(SELECT 1 FROM chats visible_chat WHERE visible_chat.id=__SOURCE__ AND visible_chat.node_id IS NOT NULL
     AND (visible_chat.node_id IN(SELECT jsonb_array_elements_text(__ACCESS__->'chat_nodes')::uuid)
       OR __PATH__ && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'chat_scopes',__ACCESS__->'scopes'))::uuid)) OFFSET 0))
+ OR (__KIND__ IN ('chat','chat_message') AND EXISTS(SELECT 1 FROM chats public_chat
+    JOIN nodes public_home ON public_home.id=COALESCE(public_chat.home_id,public_chat.org_id)
+    WHERE public_chat.id=__SOURCE__ AND public_chat.kind='group' AND public_chat.visibility='public'
+      AND (public_home.id IN(SELECT jsonb_array_elements_text(__ACCESS__->'chat_nodes')::uuid)
+        OR public_home.path && ARRAY(SELECT jsonb_array_elements_text(COALESCE(__ACCESS__->'chat_scopes',__ACCESS__->'scopes'))::uuid)) OFFSET 0))
  OR __OWNER__=(__ACCESS__->>'person')::uuid
  OR (__KIND__='document' AND (EXISTS(SELECT 1 FROM documents own WHERE own.id=__SOURCE__ AND (own.owner_id=(__ACCESS__->>'person')::uuid OR own.parent_container_id IS NOT NULL) OFFSET 0)
    OR EXISTS(SELECT 1 FROM permission_entries pe1 WHERE pe1.object_kind IN ('document','document_container') AND pe1.object_id=__SOURCE__

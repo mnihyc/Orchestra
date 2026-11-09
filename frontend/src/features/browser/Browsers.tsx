@@ -69,7 +69,7 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
   const permissions = environment.access.permissions;
   const mayDrive = permissions.includes('browser.manage');
 
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} message={query.error instanceof BrowserProgramsMissing ? t('browser.programsUnavailable') : undefined} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const data = query.data;
   const browsers = orderBrowsers(data.browsers, threadId);

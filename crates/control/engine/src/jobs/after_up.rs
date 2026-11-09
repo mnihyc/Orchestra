@@ -236,11 +236,18 @@ async fn run_on(job: &Job, restored: Option<Id>, undo: bool) -> Result<Done, Sto
     // machine's directory, and when a kept registration is restored on its own machine. Either runs the
     // directory's resolved commands on that machine, with no unit.
     let attaching = !undo
-        && (row
-            .plan
-            .pointer("/portable/destination/lifecycle")
-            .and_then(Json::as_str)
-            == Some("attach")
+        && ((row.kind == jobs::kind::ENVIRONMENT_PROVISION
+            && row.plan["mode"] == "copy"
+            && row
+                .plan
+                .pointer("/creator_provision/origin/operation")
+                .and_then(Json::as_str)
+                == Some(orch_api_contract::environment_sources::duplicating::CONNECTED.operation))
+            || row
+                .plan
+                .pointer("/portable/destination/lifecycle")
+                .and_then(Json::as_str)
+                == Some("attach")
             || (row.kind == jobs::retained::RESTORE
                 && row.plan.get("connected").and_then(Json::as_bool) == Some(true)));
     let runtime = if attaching {

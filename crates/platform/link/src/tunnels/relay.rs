@@ -82,6 +82,7 @@ enum State {
 
 struct Route {
     claims: TicketClaims,
+    recovering: bool,
     /// The original signed publication ticket; each admitted host socket has its own claims.jti.
     host_template_jti: Option<Id>,
     cid: Option<Id>,
@@ -94,6 +95,7 @@ struct Route {
 }
 
 struct MachineSession {
+    capabilities: Vec<String>,
     session_id: Id,
     sender: SessionSender,
     next_even: u32,
@@ -151,6 +153,15 @@ impl Relay {
             by_cid: HashMap::new(),
             next_route: 1,
         }
+    }
+
+    /// Fault injection discards only volatile route memory, keeping the actual authenticated endpoints.
+    #[cfg(feature = "test-observers")]
+    pub fn lose_route_memory_for_test(&mut self) {
+        self.routes.clear();
+        self.by_channel.clear();
+        self.by_api_channel.clear();
+        self.by_cid.clear();
     }
 
     /// How long a route waits for its tunnel to be resumed.
@@ -433,12 +444,24 @@ impl Relay {
 
     /// A machine's session stands.
     pub fn session_up(&mut self, machine: Id, session_id: Id, sender: SessionSender) {
+        self.session_up_capable(machine, session_id, sender, Vec::new());
+    }
+
+    /// Negotiated endpoint support is required before reconstructing a lost route.
+    pub fn session_up_capable(
+        &mut self,
+        machine: Id,
+        session_id: Id,
+        sender: SessionSender,
+        capabilities: Vec<String>,
+    ) {
         let _ = sender.send(Frame::PortControl(PortControl {
             available: self.port_available,
         }));
         self.sessions.insert(
             machine,
             MachineSession {
+                capabilities,
                 session_id,
                 sender,
                 next_even: Side::Gateway.first(),
@@ -559,22 +582,57 @@ impl Relay {
             return;
         }
         match frame {
-            Frame::Open(Open::Request(request)) => {
-                self.open(from, request.channel, &request.ticket, request.host_peer)
-            }
+            Frame::Open(Open::Request(request)) => self.open(
+                from,
+                request.channel,
+                &request.ticket,
+                request.host_peer,
+                request.route.map(|route| *route),
+            ),
             Frame::OpenOk(ok) => self.answer(from, ok.channel, Ok((ok.cid, ok.inside))),
             Frame::OpenErr(err) => self.answer(from, err.channel, Err(err)),
             Frame::Resume(resume) => self.resume(from, resume),
             Frame::ResumeOk(ok) => {
                 if let Some((id, Role::Destination)) = self.lookup(from, ok.channel)
+                    && self
+                        .routes
+                        .get(&id)
+                        .is_some_and(|route| route.recovering && route.claims.port.is_some())
+                    && ok.inside.is_none()
+                {
+                    self.pass(
+                        from,
+                        Frame::Close(Close {
+                            channel: ok.channel,
+                            code: CloseCode::Reset,
+                            detail: "the retained inside port peer is unavailable".into(),
+                        }),
+                    );
+                    return;
+                }
+                if let Some((id, Role::Destination)) = self.lookup(from, ok.channel)
                     && let Some(route) = self.routes.get_mut(&id)
                 {
+                    if route.recovering {
+                        if let (Some(port), Some(inside)) = (&route.claims.port, ok.inside.clone())
+                        {
+                            self.port_records.opened(
+                                route.claims.jti,
+                                port,
+                                inside,
+                                self.clock.time(),
+                            );
+                            self.port_uses.insert(route.claims.jti, route.claims.exp);
+                        }
+                        route.recovering = false;
+                    }
                     route.state = State::Open;
                     let opener = route.opener;
                     if let Some(channel) = Self::channel_of(opener) {
                         self.end_text(
                             opener,
                             Frame::ResumeOk(ResumeOk {
+                                inside: ok.inside,
                                 channel,
                                 recv: ok.recv,
                             }),
@@ -711,35 +769,30 @@ impl Relay {
         }
     }
 
-    /// A machine presents a ticket to open a tunnel.
-    fn open(
-        &mut self,
+    /// The original host observation is checked identically for first attachment and retained recovery.
+    fn request_claims(
+        &self,
         from: Id,
-        channel: u32,
         ticket: &str,
-        host_peer: Option<orch_link_contract::ports::HostPortPeer>,
-    ) {
-        let mut claims = match self.check_ticket(ticket, TicketSource::Machine(from)) {
-            Ok(claims) => claims,
-            Err(code) => return self.refuse(from, channel, code, "the ticket is not accepted"),
-        };
+        host_peer: Option<&orch_link_contract::ports::HostPortPeer>,
+    ) -> Result<(TicketClaims, Option<Id>), (OpenErrorCode, &'static str)> {
+        let mut claims = self
+            .check_ticket(ticket, TicketSource::Machine(from))
+            .map_err(|code| (code, "the ticket is not accepted"))?;
         let template = claims
             .port
             .as_ref()
             .is_some_and(|port| port.host_template.is_some());
         let host_template_jti = template.then_some(claims.jti);
         if template {
-            let Some(peer) = host_peer else {
-                return self.refuse(
-                    from,
-                    channel,
-                    OpenErrorCode::BadTicket,
-                    "a host accept needs its actual outside peer",
-                );
-            };
-            let Some(port) = claims.port.as_mut() else {
-                return;
-            };
+            let peer = host_peer.ok_or((
+                OpenErrorCode::BadTicket,
+                "a host accept needs its actual outside peer",
+            ))?;
+            let port = claims
+                .port
+                .as_mut()
+                .ok_or((OpenErrorCode::BadTicket, "a host template needs port facts"))?;
             if port.allocation_revision.is_none()
                 || port.opening_id.is_none()
                 || !matches!(
@@ -749,30 +802,56 @@ impl Relay {
                 || peer.use_id == claims.jti
                 || peer.peer.address.parse::<std::net::IpAddr>().is_err()
             {
-                return self.refuse(
-                    from,
-                    channel,
+                return Err((
                     OpenErrorCode::BadTicket,
                     "the host socket facts do not match a publication template",
-                );
+                ));
             }
-            port.source.address = peer.peer.address;
+            port.source.address = peer.peer.address.clone();
             port.source.port = peer.peer.port;
-            // The signature delegates raw accepts only to its named node; every socket gets a
-            // distinct reference, never a chosen person/link identity or a different target.
             claims.jti = peer.use_id;
             claims.service = orch_link_contract::tunnels::Service::Port {
                 use_id: peer.use_id,
             }
             .to_string();
         } else if host_peer.is_some() {
+            return Err((
+                OpenErrorCode::BadTicket,
+                "only a host publication delegates outside peer observation",
+            ));
+        }
+        Ok((claims, host_template_jti))
+    }
+
+    /// A machine presents a ticket to open a tunnel.
+    fn open(
+        &mut self,
+        from: Id,
+        channel: u32,
+        ticket: &str,
+        host_peer: Option<orch_link_contract::ports::HostPortPeer>,
+        route: Option<orch_link_contract::gateways::TunnelPlan>,
+    ) {
+        let (claims, host_template_jti) =
+            match self.request_claims(from, ticket, host_peer.as_ref()) {
+                Ok(value) => value,
+                Err((code, detail)) => return self.refuse(from, channel, code, detail),
+            };
+        if route.as_ref().is_some_and(|route| {
+            claims.src != TicketSource::Machine(route.src) || claims.dst != route.dst
+        }) {
             return self.refuse(
                 from,
                 channel,
                 OpenErrorCode::BadTicket,
-                "only a host publication delegates outside peer observation",
+                "the placement is not the signed ticket's pair",
             );
         }
+        let retention = Some(orch_link_contract::gateways::TunnelRetention {
+            ticket: ticket.to_owned(),
+            host_peer,
+            route,
+        });
         if !Side::Machine.owns(channel) || self.lookup(from, channel).is_some() {
             return self.refuse(
                 from,
@@ -789,11 +868,15 @@ impl Relay {
                 "too many channels",
             );
         }
-        let opener = End::Machine {
-            id: from,
-            channel: Some(channel),
-        };
-        self.start(opener, claims, host_template_jti);
+        self.start(
+            End::Machine {
+                id: from,
+                channel: Some(channel),
+            },
+            claims,
+            host_template_jti,
+            retention,
+        );
     }
 
     /// The system presents a ticket to open a tunnel that ends at a terminal.
@@ -834,7 +917,7 @@ impl Relay {
                 "that channel number is in use",
             );
         }
-        self.start(End::Api { machine, channel }, claims, None);
+        self.start(End::Api { machine, channel }, claims, None, None);
     }
 
     fn check_ticket(
@@ -846,7 +929,13 @@ impl Relay {
         verifier.verify(ticket, presenter, self.clock.time())
     }
 
-    fn start(&mut self, opener: End, claims: TicketClaims, host_template_jti: Option<Id>) {
+    fn start(
+        &mut self,
+        opener: End,
+        claims: TicketClaims,
+        host_template_jti: Option<Id>,
+        retention: Option<orch_link_contract::gateways::TunnelRetention>,
+    ) {
         let refuse = |relay: &Self, code: OpenErrorCode, detail: &str| {
             if let Some(channel) = Self::channel_of(opener) {
                 relay.end_text(
@@ -943,6 +1032,7 @@ impl Relay {
             channel: Some(channel),
         };
         let offer = Frame::Open(Open::Offer(Box::new(OpenOffer {
+            retention,
             channel,
             kind: claims.kind,
             service: claims.service.clone(),
@@ -953,6 +1043,7 @@ impl Relay {
             id,
             Route {
                 claims,
+                recovering: false,
                 host_template_jti,
                 cid: None,
                 opener,
@@ -1111,7 +1202,7 @@ impl Relay {
             return reset(self, "the ticket is not accepted");
         };
         let Some(&id) = self.by_cid.get(&resume.jti_channel) else {
-            return reset(self, "no such tunnel");
+            return self.resume_retained(from, resume);
         };
         let Some(route) = self.routes.get(&id) else {
             return reset(self, "no such tunnel");
@@ -1153,6 +1244,89 @@ impl Relay {
         self.forward_resume(id);
     }
 
+    /// A lost relay map is rebuilt only by asking the destination for its retained socket and offsets.
+    fn resume_retained(&mut self, from: Id, resume: Resume) {
+        let reset = |relay: &Self, why: &str| {
+            if let Some(session) = relay.sessions.get(&from) {
+                let _ = session.sender.send(Frame::Close(Close {
+                    channel: resume.channel,
+                    code: CloseCode::Reset,
+                    detail: why.into(),
+                }));
+            }
+        };
+        let (claims, host_template_jti) =
+            match self.request_claims(from, &resume.ticket, resume.host_peer.as_ref()) {
+                Ok(value) => value,
+                Err(_) => return reset(self, "the retained ticket is not accepted"),
+            };
+        if !self.sessions.get(&from).is_some_and(|session| {
+            session.capabilities.iter().any(|capability| {
+                capability == orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY
+            })
+        }) {
+            return reset(self, "the opener did not negotiate retained resumption");
+        }
+        if !matches!(
+            claims.kind,
+            TunnelKind::Exec | TunnelKind::Mcp | TunnelKind::Llm | TunnelKind::Port
+        ) || !Side::Machine.owns(resume.channel)
+            || self.lookup(from, resume.channel).is_some()
+            || self.channels_of(from) >= self.limits.max_channels as usize
+            || self.channels_of(claims.dst) >= self.limits.max_channels as usize
+        {
+            return reset(self, "the retained channel cannot be admitted");
+        }
+        if let Some(port) = &claims.port {
+            let now = self.clock.time().unix_millis().div_euclid(1_000);
+            self.port_uses.retain(|_, expires| *expires > now);
+            let count = self
+                .routes
+                .values()
+                .filter(|route| {
+                    route.claims.port.as_ref().is_some_and(|current| {
+                        current.environment_id == port.environment_id
+                            && current.transport == port.transport
+                    })
+                })
+                .count();
+            if !self.port_available
+                || port.transport != orch_api_contract::ports::PortTransport::Tcp
+                || self.port_uses.contains_key(&claims.jti)
+                || count
+                    >= crate::ports::count(self.limits.ports.connections_max)
+                        .saturating_add(crate::ports::count(self.limits.ports.waiting_max))
+            {
+                return reset(self, "current TCP port admission is unavailable");
+            }
+        }
+        let id = RouteId(self.next_route);
+        self.next_route += 1;
+        self.by_channel
+            .insert((from, resume.channel), (id, Role::Opener));
+        self.by_cid.insert(resume.jti_channel, id);
+        self.routes.insert(
+            id,
+            Route {
+                destination: End::Machine {
+                    id: claims.dst,
+                    channel: None,
+                },
+                claims,
+                host_template_jti,
+                cid: Some(resume.jti_channel),
+                opener: End::Machine {
+                    id: from,
+                    channel: Some(resume.channel),
+                },
+                state: State::Suspended(Instant::now()),
+                waiting_resume: Some(resume),
+                recovering: true,
+            },
+        );
+        self.forward_resume(id);
+    }
+
     /// Passes a request to carry a tunnel on to the destination, if it has a
     /// session; otherwise it waits for one.
     fn forward_resume(&mut self, id: RouteId) {
@@ -1162,6 +1336,7 @@ impl Relay {
         let Some(resume) = route.waiting_resume.clone() else {
             return;
         };
+        let recovering = route.recovering;
         let End::Machine {
             id: destination,
             channel: held,
@@ -1169,6 +1344,26 @@ impl Relay {
         else {
             return;
         };
+        if recovering
+            && self.sessions.get(&destination).is_some_and(|session| {
+                !session.capabilities.iter().any(|capability| {
+                    capability == orch_link_contract::gateways::RETAINED_RESUME_CAPABILITY
+                })
+            })
+        {
+            if let Some(channel) = Self::channel_of(route.opener) {
+                self.end_text(
+                    route.opener,
+                    Frame::Close(Close {
+                        channel,
+                        code: CloseCode::Reset,
+                        detail: "the destination did not negotiate retained resumption".into(),
+                    }),
+                );
+            }
+            self.remove(id);
+            return;
+        }
         let Some(session) = self.sessions.get_mut(&destination) else {
             return;
         };
@@ -1196,6 +1391,9 @@ impl Relay {
         }
         if let Some(session) = self.sessions.get(&destination) {
             let _ = session.sender.send(Frame::Resume(Resume {
+                epoch: resume.epoch,
+                recovering,
+                host_peer: resume.host_peer,
                 channel,
                 ticket: resume.ticket,
                 jti_channel: resume.jti_channel,
@@ -1341,5 +1539,114 @@ impl Relay {
             }
             self.remove(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod retained_host_tests {
+    use super::*;
+    use orch_api_contract::ports::{
+        PortCaller, PortConnectionOutside, PortOpeningKind, PortTransport,
+    };
+    use orch_link_contract::ports::{HostPortPeer, HostPortTemplate, PortTicketClaims};
+    use orch_link_contract::tunnels::Service;
+    use orch_pki::tickets::TicketSigner;
+    use orch_types::{ManualClock, Time, new_id};
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "signed host admission fixture assertions"
+    )]
+    fn retained_host_admission_uses_the_original_signed_template_and_observed_socket() {
+        let at = "2026-11-08T00:00:00Z".parse::<Time>().unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(ManualClock::new(at.get()));
+        let signer = TicketSigner::generate();
+        let mut relay = Relay::new(Limits::default(), clock);
+        relay.set_verifier(signer.verifier());
+        let source = new_id();
+        let parent = new_id();
+        let claims = TicketClaims {
+            jti: parent,
+            kind: TunnelKind::Port,
+            src: TicketSource::Machine(source),
+            dst: new_id(),
+            service: Service::Port { use_id: parent }.to_string(),
+            thread_id: None,
+            tool_set: None,
+            tool_environment_id: None,
+            tool_environment_generation: None,
+            tool_executor_version: None,
+            exp: at.unix_millis().div_euclid(1000) + 3600,
+            port: Some(PortTicketClaims {
+                environment_id: new_id(),
+                generation: 2,
+                port: 9000,
+                transport: PortTransport::Tcp,
+                opening_id: Some(new_id()),
+                audience: Some(PortOpeningKind::Host),
+                authority_revision: 3,
+                allocation_revision: Some(4),
+                host_template: Some(HostPortTemplate {
+                    host_id: new_id(),
+                    proxy_protocol: false,
+                }),
+                source: PortConnectionOutside {
+                    address: "0.0.0.0".into(),
+                    port: 0,
+                    caller: PortCaller::Address,
+                },
+            }),
+        };
+        let encoded = signer.sign(&claims).unwrap();
+        let peer = HostPortPeer {
+            use_id: new_id(),
+            peer: PortConnectionInside {
+                address: "198.51.100.23".into(),
+                port: 41023,
+            },
+        };
+        let (observed, template) = relay.request_claims(source, &encoded, Some(&peer)).unwrap();
+        assert_eq!(template, Some(parent));
+        assert_eq!(observed.jti, peer.use_id);
+        assert_eq!(
+            observed.service,
+            Service::Port {
+                use_id: peer.use_id
+            }
+            .to_string()
+        );
+        let port = observed.port.as_ref().unwrap();
+        assert_eq!(port.source.address, peer.peer.address);
+        assert_eq!(port.source.port, peer.peer.port);
+        assert_eq!(port.generation, 2);
+        assert_eq!(port.authority_revision, 3);
+        assert_eq!(port.allocation_revision, Some(4));
+        assert!(relay.request_claims(source, &encoded, None).is_err());
+        assert!(
+            relay
+                .request_claims(new_id(), &encoded, Some(&peer))
+                .is_err()
+        );
+        let mut invalid = peer.clone();
+        invalid.use_id = parent;
+        assert!(
+            relay
+                .request_claims(source, &encoded, Some(&invalid))
+                .is_err()
+        );
+        invalid = peer;
+        invalid.peer.address = "claimed-name.invalid".into();
+        assert!(
+            relay
+                .request_claims(source, &encoded, Some(&invalid))
+                .is_err()
+        );
+        assert_eq!(
+            signer
+                .verifier()
+                .verify(&encoded, TicketSource::Machine(source), at)
+                .unwrap(),
+            claims
+        );
     }
 }

@@ -40,6 +40,8 @@ pub struct NodeSettings {
     pub data_dir: PathBuf,
     /// The gateway it enrolls at when it is not told another address.
     pub gateway_url: String,
+    /// Trusted node parent for restricted egress, captured from configuration or HTTPS_PROXY.
+    pub egress_proxy: Option<String>,
     /// An explicit address for this node's units; empty follows the node's own list.
     pub managed_endpoint: String,
     /// The built-in drivers it loads.
@@ -83,6 +85,10 @@ impl NodeSettings {
         Self {
             data_dir: PathBuf::from(&node.data_dir),
             gateway_url: node.gateway_url.clone(),
+            egress_proxy: parent_proxy(
+                node.egress_proxy.as_deref(),
+                std::env::var("HTTPS_PROXY").ok().as_deref(),
+            ),
             managed_endpoint: config.gateway.managed_endpoint.clone(),
             drivers: node.drivers.clone(),
             external_drivers: config
@@ -145,9 +151,39 @@ impl NodeSettings {
     }
 }
 
+/// Explicit operator choice precedes the node's own HTTPS proxy; no unit environment is consulted.
+fn parent_proxy(configured: Option<&str>, https_proxy: Option<&str>) -> Option<String> {
+    configured
+        .or(https_proxy)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_parent_uses_explicit_node_choice_then_its_own_https_proxy() {
+        assert_eq!(
+            parent_proxy(
+                Some("http://operator:3128"),
+                Some("http://environment:8080")
+            ),
+            Some("http://operator:3128".into())
+        );
+        assert_eq!(
+            parent_proxy(None, Some(" http://environment:8080 ")),
+            Some("http://environment:8080".into())
+        );
+        assert_eq!(parent_proxy(None, None), None);
+        assert_eq!(
+            parent_proxy(Some(""), Some("http://environment:8080")),
+            None,
+            "an explicit empty setting disables inheritance"
+        );
+    }
 
     #[test]
     fn a_shipped_node_never_schedules_registry_lookups() {

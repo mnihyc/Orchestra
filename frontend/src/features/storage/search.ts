@@ -1,11 +1,12 @@
 /** Storage's categorical state lives in the address; typed locator text never enters it. */
 import type { StorageDimension, StorageKind, KeptWhy, StorageQuery } from '@/generated/api-types';
 
-export const STORAGE_KINDS = ['deleted_place', 'environment_files', 'volume', 'mount_data', 'kept_layer', 'skill_version', 'unit', 'network', 'image', 'build', 'tool_version', 'database', 'content', 'upload', 'export', 'release', 'dump'] as const satisfies readonly StorageKind[];
+export const STORAGE_KINDS = ['deleted_place', 'environment_files', 'volume', 'mount_data', 'kept_layer', 'skill_version', 'unit', 'network', 'image', 'build', 'tool_version', 'database', 'content', 'upload', 'export', 'snapshot', 'import', 'release', 'dump'] as const satisfies readonly StorageKind[];
 export const STORAGE_WHYS = ['in_use', 'restore', 'cache', 'unknown'] as const satisfies readonly KeptWhy[];
 export const STORAGE_DIMENSIONS = ['host', 'kind', 'place', 'owner', 'age', 'why'] as const satisfies readonly StorageDimension[];
 const AGES = ['under_7_days', '7_to_30_days', '30_days_plus', 'unknown'] as const;
 export interface StorageSearch {
+  view?: 'report' | 'uploads';
   scope?: string;
   kind?: StorageKind;
   why?: KeptWhy;
@@ -25,7 +26,9 @@ const identifier = (value: unknown): value is string => typeof value === 'string
 const oneOf = <Value extends string>(values: readonly Value[], value: unknown): Value | undefined => values.find((candidate) => candidate === value);
 
 export function readStorageSearch(raw: Record<string, unknown>): StorageSearch {
+  if (raw.view === 'uploads') return { view: 'uploads' };
   const result: StorageSearch = {};
+  if (raw.view === 'report') result.view = 'report';
   if (typeof raw.scope === 'string' && (raw.scope === 'system' || /^(?:host|node):/u.test(raw.scope) && identifier(raw.scope.split(':')[1]))) result.scope = raw.scope;
   const kind = oneOf(STORAGE_KINDS, raw.kind), why = oneOf(STORAGE_WHYS, raw.why), by = oneOf(STORAGE_DIMENSIONS, raw.by), age = oneOf(AGES, raw.age);
   if (kind !== undefined) result.kind = kind;
@@ -44,6 +47,7 @@ export function readStorageSearch(raw: Record<string, unknown>): StorageSearch {
 export function storageRequest(search: StorageSearch): StorageQuery {
   const query = { ...search };
   delete query.by;
+  delete query.view;
   return query;
 }
 

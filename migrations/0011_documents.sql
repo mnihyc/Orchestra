@@ -104,10 +104,8 @@ CREATE TABLE documents (
     deleted_at timestamp with time zone,
     deleted_by uuid,
     description text DEFAULT ''::text NOT NULL,
-    description_source text DEFAULT 'auto'::text NOT NULL,
     search_file_count bigint DEFAULT 0 NOT NULL,
     CONSTRAINT documents_description_check CHECK ((char_length(description) <= 4000)),
-    CONSTRAINT documents_description_source_check CHECK ((description_source = ANY (ARRAY['user'::text, 'auto'::text]))),
     CONSTRAINT documents_search_file_count_check CHECK ((search_file_count >= 0)),
     CONSTRAINT documents_title_check CHECK (((char_length(title) >= 1) AND (char_length(title) <= 200))),
     CONSTRAINT documents_pkey PRIMARY KEY (id),
@@ -216,7 +214,7 @@ CREATE INDEX document_blocks_seq_idx ON document_blocks USING btree (document_id
 
 CREATE INDEX document_blocks_text_idx ON document_blocks USING gin (text gin_trgm_ops) WHERE (removed_at IS NULL);
 
-CREATE INDEX document_blocks_tree_idx ON document_blocks USING btree (document_id, parent_id, "position") WHERE (removed_at IS NULL);
+CREATE INDEX document_blocks_tree_idx ON document_blocks USING btree (document_id, parent_id, "position", id) WHERE (removed_at IS NULL);
 
 CREATE INDEX search_blocks_recent_idx ON document_blocks USING btree (updated_at DESC, id DESC) WHERE (removed_at IS NULL);
 
@@ -228,7 +226,6 @@ CREATE INDEX search_headings_text_trgm_idx ON document_blocks USING gin (text gi
 
 CREATE STATISTICS document_blocks_expiry_distribution (dependencies, mcv) ON document_id, removed_at FROM document_blocks;
 
-CREATE TRIGGER document_summary_on_write AFTER INSERT OR UPDATE OF content, props, type, removed_at, parent_id, "position" ON document_blocks FOR EACH ROW EXECUTE FUNCTION orch_document_summary_due();
 
 CREATE TRIGGER related_document_references AFTER INSERT OR DELETE OR UPDATE OF content, removed_at ON document_blocks FOR EACH ROW EXECUTE FUNCTION orch_related_reference_refresh();
 
@@ -344,22 +341,6 @@ CREATE INDEX document_states_all_discussions_idx ON document_states USING btree 
 
 CREATE TRIGGER document_discussion_subscription BEFORE UPDATE OF discussion_level ON document_states FOR EACH ROW EXECUTE FUNCTION document_discussion_subscription_changed();
 
-CREATE TABLE document_summary_state (
-    document_id uuid NOT NULL,
-    due_at timestamp with time zone,
-    next_at timestamp with time zone NOT NULL,
-    last_at timestamp with time zone,
-    failures bigint DEFAULT 0 NOT NULL,
-    claimed_until timestamp with time zone,
-    claimed_by uuid,
-    run_id uuid,
-    reason text,
-    CONSTRAINT document_summary_state_check CHECK (((claimed_by IS NULL) = (claimed_until IS NULL))),
-    CONSTRAINT document_summary_state_pkey PRIMARY KEY (document_id),
-    CONSTRAINT document_summary_state_document_id_fkey FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
-);
-
-CREATE INDEX document_summary_due ON document_summary_state USING btree (next_at, due_at) WHERE (due_at IS NOT NULL);
 
 CREATE TABLE document_versions (
     document_id uuid NOT NULL,
@@ -437,3 +418,175 @@ CREATE TABLE document_discussion_participants (
     CONSTRAINT document_discussion_participants_discussion_id_fkey FOREIGN KEY (discussion_id) REFERENCES document_discussions(id) ON DELETE CASCADE,
     CONSTRAINT document_discussion_participants_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+
+
+-- One resumable offline document sweep, independent of a process or lease lifetime.
+CREATE TABLE document_purge_progress (
+    job text PRIMARY KEY CHECK (job = 'document_purge'),
+    phase text NOT NULL CHECK (phase IN ('documents','files')),
+    after_document uuid,
+    after_file_at timestamptz,
+    after_file uuid,
+    blocks_before timestamptz NOT NULL,
+    batches_before timestamptz NOT NULL,
+    files_before timestamptz NOT NULL,
+    CHECK ((after_file_at IS NULL) = (after_file IS NULL))
+);
+CREATE INDEX document_files_purge_page_idx ON document_files (added_at,id);
+
+-- Summary paragraphs are a cache of their actual resource, never its written description.
+-- A NULL viewer is automatic/shared work; an explicit person's refresh is private to that
+-- person. In particular, chat catch-up text cannot be reused for another reader.
+CREATE TABLE resource_summaries (
+    id uuid PRIMARY KEY,
+    kind text NOT NULL CHECK (kind IN ('thread','topic','document','chat','chat_title')),
+    node_id uuid REFERENCES nodes(id) ON DELETE CASCADE,
+    document_id uuid REFERENCES documents(id) ON DELETE CASCADE,
+    chat_id uuid REFERENCES chats(id) ON DELETE CASCADE,
+    viewer_id uuid REFERENCES users(id) ON DELETE CASCADE,
+    own_options jsonb CHECK (own_options IS NULL OR jsonb_typeof(own_options) = 'object'),
+    options_revision bigint NOT NULL DEFAULT 0 CHECK (options_revision >= 0),
+    options_updated_by uuid REFERENCES users(id) ON DELETE SET NULL,
+    text text,
+    producer jsonb CHECK (producer IS NULL OR jsonb_typeof(producer) = 'object'),
+    source_snapshot jsonb CHECK (source_snapshot IS NULL OR jsonb_typeof(source_snapshot) = 'object'),
+    source_refs jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(source_refs) = 'array'),
+    completed_request_id uuid,
+    completed_at timestamptz,
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    dirty_revision bigint NOT NULL DEFAULT 0 CHECK (dirty_revision >= 0),
+    completed_dirty_revision bigint,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    CONSTRAINT resource_summaries_target_check CHECK (
+        (kind IN ('thread','topic') AND node_id IS NOT NULL AND document_id IS NULL AND chat_id IS NULL)
+        OR (kind = 'document' AND document_id IS NOT NULL AND node_id IS NULL AND chat_id IS NULL)
+        OR (kind IN ('chat','chat_title') AND chat_id IS NOT NULL AND node_id IS NULL AND document_id IS NULL)
+    ),
+    CONSTRAINT resource_summaries_options_check CHECK (own_options IS NULL OR (viewer_id IS NULL AND kind = 'document')),
+    CONSTRAINT resource_summaries_text_check CHECK (
+        (text IS NULL AND completed_at IS NULL AND completed_request_id IS NULL AND completed_dirty_revision IS NULL)
+        OR (text IS NOT NULL AND btrim(text) <> '' AND completed_at IS NOT NULL
+            AND completed_request_id IS NOT NULL AND completed_dirty_revision IS NOT NULL)
+    ),
+    UNIQUE NULLS NOT DISTINCT (kind,node_id,document_id,chat_id,viewer_id),
+    UNIQUE (id,viewer_id)
+);
+
+CREATE INDEX resource_summaries_target_idx
+    ON resource_summaries (kind, COALESCE(node_id,document_id,chat_id));
+
+-- This journal stores the original accepted act, not a reconstructed session. Neither this
+-- table nor a queued/running state grants Read, provider Use, or permission to publish.
+CREATE TABLE resource_summary_requests (
+    id uuid PRIMARY KEY,
+    summary_id uuid NOT NULL REFERENCES resource_summaries(id) ON DELETE CASCADE,
+    origin text NOT NULL CHECK (origin IN ('automatic','person')),
+    requested_by uuid REFERENCES users(id) ON DELETE CASCADE,
+    paying_user uuid REFERENCES users(id) ON DELETE SET NULL,
+    client_id uuid,
+    accepted_operation jsonb,
+    arguments jsonb NOT NULL CHECK (jsonb_typeof(arguments) = 'object'),
+    accepted_source jsonb NOT NULL CHECK (jsonb_typeof(accepted_source) = 'object'),
+    prepared jsonb CHECK (prepared IS NULL OR jsonb_typeof(prepared) = 'object'),
+    accepted_revision bigint NOT NULL CHECK (accepted_revision > 0),
+    options_revision bigint NOT NULL,
+    dirty_revision bigint NOT NULL,
+    state text NOT NULL DEFAULT 'queued' CHECK (state IN ('queued','running','done','failed','discarded')),
+    lease_token uuid,
+    lease_until timestamptz,
+    problem jsonb,
+    created_at timestamptz NOT NULL,
+    due_at timestamptz NOT NULL CHECK (due_at >= created_at),
+    finished_at timestamptz,
+    CONSTRAINT resource_summary_requests_origin_fields_check CHECK (
+        (origin = 'automatic' AND requested_by IS NULL AND client_id IS NULL AND accepted_operation IS NULL)
+        OR (origin = 'person' AND requested_by IS NOT NULL AND client_id IS NOT NULL
+            AND paying_user = requested_by AND accepted_operation IS NOT NULL
+            AND jsonb_typeof(accepted_operation) = 'object' AND accepted_operation <> '{}'::jsonb)
+    ),
+    CONSTRAINT resource_summary_requests_lease_check CHECK (
+        (state = 'running' AND lease_token IS NOT NULL AND lease_until IS NOT NULL)
+        OR (state <> 'running' AND lease_token IS NULL AND lease_until IS NULL)
+    ),
+    CONSTRAINT resource_summary_requests_finished_check CHECK (
+        (state IN ('queued','running') AND finished_at IS NULL)
+        OR (state IN ('done','failed','discarded') AND finished_at IS NOT NULL)
+    ),
+    UNIQUE (requested_by,client_id),
+    UNIQUE (summary_id,accepted_revision),
+    FOREIGN KEY (summary_id,requested_by) REFERENCES resource_summaries(id,viewer_id) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX resource_summary_requests_active_idx ON resource_summary_requests(summary_id)
+    WHERE state IN ('queued','running');
+CREATE INDEX resource_summary_requests_claim_idx ON resource_summary_requests(due_at,created_at,id)
+    WHERE state IN ('queued','running');
+
+-- Governors outlive their resource/job. Removing a source cannot turn a retained prompt
+-- into an ordinary node record; the body and its immutable marker share one transaction.
+CREATE TABLE resource_summary_model_inputs (
+    model_input_id uuid PRIMARY KEY REFERENCES model_inputs(id) ON DELETE CASCADE,
+    request_id uuid REFERENCES resource_summary_requests(id) ON DELETE SET NULL,
+    viewer_id uuid,
+    source_refs jsonb NOT NULL CHECK (jsonb_typeof(source_refs)='array' AND source_refs <> '[]'::jsonb)
+);
+
+-- Native changes coalesce until an admitted automatic refresh captures their current source.
+-- Metadata checks rotate by a sequence so a controlled/frozen clock cannot starve other targets.
+CREATE SEQUENCE resource_summary_event_checks;
+CREATE TABLE resource_summary_events (
+    kind text NOT NULL CHECK (kind IN ('thread','topic','document','chat','chat_title')),
+    target_id uuid NOT NULL,
+    event text NOT NULL CHECK (event IN ('turn_completed','milestone','interval','content_changed','message_posted','child_changed')),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision>0),
+    changed_at timestamptz NOT NULL,
+    checked_order bigint NOT NULL DEFAULT 0 CHECK (checked_order>=0),
+    PRIMARY KEY(kind,target_id,event)
+);
+CREATE INDEX resource_summary_events_check_idx ON resource_summary_events(checked_order,changed_at,kind,target_id,event);
+
+CREATE FUNCTION orch_resource_summary_event(p_kind text,p_target uuid,p_event text,p_at timestamptz) RETURNS void
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO resource_summary_events(kind,target_id,event,changed_at) VALUES(p_kind,p_target,p_event,p_at)
+    ON CONFLICT(kind,target_id,event) DO UPDATE SET revision=resource_summary_events.revision+1,
+        changed_at=EXCLUDED.changed_at,checked_order=0;
+    -- Exact target only. A private descendant's change never invalidates a public topic cache.
+    IF p_kind<>'topic' AND p_event<>'interval' THEN
+        UPDATE resource_summaries SET dirty_revision=dirty_revision+1,revision=revision+1,updated_at=p_at
+        WHERE kind=p_kind AND COALESCE(node_id,document_id,chat_id)=p_target;
+    END IF;
+END $$;
+
+CREATE FUNCTION orch_document_summary_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM orch_resource_summary_event('document',NEW.id,'content_changed',NEW.updated_at);
+    RETURN NEW;
+END $$;
+CREATE TRIGGER document_paragraph_source_changed
+AFTER INSERT OR UPDATE OF doc_seq,title,node_id,parent_container_id,deleted_at ON documents
+FOR EACH ROW EXECUTE FUNCTION orch_document_summary_event();
+
+CREATE FUNCTION orch_chat_summary_event() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE at timestamptz; parent uuid; action text;
+BEGIN
+    IF NEW.kind<>'message' THEN RETURN NEW; END IF;
+    at:=COALESCE(NEW.deleted_at,NEW.edited_at,NEW.created_at);
+    action:=CASE WHEN TG_OP='INSERT' THEN 'message_posted' ELSE 'content_changed' END;
+    PERFORM orch_resource_summary_event('chat',NEW.chat_id,action,at);
+    PERFORM orch_resource_summary_event('chat_title',NEW.chat_id,action,at);
+    -- Only a source selector can decide which of these chats may contribute to a topic.
+    -- This private event is not a public cache invalidation or a paid request.
+    FOR parent IN SELECT n.id FROM chats c JOIN nodes home ON home.id=COALESCE(c.node_id,c.home_id)
+        JOIN nodes n ON n.id=ANY(home.path) AND n.kind='topic' WHERE c.id=NEW.chat_id
+    LOOP
+        PERFORM orch_resource_summary_event('topic',parent,'child_changed',at);
+    END LOOP;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER chat_paragraph_source_added AFTER INSERT ON chat_messages
+FOR EACH ROW EXECUTE FUNCTION orch_chat_summary_event();
+CREATE TRIGGER chat_paragraph_source_changed AFTER UPDATE OF content,deleted_at ON chat_messages
+FOR EACH ROW WHEN (OLD.content IS DISTINCT FROM NEW.content OR OLD.deleted_at IS DISTINCT FROM NEW.deleted_at)
+EXECUTE FUNCTION orch_chat_summary_event();

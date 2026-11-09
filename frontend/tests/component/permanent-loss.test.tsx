@@ -86,7 +86,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
 it('names an existing destination in the batch request even when each thread keeps its provider', async () => {
   show(<BatchChange source={{ kind: 'threads', threads: [{ id: 'first', name: 'First' }, { id: 'second', name: 'Second' }], label: 'Selected' }} batch={null} open onClose={vi.fn()} />);
   const user = userEvent.setup();
-  expect(await screen.findByRole('combobox', { name: i18n.t('loss.destination') })).toHaveTextContent(i18n.t('loss.keepEnvironment'));
+  expect(await screen.findByRole('combobox', { name: i18n.t('loss.destination') })).toHaveValue(i18n.t('loss.keepEnvironment'));
   await user.click(screen.getByRole('combobox', { name: i18n.t('loss.destination') }));
   await user.click(await screen.findByRole('option', { name: 'Available' }));
   await waitFor(() => expect(calls.batch).toHaveBeenCalled());
@@ -103,8 +103,9 @@ it.each(['en', 'zh-CN'] as const)('keeps a blocked environment independent and c
   calls.start.mockImplementation(() => new Promise<EnvironmentBatch>(() => undefined));
   show(<MoveDialog source={{ ids: ['ready', 'blocked'] }} open onClose={vi.fn()} />);
   expect(await screen.findByText(i18n.t('change.blocker.noHost'))).toBeVisible();
-  expect(screen.getByRole('combobox', { name: i18n.t('loss.destinationHost') })).toHaveTextContent(i18n.t('changeCompact.automatic'));
-  expect(screen.getByRole('combobox', { name: i18n.t('loss.hostFor', { name: 'Ready' }) })).toHaveTextContent(i18n.t('loss.asAbove'));
+  await userEvent.keyboard('{Escape}');
+  expect(screen.getByRole('combobox', { name: i18n.t('loss.destinationHost') })).toHaveValue(i18n.t('changeCompact.automatic'));
+  expect(screen.getByRole('combobox', { name: i18n.t('loss.hostFor', { name: 'Ready' }) })).toHaveValue(i18n.t('loss.asAbove'));
   const confirm = screen.getByRole('button', { name: i18n.t('loss.confirm') });
   expect(confirm).toBeEnabled();
   await userEvent.click(confirm);

@@ -144,11 +144,13 @@ fn script(world: &World, segment: Id, turn: Id) -> Vec<DeliveredEvent> {
         Event::TurnPhase(TurnPhase {
             turn_id: turn,
             kind: TurnPhaseKind::Compacting,
+            retry_attempt: None,
             at: Time::new(at),
         }),
         Event::TurnPhase(TurnPhase {
             turn_id: turn,
             kind: TurnPhaseKind::Working,
+            retry_attempt: None,
             at: Time::new(at + chrono::Duration::seconds(2)),
         }),
         usage(turn),
@@ -323,14 +325,39 @@ async fn growing_text_is_held_and_written_before_what_ends_its_turn() {
     world.say(thread, message_began(start.turn_id, "m4")).await;
     world.say(thread, message_grew("m4", 0, "Half of ")).await;
     world.say(thread, message_grew("m4", 8, "an answer")).await;
+    let observed = std::sync::Mutex::new(None::<Json>);
     eventually("both stretches reach the live readers", || async {
-        world
-            .live
-            .deltas()
+        let item: Option<Id> =
+            sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND native_ref='m4'")
+                .bind(thread)
+                .fetch_optional(world.pool.pool())
+                .await
+                .unwrap();
+        let deltas = world.live.deltas();
+        let snapshot = json!(deltas.iter().map(|delta| {
+            json!({"thread_id":delta.thread_id,"item_id":delta.item_id,"turn_id":delta.turn_id,
+                "stream":delta.stream,"field":delta.field,"offset":delta.offset,
+                "len":delta.len,"data":delta.data})
+        }).collect::<Vec<_>>());
+        let mut previous = observed.lock().unwrap();
+        if previous.as_ref() != Some(&snapshot) {
+            eprintln!(
+                "held-text-live thread={thread} turn={} deltas={snapshot}",
+                start.turn_id
+            );
+            *previous = Some(snapshot);
+        }
+        drop(previous);
+        deltas
             .iter()
-            .filter(|delta| delta.data == "Half of " || delta.data == "an answer")
-            .count()
-            == 2
+            .filter(|delta| {
+                delta.thread_id == thread
+                    && Some(delta.item_id) == item
+                    && delta.field == DeltaField::Text
+            })
+            .map(|delta| delta.data.as_str())
+            .collect::<String>()
+            == "Half of an answer"
     })
     .await;
     meanwhile(Duration::from_millis(200)).await;
@@ -339,6 +366,35 @@ async fn growing_text_is_held_and_written_before_what_ends_its_turn() {
         Some(""),
         "the pieces are held, not written to the item"
     );
+    let item: Id = world
+        .scalar(
+            "SELECT id FROM items WHERE thread_id=$1 AND native_ref='m4'",
+            thread,
+        )
+        .await;
+    let mut offset = 0;
+    let mut streamed = String::new();
+    for delta in world
+        .live
+        .deltas()
+        .into_iter()
+        .filter(|delta| delta.item_id == item)
+    {
+        assert_eq!(delta.thread_id, thread);
+        assert_eq!(delta.item_id, item);
+        assert_eq!(delta.turn_id, Some(start.turn_id));
+        assert_eq!(delta.stream, "main");
+        assert_eq!(delta.field, DeltaField::Text);
+        assert_eq!(delta.offset, offset, "live text has no gaps or duplicates");
+        assert_eq!(
+            delta.len,
+            i64::try_from(delta.data.chars().count()).unwrap()
+        );
+        offset += delta.len;
+        streamed.push_str(&delta.data);
+    }
+    assert_eq!(streamed, "Half of an answer");
+    assert_eq!(offset, i64::try_from(streamed.chars().count()).unwrap());
 
     world
         .say(thread, turn_ended(start.turn_id, TurnOutcome::Interrupted))
@@ -447,3 +503,601 @@ async fn events_of_two_threads_interleaved_stay_apart() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_native_settings_observation_stays_outside_an_already_reserved_turn() {
+    let world = World::new().await;
+    let thread = world.thread("Native settings").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    let before: Json = world
+        .scalar(
+            "SELECT jsonb_build_object('model',model,'params',params) FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    let event=Event::decode("item.completed",json!({"native_ref":"native-settings-idle","status":"completed","payload":{"marker":"harness_changed","data":{"program":"Codex","change":"model","previous":{"state":"told","value":"chosen"},"value":"native-future","expected":{"state":"told","value":"chosen"},"changed":true,"diverged":true,"next_turn":true,"turn_id":null,"reported_at":world.clock.time()}}})).unwrap();
+    world.say(thread, event.clone()).await;
+    world.say(thread, event).await;
+    eventually("one source-owned native settings marker",||async {world.scalar::<bool>("SELECT count(*)=1 FROM items WHERE thread_id=$1 AND native_ref='native-settings-idle'",thread).await}).await;
+    let marker_turn: Option<Id> = world
+        .scalar(
+            "SELECT turn_id FROM items WHERE thread_id=$1 AND native_ref='native-settings-idle'",
+            thread,
+        )
+        .await;
+    assert!(
+        marker_turn.is_none(),
+        "a thread-level observation must not invent an originating turn"
+    );
+    let after: Json = world
+        .scalar(
+            "SELECT jsonb_build_object('model',model,'params',params) FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(before, after);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn anonymous_native_failures_keep_source_event_identity_across_transport_replay() {
+    let world = World::new().await;
+    let thread = world.thread("Anonymous failure observations").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let running = orch_agent_contract::requests::UsageRequest {
+        id: "native-session:1".into(),
+        asked: Some(world.clock.time()),
+        ..Default::default()
+    };
+    let mut first = running.clone();
+    first.id = "native-session:native-turn:failure:1".into();
+    first.previous_ref = Some(running.id.clone());
+    first.upstream_status = Some(429);
+    first.finish(
+        "rate_limited",
+        Some("Same native words"),
+        Some("Same vendor words"),
+    );
+    let mut second = first.clone();
+    second.id = "native-session:native-turn:failure:2".into();
+    second.previous_ref = None;
+    let reported = |request| {
+        Event::ModelRequest(orch_link_contract::events::ModelRequest {
+            turn_id: start.turn_id,
+            request,
+        })
+    };
+    let first_event = reported(first.clone());
+    let events = [
+        delivered(
+            &world,
+            1,
+            &Event::SessionOpened(SessionOpened {
+                native_session_ref: "native-session".into(),
+                resumed: false,
+            }),
+        ),
+        delivered(&world, 2, &turn_began(start.turn_id)),
+        delivered(&world, 3, &reported(running)),
+        delivered(&world, 4, &first_event),
+        delivered(&world, 5, &reported(second)),
+    ];
+    apply(&world, thread, segment, &events).await;
+    let rows = world.ledger_of(start.turn_id).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "an exact provisional observation is replaced by its failure report: {rows:?}"
+    );
+    assert_ne!(rows[0].id, rows[1].id);
+    for row in &rows {
+        assert_eq!(row.total_tokens, 0);
+        assert_eq!(row.upstream_status, Some(429));
+        assert!(row.provider_request_id.is_none());
+        assert_eq!(row.outcome.as_deref(), Some("rate_limited"));
+    }
+    assert_eq!(
+        world
+            .scalar::<i64>(
+                "SELECT count(*) FROM usage_running WHERE turn_id=$1",
+                start.turn_id
+            )
+            .await,
+        0
+    );
+    apply(&world, thread, segment, &events).await;
+    apply(
+        &world,
+        thread,
+        segment,
+        &[delivered(&world, 6, &first_event)],
+    )
+    .await;
+    let replayed = world.ledger_of(start.turn_id).await;
+    assert_eq!(
+        replayed.len(),
+        2,
+        "the same reported failure event can be delivered again with its retained reference"
+    );
+    assert_eq!(rows, replayed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_marker_only_compaction_resends_context_once_without_borrowing_a_childs_context() {
+    let world = World::new().await;
+    let thread = world.thread("Marker-only compaction").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let marker = |native_ref: &str| {
+        Event::decode("item.completed",json!({"native_ref":native_ref,"status":"completed","payload":{"marker":"compacted","data":{"duration_ms":null}}})).unwrap()
+    };
+    let began = |native_ref: &str, stream: &str| {
+        Event::decode("item.started",json!({"native_ref":native_ref,"turn_id":start.turn_id,"stream":stream,"kind":"marker","payload":{"marker":"compacted","data":{"duration_ms":null}}})).unwrap()
+    };
+    let reset = || async {
+        sqlx::query("UPDATE segments SET context_sent='{\"baseline\":true}' WHERE id=$1")
+            .bind(segment)
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+    };
+    let sent = || async {
+        world
+            .scalar::<Json>("SELECT context_sent FROM segments WHERE id=$1", segment)
+            .await
+    };
+    reset().await;
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            delivered(
+                &world,
+                1,
+                &Event::SessionOpened(SessionOpened {
+                    native_session_ref: "native-compaction".into(),
+                    resumed: false,
+                }),
+            ),
+            delivered(&world, 2, &turn_began(start.turn_id)),
+            delivered(&world, 3, &marker("only-end")),
+        ],
+    )
+    .await;
+    assert_eq!(sent().await, json!({"resend":true}), "no phase was needed");
+    reset().await;
+    apply(
+        &world,
+        thread,
+        segment,
+        &[delivered(&world, 4, &marker("only-end"))],
+    )
+    .await;
+    assert_eq!(
+        sent().await,
+        json!({"baseline":true}),
+        "replay does not re-arm a consumed resend"
+    );
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            delivered(&world, 5, &began("child-compaction", "sub:child")),
+            delivered(&world, 6, &marker("child-compaction")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        sent().await,
+        json!({"baseline":true}),
+        "a child did not compact the main conversation"
+    );
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            delivered(&world, 7, &began("observed-compaction", "main")),
+            delivered(&world, 8, &marker("observed-compaction")),
+        ],
+    )
+    .await;
+    assert_eq!(
+        sent().await,
+        json!({"resend":true}),
+        "a started marker uses the same supplier"
+    );
+    reset().await;
+    let data = json!({"program":"Codex","change":"context_compaction","subject":null,
+        "previous":{"state":"unsupported"},"value":{"duration_ms":null},
+        "expected":{"state":"unsupported"},"changed":true,"diverged":false,
+        "next_turn":false,"turn_id":null,"reported_at":world.clock.time()});
+    let report = Event::decode(
+        "item.completed",
+        json!({"native_ref":"idle-native-compaction","status":"completed",
+        "payload":{"marker":"harness_changed","data":data}}),
+    )
+    .unwrap();
+    apply(&world, thread, segment, &[delivered(&world, 9, &report)]).await;
+    assert_eq!(
+        sent().await,
+        json!({"resend":true}),
+        "an explicit unassigned native compaction uses the same supplier"
+    );
+    reset().await;
+    apply(&world, thread, segment, &[delivered(&world, 10, &report)]).await;
+    assert_eq!(
+        sent().await,
+        json!({"baseline":true}),
+        "the same observed source does not re-arm a consumed resend"
+    );
+    let mut child_data = data;
+    child_data["turn_id"] = json!(start.turn_id);
+    let payload = json!({"marker":"harness_changed","data":child_data});
+    let began = Event::decode(
+        "item.started",
+        json!({"native_ref":"native-child-compaction","turn_id":start.turn_id,
+        "stream":"sub:child","kind":"marker","payload":payload}),
+    )
+    .unwrap();
+    let ended = Event::decode(
+        "item.completed",
+        json!({"native_ref":"native-child-compaction","status":"completed","payload":payload}),
+    )
+    .unwrap();
+    apply(
+        &world,
+        thread,
+        segment,
+        &[delivered(&world, 11, &began), delivered(&world, 12, &ended)],
+    )
+    .await;
+    assert_eq!(
+        sent().await,
+        json!({"baseline":true}),
+        "the new native marker preserves its child's separate context"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_runtime_changes_audit_their_source_once_without_copying_native_bodies() {
+    let world = World::new().await;
+    let thread = world.thread("Runtime audit").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let changes = [
+        "model",
+        "effort",
+        "approval_policy",
+        "sandbox_mode",
+        "collaboration_mode",
+        "collaboration_instructions",
+        "session_status",
+        "mcp_startup",
+        "session_lifecycle",
+        "hook",
+    ];
+    let marker = |change: &str, turn: Option<Id>| json!({"marker":"harness_changed","data":{"program":"Untrusted display","change":change,"subject":"Native label","previous":{"state":"unsupported"},"value":{"status":"completed","private":"never-copy-runtime-body"},"expected":{"state":"unsupported"},"changed":true,"diverged":false,"next_turn":false,"turn_id":turn,"reported_at":world.clock.time()}});
+    let complete = |reference: &str, payload: Json| {
+        Event::decode(
+            "item.completed",
+            json!({"native_ref":reference,"status":"completed","payload":payload}),
+        )
+        .unwrap()
+    };
+    let mut frames = vec![
+        delivered(
+            &world,
+            1,
+            &Event::SessionOpened(SessionOpened {
+                native_session_ref: "runtime-audit".into(),
+                resumed: false,
+            }),
+        ),
+        delivered(&world, 2, &turn_began(start.turn_id)),
+    ];
+    for (index, change) in changes.iter().enumerate() {
+        frames.push(delivered(
+            &world,
+            3 + i64::try_from(index).unwrap(),
+            &complete(change, marker(change, Some(start.turn_id))),
+        ));
+    }
+    apply(&world, thread, segment, &frames).await;
+    let rows:Vec<Json>=sqlx::query_scalar("SELECT jsonb_build_object('actor',actor_kind,'for_user',for_user_id,'details',details) FROM audit_log WHERE node_id=$1 AND action='harness.changed' ORDER BY at,id").bind(thread).fetch_all(world.pool.pool()).await.unwrap();
+    assert_eq!(rows.len(), changes.len());
+    for row in &rows {
+        assert_eq!(row["actor"], "agent");
+        assert_eq!(row["for_user"], json!(world.ada));
+        assert_eq!(row["details"]["turn_id"], json!(start.turn_id));
+        assert_ne!(row["details"]["program"], json!("Untrusted display"));
+    }
+    assert!(
+        !serde_json::to_string(&rows)
+            .unwrap()
+            .contains("never-copy-runtime-body")
+    );
+    let same = complete("model", marker("model", Some(start.turn_id)));
+    apply(&world, thread, segment, &[delivered(&world, 20, &same)]).await;
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM audit_log WHERE node_id=$1 AND action='harness.changed'",
+                thread
+            )
+            .await,
+        10
+    );
+    let mut revised = marker("model", Some(start.turn_id));
+    revised["data"]["value"] = json!("new-native-model");
+    apply(
+        &world,
+        thread,
+        segment,
+        &[delivered(&world, 21, &complete("model", revised))],
+    )
+    .await;
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM audit_log WHERE node_id=$1 AND action='harness.changed'",
+                thread
+            )
+            .await,
+        11,
+        "an actual update of one source item is audited"
+    );
+    let idle = complete("idle-observation", marker("session_status", None));
+    apply(&world, thread, segment, &[delivered(&world, 22, &idle)]).await;
+    let idle:Json=world.scalar("SELECT jsonb_build_object('actor',actor_kind,'for_user',for_user_id,'turn',details->'turn_id') FROM audit_log WHERE node_id=$1 AND action='harness.changed' AND details->>'native_ref'='idle-observation'",thread).await;
+    assert_eq!(
+        idle,
+        json!({"actor":"system","for_user":null,"turn":null}),
+        "idle facts borrow neither the newer turn nor its person"
+    );
+    let compacted = complete(
+        "compaction-observation",
+        json!({"marker":"compacted","data":{"duration_ms":null}}),
+    );
+    let rerouted = complete(
+        "reroute-observation",
+        json!({"code":"model_rerouted","message":"never-copy-runtime-body","retryable":false,"details":{"turn_id":start.turn_id,"from_model":"chosen","to_model":"native-effective"}}),
+    );
+    let review =
+        orch_agent_contract::review::reported(orch_agent_contract::review::ReportedReview {
+            native_ref: "review-observation".into(),
+            turn: Some(start.turn_id),
+            at: world.clock.time(),
+            model: "codex-auto-review",
+            model_reported: false,
+            outcome: "approved",
+            reason: Some("never-copy-runtime-body"),
+            action: json!({"private":"never-copy-runtime-body"}),
+            usage: None,
+            raw: &Json::Null,
+        });
+    let review = review
+        .into_iter()
+        .find_map(|event| {
+            if let orch_agent_contract::events::SessionEvent::ItemCompleted(item) = event {
+                Some(complete("review-observation", item.payload))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            delivered(&world, 23, &compacted),
+            delivered(&world, 24, &rerouted),
+            delivered(&world, 25, &review),
+        ],
+    )
+    .await;
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM audit_log WHERE node_id=$1 AND action='harness.changed'",
+                thread
+            )
+            .await,
+        15
+    );
+    let audit:Json=world.scalar("SELECT jsonb_agg(details ORDER BY at,id) FROM audit_log WHERE node_id=$1 AND action='harness.changed'",thread).await;
+    assert!(!audit.to_string().contains("never-copy-runtime-body"));
+    apply(
+        &world,
+        thread,
+        segment,
+        &[
+            delivered(&world, 26, &compacted),
+            delivered(&world, 27, &rerouted),
+            delivered(&world, 28, &review),
+        ],
+    )
+    .await;
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM audit_log WHERE node_id=$1 AND action='harness.changed'",
+                thread
+            )
+            .await,
+        15
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unscoped_program_status_is_a_provider_audit_fact_without_native_diagnostics() {
+    let world = World::new().await;
+    let thread = world.thread("Program status audit").await;
+    world.running_turn(thread, "Go").await;
+    let count = || async {
+        world.count("SELECT count(*) FROM audit_log WHERE object_id=$1 AND action='harness.changed' AND details->>'change'='program_status'",world.provider).await
+    };
+    let before = count().await;
+    let event = Event::HarnessStatus(orch_link_contract::events::HarnessStatus {
+        status: "online".into(),
+        detail: Some("never-copy-native-startup-words".into()),
+        harness_version: None,
+        sessions_open: 1,
+    });
+    for _ in 0..2 {
+        let mut tx = world.pool.begin().await.unwrap();
+        world
+            .engine()
+            .apply_stream_events(
+                &mut tx,
+                world.machine_id,
+                &Stream::Harness {
+                    provider_id: world.provider,
+                    agent_id: world.agent,
+                },
+                &[delivered(&world, 1, &event)],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(count().await, before + 1);
+    let row:Json=world.scalar("SELECT jsonb_build_object('actor',actor_kind,'for_user',for_user_id,'object_kind',object_kind,'details',details) FROM audit_log WHERE object_id=$1 AND action='harness.changed' AND details->>'change'='program_status' ORDER BY at DESC,id DESC LIMIT 1",world.provider).await;
+    assert_eq!(row["object_kind"], "provider");
+    assert_eq!(row["actor"], "system");
+    assert!(row["for_user"].is_null());
+    assert!(row["details"]["thread_id"].is_null());
+    assert!(row["details"]["turn_id"].is_null());
+    assert!(!row.to_string().contains("never-copy-native-startup-words"));
+}
+
+#[tokio::test]
+async fn retries_publish_each_native_attempt_once_and_clear_on_work_or_completion() {
+    let world = World::new().await;
+    let thread = world.thread("Retry phases").await;
+    world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Please continue"),
+        )
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    let segment = world.segment_of(thread).await;
+    let began = delivered(&world, 1, &turn_began(start.turn_id));
+    apply(&world, thread, segment, &[began]).await;
+    for (seq, attempt) in [(2, 1), (3, 2), (4, 4)] {
+        let event = delivered(
+            &world,
+            seq,
+            &Event::TurnPhase(TurnPhase {
+                turn_id: start.turn_id,
+                kind: TurnPhaseKind::Retrying,
+                retry_attempt: Some(attempt),
+                at: Time::new(world.clock.now()),
+            }),
+        );
+        apply(&world, thread, segment, std::slice::from_ref(&event)).await;
+        let sync = world.sync(thread).await;
+        let phase = sync
+            .turns
+            .iter()
+            .find(|t| t.id == start.turn_id)
+            .unwrap()
+            .phase
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            phase.kind,
+            orch_api_contract::threads::TurnPhaseKind::Retrying
+        );
+        assert_eq!(phase.retry_attempt, Some(attempt));
+        let once = picture(&world, thread).await;
+        apply(&world, thread, segment, &[event]).await;
+        assert_eq!(
+            picture(&world, thread).await,
+            once,
+            "replay does not reset the status timer"
+        );
+    }
+    let working = delivered(
+        &world,
+        5,
+        &Event::TurnPhase(TurnPhase {
+            turn_id: start.turn_id,
+            kind: TurnPhaseKind::Working,
+            retry_attempt: Some(99),
+            at: Time::new(world.clock.now()),
+        }),
+    );
+    apply(&world, thread, segment, &[working]).await;
+    let sync = world.sync(thread).await;
+    let phase = sync
+        .turns
+        .iter()
+        .find(|t| t.id == start.turn_id)
+        .unwrap()
+        .phase
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        phase.kind,
+        orch_api_contract::threads::TurnPhaseKind::Working
+    );
+    assert_eq!(
+        phase.retry_attempt, None,
+        "only native retry phases can carry retry numbers"
+    );
+    let completed = delivered(
+        &world,
+        6,
+        &turn_ended(start.turn_id, TurnOutcome::Completed),
+    );
+    apply(&world, thread, segment, &[completed]).await;
+    let late = delivered(
+        &world,
+        7,
+        &Event::TurnPhase(TurnPhase {
+            turn_id: start.turn_id,
+            kind: TurnPhaseKind::Retrying,
+            retry_attempt: Some(6),
+            at: Time::new(world.clock.now()),
+        }),
+    );
+    apply(&world, thread, segment, &[late]).await;
+    assert!(
+        world
+            .sync(thread)
+            .await
+            .turns
+            .iter()
+            .find(|t| t.id == start.turn_id)
+            .unwrap()
+            .phase
+            .is_none(),
+        "late status cannot reopen a completed turn"
+    );
+}
+
+#[path = "ingest/claude_audit.rs"]
+mod claude_audit;

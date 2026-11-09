@@ -266,16 +266,17 @@ impl CodexAdapter {
         before: &str,
     ) -> Result<Checkpoint, AdapterError> {
         let (shared, running) = self.live()?;
-        if running.started.harness_version != "0.165.0" {
-            return Err(unsupported(
-                "Exact input checkpoints require Codex 0.165.0.",
-            ));
+        if !crate::descriptor::is_pinned_build(&running.started.harness_version) {
+            return Err(unsupported(&format!(
+                "Exact input checkpoints require Codex {}.",
+                crate::descriptor::SUPPORTED_RANGE.trim_start_matches('=')
+            )));
         }
         if let Ok((native, segment, busy)) = shared.with_session(source.thread_id, |record| {
             (
                 record.mapper.native_thread().to_owned(),
                 record.mapper.segment_id(),
-                record.mapper.turn_in_progress(),
+                record.mapper.turn_in_progress() || record.mapper.background_running(),
             )
         }) {
             if native != source.native_session_ref || segment != source.segment_id {

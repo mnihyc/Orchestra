@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "forwarding/native_image_rules.rs"]
+mod native_image_rules;
 
 use std::time::Duration;
 
@@ -20,6 +22,646 @@ use serde_json::json;
 /// What the model is asked, with a script for the scripted server after it.
 fn scripted(text: &str, directives: &[&str]) -> String {
     format!("{text}\n#!mock\n{}\n", directives.join("\n"))
+}
+
+#[tokio::test]
+async fn the_managed_access_program_comes_from_the_frozen_lease_for_each_thread() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease = new_id();
+    let mut body = json!({"lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],"access_program":{"program":"blue"},
+        "model_parameters":{(MODEL):{"access_programs":["blue","red"],"default_access_program":"red"}}});
+    let command =
+        serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(body.clone()).unwrap();
+    p.rig.succeed(&p.provider_key(), &command).await;
+    let harness = p.harness(p.thread);
+    for _ in 0..2 {
+        let mut request = responses_request(MODEL, "use the admitted program");
+        request["access_programs"] = json!({"cyber":"red"});
+        p.mock.queue("say Kept").unwrap();
+        assert_eq!(harness.post("/v1/responses", &request).await.status, 200);
+        assert_eq!(
+            p.model_requests().last().unwrap().body["access_programs"]["cyber"],
+            "blue"
+        );
+        body["access_program"] = json!({"program":"red"});
+        let changed =
+            serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(body.clone())
+                .unwrap();
+        p.rig.succeed(&p.provider_key(), &changed).await;
+    }
+    let other = new_id();
+    body["lease_id"] = json!(new_id());
+    body["thread_id"] = json!(other);
+    let other_lease =
+        serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(body).unwrap();
+    p.rig.succeed(&p.provider_key(), &other_lease).await;
+    p.mock.queue("say Independent").unwrap();
+    assert_eq!(
+        p.harness(other)
+            .post("/v1/responses", &responses_request(MODEL, "independent"))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        p.model_requests().last().unwrap().body["access_programs"]["cyber"],
+        "red"
+    );
+    assert_eq!(p.model_requests().len(), 3);
+}
+
+#[tokio::test]
+async fn an_unopened_managed_program_is_refused_before_any_upstream_request() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let body = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],"access_program":{"program":"red"},
+        "model_parameters":{(MODEL):{"access_programs":["blue"]}}
+    }))
+    .unwrap();
+    p.rig.succeed(&p.provider_key(), &body).await;
+    assert_eq!(
+        p.harness(p.thread)
+            .post("/v1/responses", &responses_request(MODEL, "not admitted"))
+            .await
+            .status,
+        403
+    );
+    assert!(p.model_requests().is_empty());
+}
+
+#[tokio::test]
+async fn an_unselected_access_program_adds_no_ordinary_wire_member() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    p.open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    p.mock.queue("say Ordinary").unwrap();
+    assert_eq!(
+        p.harness(p.thread)
+            .post("/v1/responses", &responses_request(MODEL, "ordinary"))
+            .await
+            .status,
+        200
+    );
+    assert!(p.model_requests()[0].body.get("access_programs").is_none());
+}
+
+#[tokio::test]
+async fn known_ordinary_access_overrides_a_paid_default_without_an_ordinary_wire_member() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let body=serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],"access_program":{"program":null},
+        "model_parameters":{(MODEL):{"access_programs":["blue"],"default_access_program":"blue"}}
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &body).await;
+    p.mock.queue("say Ordinary").unwrap();
+    assert_eq!(
+        p.harness(p.thread)
+            .post("/v1/responses", &responses_request(MODEL, "ordinary"))
+            .await
+            .status,
+        200
+    );
+    assert!(p.model_requests()[0].body.get("access_programs").is_none());
+}
+
+#[tokio::test]
+async fn raw_final_payload_cannot_exceed_the_provider_option_ceiling() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let parameters = json!({"service_tiers":[{"id":"priority","label":"Fast"}],"reasoning_modes":["pro"],
+        "access_programs":["daybreak_blue"],"request_options":{"openai-responses":{
+            "type":"object","properties":{
+                "user":{"const":"provider-choice","x-orch-replace":true},
+                "safety_identifier":{"const":null,"x-orch-replace":true},
+                "metadata":{"type":"object","properties":{
+                    "user_id":{"const":null,"x-orch-replace":true},"region":{"const":"local"}}},
+                "vendor":{"type":"object",
+                "properties":{"region":{"const":"local"},"mode":{"enum":["a","b"]}},
+                "required":["region"],"additionalProperties":false}}}}});
+    let command = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],
+        "model_parameters":{(MODEL):parameters}
+    }))
+    .unwrap();
+    p.rig.succeed(&p.provider_key(), &command).await;
+    let harness = p.harness(p.thread);
+    for invalid in [
+        json!({"service_tier":"ultrafast"}),
+        json!({"access_programs":{"cyber":"daybreak_red"}}),
+        json!({"vendor":{"region":"remote"}}),
+        json!({"vendor":{"mode":"c"}}),
+        json!({"metadata":{"region":"remote","user_id":"program-id"}}),
+        json!({"reasoning":{"mode":"unopened"}}),
+    ] {
+        let mut request = responses_request(MODEL, "rejected");
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        let reply = harness.post("/v1/responses", &request).await;
+        assert_eq!(reply.status, 403, "{invalid}");
+    }
+    assert!(
+        p.model_requests().is_empty(),
+        "a refused option must not reach HTTP upstream"
+    );
+    p.mock.queue("say Allowed\nusage 100 5").unwrap();
+    let mut request = responses_request(MODEL, "allowed");
+    request["service_tier"] = json!("fast");
+    request["access_programs"] = json!({"cyber":"daybreak_blue"});
+    request["vendor"] = json!({"mode":"b"});
+    request["user"] = json!("program-id");
+    request["safety_identifier"] = json!("program-id");
+    request["metadata"] = json!({"user_id":"program-id","keep":"program-data"});
+    request["reasoning"] = json!({"mode":"pro"});
+    assert_eq!(harness.post("/v1/responses", &request).await.status, 200);
+    let sent = p.model_requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["vendor"], json!({"mode":"b","region":"local"}));
+    assert_eq!(sent[0].body["service_tier"], "fast");
+    assert_eq!(sent[0].body["user"], "provider-choice");
+    assert_eq!(sent[0].body["reasoning"]["mode"], "pro");
+    assert!(sent[0].body.get("safety_identifier").is_none());
+    assert_eq!(
+        sent[0].body["metadata"],
+        json!({"region":"local","keep":"program-data"})
+    );
+}
+
+#[tokio::test]
+async fn fallback_models_are_checked_after_defaults_and_usage_names_the_model_that_answered() {
+    const ALTERNATE: &str = "alternate-model";
+    let p = ProviderRig::new().await;
+    let progress = p
+        .start_provider(&[(
+            RESPONSES,
+            p.mock.responses_base_url(),
+            json!({"params":{"models":["outside-the-lease"]}}),
+        )])
+        .await;
+    assert!(matches!(progress, Progress::Succeeded(_)), "{progress:?}");
+    let lease = new_id();
+    let command = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL,ALTERNATE],
+        "model_parameters":{(MODEL):{"service_tiers":[{"id":"priority","label":"Fast"}]},(ALTERNATE):{}}
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &command).await;
+    let harness = p.harness(p.thread);
+    assert_eq!(
+        harness
+            .post(
+                "/v1/responses",
+                &responses_request(MODEL, "endpoint fallback refused")
+            )
+            .await
+            .status,
+        403
+    );
+    for models in [
+        json!([MODEL, "outside-the-lease"]),
+        json!([MODEL, 7]),
+        json!(null),
+    ] {
+        let mut request = responses_request(MODEL, "invalid fallback");
+        request["models"] = models;
+        assert_eq!(harness.post("/v1/responses", &request).await.status, 403);
+    }
+    let mut paid = responses_request(MODEL, "unopened fallback speed");
+    paid["models"] = json!([MODEL, ALTERNATE]);
+    paid["service_tier"] = json!("fast");
+    assert_eq!(harness.post("/v1/responses", &paid).await.status, 403);
+    assert!(p.model_requests().is_empty());
+
+    let upstream = json!({"id":"actual-fallback-response","object":"response","status":"completed","model":ALTERNATE,
+        "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The fallback answered","annotations":[]}]}],
+        "usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12}});
+    p.mock.queue(&format!("body 200 {upstream}")).unwrap();
+    let mut request = responses_request(MODEL, "allowed fallbacks");
+    request["models"] = json!([MODEL, ALTERNATE, MODEL]);
+    request["stream"] = json!(false);
+    let reply = harness.post("/v1/responses", &request).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json(), upstream);
+    let sent = p.model_requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(
+        sent[0].body["models"], request["models"],
+        "the candidate order and request stay upstream-owned"
+    );
+    let usage = p.wait_provider_event("lease.usage", 1).await;
+    assert_eq!(usage[0].body["model"], ALTERNATE);
+    assert_eq!(usage[0].body["usage"]["input_tokens"], 10);
+    let closed = p.close_lease(lease).await;
+    let groups = closed["usage_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["model"], ALTERNATE);
+    assert_eq!(groups[0]["requests"], 1);
+    assert_eq!(groups[0]["usage"]["input_tokens"], 10);
+}
+
+#[tokio::test]
+async fn raw_capacity_reports_split_groups_without_becoming_inference_speed() {
+    let p = ProviderRig::new().await;
+    let progress = p
+        .start_provider(&[(MESSAGES, p.mock.messages_base_url(), json!({}))])
+        .await;
+    assert!(matches!(progress, Progress::Succeeded(_)), "{progress:?}");
+    let lease = new_id();
+    let open = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":MESSAGES,"allowed_models":[MODEL],
+        "model_parameters":{(MODEL):{"service_tiers":[{"id":"fast","label":"Fast"}],
+            "capacity_tiers":[{"id":"auto","label":"Automatic"}],"default_capacity_tier":"auto"}}
+    }))
+    .unwrap();
+    p.rig.succeed(&p.provider_key(), &open).await;
+    let harness = p.harness(p.thread);
+    for (id, capacity) in [
+        ("capacity-priority", Some("priority")),
+        ("capacity-standard", Some("standard")),
+        ("capacity-absent", None),
+    ] {
+        let mut response = json!({"id":id,"type":"message","model":MODEL,"role":"assistant",
+            "content":[{"type":"text","text":"Capacity answer"}],"stop_reason":"end_turn",
+            "usage":{"input_tokens":10,"output_tokens":2,"speed":"fast"}});
+        if let Some(capacity) = capacity {
+            response["usage"]["service_tier"] = json!(capacity);
+        }
+        p.mock.queue(&format!("body 200 {response}")).unwrap();
+        let mut request = messages_request(MODEL, id);
+        request["speed"] = json!("fast");
+        let reply = harness.post("/v1/messages", &request).await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.json(), response);
+    }
+    let sent = p.model_requests();
+    assert_eq!(sent.len(), 3);
+    for request in &sent {
+        assert_eq!(request.body["speed"], "fast");
+        assert_eq!(request.body["service_tier"], "auto");
+    }
+    let usage = p.wait_provider_event("lease.usage", 3).await;
+    for event in &usage {
+        assert_eq!(event.body["timing"]["requested_capacity_tier"], "auto");
+        assert_eq!(
+            event.body["timing"]["reported_service_tier"],
+            json!({"state":"told","value":"fast"})
+        );
+    }
+    let closed = p.close_lease(lease).await;
+    let groups = closed["usage_groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 3);
+    for expected in [
+        json!({"state":"told","value":"priority"}),
+        json!({"state":"told","value":"standard"}),
+        json!({"state":"empty"}),
+    ] {
+        let group = groups
+            .iter()
+            .find(|group| group["timing"]["reported_capacity_tier"] == expected)
+            .unwrap();
+        assert_eq!(group["requests"], 1);
+        assert_eq!(group["usage"]["input_tokens"], 10);
+    }
+    assert_eq!(closed["usage"]["input_tokens"], 30);
+    assert_eq!(closed["usage"]["output_tokens"], 6);
+}
+
+#[tokio::test]
+async fn hourly_cache_reports_reach_events_close_and_the_existing_credit_allowance() {
+    let p = ProviderRig::new().await;
+    let progress = p
+        .start_provider(&[(MESSAGES, p.mock.messages_base_url(), json!({}))])
+        .await;
+    assert!(matches!(progress, Progress::Succeeded(_)), "{progress:?}");
+    let lease = new_id();
+    let open=serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":MESSAGES,"allowed_models":[MODEL],
+        "model_parameters":{(MODEL):{"cache_lifetimes":["1h"]}},
+        "allowance":{"credits":{"amount":"0.0015","rate":{"input_per_mtok":"1","cached_input_per_mtok":"0.1",
+            "cache_write_per_mtok":"1.25","cache_write_1h_per_mtok":"2","output_per_mtok":"2"}}}
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &open).await;
+    let response = json!({"id":"hourly-response","type":"message","model":MODEL,"role":"assistant",
+        "content":[{"type":"text","text":"Hourly response"}],"stop_reason":"end_turn",
+        "usage":{"input_tokens":600,"output_tokens":200,"cache_read_input_tokens":100,"cache_creation_input_tokens":300,
+            "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200},"speed":"standard","service_tier":"standard"}});
+    p.mock.queue(&format!("body 200 {response}")).unwrap();
+    let mut request = messages_request(MODEL, "Cache request");
+    request["max_tokens"] = json!(1024);
+    request["system"] = json!([{"type":"text","text":"Cached system","cache_control":{"type":"ephemeral","ttl":"1h"}}]);
+    let harness = p.harness(p.thread);
+    let reply = harness.post("/v1/messages", &request).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json(), response);
+    let events = p.wait_provider_event("lease.usage", 1).await;
+    assert_eq!(
+        events[0].body["timing"]["cache_write_1h_tokens"],
+        json!({"state":"told","value":200})
+    );
+    assert_eq!(events[0].body["usage"]["cache_write_tokens"], 300);
+    assert_eq!(events[0].body["usage"]["input_tokens"], 1000);
+    assert_eq!(
+        harness.post("/v1/messages", &request).await.status,
+        403,
+        "the exact hourly cost exceeds the existing credit allowance"
+    );
+    assert_eq!(p.model_requests().len(), 1);
+    let closed = p.close_lease(lease).await;
+    assert_eq!(
+        closed["usage_groups"][0]["cache_write_usage"],
+        json!({"one_hour_tokens":200,"known_requests":1})
+    );
+    assert_eq!(closed["usage"]["cache_write_tokens"], 300);
+    assert_eq!(closed["usage"]["input_tokens"], 1000);
+}
+
+#[tokio::test]
+async fn twelve_hour_cache_reports_reach_events_close_and_the_existing_credit_allowance() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease = new_id();
+    let open = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],
+        "allowance":{"credits":{"amount":"0.0012","rate":{"input_per_mtok":"1","cached_input_per_mtok":"0.1",
+            "cache_write_per_mtok":"1.25","cache_write_12h_per_mtok":"2.5","output_per_mtok":"2"}}}
+    })).unwrap();
+    p.rig.succeed(&p.provider_key(), &open).await;
+    let response = json!({"id":"cache-lifetimes-response","object":"response","status":"completed","model":MODEL,
+        "service_tier":"default","output":[],"usage":{"input_tokens":1000,"output_tokens":0,
+        "input_tokens_details":{"cached_tokens":100,"cache_write_tokens":300,
+            "cache_write_tokens_details":{"ttl_30m_tokens":100,"ttl_12h_tokens":200}}}});
+    p.mock.queue(&format!("body 200 {response}")).unwrap();
+    let request = responses_request(MODEL, "Cache accounting");
+    let harness = p.harness(p.thread);
+    let reply = harness.post("/v1/responses", &request).await;
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json(), response);
+    let events = p.wait_provider_event("lease.usage", 1).await;
+    assert_eq!(
+        events[0].body["timing"]["cache_write_12h_tokens"],
+        json!({"state":"told","value":200})
+    );
+    assert_eq!(events[0].body["usage"]["cache_write_tokens"], 300);
+    assert_eq!(events[0].body["usage"]["input_tokens"], 1000);
+    assert_eq!(
+        harness.post("/v1/responses", &request).await.status,
+        403,
+        "the actual disjoint write cost exceeds the existing allowance"
+    );
+    assert_eq!(p.model_requests().len(), 1);
+    let closed = p.close_lease(lease).await;
+    assert_eq!(
+        closed["usage_groups"][0]["cache_write_usage"],
+        json!({
+            "one_hour_tokens":0,"known_requests":0,"twelve_hour_tokens":200,"twelve_hour_known_requests":1
+        })
+    );
+    assert_eq!(closed["usage"]["cache_write_tokens"], 300);
+    assert_eq!(closed["usage"]["input_tokens"], 1000);
+}
+
+#[tokio::test]
+async fn raw_fast_requests_keep_program_betas_and_add_the_required_beta_at_egress() {
+    let p = ProviderRig::new().await;
+    let progress = p
+        .start_provider(&[(
+            MESSAGES,
+            p.mock.messages_base_url(),
+            json!({"headers":{"anthropic-beta":"shared, endpoint"}}),
+        )])
+        .await;
+    assert!(matches!(progress, Progress::Succeeded(_)), "{progress:?}");
+    let lease = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+        "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,
+        "mode":"forwarded","protocol":MESSAGES,"allowed_models":[MODEL],
+        "model_parameters":{(MODEL):{"service_tiers":[{"id":"fast","label":"Fast"}]}}
+    }))
+    .unwrap();
+    p.rig.succeed(&p.provider_key(), &lease).await;
+    let harness = p.harness(p.thread);
+    for speed in ["fast", "standard"] {
+        let mut body = messages_request(MODEL, speed);
+        body["speed"] = json!(speed);
+        let request = harness
+            .request("POST", "/v1/messages", Some(&body))
+            .messages_version()
+            .header("anthropic-beta", "program, shared");
+        assert_eq!(harness.client().send(request).await.unwrap().status, 200);
+    }
+    let sent = p.model_requests();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].body["speed"], "fast");
+    assert_eq!(
+        sent[0].headers["anthropic-beta"],
+        "program, shared, endpoint, fast-mode-2026-02-01"
+    );
+    assert!(sent[1].body.get("speed").is_none());
+    assert_eq!(
+        sent[1].headers["anthropic-beta"],
+        "program, shared, endpoint"
+    );
+}
+
+#[tokio::test]
+async fn frozen_thread_options_overlay_the_actual_wire_and_still_obey_its_provider_schema() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let parameters = json!({"request_options":{(RESPONSES):{
+        "type":"object","properties":{"vendor":{"type":"object",
+            "properties":{"region":{"const":"local"},"mode":{"enum":["a","b"]}},
+            "additionalProperties":false}}
+    }}});
+    for (options, status) in [
+        (json!({"vendor":{"mode":"b"}}), 200),
+        (json!({"vendor":{"mode":"c"}}), 403),
+        (json!({"vendor":{"region":"remote"}}), 403),
+        (json!({"unopened":true}), 403),
+        (json!({"model":"outside-the-lease"}), 403),
+    ] {
+        let command = serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({
+            "lease_id":new_id(),"provider_id":p.rig.provider,"thread_id":p.thread,
+            "mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],
+            "model_parameters":{(MODEL):parameters},
+            "request_options":{(RESPONSES):options, "unused-interface":{"unopened":true}}
+        }))
+        .unwrap();
+        p.rig.succeed(&p.provider_key(), &command).await;
+        let before = p.model_requests().len();
+        if status == 200 {
+            p.mock.queue("say Chosen\nusage 100 5").unwrap();
+        }
+        let harness = p.harness(p.thread);
+        let mut request = responses_request(MODEL, "thread option choice");
+        request["vendor"] = json!({"mode":"a"});
+        assert_eq!(harness.post("/v1/responses", &request).await.status, status);
+        let requests = p.model_requests();
+        if status == 200 {
+            assert_eq!(requests.len(), before + 1);
+            assert_eq!(requests[before].body["model"], MODEL);
+            assert_eq!(
+                requests[before].body["vendor"],
+                json!({"mode":"b","region":"local"})
+            );
+            assert!(requests[before].body.get("unopened").is_none());
+            assert_eq!(requests[before].credential.verdict, Verdict::Accepted);
+        } else {
+            assert_eq!(
+                requests.len(),
+                before,
+                "{options}: no refused request reaches upstream"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn raw_forwarded_actual_tiers_stay_per_request_and_per_close_group_under_one_lease() {
+    let mut p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease = p
+        .open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let harness = p.harness(p.thread);
+    let cases = [
+        ("raw-tier-default", Some("default")),
+        ("raw-tier-priority", Some("priority")),
+        ("raw-tier-omitted", None),
+    ];
+    for (id, actual) in cases {
+        let mut upstream = json!({
+            "id": id, "object": "response", "model": MODEL, "status": "completed",
+            "output": [{"id": format!("message-{id}"), "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": id, "annotations": []}]}],
+            "usage": {"input_tokens":100,"output_tokens":11,"total_tokens":111,
+                "input_tokens_details":{"cached_tokens":10,"cache_write_tokens":5},
+                "output_tokens_details":{"reasoning_tokens":1}}
+        });
+        if let Some(actual) = actual {
+            upstream["service_tier"] = json!(actual);
+        }
+        p.mock.queue(&format!("body 200 {upstream}")).unwrap();
+        let mut request = responses_request(MODEL, id);
+        request["stream"] = json!(false);
+        request["service_tier"] = json!("fast");
+        let reply = harness.post("/v1/responses", &request).await;
+        assert_eq!(reply.status, 200);
+        assert_eq!(
+            reply.json(),
+            upstream,
+            "forwarded reply bytes retain actual facts"
+        );
+    }
+
+    // Establish real wire and token premises before asserting new accounting metadata.
+    let requests = p.model_requests();
+    assert_eq!(requests.len(), cases.len());
+    for request in &requests {
+        assert!(request.path.ends_with("/responses"));
+        assert_eq!(request.body["service_tier"], "fast");
+        assert_eq!(request.body["stream"], false);
+        assert_eq!(request.credential.verdict, Verdict::Accepted);
+        assert_eq!(request.credential.presented_by.len(), 1);
+    }
+    let usage = p.wait_provider_event("lease.usage", cases.len()).await;
+    assert_eq!(usage.len(), cases.len());
+    let tokens = json!({"input_tokens":100,"output_tokens":11,"total_tokens":111,
+        "cached_input_tokens":10,"cache_write_tokens":5,"reasoning_tokens":1});
+    for (id, _) in cases {
+        let event = usage
+            .iter()
+            .find(|event| event.body["request_ref"] == id)
+            .expect("the actual upstream response has its own usage event");
+        assert_eq!(event.body["lease_id"], json!(lease));
+        assert_eq!(event.body["model"], MODEL);
+        for field in [
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_input_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+        ] {
+            assert_eq!(event.body["usage"][field], tokens[field], "{id} {field}");
+        }
+    }
+    let closed = p.close_lease(lease).await;
+    assert_eq!(closed["requests"], 3);
+    for (field, total) in [
+        ("input_tokens", 300),
+        ("output_tokens", 33),
+        ("total_tokens", 333),
+        ("cached_input_tokens", 30),
+        ("cache_write_tokens", 15),
+        ("reasoning_tokens", 3),
+    ] {
+        assert_eq!(
+            closed["usage"][field], total,
+            "aggregate {field} remains exact"
+        );
+    }
+
+    let expected_states = cases.map(|(_, actual)| match actual {
+        Some(actual) => json!({"state":"told","value":actual}),
+        None => json!({"state":"empty"}),
+    });
+    let events: Vec<_> = cases
+        .iter()
+        .map(|(id, _)| {
+            let event = usage
+                .iter()
+                .find(|event| event.body["request_ref"] == *id)
+                .unwrap();
+            json!({"request_ref":id,
+            "wire_protocol":event.body["timing"]["wire_protocol"],
+            "requested_service_tier":event.body["timing"]["requested_service_tier"],
+            "reported_service_tier":event.body["timing"]["reported_service_tier"]})
+        })
+        .collect();
+    let expected_events: Vec<_> = cases
+        .iter()
+        .zip(&expected_states)
+        .map(|((id, _), state)| {
+            json!({"request_ref":id,"wire_protocol":RESPONSES,
+            "requested_service_tier":"fast","reported_service_tier":state})
+        })
+        .collect();
+    let groups = closed["usage_groups"].as_array();
+    let grouped: Vec<_> = expected_states.iter().map(|state| {
+        groups.and_then(|groups| groups.iter().find(|group|
+            group["timing"]["reported_service_tier"] == *state))
+            .map(|group| json!({"model":group["model"],"requests":group["requests"],
+                "min_context_tokens":group["min_context_tokens"],"max_context_tokens":group["max_context_tokens"],
+                "wire_protocol":group["timing"]["wire_protocol"],
+                "requested_service_tier":group["timing"]["requested_service_tier"],
+                "reported_service_tier":group["timing"]["reported_service_tier"],"usage":group["usage"]}))
+            .unwrap_or(serde_json::Value::Null)
+    }).collect();
+    let expected_groups: Vec<_> = expected_states
+        .iter()
+        .map(|state| {
+            json!({"model":MODEL,"requests":1,"min_context_tokens":100,"max_context_tokens":100,
+            "wire_protocol":RESPONSES,"requested_service_tier":"fast",
+            "reported_service_tier":state,"usage":tokens})
+        })
+        .collect();
+    assert_eq!(
+        json!({"events":events,"group_count":groups.map(Vec::len),"groups":grouped}),
+        json!({"events":expected_events,"group_count":3,"groups":expected_groups}),
+        "one lease must not collapse actual downgrade, priority and omitted tier facts: {closed}"
+    );
+    p.rig.kill().await;
 }
 
 #[tokio::test]
@@ -461,6 +1103,10 @@ async fn a_stream_the_upstream_cuts_reaches_the_harness_as_a_cut_stream_and_what
         usage[0].body["usage"]["input_tokens"], 40,
         "the prompt the upstream counted before it cut is counted"
     );
+    assert_eq!(
+        usage[0].body["timing"]["outcome"],
+        json!({"state":"told","value":"stream_interrupted"})
+    );
     let closed = p.close_lease(lease).await;
     assert_eq!(closed["requests"], 1);
     let records = p.mock.settled(1).await;
@@ -793,4 +1439,129 @@ async fn the_key_is_presented_the_way_each_endpoint_says_on_each_format() {
             assert_eq!(seen.credential.verdict, Verdict::Accepted);
         }
     }
+}
+
+#[tokio::test]
+async fn failed_forwarded_attempts_without_usage_publish_distinct_classes_and_refusal_facts() {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let lease = p
+        .open_lease(p.thread, &[MODEL], Some(RESPONSES), None)
+        .await;
+    let harness = p.harness(p.thread);
+    for (status, code, words) in [
+        (429, "rate_limited", "Too many requests"),
+        (503, "overloaded", "Overloaded"),
+        (403, "model_refused", "Blocked by cyber policy"),
+    ] {
+        let body = json!({"error":{"message":words}});
+        p.mock.queue(&format!("body {status} {body}")).unwrap();
+        let response = harness
+            .post("/v1/responses", &responses_request(MODEL, "fail"))
+            .await;
+        assert_eq!(response.status, status);
+        let events = p
+            .wait_provider_event(
+                "lease.usage",
+                if status == 429 {
+                    1
+                } else if status == 503 {
+                    2
+                } else {
+                    3
+                },
+            )
+            .await;
+        let event = events
+            .iter()
+            .find(|event| event.body["timing"]["upstream_status"] == status)
+            .unwrap();
+        assert_eq!(event.body["lease_id"], json!(lease));
+        assert_eq!(
+            event.body["timing"]["outcome"],
+            json!({"state":"told","value":code})
+        );
+        assert_eq!(event.body["usage"]["total_tokens"], 0);
+        assert_eq!(
+            event.body["timing"]["reported_tokens"],
+            serde_json::Value::Null
+        );
+        assert!(
+            event.body["request_ref"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        if status == 403 {
+            assert_eq!(event.body["timing"]["error_reason"], "cyber");
+        }
+    }
+}
+
+#[tokio::test]
+async fn declared_native_search_reaches_the_same_forwarder_and_cumulative_usage_with_no_credential_in_the_payload()
+ {
+    let p = ProviderRig::new().await;
+    p.start_responses_provider().await;
+    let grammar = json!({"paths":["/responses"],"tool":{"type":"fixture_search"},"identities":[{"type":"fixture_search"}],"modes":{"live":{}},"strip_options":["external_web_access"],
+        "options_schema":{"type":"object","properties":{},"additionalProperties":false,"x-orch-mode-overrides":[{"identity":{"external_web_access":false},"mode":"cached"}]}});
+    let parameters = json!({"web_search":["live"],"native_tools":{(RESPONSES):{"web_search":{"request":grammar,"counters":{
+        "web_searches":{"pointer":"/usage/server_tool_use/actual_searches","cumulative":true},"web_fetches":{"pointer":"/usage/server_tool_use/actual_fetches","cumulative":true},"actual_cost":{"pointer":"/usage/cost","reported_cost":true,"unit":"USD"}}}}}});
+    let lease = new_id();
+    let command=serde_json::from_value::<orch_link_contract::commands::LeaseOpen>(json!({"lease_id":lease,"provider_id":p.rig.provider,"thread_id":p.thread,"mode":"forwarded","protocol":RESPONSES,"allowed_models":[MODEL],"model_parameters":{(MODEL):parameters}})).unwrap();
+    p.rig.succeed(&p.provider_key(), &command).await;
+    let harness = p.harness(p.thread);
+    let mut request = responses_request(MODEL, "query");
+    request["stream"] = json!(false);
+    request["tools"] = json!([{"type":"function","name":"local","parameters":{}},{"type":"fixture_search","external_web_access":false}]);
+    assert_eq!(harness.post("/v1/responses", &request).await.status, 403);
+    assert!(
+        p.model_requests().is_empty(),
+        "unsupported native modes never reach the provider"
+    );
+    let reply = json!({"id":"fixture-native","model":MODEL,"output":[{"type":"web_search_call","id":"fixture-search","status":"completed","action":{"type":"search","query":"query"}}],
+        "usage":{"input_tokens":100,"output_tokens":11,"server_tool_use":{"tool_search":8,"actual_searches":3,"actual_fetches":1},"cost":0.0071}});
+    p.mock.queue(&format!("body 200 {reply}")).unwrap();
+    request["tools"][1]["external_web_access"] = json!(true);
+    let response = harness.post("/v1/responses", &request).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.json(),
+        reply,
+        "the original upstream response is never rewritten"
+    );
+    let sent = p.model_requests();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["tools"][0], request["tools"][0]);
+    assert_eq!(sent[0].body["tools"][1], json!({"type":"fixture_search"}));
+    assert_eq!(sent[0].credential.verdict, Verdict::Accepted);
+    let records = p.wait_provider_event("lease.usage", 1).await;
+    let timing = &records[0].body["timing"];
+    assert_eq!(timing["web_searches"], json!({"state":"told","value":3}));
+    assert_eq!(timing["web_fetches"], json!({"state":"told","value":1}));
+    assert_eq!(
+        timing["reported_cost"],
+        json!({"state":"told","value":{"amount":"0.0071","unit":"USD"}})
+    );
+    let mut without_cost = reply.clone();
+    without_cost["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cost");
+    p.mock.queue(&format!("body 200 {without_cost}")).unwrap();
+    assert_eq!(harness.post("/v1/responses", &request).await.status, 200);
+    let records = p.wait_provider_event("lease.usage", 2).await;
+    assert_eq!(
+        records[1].body["timing"]["reported_cost"],
+        json!({"state":"unread"}),
+        "a declared cost omitted by this response is unknown, never unsupported or the previous request's amount"
+    );
+    let closed = p.close_lease(lease).await;
+    assert_eq!(closed["requests"], 2);
+    assert_eq!(closed["usage_groups"][0]["search_usage"]["searches"], 6);
+    assert_eq!(closed["usage_groups"][0]["search_usage"]["fetches"], 2);
+    assert_eq!(
+        closed["usage_groups"][0]["reported_cost_usage"],
+        json!({"total":{"amount":"0.0071","unit":"USD"},"known_requests":1}),
+        "the known subtotal retains incomplete coverage after the second response omitted cost"
+    );
 }

@@ -61,7 +61,7 @@ function People({ name, source }: { name: string; source: PeopleSource }) {
   const { t } = useTranslation();
   const list = useInfiniteQuery(source);
   const people = list.data?.pages.flatMap((page) => page.items) ?? [];
-  if (list.isPending) return <SkeletonRows rows={3} />;
+  if (list.isPending) return <SkeletonRows read={list} rows={3} />;
   if (list.isError && people.length === 0) {
     return <ErrorState compact error={list.error} title={t('access.holder.notLoaded')} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
   }

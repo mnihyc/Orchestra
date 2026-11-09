@@ -150,9 +150,48 @@ fn period_key(cap: &CapRow, window: &Window) -> NaiveDate {
 
 /// Whether one of the patterns of a cap names the model (every model where it names none), which the
 /// managers of its provider put in `groups`: by its name, by a family, or by `@<group>`.
+/// Explicit model/service selections form one union; an explicit service-only selection does not name a model.
 #[must_use]
 pub fn covers_model(cap: &CapRow, model: &str, groups: &[String]) -> bool {
-    cap.models.is_empty() || crate::models::named_by(&cap.models, model, groups)
+    (cap.models.is_empty() && cap.services.is_empty())
+        || crate::models::named_by(&cap.models, model, groups)
+}
+
+/// The same offering matcher for an actual service and its recorded manager-declared groups.
+#[must_use]
+pub fn covers_service(cap: &CapRow, offering: &str, groups: &[String]) -> bool {
+    (cap.models.is_empty() && cap.services.is_empty())
+        || crate::models::named_by(&cap.services, offering, groups)
+}
+fn covers_usage(
+    cap: &CapRow,
+    model: &str,
+    model_groups: &[String],
+    service: Option<&Json>,
+) -> bool {
+    match service {
+        None => covers_model(cap, model, model_groups),
+        Some(service) => {
+            let Some(name) = service.get("name").and_then(Json::as_str) else {
+                return false;
+            };
+            let groups = service
+                .get("groups")
+                .and_then(Json::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Json::as_str)
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            covers_service(cap, name, &groups)
+        }
+    }
+}
+
+/// Purpose filters intersect the offering selection, using the same wildcard matcher.
+#[must_use]
+pub fn covers_purpose(cap: &CapRow, purpose: &str) -> bool {
+    cap.purposes.is_empty() || crate::models::named_by(&cap.purposes, purpose, &[])
 }
 
 /// Whether a cap covers a turn at the service tier `tier` (none is the ordinary one): a cap that names no
@@ -198,22 +237,28 @@ fn groups_in<'g>(groups: &'g Groups, provider: Id, model: &str) -> &'g [String] 
 pub async fn used_of_covered_models(
     conn: &mut Conn,
     cap: &CapRow,
-    used: Vec<(Id, Id, String)>,
+    used: Vec<rows::UsedIdentity>,
 ) -> Result<std::collections::BTreeSet<Id>, EngineError> {
     let groups = groups_for(
         conn,
         cap,
         used.iter()
-            .map(|(_, provider, model)| (*provider, model.clone()))
+            .map(|row| (row.provider_id, row.model.clone()))
             .collect(),
     )
     .await?;
     Ok(used
         .into_iter()
-        .filter(|(_, provider, model)| {
-            covers_model(cap, model, groups_in(&groups, *provider, model))
+        .filter(|row| {
+            covers_purpose(cap, &row.purpose)
+                && covers_usage(
+                    cap,
+                    &row.model,
+                    groups_in(&groups, row.provider_id, &row.model),
+                    row.service.as_ref(),
+                )
         })
-        .map(|(person, _, _)| person)
+        .map(|row| row.user_id)
         .collect())
 }
 
@@ -232,6 +277,8 @@ type IdentityKey = (
     Vec<String>,
     Vec<String>,
     Vec<String>,
+    Vec<String>,
+    Vec<String>,
     String,
     Option<String>,
 );
@@ -241,6 +288,8 @@ fn identity(cap: &CapRow) -> IdentityKey {
         cap.node_id,
         cap.provider_id,
         cap.models.clone(),
+        cap.services.clone(),
+        cap.purposes.clone(),
         cap.tiers.clone(),
         cap.harness_kinds.clone(),
         cap.meter.clone(),
@@ -435,6 +484,37 @@ pub enum State {
 }
 
 impl Engine {
+    /// Personal Ask calls share the existing coverage and standing evaluator,
+    /// including each-person caps and the original asking person's attribution.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the shared cap query uses the fixed place, provider, model, tier, actor and current reservation"
+    )]
+    pub async fn room_for_ask(
+        &self,
+        conn: &mut Conn,
+        root: Id,
+        provider: Id,
+        model: &str,
+        tier: Option<&str>,
+        person: Id,
+        current_turn: Option<Id>,
+    ) -> Result<bool, EngineError> {
+        self.own_use_room(
+            conn,
+            &OwnCapAsk {
+                place: root,
+                provider,
+                model,
+                tier,
+                purpose: "ask",
+                person: Some(person),
+            },
+            OwnRoom::Turn(current_turn),
+        )
+        .await
+    }
+
     /// Counts each enabled cap once at its worst current share. Reuses admission's exact
     /// coverage, periods and in-progress use; user and cap identifiers never become labels.
     pub async fn measure_caps(&self) -> Result<(), EngineError> {
@@ -445,10 +525,10 @@ impl Engine {
             let mut state = State::Ok;
             if cap.split == "each" {
                 let mut people = HashSet::new();
-                for (person, _, _) in
-                    rows::users_of(&mut conn, &cap, window(&cap, now).start, now).await?
-                {
-                    people.insert(person);
+                for row in rows::users_of(&mut conn, &cap, window(&cap, now).start, now).await? {
+                    if covers_purpose(&cap, &row.purpose) {
+                        people.insert(row.user_id);
+                    }
                 }
                 for running in rows::running(&mut conn, &cap, None, now).await? {
                     people.extend(running.user_id);
@@ -508,6 +588,8 @@ pub struct Standing {
     pub window: Window,
     /// For a cap in credits: the tokens of models without a rate in the period.
     pub unrated_tokens: i64,
+    /// Service requests whose actual unit fee is unknown.
+    pub unrated_services: i64,
 }
 
 impl Standing {
@@ -597,6 +679,9 @@ async fn progress(
 /// The service tier a running turn asked for: the value of the parameter its harness declares as the
 /// model's service tiers, among the parameters it was started with.
 fn tier_of_running(turn: &rows::Running) -> Option<String> {
+    if let Some(protocol) = &turn.protocol {
+        return orch_model_contract::parameters::requested_tier_for_caps(protocol, &turn.params);
+    }
     let declared: Vec<ParameterDef> = turn
         .declared
         .clone()
@@ -624,11 +709,13 @@ async fn covered_running(
     Ok(turns
         .into_iter()
         .filter(|turn| {
-            covers_model(
-                cap,
-                &turn.model,
-                groups_in(&groups, turn.provider_id, &turn.model),
-            ) && covers_tier(cap, tier_of_running(turn).as_deref())
+            covers_purpose(cap, &turn.purpose)
+                && covers_model(
+                    cap,
+                    &turn.model,
+                    groups_in(&groups, turn.provider_id, &turn.model),
+                )
+                && covers_tier(cap, tier_of_running(turn).as_deref())
         })
         .collect())
 }
@@ -654,9 +741,11 @@ pub async fn standing(
             in_progress: Micros::ZERO,
             window,
             unrated_tokens: 0,
+            unrated_services: 0,
         });
     }
-    let (mut tokens, mut credits, mut unrated) = (0_i64, Micros::ZERO, 0_i64);
+    let (mut tokens, mut credits, mut unrated, mut unrated_services) =
+        (0_i64, Micros::ZERO, 0_i64, 0_i64);
     let used = rows::used(conn, cap, person, window.start, now).await?;
     let groups = groups_for(
         conn,
@@ -667,15 +756,18 @@ pub async fn standing(
     )
     .await?;
     for row in used.iter().filter(|row| {
-        covers_model(
-            cap,
-            &row.model,
-            groups_in(&groups, row.provider_id, &row.model),
-        )
+        covers_purpose(cap, &row.purpose)
+            && covers_usage(
+                cap,
+                &row.model,
+                groups_in(&groups, row.provider_id, &row.model),
+                row.service.as_ref(),
+            )
     }) {
         tokens = tokens.saturating_add(row.total_tokens);
         credits += Micros::parse(&row.credits).unwrap_or(Micros::ZERO);
         unrated = unrated.saturating_add(row.unrated_tokens);
+        unrated_services = unrated_services.saturating_add(row.unrated_services);
     }
     let mut in_progress = Micros::ZERO;
     for turn in &running {
@@ -692,6 +784,11 @@ pub async fn standing(
         },
         in_progress,
         window,
+        unrated_services: if cap.meter == meter::CREDITS {
+            unrated_services
+        } else {
+            0
+        },
         unrated_tokens: if cap.meter == meter::CREDITS {
             unrated
         } else {
@@ -720,6 +817,26 @@ pub async fn covering(
     ask: &Ask,
     now: DateTime<Utc>,
 ) -> Result<Vec<Applied>, EngineError> {
+    covering_for(conn, ask, "turn", now).await
+}
+
+/// Covers an own request through the same subject, offering, precedence and period policy.
+pub async fn covering_for(
+    conn: &mut Conn,
+    ask: &Ask,
+    purpose: &str,
+    now: DateTime<Utc>,
+) -> Result<Vec<Applied>, EngineError> {
+    covering_selected(conn, ask, purpose, None, now).await
+}
+
+async fn covering_selected(
+    conn: &mut Conn,
+    ask: &Ask,
+    purpose: &str,
+    service_groups: Option<&[String]>,
+    now: DateTime<Utc>,
+) -> Result<Vec<Applied>, EngineError> {
     let found = rows::covering(
         conn,
         &ask.path,
@@ -736,7 +853,9 @@ pub async fn covering(
         }
         _ => None,
     };
-    let named_groups = if found.iter().any(names_a_group) {
+    let named_groups = if let Some(groups) = service_groups {
+        groups.to_vec()
+    } else if found.iter().any(names_a_group) {
         orch_db::queries::resources::groups_of(conn, &[(ask.provider, ask.model.clone())])
             .await?
             .remove(&(ask.provider, ask.model.clone()))
@@ -746,7 +865,14 @@ pub async fn covering(
     };
     let covers = found
         .into_iter()
-        .filter(|cap| covers_model(cap, &ask.model, &named_groups))
+        .filter(|cap| {
+            covers_purpose(cap, purpose)
+                && if service_groups.is_some() {
+                    covers_service(cap, &ask.model, &named_groups)
+                } else {
+                    covers_model(cap, &ask.model, &named_groups)
+                }
+        })
         .filter(|cap| !(cap.per_person() && ask.person.is_none()))
         .filter(|cap| {
             cap.subject_kind != subject::ROLE
@@ -938,7 +1064,10 @@ pub async fn status(
     Ok(Status {
         replaced_by,
         waiting,
-        unmetered_threads: if is_running(cap) {
+        unmetered_threads: if is_running(cap)
+            || !covers_purpose(cap, "turn")
+            || (cap.models.is_empty() && !cap.services.is_empty())
+        {
             0
         } else {
             rows::unmetered_threads(conn, cap).await?
@@ -956,7 +1085,11 @@ pub async fn waiting_for(
     cap: &CapRow,
     now: DateTime<Utc>,
 ) -> Result<Vec<rows::Waiter>, EngineError> {
-    if !cap.enabled || size(cap).is_none() {
+    if !cap.enabled
+        || size(cap).is_none()
+        || !covers_purpose(cap, "turn")
+        || (cap.models.is_empty() && !cap.services.is_empty())
+    {
         return Ok(Vec::new());
     }
     let candidates = rows::waiting(conn, cap, now).await?;
@@ -1047,25 +1180,6 @@ pub struct Passed {
     pub standing: Standing,
     /// Who let the turn past it.
     pub by: Id,
-}
-
-/// A turn that starts past the limit of its provider's own plan, and who let it.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ProviderPass<'a> {
-    /// The thread.
-    pub thread: Id,
-    /// The segment the turn is in.
-    pub segment: Id,
-    /// The turn.
-    pub turn: Id,
-    /// Whose input it is.
-    pub author: Option<Id>,
-    /// The provider whose limit it was.
-    pub provider: Id,
-    /// Who let it past.
-    pub by: Id,
-    /// What the limit showed.
-    pub detail: &'a str,
 }
 
 /// What the caps say of a turn that would start.
@@ -1278,12 +1392,20 @@ impl Engine {
         pending: &[InputRow],
     ) -> Result<bool, EngineError> {
         let mut released = false;
+        let thread = threads::thread(unit.conn, asking.thread).await?;
         for input in pending
             .iter()
             .filter(|input| input.state_detail.as_deref() == Some(threads::HELD_CAP_REACHED))
         {
+            let person = if let Some(thread) = &thread {
+                crate::background_wake::overlap_owner(unit.conn, thread, input.answers())
+                    .await?
+                    .unwrap_or(input.answers())
+            } else {
+                input.answers()
+            };
             let ask = Ask {
-                person: input.answers(),
+                person,
                 ..asking.clone()
             };
             let check = self.check_caps(unit, input, &ask).await?;
@@ -1380,72 +1502,6 @@ impl Engine {
         }
         Ok(())
     }
-
-    /// Writes down that a turn was let past the provider's own limit, by whom.
-    pub(crate) async fn record_passed_provider(
-        &self,
-        unit: &mut Unit<'_>,
-        pass: &ProviderPass<'_>,
-    ) -> Result<(), EngineError> {
-        let ProviderPass {
-            thread,
-            segment,
-            turn,
-            author,
-            provider,
-            by,
-            detail,
-        } = *pass;
-        let now = unit.now();
-        rows::record_bypass(
-            &mut *unit.conn,
-            &NewBypass {
-                id: new_id(),
-                cap_id: None,
-                provider_id: Some(provider),
-                thread_id: thread,
-                turn_id: turn,
-                author_id: author,
-                by_user: by,
-                meter: "provider_limit",
-                used: None,
-                amount: None,
-                period_start: None,
-                at: now,
-            },
-        )
-        .await?;
-        let org = rows::node_org(&mut *unit.conn, thread).await?;
-        let action = AuditAction::UsageLimitBypassed;
-        let summary = format!("A turn was let past the limit of its provider's plan: {detail}");
-        let mut entry = audit::Entry::new(
-            Actor::User(by),
-            action.as_str(),
-            action.object_kind().unwrap_or("usage"),
-            Some(thread),
-            &summary,
-        );
-        entry.history = action.is_history_line();
-        entry.node_id = Some(thread);
-        entry.org_id = org;
-        entry.details =
-            json!({ "turn_id": turn, "provider_id": provider, "meter": "provider_limit" });
-        audit::append(&mut *unit.conn, &entry, &Origin::default(), now).await?;
-        let person = crate::views::user_ref_json(&mut *unit.conn, by).await?;
-        ingest::add_marker(
-            unit,
-            thread,
-            segment,
-            Some(turn),
-            &json!({ "marker": "limit_bypassed", "data": { "by": person, "turn_id": turn, "limits": [{
-                "cap": Json::Null, "label": detail, "used": "0", "amount": Json::Null,
-            }] } }),
-            &format!("limit_bypassed:{turn}:{by}:provider"),
-        )
-        .await?;
-        metrics::counter!("orch_limit_bypasses_total","meter"=>"provider_limit").increment(1);
-        Ok(())
-    }
 }
 
 fn capitalised(text: &str) -> String {
@@ -1519,31 +1575,275 @@ impl Engine {
         provider: Id,
         model: &str,
     ) -> Result<bool, EngineError> {
+        self.room_for_summary_with_tier(conn, topic, provider, model, None)
+            .await
+    }
+
+    /// The same cap policy for an automatic completion's actual requested tier.
+    pub(crate) async fn room_for_summary_with_tier(
+        &self,
+        conn: &mut Conn,
+        topic: Id,
+        provider: Id,
+        model: &str,
+        tier: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        self.room_for_own_use(
+            conn,
+            &OwnCapAsk {
+                place: topic,
+                provider,
+                model,
+                tier,
+                purpose: "summary",
+                person: None,
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn note_own_use_caps(
+        &self,
+        conn: &mut Conn,
+        work: &OwnCapAsk<'_>,
+    ) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
         let ask = Ask {
-            thread: topic,
-            path: threads::node_path(conn, topic).await?,
-            provider,
-            model: model.to_owned(),
-            tier: None,
+            thread: work.place,
+            path: threads::node_path(conn, work.place).await?,
+            provider: work.provider,
+            model: work.model.to_owned(),
+            tier: work.tier.map(str::to_owned),
             harness_kind: None,
-            person: None,
+            person: work.person,
             metering: None,
         };
-        for each in covering(conn, &ask, now).await? {
-            if each.replaced_by.is_some()
-                || each.cap.amount.is_none()
-                || each.cap.per_person()
-                || is_running(&each.cap)
-            {
-                continue;
-            }
-            if !standing(conn, &each.cap, None, now).await?.has_room() {
-                return Ok(false);
+        let mut standings = Vec::new();
+        for each in covering_for(conn, &ask, work.purpose, now).await? {
+            if each.replaced_by.is_none() && !is_running(&each.cap) {
+                standings.push(standing(conn, &each.cap, work.person, now).await?);
             }
         }
-        Ok(true)
+        self.note_standings_at(conn, &standings, now).await
     }
+
+    /// Check actual person-issued or automatic model work against the original cap policy.
+    /// This does not supply provider Use, current source authority or a model-call reservation.
+    pub async fn room_for_own_use(
+        &self,
+        conn: &mut Conn,
+        work: &OwnCapAsk<'_>,
+    ) -> Result<bool, EngineError> {
+        self.own_use_room(conn, work, OwnRoom::Standalone).await
+    }
+
+    async fn own_use_room(
+        &self,
+        conn: &mut Conn,
+        work: &OwnCapAsk<'_>,
+        reservation: OwnRoom,
+    ) -> Result<bool, EngineError> {
+        let now = self.inner.clock.now();
+        let (has_room, standings) = own_room_with(conn, work, now, reservation).await?;
+        if matches!(reservation, OwnRoom::Turn(_)) {
+            let mut unit = Unit::new(conn, now);
+            self.note_standings(&mut unit, &standings).await?;
+            unit.finish().await?;
+        }
+        Ok(has_room)
+    }
+}
+
+/// The same room check for work outside an engine turn (a capability service in its own transaction).
+pub(crate) async fn own_room(
+    conn: &mut Conn,
+    work: &OwnCapAsk<'_>,
+    now: DateTime<Utc>,
+) -> Result<bool, EngineError> {
+    Ok(own_room_with(conn, work, now, OwnRoom::Standalone).await?.0)
+}
+
+/// Recheck a retained model command against the same running-turn cap reservation, without
+/// repeating the interactive admission's notices or reserving a second turn.
+pub(crate) async fn retained_turn_room(
+    conn: &mut Conn,
+    work: &OwnCapAsk<'_>,
+    now: DateTime<Utc>,
+    turn: Id,
+) -> Result<bool, EngineError> {
+    Ok(own_room_with(conn, work, now, OwnRoom::Turn(Some(turn)))
+        .await?
+        .0)
+}
+
+/// Each covering cap's standing for this work, and whether all of them leave room.
+async fn own_room_with(
+    conn: &mut Conn,
+    work: &OwnCapAsk<'_>,
+    now: DateTime<Utc>,
+    reservation: OwnRoom,
+) -> Result<(bool, Vec<Standing>), EngineError> {
+    let ask = Ask {
+        thread: work.place,
+        path: threads::node_path(conn, work.place).await?,
+        provider: work.provider,
+        model: work.model.to_owned(),
+        tier: work.tier.map(str::to_owned),
+        harness_kind: None,
+        person: work.person,
+        metering: None,
+    };
+    let applied = covering_for(conn, &ask, work.purpose, now).await?;
+    if matches!(reservation, OwnRoom::Turn(None)) {
+        let running: Vec<_> = applied
+            .iter()
+            .filter(|each| {
+                each.replaced_by.is_none() && each.cap.amount.is_some() && is_running(&each.cap)
+            })
+            .map(|each| each.cap.id)
+            .collect();
+        rows::lock_for_counting(conn, &running).await?;
+    }
+    let mut has_room = true;
+    let mut standings = Vec::new();
+    for each in applied {
+        if each.replaced_by.is_some()
+            || each.cap.amount.is_none()
+            || matches!(reservation, OwnRoom::Standalone) && is_running(&each.cap)
+        {
+            continue;
+        }
+        let person = person_for(&each.cap, work.person);
+        let mut status = standing(conn, &each.cap, person, now).await?;
+        if is_running(&each.cap)
+            && let OwnRoom::Turn(Some(current)) = reservation
+        {
+            let active = rows::running(conn, &each.cap, person, now).await?;
+            if covered_running(conn, &each.cap, active)
+                .await?
+                .iter()
+                .any(|turn| turn.turn_id == current)
+            {
+                status.used = status.used.floor_sub(Micros::whole(1));
+            }
+        }
+        let may_finish = matches!(reservation, OwnRoom::Turn(Some(_)))
+            && !is_running(&each.cap)
+            && each.cap.at_limit == at_limit::FINISH_TURN;
+        has_room &= status.has_room() || may_finish;
+        standings.push(status);
+    }
+    Ok((has_room, standings))
+}
+
+#[derive(Clone, Copy)]
+enum OwnRoom {
+    Standalone,
+    Turn(Option<Id>),
+}
+
+/// Original work facts for the same cap check; the producer owns admission and issuer attribution.
+#[derive(Debug, Clone, Copy)]
+pub struct OwnCapAsk<'a> {
+    /// Actual governing place of the work.
+    pub place: Id,
+    /// Actual paying provider.
+    pub provider: Id,
+    /// Model's routing name.
+    pub model: &'a str,
+    /// Actual requested processing tier, if present.
+    pub tier: Option<&'a str>,
+    /// Purpose recorded with this request.
+    pub purpose: &'a str,
+    /// Actual admitted issuer; absent for automatic work, independently of the setting writer.
+    pub person: Option<Id>,
+}
+
+/// Current selected-service facts for the SAME cap policy, supplied by its admitted native producer.
+#[derive(Debug, Clone, Copy)]
+pub struct ServiceCapAsk<'a> {
+    /// Real governing node.
+    pub place: Id,
+    /// Selected paying provider.
+    pub provider: Id,
+    /// Selected service offering.
+    pub offering: &'a str,
+    /// Current declared groups of that offering, not an authority proof.
+    pub groups: &'a [String],
+    /// Actual common purpose.
+    pub purpose: &'a str,
+    /// Actual admitted issuer; automatic work has none.
+    pub person: Option<Id>,
+    /// Whether the original pricer can price this selected unit, not a permission or estimate of success.
+    pub priced: bool,
+    /// Original source program, when this service belongs to an agent turn.
+    pub harness_kind: Option<&'a str>,
+}
+impl ServiceCapAsk<'_> {
+    async fn ask(&self, conn: &mut Conn) -> Result<Ask, EngineError> {
+        Ok(Ask {
+            thread: self.place,
+            path: threads::node_path(conn, self.place).await?,
+            provider: self.provider,
+            model: self.offering.to_owned(),
+            tier: None,
+            harness_kind: self.harness_kind.map(str::to_owned),
+            person: self.person,
+            metering: None,
+        })
+    }
+}
+impl Engine {
+    /// Admission remains the executor's; this is the same native cap/subject/period/precedence check.
+    pub async fn room_for_service_use(
+        &self,
+        conn: &mut Conn,
+        work: &ServiceCapAsk<'_>,
+    ) -> Result<bool, EngineError> {
+        service_room(conn, work, self.inner.clock.now()).await
+    }
+    pub(crate) async fn note_service_caps(
+        &self,
+        conn: &mut Conn,
+        work: &ServiceCapAsk<'_>,
+    ) -> Result<(), EngineError> {
+        let ask = work.ask(conn).await?;
+        let now = self.inner.clock.now();
+        let mut standings = Vec::new();
+        for each in covering_selected(conn, &ask, work.purpose, Some(work.groups), now).await? {
+            if each.replaced_by.is_none() && !is_running(&each.cap) {
+                standings.push(standing(conn, &each.cap, work.person, now).await?);
+            }
+        }
+        self.note_standings_at(conn, &standings, now).await
+    }
+}
+
+/// The same native service cap check at a restored command's live publication boundary.
+pub(crate) async fn service_room(
+    conn: &mut Conn,
+    work: &ServiceCapAsk<'_>,
+    now: DateTime<Utc>,
+) -> Result<bool, EngineError> {
+    let ask = work.ask(conn).await?;
+    for each in covering_selected(conn, &ask, work.purpose, Some(work.groups), now).await? {
+        if each.replaced_by.is_some() || each.cap.amount.is_none() || is_running(&each.cap) {
+            continue;
+        }
+        if each.cap.meter == meter::CREDITS
+            && each.cap.uncounted == uncounted::BLOCK
+            && !work.priced
+        {
+            return Ok(false);
+        }
+        if !standing(conn, &each.cap, work.person, now)
+            .await?
+            .has_room()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------- notices
@@ -1556,6 +1856,17 @@ impl Engine {
         unit: &mut Unit<'_>,
         standings: &[Standing],
     ) -> Result<(), EngineError> {
+        let now = unit.now();
+        self.note_standings_at(&mut *unit.conn, standings, now)
+            .await
+    }
+
+    async fn note_standings_at(
+        &self,
+        conn: &mut Conn,
+        standings: &[Standing],
+        now: DateTime<Utc>,
+    ) -> Result<(), EngineError> {
         for each in standings {
             if is_running(&each.cap) {
                 continue;
@@ -1565,15 +1876,13 @@ impl Engine {
                 State::Warning => (level::WARNING, WARNING_KIND),
                 State::Reached => (level::REACHED, REACHED_KIND),
             };
-            let now = unit.now();
             let start = period_key(&each.cap, &each.window);
-            if !rows::note_once(&mut *unit.conn, each.cap.id, each.person, start, word, now).await?
-            {
+            if !rows::note_once(&mut *conn, each.cap.id, each.person, start, word, now).await? {
                 continue;
             }
-            let sentence = describe(&mut *unit.conn, each).await?;
+            let sentence = describe(&mut *conn, each).await?;
             let org = match each.cap.node_id {
-                Some(node) => rows::node_org(&mut *unit.conn, node).await?,
+                Some(node) => rows::node_org(&mut *conn, node).await?,
                 None => None,
             };
             if word == level::REACHED {
@@ -1591,7 +1900,7 @@ impl Engine {
                     "cap_id": each.cap.id, "person": each.person, "period_start": start,
                     "used": each.counted().text(), "amount": each.amount.map(Micros::text),
                 });
-                audit::append(&mut *unit.conn, &entry, &Origin::default(), now).await?;
+                audit::append(&mut *conn, &entry, &Origin::default(), now).await?;
             }
             let mut told: Vec<Id> = Vec::new();
             if each.cap.per_person() {
@@ -1599,7 +1908,7 @@ impl Engine {
             }
             if word == level::REACHED || !each.cap.per_person() {
                 let managers =
-                    orch_authz::caps::managers(&mut *unit.conn, home_of(&each.cap), Time::new(now))
+                    orch_authz::caps::managers(&mut *conn, home_of(&each.cap), Time::new(now))
                         .await?;
                 told.extend(managers);
             }
@@ -1610,13 +1919,10 @@ impl Engine {
             } else {
                 "A usage cap is nearly used up"
             };
-            let mail_shared = orch_settings::get::<bool>(
-                &mut *unit.conn,
-                orch_settings::Place::System,
-                "mail.shared",
-            )
-            .await?
-            .unwrap_or(false);
+            let mail_shared =
+                orch_settings::get::<bool>(&mut *conn, orch_settings::Place::System, "mail.shared")
+                    .await?
+                    .unwrap_or(false);
             for user in told {
                 let data = json!({
                     "cap_id": each.cap.id, "person": each.person, "period_start": start,
@@ -1628,7 +1934,7 @@ impl Engine {
                     each.person.map_or_else(String::new, |id| id.to_string())
                 );
                 let Some(announced) = people::announce(
-                    &mut *unit.conn,
+                    &mut *conn,
                     &people::NewNotification {
                         user_id: user,
                         kind,
@@ -1659,8 +1965,7 @@ impl Engine {
                     chat_id: None,
                     data,
                 };
-                routes::tell_routes(&mut *unit.conn, user, &snapshot, org, mail_shared, now)
-                    .await?;
+                routes::tell_routes(&mut *conn, user, &snapshot, org, mail_shared, now).await?;
             }
         }
         Ok(())
@@ -1681,7 +1986,7 @@ impl Engine {
 }
 
 /// The same next-turn coverage for preflight, the waiting display, and queue ordering.
-async fn ask_from_settings(
+pub(crate) async fn ask_from_settings(
     conn: &mut Conn,
     thread: &threads::ThreadRow,
     settings: &crate::resolved::Resolved,
@@ -1729,7 +2034,9 @@ pub async fn ask_for_thread(
     let settings = crate::resolved::load(conn, thread).await?;
     let mut ask = ask_from_settings(conn, &row, &settings).await?;
     if let Some(ask) = &mut ask {
-        ask.person = person;
+        ask.person = crate::background_wake::overlap_owner(conn, &row, person)
+            .await?
+            .unwrap_or(person);
     }
     Ok(ask)
 }
@@ -1753,13 +2060,43 @@ fn tier_asked(declared: &[ParameterDef], model: &ModelParameters, stored: &Json)
 // ---------------------------------------------------------------- while a turn runs
 
 /// The facts a running turn is asked of the caps by.
-async fn ask_of_turn(conn: &mut Conn, turn: &TurnRow) -> Result<Option<Ask>, EngineError> {
+async fn ask_of_turn(
+    conn: &mut Conn,
+    turn: &TurnRow,
+) -> Result<Option<(Ask, &'static str)>, EngineError> {
+    if let Some(binding) =
+        orch_db::queries::ask::segment_binding(conn, turn.thread_id, turn.segment_id).await?
+    {
+        let Some(root) = orch_db::queries::ask::segment_root(conn, turn.segment_id).await? else {
+            return Ok(None);
+        };
+        let person = threads::input(conn, turn.input_id)
+            .await?
+            .and_then(|input| input.answers());
+        return Ok(Some((
+            Ask {
+                thread: root,
+                path: threads::node_path(conn, root).await?,
+                provider: binding.provider_id,
+                model: turn.model.clone(),
+                tier: orch_model_contract::parameters::requested_tier_for_caps(
+                    &binding.protocol,
+                    &turn.params,
+                ),
+                harness_kind: None,
+                person,
+                metering: None,
+            },
+            "ask",
+        )));
+    }
     let Some(segment) = threads::segment(conn, turn.segment_id).await? else {
         return Ok(None);
     };
     let person = threads::input(conn, turn.input_id)
         .await?
         .and_then(|input| input.answers());
+    let person = crate::background_wake::charge_of_turn(conn, turn.id, person).await?;
     let agent = resources::agent(conn, segment.agent_id).await?;
     let tier = match &agent {
         Some(agent) => crate::harnesses::descriptor_of(agent)?.and_then(|descriptor| {
@@ -1769,16 +2106,19 @@ async fn ask_of_turn(conn: &mut Conn, turn: &TurnRow) -> Result<Option<Ask>, Eng
     };
     let harness_kind = agent.map(|agent| agent.harness_kind);
     let path = threads::node_path(conn, turn.thread_id).await?;
-    Ok(Some(Ask {
-        thread: turn.thread_id,
-        path,
-        provider: segment.provider_id,
-        model: turn.model.clone(),
-        tier,
-        harness_kind,
-        person,
-        metering: None,
-    }))
+    Ok(Some((
+        Ask {
+            thread: turn.thread_id,
+            path,
+            provider: segment.provider_id,
+            model: turn.model.clone(),
+            tier,
+            harness_kind,
+            person,
+            metering: None,
+        },
+        "turn",
+    )))
 }
 
 impl Engine {
@@ -1843,10 +2183,10 @@ impl Engine {
         let Some(turn) = threads::active_turn(&mut *unit.conn, thread).await? else {
             return Ok(());
         };
-        let Some(ask) = ask_of_turn(&mut *unit.conn, &turn).await? else {
+        let Some((ask, purpose)) = ask_of_turn(&mut *unit.conn, &turn).await? else {
             return Ok(());
         };
-        let applied = covering(&mut *unit.conn, &ask, now).await?;
+        let applied = covering_for(&mut *unit.conn, &ask, purpose, now).await?;
         let mut standings = Vec::new();
         for each in applied.iter().filter(|each| {
             each.replaced_by.is_none() && each.cap.amount.is_some() && !is_running(&each.cap)
@@ -1924,6 +2264,21 @@ impl Engine {
         turn_id: Id,
         message: &str,
     ) -> Result<(), EngineError> {
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            let builtin: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM turns t JOIN segments s ON s.id=t.segment_id WHERE t.id=$1 AND t.thread_id=$2 AND s.program='orch')",
+            )
+            .bind(turn_id)
+            .bind(thread_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+            if builtin {
+                drop(conn);
+                return self.stop_ask_for_cap(thread_id, turn_id, message).await;
+            }
+        }
         let mut tx = self.inner.db.begin().await?;
         let (finished, machine) = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
@@ -2143,6 +2498,8 @@ mod tests {
             subject_role: None,
             split: split_word.to_owned(),
             models: Vec::new(),
+            services: Vec::new(),
+            purposes: Vec::new(),
             tiers: Vec::new(),
             harness_kinds: Vec::new(),
             meter: meter::TOKENS.to_owned(),
@@ -2397,6 +2754,7 @@ mod tests {
                 ends_at: None,
             },
             unrated_tokens: 0,
+            unrated_services: 0,
         }
     }
 

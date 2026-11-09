@@ -19,6 +19,7 @@ import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { approvalKey, approvalQuery } from '@/api/approvals';
 import type { Approval, Item } from '@/generated/api-types';
 import { useDecision } from '@/features/approvals/Decision';
+import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { approvalTitle, ApprovalSubjectScope } from '@/features/approvals/Card';
 import { approvalAtItem, approvalOutcome } from '@/features/approvals/current';
@@ -112,6 +113,7 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
   const request = approval.request;
   const may = approval.can_decide && live;
   const busy = decision.pending;
+  const reason = decisionReason(approval, live, busy, t);
   return (
     <ApprovalSubjectScope subject={approval.title}><section
       aria-label={approval.title}
@@ -132,7 +134,7 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
       {request.request_kind === 'user_input' ? (
         <AnswersForm
           questions={request.detail.questions}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pending={busy}
           onSend={(answers) => decision.decide({ answers }, t('approvals.sendAnswers'))}
         />
@@ -140,18 +142,18 @@ function HarnessPending({ approval, itemId, threadId, onLost }: { approval: Harn
         <ElicitationForm
           schema={request.detail.schema}
           message={request.detail.message}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pending={busy}
           onSend={(action, content) => decision.decide({ action, ...(content === undefined ? {} : { content }) }, t('approvals.accept'))}
         />
       ) : request.request_kind === 'plan' ? (
-        <PlanAnswer disabled={!may} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
+        <PlanAnswer disabled={!may} reason={reason} pending={decision.pressed === t('plan.proceed') ? 'proceed' : decision.pressed === t('plan.keepPlanning') ? 'keep' : null}
           onProceed={() => decision.decide(planDecision(true), t('plan.proceed'))}
           onKeepPlanning={(words) => decision.decide(planDecision(false, words), t('plan.keepPlanning'))} />
       ) : (
         <OptionButtons target={request.request_kind === 'command' ? request.detail.command : approval.title}
           options={request.options}
-          disabled={!may || busy}
+          disabled={!may || busy} reason={reason}
           pressed={decision.pressed}
           onChoose={(option) => decision.decide(decisionOfOption(option), option.label)}
         />
@@ -193,10 +195,10 @@ function CapabilityPending({ approval, itemId, onLost }: { approval: Extract<App
         </ul>
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <Button action="approve" aria-label={actionName('approve', title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!approval.can_decide || !live || decision.pending} onClick={() => decision.decide({ approve: true }, t('approvals.approve'))}>
+        <Button action="approve" aria-label={actionName('approve', title)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!approval.can_decide || !live || decision.pending} reason={decisionReason(approval, live, decision.pending, t)} onClick={() => decision.decide({ approve: true }, t('approvals.approve'))}>
           {t('approvals.approve')}
         </Button>
-        <Button action="deny" aria-label={actionName('deny', title)} variant="danger-ghost" disabled={!approval.can_decide || !live || decision.pending} onClick={() => decision.decide({ approve: false }, t('approvals.refuse'))}>
+        <Button action="deny" aria-label={actionName('deny', title)} variant="danger-ghost" disabled={!approval.can_decide || !live || decision.pending} reason={decisionReason(approval, live, decision.pending, t)} onClick={() => decision.decide({ approve: false }, t('approvals.refuse'))}>
           {t('approvals.refuse')}
         </Button>
       </div>
@@ -216,7 +218,7 @@ function NativeQuestionWorkBody({ item, sourceId }: { item: ApprovalItem; source
   const query = useQuery({ ...options, enabled: held === undefined && view.thread !== null && view.closed === null && options.enabled });
   if (view.closed !== null) return <p className="text-sm text-text-muted">{t('threadViews.unavailable')}</p>;
   const source = held ?? query.data;
-  if (source === undefined) return query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <SkeletonGroup><Skeleton className="h-10 w-full" /></SkeletonGroup>;
+  if (source === undefined) return query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <SkeletonGroup read={query}><Skeleton className="h-10 w-full" /></SkeletonGroup>;
   if (source.kind !== 'tool_call' || source.thread_id !== item.thread_id || source.turn_id !== item.turn_id) return <p className="text-sm text-text-muted">{t('threadViews.unavailable')}</p>;
   return <RawCall item={source} />;
 }
@@ -232,13 +234,13 @@ function NativeQuestionWork({ item }: { item: ApprovalItem }) {
   </details>;
 }
 
-export function ApprovalCard({ item }: { item: ApprovalItem }) {
+export function ApprovalCard({ item, pinned = false }: { item: ApprovalItem; pinned?: boolean }) {
   const { t } = useTranslation();
-  const { threadId, live } = useTimelineContext();
+  const { threadId, live, pinApprovals } = useTimelineContext();
   const queryClient = useQueryClient();
   const id = item.payload.approval_id;
   const inline = approvalSnapshot(item.payload.approval, id);
-  const query = useQuery({ ...approvalQuery(id), enabled: inline === undefined });
+  const query = useQuery({ ...approvalQuery(id), enabled: inline === undefined && (pinned || pinApprovals !== true) });
   const first = useRef(true);
   const [lostTo, setLostTo] = useState<Approval | null>(null);
   useEffect(() => {
@@ -258,6 +260,15 @@ export function ApprovalCard({ item }: { item: ApprovalItem }) {
 
   // A confirmed local decision wins over an older pending item until its live replacement arrives.
   const approval = approvalAtItem(item, query.data);
+  // The timeline keeps its history anchor, while only the pinned instance owns a waiting form.
+  if (pinApprovals === true && !pinned && item.status === 'pending' && (approval === undefined || approval.state === 'pending')) {
+    return <ItemFrame item={item} label={t('timeline.approval.menu')}><Button size="sm" variant="ghost" onClick={(event) => {
+      const scope = event.currentTarget.closest('[data-screen="thread"]');
+      const target = Array.from(scope?.querySelectorAll<HTMLElement>('[data-pinned-approval]') ?? []).find((node) => node.dataset.pinnedApproval === item.id);
+      target?.scrollIntoView({ block: 'nearest' });
+      target?.focus();
+    }}>{t('approvals.review')}</Button></ItemFrame>;
+  }
   const portApproval = asPortApproval(approval);
   let body: React.ReactNode;
   if (approval === undefined) {
@@ -265,7 +276,7 @@ export function ApprovalCard({ item }: { item: ApprovalItem }) {
       action={<Button size="sm" pending={query.isRefetching} onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} /> : query.isError ? (
       <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />
     ) : (
-      <SkeletonGroup className="flex flex-col gap-2 rounded-lg border border-border px-3 py-3">
+      <SkeletonGroup read={query} className="flex flex-col gap-2 rounded-lg border border-border px-3 py-3">
         <Skeleton className="h-4 w-1/3" />
         <Skeleton className="h-10 w-full" />
       </SkeletonGroup>

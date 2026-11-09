@@ -17,10 +17,11 @@ import { choiceOption } from '@/i18n/choices';
 
 import { type AccessTarget, isPlaceKind, previewShare } from '@/api/access';
 import { ShareConsequences } from '@/features/access/ShareConsequences';
-import { ApiError, api, ok } from '@/api/client';
+import { ApiError, api, ok, ReceiptAcknowledged } from '@/api/client';
 import { ThreadIdentity } from '@/features/people/ThreadIdentity';
 import { namesQuery } from '@/api/search';
-import { shareWithAgents } from '@/api/share';
+import { beginShareAttempt, shareWithAgents, type ShareAttempt } from '@/api/share';
+import { sameLibraryReader } from '@/api/resourceLibrary';
 import { settingsQuery } from '@/api/settings';
 import type { AgentLevel, NameHit, PermissionPage, ShareParts, ShareWithAgents } from '@/generated/api-types';
 import { Hint } from '@/features/help/Hint';
@@ -40,8 +41,9 @@ import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
 import { ByteSize } from '@/ui/ByteSize';
 
-import { type Area, areasOf, LEVELS, levelNeeded, levelOfParts, partsOfLevel, readOnly, stepOf, stepsOf, withStep } from './agentShares';
-import { AREA_WORDS, stepOption } from './AgentRow';
+import { AgentAdvancedRows } from './AgentAdvancedRows';
+import { ADVANCED, type Area, hasAgentParts, agentGivingParts, areasOf, LEVELS, levelOfParts, mayGiveParts, partsInAreas, partsOfLevel, readOnly, stepOf, stepsOf, withStep } from './agentShares';
+import { AREA_WORDS, stepOption } from './agentShareWords';
 import { CoversLine, type PlaceKind, type Reach, ReachSelect } from './Covers';
 
 /** The most threads or places one share names. */
@@ -151,7 +153,7 @@ function buttonWords(t: TFunction, mode: 'live' | 'snapshot', whose: readonly Wh
   const what = shared.length === 1 && shared[0] === 'documents' ? t('access.agents.dialog.button.documents') : t('access.agents.dialog.button.this', { name: target.name });
   const top = Math.max(...areas.map((area) => stepOf(area, parts)), 0);
   // Areas at different levels have no one verb: the button says what is shared and with whom, and the levels are above it.
-  if (new Set(shared.map((area) => stepOf(area, parts))).size > 1) return t('access.agents.dialog.button.mixed', { who, what });
+  if (ADVANCED.some((row) => parts[row] === true) || new Set(shared.map((area) => stepOf(area, parts))).size > 1) return t('access.agents.dialog.button.mixed', { who, what });
   if (top >= 3) return t('access.agents.dialog.button.manage', { who, what });
   if (top === 2) return t(shared.length === 1 && shared[0] === 'documents' ? 'access.agents.dialog.button.edit' : 'access.agents.dialog.button.write', { who, what });
   return t('access.agents.dialog.button.read', { who, what });
@@ -191,37 +193,43 @@ function Refused({ error, onRaise, raising }: { error: unknown; onRaise: ((scope
 export function ShareWithAgentsDialog({ target, page, open, onClose, initialRecipient }: { target: AccessTarget; page: PermissionPage; open: boolean; onClose: () => void; initialRecipient?: { id: string; name: string } }) {
   const { t } = useTranslation();
   const actKey = useActKey();
-  const gives = page.gives.agents;
+  const sending=useRef<{clientId:string;attempt:ShareAttempt}|null>(null);
+  const available = agentGivingParts(page);
   const place: PlaceKind | null = isPlaceKind(target.kind) ? target.kind : null;
 
   // A refusal appears below what the dialog shows when it is tall: it is brought into view, since it is what the press of the button was answered with.
   const refusal = useRef<HTMLDivElement>(null);
   const [whose, setWhose] = useState<Whose[]>(() => initialRecipient === undefined ? [] : [{ ...initialRecipient, kind: 'thread' }]);
   const [reach, setReach] = useState<Reach>('inside');
-  const [wantedLevel, setLevel] = useState<AgentLevel>('view');
+  const areas = areasOf(target.kind, reach);
+  const [chosen, setChosen] = useState<ShareParts>(() => {
+    const preset = LEVELS.find((entry) => mayGiveParts(partsOfLevel(entry, areas), available));
+    return preset === undefined ? areas.reduce<ShareParts>((parts, area) => withStep(parts, area, stepOf(area, available) > 0 ? 1 : 0), {}) : partsOfLevel(preset, areas);
+  });
   const [byArea, setByArea] = useState(false);
-  const [custom, setCustom] = useState<ShareParts>({});
   const [mode, setMode] = useState<'live' | 'snapshot'>('live');
   const [comment, setComment] = useState('');
   const [until, setUntil] = useState('');
   const [download, setDownload] = useState(true);
   const [readFirst, setReadFirst] = useState(false);
+  const [viewersRead, setViewersRead] = useState(false);
 
-  const areas = areasOf(target.kind, reach);
   const everyThread = whose.length > 0 && whose.every((entry) => entry.kind === 'thread');
   const copy = mode === 'snapshot' && everyThread;
-  // The level begins as the lowest the reader may give, and stays one they may; a copy is read only.
-  const level: AgentLevel = copy ? 'view' : gives.includes(wantedLevel) ? wantedLevel : (LEVELS.find((entry) => gives.includes(entry)) ?? wantedLevel);
-  const chosen: ShareParts = byArea ? custom : partsOfLevel(level, areas);
-  const parts: ShareParts = copy ? readOnly(chosen) : chosen;
-  const nothing = areas.every((area) => stepOf(area, parts) === 0);
+  // Area disclosure never converts a precise choice into a broader everyday preset.
+  const visible = partsInAreas(chosen, areas);
+  const parts = copy ? readOnly(visible) : visible;
+  const viewerEligible = !copy && everyThread && stepOf('documents', parts) > 0;
+  const nothing = !hasAgentParts(parts);
   const asLevel = levelOfParts(parts, areas);
+  const level = asLevel ?? 'custom';
 
   const body = {
     what: target.kind === 'chat' ? { chat_id: target.id } : target.kind === 'document' ? { document_id: target.id } : { node_id: target.id },
     mode: copy ? ('snapshot' as const) : ('live' as const),
     to: everyThread ? whose.map((entry) => ({ thread_id: entry.id })) : whose.map((entry) => ({ node_id: entry.id })),
     parts,
+    ...(viewerEligible && viewersRead ? { viewers_read: true } : {}),
     ...(parts.documents !== null && parts.documents !== undefined ? { read_first: readFirst } : {}),
     ...(place !== null && !copy ? { inside: reach === 'inside' } : {}),
     ...(copy && comment.trim() !== '' ? { comment: comment.trim() } : {}),
@@ -239,9 +247,21 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
     enabled: open && whose.length > 0 && !nothing, retry: false, gcTime: 0, staleTime: 0,
   });
   const share = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       if (review.data === undefined || !review.data.preview.allowed || review.isFetching || review.isError) throw new Error(t('placeReview.newReviewRequired'));
-      return shareWithAgents(review.data.body);
+      const confirmation=review.data.preview.owner_reads?.confirmation;
+      let sent=sending.current;
+      if(sent===null || sent.clientId!==review.data.body.client_id || !sameLibraryReader(sent.attempt.reader)) {
+        sent={clientId:review.data.body.client_id,attempt:beginShareAttempt(review.data.body.client_id,confirmation)};
+        sending.current=sent;
+      }
+      try {
+        return await shareWithAgents(review.data.body, sent.attempt, confirmation);
+      } catch (error) {
+        // The existing success handler only acknowledges and closes; it needs no full share content.
+        if (error instanceof ReceiptAcknowledged) return;
+        throw error;
+      }
     },
     onSuccess: () => {
       toast({ tone: 'success', title: t(copy ? 'access.agents.dialog.copied' : 'access.agents.dialog.shared', { count: whose.length }) });
@@ -265,14 +285,10 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
     onSuccess: () => share.reset(),
   });
 
-  const levelOff = (entry: AgentLevel) => !gives.includes(entry) || (copy && entry !== 'view');
-  const levelReason = (entry: AgentLevel): string | undefined => (!gives.includes(entry) ? t('access.agents.dialog.notYours') : copy && entry !== 'view' ? t('access.agents.dialog.copyReadOnly') : undefined);
+  const levelOff = (entry: AgentLevel) => !mayGiveParts(partsOfLevel(entry, areas), available) || (copy && entry !== 'view');
+  const levelReason = (entry: AgentLevel): string | undefined => (!mayGiveParts(partsOfLevel(entry, areas), available) ? t('access.agents.dialog.notYours') : copy && entry !== 'view' ? t('access.agents.dialog.copyReadOnly') : undefined);
   const mayCopy = everyThread;
-  const stepOff = (step: number) => {
-    const needed = levelNeeded(step);
-    return needed !== null && !gives.includes(needed);
-  };
-  const documentsEdited = areas.includes('documents') && stepOf('documents', parts) >= 2;
+  const stepOff = (area: Area, step: number) => step > stepOf(area, available);
 
   return (
     <Dialog
@@ -280,7 +296,6 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
       onOpenChange={(next) => !next && !share.isPending && onClose()}
       size="lg"
       title={t('access.agents.dialog.title', { name: target.name })}
-      description={t('access.agents.dialog.lead')}
       dismissible={!share.isPending}
       footer={
         <>
@@ -305,25 +320,19 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
 
         <div className="flex flex-col gap-2">
           <div className="flex flex-wrap items-end gap-2">
-            <Select<AgentLevel>
+            <Select<AgentLevel | 'custom'>
               label={t('access.agents.dialog.what')}
               value={level}
-              onValueChange={setLevel}
+              onValueChange={(next) => { if (next !== 'custom') setChosen(partsOfLevel(next, areas)); }}
               disabled={byArea}
               fieldClassName="min-w-[12rem] flex-[1_1_12rem]"
               help={<Hint id="agents-areas" />}
-              options={LEVELS.map((entry) => ({ value: entry, ...choiceOption(t, `accessLevel.${entry}`), disabled: levelOff(entry), ...(levelReason(entry) === undefined ? {} : { description: levelReason(entry) }) }))}
+              options={[...LEVELS.map((entry) => ({ value: entry, name: choiceOption(t, `accessLevel.${entry}`).name, disabled: levelOff(entry), description: levelReason(entry) })), ...(asLevel === null ? [{ value: 'custom' as const, name: choiceOption(t, 'generalAccess.custom').name, disabled: true }] : [])]}
             />
-            <Button size="sm" variant="ghost" aria-pressed={byArea} onClick={() => { setCustom(chosen); setByArea((on) => !on); }}>
+            <Button size="sm" variant="ghost" aria-pressed={byArea} onClick={() => setByArea((on) => !on)}>
               {t('access.agents.dialog.byArea')}
             </Button>
           </div>
-          {level === 'manage' && !byArea && (
-            <p className="flex items-start gap-1 text-sm text-text-muted">
-              <span>{t('access.agents.manageNote')}</span>
-              <Hint id="agents-manage" />
-            </p>
-          )}
           {byArea && (
             <div role="group" aria-label={t('access.agents.dialog.byAreaLabel')} className="flex flex-wrap gap-x-4 gap-y-2">
               {areas.map((area) => (
@@ -331,16 +340,16 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
                   key={area}
                   label={t(AREA_WORDS[area])}
                   size="sm"
-                  value={String(stepOf(area, custom))}
-                  onValueChange={(next) => setCustom(withStep(custom, area, Number(next)))}
+                  value={String(stepOf(area, parts))}
+                  onValueChange={(next) => setChosen(withStep(parts, area, Number(next)))}
                   fieldClassName="min-w-[9rem] flex-[1_1_9rem]"
-                  options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: stepOff(step) || (copy && step > 1) }))}
+                  options={stepsOf(area).map((step) => ({ value: String(step), ...stepOption(t, area, step), disabled: stepOff(area, step) || (copy && step > 1) }))}
                 />
               ))}
             </div>
           )}
-          {byArea && asLevel === null && !nothing && <p className="text-sm text-text-muted">{t('access.agents.dialog.custom')}</p>}
-          {!byArea && gives.length === 0 && <EmptyState compact title={t('access.agents.cannotShare', { name: target.name })} />}
+          {byArea && areas.includes('timeline') && !copy && <AgentAdvancedRows parts={parts} available={available} onChange={(next) => setChosen(next)} />}
+          {!byArea && areas.every((area) => stepOf(area, available) === 0) && <EmptyState compact title={t('access.agents.cannotShare', { name: target.name })} />}
         </div>
 
         <RadioGroup<'live' | 'snapshot'>
@@ -371,13 +380,13 @@ export function ShareWithAgentsDialog({ target, page, open, onClose, initialReci
           </div>
         )}
 
+        {viewerEligible && <Checkbox label={t('agentContributions.viewerChoice')} hint={t('agentContributions.viewerHint')} checked={viewersRead} onCheckedChange={setViewersRead} />}
+
         <div className="flex flex-col gap-1 text-sm text-text-muted">
-          <p>{t('access.agents.repeat')}</p>
           {parts.documents !== null && parts.documents !== undefined && <Checkbox label={t('people.readFirst')} hint={t('people.readFirstHint')} checked={readFirst} onCheckedChange={setReadFirst} />}
-          {documentsEdited && <p>{t('access.agents.dialog.history')}</p>}
         </div>
 
-        {whose.length > 0 && !nothing && (review.isPending || review.isFetching ? <SkeletonRows rows={3} /> : review.isError ? <Button onClick={() => void review.refetch()}>{t('actions.refresh.label')}</Button> : <ShareConsequences preview={review.data.preview} target={target} />)}
+        {whose.length > 0 && !nothing && (review.isPending || review.isFetching ? <SkeletonRows read={review} rows={3} /> : review.isError ? <Button onClick={() => void review.refetch()}>{t('actions.refresh.label')}</Button> : <ShareConsequences preview={review.data.preview} target={target} />)}
         {failure !== null && (
           <div ref={refusal}>
             <Refused error={failure} onRaise={writable ? (scopeId) => raise.mutate(scopeId) : null} raising={raise.isPending} />

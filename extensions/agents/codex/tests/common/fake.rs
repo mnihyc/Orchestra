@@ -174,7 +174,7 @@ impl FakeLauncher {
                 inject: Mutex::new(None),
                 raw: Mutex::new(None),
                 stop: Mutex::new(None),
-                version: Mutex::new("0.165.0".to_owned()),
+                version: Mutex::new("0.167.0".to_owned()),
                 stderr: Mutex::new(String::new()),
                 exit_on_initialize: Mutex::new(false),
                 initialize_delay: Mutex::new(Duration::ZERO),

@@ -10,13 +10,18 @@ pub fn data() -> Result<Value, String> {
         let mut row = serde_json::to_value(def).map_err(|error| format!("{}: {error}", def.key))?;
         row["text_key"] = json!(format!("day100.builtin.{}", def.key));
         row["keywords"] = json!([]);
-        if let orch_settings_contract::registry::Schema::Int { unit, .. } = def.schema {
+        if let Some(unit) = def.numeric_unit() {
             let unit = if unit == orch_settings_contract::registry::Unit::Count {
                 "raw"
             } else {
                 unit.as_str()
             };
-            row["display"] = json!({ "unit": unit, "zero": def.zero_disables().then_some("off") });
+            let zero = if def.zero_means_no_limit() {
+                Some("no_limit")
+            } else {
+                def.zero_disables().then_some("off")
+            };
+            row["display"] = json!({ "unit": unit, "zero": zero });
         }
         rows.push(row);
     }

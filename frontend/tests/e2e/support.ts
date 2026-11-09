@@ -11,7 +11,7 @@ import { expectUniqueGuideEntries } from '../accessibility/guide-entries.ts';
 import { expectOneScrollerPerArea } from '../accessibility/scrolling.ts';
 import { expectOneCurrentSection } from '../accessibility/navigation.ts';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
+export const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
 /** The people of the fake API's team, with what each proves who they are by. */
 export const PEOPLE = {

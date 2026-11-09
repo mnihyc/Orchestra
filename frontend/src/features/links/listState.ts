@@ -1,4 +1,5 @@
 /** What a list of Links shows of the pages read so far, whatever query read them. */
+import type { SkeletonRead } from '@/ui/Skeleton';
 import type { LinkedThing } from '@/generated/api-types';
 
 /** The part of an infinite query a list draws from. */
@@ -15,6 +16,7 @@ export interface PagedQuery {
 }
 
 export interface ListState {
+  read?: SkeletonRead;
   rows: readonly LinkedThing[];
   /** The first page has not come. */
   pending: boolean;
@@ -33,6 +35,7 @@ export function listState(query: PagedQuery): ListState {
   const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
   return {
     rows,
+    read: query,
     pending: query.isPending,
     failed: query.isError && rows.length === 0,
     error: query.error,

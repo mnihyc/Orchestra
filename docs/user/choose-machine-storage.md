@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Choose where a machine keeps data
 screens: /resources/templates, /resources/templates/$id, /resources/machines/$id, /resources/environments/$id, /resources/providers/$id
 keywords: storage, disk, machine, host, template, env.storage, runtime.storage, workspace, home, state
+summary: Use a machine’s named storages for workspace, home and runtime data.
 ---
 
 # Choose where a machine keeps data

@@ -113,8 +113,12 @@ export function byGroup(defs: readonly KeyDef[]): { group: SettingsGroup; keys: 
 }
 
 /** Whether a lock on a row of this key changes anything: where a lower scope can only narrow, it does not. */
+export function narrowsOnly(merge: string): boolean {
+  return ['intersect', 'min', 'max', 'all', 'any', 'stricter'].includes(merge);
+}
+
 export function honoursLocks(def: Pick<SettingDef, 'merge'>): boolean {
-  return def.merge !== 'intersect' && def.merge !== 'min';
+  return !narrowsOnly(def.merge);
 }
 
 // ---------------------------------------------------------------- where the value in force comes from

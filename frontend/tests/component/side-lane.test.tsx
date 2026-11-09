@@ -142,7 +142,10 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: i18n.t('side.close') })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: i18n.t('side.keep') })).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(i18n.t('side.lane.readOnly'));
+    const notice = screen.getByText(i18n.t('side.lane.readOnly'), { exact: true });
+    expect(notice).toBeVisible();
+    expect(notice).toHaveAttribute('role', 'status');
+    expect(screen.getAllByText(i18n.t('side.lane.readOnly'), { exact: true })).toHaveLength(1);
     expect(calls.draft).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('side.lane.openPanel') }));
     expect(calls.panel).toHaveBeenCalledExactlyOnceWith('side-thread', { thread: PARENT, side: SIDE });
@@ -303,4 +306,18 @@ it('keeps the open list current from the parent markers without another list or 
   act(() => threadWriter.apply(PARENT, { items: [{ ...ended, seq_created: 22, seq_updated: 22 }] }));
   expect(screen.queryByRole('button', { name: 'Login (side)' })).not.toBeInTheDocument();
   expect(calls.sides).toHaveBeenCalledTimes(1); expect(calls.feed).not.toHaveBeenCalled(); expect(calls.draft).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names a side lane’s author with the shared person card and keeps its own running Stop in %s', async (locale) => {
+  await setLocale(locale); seed({}, true);
+  const view = draw();
+  const author = view.container.querySelector('[data-side-started-by]');
+  if (!(author instanceof HTMLElement)) throw new Error('The side lane exposes its author');
+  expect(within(author).getByText(ADA.display_name)).toBeVisible();
+  expect(within(author).getByRole('button')).toBeInTheDocument();
+  expect(within(author).getByText(i18n.t('side.lane.started'))).toBeVisible();
+  expect(screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) })).toHaveAttribute('data-side-lane', SIDE);
+  expect(screen.getByRole('button', { name: i18n.t('composer.stop') })).toBeVisible();
+  expect(calls.stop).not.toHaveBeenCalled();
 });

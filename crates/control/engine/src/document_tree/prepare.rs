@@ -50,7 +50,7 @@ pub(super) fn validate(request: &Request) -> Result<(), Error> {
             }
             create::validate_name(request.name.as_deref().unwrap_or_default(), true)?;
         }
-        Command::Copy | Command::Move => {
+        Command::Copy | Command::Move | Command::MoveOut => {
             if request.items.is_empty()
                 || request.to.is_none()
                 || (request.name.is_some() && request.items.len() != 1)
@@ -176,12 +176,8 @@ pub(super) fn live_entries(entries: &[containers::EntryRow]) -> Vec<containers::
         .collect()
 }
 
-pub(super) async fn prepare(
-    conn: &mut Conn,
-    actor: Actor<'_>,
-    request: &Request,
-    now: Time,
-) -> Result<Prepared, Error> {
+/// Lock the same bounded native header membership before content or audience preparation.
+pub(super) async fn lock(conn: &mut Conn, request: &Request) -> Result<Prepared, Error> {
     validate(request)?;
     let original = load_roots(conn, request).await?;
     let destination = match request.to {
@@ -224,6 +220,23 @@ pub(super) async fn prepare(
     if matches!(request.command, Command::Copy) {
         entries = live_entries(&entries);
     }
+    Ok(Prepared {
+        roots,
+        entries,
+        destination,
+        text_copy: None,
+    })
+}
+
+/// The original ordinary gates over the exact locked native members.
+pub(super) async fn require(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+    prepared: &Prepared,
+    now: Time,
+) -> Result<(), Error> {
+    let destination = prepared.destination;
     let permission = match request.command {
         Command::Copy => Permission::DocView,
         Command::Rename => Permission::DocEdit,
@@ -237,20 +250,127 @@ pub(super) async fn prepare(
     access::require_entries(
         conn,
         actor,
-        &entries,
+        &prepared.entries,
         permission,
         now,
         matches!(
             request.command,
-            Command::Delete | Command::Move | Command::Restore
+            Command::Delete | Command::Move | Command::MoveOut | Command::Restore
         ),
         act,
     )
     .await?;
+    if request.command == Command::MoveOut {
+        let Actor::Person(principal) = actor else {
+            return Err(Error::Denied);
+        };
+        let (_, destination_root, _) = destination.ok_or(Error::NotFound)?;
+        for row in &prepared.roots {
+            if row.org_id == destination_root {
+                return Err(Error::Invalid(
+                    "Use the existing Move within this organization.",
+                ));
+            }
+            if !orch_authz::documents::effective(
+                conn,
+                principal,
+                row.id,
+                orch_authz::Policy::default(),
+            )
+            .await?
+            .owner
+            {
+                return Err(Error::Denied);
+            }
+        }
+        // Copy reads only the live material. The complete original closure, including retained
+        // descendants, remains admitted and checked under the same native Delete authority above.
+        access::require_entries(
+            conn,
+            actor,
+            &live_entries(&prepared.entries),
+            Permission::DocView,
+            now,
+            false,
+            orch_authz::Act::Use,
+        )
+        .await?;
+    }
+    if matches!(request.command, Command::Copy | Command::MoveOut)
+        && let Some((node, root, _)) = destination
+    {
+        let outgoing = prepared
+            .entries
+            .iter()
+            .filter(|row| row.deleted_at.is_none() && row.org_id != root)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut knowledge = HashSet::new();
+        for row in prepared
+            .entries
+            .iter()
+            .filter(|row| row.deleted_at.is_none())
+        {
+            let kind = if row.kind == "container" {
+                orch_access_contract::permissions::ObjectKind::DocumentContainer
+            } else {
+                orch_access_contract::permissions::ObjectKind::Document
+            };
+            let boundary = crate::copy_out::inspect(
+                conn,
+                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                    kind,
+                    id: row.id,
+                }),
+                Some(node),
+            )
+            .await
+            .map_err(|error| match error {
+                crate::copy_out::Error::Native(error) => Error::Engine(error),
+                _ => Error::Denied,
+            })?;
+            if let Some(boundary) = boundary {
+                match actor {
+                    Actor::Person(principal) => {
+                        crate::copy_out::require_knowledge_exports(conn, principal, &boundary)
+                            .await
+                            .map_err(|error| match error {
+                                crate::copy_out::Error::Native(error) => Error::Engine(error),
+                                _ => Error::Denied,
+                            })?
+                    }
+                    Actor::Agent { .. } => knowledge.extend(boundary.knowledge_roots()),
+                }
+            }
+        }
+        access::require_exports(conn, actor, &outgoing, now).await?;
+        if !knowledge.is_empty()
+            && let Actor::Agent { thread } = actor
+        {
+            let reach = access::agent_reach(
+                conn,
+                thread,
+                Vec::new(),
+                knowledge.iter().copied().collect(),
+                now,
+            )
+            .await?;
+            if knowledge.into_iter().any(|root| {
+                !reach.governing_export_allowed(
+                    root,
+                    Permission::DocExport,
+                    orch_access_contract::permissions::Profile::Any,
+                )
+            }) {
+                return Err(Error::Denied);
+            }
+        }
+    }
     if let Some(parent) = request.to {
         access::require_create(conn, actor, parent, now).await?;
         if let Directory::Container(id) = parent
-            && entries
+            && prepared
+                .entries
                 .iter()
                 .any(|row| row.kind == "container" && row.id == id)
         {
@@ -260,7 +380,7 @@ pub(super) async fn prepare(
         }
     }
     if request.command == Command::Restore {
-        for root in &roots {
+        for root in &prepared.roots {
             let parent = root
                 .parent_container_id
                 .map_or(Directory::NodeDocs(root.node_id), Directory::Container);
@@ -269,18 +389,13 @@ pub(super) async fn prepare(
     }
     if matches!(request.command, Command::Move | Command::Restore)
         && let Some((_, root, _)) = destination
-        && entries.iter().any(|row| row.org_id != root)
+        && prepared.entries.iter().any(|row| row.org_id != root)
     {
         return Err(Error::Invalid(
-            "a moved document tree stays in its original root organization",
+            "Use Move to another org to copy there and delete here.",
         ));
     }
-    Ok(Prepared {
-        roots,
-        entries,
-        destination,
-        text_copy: None,
-    })
+    Ok(())
 }
 
 pub(super) fn deadline(now: Time, options: Options) -> Result<DateTime<Utc>, Error> {
@@ -323,12 +438,129 @@ pub async fn plan_delete_in(
     now: Time,
     options: Options,
 ) -> Result<Plan, Error> {
+    let sources = prepare_deletion_sources_in(&mut *tx, actor, request).await?;
+    complete_deletion_plan_in(&mut *tx, actor, sources, now, options).await
+}
+
+/// The native complete locked deletion membership, before authority/audience preparation.
+/// The actual source rows are factual input for an adapter and grant no access.
+pub struct DeletionSources {
+    request: Request,
+    prepared: Prepared,
+    identity: access::Identity,
+    transaction: Option<String>,
+}
+
+impl DeletionSources {
+    /// Actual selected roots retained by the native selector and its lock footprint.
+    #[must_use]
+    pub fn roots(&self) -> &[containers::EntryRow] {
+        &self.prepared.roots
+    }
+    /// Every actual affected native entry, including descendants hidden from ordinary lists.
+    #[must_use]
+    pub fn entries(&self) -> &[containers::EntryRow] {
+        &self.prepared.entries
+    }
+}
+
+/// Native factual roots for early destination/selection admission, never the expanded closure.
+pub async fn deletion_roots_in(
+    conn: &mut Conn,
+    request: &Request,
+) -> Result<Vec<containers::EntryRow>, Error> {
     if request.command != Command::Delete {
         return Err(Error::Invalid("only deletion has a confirmation preview"));
     }
-    let prepared = prepare(&mut *tx, actor, request, now).await?;
-    let stamp = stamp(&mut *tx, &prepared.entries, now).await?;
-    let audience = super::audience::read(&mut *tx, actor, &prepared.entries, now).await?;
+    validate(request)?;
+    load_roots(conn, request).await
+}
+
+async fn deletion_transaction(conn: &mut Conn) -> Result<String, Error> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await?)
+}
+
+/// Lock and retain the actual native header closure without computing descriptive plans.
+pub async fn prepare_deletion_sources_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    request: &Request,
+) -> Result<DeletionSources, Error> {
+    if request.command != Command::Delete {
+        return Err(Error::Invalid("only deletion has a confirmation preview"));
+    }
+    validate(request)?;
+    let identity = access::identity(conn, actor).await?;
+    let prepared = lock(conn, request).await?;
+    let transaction = if orch_db::queries::transaction_guard::in_transaction(conn) {
+        Some(deletion_transaction(conn).await?)
+    } else {
+        None
+    };
+    Ok(DeletionSources {
+        request: request.clone(),
+        prepared,
+        identity,
+        transaction,
+    })
+}
+
+/// The same ordinary gate on the original factual header stage, without audience planning.
+/// Provisional discovery cannot be promoted into an action transaction.
+pub async fn require_deletion_sources_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    sources: &DeletionSources,
+    now: Time,
+) -> Result<(), Error> {
+    match (
+        &sources.transaction,
+        orch_db::queries::transaction_guard::in_transaction(conn),
+    ) {
+        (Some(original), true) if deletion_transaction(conn).await? == *original => {}
+        (None, false) => {}
+        _ => return Err(Error::Stale),
+    }
+    let current = access::identity(conn, actor).await?;
+    if current.kind != sources.identity.kind
+        || current.id != sources.identity.id
+        || current.owner != sources.identity.owner
+        || current.thread != sources.identity.thread
+    {
+        return Err(Error::Denied);
+    }
+    require(conn, actor, &sources.request, &sources.prepared, now).await
+}
+
+/// Check an opened preview's exact current stamp and ordinary gates, never its audience again.
+pub async fn check_deletion_plan_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    sources: &DeletionSources,
+    expected: &MembershipStamp,
+    now: Time,
+) -> Result<bool, Error> {
+    require_deletion_sources_in(conn, actor, sources, now).await?;
+    super::DeletionConfirmation::Membership(expected)
+        .matches(&stamp(conn, &sources.prepared.entries, now).await?, now)
+}
+
+/// Consume only the original locked closure after its operation admits all native sources.
+pub async fn complete_deletion_plan_in(
+    conn: &mut Conn,
+    actor: Actor<'_>,
+    sources: DeletionSources,
+    now: Time,
+    options: Options,
+) -> Result<Plan, Error> {
+    if sources.transaction.is_none() {
+        return Err(Error::Stale);
+    }
+    require_deletion_sources_in(conn, actor, &sources, now).await?;
+    let stamp = stamp(conn, &sources.prepared.entries, now).await?;
+    let audience = super::audience::read(conn, actor, &sources.prepared.entries, now).await?;
     let (_, losing) = super::audience::difference(&audience, &HashMap::new(), &[]);
     Ok(Plan {
         stamp,

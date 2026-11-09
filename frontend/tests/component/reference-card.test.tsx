@@ -1,7 +1,7 @@
 /** A reference chip's card: it opens under the pointer and under the keyboard's focus, shows the thing and the part it
  * names with Open, Open beside and Copy reference, copies the words an agent follows, and is not there for a reader
  * who may not read the thing. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Documents from '@/api/documents';
@@ -57,7 +57,7 @@ beforeEach(() => {
   calls.document.mockResolvedValue({ id: DOC, title: 'Rollout plan' });
   calls.copy.mockResolvedValue(true);
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(async () => { cleanup(); vi.unstubAllGlobals(); await i18n.changeLanguage('en'); });
 
 const chip = () => show(<NamedChip path={`/doc/${DOC}`} id={DOC} kind="doc" original={i18n.t('people.privateReference')} reference={{ kind: 'document', id: DOC, block: BLOCK }} />);
 const card = () => document.querySelector('[data-reference-card]');
@@ -204,4 +204,19 @@ it('reads a reference from its address and writes the words an agent follows', (
   expect(referenceTarget(preview)).toBe(`/doc/${DOC}?block=${BLOCK}`);
   expect(referenceText({ ...preview, title: 'Plan [v2]' })).toBe(`[Plan \\[v2\\]](id:${DOC}#3)`);
   expect(referenceText({ ...preview, part: null })).toBe(`[Rollout plan](id:${DOC})`);
+});
+
+
+it.each(['en', 'zh-CN'])('copies the block web address and the agent reference in %s', async (locale) => {
+  await i18n.changeLanguage(locale);
+  const user = userEvent.setup();
+  chip();
+  await user.click(await screen.findByRole('link', { name: 'Rollout plan' }));
+  await waitFor(() => expect(card()).not.toBeNull());
+  const opened = card(); if (!(opened instanceof HTMLElement)) throw new Error('The reference card must be open');
+  await user.click(within(opened).getByRole('button', { name: i18n.t('actions.copyLink.label') }));
+  expect(calls.copy).toHaveBeenCalledWith(`${location.origin}/doc/${DOC}?block=${BLOCK}`, i18n.t('common.linkCopied'));
+  await user.click(within(opened).getByRole('button', { name: i18n.t('people.reference.copy') }));
+  expect(calls.copy).toHaveBeenCalledWith(`[Rollout plan](id:${DOC}#3)`, i18n.t('people.reference.copied'));
+  expect(calls.preview).toHaveBeenCalledOnce();
 });

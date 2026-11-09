@@ -54,7 +54,7 @@ export function PortsGrants({ environmentId, capabilities, onChanged }: { enviro
     <Dialog open={chosen !== null} onOpenChange={(open) => { if (!open && !busy) setChosen(null); }} dismissible={!busy}
       title={chosen === null ? '' : t(granting ? 'ports.grants.grantTitle' : 'ports.grants.revokeTitle', { label: capabilityName(chosen.capability.key, chosen.capability.label, t) })}
       description={chosen === null ? '' : granting ? t(`ports.grants.grantAbout.${chosen.capability.kind}`) : t('ports.grants.revokeAbout')}
-      footer={<><Button onClick={() => setChosen(null)} blocked={busy}>{t('ports.cancel')}</Button><Button variant={granting ? 'primary' : 'danger'} icon={granting ? <Check aria-hidden /> : <X aria-hidden />} pending={busy} onClick={() => void act()}>{t(granting ? 'ports.grants.grant' : 'ports.grants.revoke')}</Button></>}>
+      footer={<><Button onClick={() => setChosen(null)} blocked={busy} reason={busy ? t('ui.unavailable.saving') : undefined}>{t('ports.cancel')}</Button><Button variant={granting ? 'primary' : 'danger'} icon={granting ? <Check aria-hidden /> : <X aria-hidden />} pending={busy} reason={busy ? t('ui.unavailable.saving') : undefined} onClick={() => void act()}>{t(granting ? 'ports.grants.grant' : 'ports.grants.revoke')}</Button></>}>
       <PortFault error={error} />
     </Dialog>
   </section>;

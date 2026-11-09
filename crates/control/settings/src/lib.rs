@@ -24,6 +24,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod account_policy;
 pub mod locks;
 pub mod merge;
 pub mod provenance;
@@ -38,7 +39,8 @@ use orch_types::Id;
 
 pub use provenance::SettingView;
 pub use resolver::{
-    ProviderAt, Snapshot, Wanted, cleanup_at_hosts, get, get_at_providers, resolve, resolve_all,
+    ProviderAt, Snapshot, Wanted, cleanup_at_hosts, get, get_at_nodes, get_at_providers, resolve,
+    resolve_all,
 };
 mod provider_runtime;
 pub use provider_runtime::{

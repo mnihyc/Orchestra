@@ -22,7 +22,7 @@ import { show } from './support';
 const NOW=Date.parse('2026-10-28T12:00:00Z');
 const planRead=vi.hoisted(()=>vi.fn<()=>Promise<{items:ProviderPlanSeries[];next_cursor:string | null}>>());
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
-vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,planUsageQuery:(id:string,from:string,to:string,bucket:string,at:string | null,cursor?:string)=>({queryKey:['chart-plan',id,from,to,bucket,at,cursor],staleTime:Infinity,queryFn:planRead})}));
+vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,creditUsageQuery:()=>({queryKey:['chart-credit'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})}),planUsageQuery:(id:string,from:string,to:string,bucket:string,at:string | null,cursor?:string)=>({queryKey:['chart-plan',id,from,to,bucket,at,cursor],staleTime:Infinity,queryFn:planRead})}));
 vi.mock('@tanstack/react-router',async(load)=>({...await load<typeof RouterModule>(),Link:({to,params,search,hash,children,...anchor}:AnchorHTMLAttributes<HTMLAnchorElement> & {to:string;params?:Record<string,string>;search?:Record<string,string>;hash?:string;children?:ReactNode})=><a {...anchor} href={`${to.replace(/\$(\w+)/g,(_,key:string)=>params?.[key] ?? '')}?${new URLSearchParams(search)}${hash===undefined ? '' : `#${hash}`}`}>{children}</a>}));
 beforeEach(()=>{vi.spyOn(Date,'now').mockReturnValue(NOW);planRead.mockReset();});
 afterEach(()=>vi.restoreAllMocks());
@@ -130,7 +130,7 @@ it('uses the same forecast line below the overview meter and a period cap',()=>{
   const shown=show(<ProviderUsageCard provider={provider} />);
   const meter=screen.getByRole('meter',{name:'5-hour window'});
   expect(meter.closest('li')?.querySelector('[data-forecast-state="runs_out"]')).toBeInTheDocument();
-  expect(screen.getByRole('link',{name:'Over time'})).toHaveAttribute('href',expect.stringContaining('#usage-plan'));
+  expect(within(screen.getByRole('group',{name:'Usage windows'})).getByRole('link',{name:'Over time'})).toHaveAttribute('href',expect.stringContaining('#usage-plan'));
   shown.unmount();
   show(<ForecastLine cap usedPercent={20} resetsAt={new Date(NOW+12*3_600_000).toISOString()} forecast={{basis:'period',percent_at_end:80,runs_out_at:null}} />);
   expect(screen.getByText(/At this period's pace: about 80 % by/)).toBeInTheDocument();

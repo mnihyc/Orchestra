@@ -44,6 +44,13 @@ fn parts(usage: &Json) -> TokensReportedApart {
     }
 }
 
+fn search_count(usage: &Json) -> Option<i64> {
+    usage
+        .pointer("/server_tool_use/web_search_requests")
+        .and_then(Json::as_i64)
+        .filter(|count| *count >= 0)
+}
+
 fn counts(usage: &Json) -> RequestTokens {
     // Reuse the existing shared normalization of Claude's uncached-input parts,
     // retaining absence instead of publishing that normalizer's numeric defaults.
@@ -79,6 +86,8 @@ impl Requests {
         let request = UsageRequest {
             id: format!("main:{}", self.serial),
             asked: Some(at),
+            attempt: Some(1),
+            tool_refs: Some(Vec::new()),
             ..UsageRequest::default()
         };
         self.pending = Some(request.clone());
@@ -112,7 +121,24 @@ impl Requests {
         let stream = parent.unwrap_or("main").to_owned();
         let event = frame.get("event").unwrap_or(&Json::Null);
         match frame.text("type") {
-            Some("system") if frame.text("subtype") == Some("api_retry") => {
+            Some("system")
+                if frame.text("subtype") == Some("api_retry")
+                    && frame.get("parent_tool_use_id").is_none_or(Json::is_null) =>
+            {
+                let native_next = frame
+                    .get("attempt")
+                    .and_then(Json::as_i64)
+                    .filter(|n| *n > 0)
+                    .and_then(|n| n.checked_add(1));
+                if native_next.is_some()
+                    && !self.open.contains_key("main")
+                    && self
+                        .pending
+                        .as_ref()
+                        .is_some_and(|request| request.attempt == native_next)
+                {
+                    return Vec::new();
+                }
                 let retry = Frame::from_value(
                     serde_json::json!({"type":"result","api_error_status":frame.get("error_status"),"api_error":frame.text("error"),"result":frame.text("message").unwrap_or("The provider request is being retried.")}),
                 );
@@ -123,17 +149,27 @@ impl Requests {
                     &chrono::Utc,
                 );
                 let mut reports = Vec::new();
+                let mut next_attempt = None;
+                let mut retry_of = None;
                 if let Some(mut failed) = self
                     .open
                     .remove("main")
                     .map(|open| open.request)
                     .or_else(|| self.pending.take())
                 {
+                    next_attempt = failed.attempt.and_then(|n| n.checked_add(1));
+                    retry_of = Some(failed.id.clone());
+                    failed.error_reason = error.reason.clone();
+                    failed.upstream_status = error.status;
                     failed.finish(&error.code, Some(&error.message), error.said.as_deref());
                     self.finished.insert(failed.id.clone());
                     reports.push(failed);
                 }
-                reports.push(self.asked(at));
+                let mut next = self.asked(at);
+                next.attempt = native_next.or(next_attempt);
+                next.retry_of = retry_of;
+                self.pending = Some(next.clone());
+                reports.push(next);
                 return reports;
             }
             Some("user")
@@ -179,10 +215,13 @@ impl Requests {
                             ..UsageRequest::default()
                         }
                     };
+                    raw.tool_refs = Some(Vec::new());
+                    raw.provider_request_id = (!id.is_empty()).then(|| id.to_owned());
                     raw.model = message
                         .get("model")
                         .and_then(Json::as_str)
                         .map(str::to_owned);
+                    raw.web_searches = search_count(message.get("usage").unwrap_or(&Json::Null));
                     raw.subagent = parent.is_some();
                     raw.first_output = parent.is_none().then_some(at);
                     raw.output_streamed = Some(parent.is_none());
@@ -203,6 +242,18 @@ impl Requests {
                     return reports;
                 }
                 "content_block_start" => {
+                    let block = event.get("content_block").unwrap_or(&Json::Null);
+                    if text(block, "type") == "tool_use"
+                        && let Some(open) = self.open.get_mut(&stream)
+                    {
+                        let id = text(block, "id");
+                        if !id.is_empty() {
+                            let refs = open.request.tool_refs.get_or_insert_with(Vec::new);
+                            if !refs.iter().any(|known| known == id) {
+                                refs.push(id.to_owned());
+                            }
+                        }
+                    }
                     if text(event.get("content_block").unwrap_or(&Json::Null), "type") == "thinking"
                         && let Some(open) = self.open.get_mut(&stream)
                     {
@@ -225,6 +276,11 @@ impl Requests {
                 }
                 "message_delta" => {
                     if let Some(open) = self.open.get_mut(&stream) {
+                        if let Some(searches) =
+                            search_count(event.get("usage").unwrap_or(&Json::Null))
+                        {
+                            open.request.web_searches = Some(searches);
+                        }
                         if let Some(output) =
                             event.pointer("/usage/output_tokens").and_then(Json::as_i64)
                         {
@@ -266,7 +322,50 @@ impl Requests {
             },
             Some("assistant") if parent.is_some() => {
                 let message = frame.get("message").unwrap_or(&Json::Null);
-                let id = format!("{stream}:{}", text(message, "id"));
+                let message_id = text(message, "id");
+                if !message_id.is_empty()
+                    && let Some(open) = self.open.get_mut(&stream).filter(|open| {
+                        open.request.provider_request_id.as_deref() == Some(message_id)
+                    })
+                {
+                    // The CLI also emits the whole assistant block before the stream's
+                    // final usage delta. Its start-usage output count is not a completion.
+                    let usage = message.get("usage").unwrap_or(&Json::Null);
+                    let observed = counts(usage);
+                    if open.request.model.is_none() {
+                        open.request.model = message
+                            .get("model")
+                            .and_then(Json::as_str)
+                            .map(str::to_owned);
+                    }
+                    open.counts.input_tokens = open.counts.input_tokens.or(observed.input_tokens);
+                    open.counts.cached_input_tokens = open
+                        .counts
+                        .cached_input_tokens
+                        .or(observed.cached_input_tokens);
+                    open.counts.cache_write_tokens = open
+                        .counts
+                        .cache_write_tokens
+                        .or(observed.cache_write_tokens);
+                    open.request.web_searches = search_count(usage).or(open.request.web_searches);
+                    for block in message
+                        .get("content")
+                        .and_then(Json::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        open.thinking |= text(block, "type") == "thinking";
+                        if text(block, "type") == "tool_use" {
+                            let id = text(block, "id");
+                            let refs = open.request.tool_refs.get_or_insert_with(Vec::new);
+                            if !id.is_empty() && !refs.iter().any(|known| known == id) {
+                                refs.push(id.to_owned());
+                            }
+                        }
+                    }
+                    return Vec::new();
+                }
+                let id = format!("{stream}:{message_id}");
                 if self.finished.insert(id.clone()) {
                     self.open.remove(&stream);
                     let mut raw = UsageRequest {
@@ -276,6 +375,21 @@ impl Requests {
                             .get("model")
                             .and_then(Json::as_str)
                             .map(str::to_owned),
+                        provider_request_id: (!text(message, "id").is_empty())
+                            .then(|| text(message, "id").to_owned()),
+                        tool_refs: Some(
+                            message
+                                .get("content")
+                                .and_then(Json::as_array)
+                                .into_iter()
+                                .flatten()
+                                .filter(|block| text(block, "type") == "tool_use")
+                                .filter_map(|block| block.get("id").and_then(Json::as_str))
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_owned)
+                                .collect(),
+                        ),
+                        web_searches: search_count(message.get("usage").unwrap_or(&Json::Null)),
                         tokens: counts(message.get("usage").unwrap_or(&Json::Null)),
                         output_streamed: Some(false),
                         ..UsageRequest::default()
@@ -287,7 +401,16 @@ impl Requests {
             Some("result") => {
                 let (code, message) = outcome.unwrap_or(("done", None));
                 let mut ended = Vec::new();
-                for (_, mut open) in self.open.drain() {
+                let closing: Vec<_> = self
+                    .open
+                    .keys()
+                    .filter(|stream| stream.as_str() == "main")
+                    .cloned()
+                    .collect();
+                for stream in closing {
+                    let Some(mut open) = self.open.remove(&stream) else {
+                        continue;
+                    };
                     // A result without message_stop has no proven last-output boundary.
                     open.request.tokens = open.counts;
                     open.request.reasoning_hidden = (open.thinking
@@ -299,6 +422,7 @@ impl Requests {
                 let prior = self.finished.iter().any(|id| id.starts_with("main:"));
                 if let Some(mut raw) = self.pending.take() {
                     if !prior {
+                        raw.web_searches = search_count(frame.get("usage").unwrap_or(&Json::Null));
                         raw.tokens = counts(frame.get("usage").unwrap_or(&Json::Null));
                     }
                     raw.finish(code, message, None);
@@ -306,6 +430,7 @@ impl Requests {
                 } else if ended.is_empty() && !prior {
                     let mut raw = UsageRequest {
                         id: format!("turn:{}", self.serial),
+                        web_searches: search_count(frame.get("usage").unwrap_or(&Json::Null)),
                         tokens: if prior {
                             RequestTokens::default()
                         } else {
@@ -321,5 +446,102 @@ impl Requests {
             _ => {}
         }
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod native_child_usage_tests {
+    #![allow(
+        clippy::unwrap_used,
+        reason = "a protocol assertion fails by panicking"
+    )]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn whole_child_echoes_do_not_finish_the_stream_before_its_final_usage() {
+        let at: Time = "2026-11-08T03:00:00Z".parse().unwrap();
+        let mut requests = Requests::default();
+        let mut total = 0;
+        for (id, input) in [("child-first", 70), ("child-after-barrier", 90)] {
+            let frame = |event: Json| {
+                Frame::from_value(
+                    json!({"type":"stream_event","parent_tool_use_id":"owned-child","event":event}),
+                )
+            };
+            let _=requests.observe(&frame(json!({"type":"message_start","message":{"id":id,"model":"actual-child-model",
+                "usage":{"input_tokens":input,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}})),at,None);
+            let whole = Frame::from_value(
+                json!({"type":"assistant","parent_tool_use_id":"owned-child","message":{"id":id,
+                "model":"actual-child-model","content":[{"type":"tool_use","id":"child-command","name":"Bash","input":{}}],
+                "usage":{"input_tokens":input,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1}}}),
+            );
+            assert!(
+                requests.observe(&whole, at, None).is_empty(),
+                "the whole block is not the final usage boundary"
+            );
+            // The foreground result does not end this separately observed child request.
+            let _ = requests.observe(
+                &Frame::from_value(json!({"type":"result","subtype":"success"})),
+                at,
+                Some(("done", None)),
+            );
+            let _=requests.observe(&frame(json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}})),at,None);
+            let done = requests.observe(&frame(json!({"type":"message_stop"})), at, None);
+            assert_eq!(done.len(), 1);
+            let measured = &done[0];
+            assert!(measured.subagent);
+            assert_eq!(measured.tokens.input_tokens, Some(input));
+            assert_eq!(measured.tokens.output_tokens, Some(10));
+            assert_eq!(
+                measured.tool_refs.as_deref(),
+                Some(["child-command".to_owned()].as_slice())
+            );
+            assert!(
+                measured.asked.is_none()
+                    && measured.first_output.is_none()
+                    && measured.end.is_none(),
+                "untold child times stay unsupported"
+            );
+            total += measured.tokens.input_tokens.unwrap() + measured.tokens.output_tokens.unwrap();
+            assert!(
+                requests.observe(&whole, at, None).is_empty(),
+                "the same native request is not counted again"
+            );
+        }
+        assert_eq!(total, 180);
+    }
+}
+
+#[cfg(test)]
+mod native_search_tests {
+    #![allow(clippy::expect_used, reason = "a test fails by panicking")]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn native_search_reports_keep_the_vendor_cumulative_count() {
+        let at = "2026-10-01T00:00:00Z".parse().expect("a fixed timestamp");
+        let mut requests = Requests::default();
+        let _ = requests.asked(at);
+        let start = Frame::from_value(json!({"type":"stream_event","event":{
+            "type":"message_start","message":{"id":"search-message","model":"chosen","usage":{
+                "input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":1
+            }}
+        }}));
+        let _ = requests.observe(&start, at, None);
+        let delta = Frame::from_value(json!({"type":"stream_event","event":{
+            "type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{
+                "output_tokens":5,"server_tool_use":{"web_search_requests":2}
+            }
+        }}));
+        let _ = requests.observe(&delta, at, None);
+        let _ = requests.observe(&delta, at, None);
+        let stop =
+            Frame::from_value(json!({"type":"stream_event","event":{"type":"message_stop"}}));
+        let ended = requests.observe(&stop, at, None);
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].web_searches, Some(2));
+        assert_eq!(ended[0].measured().web_searches.value(), Some(&2));
     }
 }

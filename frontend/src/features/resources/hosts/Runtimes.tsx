@@ -102,7 +102,7 @@ export function HostRuntimes({ host }: { host: Host }) {
     },
   });
 
-  if (list.isPending) return <SkeletonRows rows={4} />;
+  if (list.isPending) return <SkeletonRows read={list} rows={4} />;
   if (list.isError) return <ErrorState compact title={t('hosts.runtimes.title')} error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
 
   const columns: Column<Runtime>[] = [
