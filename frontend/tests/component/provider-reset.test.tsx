@@ -57,3 +57,17 @@ it('offers no reset for a sign-in when its source does not spend resets', () => 
   show(<ProviderReset provider={provider} />);
   expect(screen.queryByRole('button',{name:i18n.t('providerPlan.reset.open')})).not.toBeInTheDocument();
 });
+
+it('shows a genuine receipt outcome as completed without provider facts or an unknown-result retry', async () => {
+  client.session.setState({ status:'signed_in',userId:'ada' });
+  const provider = planProvider({ kind:'api' });
+  provider.facts.available_resets!.credits![0]!.expires_at = null;
+  vi.mocked(consumeReset).mockImplementation((id, body) => Promise.resolve<Awaited<ReturnType<typeof consumeReset>>>({ projection:'receipt',provider_id:id,request_id:body.request_id,outcome:'nothingToReset' }));
+  show(<ProviderReset provider={provider} />);
+  await userEvent.click(screen.getByRole('button', { name:i18n.t('providerPlan.reset.open') }));
+  await userEvent.click(screen.getByRole('button', { name:'Use this reset' }));
+  await waitFor(() => expect(consumeReset).toHaveBeenCalledOnce());
+  expect(await screen.findByText(/nothingToReset/)).toBeVisible();
+  expect(screen.queryByText(i18n.t('providerPlan.reset.unknown'))).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name:i18n.t('providerPlan.reset.check') })).not.toBeInTheDocument();
+});

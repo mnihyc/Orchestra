@@ -1,6 +1,8 @@
 /** Scoped notification status, pause, retained routes, device registrations and grouped read requests. */
 import { queryOptions } from '@tanstack/react-query';
 
+import { suppliedRead } from '@/api/readScheduler';
+import type { OutsideStatus } from '@/generated/api-types';
 import { api, done, ok, repeatable } from '@/api/client';
 import { INBOX_PAGE, notificationPrefsKey } from '@/api/notifications';
 import type { AwayPage, GroupReadBody, PrefsChange, ReadResult, RouteChange } from '@/features/settings/personal/away/types';
@@ -14,6 +16,14 @@ export const groupedKey = ['away', 'groups'] as const;
 export const outsideQuery = (nodeId?: string) => queryOptions({
   queryKey: [...outsideKey, nodeId ?? null],
   queryFn: ({ signal }) => ok(api.GET('/notifications/summary', { params: { query: nodeId === undefined ? {} : { node_id: nodeId } }, signal })),
+  retry: false,
+});
+
+/** Scoped consumers need the same status the setup producer already observed, not another counter read. */
+export const outsideStatusQuery = (nodeId: string) => queryOptions({
+  queryKey: ['away', 'outside-status', nodeId] as const,
+  ...suppliedRead(['away', 'outside-status', nodeId]),
+  queryFn: async ({ signal }): Promise<OutsideStatus> => (await ok(api.GET('/notifications/summary', { params: { query: { node_id: nodeId } }, signal }))).outside,
   retry: false,
 });
 

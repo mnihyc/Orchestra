@@ -237,6 +237,7 @@ async fn a_session_is_resumed_by_a_whole_new_adapter_on_the_same_home() {
         .start(
             AgentStart {
                 provider_id: new_id(),
+                provider_kind: None,
                 agent_id: new_id(),
                 harness_kind: "claude-code".into(),
                 profile: AgentProfile {

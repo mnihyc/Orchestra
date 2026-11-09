@@ -20,6 +20,11 @@
 //! access engine for each thing that changes and for nothing else; the estimate; and, for a switch,
 //! what is left behind.
 
+pub mod command;
+/// Native original-Thread deletion inside the existing fork mechanism.
+pub mod moving;
+pub mod operation;
+pub(crate) mod program;
 use crate::access::{Answer, ProviderUse};
 use crate::binding::{self, Facts};
 use crate::engine::Engine;
@@ -144,6 +149,9 @@ pub enum PlanError {
     /// A fork, switch or move holds the thread already.
     #[error("another job holds the thread")]
     Held(Id),
+    /// The requested initial agent contribution is not valid.
+    #[error("the initial agent access could not be chosen: {0}")]
+    AgentAccess(Box<crate::sharing::ShareError>),
     /// Something the engine stands on failed.
     #[error(transparent)]
     Internal(#[from] EngineError),
@@ -188,6 +196,8 @@ impl From<serde_json::Error> for PlanError {
 pub struct Draft {
     /// What was asked, with the omitted members left omitted.
     pub request: ForkRequest,
+    /// The exact choice or omitted preset captured for this new holder.
+    pub(crate) agent_access: binding::BirthAgentAccess,
     /// The plan; its identifier is nil until it is kept, and the parts that are the API's to say are
     /// empty.
     pub plan: ForkPlan,
@@ -200,6 +210,155 @@ pub struct Draft {
     pub(crate) source_scope: SourceScope,
     /// What the job does with the mounts of a new environment: those it detaches and the data it copies.
     pub mount_decisions: crate::mount_copies::MountDecisions,
+    /// Existing native objects whose names/configuration entered this exact plan.
+    pub disclosure: Vec<orch_access_contract::decisions::ObjectRef>,
+}
+
+/// The native selected binding and ordinary planning decisions, before any supplier IO.
+/// This value is created by the same native selector used by ordinary drafts and confirmation.
+#[derive(Clone)]
+pub struct PreparedFork {
+    principal: Principal,
+    source: Source,
+    target: Target,
+    request: ForkRequest,
+    history: orch_api_contract::forks::ForkHistory,
+    options: AppliedChangeOptions,
+    options_listed: Vec<binding::ArrangementOption>,
+    approval_mode: ApprovalMode,
+    blockers: Blockers,
+    reach: Reach,
+    now: DateTime<Utc>,
+    captured_agent_access: Option<binding::BirthAgentAccess>,
+}
+impl PreparedFork {
+    /// The actual stored source, including its selected history and physical execution.
+    pub fn source(&self) -> &ThreadRow {
+        self.source.thread()
+    }
+    /// The existing source environment whose native suppliers are used.
+    pub fn source_environment(&self) -> Option<&EnvironmentRow> {
+        self.source.environment()
+    }
+    /// The native selected target profile, not every candidate considered by the chooser.
+    pub fn agent(&self) -> &AgentRow {
+        &self.target.agent
+    }
+    /// The native selected target provider.
+    pub fn provider(&self) -> &ProviderRow {
+        &self.target.provider
+    }
+    /// Existing destination where selected; a new environment has no invented identity.
+    pub fn target_environment(&self) -> Option<&EnvironmentRow> {
+        match &self.target.landing {
+            Landing::Same => self.source.environment(),
+            Landing::Existing(row) => Some(row),
+            Landing::New { .. } => None,
+        }
+    }
+    /// The real parent of a prospective new thread.
+    pub fn topic(&self) -> Id {
+        self.target.topic
+    }
+    /// The native request, still distinguishing omitted and explicit options.
+    pub fn request(&self) -> &ForkRequest {
+        &self.request
+    }
+    /// The selected directory, independent of a client's omitted default.
+    pub fn directory(&self) -> &str {
+        &self.target.directory
+    }
+    /// The resolved history mode, including the native inherited default.
+    pub fn history(&self) -> &orch_api_contract::forks::ForkHistory {
+        &self.history
+    }
+    pub(crate) fn source_ref(&self) -> NodeRef {
+        thread_ref(self.source.thread())
+    }
+    pub(crate) fn missing_thread_manage(&self) -> bool {
+        self.blockers.lacks.iter().any(|(_, missing)| {
+            missing
+                .iter()
+                .any(|lack| lack.permissions.contains(&Permission::ThreadManage))
+        })
+    }
+    /// The same shared new landing chosen for the first native batch member.
+    pub(crate) async fn share_environment(
+        &self,
+        conn: &mut Conn,
+        environment: &mut Option<ForkEnvironment>,
+    ) -> Result<(), PlanError> {
+        if let Some(ForkEnvironment::New { new }) = environment {
+            if new.home_node_id.is_none() {
+                new.home_node_id = Some(self.source.thread().topic_id);
+            }
+            if new.template_id.is_none()
+                && let Some(home) = new.home_node_id
+            {
+                new.template_id =
+                    setting::<Id>(conn, SettingsPlace::Node(home), keys::ENV_TEMPLATE_ID).await?;
+            }
+            if new.host_id.is_none()
+                && let Landing::New {
+                    host: Some(host), ..
+                } = &self.target.landing
+            {
+                new.host_id = Some(Some(host.host.id));
+            }
+        }
+        Ok(())
+    }
+    /// Actual unchanged native association at a later source checkpoint.
+    pub fn preserves(&self, fresh: &Self) -> bool {
+        SourceScope::of(self.source.thread(), self.reach)
+            == SourceScope::of(fresh.source.thread(), fresh.reach)
+            && self.source.thread().node_id == fresh.source.thread().node_id
+            && self.source.thread().topic_id == fresh.source.thread().topic_id
+            && self.source.thread().workspace_dir == fresh.source.thread().workspace_dir
+            && self.source.preserves(&fresh.source)
+            && self.target.agent.id == fresh.target.agent.id
+            && self.target.provider.id == fresh.target.provider.id
+            && self.target.descriptor == fresh.target.descriptor
+            && self.target.model == fresh.target.model
+            && self.target.effort == fresh.target.effort
+            && self.target.arrangement == fresh.target.arrangement
+            && self.target.directory == fresh.target.directory
+            && self.target.topic == fresh.target.topic
+            && self.request == fresh.request
+            && self.history == fresh.history
+            && self.options == fresh.options
+            && self.options_listed == fresh.options_listed
+            && self.approval_mode == fresh.approval_mode
+            && self.blockers == fresh.blockers
+            && self.captured_agent_access == fresh.captured_agent_access
+            && match (&self.target.landing, &fresh.target.landing) {
+                (Landing::Same, Landing::Same) => true,
+                (Landing::Existing(a), Landing::Existing(b)) => {
+                    a.id == b.id
+                        && a.generation == b.generation
+                        && a.machine_id == b.machine_id
+                        && a.workspace_root == b.workspace_root
+                }
+                (
+                    Landing::New {
+                        name: a,
+                        host: ah,
+                        promised: ap,
+                    },
+                    Landing::New {
+                        name: b,
+                        host: bh,
+                        promised: bp,
+                    },
+                ) => {
+                    a == b
+                        && ah.as_ref().map(|h| h.host.id) == bh.as_ref().map(|h| h.host.id)
+                        && ap.offers == bp.offers
+                        && ap.colocated == bp.colocated
+                }
+                _ => false,
+            }
+    }
 }
 
 /// What a fork's new environment would be, as far as its mounts and its MCP servers go.
@@ -274,9 +433,18 @@ pub struct StoredPlan {
     pub plan: ForkPlan,
     /// The thread it is for.
     pub source: Id,
+    /// A fork must keep the creation preset shown before confirmation.
+    #[serde(default)]
+    pub(crate) agent_access: Option<binding::BirthAgentAccess>,
     /// Old plans without an actual scope must be refreshed before execution.
     #[serde(default)]
     pub(crate) source_scope: Option<SourceScope>,
+    /// The exact source ending of a native Move; absent for every ordinary fork/switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) moving: Option<moving::Review>,
+    /// The same native explicit notice audience, retained only for this Move preflight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) move_people: Option<moving::Audience>,
 }
 
 /// One plan of a kept batch: the thread, what was asked of it, and how the caller reached it.
@@ -301,6 +469,39 @@ pub struct StoredBatch {
     pub plan: orch_api_contract::forks::ForkBatchPlan,
     /// What each plan is for, in the order of the plans.
     pub members: Vec<StoredMember>,
+}
+
+impl StoredBatch {
+    /// The executable native members used by this batch's private audience producer.
+    #[must_use]
+    pub fn recipient_threads(&self) -> Vec<Id> {
+        self.members
+            .iter()
+            .zip(&self.plan.plans)
+            .filter(|(_, plan)| plan.blockers.is_empty())
+            .map(|(member, _)| member.thread)
+            .collect()
+    }
+
+    /// The native aggregate governor, or the individually selected executable Threads.
+    #[must_use]
+    pub fn recipient_subjects(&self) -> Vec<orch_access_contract::decisions::ObjectRef> {
+        use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
+        match self.body.all_of_environment {
+            Some(id) => vec![ObjectRef {
+                kind: ObjectKind::Environment,
+                id,
+            }],
+            None => self
+                .recipient_threads()
+                .into_iter()
+                .map(|id| ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id,
+                })
+                .collect(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------- small helpers
@@ -374,7 +575,7 @@ fn under<'a>(path: &'a str, directory: &str) -> Option<&'a str> {
 // ---------------------------------------------------------------- what the plan is made from
 
 /// The blockers of a plan as they are found.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 struct Blockers {
     list: Vec<PlanBlocker>,
     lacks: Vec<(usize, Vec<Missing>)>,
@@ -393,15 +594,81 @@ impl Blockers {
 }
 
 /// What the thread runs on now.
-struct Source {
+#[derive(Clone)]
+struct AgentSource {
     thread: ThreadRow,
     agent: AgentRow,
     provider: ProviderRow,
-    environment: EnvironmentRow,
+    environment: Option<EnvironmentRow>,
     descriptor: AgentDescriptor,
     settings: Resolved,
     arrangement: Option<AgentArrangement>,
     model: Option<String>,
+}
+
+impl AgentSource {
+    /// Physical suppliers require a real workspace; optional bindings stay absent in source facts.
+    fn workspace(&self) -> Result<&EnvironmentRow, PlanError> {
+        self.environment.as_ref().ok_or_else(|| {
+            PlanError::invalid(
+                "environment",
+                "The native source has no workspace to carry over",
+            )
+        })
+    }
+}
+
+/// A built-in source has no native profile, workspace or native archive supplier.
+#[derive(Clone)]
+struct ProgramSource {
+    thread: ThreadRow,
+    program: orch_api_contract::threads::BuiltinThreadProgram,
+    provider: ProviderRow,
+    model: String,
+    settings: Resolved,
+}
+
+#[derive(Clone)]
+enum Source {
+    Agent(Box<AgentSource>),
+    Program(Box<ProgramSource>),
+}
+impl Source {
+    fn thread(&self) -> &ThreadRow {
+        match self {
+            Self::Agent(source) => &source.thread,
+            Self::Program(source) => &source.thread,
+        }
+    }
+    fn environment(&self) -> Option<&EnvironmentRow> {
+        match self {
+            Self::Agent(source) => source.environment.as_ref(),
+            Self::Program(_) => None,
+        }
+    }
+    fn preserves(&self, fresh: &Self) -> bool {
+        match (self, fresh) {
+            (Self::Agent(a), Self::Agent(b)) => {
+                a.agent.id == b.agent.id
+                    && a.provider.id == b.provider.id
+                    && a.environment
+                        .as_ref()
+                        .map(|env| (env.id, env.generation, env.machine_id, &env.workspace_root))
+                        == b.environment.as_ref().map(|env| {
+                            (env.id, env.generation, env.machine_id, &env.workspace_root)
+                        })
+                    && a.descriptor == b.descriptor
+                    && a.settings == b.settings
+            }
+            (Self::Program(a), Self::Program(b)) => {
+                a.program == b.program
+                    && a.provider.id == b.provider.id
+                    && a.model == b.model
+                    && a.settings == b.settings
+            }
+            _ => false,
+        }
+    }
 }
 
 /// Where the result lands.
@@ -465,6 +732,7 @@ impl Promised {
 }
 
 /// What the result runs on.
+#[derive(Clone)]
 struct Target {
     agent: AgentRow,
     provider: ProviderRow,
@@ -694,6 +962,11 @@ async fn choose_host(
 ) -> Result<(Option<Box<crate::places::HostPlace>>, Promised), PlanError> {
     use crate::places::{self, Ask, IDLE_MINUTES_DEFAULT};
     use orch_db::queries::resources::hosting as host_rows;
+    if let Some(config) = &new.config {
+        crate::environments::check_initial_program_consent(config).map_err(|reason| {
+            PlanError::invalid("environment.new.config.exec.version_overrides", reason)
+        })?;
+    }
     let home = new.home_node_id.unwrap_or(topic);
     let template_id: Option<Id> = match new.template_id {
         Some(id) => Some(id),
@@ -704,6 +977,7 @@ async fn choose_host(
             code::NO_HOST,
             "no template is named, and none is set for the place the environment is made in",
         );
+        crate::jobs::environment_move::preparation::select_destinations(conn, &[]).await?;
         return Ok((None, Promised::default()));
     };
     let template = match host_rows::template(conn, template_id).await? {
@@ -719,6 +993,7 @@ async fn choose_host(
                 code::NO_HOST,
                 "the template is not there, is switched off, or does not make environments",
             );
+            crate::jobs::environment_move::preparation::select_destinations(conn, &[]).await?;
             return Ok((None, Promised::default()));
         }
     };
@@ -773,8 +1048,68 @@ async fn choose_host(
     )
     .await?;
     match places::choose(&listed, named) {
-        Ok(place) => Ok((Some(Box::new(place.clone())), promised)),
+        Ok(place) => {
+            if crate::jobs::environment_move::preparation::is_active() {
+                use orch_access_contract::{
+                    decisions::ObjectRef,
+                    permissions::{ObjectKind, Permission},
+                };
+                let home_kind = orch_db::queries::hierarchy::with_ancestors(conn, &[home])
+                    .await?
+                    .into_iter()
+                    .find(|r| r.id == home)
+                    .and_then(|r| match r.kind.as_str() {
+                        "org" => Some(ObjectKind::Org),
+                        "project" => Some(ObjectKind::Project),
+                        "topic" => Some(ObjectKind::Topic),
+                        "thread" => Some(ObjectKind::Thread),
+                        _ => None,
+                    })
+                    .ok_or_else(|| EngineError::unreadable("invalid native environment home"))?;
+                let home_permission = match home_kind {
+                    ObjectKind::Org => Permission::OrgView,
+                    ObjectKind::Project => Permission::ProjectView,
+                    ObjectKind::Topic => Permission::TopicView,
+                    ObjectKind::Thread => Permission::ThreadView,
+                    _ => {
+                        return Err(EngineError::unreadable(
+                            "invalid native environment home kind",
+                        )
+                        .into());
+                    }
+                };
+                crate::jobs::environment_move::preparation::select_destinations(
+                    conn,
+                    &[
+                        (
+                            ObjectRef {
+                                kind: ObjectKind::Host,
+                                id: place.host.id,
+                            },
+                            Permission::HostUse,
+                        ),
+                        (
+                            ObjectRef {
+                                kind: ObjectKind::Template,
+                                id: template_id,
+                            },
+                            Permission::TemplateUse,
+                        ),
+                        (
+                            ObjectRef {
+                                kind: home_kind,
+                                id: home,
+                            },
+                            home_permission,
+                        ),
+                    ],
+                )
+                .await?;
+            }
+            Ok((Some(Box::new(place.clone())), promised))
+        }
         Err(refused) => {
+            crate::jobs::environment_move::preparation::select_destinations(conn, &[]).await?;
             blockers.add(refused.code, refused.message);
             Ok((None, promised))
         }
@@ -789,10 +1124,11 @@ async fn choose_host(
 )]
 async fn choose_agent(
     conn: &mut Conn,
-    source: &Source,
+    source: Option<&AgentSource>,
+    scope: Id,
     request: &ForkRequest,
     provider: &ProviderRow,
-    judged_in: &EnvironmentRow,
+    judged_in: Option<&EnvironmentRow>,
     promised: Option<&Promised>,
     entry: Option<Vec<AgentArrangement>>,
     settings: &Resolved,
@@ -803,11 +1139,11 @@ async fn choose_agent(
     match named {
         Some(id) => candidates.push(id),
         None => {
-            candidates.push(source.agent.id);
+            candidates.extend(source.map(|source| source.agent.id));
             candidates.extend(provider.agent_id);
             if let Some(default) = setting::<Id>(
                 conn,
-                SettingsPlace::Node(source.thread.node_id),
+                SettingsPlace::Node(scope),
                 keys::AGENT_DEFAULT_AGENT_ID,
             )
             .await?
@@ -818,8 +1154,10 @@ async fn choose_agent(
     }
     candidates.dedup();
     let mut first: Option<(AgentRow, AgentDescriptor)> = None;
-    for id in candidates {
-        let Some(agent) = resources::agent(conn, id)
+    let mut program_facts = None;
+    let mut programs_loaded = false;
+    for id in &candidates {
+        let Some(agent) = resources::agent(conn, *id)
             .await?
             .filter(|agent| agent.deleted_at.is_none() && !agent.disabled)
         else {
@@ -828,7 +1166,20 @@ async fn choose_agent(
         let Some(descriptor) = harnesses::current_descriptor(conn, &agent).await? else {
             continue;
         };
-        let offers = binding::environment_offers(conn, judged_in).await?;
+        if !programs_loaded
+            && promised.is_none()
+            && binding::needs_machine_program(&descriptor)
+            && let Some(judged_in) = judged_in
+        {
+            program_facts =
+                binding::prepare_machine_program_ids(conn, judged_in, &[provider], &candidates)
+                    .await?;
+            programs_loaded = true;
+        }
+        let offers = match judged_in {
+            Some(environment) => binding::environment_offers(conn, environment).await?,
+            None => binding::EnvironmentOffers::default(),
+        };
         let machine = binding::machine_arrangements_of(conn, provider).await?;
         let facts = Facts {
             descriptor: &descriptor,
@@ -838,7 +1189,19 @@ async fn choose_agent(
             settings,
             entry: entry.clone(),
             colocated: promised.map_or(offers.colocated, |promised| promised.colocated.clone()),
-            runtime: binding::runtime_facts(conn, &agent, provider, judged_in).await?,
+            runtime: match judged_in {
+                Some(environment) => {
+                    binding::runtime_facts_prepared(
+                        conn,
+                        &agent,
+                        provider,
+                        environment,
+                        program_facts.as_ref(),
+                    )
+                    .await?
+                }
+                None => binding::runtime_facts_for_target(conn, &agent, provider, None).await?,
+            },
         };
         let fits = match promised {
             Some(promised) => {
@@ -861,7 +1224,13 @@ async fn choose_agent(
                 code::UNAVAILABLE,
                 "the agent profile is not there, is switched off, or has not reported what its harness is",
             );
-            Ok((source.agent.clone(), source.descriptor.clone()))
+            match source {
+                Some(source) => Ok((source.agent.clone(), source.descriptor.clone())),
+                None => Err(PlanError::invalid(
+                    "to.agent_id",
+                    "Choose an available native agent profile for the destination",
+                )),
+            }
         }
     }
 }
@@ -978,6 +1347,7 @@ impl Engine {
         directory: &str,
         selection: Option<&FileSelection>,
         now: DateTime<Utc>,
+        preparation: Option<&operation::Preparation>,
     ) -> Result<Listing, EngineError> {
         let listing = Listing {
             as_of: now,
@@ -997,6 +1367,9 @@ impl Engine {
         let (Some(blob), true) = (row.manifest_blob, self.blobs().is_some()) else {
             return Ok(listing);
         };
+        if let Some(source) = preparation {
+            source.check(self).await?;
+        }
         let manifest = match self.read_manifest(&blob).await {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -1004,6 +1377,9 @@ impl Engine {
                 return Ok(listing);
             }
         };
+        if let Some(source) = preparation {
+            source.check(self).await?;
+        }
         listing_from_manifest(&manifest, directory, selection)
     }
 
@@ -1013,6 +1389,7 @@ impl Engine {
         environment: &EnvironmentRow,
         directory: &str,
         selection: &FileSelection,
+        preparation: Option<&operation::Preparation>,
     ) -> Result<Listing, EngineError> {
         let FileSelection::Selection { include, exclude } = selection else {
             return Err(EngineError::unreadable(
@@ -1048,6 +1425,10 @@ impl Engine {
                 selection,
             },
         )?;
+        let command = match preparation {
+            Some(source) => source.command(self, command).await?,
+            None => command,
+        };
         let Some(crate::commands::Outcome::Succeeded(value)) = self.ask_bounded(command).await?
         else {
             return Err(EngineError::unreadable(
@@ -1067,6 +1448,9 @@ impl Engine {
         )
         .await?;
         let manifest = self.read_manifest(&blob).await?;
+        if let Some(source) = preparation {
+            source.check(self).await?;
+        }
         listing_from_manifest(&manifest, directory, None)
     }
 }
@@ -1131,7 +1515,7 @@ impl Engine {
         request: &ForkRequest,
     ) -> Result<Draft, PlanError> {
         let mut conn = self.inner.db.acquire().await?;
-        self.draft_in(&mut conn, caller, thread, request, Reach::Seen, None)
+        self.draft_in(&mut conn, caller, thread, request, Reach::Seen, None, None)
             .await
     }
 
@@ -1142,6 +1526,10 @@ impl Engine {
         clippy::too_many_lines,
         reason = "one plan is made from one reading of the database, in the order its parts depend on each other"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the existing fork planner also accepts a previously captured creation choice at confirmation"
+    )]
     pub(crate) async fn draft_in(
         &self,
         conn: &mut Conn,
@@ -1150,656 +1538,828 @@ impl Engine {
         request: &ForkRequest,
         reach: Reach,
         own_batch: Option<Id>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
     ) -> Result<Draft, PlanError> {
-        let now = self.inner.clock.now();
-        let person = caller.user();
-        let principal = Principal::load(&mut *conn, caller.clone(), Time::new(now)).await?;
-        let thread = threads::thread(&mut *conn, thread_id)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-            .ok_or(PlanError::NotFound)?;
-        let (sees, archived) = visibility(&mut *conn, &principal, thread_id).await?;
-        if !sees && reach == Reach::Seen {
-            return Err(PlanError::NotFound);
-        }
-        if archived || thread.archived_at.is_some() {
-            return Err(PlanError::Archived);
-        }
-        let replace = request.result == ForkResult::Replace;
-        if replace && thread.side_of.is_some() {
-            return Err(PlanError::Side);
-        }
-        let (Some(agent_id), Some(provider_id), Some(environment_id)) =
-            (thread.agent_id, thread.provider_id, thread.environment_id)
-        else {
-            return Err(PlanError::invalid(
-                "",
-                "the thread is bound to nothing yet: bind it, there is nothing to carry over",
-            ));
-        };
-        if matches!(
-            request.environment,
-            Some(ForkEnvironment::Same { same: false })
-        ) {
-            return Err(PlanError::invalid(
-                "environment.same",
-                "is true, or the member is left out",
-            ));
-        }
-        if let Some(directory) = request.directory.as_deref()
-            && !binding::directory_is_valid(directory)
-        {
-            return Err(PlanError::invalid(
-                "directory",
-                "is relative to the workspace root and does not go up",
-            ));
-        }
-        if let Some(cwd) = request.cwd.as_deref()
-            && !binding::directory_is_valid(cwd)
-        {
-            return Err(PlanError::invalid(
-                "cwd",
-                "is relative to the thread's directory and does not go up",
-            ));
-        }
-        if let Some(name) = request.name.as_deref()
-            && (name.trim().is_empty() || name.chars().count() > NAME_MAX_CHARS)
-        {
-            return Err(PlanError::invalid(
-                "name",
-                format!("is between 1 and {NAME_MAX_CHARS} characters"),
-            ));
-        }
-        // A request that names no history takes what the place carries on a switch or a fork.
-        let history = match request.history.clone() {
-            Some(history) => history,
-            None => orch_api_contract::forks::ForkHistory {
-                mode: default_history_mode(&mut *conn, thread_id).await?,
-                from_turn: None,
-                to_turn: None,
+        let prepared = self
+            .prepare_fork_in(
+                conn,
+                caller,
+                thread_id,
+                request,
+                reach,
+                own_batch,
+                captured_agent_access,
+            )
+            .await?;
+        self.assemble_prepared_fork(conn, &prepared).await
+    }
+
+    /// Selects the native source, target binding and ordinary prerequisites without supplier IO.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the existing native fork selector reads one dependent binding in its original order"
+    )]
+    pub async fn prepare_fork_in(
+        &self,
+        conn: &mut Conn,
+        caller: &Caller,
+        thread_id: Id,
+        request: &ForkRequest,
+        reach: Reach,
+        own_batch: Option<Id>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
+    ) -> Result<PreparedFork, PlanError> {
+        prepare_with_access(
+            conn,
+            self.inner.clock.as_ref(),
+            self.inner.access.as_ref(),
+            caller,
+            thread_id,
+            request,
+            reach,
+            own_batch,
+            captured_agent_access,
+        )
+        .await
+    }
+}
+
+/// The same pure native selector on an executor's real configured ports.
+/// No service or permission evaluator is persisted in the selected operands.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the existing native selector receives the executor ports and one dependent fork request"
+)]
+pub async fn prepare_with_access(
+    conn: &mut Conn,
+    clock: &dyn orch_types::Clock,
+    access: &dyn crate::access::ResourceAccess,
+    caller: &Caller,
+    thread_id: Id,
+    request: &ForkRequest,
+    reach: Reach,
+    own_batch: Option<Id>,
+    captured_agent_access: Option<binding::BirthAgentAccess>,
+) -> Result<PreparedFork, PlanError> {
+    let now = clock.now();
+    let person = caller.user();
+    let principal = Principal::load(&mut *conn, caller.clone(), Time::new(now)).await?;
+    let thread = threads::thread(&mut *conn, thread_id)
+        .await?
+        .filter(|row| row.deleted_at.is_none())
+        .ok_or(PlanError::NotFound)?;
+    let (sees, archived) = visibility(&mut *conn, &principal, thread_id).await?;
+    if !sees && reach == Reach::Seen {
+        return Err(PlanError::NotFound);
+    }
+    if archived || thread.archived_at.is_some() {
+        return Err(PlanError::Archived);
+    }
+    let replace = request.result == ForkResult::Replace;
+    if replace && thread.side_of.is_some() {
+        return Err(PlanError::Side);
+    }
+    if let Some(program) = orch_db::queries::ask::program_binding(conn, thread_id).await? {
+        return program::prepare(
+            conn,
+            program::Request {
+                clock,
+                access,
+                principal: &principal,
+                thread,
+                binding: program,
+                request,
+                reach,
+                own_batch,
+                agent_access: captured_agent_access,
             },
-        };
-        let options = applied_options(&mut *conn, thread_id, request.options.as_ref()).await?;
+        )
+        .await;
+    }
+    let (Some(agent_id), Some(provider_id), Some(environment_id)) =
+        (thread.agent_id, thread.provider_id, thread.environment_id)
+    else {
+        return Err(PlanError::invalid(
+            "",
+            "the thread is bound to nothing yet: bind it, there is nothing to carry over",
+        ));
+    };
+    if matches!(
+        request.environment,
+        Some(ForkEnvironment::Same { same: false })
+    ) {
+        return Err(PlanError::invalid(
+            "environment.same",
+            "is true, or the member is left out",
+        ));
+    }
+    if let Some(directory) = request.directory.as_deref()
+        && !binding::directory_is_valid(directory)
+    {
+        return Err(PlanError::invalid(
+            "directory",
+            "is relative to the workspace root and does not go up",
+        ));
+    }
+    if let Some(cwd) = request.cwd.as_deref()
+        && !binding::directory_is_valid(cwd)
+    {
+        return Err(PlanError::invalid(
+            "cwd",
+            "is relative to the thread's directory and does not go up",
+        ));
+    }
+    if let Some(name) = request.name.as_deref()
+        && (name.trim().is_empty() || name.chars().count() > NAME_MAX_CHARS)
+    {
+        return Err(PlanError::invalid(
+            "name",
+            format!("is between 1 and {NAME_MAX_CHARS} characters"),
+        ));
+    }
+    // A request that names no history takes what the place carries on a switch or a fork.
+    let history = match request.history.clone() {
+        Some(history) => history,
+        None => orch_api_contract::forks::ForkHistory {
+            mode: default_history_mode(&mut *conn, thread_id).await?,
+            from_turn: None,
+            to_turn: None,
+        },
+    };
+    let options = applied_options(&mut *conn, thread_id, request.options.as_ref()).await?;
 
-        // ---- what the thread runs on now
-        let agent = resources::agent(&mut *conn, agent_id)
-            .await?
-            .ok_or_else(|| EngineError::unreadable("the thread's profile is gone"))?;
-        let provider = resources::provider(&mut *conn, provider_id)
-            .await?
-            .ok_or_else(|| EngineError::unreadable("the thread's provider is gone"))?;
-        let environment = environments::environment(&mut *conn, environment_id)
-            .await?
-            .ok_or_else(|| EngineError::unreadable("the thread's environment is gone"))?;
-        let descriptor = harnesses::current_descriptor(&mut *conn, &agent)
-            .await?
-            .ok_or_else(|| EngineError::unreadable("the thread's profile never reported"))?;
-        let settings = resolved::load(&mut *conn, thread_id).await?;
-        let source = Source {
-            arrangement: parse_arrangement(thread.arrangement.as_deref()),
-            model: settings.model.clone(),
-            thread,
-            agent,
-            provider,
-            environment,
-            descriptor,
-            settings,
-        };
-        let mut blockers = Blockers::default();
-        let target_topic = request.topic_id.unwrap_or(source.thread.topic_id);
-
-        // ---- what the result runs on
-        let wanted_provider = request.to.as_ref().and_then(|to| to.provider_id);
-        let provider = match wanted_provider {
-            Some(id) if id != source.provider.id => {
-                match resources::provider(&mut *conn, id)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none())
-                {
-                    Some(row) => row,
-                    None => {
-                        blockers.add(code::UNAVAILABLE, "the provider is not there");
-                        source.provider.clone()
-                    }
-                }
-            }
-            _ => source.provider.clone(),
-        };
-        let model = request
-            .to
-            .as_ref()
-            .and_then(|to| to.model.clone())
-            .or_else(|| source.model.clone());
-        let destination = if target_topic == source.thread.topic_id {
-            source.thread.node_id
-        } else {
-            target_topic
-        };
-        if let Some(why) =
-            crate::provider_policy::forbidden(&mut *conn, destination, provider.id).await?
-        {
-            blockers.add("provider_not_allowed", why.to_string());
-        }
-        let asked_effort = request.to.as_ref().and_then(|to| to.effort.clone());
-        let model_row = match model.as_deref() {
-            Some(model) => resources::model(&mut *conn, provider.id, model).await?,
-            None => None,
-        };
-        let model_name = model.clone().unwrap_or_default();
-        match &model {
-            None => blockers.add(
-                code::MODEL_NOT_ALLOWED,
-                "no model is chosen for the thread, and the request names none",
-            ),
-            Some(name) => {
-                if crate::models::check_allowed(
-                    model_row.as_ref(),
-                    source.settings.models_allowed.as_deref(),
-                    name,
-                )
-                .is_err()
-                {
-                    blockers.add(
-                        code::MODEL_NOT_ALLOWED,
-                        format!(
-                            "the model {name} is not allowed on the provider {}",
-                            provider.name
-                        ),
-                    );
-                }
-            }
-        }
-        // An effort the new model does not list falls back to that model's default, unless the request
-        // asked for it by name.
-        let effort = {
-            let wanted = asked_effort
-                .clone()
-                .or_else(|| source.settings.effort.clone());
-            match (&wanted, &model_row) {
-                (Some(effort), Some(row)) => {
-                    let parameters = binding::model_parameters(row)?;
-                    if parameters.efforts().iter().any(|listed| listed == effort) {
-                        wanted
-                    } else if asked_effort.is_some() {
-                        blockers.add(
-                            code::EFFORT_NOT_LISTED,
-                            format!("the model does not take the effort {effort}"),
-                        );
-                        wanted
-                    } else {
-                        parameters.default_effort.clone()
-                    }
-                }
-                _ => wanted,
-            }
-        };
-        if provider.status == "disabled" {
-            blockers.add(code::PROVIDER_DISABLED, "the provider is switched off");
-        } else if provider.status != "ready" {
-            blockers.add(
-                code::PROVIDER_NOT_READY,
-                format!("the provider {} is {}", provider.name, provider.status),
-            );
-        }
-
-        // ---- where it lands
-        if let Some(worktree) = &request.worktree {
-            if replace
-                || !matches!(
-                    request.environment,
-                    None | Some(ForkEnvironment::Same { same: true })
-                )
-            {
-                return Err(PlanError::invalid(
-                    "worktree",
-                    "an own worktree is for a new thread in the same environment",
-                ));
-            }
-            if !binding::directory_is_valid(&worktree.directory)
-                || worktree.directory.is_empty()
-                || !binding::directory_is_valid(&worktree.repository_dir)
-                || !orch_settings_contract::registry::is_git_branch(&worktree.branch)
-                || request
-                    .directory
-                    .as_ref()
-                    .is_some_and(|directory| directory != &worktree.directory)
-            {
-                return Err(PlanError::invalid(
-                    "worktree",
-                    "choose an unused relative directory and a valid new branch",
-                ));
-            }
-            if request.files_at.is_some()
-                && matches!(
-                    worktree.from,
-                    orch_api_contract::source::WorktreeFrom::Commit { .. }
-                )
-            {
-                return Err(PlanError::invalid(
-                    "files_at",
-                    "saved local files and From commit are alternatives",
-                ));
-            }
-        }
-        if request.files_at.is_some()
-            && request.worktree.is_none()
-            && request.directory.as_deref().is_none_or(str::is_empty)
-        {
+    // ---- what the thread runs on now
+    let agent = resources::agent(&mut *conn, agent_id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the thread's profile is gone"))?;
+    let provider = resources::provider(&mut *conn, provider_id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the thread's provider is gone"))?;
+    let environment = environments::environment(&mut *conn, environment_id)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the thread's environment is gone"))?;
+    let descriptor = harnesses::current_descriptor(&mut *conn, &agent)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the thread's profile never reported"))?;
+    let settings = resolved::load(&mut *conn, thread_id).await?;
+    let source = AgentSource {
+        arrangement: parse_arrangement(thread.arrangement.as_deref()),
+        model: settings.model.clone(),
+        thread,
+        agent,
+        provider,
+        environment: Some(environment),
+        descriptor,
+        settings,
+    };
+    let mut blockers = Blockers::default();
+    let target_topic = request.topic_id.unwrap_or(source.thread.topic_id);
+    if !replace
+        && matches!(
+            request.access.as_ref(),
+            Some(orch_api_contract::access::ThreadAccess::As(_))
+        )
+    {
+        let rows =
+            orch_db::queries::hierarchy::with_ancestors(conn, &[thread_id, target_topic]).await?;
+        let from = rows
+            .iter()
+            .find(|row| row.id == thread_id)
+            .ok_or(PlanError::NotFound)?;
+        let to = rows
+            .iter()
+            .find(|row| row.id == target_topic)
+            .ok_or(PlanError::NotFound)?;
+        if from.org_id != to.org_id {
             return Err(PlanError::invalid(
-                "directory",
-                "saved files need an unused directory",
+                "access",
+                "a copy into another organization starts with the destination's defaults",
             ));
         }
-        let wanted_directory = request
-            .worktree
-            .as_ref()
-            .map(|choice| choice.directory.clone())
-            .or_else(|| request.directory.clone());
-        let (landing, judged_in) = match &request.environment {
-            None | Some(ForkEnvironment::Same { .. }) => {
-                (Landing::Same, source.environment.clone())
-            }
-            Some(ForkEnvironment::Existing { environment_id, .. })
-                if *environment_id == source.environment.id =>
+    }
+    if request.result == ForkResult::Replace && request.agent_access.is_some() {
+        return Err(PlanError::invalid(
+            "agent_access",
+            "a switch keeps its existing agent contributions",
+        ));
+    }
+
+    // ---- what the result runs on
+    let wanted_provider = request.to.as_ref().and_then(|to| to.provider_id);
+    let provider = match wanted_provider {
+        Some(id) if id != source.provider.id => {
+            match resources::provider(&mut *conn, id)
+                .await?
+                .filter(|row| row.deleted_at.is_none())
             {
-                (Landing::Same, source.environment.clone())
-            }
-            Some(ForkEnvironment::Existing { environment_id, .. }) => {
-                match environments::environment(&mut *conn, *environment_id)
-                    .await?
-                    .filter(|row| row.deleted_at.is_none())
-                {
-                    Some(row) => {
-                        if row.status == "disabled" {
-                            blockers.add(
-                                code::ENVIRONMENT_DISABLED,
-                                "the environment is switched off",
-                            );
-                        }
-                        if matches!(row.status.as_str(), "lost" | "removed") {
-                            blockers.add(
-                                code::UNAVAILABLE,
-                                "The destination environment was lost or removed",
-                            );
-                        }
-                        if row.remove_at.is_some() {
-                            blockers.add(
-                                code::REMOVAL_SCHEDULED,
-                                format!("the removal of the environment {} is scheduled", row.name),
-                            );
-                        }
-                        (Landing::Existing(Box::new(row.clone())), row)
-                    }
-                    None => {
-                        blockers.add(code::UNAVAILABLE, "the environment is not there");
-                        (Landing::Same, source.environment.clone())
-                    }
+                Some(row) => row,
+                None => {
+                    blockers.add(code::UNAVAILABLE, "the provider is not there");
+                    source.provider.clone()
                 }
             }
-            Some(ForkEnvironment::New { new }) => {
-                let (host, promised) = choose_host(
-                    &mut *conn,
-                    &principal,
-                    new,
-                    target_topic,
-                    now,
-                    &mut blockers,
-                )
-                .await?;
-                (
-                    Landing::New {
-                        name: new
-                            .name
-                            .clone()
-                            .unwrap_or_else(|| crate::environments::DEFAULT_NAME.to_owned()),
-                        host,
-                        promised,
-                    },
-                    source.environment.clone(),
-                )
-            }
-        };
-        let directory = wanted_directory.unwrap_or_else(|| source.thread.workspace_dir.clone());
-
-        // ---- the profile, the access to it, and the arrangement
-        let mut entry: Option<Vec<AgentArrangement>> = None;
-        let provider_changes = provider.id != source.provider.id;
-        if replace && !provider_changes {
-            // nothing is asked about a provider that stays
-        } else if reach == Reach::Seen {
-            if !caller.permits(Permission::ProviderUse) {
+        }
+        _ => source.provider.clone(),
+    };
+    let model = request
+        .to
+        .as_ref()
+        .and_then(|to| to.model.clone())
+        .or_else(|| source.model.clone());
+    let destination = if target_topic == source.thread.topic_id {
+        source.thread.node_id
+    } else {
+        target_topic
+    };
+    if let Some(why) =
+        crate::provider_policy::forbidden(&mut *conn, destination, provider.id).await?
+    {
+        blockers.add("provider_not_allowed", why.to_string());
+    }
+    let asked_effort = request.to.as_ref().and_then(|to| to.effort.clone());
+    let model_row = match model.as_deref() {
+        Some(model) => resources::model(&mut *conn, provider.id, model).await?,
+        None => None,
+    };
+    let model_name = model.clone().unwrap_or_default();
+    match &model {
+        None => blockers.add(
+            code::MODEL_NOT_ALLOWED,
+            "no model is chosen for the thread, and the request names none",
+        ),
+        Some(name) => {
+            if crate::models::check_allowed(
+                model_row.as_ref(),
+                source.settings.models_allowed.as_deref(),
+                name,
+            )
+            .is_err()
+            {
                 blockers.add(
-                    code::ACCESS,
-                    "this credential does not include provider.use for the requested new binding",
-                );
-            }
-            let node = if replace { thread_id } else { target_topic };
-            let answer = self
-                .inner
-                .access
-                .provider_use(
-                    &mut *conn,
-                    &ProviderUse {
-                        person,
-                        node,
-                        provider: provider.id,
-                        model: model.as_deref(),
-                        effort: effort.as_deref(),
-                    },
-                )
-                .await
-                .map_err(EngineError::from)?;
-            match answer {
-                Answer::Allowed { arrangements } => entry = arrangements,
-                Answer::Refused(missing) => blockers.lack(
+                    code::MODEL_NOT_ALLOWED,
                     format!(
-                        "you may not use the provider {} with the model and effort asked",
+                        "the model {name} is not allowed on the provider {}",
                         provider.name
                     ),
-                    missing,
-                ),
+                );
             }
         }
-        // An environment that is made for the result is judged by what its template promises of it, and not
-        // by the one the thread leaves: whether the agent can be beside its tools there, and what carries
-        // out its tool calls.
-        let made_for_it = match &landing {
-            Landing::New { promised, .. } => Some(promised.clone()),
-            _ => None,
-        };
-        let (agent, descriptor) = choose_agent(
-            &mut *conn,
-            &source,
-            request,
-            &provider,
-            &judged_in,
-            made_for_it.as_ref(),
-            entry.clone(),
-            &source.settings,
-            &mut blockers,
-        )
-        .await?;
-        let approval_place = if replace { thread_id } else { target_topic };
-        let target_settings = crate::resolved::load(&mut *conn, approval_place).await?;
-        let approval_mode =
-            match binding::offered_approval_mode(&descriptor, target_settings.approval_mode) {
-                Ok(mode) => mode,
-                Err(why) => {
-                    blockers.add("approval_mode_unsupported", why);
-                    target_settings.approval_mode
+    }
+    // An effort the new model does not list falls back to that model's default, unless the request
+    // asked for it by name.
+    let effort = {
+        let wanted = asked_effort
+            .clone()
+            .or_else(|| source.settings.effort.clone());
+        match (&wanted, &model_row) {
+            (Some(effort), Some(row)) => {
+                let parameters = binding::model_parameters(row)?;
+                if parameters.efforts().iter().any(|listed| listed == effort) {
+                    wanted
+                } else if asked_effort.is_some() {
+                    blockers.add(
+                        code::EFFORT_NOT_LISTED,
+                        format!("the model does not take the effort {effort}"),
+                    );
+                    wanted
+                } else {
+                    parameters.default_effort.clone()
                 }
-            };
-        if !target_settings.allowed_modes.contains(&approval_mode) {
+            }
+            _ => wanted,
+        }
+    };
+    if provider.status == "disabled" {
+        blockers.add(code::PROVIDER_DISABLED, "the provider is switched off");
+    } else if !crate::providers::request_status_available(&provider.status) {
+        blockers.add(
+            code::PROVIDER_NOT_READY,
+            format!("the provider {} is {}", provider.name, provider.status),
+        );
+    }
+
+    // ---- where it lands
+    if let Some(worktree) = &request.worktree {
+        if replace
+            || !matches!(
+                request.environment,
+                None | Some(ForkEnvironment::Same { same: true })
+            )
+        {
+            return Err(PlanError::invalid(
+                "worktree",
+                "an own worktree is for a new thread in the same environment",
+            ));
+        }
+        if !binding::directory_is_valid(&worktree.directory)
+            || worktree.directory.is_empty()
+            || !binding::directory_is_valid(&worktree.repository_dir)
+            || !orch_settings_contract::registry::is_git_branch(&worktree.branch)
+            || request
+                .directory
+                .as_ref()
+                .is_some_and(|directory| directory != &worktree.directory)
+        {
+            return Err(PlanError::invalid(
+                "worktree",
+                "choose an unused relative directory and a valid new branch",
+            ));
+        }
+        if request.files_at.is_some()
+            && matches!(
+                worktree.from,
+                orch_api_contract::source::WorktreeFrom::Commit { .. }
+            )
+        {
+            return Err(PlanError::invalid(
+                "files_at",
+                "saved local files and From commit are alternatives",
+            ));
+        }
+    }
+    if request.files_at.is_some()
+        && request.worktree.is_none()
+        && request.directory.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(PlanError::invalid(
+            "directory",
+            "saved files need an unused directory",
+        ));
+    }
+    let wanted_directory = request
+        .worktree
+        .as_ref()
+        .map(|choice| choice.directory.clone())
+        .or_else(|| request.directory.clone());
+    let (landing, judged_in) = match &request.environment {
+        None | Some(ForkEnvironment::Same { .. }) => (Landing::Same, source.workspace()?.clone()),
+        Some(ForkEnvironment::Existing { environment_id, .. })
+            if *environment_id == source.workspace()?.id =>
+        {
+            (Landing::Same, source.workspace()?.clone())
+        }
+        Some(ForkEnvironment::Existing { environment_id, .. }) => {
+            match environments::environment(&mut *conn, *environment_id)
+                .await?
+                .filter(|row| row.deleted_at.is_none())
+            {
+                Some(row) => {
+                    if row.status == "disabled" {
+                        blockers.add(
+                            code::ENVIRONMENT_DISABLED,
+                            "the environment is switched off",
+                        );
+                    }
+                    if matches!(row.status.as_str(), "lost" | "removed") {
+                        blockers.add(
+                            code::UNAVAILABLE,
+                            "The destination environment was lost or removed",
+                        );
+                    }
+                    if row.remove_at.is_some() {
+                        blockers.add(
+                            code::REMOVAL_SCHEDULED,
+                            format!("the removal of the environment {} is scheduled", row.name),
+                        );
+                    }
+                    (Landing::Existing(Box::new(row.clone())), row)
+                }
+                None => {
+                    blockers.add(code::UNAVAILABLE, "the environment is not there");
+                    (Landing::Same, source.workspace()?.clone())
+                }
+            }
+        }
+        Some(ForkEnvironment::New { new }) => {
+            let (host, promised) = choose_host(
+                &mut *conn,
+                &principal,
+                new,
+                target_topic,
+                now,
+                &mut blockers,
+            )
+            .await?;
+            (
+                Landing::New {
+                    name: new
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| crate::environments::DEFAULT_NAME.to_owned()),
+                    host,
+                    promised,
+                },
+                source.workspace()?.clone(),
+            )
+        }
+    };
+    let directory = wanted_directory.unwrap_or_else(|| source.thread.workspace_dir.clone());
+
+    // ---- the profile, the access to it, and the arrangement
+    let mut entry: Option<Vec<AgentArrangement>> = None;
+    let provider_changes = provider.id != source.provider.id;
+    if replace && !provider_changes {
+        // nothing is asked about a provider that stays
+    } else if reach == Reach::Seen {
+        if !caller.permits(Permission::ProviderUse) {
             blockers.add(
-                "approval_mode_not_allowed",
-                crate::sessions::APPROVAL_NOT_ALLOWED,
+                code::ACCESS,
+                "this credential does not include provider.use for the requested new binding",
             );
         }
-        if approval_mode != target_settings.approval_mode {
-            let setting = orch_settings::resolve(
+        let node = if replace { thread_id } else { target_topic };
+        let answer = access
+            .provider_use(
                 &mut *conn,
-                SettingsPlace::Node(approval_place),
-                keys::APPROVAL_MODE,
+                &ProviderUse {
+                    person,
+                    node,
+                    provider: provider.id,
+                    model: model.as_deref(),
+                    effort: effort.as_deref(),
+                },
             )
             .await
             .map_err(EngineError::from)?;
-            if !setting.open_to_write() || (!replace && setting.resolved.locked_by.is_some()) {
-                blockers.add("approval_mode_locked", "The place locks an approval mode that the target program does not offer. Ask a manager to change the lock or choose another program.");
-            }
+        match answer {
+            Answer::Allowed { arrangements } => entry = arrangements,
+            Answer::Refused(missing) => blockers.lack(
+                format!(
+                    "you may not use the provider {} with the model and effort asked",
+                    provider.name
+                ),
+                missing,
+            ),
         }
-        let agent_changes = agent.id != source.agent.id;
-        if (!replace || agent_changes) && reach == Reach::Seen {
-            if !caller.permits(Permission::AgentUse) {
-                blockers.add(
-                    code::ACCESS,
-                    "this credential does not include agent.use for the requested new binding",
-                );
-            }
-            let node = if replace { thread_id } else { target_topic };
-            if let Answer::Refused(missing) = self
-                .inner
-                .access
-                .agent_use(&mut *conn, person, node, agent.id)
-                .await
-                .map_err(EngineError::from)?
-            {
-                blockers.lack(
-                    format!("you may not use the agent profile {}", agent.name),
-                    missing,
-                );
-            }
-        }
-        let offers = binding::environment_offers(&mut *conn, &judged_in).await?;
-        let machine_list = binding::machine_arrangements_of(&mut *conn, &provider).await?;
-        let place = made_for_it
-            .as_ref()
-            .map(|promised| promised.place(&descriptor));
-        let facts = Facts {
-            descriptor: &descriptor,
-            provider: &provider,
-            environment: &judged_in,
-            offers: made_for_it
-                .as_ref()
-                .map_or(offers.offers, |promised| promised.offers.clone()),
-            settings: &source.settings,
-            entry,
-            colocated: made_for_it.map_or(offers.colocated, |promised| promised.colocated),
-            runtime: binding::runtime_facts(conn, &agent, &provider, &judged_in).await?,
-        };
-        let choose = |wanted: Option<AgentArrangement>| match &place {
-            Some(place) => binding::choose_placed(&facts, place, machine_list.clone(), wanted),
-            None => binding::choose_with_machine(&facts, machine_list.clone(), wanted),
-        };
-        let requested: Option<AgentArrangement> = request
-            .to
-            .as_ref()
-            .and_then(|to| to.arrangement)
-            .map(|word| convert(&word))
-            .transpose()?;
-        let chosen = match requested.or(source.arrangement) {
-            Some(kind) => choose(Some(kind)).or_else(|first| {
-                if requested.is_some() {
-                    Err(first)
-                } else {
-                    choose(None)
-                }
-            }),
-            None => choose(None),
-        };
-        let arrangement = match chosen {
-            Ok(arrangement) => Some(arrangement),
+    }
+    // An environment that is made for the result is judged by what its template promises of it, and not
+    // by the one the thread leaves: whether the agent can be beside its tools there, and what carries
+    // out its tool calls.
+    let made_for_it = match &landing {
+        Landing::New { promised, .. } => Some(promised.clone()),
+        _ => None,
+    };
+    let (agent, descriptor) = choose_agent(
+        &mut *conn,
+        Some(&source),
+        source.thread.node_id,
+        request,
+        &provider,
+        Some(&judged_in),
+        made_for_it.as_ref(),
+        entry.clone(),
+        &source.settings,
+        &mut blockers,
+    )
+    .await?;
+    let approval_place = if replace { thread_id } else { target_topic };
+    let target_settings = crate::resolved::load(&mut *conn, approval_place).await?;
+    let approval_mode =
+        match binding::offered_approval_mode(&descriptor, target_settings.approval_mode) {
+            Ok(mode) => mode,
             Err(why) => {
-                blockers.add(
-                    code::NO_ARRANGEMENT,
-                    format!("no arrangement is available: {}", binding::sentence(&why)),
-                );
-                None
+                blockers.add("approval_mode_unsupported", why);
+                target_settings.approval_mode
             }
         };
-        let options_listed = match &place {
-            Some(place) => binding::options_placed(&facts, place, machine_list),
-            None => binding::options(&facts, machine_list),
-        };
-
-        let target = Target {
-            agent,
-            provider,
-            descriptor,
-            model: model_name,
-            effort,
-            arrangement,
-            landing,
-            directory,
-            topic: target_topic,
-        };
-
-        // ---- what changes, and what the caller needs for it
-        let target_environment = target.environment_id().unwrap_or(source.environment.id);
-        let environment_changes =
-            matches!(target.landing, Landing::Existing(_) | Landing::New { .. });
-        let directory_changes = target.directory != source.thread.workspace_dir;
-        let arrangement_changes = target
-            .arrangement
-            .as_ref()
-            .is_some_and(|chosen| Some(chosen.kind) != source.arrangement);
-        let changes_binding = provider_changes || agent_changes || arrangement_changes;
-        if replace && !(changes_binding || environment_changes || directory_changes) {
+    if !target_settings.allowed_modes.contains(&approval_mode) {
+        blockers.add(
+            "approval_mode_not_allowed",
+            crate::sessions::APPROVAL_NOT_ALLOWED,
+        );
+    }
+    if approval_mode != target_settings.approval_mode {
+        let setting = orch_settings::resolve(
+            &mut *conn,
+            SettingsPlace::Node(approval_place),
+            keys::APPROVAL_MODE,
+        )
+        .await
+        .map_err(EngineError::from)?;
+        if !setting.open_to_write() || (!replace && setting.resolved.locked_by.is_some()) {
+            blockers.add("approval_mode_locked", "The place locks an approval mode that the target program does not offer. Ask a manager to change the lock or choose another program.");
+        }
+    }
+    let agent_changes = agent.id != source.agent.id;
+    if (!replace || agent_changes) && reach == Reach::Seen {
+        if !caller.permits(Permission::AgentUse) {
             blockers.add(
+                code::ACCESS,
+                "this credential does not include agent.use for the requested new binding",
+            );
+        }
+        let node = if replace { thread_id } else { target_topic };
+        if let Answer::Refused(missing) = access
+            .agent_use(&mut *conn, person, node, agent.id)
+            .await
+            .map_err(EngineError::from)?
+        {
+            blockers.lack(
+                format!("you may not use the agent profile {}", agent.name),
+                missing,
+            );
+        }
+    }
+    let offers = binding::environment_offers(&mut *conn, &judged_in).await?;
+    let machine_list = binding::machine_arrangements_of(&mut *conn, &provider).await?;
+    let place = made_for_it
+        .as_ref()
+        .map(|promised| promised.place(&descriptor));
+    let facts = Facts {
+        descriptor: &descriptor,
+        provider: &provider,
+        environment: Some(&judged_in),
+        offers: made_for_it
+            .as_ref()
+            .map_or(offers.offers, |promised| promised.offers.clone()),
+        settings: &source.settings,
+        entry,
+        colocated: made_for_it.map_or(offers.colocated, |promised| promised.colocated),
+        runtime: binding::runtime_facts(conn, &agent, &provider, &judged_in).await?,
+    };
+    let choose = |wanted: Option<AgentArrangement>| match &place {
+        Some(place) => binding::choose_placed(&facts, place, machine_list.clone(), wanted),
+        None => binding::choose_with_machine(&facts, machine_list.clone(), wanted),
+    };
+    let requested: Option<AgentArrangement> = request
+        .to
+        .as_ref()
+        .and_then(|to| to.arrangement)
+        .map(|word| convert(&word))
+        .transpose()?;
+    let chosen = match requested.or(source.arrangement) {
+        Some(kind) => choose(Some(kind)).or_else(|first| {
+            if requested.is_some() {
+                Err(first)
+            } else {
+                choose(None)
+            }
+        }),
+        None => choose(None),
+    };
+    let arrangement = match chosen {
+        Ok(arrangement) => Some(arrangement),
+        Err(why) => {
+            blockers.add(
+                code::NO_ARRANGEMENT,
+                format!("no arrangement is available: {}", binding::sentence(&why)),
+            );
+            None
+        }
+    };
+    let options_listed = match &place {
+        Some(place) => binding::options_placed(&facts, place, machine_list),
+        None => binding::options(&facts, machine_list),
+    };
+
+    let target = Target {
+        agent,
+        provider,
+        descriptor,
+        model: model_name,
+        effort,
+        arrangement,
+        landing,
+        directory,
+        topic: target_topic,
+    };
+
+    // ---- what changes, and what the caller needs for it
+    let target_environment = target.environment_id().unwrap_or(source.workspace()?.id);
+    let environment_changes = matches!(target.landing, Landing::Existing(_) | Landing::New { .. });
+    let directory_changes = target.directory != source.thread.workspace_dir;
+    let arrangement_changes = target
+        .arrangement
+        .as_ref()
+        .is_some_and(|chosen| Some(chosen.kind) != source.arrangement);
+    let changes_binding = provider_changes || agent_changes || arrangement_changes;
+    if replace && !(changes_binding || environment_changes || directory_changes) {
+        blockers.add(
                 code::NOTHING_TO_CHANGE,
                 "the request changes nothing: a model or an effort alone is a setting, and needs no switch",
             );
-        }
-        if reach == Reach::Seen {
-            if replace {
-                if changes_binding
-                    && let Some(missing) =
-                        node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadManage)
-                            .await?
-                {
-                    blockers.lack("you may not manage this thread", missing);
-                }
-            } else {
-                // Either right to fork will do: managing the thread, or its own row of forking.
-                if node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadManage)
+    }
+    if reach == Reach::Seen {
+        if replace {
+            if changes_binding
+                && let Some(missing) =
+                    node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadManage).await?
+            {
+                blockers.lack("you may not manage this thread", missing);
+            }
+        } else {
+            // Either right to fork will do: managing the thread, or its own row of forking.
+            if node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadManage)
+                .await?
+                .is_some()
+                && let Some(fork) =
+                    node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadFork).await?
+            {
+                blockers.lack("you may neither fork nor manage this thread", fork);
+            }
+            // The files that are taken are the environment's, and are read by whoever holds its
+            // `files.view`, whatever they hold on the thread.
+            if (environment_changes || directory_changes)
+                && let Some(missing) = environment_lacks(
+                    &mut *conn,
+                    &principal,
+                    source.workspace()?.id,
+                    Permission::FilesView,
+                )
+                .await?
+            {
+                blockers.lack("you may not read the files that would be taken", missing);
+            }
+            if let Some(missing) = node_lacks(
+                &mut *conn,
+                &principal,
+                target.topic,
+                Permission::TopicStartThreads,
+            )
+            .await?
+            {
+                blockers.lack("you may not start a thread in that topic", missing);
+            }
+            // The page of another thread is carried over only by whoever manages that thread.
+            if let Some(orch_api_contract::access::ThreadAccess::As(as_page)) = &request.access
+                && as_page.source != thread_id
+            {
+                if threads::thread(&mut *conn, as_page.source)
                     .await?
-                    .is_some()
-                    && let Some(fork) =
-                        node_lacks(&mut *conn, &principal, thread_id, Permission::ThreadFork)
-                            .await?
+                    .is_none_or(|row| row.deleted_at.is_some())
                 {
-                    blockers.lack("you may neither fork nor manage this thread", fork);
-                }
-                // The files that are taken are the environment's, and are read by whoever holds its
-                // `files.view`, whatever they hold on the thread.
-                if (environment_changes || directory_changes)
-                    && let Some(missing) = environment_lacks(
-                        &mut *conn,
-                        &principal,
-                        source.environment.id,
-                        Permission::FilesView,
-                    )
-                    .await?
-                {
-                    blockers.lack("you may not read the files that would be taken", missing);
+                    return Err(PlanError::invalid(
+                        "access.as",
+                        "is a thread whose page is carried over",
+                    ));
                 }
                 if let Some(missing) = node_lacks(
                     &mut *conn,
                     &principal,
-                    target.topic,
-                    Permission::TopicStartThreads,
+                    as_page.source,
+                    Permission::ThreadManage,
                 )
                 .await?
                 {
-                    blockers.lack("you may not start a thread in that topic", missing);
-                }
-                // The page of another thread is carried over only by whoever manages that thread.
-                if let Some(orch_api_contract::access::ThreadAccess::As(as_page)) = &request.access
-                    && as_page.source != thread_id
-                {
-                    if threads::thread(&mut *conn, as_page.source)
-                        .await?
-                        .is_none_or(|row| row.deleted_at.is_some())
-                    {
-                        return Err(PlanError::invalid(
-                            "access.as",
-                            "is a thread whose page is carried over",
-                        ));
-                    }
-                    if let Some(missing) = node_lacks(
-                        &mut *conn,
-                        &principal,
-                        as_page.source,
-                        Permission::ThreadManage,
-                    )
-                    .await?
-                    {
-                        blockers.lack("you may not carry over the page of that thread", missing);
-                    }
-                }
-                if matches!(target.landing, Landing::Same)
-                    && let Answer::Refused(missing) = self
-                        .inner
-                        .access
-                        .environment_manage(&mut *conn, person, source.environment.id)
-                        .await
-                        .map_err(EngineError::from)?
-                {
-                    blockers.lack(
-                        "putting another thread in this environment takes managing it",
-                        missing,
-                    );
+                    blockers.lack("you may not carry over the page of that thread", missing);
                 }
             }
-        }
-        if replace && (environment_changes || directory_changes)
-            || (!replace && environment_changes)
-        {
-            let moving = orch_authz::environments::Moving {
-                thread: replace.then_some(thread_id),
-                from: replace.then_some(source.environment.id),
-                to: target.environment_id(),
-                all_of_the_environment: reach == Reach::Environment,
-            };
-            if (replace || matches!(target.landing, Landing::Existing(_)))
-                && let Decision::Refused(refusal) = orch_authz::environments::check_move(
-                    &mut *conn,
-                    &principal,
-                    &moving,
-                    orch_authz::Policy::default(),
-                )
-                .await?
+            if matches!(target.landing, Landing::Same)
+                && let Answer::Refused(missing) = access
+                    .environment_manage(&mut *conn, person, source.workspace()?.id)
+                    .await
+                    .map_err(EngineError::from)?
             {
-                blockers.lack("you may not decide where this thread runs", refusal.missing);
-            }
-        }
-
-        // ---- what is already going on
-        for id in [source.environment.id, target_environment]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            if fork_rows::open_touching_environment(&mut *conn, id)
-                .await?
-                .iter()
-                .any(|job| {
-                    (job.node_id != Some(thread_id) || replace)
-                        && own_batch.is_none_or(|own| job.batch_id != Some(own))
-                })
-                || fork_rows::environment_is_being_changed(&mut *conn, id)
-                    .await?
-                    .is_some()
-            {
-                blockers.add(
-                    code::ALREADY_RUNNING,
-                    "a fork, switch, move, recreate or update is already under way for an environment it touches",
+                blockers.lack(
+                    "putting another thread in this environment takes managing it",
+                    missing,
                 );
-                break;
             }
         }
-        if orch_db::queries::agent_history::removing(conn, thread_id).await?
-            || crate::locks::held_by(&mut *conn, thread_id)
+    }
+    if !replace {
+        let subject =
+            crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Thread,
+                id: thread_id,
+            });
+        match crate::copy_out::authorize(&mut *conn, &principal, subject, Some(target.topic)).await
+        {
+            Ok(_) => {}
+            Err(crate::copy_out::Error::Native(error)) => return Err(error.into()),
+            Err(error) => blockers.add("copy_out_denied", error.to_string()),
+        }
+    }
+    if replace && (environment_changes || directory_changes) || (!replace && environment_changes) {
+        let moving = orch_authz::environments::Moving {
+            thread: replace.then_some(thread_id),
+            from: replace.then_some(source.workspace()?.id),
+            to: target.environment_id(),
+            all_of_the_environment: reach == Reach::Environment,
+        };
+        if (replace || matches!(target.landing, Landing::Existing(_)))
+            && let Decision::Refused(refusal) = orch_authz::environments::check_move(
+                &mut *conn,
+                &principal,
+                &moving,
+                orch_authz::Policy::default(),
+            )
+            .await?
+        {
+            blockers.lack("you may not decide where this thread runs", refusal.missing);
+        }
+    }
+
+    // ---- what is already going on
+    for id in [source.workspace()?.id, target_environment]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        if fork_rows::open_touching_environment(&mut *conn, id)
+            .await?
+            .iter()
+            .any(|job| {
+                (job.node_id != Some(thread_id) || replace)
+                    && own_batch.is_none_or(|own| job.batch_id != Some(own))
+            })
+            || fork_rows::environment_is_being_changed(&mut *conn, id)
                 .await?
                 .is_some()
         {
             blockers.add(
-                code::ALREADY_RUNNING,
-                "a fork or a switch holds this thread already",
-            );
+                    code::ALREADY_RUNNING,
+                    "a fork, switch, move, recreate or update is already under way for an environment it touches",
+                );
+            break;
         }
+    }
+    if orch_db::queries::agent_history::removing(conn, thread_id).await?
+        || crate::locks::held_by(&mut *conn, thread_id)
+            .await?
+            .is_some()
+    {
+        blockers.add(
+            code::ALREADY_RUNNING,
+            "a fork or a switch holds this thread already",
+        );
+    }
+    if crate::background_wake::running(conn, Some(thread_id), None, None).await? {
+        blockers.add(
+            "background_tasks_running",
+            "Review and end the running background tasks before forking or switching this session.",
+        );
+    }
 
+    if let Landing::Existing(environment) = &target.landing {
+        crate::jobs::environment_move::preparation::select_destinations(
+            conn,
+            &[(
+                orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Environment,
+                    id: environment.id,
+                },
+                orch_access_contract::permissions::Permission::EnvironmentManage,
+            )],
+        )
+        .await?;
+    }
+    Ok(PreparedFork {
+        principal,
+        source: Source::Agent(Box::new(source)),
+        target,
+        request: request.clone(),
+        history,
+        options,
+        options_listed,
+        approval_mode,
+        blockers,
+        reach,
+        now,
+        captured_agent_access,
+    })
+}
+
+impl Engine {
+    /// Runs the existing once-only native suppliers and assembles their plan over selected operands.
+    /// Callers own source refresh around supplier waits; retryable preparation never calls this method.
+    pub async fn assemble_prepared_fork(
+        &self,
+        conn: &mut Conn,
+        prepared: &PreparedFork,
+    ) -> Result<Draft, PlanError> {
+        self.assemble_prepared_fork_with_source(conn, prepared, None)
+            .await
+    }
+    /// The same native assembler with its original scoped preparation supplier.
+    pub async fn assemble_prepared_fork_with_source(
+        &self,
+        conn: &mut Conn,
+        prepared: &PreparedFork,
+        preparation: Option<&operation::Preparation>,
+    ) -> Result<Draft, PlanError> {
+        let source = match &prepared.source {
+            Source::Agent(source) => source.as_ref(),
+            Source::Program(source) => {
+                return program::assemble(self, conn, prepared, source, preparation).await;
+            }
+        };
         self.assemble(
             conn,
-            &principal,
-            &source,
-            &target,
-            request,
-            &history,
-            options,
-            &options_listed,
-            approval_mode,
-            blockers,
-            reach,
-            now,
+            &prepared.principal,
+            source,
+            &prepared.target,
+            &prepared.request,
+            &prepared.history,
+            prepared.options.clone(),
+            &prepared.options_listed,
+            prepared.approval_mode,
+            prepared.blockers.clone(),
+            prepared.reach,
+            prepared.now,
+            prepared.captured_agent_access.clone(),
+            preparation,
         )
         .await
     }
@@ -1866,7 +2426,7 @@ impl Engine {
         &self,
         conn: &mut Conn,
         principal: &Principal,
-        source: &Source,
+        source: &AgentSource,
         target: &Target,
         request: &ForkRequest,
         history: &orch_api_contract::forks::ForkHistory,
@@ -1876,6 +2436,8 @@ impl Engine {
         mut blockers: Blockers,
         reach: Reach,
         now: DateTime<Utc>,
+        captured_agent_access: Option<binding::BirthAgentAccess>,
+        preparation: Option<&operation::Preparation>,
     ) -> Result<Draft, PlanError> {
         let thread_id = source.thread.node_id;
         let replace = request.result == ForkResult::Replace;
@@ -1886,13 +2448,14 @@ impl Engine {
             principal,
             request,
             &source.thread,
-            &source.environment,
+            source.workspace()?,
             &target.directory,
             match &target.landing {
-                Landing::Same => Some(&source.environment),
+                Landing::Same => Some(source.workspace()?),
                 Landing::Existing(row) => Some(row.as_ref()),
                 Landing::New { .. } => None,
             },
+            preparation,
         )
         .await?;
         for blocker in &source_files.blockers {
@@ -1987,10 +2550,10 @@ impl Engine {
         let source_machine = harnesses::machine_of(
             source.thread.arrangement.as_deref(),
             &source.provider,
-            source.environment.machine_id,
+            source.workspace()?.machine_id,
         );
         let target_environment_machine = match &target.landing {
-            Landing::Same => source.environment.machine_id,
+            Landing::Same => source.workspace()?.machine_id,
             Landing::Existing(row) => row.machine_id,
             Landing::New { .. } => None,
         };
@@ -2184,9 +2747,9 @@ impl Engine {
         // ---- the files and the notes
         let carry = carry_of(request);
         let source_root = crate::sessions::workspace_root(
-            &source.environment.workspace_root,
-            &source.environment.facts,
-            source.environment.generation,
+            &source.workspace()?.workspace_root,
+            &source.workspace()?.facts,
+            source.workspace()?.generation,
         );
         let target_root = match &target.landing {
             Landing::Existing(row) => {
@@ -2194,8 +2757,12 @@ impl Engine {
             }
             _ => source_root,
         };
-        let live_tree =
-            source.environment.facts.get("index").and_then(Json::as_str) == Some("live");
+        let live_tree = source
+            .workspace()?
+            .facts
+            .get("index")
+            .and_then(Json::as_str)
+            == Some("live");
         let selection_required = differs
             && live_tree
             && !matches!(carry.selection.as_ref(),
@@ -2207,7 +2774,7 @@ impl Engine {
                 "this workspace is listed live; choose explicit paths before copying it",
             );
         }
-        let source_mounts = crate::mounts::views(conn, source.environment.id, now).await?;
+        let source_mounts = crate::mounts::views(conn, source.workspace()?.id, now).await?;
         let mut target_copy_driver = None;
         // A new environment's mounts are resolved as it would be made: with the locations its machine has, and
         // again with what the plan copies there and detaches.
@@ -2260,7 +2827,7 @@ impl Engine {
                 }
             }
         };
-        let source_machine = crate::mounts::location_machine(conn, source.environment.id).await?;
+        let source_machine = crate::mounts::location_machine(conn, source.workspace()?.id).await?;
         let target_machine = match &target.landing {
             Landing::Same => source_machine,
             Landing::Existing(row) => crate::mounts::location_machine(conn, row.id).await?,
@@ -2270,6 +2837,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request
@@ -2314,7 +2882,7 @@ impl Engine {
         };
         let mount_plan = crate::mounts::plan(&source_mounts, &target_mounts, &decided.fated);
         let source_servers =
-            crate::mcp::resolve(conn, source.environment.id, Time::new(now)).await?;
+            crate::mcp::resolve(conn, source.workspace()?.id, Time::new(now)).await?;
         let target_servers = match (&target.landing, &prospect) {
             (Landing::Same, _) => source_servers.clone(),
             (Landing::Existing(row), _) => {
@@ -2351,17 +2919,19 @@ impl Engine {
         } else {
             Vec::new()
         };
-        let home_plan = match crate::volume_carry::measure(
+        let home_plan = match crate::volume_carry::measure_from(
             self,
             conn,
-            source.environment.id,
+            source.workspace()?.id,
             carry.home,
             principal.user(),
             &mut private_views,
+            preparation,
         )
         .await
         {
             Ok(home) => home,
+            Err(error @ EngineError::BeforeEffect(_)) => return Err(error.into()),
             Err(_) => {
                 if carry.home || private_views.iter().any(|view| view.carried) {
                     blockers.add("volume_measurement_unavailable", "the old host could not measure the whole home/private volumes; no carry can be confirmed");
@@ -2381,9 +2951,17 @@ impl Engine {
                 },
                 Some(driver),
             ) = (&target.landing, target_copy_driver.as_deref())
-            && let Err(error) =
-                crate::volume_carry::check_target(self, host.host.machine_id, driver).await
+            && let Err(error) = crate::volume_carry::check_target_from(
+                self,
+                host.host.machine_id,
+                driver,
+                preparation,
+            )
+            .await
         {
+            if matches!(error, EngineError::BeforeEffect(_)) {
+                return Err(error.into());
+            }
             blockers.add("volume_copy_unavailable", error.to_string());
         }
         let (volume_files, volume_bytes) =
@@ -2404,37 +2982,41 @@ impl Engine {
                 }
             } else if live_tree && matches!(carry.selection, Some(FileSelection::Selection { .. }))
             {
-                if source.environment.status != "running" {
+                if source.workspace()?.status != "running" {
                     blockers.add("files_unavailable", "connect this live workspace to measure the selected paths before confirming");
                     self.list_directory(
                         conn,
-                        source.environment.id,
+                        source.workspace()?.id,
                         &source.thread.workspace_dir,
                         carry.selection.as_ref(),
                         now,
+                        preparation,
                     )
                     .await?
                 } else {
                     match self
                         .list_selected_live(
                             conn,
-                            &source.environment,
+                            source.workspace()?,
                             &source.thread.workspace_dir,
                             carry.selection.as_ref().ok_or_else(|| {
                                 EngineError::unreadable("the selection is missing")
                             })?,
+                            preparation,
                         )
                         .await
                     {
                         Ok(listing) => listing,
+                        Err(error @ EngineError::BeforeEffect(_)) => return Err(error.into()),
                         Err(_) => {
                             blockers.add("files_unavailable", "the source could not measure the selected paths; no copy has started");
                             self.list_directory(
                                 conn,
-                                source.environment.id,
+                                source.workspace()?.id,
                                 &source.thread.workspace_dir,
                                 carry.selection.as_ref(),
                                 now,
+                                preparation,
                             )
                             .await?
                         }
@@ -2443,14 +3025,15 @@ impl Engine {
             } else {
                 self.list_directory(
                     &mut *conn,
-                    source.environment.id,
+                    source.workspace()?.id,
                     &source.thread.workspace_dir,
                     carry.selection.as_ref(),
                     now,
+                    preparation,
                 )
                 .await?
             };
-            let online = source.environment.status == "running";
+            let online = source.workspace()?.status == "running";
             if !nothing_copied && request.worktree.is_none() && request.files_at.is_none() {
                 let selection = crate::jobs::fork::snapshot_selection(
                     &source.thread.workspace_dir,
@@ -2458,10 +3041,11 @@ impl Engine {
                     None,
                 );
                 if online {
-                    match crate::fork_source::independent_plan(self, &source.environment, &source.thread.workspace_dir, selection).await {
+                    match crate::fork_source::independent_plan_from(self, source.workspace()?, &source.thread.workspace_dir, selection, preparation).await {
                         Ok(extra) => { copy_worktree = extra.independent;
                             listing.files = listing.files.saturating_add(extra.additional_files);
                             listing.bytes = listing.bytes.saturating_add(extra.additional_bytes); },
+                        Err(error @ EngineError::BeforeEffect(_)) => return Err(error.into()),
                         Err(_) => blockers.add("worktree_copy_unavailable", "the source must provide all repository objects and refs before this directory can be copied"),
                     }
                 } else if source
@@ -2572,7 +3156,7 @@ impl Engine {
             let environment = if environment_changes {
                 let others = orch_db::queries::threads::tools::threads_in_environment(
                     &mut *conn,
-                    source.environment.id,
+                    source.workspace()?.id,
                 )
                 .await?
                 .into_iter()
@@ -2581,7 +3165,7 @@ impl Engine {
                 let may_remove = self
                     .inner
                     .access
-                    .environment_manage(&mut *conn, person, source.environment.id)
+                    .environment_manage(&mut *conn, person, source.workspace()?.id)
                     .await
                     .map_err(EngineError::from)?
                     .is_allowed();
@@ -2591,7 +3175,7 @@ impl Engine {
                     LeftAction::InUse
                 } else if !orch_db::queries::environment_facts::has_unit(
                     conn,
-                    source.environment.id,
+                    source.workspace()?.id,
                 )
                 .await?
                     || !may_remove
@@ -2601,7 +3185,7 @@ impl Engine {
                     LeftAction::Remove
                 };
                 Some(LeftEnvironment {
-                    environment: environment_ref(&mut *conn, &source.environment, Time::new(now))
+                    environment: environment_ref(&mut *conn, source.workspace()?, Time::new(now))
                         .await?,
                     action,
                     processes: 0,
@@ -2627,7 +3211,7 @@ impl Engine {
                 }
             }))
         };
-        let source_row = match source.environment.machine_id {
+        let source_row = match source.workspace()?.machine_id {
             Some(machine) => orch_db::queries::resources::machine(&mut *conn, machine).await?,
             None => None,
         };
@@ -2679,7 +3263,7 @@ impl Engine {
             .map_or(option.kind, |chosen| chosen.kind);
         let to_environment = match &target.landing {
             Landing::Same => ForkPlanTarget::Existing(
-                environment_ref(&mut *conn, &source.environment, Time::new(now)).await?,
+                environment_ref(&mut *conn, source.workspace()?, Time::new(now)).await?,
             ),
             Landing::Existing(row) => {
                 ForkPlanTarget::Existing(environment_ref(&mut *conn, row, Time::new(now)).await?)
@@ -2695,12 +3279,12 @@ impl Engine {
                 },
             },
             Landing::New { host: None, .. } => ForkPlanTarget::Existing(
-                environment_ref(&mut *conn, &source.environment, Time::new(now)).await?,
+                environment_ref(&mut *conn, source.workspace()?, Time::new(now)).await?,
             ),
         };
         let profile_environment = match &target.landing {
             Landing::Existing(row) => Some(row.id),
-            Landing::Same => Some(source.environment.id),
+            Landing::Same => Some(source.workspace()?.id),
             _ => None,
         };
         let profile = match profile_environment {
@@ -2738,7 +3322,7 @@ impl Engine {
                 },
                 path_map: PathMap {
                     from: crate::sessions::absolute_directory(
-                        &source.environment.workspace_root,
+                        &source.workspace()?.workspace_root,
                         saved.directory.as_deref().unwrap_or_default(),
                     ),
                     to: crate::sessions::absolute_directory(target_root, &target.directory),
@@ -2748,17 +3332,102 @@ impl Engine {
                 private_views: private_views.clone(),
             });
         }
+        let mut disclosure = std::collections::BTreeSet::new();
+        use orch_access_contract::permissions::ObjectKind as DisclosureKind;
+        for (kind, id) in [
+            (DisclosureKind::Thread, source.thread.node_id),
+            (DisclosureKind::Agent, source.agent.id),
+            (DisclosureKind::Provider, source.provider.id),
+            (DisclosureKind::Environment, source.workspace()?.id),
+            (DisclosureKind::Agent, target.agent.id),
+            (DisclosureKind::Provider, target.provider.id),
+            (DisclosureKind::Topic, target.topic),
+        ] {
+            disclosure.insert((kind, id));
+        }
+        let mut homes = vec![
+            source.thread.node_id,
+            target.topic,
+            source.workspace()?.home_node_id,
+        ];
+        match &target.landing {
+            Landing::Existing(row) => {
+                disclosure.insert((DisclosureKind::Environment, row.id));
+                homes.push(row.home_node_id);
+            }
+            Landing::New {
+                host: Some(host), ..
+            } => {
+                disclosure.insert((DisclosureKind::Host, host.host.id));
+                disclosure.insert((DisclosureKind::Machine, host.host.machine_id));
+            }
+            _ => {}
+        }
+        if let Some(ForkEnvironment::New { new }) = &request.environment {
+            let home = new.home_node_id.unwrap_or(target.topic);
+            homes.push(home);
+            if let Some(template) = match new.template_id {
+                Some(id) => Some(id),
+                None => {
+                    setting::<Id>(conn, SettingsPlace::Node(home), keys::ENV_TEMPLATE_ID).await?
+                }
+            } {
+                disclosure.insert((DisclosureKind::Template, template));
+            }
+        }
+        for mount in source_mounts.iter().chain(&target_mounts) {
+            disclosure.insert((DisclosureKind::Mount, mount.mount.id));
+        }
+        let graph = orch_authz::engine::Graph::load(conn, &homes).await?;
+        for node in graph.nodes() {
+            disclosure.insert((DisclosureKind::from(node.kind), node.id));
+        }
+        if let Some(orch_api_contract::access::ThreadAccess::As(page)) = &request.access {
+            disclosure.insert((DisclosureKind::Thread, page.source));
+        }
+        let disclosure = disclosure
+            .into_iter()
+            .map(|(kind, id)| orch_access_contract::decisions::ObjectRef { kind, id })
+            .collect();
+        if files.is_some() || source_files.worktree.is_some() || source_files.files_at.is_some() {
+            // Files come only from a source with a real workspace; a program source has none.
+            let source_environment = source.workspace()?;
+            let destination = match &target.landing {
+                Landing::Same => source_environment.home_node_id,
+                Landing::Existing(environment) => environment.home_node_id,
+                Landing::New { .. } => match &request.environment {
+                    Some(ForkEnvironment::New { new }) => new.home_node_id.unwrap_or(target.topic),
+                    _ => target.topic,
+                },
+            };
+            match crate::copy_out::authorize(
+                conn,
+                principal,
+                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Environment,
+                    id: source_environment.id,
+                }),
+                Some(destination),
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(crate::copy_out::Error::Native(error)) => return Err(error.into()),
+                Err(error) => blockers.add("copy_out_denied", error.to_string()),
+            }
+        }
         let plan = ForkPlan {
+            agent_access: None,
             preflight_id: Id::nil(),
             expires_at: Time::new(now + Duration::minutes(PREFLIGHT_VALID_MINUTES)),
             source: thread_ref(&source.thread),
             result: request.result,
-            from: ForkPlanFrom {
-                agent: agent_ref(&mut *conn, &source.agent).await?,
+            from: ForkPlanFrom::Agent {
+                agent: Box::new(agent_ref(&mut *conn, &source.agent).await?),
                 provider: provider_ref(&mut *conn, &source.provider).await?,
-                environment: Some(
-                    environment_ref(&mut *conn, &source.environment, Time::new(now)).await?,
-                ),
+                environment: Some(Box::new(
+                    environment_ref(&mut *conn, source.workspace()?, Time::new(now)).await?,
+                )),
             },
             to: ForkPlanTo {
                 agent: agent_ref(&mut *conn, &target.agent).await?,
@@ -2828,17 +3497,36 @@ impl Engine {
             turn_running: running,
             blockers: std::mem::take(&mut blockers.list),
         };
-        // The history the plan shows is the one carried out, even when the place's default changes before confirming.
+        let agent_access = if replace {
+            binding::BirthAgentAccess::nothing()
+        } else {
+            match captured_agent_access {
+                Some(choice) => choice,
+                None => binding::BirthAgentAccess::from(request.agent_access)
+                    .freeze(conn, target.topic)
+                    .await
+                    .map_err(|error| PlanError::AgentAccess(Box::new(error)))?,
+            }
+        };
+        self.check_birth_source_in(conn, principal, target.topic, &agent_access)
+            .await
+            .map_err(|error| PlanError::AgentAccess(Box::new(error)))?;
+        // History and the omitted creation preset stay as shown even if a parent changes later.
+        if let Some(source) = preparation {
+            source.check(self).await?;
+        }
         Ok(Draft {
             request: ForkRequest {
                 history: Some(history.clone()),
                 ..request.clone()
             },
             plan,
+            agent_access,
             lacks: blockers.lacks,
             copy_worktree,
             source_scope: SourceScope::of(&source.thread, reach),
             mount_decisions: decided.decisions,
+            disclosure,
         })
     }
 }
@@ -2851,7 +3539,19 @@ impl Engine {
     pub async fn keep_fork_plan(
         &self,
         caller: &Caller,
+        draft: Draft,
+    ) -> Result<ForkPlan, PlanError> {
+        let mut conn = self.inner.db.acquire().await?;
+        self.keep_fork_plan_on(&mut conn, caller, draft, || Ok(()))
+            .await
+    }
+    /// The original native preflight insert on the action connection, at its first actual effect.
+    pub async fn keep_fork_plan_on<'a>(
+        &self,
+        conn: &'a mut Conn,
+        caller: &Caller,
         mut draft: Draft,
+        before: impl FnOnce() -> Result<(), EngineError> + Send + 'a,
     ) -> Result<ForkPlan, PlanError> {
         let id = new_id();
         draft.plan.preflight_id = id;
@@ -2859,12 +3559,15 @@ impl Engine {
             request: draft.request.clone(),
             plan: draft.plan.clone(),
             source: draft.plan.source.id,
+            agent_access: Some(draft.agent_access),
             source_scope: Some(draft.source_scope),
+            moving: None,
+            move_people: None,
         };
-        let mut conn = self.inner.db.acquire().await?;
         let now = self.inner.clock.now();
+        before()?;
         fork_rows::save_preflight(
-            &mut conn,
+            conn,
             &fork_rows::PreflightRow {
                 id,
                 kind: fork_rows::PLAN_KIND.to_owned(),

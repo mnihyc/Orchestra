@@ -19,7 +19,7 @@ export function BeforeOrchHeading() {
         <History aria-hidden /> {t('adopt.band')}
       </span>
       <span className="text-xs text-text-subtle">{t('adopt.bandLead')}</span>
-      {status === undefined && query.error === null && <SkeletonRows rows={1} />}
+      {status === undefined && query.error === null && <SkeletonRows read={query} rows={1} />}
       {query.error !== null && <ErrorAlert error={query.error} />}
       {status?.state === 'unreadable' && <p className="text-sm text-text-muted">{t('adopt.history.unreadable')}</p>}
       {status?.state === 'unsupported' && <p className="text-sm text-text-muted">{t('adopt.history.unsupported')}</p>}

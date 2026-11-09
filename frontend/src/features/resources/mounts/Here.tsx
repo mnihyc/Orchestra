@@ -1,3 +1,5 @@
+import { CompoundPickerScope } from '@/features/resources/PickerContext';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Mount locations on one machine, with reported sizes, readable attachments and the ordinary guarded add/remove acts. */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { ResourceChip, resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -42,7 +44,7 @@ function AddHere({ machine, choices, onClose }: { machine: string; choices: read
     <Button variant="primary" pending={save.isPending} disabled={!valid} onClick={() => save.mutate()}>{t('resources.edit.save')}</Button>
   </>}>
     <div className="flex flex-col gap-3">
-      <Select label={t('resourceDetails.mount.here.mount')} value={mount} disabled={save.isPending} placeholder={t('resourceDetails.mount.here.choose')}
+      <ResourcePicker pickerKey="resources.mounts.Here.resourceDetails.mount.here.mount" label={t('resourceDetails.mount.here.mount')} value={mount} disabled={save.isPending} placeholder={t('resourceDetails.mount.here.choose')}
         options={choices.map((choice) => ({ value: choice.mount.id, ...choiceOption(t, 'dynamic.resource', { name: choice.mount.name }), ...resourceChoice({ kind: 'mount', mount: choice.mount }), description: choice.mount.address === '' ? choiceOption(t, 'dynamic.resource', { name: choice.mount.name }).description : choice.mount.address }))}
         onValueChange={(id) => {
           const next = choices.find((choice) => choice.mount.id === id);
@@ -86,8 +88,8 @@ function Here({ machine, name }: { machine: string; name: string }) {
       : <ul>{row.environments.map((environment) => <li key={environment.id} className="flex flex-wrap gap-x-2"><ResourceChip subject={{ kind: 'environment', environment }} asChild hint={false}><Link to="/resources/environments/$id" params={{ id: environment.id }}>{environment.name}</Link></ResourceChip><span className="text-sm text-text-muted">{t(`environments.status.${environment.status}`)}</span></li>)}</ul> },
     { id: 'remove', header: <span className="sr-only">{t('resourceDetails.remove')}</span>, cell: (row) => row.can_remove && <Button variant="danger-ghost" size="sm" onClick={() => { setRemoving(row); setConfirm(''); remove.reset(); }}>{t('resourceDetails.mount.here.remove', { name: row.mount.name })}</Button> },
   ];
-  return <Section id={`mounts-here-${machine}`} title={t('resourceDetails.mount.here.title')} action={<Button variant="primary" icon={<Plus aria-hidden />} disabled={data === undefined || data.available.length === 0} onClick={() => setAdding(true)}>{t('resourceDetails.mount.here.add')}</Button>}>
-    {data === undefined ? query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <SkeletonRows rows={3} />
+  return <CompoundPickerScope data={data} screen="machine-mount-location">{<Section id={`mounts-here-${machine}`} title={t('resourceDetails.mount.here.title')} action={<Button variant="primary" icon={<Plus aria-hidden />} disabled={data === undefined || data.available.length === 0} onClick={() => setAdding(true)}>{t('resourceDetails.mount.here.add')}</Button>}>
+    {data === undefined ? query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : <SkeletonRows read={query} rows={3} />
       : data.locations.length === 0 ? <EmptyState compact title={t('resourceDetails.mount.here.none', { machine: name })} />
       : <Table label={t('resourceDetails.mount.here.title')} columns={columns} rows={data.locations} rowKey={(row) => row.mount.id} />}
     {data?.available.length === 0 && <EmptyState compact title={t('resourceDetails.mount.here.noChoices')} />}
@@ -100,7 +102,7 @@ function Here({ machine, name }: { machine: string; name: string }) {
       {removing?.kind === 'volume' && <Input label={t('resourceDetails.mount.confirmName')} value={confirm} onChange={(event) => setConfirm(event.target.value)} />}
       {remove.error !== null && <ErrorAlert error={remove.error} />}
     </Dialog>
-  </Section>;
+  </Section>}</CompoundPickerScope>;
 }
 
 export function MountsHere(props: { machine: string; name: string }) {

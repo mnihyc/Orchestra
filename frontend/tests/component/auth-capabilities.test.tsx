@@ -53,11 +53,11 @@ afterEach(async () => {
 });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  it(`hides every unavailable mail act at sign-in and on expired links in ${locale}/${theme}`, async () => {
+  it(`keeps recovery guidance reachable while hiding unavailable mail acts in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme }); document.documentElement.dataset.theme = theme;
     const login = show(<AuthFrame><Login onward={null} callbackError={null} /></AuthFrame>);
     await screen.findByLabelText(i18n.t('auth.fields.login'));
-    expect(screen.queryByRole('link', { name: i18n.t('auth.links.forgot') })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: i18n.t('auth.links.forgot') })).toHaveAttribute('href', '/recover');
     expect(screen.queryByRole('link', { name: i18n.t('auth.links.register') })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: i18n.t('auth.login.mailCode') })).not.toBeInTheDocument();
     expect(screen.getByText(i18n.t('auth.login.byInvitation'))).toBeVisible();
@@ -87,6 +87,9 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   it(`retains mail-capable recovery and confirmation paths in ${locale}/${theme}`, async () => {
     await setLocale(locale); useAppearance.setState({ locale, theme }); document.documentElement.dataset.theme = theme;
     calls.meta.mockResolvedValue(meta({ name: 'Workshop', mail: true, registration_mode: 'open' }));
+    const login = show(<AuthFrame><Login onward={null} callbackError={null} /></AuthFrame>);
+    expect(await screen.findByRole('link', { name: i18n.t('auth.links.forgot') })).toHaveAttribute('href', '/recover');
+    login.unmount();
     const recovery = show(<AuthFrame><Recovery /></AuthFrame>);
     await userEvent.type(await screen.findByLabelText(i18n.t('auth.fields.email')), 'reader@example.test');
     await userEvent.click(screen.getByRole('button', { name: i18n.t('auth.recover.submit') }));

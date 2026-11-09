@@ -1,7 +1,9 @@
 ---
+group: access
 title: Read notices and send announcements
 screens: /inbox, /settings/notifications, /org/$slug, /project/$projectId, /topic/$topicId, /thread/$threadId, /org/$slug/settings/$section, /admin/$section
 keywords: inbox, notice, announcement, milestone, delivery, wake, unread, mentions, bell, notification
+summary: Read Inbox notices, choose notification delivery and send announcements with visible outcomes.
 ---
 
 # Read notices and send announcements

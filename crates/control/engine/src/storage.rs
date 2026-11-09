@@ -8,7 +8,7 @@ use orch_api_contract::storage::{
     KeptRecord, KeptWhy, StorageAvailability, StorageBreakdown, StorageBreakdownRow,
     StorageDimension, StorageKind, StorageQuery, StorageTotals,
 };
-use orch_driver_contract::resources::{Resource, ResourceInventory, ResourceKind};
+use orch_driver_contract::resources::{Resource, ResourceInventory, ResourceKind, ResourceRef};
 use orch_types::Time;
 
 /// Seven days is the shipped cache window; thirty days gives the next calendar-scale report group.
@@ -19,6 +19,9 @@ const SECOND_AGE_DAYS: i64 = 30;
 #[must_use]
 pub fn record(id: String, kind: StorageKind, name: String, observed_at: Time) -> KeptRecord {
     KeptRecord {
+        artifact: None,
+        physical_parts: Vec::new(),
+        upload: None,
         accounting_key: id.clone(),
         id,
         kind,
@@ -67,6 +70,12 @@ pub const fn node_kind(kind: ResourceKind) -> StorageKind {
     }
 }
 
+/// The common opaque key of one actual native inventory object.
+#[must_use]
+pub fn node_record_key(host: orch_types::Id, resource: &ResourceRef) -> String {
+    format!("host:{}:{:?}:{}", host, resource.kind, resource.id)
+}
+
 /// Every native object uses the same retention fields; logical owners may enrich the facts afterwards.
 #[must_use]
 pub fn node_records(
@@ -74,6 +83,18 @@ pub fn node_records(
     inventory: &ResourceInventory,
     days: i64,
     online: bool,
+) -> Vec<KeptRecord> {
+    node_records_selected(host, inventory, days, online, None)
+}
+
+/// Format selected native candidates while every native dependency still contributes safety facts.
+#[must_use]
+pub fn node_records_selected(
+    host: &HostRef,
+    inventory: &ResourceInventory,
+    days: i64,
+    online: bool,
+    selected: Option<&BTreeSet<ResourceRef>>,
 ) -> Vec<KeptRecord> {
     let used: BTreeSet<_> = inventory
         .resources
@@ -83,12 +104,10 @@ pub fn node_records(
     inventory
         .resources
         .iter()
+        .filter(|item| selected.is_none_or(|selected| selected.contains(&item.resource)))
         .map(|item| {
             let mut row = record(
-                format!(
-                    "host:{}:{:?}:{}",
-                    host.id, item.resource.kind, item.resource.id
-                ),
+                node_record_key(host.id, &item.resource),
                 node_kind(item.resource.kind),
                 item.name.clone(),
                 inventory.observed_at,
@@ -138,12 +157,10 @@ pub fn node_object<'a>(
     inventory: &'a ResourceInventory,
     id: &str,
 ) -> Option<&'a Resource> {
-    inventory.resources.iter().find(|item| {
-        format!(
-            "host:{}:{:?}:{}",
-            host.id, item.resource.kind, item.resource.id
-        ) == id
-    })
+    inventory
+        .resources
+        .iter()
+        .find(|item| node_record_key(host.id, &item.resource) == id)
 }
 
 /// Counts shared content once, and only while the larger enclosing record is absent from this subset.
@@ -160,16 +177,13 @@ pub fn totals(records: &[KeptRecord]) -> StorageTotals {
             .as_deref()
             .is_none_or(|parent| !parents.contains(parent))
     }) {
-        let bytes = row.bytes.filter(|bytes| *bytes >= 0);
-        groups
-            .entry(&row.accounting_key)
-            .and_modify(|held| {
-                *held = match (*held, bytes) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    (a, b) => a.or(b),
-                }
-            })
-            .or_insert(bytes);
+        if row.physical_parts.is_empty() {
+            count_part(&mut groups, &row.accounting_key, row.bytes);
+        } else {
+            for part in &row.physical_parts {
+                count_part(&mut groups, &part.key, part.bytes);
+            }
+        }
     }
     StorageTotals {
         items: i64::try_from(records.len()).unwrap_or(i64::MAX),
@@ -180,6 +194,19 @@ pub fn totals(records: &[KeptRecord]) -> StorageTotals {
         unknown: i64::try_from(groups.values().filter(|bytes| bytes.is_none()).count())
             .unwrap_or(i64::MAX),
     }
+}
+
+fn count_part<'a>(groups: &mut BTreeMap<&'a str, Option<i64>>, key: &'a str, bytes: Option<i64>) {
+    let bytes = bytes.filter(|bytes| *bytes >= 0);
+    groups
+        .entry(key)
+        .and_modify(|held| {
+            *held = match (*held, bytes) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            };
+        })
+        .or_insert(bytes);
 }
 
 /// Stable age filters use elapsed days, including their exact boundaries.
@@ -220,6 +247,8 @@ pub fn dimension_key(row: &KeptRecord, by: StorageDimension, at: Time) -> String
                         | StorageKind::Content
                         | StorageKind::Upload
                         | StorageKind::Export
+                        | StorageKind::Snapshot
+                        | StorageKind::Import
                         | StorageKind::SkillVersion
                         | StorageKind::Release
                         | StorageKind::Dump
@@ -352,4 +381,118 @@ pub fn breakdowns(records: &[KeptRecord], at: Time) -> Vec<StorageBreakdown> {
         StorageBreakdown { by, rows }
     })
     .collect()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod tests {
+    use super::*;
+    use orch_types::Id;
+
+    #[test]
+    fn shared_artifact_parts_count_once_with_raw_blobs_and_in_filtered_subsets() {
+        use orch_api_contract::storage::StoragePart;
+        let at = Time::new("2026-10-01T12:00:00Z".parse().unwrap());
+        let mut first = record(
+            "snapshot:first".into(),
+            StorageKind::Snapshot,
+            String::new(),
+            at,
+        );
+        first.bytes = Some(17);
+        first.physical_parts = vec![
+            StoragePart {
+                key: "blob:shared".into(),
+                bytes: Some(10),
+            },
+            StoragePart {
+                key: "blob:first".into(),
+                bytes: Some(7),
+            },
+        ];
+        let mut second = record(
+            "import:second".into(),
+            StorageKind::Import,
+            String::new(),
+            at,
+        );
+        second.bytes = Some(15);
+        second.physical_parts = vec![
+            StoragePart {
+                key: "blob:shared".into(),
+                bytes: Some(10),
+            },
+            StoragePart {
+                key: "blob:second".into(),
+                bytes: Some(5),
+            },
+        ];
+        let mut raw = record(
+            "blob:shared".into(),
+            StorageKind::Content,
+            String::new(),
+            at,
+        );
+        raw.bytes = Some(10);
+        assert_eq!(totals(&[first.clone(), second.clone(), raw]).bytes, 22);
+        assert_eq!(totals(std::slice::from_ref(&first)).bytes, 17);
+        assert_eq!(totals(std::slice::from_ref(&second)).bytes, 15);
+        second.physical_parts.push(StoragePart {
+            key: "blob:unmeasured".into(),
+            bytes: None,
+        });
+        let combined = totals(&[first, second]);
+        assert_eq!(combined.bytes, 22);
+        assert_eq!(combined.unknown, 1);
+    }
+
+    #[test]
+    fn selected_records_keep_dependencies_of_unselected_native_units() {
+        let at = Time::new("2026-10-01T12:00:00Z".parse().unwrap());
+        let volume = ResourceRef {
+            kind: ResourceKind::Volume,
+            id: "kept-volume".into(),
+        };
+        let inventory = ResourceInventory {
+            observed_at: at,
+            unavailable: Vec::new(),
+            resources: vec![
+                Resource {
+                    resource: volume.clone(),
+                    name: "Kept data".into(),
+                    size_bytes: Some(11),
+                    labels: Default::default(),
+                    depends_on: Vec::new(),
+                    aliases: Vec::new(),
+                    last_used_at: Some(at),
+                    busy: false,
+                },
+                Resource {
+                    resource: ResourceRef {
+                        kind: ResourceKind::Unit,
+                        id: "unselected-user".into(),
+                    },
+                    name: "Unselected dependent".into(),
+                    size_bytes: Some(2),
+                    labels: Default::default(),
+                    depends_on: vec![volume.clone()],
+                    aliases: Vec::new(),
+                    last_used_at: Some(at),
+                    busy: false,
+                },
+            ],
+        };
+        let host = HostRef {
+            id: Id::from_u128(1),
+            name: "Host".into(),
+            address: String::new(),
+        };
+        let selected = BTreeSet::from([volume]);
+        let rows = node_records_selected(&host, &inventory, 7, true, Some(&selected));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Kept data");
+        assert_eq!(rows[0].why, KeptWhy::InUse);
+        assert_eq!(rows[0].blocker.as_deref(), Some("in_use"));
+        assert_eq!(rows[0], node_records(&host, &inventory, 7, true)[0]);
+    }
 }

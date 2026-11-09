@@ -33,8 +33,9 @@ when its name tooltip opens; the tooltip does not repeat its accessible name as 
 A distinct `reason` still joins the value, so a blocked control explains the refusal. The native
 button applies this after tooltip composition; refs, events and focus retain their normal behavior.
 
-Primary navigation stays visible. `Tabs` and the native links/specialized tabs in `FoldingStrip`
-wrap onto further lines; arrows traverse the whole set, and Enter follows a focused native link.
+`Tabs` keeps one horizontally scrolling row and reveals the selected or focused tab inside it.
+Native links/specialized navigation in `FoldingStrip` wrap onto further lines; arrows traverse the
+whole set, and Enter follows a focused native link.
 `ViewGroup` keeps one horizontally scrolling strip at the ordinary tab height, so long tab sets leave
 the view usable. Its existing Palette locator searches titles and authorized paths, with dirty marks
 and an addressed Close action. Workbench containers keep their icons and full names visible,

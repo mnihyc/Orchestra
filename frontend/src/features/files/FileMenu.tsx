@@ -6,7 +6,7 @@
  * person may not use is shown disabled with the reason: a menu that changes shape teaches nothing.
  * The acts that need a word from the person (a name, a place, a yes) open a small dialog of their own.
  */
-import { contentHref } from '@/features/workbench/contentAddress';
+import { linkTo } from '@/lib/links';
 import { environmentFileReference } from '@/features/people/references';
 import { Copy, Download, ExternalLink, FilePlus, FolderPlus, FolderSearch, Link2, MessageSquarePlus, Pencil, RefreshCw, Scissors, Trash2, Upload, ClipboardPaste, CopyPlus, FolderInput, ChevronsDownUp } from 'lucide-react';
 import type { TFunction } from 'i18next';
@@ -26,6 +26,7 @@ import { Input } from '@/ui/Input';
 import type { MenuEntry } from '@/ui/Menu';
 import { toast } from '@/ui/Toast';
 import { copyText } from '@/ui/clipboard';
+import { useActKey } from '@/lib/forms';
 
 import { addToMessage } from './AddToMessage';
 import { type EnvironmentWorkspaceAccess, isAway, workspaceDenial } from './door';
@@ -175,7 +176,6 @@ export function useFileActions({ access, environment, open, collapseAll, search,
     [door, refresh, t, why],
   );
 
-  const linkTo = (path: string) => `${window.location.origin}${contentHref({ view: 'file', environmentId: door.environmentId, threadId: door.threadId, path })}`;
   const fromDirectory = (path: string) => (access.directory !== '' && path.startsWith(`${access.directory}/`) ? path.slice(access.directory.length + 1) : path);
 
   const entriesFor = useCallback(
@@ -218,7 +218,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
           { id: 'paste', label: t('files.menu.paste'), icon: <ClipboardPaste aria-hidden />, disabled: pasteBlocked, onSelect: () => paste(entry.path) },
           { id: 'sep-copy', type: 'separator' },
           { id: 'copy-path', label: t('files.menu.copyPath'), icon: <Copy aria-hidden />, onSelect: () => void copyText(entry.path) },
-          { id: 'copy-link', label: t('files.menu.copyLink'), icon: <Link2 aria-hidden />, onSelect: () => void copyText(linkTo(entry.path)) },
+          { id: 'copy-link', label: t('files.menu.copyLink'), icon: <Link2 aria-hidden />, onSelect: () => void copyText(linkTo({ kind: 'environment_file', id: door.environmentId, threadId: door.threadId, path: entry.path })) },
           { id: 'search-in', label: t('files.menu.searchIn'), icon: <FolderSearch aria-hidden />, onSelect: () => search(entry.path) },
           { id: 'refresh', label: t('files.menu.refresh'), icon: <RefreshCw aria-hidden />, onSelect: () => void refresh(entry.path) },
           { id: 'sep-danger', type: 'separator' },
@@ -251,7 +251,7 @@ export function useFileActions({ access, environment, open, collapseAll, search,
         { id: 'copy-path', label: t('files.menu.copyPath'), icon: <Copy aria-hidden />, onSelect: () => void copyText(entry.path) },
         { id: 'copy-relative', label: t('files.menu.copyPathFromDirectory'), icon: <Copy aria-hidden />, onSelect: () => void copyText(fromDirectory(entry.path)) },
         { id: 'copy-reference', label: t('people.reference.copy'), icon: <Link2 aria-hidden />, onSelect: () => void copyText(environmentFileReference(door.environmentId, entry.path), t('people.reference.copied')) },
-        { id: 'copy-link', label: t('files.menu.copyLink'), icon: <Link2 aria-hidden />, onSelect: () => void copyText(linkTo(entry.path)) },
+        { id: 'copy-link', label: t('files.menu.copyLink'), icon: <Link2 aria-hidden />, onSelect: () => void copyText(linkTo({ kind: 'environment_file', id: door.environmentId, threadId: door.threadId, path: entry.path })) },
         ...(door.threadId === null ? [] : [{ id: 'add', label: t('files.addToMessage'), icon: <MessageSquarePlus aria-hidden />, onSelect: () => { if (door.threadId !== null) addToMessage(door.threadId, { kind: 'file', path: entry.path }); } }]),
         { id: 'sep-danger', type: 'separator' },
         { id: 'delete', label: t('files.menu.delete'), icon: <Trash2 aria-hidden />, danger: true, shortcut: 'Delete', disabled: why, onSelect: () => start({ kind: 'delete', entries: [entry] }) },
@@ -400,6 +400,7 @@ function DeleteDialog({ act, blocked, onClose, door, environmentName, refresh }:
 
 function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: string | false; act: Exclude<FileAct, { kind: 'delete' }>; onClose: () => void; door: Door; refresh: DialogsProps['refresh']; open: DialogsProps['open'] }) {
   const { t } = useTranslation();
+  const creationKey = useActKey();
   const initial =
     act.kind === 'rename'
       ? act.entry.name
@@ -444,10 +445,12 @@ function NameDialog({ act, blocked, onClose, door, refresh, open }: { blocked: s
             open({ ...blank(path, name) }, true);
             return;
           }
-          case 'newFolder':
-            await makeDirectory(door, joinPath(act.directory, name));
+          case 'newFolder': {
+            const path = joinPath(act.directory, name);
+            await makeDirectory(door, path, creationKey({ door, path }));
             await refresh(act.directory);
             break;
+          }
           case 'rename':
             await renameFile(door, act.entry.path, joinPath(parentOf(act.entry.path), name));
             await refresh(parentOf(act.entry.path));

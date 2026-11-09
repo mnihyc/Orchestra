@@ -1,15 +1,20 @@
 //! Aggregate capacity of compatible, ready and schedulable cluster workers.
 
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use orch_driver_contract::driver::DriverError;
+#[cfg(target_os = "linux")]
 use orch_driver_contract::host::HostResources;
 
 /// Kubernetes measures CPU in cores; Orch reports thousandths of a core.
+#[cfg(target_os = "linux")]
 const MILLIS_PER_CPU: u128 = 1_000;
 /// Orch reports memory in mebibytes; Kubernetes memory quantities are bytes.
+#[cfg(target_os = "linux")]
 const BYTES_PER_MIB: u128 = 1_024 * 1_024;
 /// Kubernetes quantities use decimal exponents, SI prefixes and binary prefixes with these bases.
 const DECIMAL_BASE: u128 = 10;
@@ -99,6 +104,7 @@ fn fraction(quantity: &Quantity) -> Result<(u128, u128), DriverError> {
 }
 
 /// Reads Kubernetes quantities in host units; fractional capacity rounds down.
+#[cfg(target_os = "linux")]
 fn units(quantity: &Quantity, multiply: u128, divide: u128) -> Result<i64, DriverError> {
     let (mut numerator, mut denominator) = fraction(quantity)?;
     (numerator, denominator) =
@@ -123,6 +129,7 @@ pub(crate) fn positive(quantity: &Quantity) -> bool {
 }
 
 /// Compares exact quantities without cross multiplication or rounding away a small difference.
+#[cfg(target_os = "linux")]
 pub(crate) fn at_least(actual: &Quantity, requested: &Quantity) -> Result<bool, DriverError> {
     use std::cmp::Ordering;
     let (mut left, mut left_denominator) = fraction(actual)?;
@@ -155,6 +162,7 @@ pub(crate) fn at_least(actual: &Quantity, requested: &Quantity) -> Result<bool, 
 }
 
 /// Counts only compatible workers the scheduler can use; unmeasured storage and load remain unknown.
+#[cfg(target_os = "linux")]
 pub(crate) fn aggregate(
     nodes: &[Node],
     selector: &BTreeMap<String, String>,
@@ -234,6 +242,7 @@ pub(crate) fn aggregate(
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
     use serde_json::json;

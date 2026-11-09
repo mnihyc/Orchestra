@@ -36,7 +36,7 @@ pub const DOC_CHANNEL: &str = "orch_doc";
 
 /// The columns of a document, as [`DocumentRow`] reads them.
 const DOCUMENT_COLUMNS: &str = "d.id, d.node_id, d.org_id, d.owner_id, d.created_by, d.created_by_thread, d.created_by_agent,
-    d.title, d.description, d.description_source, d.doc_seq, d.seq_updated, d.purged_seq, d.block_count, d.bytes, d.files_bytes, d.version, d.version_at,
+    d.title, d.description, d.doc_seq, d.seq_updated, d.purged_seq, d.block_count, d.bytes, d.files_bytes, d.version, d.version_at,
     d.span, d.told, d.created_at, d.updated_at, d.updated_by, d.deleted_at, d.deleted_by";
 
 /// A document, as stored.
@@ -60,8 +60,6 @@ pub struct DocumentRow {
     pub title: String,
     /// Its description, whose first line is shown where documents are listed; empty when nobody wrote one.
     pub description: String,
-    /// Who maintains the description: `user` once a person or an agent wrote it, `auto` while automation may.
-    pub description_source: String,
     /// Its sequence.
     pub doc_seq: i64,
     /// The stamp of this row.
@@ -931,7 +929,51 @@ pub async fn rename(
     writer: &Writer,
     now: DateTime<Utc>,
 ) -> Result<Option<Seq>, DbError> {
-    containers::lock_document_scope(conn, document).await?;
+    match rename_checked(conn, document, title, writer, now, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(never) => match never {},
+    }
+}
+
+/// The same native rename, with the caller's once-only cut after its scope/document waits.
+pub async fn rename_checked<E, F>(
+    conn: &mut Conn,
+    document: Id,
+    title: &str,
+    writer: &Writer,
+    now: DateTime<Utc>,
+    before: F,
+) -> Result<Result<Option<Seq>, DbError>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let ready: Result<bool, DbError> = async {
+        containers::lock_document_scope(conn, document).await?;
+        Ok(lock(conn, document)
+            .await?
+            .is_some_and(|row| row.deleted_at.is_none()))
+    }
+    .await;
+    match ready {
+        Err(error) => return Ok(Err(error)),
+        Ok(false) => return Ok(Ok(None)),
+        Ok(true) => {}
+    }
+    before()?;
+    Ok(rename_locked(conn, document, title, writer, now).await)
+}
+
+async fn rename_locked(
+    conn: &mut Conn,
+    document: Id,
+    title: &str,
+    writer: &Writer,
+    now: DateTime<Utc>,
+) -> Result<Option<Seq>, DbError> {
     let Some(seq) = next_seq(conn, document).await? else {
         return Ok(None);
     };
@@ -950,9 +992,8 @@ pub async fn rename(
     Ok(Some(seq))
 }
 
-/// Gives the document a description written by `writer`, a person or an agent: from now on it is theirs to keep
-/// (`user`), and automation leaves it alone. Stamped as a change, so that every open copy and every list that
-/// shows its first line hears of it. None where the document is gone.
+/// Writes a description explicitly supplied by a person or agent. Stamped as a change so every open copy
+/// and list showing its first line hears of it. None where the document is gone.
 pub async fn describe(
     conn: &mut Conn,
     document: Id,
@@ -965,7 +1006,7 @@ pub async fn describe(
     };
     let (user, _, _) = stamped_by(writer);
     sqlx::query(
-        "UPDATE documents SET description = $2, description_source = 'user', updated_at = $3, updated_by = $4
+        "UPDATE documents SET description = $2, updated_at = $3, updated_by = $4
           WHERE id = $1",
     )
     .bind(document)
@@ -979,11 +1020,11 @@ pub async fn describe(
     Ok(Some(seq))
 }
 
-/// Gives a copy the description of the document it copies, kept by whoever kept that one; the copy is new, so
+/// Gives a copy the written description of the document it copies; the copy is new, so
 /// nothing is stamped or announced that its creation does not announce already.
 pub async fn copy_description(conn: &mut Conn, from: Id, to: Id) -> Result<(), DbError> {
     sqlx::query(
-        "UPDATE documents d SET description = s.description, description_source = s.description_source
+        "UPDATE documents d SET description = s.description
            FROM documents s WHERE d.id = $2 AND s.id = $1",
     )
     .bind(from)
@@ -1261,8 +1302,23 @@ pub async fn maintenance_page(
     after: Option<Id>,
     limit: i64,
 ) -> Result<Vec<(Id, Id)>, DbError> {
-    Ok(sqlx::query_as("SELECT id,node_id FROM documents WHERE ($1::uuid IS NULL OR id>$1) ORDER BY id LIMIT $2 FOR UPDATE")
-        .bind(after).bind(limit).fetch_all(conn).await?)
+    Ok(match after {
+        Some(after) => {
+            sqlx::query_as(
+                "SELECT id,node_id FROM documents WHERE id>$1 ORDER BY id LIMIT $2 FOR UPDATE",
+            )
+            .bind(after)
+            .bind(limit)
+            .fetch_all(conn)
+            .await?
+        }
+        None => {
+            sqlx::query_as("SELECT id,node_id FROM documents ORDER BY id LIMIT $1 FOR UPDATE")
+                .bind(limit)
+                .fetch_all(conn)
+                .await?
+        }
+    })
 }
 
 /// The files nothing names any more, each with its document: no block of the document names it,
@@ -1761,9 +1817,8 @@ mod tests {
         let here = place(&mut conn, now).await;
         let made = get(&mut conn, here.document).await.unwrap().unwrap();
         assert_eq!(
-            (made.description.as_str(), made.description_source.as_str()),
-            ("", "auto"),
-            "a new document has none, and automation may write one"
+            made.description, "",
+            "a new document has no written description"
         );
         let later = now + chrono::Duration::minutes(1);
         let seq = describe(
@@ -1780,20 +1835,12 @@ mod tests {
         assert_eq!(
             (
                 row.description.as_str(),
-                row.description_source.as_str(),
                 row.doc_seq,
                 row.seq_updated,
                 row.updated_by,
                 row.updated_at
             ),
-            (
-                "How we ship\nand roll back",
-                "user",
-                1,
-                1,
-                Some(here.bob),
-                later
-            )
+            ("How we ship\nand roll back", 1, 1, Some(here.bob), later)
         );
         soft_delete(&mut conn, here.document, here.ada, later)
             .await
@@ -2040,19 +2087,28 @@ mod tests {
 // Announcing document placement and visibility to open trees.
 pub mod tree;
 
-/// Writes an unchanged automatic description, stamped and notified without cutting a content version.
-pub async fn describe_automatically(
+/// One bounded oldest-first unnamed-file page after the durable purge supplier.
+pub async fn unnamed_files_page(
     conn: &mut Conn,
-    document: Id,
-    description: &str,
-    expected: Seq,
-    now: DateTime<Utc>,
-) -> Result<Option<Seq>, DbError> {
-    let seq: Option<Seq> = sqlx::query_scalar("UPDATE documents SET description=$2,doc_seq=doc_seq+1,seq_updated=doc_seq+1,updated_at=$4,updated_by=NULL WHERE id=$1 AND doc_seq=$3 AND description_source='auto' AND deleted_at IS NULL AND description<>$2 RETURNING doc_seq")
-        .bind(document).bind(description).bind(expected).bind(now).fetch_optional(&mut *conn).await?;
-    if let Some(seq) = seq {
-        notify(conn, document, seq).await?;
-        tree::stamp(conn, document).await?;
+    before: DateTime<Utc>,
+    after: Option<(DateTime<Utc>, Id)>,
+    limit: i64,
+) -> Result<Vec<(Id, Id, DateTime<Utc>)>, DbError> {
+    let seek = if after.is_some() {
+        " AND (f.added_at,f.id)>($3,$4)"
+    } else {
+        ""
+    };
+    let sql=format!("SELECT f.document_id,f.id,f.added_at FROM document_files f
+      WHERE f.added_at<$1 {seek}
+        AND NOT EXISTS(SELECT 1 FROM document_blocks b WHERE b.document_id=f.document_id AND b.props->>'file_id'=f.id::text)
+        AND NOT EXISTS(SELECT 1 FROM document_versions v WHERE v.document_id=f.document_id AND strpos(COALESCE(v.whole,v.change)::text,f.id::text)>0)
+      ORDER BY f.added_at,f.id LIMIT $2");
+    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(before)
+        .bind(limit);
+    if let Some((at, id)) = after {
+        query = query.bind(at).bind(id);
     }
-    Ok(seq)
+    Ok(query.fetch_all(conn).await?)
 }

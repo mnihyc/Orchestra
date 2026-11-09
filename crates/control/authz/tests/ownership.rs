@@ -156,6 +156,44 @@ async fn a_member_makes_each_kind_in_their_domain_or_inside_it_and_an_admin_make
 }
 
 #[tokio::test]
+async fn a_project_provider_keeps_membership_work_and_creation_policy_requirements() {
+    let w = World::new().await;
+    let member = w.member("project-provider-maker").await;
+    w.row(w.project, P::ProjectInteract, false).await;
+    assert!(!w.can(member, w.project, P::ProjectInteract).await);
+    assert!(matches!(
+        making(&w, member, ResourceKind::Provider, Some(w.project), &FIVE).await,
+        Making::Refused(Why::KeptByAdmins(_))
+    ));
+    w.name(w.project, P::ProjectInteract, Holder::User { id: member })
+        .await;
+    assert!(w.can(member, w.project, P::ProjectInteract).await);
+    assert!(matches!(
+        making(&w, member, ResourceKind::Provider, Some(w.project), &FIVE).await,
+        Making::Allowed(Basis::Member)
+    ));
+    assert!(matches!(
+        making(&w, member, ResourceKind::Provider, Some(w.project), &[]).await,
+        Making::Refused(Why::KeptByAdmins(_))
+    ));
+    assert!(matches!(
+        making(&w, w.boss, ResourceKind::Provider, Some(w.project), &[]).await,
+        Making::Allowed(Basis::Rules(_))
+    ));
+    let stranger = w.user("project-provider-outsider").await;
+    w.name(w.project, P::ProjectInteract, Holder::User { id: stranger })
+        .await;
+    assert!(matches!(
+        making(&w, stranger, ResourceKind::Provider, Some(w.project), &FIVE).await,
+        Making::Refused(Why::NotAMember)
+    ));
+    assert!(matches!(
+        making(&w, member, ResourceKind::Provider, Some(w.topic), &FIVE).await,
+        Making::Refused(Why::HomeIsNoOrg)
+    ));
+}
+
+#[tokio::test]
 async fn a_resource_of_the_system_is_made_by_a_system_admin_alone() {
     let w = World::new().await;
     let (sysadmin, member) = (w.user("root").await, w.member("member").await);

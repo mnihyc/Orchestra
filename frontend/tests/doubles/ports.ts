@@ -98,7 +98,9 @@ export class PortsWorld implements Part {
   return (['place', 'link', 'host'] as const).map((kind) => {
    const decision = kind === 'link' && !links || kind === 'host' && !publish ? 'deny' as const : 'ask' as const;
    const granted = this.granted(id, kind);
-   return { key: PORT_KEYS[kind], kind, label: PORT_LABELS[kind], risk: kind === 'place' ? 'medium' as const : 'high' as const, offered: true, granted, from_template: false, decision, approver_scope: 'environment' as const, admission: granted && decision !== 'deny' ? this.admission(id, kind) : null, can_grant: manage && !granted && decision !== 'deny', can_revoke: manage && granted };
+   return { key: PORT_KEYS[kind], kind, label: PORT_LABELS[kind], risk: kind === 'place' ? 'medium' as const : 'high' as const, offered: true, granted, from_template: false, decision, approver_scope: 'environment' as const, admission: granted && decision !== 'deny' ? this.admission(id, kind) : null, can_grant: manage && !granted && decision !== 'deny', can_revoke: manage && granted,
+    ...{ grant_unavailable_reason: !manage ? 'manage_required' as const : decision === 'deny' ? 'policy_denied' as const : granted ? 'already_granted' as const : null,
+     revoke_unavailable_reason: !manage ? 'manage_required' as const : !granted ? 'no_grant' as const : null } };
   });
  }
  private guard(person: Person, id: string, port: number, way: PortOpening['way']): void {

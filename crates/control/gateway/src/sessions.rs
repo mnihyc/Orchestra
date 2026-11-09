@@ -1,6 +1,8 @@
 //! Active machine sessions and replacement.
 //!
-//! A machine has one session. When a second one is accepted for it, the first
+//! A machine has one session on this gateway. Its primary and any tunnel-only
+//! attachments on other gateways never replace one another. When a second
+//! primary is accepted here, the first
 //! is told that it is replaced and is ended, and from then on only the second
 //! counts: its tunnels are the ones the relay knows, its frames are the ones
 //! passed on, and it is the one the system is told about. What the first one
@@ -15,6 +17,7 @@ use crate::Gateway;
 use orch_link::framing::Connection;
 use orch_link::session::{self, Accepted, EndReason, SessionEvent, SessionSender};
 use orch_link_contract::backplane::{BackplaneFrame, MachineDown, MachineUp};
+use orch_link_contract::frames::Frame;
 use orch_link_contract::version::ByeCode;
 use orch_types::Id;
 use std::collections::HashMap;
@@ -24,6 +27,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 /// One session that stands.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionEntry {
+    pub(crate) capabilities: Vec<String>,
+    pub(crate) purpose: orch_link_contract::gateways::SessionPurpose,
     pub(crate) session_id: Id,
     pub(crate) sender: SessionSender,
     pub(crate) token: String,
@@ -71,16 +76,30 @@ impl Sessions {
     }
 
     /// Puts a session in a machine's place and returns the one it replaced.
-    pub(crate) fn install(&self, machine: Id, entry: SessionEntry) -> Option<SessionEntry> {
+    pub(crate) fn install(
+        &self,
+        machine: Id,
+        entry: SessionEntry,
+    ) -> Result<Option<SessionEntry>, SessionEntry> {
         let mut registry = self.lock();
+        if !entry.purpose.is_primary()
+            && registry
+                .by_machine
+                .get(&machine)
+                .is_some_and(|current| current.purpose.is_primary())
+        {
+            return Err(entry);
+        }
         metrics::gauge!("orch_link_sessions","placement"=>entry.placement.clone(),"trust"=>entry.trust).increment(1.0);
-        registry.by_token.insert(entry.token.clone(), machine);
+        if entry.purpose.is_primary() && !entry.token.is_empty() {
+            registry.by_token.insert(entry.token.clone(), machine);
+        }
         let replaced = registry.by_machine.insert(machine, entry);
         if let Some(old) = &replaced {
             metrics::gauge!("orch_link_sessions","placement"=>old.placement.clone(),"trust"=>old.trust).decrement(1.0);
             registry.by_token.remove(&old.token);
         }
-        replaced
+        Ok(replaced)
     }
 
     /// Takes a session out, if it is still the machine's. Returns whether it
@@ -106,6 +125,19 @@ impl Sessions {
             .map(|entry| entry.sender.clone())
     }
 
+    /// Business/control delivery and API-owned attachments use only a primary.
+    pub(crate) fn primary_sender_of(&self, machine: Id) -> Option<SessionSender> {
+        self.lock()
+            .by_machine
+            .get(&machine)
+            .filter(|entry| entry.purpose.is_primary())
+            .map(|entry| entry.sender.clone())
+    }
+
+    pub(crate) fn has_primary(&self, machine: Id) -> bool {
+        self.primary_sender_of(machine).is_some()
+    }
+
     /// The machine a session token was given to, and the fingerprint of the
     /// certificate that session was opened with.
     pub(crate) fn machine_of_token(&self, token: &str) -> Option<(Id, String)> {
@@ -120,7 +152,10 @@ impl Sessions {
         self.lock()
             .by_machine
             .iter()
+            .filter(|(_, entry)| entry.purpose.is_primary())
             .map(|(machine, entry)| MachineUp {
+                capabilities: entry.capabilities.clone(),
+                purpose: entry.purpose,
                 machine_id: *machine,
                 session_id: entry.session_id,
                 ip: entry
@@ -170,11 +205,17 @@ impl Sessions {
 /// Accepts the session on a connection that was just upgraded, and serves it
 /// until it ends.
 pub(crate) async fn serve_connection(gateway: Gateway, connection: Connection) {
+    #[cfg(feature = "test-observers")]
+    let (connection, observation) = orch_link::test_observers::gateway_connection(connection);
     let authority = crate::authentication::BackplaneAuthority::new(&gateway);
     let config = gateway.session_config();
     let accepted = session::accept(connection, &config, &authority, gateway.clock().as_ref()).await;
     match accepted {
-        Ok(accepted) => serve_session(gateway, accepted).await,
+        Ok(accepted) => {
+            #[cfg(feature = "test-observers")]
+            observation.accepted(accepted.auth.machine_id, accepted.session_id);
+            serve_session(gateway, accepted).await
+        }
         Err(error) => tracing::debug!(%error, "a session was not accepted"),
     }
 }
@@ -193,10 +234,13 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         ..
     } = accepted;
     let machine = auth.machine_id;
+    let purpose = auth.purpose;
     let inner = &gateway.inner;
     let replaced = inner.sessions.install(
         machine,
         SessionEntry {
+            capabilities: auth.capabilities.clone(),
+            purpose,
             session_id,
             sender: sender.clone(),
             token: session_token,
@@ -210,6 +254,13 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
             },
         },
     );
+    let replaced = match replaced {
+        Ok(replaced) => replaced,
+        Err(unused) => {
+            unused.sender.bye(ByeCode::Replaced);
+            return;
+        }
+    };
     if let Some(old) = replaced {
         // The old session's tunnels wait for the new one; the old session is
         // told why it ends.
@@ -219,14 +270,23 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         old.sender.bye(ByeCode::Replaced);
         tracing::info!(%machine, "a session replaced the one before it");
     }
-    inner
-        .relay
-        .with(|relay| relay.session_up(machine, session_id, sender.clone()));
-    inner.backplane.send(BackplaneFrame::MachineUp(MachineUp {
-        machine_id: machine,
-        session_id,
-        ip: remote_ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
-    }));
+    inner.relay.with(|relay| {
+        relay.session_up_capable(
+            machine,
+            session_id,
+            sender.clone(),
+            auth.capabilities.clone(),
+        )
+    });
+    if purpose.is_primary() {
+        inner.backplane.send(BackplaneFrame::MachineUp(MachineUp {
+            capabilities: auth.capabilities.clone(),
+            purpose,
+            machine_id: machine,
+            session_id,
+            ip: remote_ip.unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        }));
+    }
     tracing::info!(%machine, session = %session_id, "a session stands");
 
     let mut stopping = false;
@@ -241,6 +301,25 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
         };
         match event {
             Some(SessionEvent::Frame(frame)) => {
+                if !purpose.is_primary()
+                    && !matches!(
+                        frame.as_ref(),
+                        Frame::Open(_)
+                            | Frame::OpenOk(_)
+                            | Frame::OpenErr(_)
+                            | Frame::Resume(_)
+                            | Frame::ResumeOk(_)
+                            | Frame::Credit(_)
+                            | Frame::ChAck(_)
+                            | Frame::Eof(_)
+                            | Frame::Close(_)
+                            | Frame::PtyResize(_)
+                            | Frame::PtyExit(_)
+                    )
+                {
+                    sender.bye(ByeCode::ProtocolError);
+                    continue;
+                }
                 crate::routing::from_machine(&gateway, machine, session_id, *frame);
             }
             Some(SessionEvent::Data(data)) => {
@@ -260,13 +339,16 @@ async fn serve_session(gateway: Gateway, accepted: Accepted) {
     inner
         .relay
         .with(|relay| relay.session_gone(machine, session_id));
-    inner
-        .backplane
-        .send(BackplaneFrame::MachineDown(MachineDown {
-            machine_id: machine,
-            session_id,
-            reason: describe(&reason),
-        }));
+    if purpose.is_primary() {
+        inner
+            .backplane
+            .send(BackplaneFrame::MachineDown(MachineDown {
+                purpose,
+                machine_id: machine,
+                session_id,
+                reason: describe(&reason),
+            }));
+    }
     tracing::info!(%machine, session = %session_id, reason = %describe(&reason), "a session ended");
 }
 

@@ -4,15 +4,18 @@
  */
 import { FLOATING_EDGE as EDGE, FLOATING_GAP as GAP, floatingClasses, floatingRoom } from '@/ui/floating';
 import { onPromptOpened } from '@/ui/PromptScope';
+import { AUTOMATIC_FOCUS } from '@/ui/focus';
 
 export const OVERFLOW_REST_MS = 400;
 /** Enough time to cross the same six-pixel gap used by the ordinary tooltip. */
 const LEAVE_MS = 100;
 const CONTROLS = 'a[href],button,input,select,textarea,summary,[contenteditable="true"],[role="button"],[role="link"],[role="tab"],[role="treeitem"],[role="menuitem"],[role="option"],[role="combobox"],[role="checkbox"],[role="radio"],[role="switch"]';
-const EXCLUDED = 'script,style,[hidden],[inert],[aria-hidden="true"],[role="tooltip"],[data-tooltip-content]';
+// Controls with a dedicated full-detail card do not need a second overflow explanation.
+const EXCLUDED = 'script,style,[hidden],[inert],[aria-hidden="true"],[role="tooltip"],[data-tooltip-content],[data-overflow-details]';
 
 /** The value stays text, never HTML. Manual previews retain their original in one explicit member. */
 function renderedText(element: { innerText?: string; textContent: string | null }): string {
+  if (element instanceof HTMLInputElement && element.type === 'text' && element.getAttribute('role') === 'combobox') return element.value;
   // DOM implementations without layout (including the unit harness) have no innerText.
   return element.innerText ?? element.textContent ?? '';
 }
@@ -153,7 +156,8 @@ export function installOverflowTooltips(doc: Document): () => void {
   function candidate(eventTarget: EventTarget | null, keyboard: boolean): HTMLElement | null {
     let hit = eventTarget instanceof Element ? eventTarget : null;
     while (hit !== null && !(hit instanceof HTMLElement)) hit = hit.parentElement;
-    if (!(hit instanceof HTMLElement) || hit.closest('[role="tooltip"],[data-tooltip-content]') !== null) return null;
+    if (!(hit instanceof HTMLElement) || hit.closest('[role="tooltip"],[data-tooltip-content]') !== null
+      || keyboard && hit.closest(`[${AUTOMATIC_FOCUS}]`) !== null) return null;
     const target = hit;
     for (let element: HTMLElement | null = target; element !== null && element !== doc.body; element = element.parentElement) {
       if (textOverflows(element) && !hasOwnTooltip(element, keyboard ? target : undefined)) return element;
@@ -231,7 +235,7 @@ export function installOverflowTooltips(doc: Document): () => void {
       if (!(element instanceof HTMLElement)) continue;
       const wanted = clipsText(getComputedStyle(element)) || element.hasAttribute('data-overflow-text') || (element.hasAttribute('title') && renderedText(element).includes('…'));
       if (!wanted && !candidates.has(element)) continue;
-      if (element.closest(EXCLUDED) !== null || element.textContent.trim() === '') continue;
+      if (element.closest(EXCLUDED) !== null || renderedText(element).trim() === '') continue;
       if (wanted) {
         if (!candidates.has(element)) { candidates.add(element); sizes?.observe(element); }
         measure(element);

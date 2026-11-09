@@ -212,7 +212,14 @@ impl Engine {
     /// and waited for, the files written, and the input settled, after which pre-flight runs again. A
     /// thread left `starting` without a turn and with nothing to prepare (its input was cancelled) is put
     /// back as pre-flight finds it.
-    pub(crate) async fn drive_preparation(&self, thread_id: Id) -> Result<(), EngineError> {
+    pub(crate) fn drive_preparation(
+        &self,
+        thread_id: Id,
+    ) -> futures::future::BoxFuture<'_, Result<(), EngineError>> {
+        Box::pin(self.drive_preparation_inner(thread_id))
+    }
+
+    async fn drive_preparation_inner(&self, thread_id: Id) -> Result<(), EngineError> {
         let (thread, input, environment) = {
             let mut conn = self.inner.db.acquire().await?;
             let Some(thread) = threads::thread(&mut conn, thread_id).await? else {

@@ -12,7 +12,7 @@ import type { EnvironmentPorts, PortReason } from './presentation';
 
 export function PortScope({ scope }: { scope: NodeRef }) {
   const path = pathFor(scope);
-  return path === null ? <span>{scope.name}</span> : <Link to={path} className="text-accent-text hover:underline">{scope.name}</Link>;
+  return <Link to={path} className="text-accent-text hover:underline">{scope.name}</Link>;
 }
 
 export function PortHolders({ holders }: { holders: readonly Holder[] }) {

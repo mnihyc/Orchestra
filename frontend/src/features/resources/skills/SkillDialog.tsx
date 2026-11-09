@@ -17,7 +17,8 @@ import { Button } from '@/ui/Button';
 import { ByteSize } from '@/ui/ByteSize';
 import { Input } from '@/ui/Input';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
+import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { Textarea } from '@/ui/Textarea';
 import { SkillRefusal } from './Refusal';
 
@@ -68,9 +69,9 @@ function SourceFields({ way, fields, disabled }: { way: Way; fields: ReturnType<
   const managed = (environments.data ?? []).filter((row) => holds(row.access, 'environment.manage'));
   const hosts = useQuery({ ...hostsQuery(null), enabled: way === 'git' || way === 'url' });
   const usable = (hosts.data ?? []).filter((row) => holds(row.access, 'host.use'));
-  const hostField = <Select label={t('resourceDetails.skill.form.host')} value={fields.host} disabled={disabled}
+  const hostField = <ResourcePicker pickerKey="skill-source-host" label={t('resourceDetails.skill.form.host')} value={fields.host} disabled={disabled}
     placeholder={t(hosts.isPending ? 'common.loading' : 'resourceDetails.skill.form.chooseHost')}
-    options={usable.map((row) => ({ value: row.id, label: row.name }))} onValueChange={fields.setHost} />;
+    options={usable.map((row) => ({ value: row.id, name: row.name, ...resourceChoice({kind:'host',host:row}) }))} onValueChange={fields.setHost} />;
   const folderField = <Input label={t('resourceDetails.skill.form.folder')} value={fields.folder} disabled={disabled} spellCheck={false} autoComplete="off" onChange={(event) => fields.setFolder(event.target.value)} />;
   if (way === 'upload') return <>
     <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -93,9 +94,9 @@ function SourceFields({ way, fields, disabled }: { way: Way; fields: ReturnType<
     {folderField}
   </>;
   if (way === 'directory') return <>
-    <Select label={t('resourceDetails.skill.form.environment')} value={fields.environment} disabled={disabled}
+    <ResourcePicker pickerKey="skill-source-environment" label={t('resourceDetails.skill.form.environment')} value={fields.environment} disabled={disabled}
       placeholder={t(environments.isPending ? 'common.loading' : 'resourceDetails.skill.form.chooseEnvironment')}
-      options={managed.map((row) => ({ value: row.id, label: row.name }))} onValueChange={fields.setEnvironment} />
+      options={managed.map((row) => ({ value: row.id, name: row.name, ...resourceChoice({kind:'environment',environment:row}) }))} onValueChange={fields.setEnvironment} />
     <Input label={t('resourceDetails.skill.form.path')} value={fields.path} disabled={disabled} spellCheck={false} autoComplete="off" onChange={(event) => fields.setPath(event.target.value)} />
   </>;
   return <>

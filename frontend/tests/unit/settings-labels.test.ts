@@ -12,7 +12,7 @@ describe('a settings section in navigation and the title bar', () => {
     for (const language of ['en', 'zh-CN'] as const) {
       await setLocale(language);
       const t = i18n.getFixedT(language);
-      expect(sectionLabel('policies', t)).toBe(t('day100.names.defaults'));
+      expect(sectionLabel('defaults', t)).toBe(t('day100.names.defaults'));
       expect(sectionLabel('roles', t)).toBe(t('day100.names.roles'));
       expect(sectionLabel('channels', t)).toBe(t('day100.names.outside'));
       expect(sectionLabel('destinations', t)).toBe(sectionLabel('channels', t));

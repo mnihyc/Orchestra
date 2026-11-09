@@ -36,7 +36,7 @@ export function BrowsersSection() {
   const query = useQuery({ ...browsersQuery(id ?? ''), enabled: shown && id !== null });
   useTargetsFeed(shown ? id : null, 'browsers');
   if (id === null) return null;
-  if (query.isPending) return <SkeletonRows rows={3} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const browsers = query.data.browsers.filter((browser) => browser.state !== 'closed');
   return <div className="relative h-full min-h-0 overflow-y-auto p-2">
@@ -63,7 +63,7 @@ export function DisplaysSection() {
   const query = useQuery({ ...displaysQuery(id ?? ''), enabled: shown && id !== null });
   useTargetsFeed(shown ? id : null, 'displays');
   if (id === null) return null;
-  if (query.isPending) return <SkeletonRows rows={3} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const displays = query.data.displays.filter((display) => display.state !== 'closed');
   return <div className="relative h-full min-h-0 overflow-y-auto p-2">
