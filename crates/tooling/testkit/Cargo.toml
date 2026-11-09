@@ -19,6 +19,7 @@ clap.workspace = true
 form_urlencoded.workspace = true
 futures.workspace = true
 http.workspace = true
+orch-agent-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-driver-contract.workspace = true
 orch-link-contract.workspace = true

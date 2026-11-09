@@ -4,6 +4,7 @@ screens: /admin
 keywords: 代理, 程序, 构建, 校验和, 镜像, 离线, 厂商, 信任, harness, checksum, mirror, offline
 heading_id.校验和来源: checksum-sources
 heading_id.信任镜像: trusting-a-mirror
+summary: 选择代理程序构建前，查看校验和来源和兼容性检查结果。
 ---
 
 # 代理程序构建

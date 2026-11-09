@@ -446,6 +446,7 @@ impl Rig {
     pub fn agent_start(&self) -> AgentStart {
         AgentStart {
             provider_id: self.provider_id,
+            provider_kind: Some(orch_agent_contract::descriptor::ProviderKind::Api),
             agent_id: self.agent_id,
             harness_kind: "codex".to_owned(),
             profile: AgentProfile::default(),
@@ -466,7 +467,7 @@ impl Rig {
         let started = self.adapter.start(start, self.sink.clone()).await.unwrap();
         if prefix_container_mode() {
             assert_eq!(
-                started.harness_version, "0.165.0",
+                started.harness_version, "0.167.0",
                 "container prefix proof requires the exact pinned native CLI"
             );
         }
@@ -496,6 +497,8 @@ impl Rig {
     /// A turn that says `text`.
     pub fn turn(&self, thread: ThreadId, text: &str) -> TurnStart {
         TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -706,6 +709,7 @@ pub fn plain_spec(
 ) -> SessionSpec {
     SessionSpec {
         settings: SessionSettings {
+            native_model: None,
             agent_id,
             thread_id: thread,
             segment_id: new_id(),
@@ -725,6 +729,9 @@ pub fn plain_spec(
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec![MODEL.to_owned()],
             subagent_limits: Default::default(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: Vec::new(),

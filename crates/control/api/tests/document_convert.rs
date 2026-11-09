@@ -7,6 +7,8 @@
 
 mod desk;
 mod places;
+#[path = "document_convert/scopes.rs"]
+mod scopes;
 mod support;
 
 use desk::Desk;
@@ -28,7 +30,8 @@ async fn convert(
     text: &str,
     document: Option<orch_types::Id>,
 ) -> Reply<DocumentConvertReply> {
-    desk.world
+    let reply = desk
+        .world
         .app
         .call(DocumentConvert, &[])
         .token(&by.token)
@@ -38,9 +41,18 @@ async fn convert(
             document_id: document,
         })
         .send()
-        .await
+        .await;
+    Reply {
+        body: reply.body.map(|answer| {
+            answer
+                .into_full()
+                .expect("the ordinary converter retains its full native result")
+        }),
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+    }
 }
-
 fn kinds(blocks: &[NewBlock]) -> Vec<BlockType> {
     blocks.iter().map(|block| block.block_type).collect()
 }

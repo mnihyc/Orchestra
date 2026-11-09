@@ -40,7 +40,8 @@ reset their own scenarios. Each route is a separate bounded test with a JSON rec
 text, DOM/AX locations and measurements. Every route attaches a full-page screenshot, including failed
 readiness waits while the page remains available, so the integrator can review the whole matrix.
 There are no swallowed readiness waits: a heading, settled appearance, finished loading indicators and
-loaded fonts are required. Shared-state contexts close in `afterAll`.
+loaded fonts are required. Each route owns a fresh context, closed by the test fixture before the next
+route starts.
 
 The suite opens every currently rendered read-only menu/listbox, including guided select pickers, and
 hovers icon actions so resting opacity cannot conceal a bad alignment. It checks every cut value by
@@ -67,9 +68,10 @@ picker closes so it cannot dismiss an underlying dialog.
   not only one landmark. Counting its direct owner avoids counting the same text again on each wrapper.
   List, table, menu/option and timeline rows are the specified repeated-row exception; their surrounding
   headings, filters and captions are checked.
-- **There are no allow-listed in-page duplicate strings.** `DUPLICATE_ALLOW_LIST` is empty. Its supported
+- **The global route allow list is empty.** `DUPLICATE_ALLOW_LIST` has no entries. Its supported
   entries require exact text, one exact selector per occurrence and a nonempty reason. A third occurrence
-  fails. The only enabled class allowance is a **full-value disclosure**: a tooltip may repeat its
+  fails. The native-program workflow supplies one local navigation/status reference pair only after verifying
+  both canonical Environment targets; another subject or a third copy still fails. The only enabled class allowance is a **full-value disclosure**: a tooltip may repeat its
   own actually clipped value. The detector verifies one original, real clipping and ARIA ownership;
   an unrelated tooltip, an uncut original or a second original does not qualify. Each applied allowance
   and its reason is recorded in the receipt. This is required because full-value tooltips make an otherwise hidden

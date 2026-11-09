@@ -180,6 +180,7 @@ impl Engine {
                 text,
                 &[],
                 crate::inputs::Arrival::Steer { turn: turn.id },
+                None,
             )
             .await?;
         } else {

@@ -9,7 +9,9 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullDiscussionCreationReply as _;
 use desk::{Desk, paragraph, put, put_after, rewrite};
+use futures::FutureExt as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::documents::{
     DocumentDiscussionCreate, DocumentDiscussionCreateBody, DocumentOp, DocumentOpsCreate,
@@ -51,7 +53,9 @@ async fn an_editor_puts_one_block_back_preserving_a_colleagues_later_sibling_and
         .body(&inverse)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full document reply");
     assert_eq!(
         desk.words(&editor, doc.base.id).await,
         ["Before", "A colleague's newer sibling"]
@@ -71,7 +75,9 @@ async fn an_editor_puts_one_block_back_preserving_a_colleagues_later_sibling_and
         .body(&inverse)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the browser session receives the full document reply");
     assert_eq!(
         repeated.seq, answer.seq,
         "a retry is answered before the now-old snapshot fence"
@@ -146,6 +152,7 @@ async fn returning_a_removed_subtree_uses_fresh_ids_and_does_not_move_a_historic
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok();
     desk.write(

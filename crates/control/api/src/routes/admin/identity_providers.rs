@@ -9,7 +9,6 @@
 
 use super::{admin_of, invalid, record};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
 use crate::routes::auth::oidc::{kind_of, settings_of};
 use crate::routes::nodes::placed;
@@ -48,10 +47,12 @@ const OPENID_SCOPE: &str = "openid";
 const DEFAULT_CLAIMS: [&str; 4] = ["sub", "email", "name", "preferred_username"];
 /// How many people a refusal to remove a provider names; the rest are counted.
 const NAMED_PEOPLE: usize = 20;
+mod creation;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
+        .creation(AdminIdentityProviderCreate, creation::binding())
         .on(AdminIdentityProviderList, list)
         .on(AdminIdentityProviderCreate, create)
         .on(AdminIdentityProviderUpdate, update)
@@ -274,7 +275,11 @@ fn key_taken(error: DbError) -> ApiError {
 }
 
 /// Adds an identity provider.
-async fn create(mut ctx: Ctx, (): (), body: IdentityProviderInput) -> ApiResult<IdentityProvider> {
+async fn create(
+    mut ctx: Ctx,
+    (): (),
+    body: IdentityProviderInput,
+) -> ApiResult<orch_api_contract::admin::IdentityProviderCreateResponse> {
     admin_of(&ctx)?;
     let key = clean_key(&body.key)?;
     let name = clean_name(&body.name)?;
@@ -304,7 +309,7 @@ async fn create(mut ctx: Ctx, (): (), body: IdentityProviderInput) -> ApiResult<
             "needs default_org_id: it is the role in that org",
         ));
     }
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     if let Some(org) = body.default_org_id {
@@ -352,8 +357,9 @@ async fn create(mut ctx: Ctx, (): (), body: IdentityProviderInput) -> ApiResult<
         .await?
         .ok_or_else(|| ApiError::internal("a provider was added and is not there"))?;
     orch_db::sequences::notify_meta_changed(&mut tx, Some(ctx.request_id.as_str())).await?;
+    orch_db::idempotency::creation::observe(&mut tx, Some(admin), "identity_provider", id).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(shown(&ctx.app.config, row))
+    Ok(orch_api_contract::admin::IdentityProviderCreateResponse::full(shown(&ctx.app.config, row)))
 }
 
 /// Changes an identity provider that is at the revision the caller saw.
@@ -392,7 +398,7 @@ async fn update(
         .default_role
         .map(|role| role.map(role_word).transpose())
         .transpose()?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let before = identity::identity_provider(&mut tx, id)
@@ -492,7 +498,7 @@ async fn update(
 async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    let (mut tx, guard) = super::action(&ctx).await?;
     ctx.now = guard.now().get();
     let admin = guard.user().id();
     let row = identity::identity_provider(&mut tx, id)
@@ -536,7 +542,7 @@ async fn test(ctx: Ctx, (): (), (): ()) -> ApiResult<IdentityProviderTestReply> 
     admin_of(&ctx)?;
     let id = ctx.id("id")?;
     let row = {
-        let (mut tx, _guard) = transaction_guard::begin(&ctx).await?;
+        let (mut tx, _guard) = super::action(&ctx).await?;
         let row = identity::identity_provider(&mut tx, id)
             .await?
             .ok_or_else(ApiError::not_found)?;

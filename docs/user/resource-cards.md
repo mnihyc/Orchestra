@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Read resource cards and choices
 screens: /resources, /resources/providers, /resources/providers/$id, /resources/agents, /resources/agents/$id, /resources/environments, /resources/environments/$id, /resources/hosts, /resources/hosts/$id, /resources/machines, /resources/machines/$id, /resources/templates, /resources/templates/$id, /resources/mounts, /resources/mounts/$id, /resources/mcp, /resources/mcp/$id, /resources/skills, /resources/skills/$id, /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /admin/$section
 keywords: resource card, inspect, choice, provider, model, host, environment, load, speed, context, limits, unknown
+summary: Inspect resources and choices with their reported facts, sources and unavailable reasons.
 ---
 
 # Read resource cards and choices

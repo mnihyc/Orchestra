@@ -7,17 +7,29 @@ use crate::middleware::requests::{ApiError, ApiResult};
 use axum::response::{IntoResponse, Response};
 use http::{HeaderValue, StatusCode, header};
 use serde::Serialize;
+use std::borrow::Cow;
 
 /// The type of a CSV answer.
 pub const CONTENT_TYPE: &str = "text/csv; charset=utf-8";
 
-/// One cell, quoted where it holds a comma, a quote or a line break.
+/// One data cell: formula-leading native text stays text when opened in a spreadsheet.
+/// Signed finite numeric literals retain their exact bytes; classification never rounds the value.
 #[must_use]
 pub fn cell(text: &str) -> String {
+    let start =
+        text.trim_start_matches(|c: char| c.is_whitespace() || c.is_control() || c == '\u{feff}');
+    let signed_number = matches!(start.chars().next(), Some('+' | '-'))
+        && start.trim_end().parse::<f64>().is_ok_and(f64::is_finite);
+    let formula = matches!(start.chars().next(), Some('=' | '+' | '-' | '@')) && !signed_number;
+    let text = if formula {
+        Cow::Owned(format!("'{text}"))
+    } else {
+        Cow::Borrowed(text)
+    };
     if text.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", text.replace('"', "\"\""))
     } else {
-        text.to_owned()
+        text.into_owned()
     }
 }
 
@@ -57,6 +69,41 @@ pub fn json_response<T: Serialize>(body: &T, status: StatusCode) -> ApiResult<Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_text_cannot_become_a_spreadsheet_formula_even_behind_controls() {
+        assert_eq!(cell("=1+1"), "'=1+1");
+        assert_eq!(cell("+SUM(A1:A2)"), "'+SUM(A1:A2)");
+        assert_eq!(cell("-SUM(A1:A2)"), "'-SUM(A1:A2)");
+        assert_eq!(cell("@SUM(A1)"), "'@SUM(A1)");
+        assert_eq!(cell(" \t=1+1"), "' \t=1+1");
+        assert_eq!(cell("\u{feff}=1+1"), "'\u{feff}=1+1");
+        assert_eq!(cell("\0=1+1"), "'\0=1+1");
+        assert_eq!(cell("\r\n=1+1"), "\"'\r\n=1+1\"");
+        assert_eq!(
+            cell("=HYPERLINK(\"https://example.invalid\",\"view\")"),
+            "\"'=HYPERLINK(\"\"https://example.invalid\"\",\"\"view\"\")\""
+        );
+    }
+
+    #[test]
+    fn statistics_keep_exact_numeric_bytes_and_ordinary_native_words() {
+        for number in [
+            "0",
+            "-1",
+            "+1",
+            "-0.0300",
+            "1e30",
+            "-1e30",
+            "9223372036854775807",
+        ] {
+            assert_eq!(cell(number), number);
+        }
+        assert_eq!(cell("A native refusal"), "A native refusal");
+        assert_eq!(cell("source-id-42"), "source-id-42");
+        assert_eq!(cell("'already text"), "'already text");
+        assert_eq!(cell("-infinity"), "'-infinity");
+    }
 
     #[test]
     fn a_cell_with_a_comma_a_quote_or_a_line_break_is_quoted_and_its_quotes_are_doubled() {

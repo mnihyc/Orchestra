@@ -1,10 +1,10 @@
 /** Agents available to a new thread here, and its current defaults, from the same authorized answer as Start. */
-import { useQuery } from '@tanstack/react-query';
 import { Bot } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { startOptionsQuery, type StartOptions } from '@/api/start';
-import { modelName } from '@/features/start/choices';
+import type { StartOptions } from '@/api/start';
+import { modelName, NO_PICKS } from '@/features/start/choices';
+import { useStartOptions } from '@/features/start/options';
 import type { AgentRef, BindingAgent, Topic } from '@/generated/api-types';
 import { offeredChoice } from '@/i18n/choices';
 import { canCreateIn } from '@/lib/permissions';
@@ -20,7 +20,7 @@ function usable(agent: BindingAgent): boolean {
 
 /** A profile offered by several providers is still one agent; keep its name and default marker once. */
 function available(options: StartOptions) {
-  const providers = options.providers.filter((entry) => entry.usable && entry.reason === null && entry.provider.status === 'ready'
+  const providers = options.providers.filter((entry) => entry.usable && entry.reason === null && (entry.provider.status === 'ready' || entry.provider.status === 'exhausted')
     && entry.models.some((model) => model.allowed) && entry.agents.some(usable));
   const agents = new Map<string, AgentRef>();
   for (const provider of providers) for (const entry of provider.agents) if (usable(entry)) agents.set(entry.agent.id, entry.agent);
@@ -30,13 +30,13 @@ function available(options: StartOptions) {
 export function TopicAgents({ topic }: { topic: Topic }) {
   const { t } = useTranslation();
   const mayStart = canCreateIn('topic', topic.access) && !topic.archived;
-  const query = useQuery({ ...startOptionsQuery(topic.id, null), enabled: mayStart });
+  const query = useStartOptions(topic.id, NO_PICKS, { suggest: true, respectDefaults: true }, mayStart, undefined, topic.default_environment_id);
   if (!mayStart) return <EmptyState compact title={topic.archived ? t('topicAgents.archived') : t('topicAgents.notAllowed', { owner: topic.owner.display_name })} />;
-  if (query.isPending) return <SkeletonRows rows={3} />;
-  if (query.isError) return <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
+  if (query.failed !== null) return <ErrorState compact error={query.failed} retrying={query.read.isFetching} onRetry={query.retry} />;
+  if (query.options === null || query.refreshing && (query.resolved?.missing.length ?? 0) > 0) return <SkeletonRows read={query.read} rows={3} />;
 
-  const { providers, agents } = available(query.data);
-  const defaults = query.data.defaults;
+  const { providers, agents } = available(query.options);
+  const defaults = query.options.defaults;
   const provider = providers.find((entry) => entry.provider.id === defaults.provider_id);
   const agent = provider?.agents.find((entry) => entry.agent.id === defaults.agent_id && usable(entry));
   const model = provider?.models.find((entry) => entry.allowed && entry.model_name === defaults.model_name);

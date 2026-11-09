@@ -1,0 +1,380 @@
+{
+  "title": "Codex",
+  "native_switches": {
+    "web_search": {
+      "capability": "web_search",
+      "values": {
+        "disabled": "disabled",
+        "cached": "cached",
+        "indexed": "indexed",
+        "live": "live"
+      }
+    },
+    "supports_standalone_web_search": {
+      "capability": "web_search",
+      "value": false,
+      "values": {
+        "no": false,
+        "yes": true
+      },
+      "provider_overrides": true,
+      "when": {
+        "required": [
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "const": "forwarded"
+          }
+        }
+      }
+    },
+    "capabilities.remote_compaction": {
+      "capability": "generation",
+      "value": "unsupported",
+      "values": {
+        "unsupported": "unsupported",
+        "v2": "v2"
+      },
+      "provider_overrides": true,
+      "when": {
+        "required": [
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "const": "forwarded"
+          }
+        }
+      }
+    },
+    "features.image_generation": {
+      "capability": "image_generation",
+      "values": {
+        "off": false,
+        "on": true
+      }
+    },
+    "features.view_image": {
+      "capability": "image_input",
+      "value": false,
+      "resolved_value": true,
+      "when": {
+        "type": "object",
+        "required": ["route_kind"],
+        "properties": {
+          "route_kind": {
+            "enum": ["native-model", "native-program"]
+          }
+        }
+      },
+      "values": {
+        "off": false,
+        "on": true
+      }
+    },
+    "model.use_responses_lite": {
+      "capability": "generation",
+      "value": false,
+      "values": {
+        "no": false,
+        "yes": true
+      },
+      "provider_overrides": true,
+      "when": {
+        "required": [
+          "access"
+        ],
+        "properties": {
+          "access": {
+            "const": "forwarded"
+          }
+        }
+      }
+    }
+  },
+  "access": {
+    "forwarded": {
+      "interfaces": [
+        "openai-responses"
+      ],
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native",
+          "eligible_when": {
+            "type": "object",
+            "required": [
+              "route_kind"
+            ],
+            "properties": {
+              "route_kind": {
+                "const": "native-model"
+              }
+            }
+          }
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native",
+          "eligible_when": {
+            "type": "object",
+            "required": [
+              "route_kind"
+            ],
+            "properties": {
+              "route_kind": {
+                "const": "native-model"
+              }
+            }
+          }
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "cached",
+            "indexed",
+            "live"
+          ],
+          "default_mode": "disabled",
+          "eligible_when": {
+            "allOf": [
+              {
+                "anyOf": [
+                  {
+                    "not": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "offering": {
+                              "properties": {
+                                "parameters": {
+                                  "properties": {
+                                    "requires_standalone_search": {
+                                      "const": true
+                                    }
+                                  },
+                                  "required": [
+                                    "requires_standalone_search"
+                                  ]
+                                }
+                              }
+                            }
+                          },
+                          "required": [
+                            "offering"
+                          ]
+                        },
+                        {
+                          "required": [
+                            "offering"
+                          ],
+                          "properties": {
+                            "offering": {
+                              "required": [
+                                "model_metadata"
+                              ],
+                              "properties": {
+                                "model_metadata": {
+                                  "required": [
+                                    "codex"
+                                  ],
+                                  "properties": {
+                                    "codex": {
+                                      "required": [
+                                        "requires_standalone_search"
+                                      ],
+                                      "properties": {
+                                        "requires_standalone_search": {
+                                          "const": true
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "required": [
+                      "offering"
+                    ],
+                    "properties": {
+                      "offering": {
+                        "required": [
+                          "native_tools"
+                        ],
+                        "properties": {
+                          "native_tools": {
+                            "required": [
+                              "web_search"
+                            ],
+                            "properties": {
+                              "web_search": {
+                                "type": "object",
+                                "required": [
+                                  "request"
+                                ],
+                                "properties": {
+                                  "request": {
+                                    "required": [
+                                      "forms"
+                                    ],
+                                    "properties": {
+                                      "forms": {
+                                        "type": "array",
+                                        "contains": {
+                                          "required": [
+                                            "native_session"
+                                          ],
+                                          "properties": {
+                                            "native_session": {
+                                              "type": "object"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "type": "object",
+                "required": [
+                  "route_kind"
+                ],
+                "properties": {
+                  "route_kind": {
+                    "const": "native-model"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "page_fetch": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": null
+        },
+        "image_generation": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on",
+          "x_unavailable_reason": "native_image_sign_in_required"
+        }
+      },
+      "orch_tools": true,
+      "model_details": [
+        "input_images",
+        "context_window",
+        "context_max",
+        "default_context",
+        "efforts",
+        "default_effort",
+        "service_tiers"
+      ]
+    },
+    "native": {
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "cached",
+            "indexed",
+            "live"
+          ],
+          "default_mode": "disabled"
+        },
+        "page_fetch": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": null
+        },
+        "image_generation": {
+          "enabled": true,
+          "delegated_mode": "on",
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on",
+          "eligible_when": {
+            "required": [
+              "plan",
+              "credential",
+              "credential_verified"
+            ],
+            "properties": {
+              "plan": {
+                "type": "string",
+                "minLength": 1,
+                "not": {
+                  "enum": [
+                    "free"
+                  ]
+                }
+              },
+              "credential": {
+                "type": "object",
+                "required": [
+                  "yields"
+                ],
+                "properties": {
+                  "yields": {
+                    "enum": [
+                      "login",
+                      "token"
+                    ]
+                  }
+                }
+              },
+              "credential_verified": {
+                "const": true
+              }
+            }
+          },
+          "x_unavailable_reason": "native_image_sign_in_required"
+        }
+      },
+      "orch_tools": true
+    }
+  }
+}

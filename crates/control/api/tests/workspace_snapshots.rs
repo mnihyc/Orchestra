@@ -6,6 +6,18 @@
 )]
 
 mod places;
+#[path = "workspace_snapshots/creation_scopes.rs"]
+mod snapshot_creation;
+#[path = "workspace_snapshots/list.rs"]
+mod snapshot_list;
+#[path = "workspace_snapshots/mutations.rs"]
+mod snapshot_mutations;
+#[path = "workspace_snapshots/preflight_scopes.rs"]
+mod snapshot_preflight;
+#[path = "workspace_snapshots/scope_helpers.rs"]
+mod snapshot_scope_helpers;
+#[path = "workspace_snapshots/scopes.rs"]
+mod snapshot_scopes;
 mod support;
 mod workspace;
 
@@ -14,11 +26,11 @@ use http::StatusCode;
 use orch_api_contract::common::{ErrorCode, PageQuery};
 use orch_api_contract::nodes::JobState;
 use orch_api_contract::workspace::{
-    DirEntryKind, EnvironmentFilesExport, Job, JobCancel, JobGet, PhaseState, Snapshot,
-    SnapshotArchiveFormat, SnapshotArchiveGet, SnapshotArchiveGetQuery, SnapshotDelete,
-    SnapshotFileContentGet, SnapshotFileList, SnapshotGet, SnapshotPathQuery, SnapshotState,
-    SnapshotUpdate, SnapshotUpdateBody, ThreadSnapshotCreate, ThreadSnapshotCreateBody,
-    ThreadSnapshotCreateSelection, ThreadSnapshotList,
+    DirEntryKind, EnvironmentFilesExport, EnvironmentSnapshotList, Job, JobCancel, JobGet,
+    PhaseState, Snapshot, SnapshotArchiveFormat, SnapshotArchiveGet, SnapshotArchiveGetQuery,
+    SnapshotDelete, SnapshotFileContentGet, SnapshotFileList, SnapshotGet, SnapshotPathQuery,
+    SnapshotState, SnapshotUpdate, SnapshotUpdateBody, ThreadSnapshotCreate,
+    ThreadSnapshotCreateBody, ThreadSnapshotCreateSelection, ThreadSnapshotList,
 };
 use orch_api_core::testing::Reply;
 use orch_db::queries::storage::{self, NewSnapshot, SnapshotEnd, snapshot_state};
@@ -78,7 +90,9 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert!(stopped.progress.activity.unwrap().stopping);
     assert_eq!(
         stopped.state,
@@ -118,13 +132,26 @@ async fn a_background_count_is_readable_to_its_resource_reader_and_its_maker_can
     assert_eq!(site.sent(CommandKind::FsSnapshot), 0);
 }
 
+fn initial_job(reply: Reply<orch_api_contract::workspace::SnapshotStartResponse>) -> Reply<Job> {
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("ordinary snapshot creation keeps its initial job")
+        }),
+    }
+}
+
 async fn create(site: &Site, by: &Who, body: ThreadSnapshotCreateBody) -> Reply<Job> {
-    site.app()
+    let call = site
+        .app()
         .call(ThreadSnapshotCreate, &[&site.thread])
         .token(&by.token)
-        .body(&body)
-        .send()
-        .await
+        .body(&body);
+    initial_job(call.send().await)
 }
 
 async fn job(site: &Site, by: &Who, id: Id) -> Reply<Job> {
@@ -1038,7 +1065,9 @@ async fn an_environment_export_copies_the_entire_workspace_without_a_thread_and_
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary export keeps its initial job");
     assert_eq!(begun.node_id, None);
     let ended = over(&site, begun.id).await;
     assert_eq!(ended.state, JobState::Succeeded, "{ended:?}");
@@ -1059,6 +1088,85 @@ async fn an_environment_export_copies_the_entire_workspace_without_a_thread_and_
         snapshot(&site, &site.vic, id).await.status,
         StatusCode::NOT_FOUND
     );
+    let admin = places::admin(&site.world, "snapshot-reviewer").await;
+    places::admin_mode(&site.world, &admin, false).await;
+    assert_eq!(
+        snapshot(&site, &admin, id).await.status,
+        StatusCode::NOT_FOUND
+    );
+    places::admin_mode(&site.world, &admin, true).await;
+    let inspected = snapshot(&site, &admin, id).await.ok();
+    assert!(
+        inspected
+            .admin_access
+            .as_ref()
+            .is_some_and(|reach| reach.private)
+    );
+    assert_eq!(inspected.created_by, kept.created_by);
+    let listed = site
+        .app()
+        .call(EnvironmentSnapshotList, &[&site.environment])
+        .token(&site.ada.token)
+        .query(&PageQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(
+        listed.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+        vec![id]
+    );
+    assert_eq!(listed.items[0].created_by, kept.created_by);
+    let colleague = site
+        .app()
+        .call(EnvironmentSnapshotList, &[&site.environment])
+        .token(&site.vic.token)
+        .query(&PageQuery::default())
+        .send()
+        .await
+        .ok();
+    assert!(
+        colleague.items.is_empty(),
+        "Files View alone does not inherit another maker's private export"
+    );
+    let administrator = site
+        .app()
+        .call(EnvironmentSnapshotList, &[&site.environment])
+        .token(&admin.token)
+        .query(&PageQuery::default())
+        .send()
+        .await
+        .ok();
+    assert_eq!(administrator.items[0].id, id);
+    assert!(administrator.items[0].admin_access.is_some());
+    for (operation, actions, allowed) in [
+        ("EnvironmentSnapshotList", vec!["read"], true),
+        ("SnapshotGet", vec!["read"], false),
+        ("EnvironmentSnapshotList", vec!["write"], false),
+    ] {
+        let key = snapshot_scope_helpers::scoped(
+            &site,
+            site.ada.id(),
+            vec![snapshot_scope_helpers::rule(
+                operation,
+                "environment",
+                site.environment,
+                "self",
+                &actions,
+            )],
+        )
+        .await;
+        let answer = site
+            .app()
+            .call(EnvironmentSnapshotList, &[&site.environment])
+            .token(&key.secret)
+            .query(&PageQuery::default())
+            .send()
+            .await;
+        assert_eq!(answer.status.is_success(), allowed, "{:?}", answer.body);
+        if allowed {
+            assert_eq!(answer.ok().items[0].id, id);
+        }
+    }
     sqlx::query("UPDATE environments SET deleted_at=$2,status='removed' WHERE id=$1")
         .bind(site.environment)
         .bind(site.world.now())
@@ -1075,6 +1183,62 @@ async fn an_environment_export_copies_the_entire_workspace_without_a_thread_and_
         .send_bytes()
         .await;
     assert_eq!(downloaded.status, StatusCode::OK);
+    let reviewed = site
+        .app()
+        .call(SnapshotArchiveGet, &[&id])
+        .token(&admin.token)
+        .query(&SnapshotArchiveGetQuery {
+            format: Some(SnapshotArchiveFormat::Zip),
+        })
+        .send_bytes()
+        .await;
+    assert_eq!(reviewed.status, StatusCode::OK);
+    assert_eq!(reviewed.raw, downloaded.raw);
+    let openings:i64=sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE action='admin.opened' AND object_id=$1 AND actor_id=$2")
+        .bind(id).bind(admin.id()).fetch_one(&site.world.db.pool).await.unwrap();
+    assert_eq!(openings, 2);
+    let report = site
+        .app()
+        .call(orch_api_contract::storage::StorageGet, &[])
+        .token(&admin.token)
+        .query(&orch_api_contract::storage::StorageQuery {
+            scope: Some("system".into()),
+            kind: Some(orch_api_contract::storage::StorageKind::Snapshot),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let retained = report
+        .items
+        .iter()
+        .find(|row| {
+            row.artifact
+                .as_ref()
+                .is_some_and(|artifact| artifact.id == id)
+        })
+        .unwrap();
+    assert_eq!(
+        retained.owner.as_ref().map(|owner| owner.id),
+        Some(site.ada.id())
+    );
+    assert_eq!(retained.name, kept.label);
+    assert_eq!(retained.since, Some(kept.created_at));
+    assert!(
+        retained
+            .bytes
+            .is_some_and(|bytes| bytes >= kept.total_bytes)
+    );
+    assert_eq!(report.totals.bytes, retained.bytes.unwrap());
+    assert!(
+        retained.physical_parts.len() > 1,
+        "real data plus its actual immutable manifest"
+    );
+    places::admin_mode(&site.world, &admin, false).await;
+    assert_eq!(
+        snapshot(&site, &admin, id).await.status,
+        StatusCode::NOT_FOUND
+    );
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(downloaded.raw.to_vec())).unwrap();
     let top = orch_api_core::media::safe_name(&kept.label);
     for (path, expected) in [
@@ -1170,7 +1334,11 @@ async fn a_snapshot_is_renamed_by_whoever_may_write_the_files() {
             });
         async move { call.send().await }
     };
-    let renamed = rename(&site.ada, "  Before the move  ").await.ok();
+    let renamed = rename(&site.ada, "  Before the move  ")
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(renamed.label, "Before the move");
     assert_eq!(
         rename(&site.ada, "   ").await.problem().code,
@@ -1354,7 +1522,10 @@ async fn a_job_under_way_is_cancelled_and_the_snapshot_it_was_taking_fails() {
         .send()
         .await;
     assert!(asked.status.is_success(), "{:?}", asked.body);
-    let stopping = asked.ok();
+    let stopping = asked
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(stopping.state, JobState::Running);
     assert!(stopping.progress.activity.unwrap().stopping);
     // The machine still owns the held command: cancellation is a visible request until it answers.
@@ -1399,7 +1570,9 @@ async fn a_job_under_way_is_cancelled_and_the_snapshot_it_was_taking_fails() {
         .token(&site.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary cancellation keeps the full job");
     assert_eq!(late.state, JobState::Cancelled);
 }
 

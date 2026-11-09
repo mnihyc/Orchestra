@@ -20,9 +20,43 @@ use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// Run the production control-plane orphan sweep with the test application's clock.
+pub async fn recover_ask_turns(app: &App) -> crate::middleware::requests::ApiResult<usize> {
+    crate::ask::recovery::run_due(app).await
+}
+
 /// Replaces inside-machine reads for a fault-injection walk; the production link setter stays private.
 pub fn machine_request_handler(app: &App, handler: Arc<dyn crate::machine_requests::Handler>) {
     app.link.serve_machine_requests(handler);
+}
+
+/// Run one existing physical update coordinator pass for native control tests.
+pub async fn advance_component_updates(app: &App) -> Result<(), crate::dispatch::DispatchError> {
+    app.link.advance_component_updates().await
+}
+
+/// Exercise the real certificate/session authorization supplier, including minimum recovery.
+pub async fn authorize_machine(
+    app: &App,
+    query: &orch_link_contract::backplane::AuthQuery,
+) -> orch_link_contract::backplane::AuthReply {
+    app.link.authorize(query).await
+}
+
+/// Exercise the actual native result mirror and its atomic controller completion in tests.
+pub async fn mirror_native_result(
+    app: &App,
+    command: orch_types::Id,
+    result: orch_types::Json,
+) -> Result<(), orch_db::DbError> {
+    let mut conn = app.db.acquire().await?;
+    crate::backplane::write_progress(
+        &mut conn,
+        command,
+        &orch_link::commands::Progress::Succeeded(result),
+        app.clock.as_ref(),
+    )
+    .await
 }
 
 /// The application in memory.
@@ -100,6 +134,23 @@ pub struct RawReply {
     pub raw: bytes::Bytes,
 }
 
+/// Identifies the current transport identity's locking read in pg_stat_activity.
+/// The blocker PID is checked separately. Read identities watch no action epoch;
+/// authentication bookkeeping and later key-ceiling reads are different boundaries.
+#[must_use]
+pub fn current_identity_query_pattern(
+    surface: orch_api_contract::surface::HttpSurface,
+) -> &'static str {
+    match surface {
+        orch_api_contract::surface::HttpSurface::Browser => {
+            r"WITH watched AS MATERIALIZED (%FROM marked CROSS JOIN users u%JOIN sessions s%a.token\_hash = $3%FOR SHARE OF s, a"
+        }
+        orch_api_contract::surface::HttpSurface::Key => {
+            r"WITH watched AS MATERIALIZED (%FROM marked CROSS JOIN users u%JOIN api\_tokens t%t.token\_hash = $3%FOR SHARE OF t"
+        }
+    }
+}
+
 impl RawReply {
     /// The problem of a call that had to be refused.
     ///
@@ -125,6 +176,7 @@ impl RawReply {
 pub struct Call<'a, E: Endpoint> {
     app: &'a TestApp,
     path: String,
+    surface: Option<orch_api_contract::surface::HttpSurface>,
     query: Option<String>,
     headers: HeaderMap,
     body: Option<Vec<u8>>,
@@ -203,7 +255,11 @@ impl TestApp {
     pub fn over(app: App, clock: ManualClock, registry: Registry) -> Self {
         crate::machine_requests::install(&app);
         crate::port_tools::install(&app);
-        let router = registry.into_router().with_state(app.clone());
+        crate::thread_read_tools::install(&app);
+        crate::input_schedules::install(&app);
+        app.engine
+            .attach_capability_services(Arc::clone(&app.builtin_sources));
+        let router = crate::server::http_routes(registry).with_state(app.clone());
         Self { app, clock, router }
     }
 
@@ -254,6 +310,7 @@ impl TestApp {
         Call {
             app: self,
             path,
+            surface: None,
             query: None,
             headers: HeaderMap::new(),
             body: None,
@@ -277,6 +334,13 @@ impl<E: Endpoint> Call<'_, E> {
         if let Ok(value) = HeaderValue::from_str(&format!("Bearer {token}")) {
             self.headers.insert(header::AUTHORIZATION, value);
         }
+        self
+    }
+
+    /// Fixes the actual request plane; a later token never overrides an explicit cross-kind control.
+    #[must_use]
+    pub fn surface(mut self, surface: orch_api_contract::surface::HttpSurface) -> Self {
+        self.surface = Some(surface);
         self
     }
 
@@ -371,9 +435,17 @@ impl<E: Endpoint> Call<'_, E> {
         reason = "test support: a missing router answer fails the test"
     )]
     pub async fn send_response(self) -> axum::response::Response {
+        let surface = self
+            .surface
+            .or_else(|| {
+                crate::middleware::authentication::bearer(&self.headers)
+                    .and_then(orch_api_contract::surface::HttpSurface::for_token)
+            })
+            .unwrap_or(orch_api_contract::surface::HttpSurface::Browser);
+        let path = format!("{}{}", surface.base_path(), self.path);
         let uri = match &self.query {
-            Some(query) if !query.is_empty() => format!("{}?{query}", self.path),
-            _ => self.path.clone(),
+            Some(query) if !query.is_empty() => format!("{path}?{query}"),
+            _ => path,
         };
         let mut request = Request::builder().method(E::ROUTE.method.as_str()).uri(uri);
         if let Some(peer) = self.peer {

@@ -14,6 +14,7 @@ import { openFinder } from '@/features/finder/store';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
 import { Button } from '@/ui/Button';
 import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewWindowLease } from '@/features/workbench/ViewWindow';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
 import { contentLocation, contentTarget } from './contentAddress';
 import { WorkspaceContext } from './WorkspaceContext';
@@ -134,7 +135,7 @@ export function ViewHost({ layout }: { layout: Layout }) {
     }
   }, [keys]);
 
-  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
+  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
 }
 
 /** Shows a view in the group that holds its tab, by taking in the element the view is drawn into. */
@@ -523,7 +524,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
       onResize: (size) => change((current) => resizeBar(current, id, size)),
       content: id !== 'bottom' ? <SideBarView bar={id} layout={layout[id]} renderView={(tab) => <ViewSlot tab={tab} />}
         onSelectContainer={(name) => change((current) => { const next = selectContainer(current, id, name); return floating ? { ...next, [id]: { ...next[id], open: false } } : next; })}
-        addView={<AddViewButton />}
+        addView={null}
         actions={<>{floating && <IconButton size="sm" label={t('workbench.bars.pin')} icon={<Pin aria-hidden />} onClick={() => {
           change((current) => setBarOpen(current, id, true)); setOverlay(null);
           requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workbench-bar="${id}"] button`)?.focus());

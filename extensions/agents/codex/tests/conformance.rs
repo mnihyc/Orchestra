@@ -20,7 +20,8 @@ use orch_adapter_codex::{
 };
 use orch_agent_contract::adapter::AgentAdapter;
 use orch_agent_contract::events::{SessionEvent, TurnOutcome};
-use orch_conformance::native::{self, Fixture, ModelRequest};
+use orch_conformance::native::{self, Fixture, ModelControl, ModelRequest};
+use orch_testkit::doubles::model::QueueFilter;
 use serde_json::json;
 
 struct Isolated {
@@ -140,6 +141,8 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
             .map(|request| ModelRequest {
                 path: request.path,
                 body: request.body,
+                status: request.status,
+                queued: request.script == Some(orch_testkit::doubles::model::ScriptSource::Queue),
             })
             .collect()
     };
@@ -160,6 +163,49 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
     let observe = |event: &orch_agent_contract::events::SessionEvent| {
         eprintln!("{}", json!({"case":case,"event":event}));
     };
+    let control_model = |control: ModelControl| -> Result<(), String> {
+        match control {
+            ModelControl::Reset => {
+                rig.mock.reset();
+                Ok(())
+            }
+            ModelControl::Queue {
+                model: model_name,
+                script,
+            } => rig
+                .mock
+                .queue_for(
+                    &script,
+                    &QueueFilter {
+                        model: Some(model_name),
+                        format: None,
+                    },
+                    1,
+                )
+                .map_err(|error| error.to_string()),
+            ModelControl::QueueMatching {
+                model: selected_model,
+                script,
+                pattern,
+                times,
+            } => rig
+                .mock
+                .queue_matching(
+                    &script,
+                    &QueueFilter {
+                        model: selected_model,
+                        format: None,
+                    },
+                    times,
+                    move |body| pattern.matches(body),
+                )
+                .map_err(|error| error.to_string()),
+            ModelControl::Default { script } => rig
+                .mock
+                .set_default(&script)
+                .map_err(|error| error.to_string()),
+        }
+    };
     let fixture = Fixture {
         start,
         version: std::env::var("ORCH_EXPECTED_CODEX_VERSION").unwrap_or_else(|_| "0.162.1".into()),
@@ -167,6 +213,7 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
         workspace: rig.workspace.path().into(),
         within: common::WAIT,
         requests: &requests,
+        control_model: Some(&control_model),
         launches: &launches,
         elicitation: &elicitation,
         observe: if std::env::var_os("ORCH_CONFORMANCE_FRAMES").is_some() {
@@ -224,6 +271,14 @@ async fn observed(case: &str) -> orch_api_contract::admin::HarnessConformanceCas
 
 async fn shared(case: &str) {
     let _ = observed(case).await;
+}
+
+#[tokio::test]
+async fn native_auto_reviewer_decisions_and_model_policy_are_proven() {
+    let result = observed("auto_review").await;
+    assert_eq!(result.feature.as_deref(), Some("approval_modes.auto"));
+    assert!(result.passed && result.error.is_none(), "{result:?}");
+    assert!(result.unsupported.is_none(), "{result:?}");
 }
 
 #[tokio::test]

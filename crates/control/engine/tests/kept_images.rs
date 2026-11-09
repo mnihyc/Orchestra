@@ -179,7 +179,9 @@ async fn a_new_image_is_reviewed_as_losing_installed_files_and_drops_the_old_env
         reviewed
             .lost
             .iter()
-            .any(|line| line.contains("/usr, /etc and /opt"))
+            .any(|line| line.contains("Software installed")
+                && line.contains("outside its volumes")
+                && line.contains("is removed"))
     );
     let job = queue(&world, reviewed).await;
     let (state, _, error) = hosting::wait_over(&world, job).await;

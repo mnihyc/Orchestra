@@ -246,6 +246,7 @@ CREATE TABLE permission_entries (
     source text DEFAULT 'page'::text NOT NULL,
     created_by uuid,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    renewed_at timestamp with time zone,
     removed_at timestamp with time zone,
     removed_by uuid,
     revision bigint DEFAULT 1 NOT NULL,
@@ -267,7 +268,7 @@ CREATE TABLE permission_entries (
     CONSTRAINT permission_entries_removed_by_fkey FOREIGN KEY (removed_by) REFERENCES users(id)
 );
 
-CREATE UNIQUE INDEX permission_entries_active_key ON permission_entries USING btree (object_kind, object_id, page, profile, permission, holder_kind, holder_id, holder_role, share_inside) NULLS NOT DISTINCT WHERE (removed_at IS NULL);
+CREATE UNIQUE INDEX permission_entries_active_key ON permission_entries USING btree (object_kind, object_id, page, profile, permission, holder_kind, holder_id, holder_role, share_inside, (CASE WHEN holder_kind = 'agents' THEN created_by END)) NULLS NOT DISTINCT WHERE (removed_at IS NULL);
 
 CREATE INDEX permission_entries_ending_idx ON permission_entries USING btree (expires_at) WHERE ((removed_at IS NULL) AND (expires_at IS NOT NULL) AND (object_kind = ANY (ARRAY['system'::text, 'node'::text])));
 

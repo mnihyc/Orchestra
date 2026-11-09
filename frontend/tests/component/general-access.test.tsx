@@ -25,7 +25,7 @@ import { show } from './support';
 
 const { start } = vi.hoisted(() => ({ start: vi.fn() }));
 const fixture = vi.hoisted((): { defaultsKind: AccessApi.AccessKind } => ({ defaultsKind: 'thread' }));
-const answer = options();
+const answer = options({ viewer_default: { value: true, source: { scope: 'topic', node: null } } });
 vi.mock('@/features/start/options', () => ({ useStartOptions: () => ({ options: answer, resolved: resolve(answer, NO_PICKS, { suggest: true }), loading: false, failed: null, refreshing: false, retry: () => undefined }) }));
 vi.mock('@/features/start/start', () => ({ useStart: () => ({ start, pending: false, error: null, standing: { topic: null, environment: null }, reset: () => undefined, step: null }) }));
 vi.mock('@/features/start/Where', () => ({ Where: () => null, WhereOptions: () => null }));
@@ -42,7 +42,7 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof AuthApi>()
 vi.mock('@/features/access/AddHolders', async (original) => ({ ...await original<typeof AddForm>(), AddHolders: () => null }));
 vi.mock('@/features/access/Owners', () => ({ Owners: () => null }));
 vi.mock('@/features/access/GoesWith', () => ({ GoesWith: () => null }));
-vi.mock('@/features/access/RequestCard', () => ({ WaitingRequests: () => null }));
+vi.mock('@/features/access/RequestCard', () => ({ WaitingRequests: () => null, RequestReview: () => null }));
 vi.mock('@/features/access/RowCell', () => ({ FollowMark: () => null, RowCell: () => null }));
 vi.mock('@/features/access/Reaches', () => ({ EnvironmentReachLine: () => null, ReachesLine: () => null, privateWarning: () => null }));
 vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: { name?: string | null } | null | undefined) => place?.name ?? null, useKnownPlaces: () => new Map() }));

@@ -17,7 +17,7 @@ import type { WorkState } from '@/ui/StateChip';
 import { ThreadStateChip, threadDisplayState } from '@/ui/ThreadState';
 
 /** The state a thread shows: its own, or archived once it is. */
-export function threadState(thread: TreeNode): WorkState {
+export function threadState(thread: TreeNode): WorkState | undefined {
   return threadDisplayState(thread.thread?.display);
 }
 

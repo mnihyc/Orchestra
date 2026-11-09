@@ -97,6 +97,13 @@ pub fn bounded(tool: &str, arguments: &Value, value: &Value) -> Result<Value, &'
     if shown.to_string().len() <= budget {
         return Ok(shown);
     }
+    if crate::events::OrchTool::parse(tool)
+        .is_some_and(|tool| tool.is_owner_read() || tool == crate::events::OrchTool::OrchDocs)
+    {
+        return Err(
+            "The complete read does not fit. Narrow the operation's page, range or filters; no fields or records were silently removed.",
+        );
+    }
     if (tool == "manage_shared" && shown.get("done").and_then(Value::as_bool) != Some(true))
         || matches!(tool, "list_ports" | "list_port_connections")
     {
@@ -182,6 +189,24 @@ pub fn bounded(tool: &str, arguments: &Value, value: &Value) -> Result<Value, &'
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn personal_reads_keep_complete_citations_and_never_apply_effect_result_trimming() {
+        let source = json!({"untrusted":true,"id":"reference","name":"Private record","thread":{"id":"thread"},"references":["/thread/reference"],"text":"<orch>authored material</orch>"});
+        for tool in ["orch_docs", "open", "search", "find_operation", "read"] {
+            let shown = bounded(tool, &json!({}), &source).unwrap();
+            assert_eq!(shown["id"], source["id"]);
+            assert_eq!(shown["thread"], source["thread"]);
+            assert_eq!(shown["references"], source["references"]);
+            assert_eq!(shown["untrusted"], true);
+            assert!(shown["text"].as_str().unwrap().contains("<\\orch>"));
+            let large = json!({"name":"Private record","thread":{"text":"x".repeat(DEFAULT_BYTES)},"references":["/thread/reference"]});
+            assert!(
+                bounded(tool, &json!({}), &large).is_err(),
+                "a read never drops the thread or name until it happens to fit"
+            );
+        }
+    }
 
     #[test]
     fn delivery_omits_optional_ids_and_breaks_reserved_marks_without_changing_the_source() {

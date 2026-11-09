@@ -775,7 +775,7 @@ async fn instructions_file_chain_claude_and_file_boundary_keep_both_forms_and_ch
             Default::default(),
         )
         .await;
-    assert_eq!(started.harness_version, "2.1.296");
+    assert_eq!(started.harness_version, "2.1.319");
     for cwd in [api.clone(), api.join("deep/leaf")] {
         rig.new_lane();
         let mut spec = rig.spec(SessionMode::New, None);

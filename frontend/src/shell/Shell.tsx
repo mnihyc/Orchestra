@@ -26,6 +26,7 @@ import { ImportStatus } from '@/features/people/ImportStatus';
 import { closeFinder } from '@/features/finder/store';
 import { ShellCommands } from '@/features/finder/shellCommands';
 import { registerHelpView } from '@/features/help/register';
+import { registerAskView } from '@/features/ask/register';
 import { TutorialHost } from '@/features/help/Tutorial';
 import { HelpOverlayHost, HelpWork } from '@/features/help/HelpOverlay';
 import { useHelpState } from '@/features/help/state';
@@ -34,6 +35,7 @@ import { registerInspectorViews } from '@/features/inspector/Inspector';
 import { usePortsRegistration } from '@/features/ports/View';
 import { useBrowserRegistration } from '@/features/browser/View';
 import { useVncRegistration } from '@/features/vnc/View';
+import { DuplicateHost } from '@/features/duplicate/DuplicateHost';
 import { ChangeHost } from '@/features/change/ChangeHost';
 import { useRememberPlace } from '@/features/navigation/lastPlace';
 import { NodeDialogHost } from '@/features/navigation/NodeDialogs';
@@ -73,6 +75,7 @@ import { FrameReadiness, useFrameReadiness } from '@/shell/FrameReadiness';
 registerShippedViews(Sidebar, NavigationActions, NavigationActions);
 // Each feature supplies its own views; only registered views are offered.
 registerHelpView();
+registerAskView();
 registerInspectorViews();
 
 client.session.subscribe((next, previous) => {
@@ -194,6 +197,7 @@ function ShellFrame({ leavingAdmin, ready }: { children: ReactNode; leavingAdmin
       <NodeDialogHost />
       <CapHost />
       <ChangeHost />
+      <DuplicateHost />
       <AccessHost />
       <ExportHost /><ImportHost /><CloseViews /><PanelTargetChoice />
       </AdmittedServices>

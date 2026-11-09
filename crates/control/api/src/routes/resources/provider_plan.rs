@@ -6,11 +6,14 @@ use base64::Engine as _;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use orch_api_contract::common::{DEFAULT_LIMIT, MAX_LIMIT, Page};
 use orch_api_contract::resources::{
-    Provider, ProviderPlanGetQuery, ProviderPlanSeries, UsageWindow,
+    Provider, ProviderCreditMember, ProviderCreditQuantity, ProviderCreditSeries,
+    ProviderCreditSeriesKind, ProviderHistoryMetric, ProviderHistorySeries, ProviderPlanGetQuery,
+    ProviderPlanSeries, UsageWindow,
 };
 use orch_api_contract::usage::{
     USAGE_DAY_BUCKET_MAX_DAYS, USAGE_HOUR_BUCKET_MAX_DAYS, UsageBucket,
 };
+use orch_db::queries::provider_credits;
 use orch_db::queries::provider_plan::{self as rows, PlanRead, WindowDefinition};
 use orch_provider_contract::forecast::{
     FORECAST_LONG_LOOKBACK, FORECAST_SHORT_LOOKBACK, ForecastSource, ReadingPace, forecast,
@@ -164,38 +167,40 @@ pub async fn get(
     ctx: Ctx,
     query: ProviderPlanGetQuery,
     (): (),
-) -> ApiResult<Page<ProviderPlanSeries>> {
-    use orch_access_contract::permissions::{Permission, ResourceKind};
-    let id = ctx.id("id")?;
-    let (mut tx, guard) = Box::pin(crate::middleware::transaction_guard::begin(&ctx)).await?;
-    crate::middleware::authorization::require_resource(
-        &mut tx,
-        guard.principal(),
-        ResourceKind::Provider,
-        id,
-        Permission::ProviderView,
-        orch_authz::Policy::default(),
-    )
-    .await?;
-    let effective = orch_authz::resources::effective(
-        &mut tx,
-        guard.principal(),
-        orch_access_contract::decisions::ObjectRef {
-            kind: ResourceKind::Provider.into(),
-            id,
-        },
-        orch_authz::Policy::default(),
-    )
+) -> ApiResult<Page<ProviderHistorySeries>> {
+    crate::key_operations::snapshot_read::run(ctx, move |ctx| {
+        let query = query.clone();
+        async move {
+            let completed =
+                crate::key_operations::native::read_once(ctx, move |ctx, conn, principal| {
+                    Box::pin(async move {
+                        super::providers::provider_for(
+                            conn,
+                            principal,
+                            ctx.id("id")?,
+                            orch_access_contract::permissions::Permission::ProviderView,
+                        )
+                        .await?;
+                        window_page(ctx, conn, query).await
+                    })
+                })
+                .await?;
+            Ok(completed.value)
+        }
+    })
     .await
-    .map_err(ApiError::internal)?;
-    if !effective
-        .held
-        .iter()
-        .any(|held| held.permission == Permission::ProviderView)
-    {
-        return Err(ApiError::not_found());
+}
+
+async fn window_page(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    query: ProviderPlanGetQuery,
+) -> ApiResult<Page<ProviderHistorySeries>> {
+    if query.metric == Some(ProviderHistoryMetric::Credits) {
+        return credits(ctx, conn, query).await;
     }
-    let row = orch_db::queries::resources::routes::providers(&mut tx, &[id])
+    let id = ctx.id("id")?;
+    let row = orch_db::queries::resources::routes::providers(&mut *conn, &[id])
         .await?
         .pop()
         .ok_or_else(ApiError::not_found)?;
@@ -272,7 +277,7 @@ pub async fn get(
         Vec::new()
     } else {
         rows::chart(
-            &mut tx,
+            &mut *conn,
             &PlanRead {
                 provider: id,
                 windows: &definitions,
@@ -329,6 +334,151 @@ pub async fn get(
     } else {
         None
     };
-    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(Page {
+        items: items
+            .into_iter()
+            .map(ProviderHistorySeries::Subscription)
+            .collect(),
+        next_cursor,
+    })
+}
+
+/// Exact credit observations use this same ordinary ProviderPlanGet gate and history span.
+/// Groups page together, so the reported used amount and limit cannot be split arbitrarily.
+async fn credits(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    query: ProviderPlanGetQuery,
+) -> ApiResult<Page<ProviderHistorySeries>> {
+    let id = ctx.id("id")?;
+    let row = orch_db::queries::resources::routes::providers(&mut *conn, &[id])
+        .await?
+        .pop()
+        .ok_or_else(ApiError::not_found)?;
+    let source_revision = provider_credits::source_revision(&mut *conn, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let from = date("from", &query.from)?;
+    let to = date("to", &query.to)?
+        .checked_add_signed(Duration::days(1))
+        .ok_or_else(|| ApiError::invalid("to", "is outside the supported dates"))?;
+    if from >= to {
+        return Err(ApiError::invalid("to", "must not be before from"));
+    }
+    let bucket = query.bucket.unwrap_or(UsageBucket::Day);
+    let days = (to - from).num_days();
+    if bucket == UsageBucket::Hour && days > i64::from(USAGE_HOUR_BUCKET_MAX_DAYS)
+        || bucket == UsageBucket::Day && days > i64::from(USAGE_DAY_BUCKET_MAX_DAYS)
+    {
+        return Err(ApiError::invalid("bucket", "is too fine for this span"));
+    }
+    // The safe observation/source cut distinguishes this metric from subscription cursors.
+    // No configuration, source address, credential identity or amount becomes a series label.
+    let epoch = Hash::of(
+        &serde_json::to_vec(&(
+            id,
+            "credits",
+            source_revision,
+            row.facts_at,
+            row.revision,
+            &query.from,
+            &query.to,
+            bucket,
+        ))
+        .map_err(ApiError::internal)?,
+    );
+    let cursor = query.cursor.as_deref().map(decode).transpose()?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.epoch != epoch || cursor.as_of.get() > ctx.now)
+    {
+        return Err(ApiError::invalid(
+            "cursor",
+            "the plan changed; reopen its first page",
+        ));
+    }
+    let as_of = cursor.as_ref().map_or(ctx.now, |cursor| cursor.as_of.get());
+    let limit = query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+    let data = provider_credits::read(
+        &mut *conn,
+        &provider_credits::Read {
+            provider: id,
+            from,
+            to,
+            as_of,
+            bucket: bucket_name(bucket),
+            after: cursor.as_ref().map(|cursor| cursor.after.as_str()),
+            limit: i64::from(limit),
+        },
+    )
+    .await?;
+    let groups: Vec<_> = data
+        .iter()
+        .map(|row| row.group_key.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let limit = usize::try_from(limit).map_err(ApiError::internal)?;
+    let selected: std::collections::BTreeSet<_> = groups.iter().take(limit).cloned().collect();
+    let more = groups.len() > limit;
+    let mut items = Vec::new();
+    for row in data
+        .into_iter()
+        .filter(|row| selected.contains(&row.group_key))
+    {
+        if row.overflow {
+            return Err(ApiError::invalid(
+                "bucket",
+                "is too fine for the retained history; choose a larger interval",
+            ));
+        }
+        let member = match row.member.as_str() {
+            "balances" => ProviderCreditMember::Balances,
+            "spend" => ProviderCreditMember::Spend,
+            "extra_usage" => ProviderCreditMember::ExtraUsage,
+            _ => return Err(ApiError::internal("a credit observation member is unknown")),
+        };
+        let quantity = match row.quantity.as_str() {
+            "remaining" => ProviderCreditQuantity::Remaining,
+            "total" => ProviderCreditQuantity::Total,
+            "used" => ProviderCreditQuantity::Used,
+            "limit" => ProviderCreditQuantity::Limit,
+            _ => {
+                return Err(ApiError::internal(
+                    "a credit observation quantity is unknown",
+                ));
+            }
+        };
+        items.push(ProviderHistorySeries::Credits(ProviderCreditSeries {
+            kind: ProviderCreditSeriesKind::Credits,
+            series_id: Hash::of(row.key.as_bytes()).to_string(),
+            group_id: Hash::of(row.group_key.as_bytes()).to_string(),
+            member,
+            item_id: row.item_id,
+            quantity,
+            label: row.label,
+            unit: row.unit,
+            decimal_places: row
+                .decimal_places
+                .map(u32::try_from)
+                .transpose()
+                .map_err(ApiError::internal)?,
+            points: serde_json::from_value(row.points).map_err(ApiError::internal)?,
+        }));
+    }
+    let next_cursor = if more {
+        groups
+            .get(limit.saturating_sub(1))
+            .map(|after| {
+                encode(&Cursor {
+                    epoch,
+                    after: after.clone(),
+                    as_of: Time::new(as_of),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     Ok(Page { items, next_cursor })
 }

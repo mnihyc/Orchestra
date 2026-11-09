@@ -2,7 +2,7 @@
 import { expect, type Page, test } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
 import { ACME, PEOPLE, configureThread, emit, scenario, signIn } from './support.ts';
-import { agentMessage, turn } from '../doubles/thread-rows.ts';
+import { recordedConversation } from '../doubles/recorded-conversation.ts';
 import { DOCS } from './documents-support.ts';
 
 test.beforeEach(async () => { await scenario(); });
@@ -166,11 +166,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
 
 test('Recent reports cold and warm frame reads against the shared opening goals without per-row reads', async ({ page }) => {
   await configureThread(ACME.mainThread, { reset: true });
-  const completed = '2026-10-15T10:00:01Z';
-  await emit(ACME.mainThread, { turns: [
-    { ...turn('recorded-one', { ordinal: 1, state: 'completed', inputId: 'input-one', completedAt: completed }), before_snapshot_id: 'copy-one' },
-    { ...turn('recorded-two', { ordinal: 2, state: 'completed', inputId: 'input-two', completedAt: completed }), before_snapshot_id: 'copy-two' },
-  ], items: [agentMessage('result-one', 'The first change is ready.', { turn: 'recorded-one' }), agentMessage('result-two', 'The second change is ready.', { turn: 'recorded-two' })] });
+  await emit(ACME.mainThread, recordedConversation());
   await page.setViewportSize({ width: 1440, height: 1000 });
   await signIn(page);
   await page.goto(`/thread/${ACME.mainThread}`);

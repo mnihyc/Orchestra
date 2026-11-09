@@ -144,6 +144,9 @@ async fn serve(app: &App, environment: Id, port: u16, host: String, request: Req
                 "Open the port again from its page in Orch.",
             );
         };
+        if let Err(error) = admitted(app, &entry, now).await {
+            return refused(&error);
+        }
         return remembered(app, entry, now, "/");
     }
     let proofs: Vec<String> = form_urlencoded::parse(query.as_bytes())
@@ -225,7 +228,9 @@ async fn link_entry(
             row.kind == "link" && row.port == i32::from(port) && proof_matches(row, proof)
         })?;
     Some(BrowserEntry {
+        id: orch_types::new_id(),
         person: None,
+        origin: None,
         environment,
         port,
         opening: Some(row.id),
@@ -245,20 +250,30 @@ struct Admission {
 async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admission> {
     let mut tx = app.db.begin().await?;
     let env = environment(&mut tx, entry.environment).await?;
+    let mut credential_deadline = None;
     let (caller, revision) = match entry.person {
         Some(person) => {
-            let principal = orch_authz::Principal::load(
-                &mut tx,
-                orch_authz::tokens::Caller::session(person),
-                now,
-            )
-            .await
-            .map_err(|_| {
+            let origin = entry.origin.as_ref().ok_or_else(|| {
                 ApiError::new(
                     ErrorCode::PortsNotAllowed,
-                    "the person cannot use this port",
+                    "the original browser entry credential is absent",
                 )
             })?;
+            if origin.user() != person {
+                return Err(ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "the browser entry belongs to another credential",
+                ));
+            }
+            let (principal, deadline) = origin
+                .required_principal(&mut tx, env.id, "EnvironmentPortEnter", app.clock.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::PortsNotAllowed,
+                        "the original credential cannot use this port",
+                    )
+                })?;
             may_use(
                 &mut tx,
                 &principal,
@@ -281,6 +296,17 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
                 }
                 None => env.revision,
             };
+            if !crate::realtime::ticket_origin::deadline_allows(
+                principal.caller(),
+                deadline,
+                app.clock.as_ref(),
+            ) {
+                return Err(ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "the original browser entry credential expired",
+                ));
+            }
+            credential_deadline = Some((principal.caller().clone(), deadline));
             (PortCaller::Person { user }, revision)
         }
         None => {
@@ -316,6 +342,17 @@ async fn admitted(app: &App, entry: &BrowserEntry, now: Time) -> ApiResult<Admis
     }
     let (program, _) = rows::program(&mut tx, env.id, entry.port).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
+    if credential_deadline
+        .as_ref()
+        .is_some_and(|(caller, deadline)| {
+            !crate::realtime::ticket_origin::deadline_allows(caller, *deadline, app.clock.as_ref())
+        })
+    {
+        return Err(ApiError::new(
+            ErrorCode::PortsNotAllowed,
+            "the original browser entry credential expired",
+        ));
+    }
     Ok(Admission {
         env,
         caller,
@@ -399,7 +436,7 @@ async fn carry(
             entry.port,
             entry.opening,
             admission.caller.clone(),
-            entry.person,
+            entry.origin.clone(),
             admission.revision,
             outside,
             connection,

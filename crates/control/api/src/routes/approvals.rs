@@ -10,7 +10,13 @@
 //! request for access by whoever could change the page of what it asks for
 //! (`routes/access/requests`); both are listed and read here with the rest.
 
-use crate::middleware::authorization::{self, MANAGE, VIEW, exact, refusals};
+mod operation;
+pub(crate) use operation::{
+    Sources as CardSources, bind_card_sources, bind_prepared_card_sources, card_read_caller,
+    card_sources, governor as card_governor,
+};
+
+use crate::middleware::authorization::{self, VIEW, exact, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
 use crate::registry::{Ctx, Registry};
@@ -21,7 +27,7 @@ use orch_api_contract::access::ObjectRef;
 use orch_api_contract::approvals::{
     Approval, ApprovalCancel, ApprovalDecide, ApprovalDecision, ApprovalDecisionReply, ApprovalGet,
     ApprovalList, ApprovalListQuery, ApprovalListState, ApprovalRequest, ApprovalRequester,
-    ApprovalState,
+    ApprovalState, ApprovalWriteResponse,
 };
 use orch_api_contract::common::{ErrorCode, Page, PageQuery};
 use orch_api_contract::threads::ThreadMention;
@@ -36,10 +42,10 @@ use std::collections::{HashMap, HashSet};
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ApprovalList, list)
-        .on(ApprovalGet, get)
-        .on(ApprovalDecide, decide)
-        .on(ApprovalCancel, cancel);
+        .on_with_optional_operation(ApprovalList, operation::list, list)
+        .on_with_optional_operation(ApprovalGet, operation::get, get)
+        .on_with_optional_operation(ApprovalDecide, operation::decide, decide)
+        .on_with_optional_operation(ApprovalCancel, operation::cancel, cancel);
 }
 
 /// How many rows of a list are read at once while some of them are left out
@@ -148,9 +154,10 @@ async fn views_routed(
         .filter(|row| row.kind == "capability" && row.state == "pending")
     {
         if engine
-            .may_decide_capability_request(principal.caller(), row)
+            .capability_decision_authority(conn, principal, row)
             .await
-            .unwrap_or(false)
+            .map_err(ApiError::engine)?
+            .is_ok()
         {
             capability_deciders.insert(row.id);
         }
@@ -400,6 +407,24 @@ fn scope_of(asked: Option<&str>) -> ApiResult<Scope> {
 /// Approvals, newest first: those the caller can decide, those they asked for,
 /// or those attached to a node they may view.
 async fn list(ctx: Ctx, query: ApprovalListQuery, (): ()) -> ApiResult<Page<Approval>> {
+    if operation::is_scoped(&ctx) {
+        let projection = ctx.clone();
+        return operation::protect_error(&projection, operation::list_reply(ctx, query).await);
+    }
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    list_in(&ctx, &mut conn, &principal, &query, None).await
+}
+
+/// The ordinary ordering, scope/routing, visibility and lookahead algorithm, shared by
+/// native and explicitly scoped readers. Scope filtering completes before filling a page.
+async fn list_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    query: &ApprovalListQuery,
+    scoped_caller: Option<&orch_authz::Caller>,
+) -> ApiResult<Page<Approval>> {
     let scope = scope_of(query.scope.as_deref())?;
     let page = PageQuery {
         limit: query.limit,
@@ -420,20 +445,11 @@ async fn list(ctx: Ctx, query: ApprovalListQuery, (): ()) -> ApiResult<Page<Appr
         .map(|kind| serde_json::to_value(kind).ok())
         .map(|value| value.and_then(|value| value.as_str().map(str::to_owned)));
     let kind = kind.flatten();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let caller = principal.user();
     let under = match scope {
         Scope::Under(node) => {
-            authorization::require(
-                &mut conn,
-                &principal,
-                node,
-                VIEW,
-                Act::Use,
-                Policy::default(),
-            )
-            .await?;
+            authorization::require(conn, principal, node, VIEW, Act::Use, Policy::default())
+                .await?;
             Some(node)
         }
         _ => None,
@@ -442,7 +458,7 @@ async fn list(ctx: Ctx, query: ApprovalListQuery, (): ()) -> ApiResult<Page<Appr
     let mut kept: Vec<Approval> = Vec::new();
     loop {
         let found = rows::list(
-            &mut conn,
+            conn,
             &Listing {
                 states: states_of(query.state.unwrap_or_default()),
                 kind: kind.as_deref(),
@@ -458,11 +474,10 @@ async fn list(ctx: Ctx, query: ApprovalListQuery, (): ()) -> ApiResult<Page<Appr
             break;
         };
         before = Some(last);
-        let (shown, sent) =
-            views_routed(&mut conn, &principal, &found, ctx.now, &ctx.app.engine).await?;
+        let (shown, sent) = views_routed(conn, principal, &found, ctx.now, &ctx.app.engine).await?;
         let visible = visible_to(
-            &mut conn,
-            &principal,
+            conn,
+            principal,
             &scope,
             shown,
             &Routing {
@@ -471,6 +486,10 @@ async fn list(ctx: Ctx, query: ApprovalListQuery, (): ()) -> ApiResult<Page<Appr
             },
         )
         .await?;
+        let visible = match scoped_caller {
+            Some(caller) => operation::selected_cards(ctx, conn, caller, visible).await?,
+            None => visible,
+        };
         // A request that ran out while nobody looked reads as expired, and is not among those waiting.
         let waiting = query.state.unwrap_or_default() == ApprovalListState::Pending;
         kept.extend(
@@ -654,7 +673,17 @@ pub(crate) async fn one_approval(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResul
     let row = rows::approval(conn, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let decides = require_decision_authority(ctx, conn, &principal, &row)
+    one_approval_in(ctx, conn, &principal, row).await
+}
+
+/// The unchanged native read alternatives on a supplied current principal/connection.
+async fn one_approval_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    row: ApprovalRow,
+) -> ApiResult<Approval> {
+    let decides = require_decision_authority(ctx, conn, principal, &row)
         .await
         .is_ok();
     if row.requester_user_id != Some(principal.user()) && !decides {
@@ -662,7 +691,7 @@ pub(crate) async fn one_approval(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResul
             Some(thread) => {
                 authorization::require(
                     conn,
-                    &principal,
+                    principal,
                     thread,
                     exact(Permission::ThreadView),
                     Act::Use,
@@ -673,7 +702,7 @@ pub(crate) async fn one_approval(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResul
             None => return Err(ApiError::not_found()),
         }
     }
-    views(conn, &principal, &[row], ctx.now, &ctx.app.engine)
+    views(conn, principal, &[row], ctx.now, &ctx.app.engine)
         .await?
         .into_iter()
         .next()
@@ -682,6 +711,10 @@ pub(crate) async fn one_approval(ctx: &Ctx, conn: &mut Conn, id: Id) -> ApiResul
 
 /// One approval.
 async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Approval> {
+    if operation::is_scoped(&ctx) {
+        let projection = ctx.clone();
+        return operation::protect_error(&projection, operation::get_reply(ctx).await);
+    }
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.acquire().await?;
     one_approval(&ctx, &mut conn, id).await
@@ -689,6 +722,14 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<Approval> {
 
 /// `409 approval.already_decided`, with the approval as it stands.
 pub(crate) async fn already_decided(ctx: &Ctx, id: Id) -> ApiError {
+    if operation::is_scoped(ctx) && matches!(ctx.route.name, "ApprovalDecide" | "ApprovalCancel") {
+        let current = operation::conflict_current(ctx, id).await;
+        return ApiError::new(
+            ErrorCode::ApprovalAlreadyDecided,
+            "that approval is not waiting any more",
+        )
+        .with("current", current);
+    }
     let mut conn = match ctx.app.db.acquire().await {
         Ok(conn) => conn,
         Err(error) => return error.into(),
@@ -703,38 +744,7 @@ pub(crate) async fn already_decided(ctx: &Ctx, id: Id) -> ApiError {
 
 /// Decides a request for a capability: by whoever decides on the machine's side, as the scope the policy names
 /// says, and by nobody else.
-async fn decided_capability(
-    ctx: &Ctx,
-    tx: orch_db::Tx,
-    principal: Principal,
-    id: Id,
-    body: &ApprovalDecision,
-) -> ApiResult<Approval> {
-    match ctx
-        .app
-        .engine
-        .decide_capability_guarded(tx, principal.clone(), id, body)
-        .await
-    {
-        Ok(row) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            views(&mut conn, &principal, &[row], ctx.now, &ctx.app.engine)
-                .await?
-                .into_iter()
-                .next()
-                .ok_or_else(ApiError::not_found)
-        }
-        Err(ApprovalError::NotFound) => Err(ApiError::not_found()),
-        Err(ApprovalError::AlreadyDecided) => Err(already_decided(ctx, id).await),
-        Err(ApprovalError::Denied(refusal)) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(refusals::denied(&mut conn, *refusal).await?)
-        }
-        Err(ApprovalError::Invalid(message)) => Err(ApiError::invalid("", &message)),
-        Err(ApprovalError::Internal(error)) => Err(ApiError::internal(error)),
-    }
-}
-
+///
 /// Decides an approval. The decider's credential and authority are asked again once the body has come, in
 /// the transaction that then decides, whichever part raised the approval: a request for a capability is
 /// decided on the machine's side, a request for access by whoever could change the page of what it asks for,
@@ -749,11 +759,16 @@ async fn require_decision_authority(
     use orch_authz::approvals::Authority;
     match orch_authz::approvals::authority(&row.kind) {
         Some(Authority::HarnessThread) => {
+            let thread = row.thread_id.ok_or_else(ApiError::not_found)?;
+            let permission =
+                orch_engine::approvals::deciding_permission(conn, thread, &row.request)
+                    .await
+                    .map_err(ApiError::engine)?;
             authorization::require(
                 conn,
                 principal,
-                row.thread_id.ok_or_else(ApiError::not_found)?,
-                exact(Permission::ThreadManage),
+                thread,
+                exact(permission),
                 Act::Use,
                 Policy::default(),
             )
@@ -835,11 +850,14 @@ async fn require_decision_authority(
     }
 }
 
-async fn decide(mut ctx: Ctx, (): (), body: ApprovalDecision) -> ApiResult<ApprovalDecisionReply> {
+async fn decide(ctx: Ctx, (): (), body: ApprovalDecision) -> ApiResult<ApprovalWriteResponse> {
+    let projection = ctx.clone();
+    operation::protect_error(&projection, decide_action(ctx, body).await)
+}
+
+async fn decide_action(ctx: Ctx, body: ApprovalDecision) -> ApiResult<ApprovalWriteResponse> {
     let id = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.into_principal();
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
     let row = rows::approval(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
@@ -847,81 +865,117 @@ async fn decide(mut ctx: Ctx, (): (), body: ApprovalDecision) -> ApiResult<Appro
         drop(tx);
         return Err(already_decided(&ctx, id).await);
     }
+    require_decision_authority(&ctx, &mut tx, initial.principal(), &row).await?;
+    let locked =
+        orch_engine::approvals::operation::lock_decision(&ctx.app.engine, &mut tx, id, &body)
+            .await
+            .map_err(ApiError::engine)?
+            .ok_or_else(ApiError::not_found)?;
+    let row = locked.row().clone();
+    let selected = initial
+        .principal()
+        .caller()
+        .admitted_operation()
+        .map(str::to_owned);
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    let mut principal = guard.into_principal();
+    if principal.caller().grant().is_some() && principal.caller().admitted_operation().is_none() {
+        // New legacy key work retains this exact native approval origin too. The same
+        // legacy permission/subtree/lifetime checks remain on the original caller.
+        let plan = orch_engine::approvals::operation::prepare_decision(&mut tx, &row, &body)
+            .await
+            .map_err(ApiError::engine)?;
+        let caller = plan
+            .admit(principal.caller(), false)
+            .map_err(crate::key_operations::admission::binding_error)?;
+        let refreshed = authorization::load_principal(&mut tx, caller, Time::new(ctx.now)).await?;
+        principal = match principal.second_step_hold() {
+            Some(hold) => refreshed.held_for_second_step(hold.clone()),
+            None => refreshed,
+        };
+    }
+    if operation::is_scoped(&ctx) && selected.as_deref() != principal.caller().admitted_operation()
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the selected approval operation changed while waiting",
+        ));
+    }
+    if row.state != "pending" {
+        drop(tx);
+        return Err(already_decided(&ctx, id).await);
+    }
     require_decision_authority(&ctx, &mut tx, &principal, &row).await?;
-    let kind = row.kind.clone();
-    match kind.as_str() {
+    let outcome = decide_native(&ctx, tx, principal.clone(), locked, &body).await?;
+    operation::write_reply(&ctx, &principal, outcome).await
+}
+
+/// Each branch still uses its ordinary native writer, under the common post-wait HTTP guard.
+async fn decide_native(
+    ctx: &Ctx,
+    tx: orch_db::Tx,
+    principal: Principal,
+    locked: orch_engine::approvals::operation::DecisionLocks,
+    body: &ApprovalDecision,
+) -> ApiResult<operation::Outcome> {
+    let row = locked.row().clone();
+    let id = row.id;
+    match row.kind.as_str() {
         "capability" => {
-            return decided_capability(&ctx, tx, principal, id, &body)
+            let row = match ctx
+                .app
+                .engine
+                .decide_capability_prepared(tx, principal, locked, body)
                 .await
-                .map(ApprovalDecisionReply::from);
+            {
+                Ok(row) => row,
+                Err(error) => return Err(native_error(ctx, id, error).await),
+            };
+            return operation::Outcome::row(&row);
         }
         "access" => {
-            return requests::decide(&ctx, tx, principal, id, &body)
-                .await
-                .map(ApprovalDecisionReply::from);
+            return operation::Outcome::row(
+                &requests::decide_row(ctx, tx, principal, id, body).await?,
+            );
         }
-        // A port request answers with its opening's one result as well.
         "port" => {
-            return crate::routes::port_requests::decide(&ctx, tx, principal, id, &body).await;
+            return crate::routes::port_requests::decide(ctx, tx, principal, id, body)
+                .await
+                .map(operation::Outcome::reply);
         }
         "harness" => {}
-        "plan" | "input" => {
+        "plan" => {
             let source = row.object_id.ok_or_else(ApiError::not_found)?;
             let thread = row.thread_id.ok_or_else(ApiError::not_found)?;
-            let result = if kind == "plan" {
-                let ApprovalDecision::Option(choice) = &body else {
-                    return Err(ApiError::invalid(
-                        "",
-                        "a plan is answered with Proceed or Keep planning",
-                    ));
-                };
-                let proceed = match choice.option_id.as_str() {
-                    "proceed" => true,
-                    "keep_planning" => false,
-                    _ => return Err(ApiError::invalid("option_id", "is not a plan response")),
-                };
-                ctx.app
-                    .engine
-                    .decide_plan_guarded(
-                        tx,
-                        principal,
-                        thread,
-                        source,
-                        &orch_api_contract::threads::ThreadPlanDecideBody {
-                            proceed,
-                            text: choice.note.clone(),
-                        },
-                    )
-                    .await
-                    .map(|_| ())
-            } else {
-                let ApprovalDecision::Input(choice) = &body else {
-                    return Err(ApiError::invalid(
-                        "",
-                        "a held message is answered with Run it",
-                    ));
-                };
-                if !choice.run {
-                    return Err(ApiError::invalid(
-                        "run",
-                        "must be true; cancel a message from its queue",
-                    ));
-                }
-                ctx.app
-                    .engine
-                    .run_input_guarded(tx, principal, thread, source)
-                    .await
-                    .map(|_| ())
+            let ApprovalDecision::Option(choice) = body else {
+                return Err(ApiError::invalid(
+                    "",
+                    "a plan is answered with Proceed or Keep planning",
+                ));
             };
-            return match result {
-                Ok(()) => {
-                    let mut conn = ctx.app.db.acquire().await?;
-                    one_approval(&ctx, &mut conn, id)
-                        .await
-                        .map(ApprovalDecisionReply::from)
-                }
+            let proceed = match choice.option_id.as_str() {
+                "proceed" => true,
+                "keep_planning" => false,
+                _ => return Err(ApiError::invalid("option_id", "is not a plan response")),
+            };
+            return match ctx
+                .app
+                .engine
+                .decide_plan_guarded(
+                    tx,
+                    principal,
+                    thread,
+                    source,
+                    &orch_api_contract::threads::ThreadPlanDecideBody {
+                        proceed,
+                        text: choice.note.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(reply) => Ok(operation::Outcome::source(id, &reply.decision)),
                 Err(orch_engine::inputs::InputError::AlreadyDecided(_)) => {
-                    Err(already_decided(&ctx, id).await)
+                    Err(already_decided(ctx, id).await)
                 }
                 Err(error) => {
                     let mut conn = ctx.app.db.acquire().await?;
@@ -929,7 +983,39 @@ async fn decide(mut ctx: Ctx, (): (), body: ApprovalDecision) -> ApiResult<Appro
                 }
             };
         }
-        _ => {
+        "input" => {
+            let source = row.object_id.ok_or_else(ApiError::not_found)?;
+            let thread = row.thread_id.ok_or_else(ApiError::not_found)?;
+            let ApprovalDecision::Input(choice) = body else {
+                return Err(ApiError::invalid(
+                    "",
+                    "a held message is answered with Run it",
+                ));
+            };
+            if !choice.run {
+                return Err(ApiError::invalid(
+                    "run",
+                    "must be true; cancel a message from its queue",
+                ));
+            }
+            let actor = principal.user();
+            return match ctx
+                .app
+                .engine
+                .run_input_guarded(tx, principal, thread, source)
+                .await
+            {
+                Ok(_) => Ok(operation::Outcome::input(id, actor)),
+                Err(orch_engine::inputs::InputError::AlreadyDecided(_)) => {
+                    Err(already_decided(ctx, id).await)
+                }
+                Err(error) => {
+                    let mut conn = ctx.app.db.acquire().await?;
+                    Err(crate::routes::threads::input_failed(&mut conn, thread, error).await)
+                }
+            };
+        }
+        kind => {
             return Err(ApiError::new(
                 ErrorCode::CapabilityUnsupported,
                 "the approval has an unrecognized kind",
@@ -937,41 +1023,65 @@ async fn decide(mut ctx: Ctx, (): (), body: ApprovalDecision) -> ApiResult<Appro
             .with("capability", format!("decide.{kind}")));
         }
     }
-    let _ = MANAGE;
     match ctx
         .app
         .engine
-        .decide_approval_guarded(tx, principal.clone(), id, &body)
+        .decide_approval_guarded(tx, principal, id, body)
         .await
     {
-        Ok(row) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            views(&mut conn, &principal, &[row], ctx.now, &ctx.app.engine)
-                .await?
-                .into_iter()
-                .next()
-                .map(ApprovalDecisionReply::from)
-                .ok_or_else(ApiError::not_found)
-        }
-        Err(ApprovalError::NotFound) => Err(ApiError::not_found()),
-        Err(ApprovalError::AlreadyDecided) => Err(already_decided(&ctx, id).await),
-        Err(ApprovalError::Denied(refusal)) => {
-            let mut conn = ctx.app.db.acquire().await?;
-            Err(refusals::denied(&mut conn, *refusal).await?)
-        }
-        Err(ApprovalError::Invalid(message)) => Err(ApiError::invalid("", &message)),
-        Err(ApprovalError::Internal(error)) => Err(ApiError::internal(error)),
+        Ok(row) => operation::Outcome::row(&row),
+        Err(error) => Err(native_error(ctx, id, error).await),
+    }
+}
+
+/// Keep the ordinary error code and native refusal attribution for both native writers.
+async fn native_error(ctx: &Ctx, id: Id, error: ApprovalError) -> ApiError {
+    match error {
+        ApprovalError::NotFound => ApiError::not_found(),
+        ApprovalError::AlreadyDecided => already_decided(ctx, id).await,
+        ApprovalError::Denied(refusal) => match ctx.app.db.acquire().await {
+            Ok(mut conn) => match refusals::denied(&mut conn, *refusal).await {
+                Ok(error) => error,
+                Err(error) => error,
+            },
+            Err(error) => error.into(),
+        },
+        ApprovalError::Invalid(message) => ApiError::invalid("", &message),
+        ApprovalError::Internal(error) => ApiError::engine(error),
     }
 }
 
 /// Takes back a request for access, which only the person who asked can do.
-async fn cancel(ctx: Ctx, (): (), (): ()) -> ApiResult<Approval> {
+async fn cancel(ctx: Ctx, (): (), (): ()) -> ApiResult<ApprovalWriteResponse> {
+    let projection = ctx.clone();
+    operation::protect_error(&projection, cancel_action(ctx).await)
+}
+
+async fn cancel_action(ctx: Ctx) -> ApiResult<ApprovalWriteResponse> {
     let id = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let person = ctx.user()?.id();
-    let row = rows::approval(&mut conn, id)
+    let (mut tx, initial) = transaction_guard::begin(&ctx).await?;
+    let before = rows::approval(&mut tx, id)
         .await?
         .ok_or_else(ApiError::not_found)?;
+    require_requester(&before, initial.user().id())?;
+    let row = rows::lock(&mut tx, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let (ctx, guard) = transaction_guard::after_wait(&ctx, &mut tx).await?;
+    require_requester(&row, guard.user().id())?;
+    if !rows::cancel_request(&mut tx, id, guard.user().id(), guard.now().get()).await? {
+        drop(tx);
+        return Err(already_decided(&ctx, id).await);
+    }
+    orch_db::queries::notifications::inbox::settle_approval(&mut tx, id, guard.now().get()).await?;
+    let row = rows::approval(&mut tx, id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let outcome = operation::Outcome::row(&row)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    operation::write_reply(&ctx, guard.principal(), outcome).await
+}
+fn require_requester(row: &ApprovalRow, person: Id) -> ApiResult<()> {
     if row.kind != "access" {
         return Err(ApiError::invalid(
             "id",
@@ -984,7 +1094,7 @@ async fn cancel(ctx: Ctx, (): (), (): ()) -> ApiResult<Approval> {
             "only the person who asked takes a request back",
         )
         .with("required", "approval.requester")
-        .with("object", json!({ "kind": "approval", "id": id }))
+        .with("object", json!({"kind":"approval","id":row.id}))
         .with("requestable", false)
         .with("override", false)
         .with(
@@ -992,11 +1102,5 @@ async fn cancel(ctx: Ctx, (): (), (): ()) -> ApiResult<Approval> {
             Vec::<orch_api_contract::access::MissingAccess>::new(),
         ));
     }
-    if !rows::cancel_request(&mut conn, id, person, ctx.now).await? {
-        drop(conn);
-        return Err(already_decided(&ctx, id).await);
-    }
-    // Nobody has anything left to do about it: what asked them to decide is read.
-    orch_db::queries::notifications::inbox::settle_approval(&mut conn, id, ctx.now).await?;
-    one_approval(&ctx, &mut conn, id).await
+    Ok(())
 }

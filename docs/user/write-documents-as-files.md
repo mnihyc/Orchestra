@@ -1,4 +1,5 @@
 ---
+group: work
 title: Write documents as files
 screens: /doc/$documentId, /documents/$nodeId, /document-folder/$folderId
 keywords: markdown, orch markdown, html, word, docx, text, paste, import, export, archive, zip, relative links, pictures, toggle, columns, callout, colour, underline, page break, agent, edit_document, download_shared, checkout, commit, 文档, 文件, 导入, 粘贴, 代理
@@ -8,6 +9,7 @@ heading_keywords.import-files: folder, zip, link, reference, picture, notion, la
 heading_keywords.word-files: docx, heading, table, picture, style
 heading_keywords.what-agents-do: file, format, seq, block, address, batch, import, checkout, commit, comments
 heading_keywords.what-a-file-cannot-keep: loss, colour, alignment, spans, widths, blank
+summary: Use Orch Markdown, paste and file imports to exchange documents with people and agents.
 ---
 
 # Write documents as files

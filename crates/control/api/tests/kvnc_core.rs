@@ -63,7 +63,9 @@ async fn a_real_screen_is_listed_with_its_x_address_and_only_managers_see_the_en
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary native session creation content");
     assert_eq!(opened.name, "Build preview");
     assert!(opened.x_display.as_ref().unwrap().starts_with(':'));
     assert_eq!(opened.geometry.as_deref(), Some("800x600"));
@@ -163,7 +165,9 @@ async fn one_display_ticket_opens_one_connection_and_replay_cannot_interrupt_its
         .body(&EnvironmentDisplayCreateBody::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary native session creation content");
     let ticket = floor
         .scene
         .rig
@@ -176,7 +180,9 @@ async fn one_display_ticket_opens_one_connection_and_replay_cannot_interrupt_its
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("a first native display ticket carries its once-only secret");
     let mut viewer =
         displays_support::Screen::with_ticket(&floor, display.id, &ticket.ticket).await;
     let address = floor.serve().await;
@@ -488,7 +494,9 @@ async fn concurrent_opens_share_the_exact_display_limit_including_browser_window
         one.ok()
     } else {
         two.ok()
-    };
+    }
+    .into_full()
+    .expect("ordinary created display content");
     let browser = displays_support::window(&floor).await;
     assert_eq!(browser.display, Some(opened.id));
     let denied = floor
@@ -625,7 +633,9 @@ async fn an_owned_screen_reuses_its_original_endpoint_and_x_display_after_regist
         .body(&EnvironmentDisplayCreateBody::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary native session creation content");
     let recovered = floor.peer.rpc(json!({"recover_display":display.id}))["ok"].clone();
     assert_eq!(recovered["endpoint"], display.endpoint.unwrap());
     assert_eq!(recovered["x_display"], display.x_display.unwrap());

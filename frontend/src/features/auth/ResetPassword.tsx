@@ -76,13 +76,13 @@ function ResetForToken({ token }: { token: string }) {
             </Button> : undefined
           }
         />
-        {meta===undefined && (system.isError ? <ErrorState compact error={system.error} onRetry={()=>void system.refetch()} /> : <SkeletonRows rows={1} />)}
+        {meta===undefined && (system.isError ? <ErrorState compact error={system.error} onRetry={()=>void system.refetch()} /> : <SkeletonRows read={system} rows={1} />)}
       </AuthCard>
     );
   }
 
   if (checked.isPending) {
-    return <AuthCard title={t('auth.reset.linkTitle')} foot={back}><SkeletonRows rows={2} /></AuthCard>;
+    return <AuthCard title={t('auth.reset.linkTitle')} foot={back}><SkeletonRows read={checked} rows={2} /></AuthCard>;
   }
   if (checked.isError && !reset.isPending) {
     return <AuthCard title={t('auth.reset.linkTitle')} foot={back}><ErrorState compact error={checked.error} retrying={checked.isRefetching} onRetry={() => void checked.refetch()} /></AuthCard>;

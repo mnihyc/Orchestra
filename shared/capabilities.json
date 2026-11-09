@@ -1,0 +1,1122 @@
+{
+  "contract": 1,
+  "capabilities": {
+    "generation": {
+      "title": "Generation",
+      "setting": "agent.model",
+      "item": "agent_message",
+      "ledger_unit": "token",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "native": {
+          "routes": [
+            "generation.model",
+            "generation.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "generation.service-model",
+            "generation.service-api",
+            "generation.delegation"
+          ],
+          "native_value": "off"
+        }
+      }
+    },
+    "image_input": {
+      "title": "Image input",
+      "setting": "agent.model",
+      "item": "image",
+      "ledger_unit": "image",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "native": {
+          "routes": [
+            "image_input.model",
+            "image_input.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "image_input.service-model",
+            "image_input.service-api",
+            "image_input.delegation"
+          ],
+          "native_value": "off"
+        }
+      },
+      "offering_support": {
+        "enabled": "/parameters/input_images"
+      }
+    },
+    "web_search": {
+      "title": "Web search",
+      "setting": "agent.params.web_search",
+      "item": "web_search",
+      "ledger_unit": "search",
+      "modes": {
+        "disabled": {
+          "routes": [],
+          "native_value": "disabled"
+        },
+        "live": {
+          "routes": [
+            "web_search.model",
+            "web_search.program"
+          ],
+          "native_value": "live"
+        },
+        "cached": {
+          "routes": [
+            "web_search.model",
+            "web_search.program"
+          ],
+          "native_value": "cached"
+        },
+        "indexed": {
+          "routes": [
+            "web_search.model",
+            "web_search.program"
+          ],
+          "native_value": "indexed"
+        },
+        "service": {
+          "routes": [
+            "web_search.service-model",
+            "web_search.service-api",
+            "web_search.delegation"
+          ],
+          "native_value": "disabled"
+        }
+      },
+      "backend_setting": "agents.web_search_backend",
+      "offering_support": {
+        "modes": "/parameters/web_search",
+        "default_mode": "/parameters/default_web_search"
+      },
+      "mode_setting": "agent.params.web_search",
+      "recovery_purpose": "web_search",
+      "counter_accounting": {
+        "measurement": "web_searches",
+        "price": "/web_search_per_call"
+      }
+    },
+    "page_fetch": {
+      "title": "Page fetch",
+      "setting": "agents.page_fetch",
+      "backend_setting": "agents.web_search_backend",
+      "item": "web_fetch",
+      "ledger_unit": "page",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "on": {
+          "routes": [
+            "page_fetch.model",
+            "page_fetch.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "page_fetch.service-model",
+            "page_fetch.service-api",
+            "page_fetch.delegation"
+          ],
+          "native_value": "off"
+        }
+      },
+      "mode_setting": "agents.page_fetch",
+      "recovery_purpose": "page_fetch",
+      "counter_accounting": {
+        "measurement": "web_fetches",
+        "price": "/web_fetch_per_call"
+      }
+    },
+    "image_generation": {
+      "title": "Image generation",
+      "setting": "agents.image_generation",
+      "item": "image",
+      "ledger_unit": "image",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "on": {
+          "routes": [
+            "image_generation.model",
+            "image_generation.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "image_generation.service-model",
+            "image_generation.service-api",
+            "image_generation.delegation"
+          ],
+          "native_value": "off"
+        }
+      },
+      "mode_setting": "agents.image_generation",
+      "recovery_purpose": "image_generation",
+      "backend_setting": "agents.image_generation_backend"
+    },
+    "embeddings": {
+      "title": "Embeddings",
+      "setting": "search.embedding",
+      "item": "embedding",
+      "ledger_unit": "token",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "native": {
+          "routes": [
+            "embeddings.model",
+            "embeddings.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "embeddings.service-model",
+            "embeddings.service-api",
+            "embeddings.delegation"
+          ],
+          "native_value": "off"
+        }
+      }
+    },
+    "provider_facts": {
+      "title": "Provider facts",
+      "setting": "provider.sources",
+      "item": "provider_facts",
+      "ledger_unit": "call",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "native": {
+          "routes": [
+            "provider_facts.model",
+            "provider_facts.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "provider_facts.service-model",
+            "provider_facts.service-api",
+            "provider_facts.delegation"
+          ],
+          "native_value": "off"
+        }
+      }
+    },
+    "summary": {
+      "title": "Summarization",
+      "setting": "auto.summarizer",
+      "item": "summary",
+      "ledger_unit": "token",
+      "modes": {
+        "off": {
+          "routes": [],
+          "native_value": "off"
+        },
+        "native": {
+          "routes": [
+            "summary.model",
+            "summary.program"
+          ],
+          "native_value": "on"
+        },
+        "service": {
+          "routes": [
+            "summary.service-model",
+            "summary.service-api",
+            "summary.delegation"
+          ],
+          "native_value": "off"
+        }
+      },
+      "recovery_purpose": "summary"
+    }
+  },
+  "routes": {
+    "generation.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "generation"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": false,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "generation.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "generation"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "generation.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "generation.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "generation.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "image_input.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "image_input"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": false,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "image_input.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "image_input"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      },
+      "eligible_when": {
+        "not": {
+          "required": [
+            "offering"
+          ],
+          "properties": {
+            "offering": {
+              "required": [
+                "parameters"
+              ],
+              "properties": {
+                "parameters": {
+                  "required": [
+                    "input_images"
+                  ],
+                  "properties": {
+                    "input_images": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "image_input.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "image_input"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "image_input.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "image_input"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "image_input.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "image_input"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "web_search.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "web_search"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "web_search.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "web_search"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "web_search.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "web_search"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_search",
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "live",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "web_search.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "web_search"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_search",
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "web_search.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "web_search"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_search",
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "page_fetch.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "page_fetch.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "page_fetch.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_fetch",
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "page_fetch.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_fetch",
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "page_fetch.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "web_fetch",
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "image_generation.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "image_generation"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "image_generation.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "image_generation"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "image_generation.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "image_generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "image_generation",
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "image_generation.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "image_generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "image_generation",
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "image_generation.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "orch_tool": "image_generation",
+      "capabilities": [
+        "image_generation"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "orch_tool": "image_generation",
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "embeddings.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "embeddings"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": false,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "embeddings.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "embeddings"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "embeddings.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "embeddings"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "embeddings.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "embeddings"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "embeddings.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "embeddings"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "provider_facts.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "provider_facts"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": false,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "provider_facts.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "provider_facts"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "provider_facts.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "provider_facts"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "provider_facts.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "provider_facts"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "provider_facts.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "provider_facts"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    },
+    "summary.model": {
+      "kind": "native-model",
+      "capabilities": [
+        "summary"
+      ],
+      "requires_program_support": true,
+      "requires_generation_interface": true,
+      "requires_offering_support": true,
+      "requires_native_tool": false,
+      "requires_offering": true,
+      "title": "Model tool",
+      "text": {
+        "en": "Model tool",
+        "zh-CN": "模型原生工具"
+      }
+    },
+    "summary.program": {
+      "kind": "native-program",
+      "capabilities": [
+        "summary"
+      ],
+      "requires_program_support": true,
+      "requires_offering": true,
+      "title": "Program tool",
+      "text": {
+        "en": "Program tool",
+        "zh-CN": "程序原生工具"
+      }
+    },
+    "summary.service-model": {
+      "kind": "service",
+      "executor": "model-backed",
+      "capabilities": [
+        "summary"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering_support": true,
+      "requires_native_tool": true,
+      "offering_mode": "on",
+      "requires_offering": true,
+      "requires_interface": true,
+      "title": "Model tool via Orch",
+      "text": {
+        "en": "Model tool via Orch",
+        "zh-CN": "通过 Orch 调用模型工具"
+      }
+    },
+    "summary.service-api": {
+      "kind": "service",
+      "executor": "api-backed",
+      "capabilities": [
+        "summary"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "requires_interface": true,
+      "requires_offering_support": true,
+      "eligible_when": {
+        "required": [
+          "offering"
+        ],
+        "properties": {
+          "offering": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "service"
+              }
+            }
+          }
+        }
+      },
+      "title": "Provider API",
+      "text": {
+        "en": "Provider API",
+        "zh-CN": "提供方 API"
+      }
+    },
+    "summary.delegation": {
+      "kind": "delegation",
+      "executor": "program-session",
+      "capabilities": [
+        "summary"
+      ],
+      "uses_backend": true,
+      "requires_opt_in": true,
+      "requires_orch_tools": true,
+      "disable_native": true,
+      "requires_offering": true,
+      "title": "Delegated session",
+      "text": {
+        "en": "Delegated session",
+        "zh-CN": "委派会话"
+      }
+    }
+  }
+}

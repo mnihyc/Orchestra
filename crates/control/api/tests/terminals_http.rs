@@ -10,6 +10,7 @@ mod rig;
 mod support;
 mod terminals_support;
 
+use crate::support::FullTicketReply as _;
 use chrono::Duration;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::terminals::{
@@ -827,6 +828,7 @@ async fn agent_ticket(
         })
         .send()
         .await
+        .full_ticket()
 }
 
 #[tokio::test(flavor = "multi_thread")]

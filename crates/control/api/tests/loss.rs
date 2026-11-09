@@ -8,6 +8,16 @@
 mod places;
 mod resources;
 mod support;
+use support::FullMoveReply as _;
+
+#[path = "loss/creation_replays.rs"]
+mod creation_replays;
+#[path = "loss/host_delete_scopes.rs"]
+mod host_delete_scopes;
+#[path = "loss/preflight_scopes.rs"]
+mod preflight_scopes;
+#[path = "loss/recipient_scopes.rs"]
+mod recipient_scopes;
 
 use orch_access_contract::{decisions::ObjectRef, permissions::ObjectKind};
 use orch_api_contract::{common::ErrorCode, loss::*};
@@ -15,6 +25,17 @@ use orch_authz::ownership::{NewAccess, start_resource};
 use orch_db::queries::resources::access_fixtures;
 use orch_types::Time;
 use support::World;
+
+fn show_loss_errors() {
+    if std::env::var_os("ORCH_TEST_LOSS_ERRORS").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                "orch_api_core::routes::loss=debug,orch_api_core::middleware::requests=error",
+            )
+            .with_test_writer()
+            .try_init();
+    }
+}
 
 #[tokio::test]
 async fn only_managers_can_plan_and_confirm_a_host_loss() {
@@ -65,7 +86,9 @@ async fn only_managers_can_plan_and_confirm_a_host_loss() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     assert_eq!(plan.name, "Lost host");
     let wrong = LossDeclareBody {
         notify: true,
@@ -215,7 +238,9 @@ async fn a_persons_lost_machine_cannot_renew_or_use_a_previously_issued_reenroll
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     world
         .app
         .call(LossDeclare, &[])
@@ -351,7 +376,9 @@ async fn a_host_manager_recovers_only_their_managed_rows_and_owners_are_notified
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary loss preview retains its native full result");
         world
             .app
             .call(LossDeclare, &[])
@@ -395,6 +422,7 @@ async fn a_host_manager_recovers_only_their_managed_rows_and_owners_are_notified
             })
             .send()
             .await
+            .full_move()
             .ok();
         assert_eq!(recovery.others, 1);
         assert_eq!(recovery.rows.len(), 1);
@@ -415,6 +443,7 @@ async fn a_host_manager_recovers_only_their_managed_rows_and_owners_are_notified
                 })
                 .send()
                 .await
+                .full_move()
                 .problem()
                 .code,
             ErrorCode::PlanBlocked
@@ -451,7 +480,9 @@ async fn declaring_loss_as_administrator_names_the_actor_on_the_page_and_marks_t
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     assert_eq!(plan.admin_grants.len(), 1);
     assert_eq!(
         plan.admin_grants[0].permission,
@@ -511,7 +542,9 @@ async fn a_host_deletion_plan_lists_cascades_and_never_removes_others_live_envir
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary Host manager reads the native deletion review");
     assert_eq!(plan.rows.len(), 4);
     assert_eq!(plan.others, 1);
     assert!(
@@ -543,6 +576,9 @@ async fn a_host_deletion_plan_lists_cascades_and_never_removes_others_live_envir
         .send()
         .await
         .ok();
+    let accepted = accepted
+        .into_full()
+        .expect("the ordinary manager reads the native accepted job");
     assert_eq!(accepted.kind, "host_delete");
     let paused: bool = sqlx::query_scalar("SELECT NOT schedulable FROM hosts WHERE id=$1")
         .bind(host)
@@ -633,7 +669,9 @@ async fn host_data_stays_by_default_and_exact_consent_is_required_before_its_rem
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary Host manager reads the native deletion review");
     assert!(!plan.erase);
     assert!(plan.executable, "{:?}", plan.rows);
     let data = plan
@@ -656,7 +694,9 @@ async fn host_data_stays_by_default_and_exact_consent_is_required_before_its_rem
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary Host manager reads the native deletion review");
     assert!(!counting.executable);
     assert!(
         counting
@@ -665,6 +705,23 @@ async fn host_data_stays_by_default_and_exact_consent_is_required_before_its_rem
             .any(|row| row.code == "measurement_pending")
     );
     let count = counting.inventory_measurement.unwrap();
+    {
+        let mut conn = world.conn().await;
+        let stored = orch_db::queries::jobs::forks::preflight(&mut conn, counting.preflight_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = orch_db::queries::loss::inventory(&mut conn, "host", host)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(current.jobs.contains(&count.job_id));
+        assert_eq!(
+            stored.plan["fingerprint"],
+            serde_json::to_value(current.fingerprint().unwrap()).unwrap(),
+            "the reviewed dependency cut includes its actual inventory measurement job"
+        );
+    }
     assert_eq!(
         world
             .app
@@ -691,7 +748,9 @@ async fn host_data_stays_by_default_and_exact_consent_is_required_before_its_rem
         .body(&request)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary Host manager reads the native deletion review");
     assert!(plan.executable);
     assert_eq!(plan.data[0].selected, HostDataFate::Delete);
     let wrong = HostDeleteCreateBody {
@@ -742,6 +801,9 @@ async fn host_data_stays_by_default_and_exact_consent_is_required_before_its_rem
         .send()
         .await
         .ok();
+    let accepted = accepted
+        .into_full()
+        .expect("the ordinary manager reads the native accepted job");
     assert_eq!(accepted.kind, "host_delete");
     let persisted: serde_json::Value = sqlx::query_scalar("SELECT plan FROM jobs WHERE id=$1")
         .bind(accepted.id)
@@ -791,7 +853,9 @@ async fn notification_previews_are_caller_bound_and_filter_private_names_and_per
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary loss preview retains its native full result");
     let people = world
         .app
         .call(OperationRecipientsGet, &[&plan.preflight_id])

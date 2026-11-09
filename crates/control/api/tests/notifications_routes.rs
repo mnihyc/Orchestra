@@ -73,7 +73,9 @@ async fn system_webhook(o: &Outside) -> (NotificationChannel, FarSide) {
         .body(&Outside::webhook("Hook", &far.url, None))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary created notification content");
     (made, far)
 }
 
@@ -89,6 +91,8 @@ async fn system_channel(o: &Outside, body: &NotificationChannelCreateBody) -> No
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("ordinary created notification content")
 }
 
 /// A person whose address is not confirmed, with a session of their own, who is a viewer in Acme.
@@ -239,7 +243,11 @@ async fn the_link_of_a_bot_is_good_for_ten_minutes_and_only_the_hash_of_its_code
                 .await
         }
     };
-    let first = link(&o.cai).await.ok();
+    let first = link(&o.cai)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary first native link");
     let code = first
         .url
         .strip_prefix("https://t.me/acme_orch_bot?start=")
@@ -265,7 +273,11 @@ async fn the_link_of_a_bot_is_good_for_ten_minutes_and_only_the_hash_of_its_code
     assert_eq!(expires, first.expires_at.get());
 
     // Asking again makes another code and the first no longer counts.
-    let second = link(&o.cai).await.ok();
+    let second = link(&o.cai)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary first native link");
     assert_ne!(second.url, first.url);
     let mut conn = o.world.conn().await;
     let route: Id = sqlx::query_scalar("SELECT id FROM notification_routes WHERE user_id = $1")
@@ -314,7 +326,9 @@ async fn a_code_that_comes_back_after_ten_minutes_matches_nothing() {
         .token(&o.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary created notification content");
     let code = made.url.rsplit('=').next().unwrap().to_owned();
     o.world.advance(Duration::minutes(11));
     let mut conn = o.world.conn().await;
@@ -506,7 +520,9 @@ async fn ending_a_route_switches_it_off_and_forgets_where_it_was_linked() {
         .token(&o.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary created notification content");
     let mut conn = o.world.conn().await;
     let (route, hash): (Id, Vec<u8>) =
         sqlx::query_as("SELECT id, link_hash FROM notification_routes WHERE user_id = $1")
@@ -614,7 +630,9 @@ async fn the_screens_of_a_person_are_told_when_a_bot_is_started_a_route_is_ended
         .token(&o.cai.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary created notification content");
     let mut conn = o.world.conn().await;
     let (route, hash): (Id, Vec<u8>) =
         sqlx::query_as("SELECT id, link_hash FROM notification_routes WHERE user_id = $1")
@@ -737,4 +755,107 @@ async fn a_routes_minutes_outside_the_contracts_bounds_are_refused_at_their_fiel
         (edges.unread_delay_minutes, edges.min_interval_minutes),
         (Some(ROUTE_MINUTES_MIN), Some(ROUTE_MINUTES_MAX))
     );
+}
+
+#[tokio::test]
+async fn a_link_creation_key_reads_only_its_current_kept_generation_and_never_rotates_it() {
+    use orch_access_contract::key_scope::KeyScope;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity;
+    let o = Outside::new().await;
+    let bot = o
+        .org_channel(&o.bea, o.acme, &Outside::bot("good-token"))
+        .await
+        .unwrap();
+    let header = orch_types::new_id().to_string();
+    let send = |secret: String| {
+        let app = o.world.app.clone();
+        let header = header.clone();
+        let channel = bot.id;
+        async move {
+            let call = app
+                .call(MeNotificationRouteLinkCreate, &[&channel])
+                .token(&secret)
+                .header("Idempotency-Key", &header);
+            call.send_bytes().await
+        }
+    };
+    let first = send(o.cai.token.clone()).await;
+    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.raw));
+    let first: serde_json::Value = serde_json::from_slice(&first.raw).unwrap();
+    assert!(first["url"].is_string());
+    let (route,hash,stamp):(Id,Option<Vec<u8>>,String)=sqlx::query_as("SELECT id,link_hash,xmin::text FROM notification_routes WHERE user_id=$1 AND channel_id=$2")
+        .bind(o.cai.id()).bind(bot.id).fetch_one(&o.world.db.pool).await.unwrap();
+    let scope:KeyScope=serde_json::from_value(json!({"rules":[{"target":{"kind":"account","id":o.cai.id(),"reach":"self"},
+        "resources":["account"],"allow":[{"operation":"MeNotificationRouteLinkCreate","actions":["read"]}]}]})).unwrap();
+    assert!(scope.validate().is_empty());
+    let secret = new_token(API_TOKEN_PREFIX);
+    identity::create_api_token_scoped(
+        &mut *o.world.conn().await,
+        &identity::NewApiToken {
+            id: orch_types::new_id(),
+            user_id: o.cai.id(),
+            name: "Current native bot link",
+            token_hash: &token_hash(&secret),
+            scopes: &[],
+            node_id: None,
+            at: o.world.now(),
+            expires_at: Some(o.world.now() + chrono::Duration::hours(1)),
+        },
+        Some(&serde_json::to_value(scope).unwrap()),
+    )
+    .await
+    .unwrap();
+    let repeated = send(secret.clone()).await;
+    assert_eq!(
+        repeated.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&repeated.raw)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&repeated.raw).unwrap(),
+        first
+    );
+    let after: (Option<Vec<u8>>, String) =
+        sqlx::query_as("SELECT link_hash,xmin::text FROM notification_routes WHERE id=$1")
+            .bind(route)
+            .fetch_one(&o.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(after, (hash, stamp));
+    // An explicit new act creates the next generation; the old key cannot retrieve it.
+    let call = o
+        .world
+        .app
+        .call(MeNotificationRouteLinkCreate, &[&bot.id])
+        .token(&o.cai.token);
+    let next = call
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("the explicit new native generation");
+    assert_ne!(next.url, first["url"].as_str().unwrap());
+    let again = send(secret).await;
+    assert_eq!(again.status, 200);
+    let receipt: serde_json::Value = serde_json::from_slice(&again.raw).unwrap();
+    assert_eq!(
+        receipt,
+        json!({"projection":"receipt","route_id":route,"expires_at":first["expires_at"]})
+    );
+    let record: serde_json::Value =
+        sqlx::query_scalar("SELECT response FROM idempotency_keys WHERE user_id=$1 AND key=$2")
+            .bind(o.cai.id())
+            .bind(header)
+            .fetch_one(&o.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(record["outcome"]["id"], json!(route));
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains(first["url"].as_str().unwrap())
+    );
+    assert!(!serde_json::to_string(&record).unwrap().contains(&next.url));
 }

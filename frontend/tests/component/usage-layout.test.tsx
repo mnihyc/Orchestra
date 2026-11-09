@@ -67,7 +67,7 @@ it.each(['usage', 'performance'] as const)('locates every scoped %s split locall
   }
   show(<ControlledReport />);
   const input = await screen.findByRole('combobox', { name: i18n.t('usage.chart.splitBy') });
-  const expected: (UsageDimension | 'none')[] = ['thread', 'person', 'model', 'provider', 'agent', 'environment', 'org', 'project', 'tier', 'effort', 'program',
+  const expected: (UsageDimension | 'none')[] = ['thread', 'person', 'model','offering','purpose', 'provider', 'agent', 'environment', 'org', 'project', 'tier', 'effort', 'program',
     ...(view === 'performance' ? ['topic' as const] : []), 'none'];
   let reads = usageRead.mock.calls.length;
   expect(reads).toBeGreaterThan(0);

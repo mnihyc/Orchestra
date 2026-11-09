@@ -639,13 +639,21 @@ fn profile(name: &str) -> OrgAgentCreateBody {
 }
 
 async fn make_profile(world: &World, by: &Who, body: &OrgAgentCreateBody) -> Reply<Agent> {
-    world
+    let reply = world
         .app
         .call(AdminAgentCreate, &[])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary system profile content")),
+    }
 }
 
 #[tokio::test]
@@ -770,13 +778,23 @@ async fn add_provider(
     by: &Who,
     input: &IdentityProviderInput,
 ) -> Reply<IdentityProvider> {
-    world
+    let reply = world
         .app
         .call(AdminIdentityProviderCreate, &[])
         .token(&by.token)
         .body(input)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("the ordinary provider creation returns its complete native configuration")
+        }),
+    }
 }
 
 async fn change_provider(
@@ -1243,6 +1261,8 @@ async fn a_provider_that_is_the_only_way_somebody_signs_in_is_not_removed() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account")
         .user;
     sqlx::query(
         "INSERT INTO user_identities (identity_provider_id, subject, user_id) VALUES ($1, 'dan-1', $2)",

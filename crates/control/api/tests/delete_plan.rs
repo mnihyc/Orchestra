@@ -23,12 +23,21 @@ use places::{Who, make_org, make_project, make_topic, person};
 use support::World;
 
 async fn preview(world: &World, by: &Who, node: Id) -> Reply<NodeDeletePlan> {
-    world
+    let reply = world
         .app
         .call(NodeDeletePreview, &[&node])
         .token(&by.token)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("ordinary deletion previews keep the full plan")
+        }),
+    }
 }
 
 async fn delete(
@@ -63,7 +72,9 @@ async fn document(world: &World, by: &Who, node: Id, title: &str) {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
 }
 
 #[tokio::test]
@@ -210,7 +221,9 @@ async fn holdings_count_documents_and_what_is_owned_with_others_by_kind() {
         .token(&boss.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary holdings retains its full body");
     assert_eq!(held.nodes.documents, 1, "the document is hers alone");
     assert_eq!(held.shared_by_kind.documents, 0);
     assert_eq!(

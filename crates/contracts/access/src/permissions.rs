@@ -675,11 +675,11 @@ permissions! {
     ProviderView = "provider.view", Provider, View, PROVIDER, NOBODY,
         "View Provider", "See the provider in lists, with its status, plan and limits, and what each thread used of it.";
     ProviderUse = "provider.use", Provider, Use, PROVIDER, NOBODY,
-        "Use Provider", "Run turns on the provider: put a thread on it, and give input to threads that run on it, with the models and efforts the entry allows.";
+        "Use Provider", "Run turns and enabled services on the provider, within the entry's model, service and effort lists.";
     ProviderManage = "provider.manage", Provider, Manage, PROVIDER, NOBODY,
         "Manage Provider", "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.";
     ProviderBypass = "provider.bypass", Provider, Advanced, PROVIDER, NOBODY,
-        "Go past limits", "Let one turn run past a cap on the provider that has no room left, or past the limit of its plan.";
+        "Go past limits", "Let one turn run past a configured Orch usage cap on the provider that has no room left.";
     AgentView = "agent.view", Agent, View, AGENT, NOBODY,
         "View Agent profile", "See the agent profile in lists, with what its adapter declares.";
     AgentUse = "agent.use", Agent, Use, AGENT, NOBODY,
@@ -954,17 +954,20 @@ impl Permission {
     }
 
     /// Whether the agents of a place can be named in its rows: the rows by
-    /// which conversations, chats and documents are read and written, and the
-    /// one by which documents are deleted, moved and brought back (nothing of
-    /// that kind is open to agents for conversations or chats).
+    /// which conversations, chats and documents are read, written and managed.
+    /// Advanced thread acts retain their own rows.
     #[must_use]
     pub const fn shared_with_agents(self) -> bool {
         matches!(
             self,
             Self::ThreadView
                 | Self::ThreadInteract
+                | Self::ThreadManage
+                | Self::ThreadFork
+                | Self::ThreadArchive
                 | Self::ChatView
                 | Self::ChatInteract
+                | Self::ChatManage
                 | Self::DocView
                 | Self::DocEdit
                 | Self::DocManage
@@ -1480,6 +1483,10 @@ pub struct ProviderUse {
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// The enabled service offerings the holder may use, by name, family or group.
+    /// Left out, every enabled service; independent of the model list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
     /// The reasoning efforts the holder may run, by name, on any model that
     /// lists them; left out, every effort a model lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1589,6 +1596,7 @@ impl Options {
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
                 models: reader.texts("models"),
+                services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
                 arrangements: reader.words::<Arrangement>("arrangements"),
             }),
@@ -1791,6 +1799,7 @@ impl ProviderUse {
     pub fn or(&self, other: &Self) -> Self {
         Self {
             models: either(self.models.as_ref(), other.models.as_ref()),
+            services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
             arrangements: either(self.arrangements.as_ref(), other.arrangements.as_ref()),
         }
@@ -2233,8 +2242,12 @@ mod tests {
         for row in [
             P::ThreadView,
             P::ThreadInteract,
+            P::ThreadManage,
+            P::ThreadFork,
+            P::ThreadArchive,
             P::ChatView,
             P::ChatInteract,
+            P::ChatManage,
             P::DocView,
             P::DocEdit,
             P::DocManage,
@@ -2243,14 +2256,15 @@ mod tests {
         }
         assert!(HolderKind::Agents.fits(P::DocEdit, ObjectKind::Document, false));
         assert!(HolderKind::Agents.fits(P::DocManage, ObjectKind::Document, false));
-        // A conversation and a chat are never managed by an agent, whatever was shared.
+        // Management never lends permission administration, ownership or environment access.
         for row in [
             P::DocCreate,
             P::DocComment,
             P::FilesView,
             P::TerminalManage,
-            P::ThreadManage,
-            P::ChatManage,
+            P::AccessManage,
+            P::AccessOwn,
+            P::TopicManage,
         ] {
             assert!(!HolderKind::Agents.fits(row, row.on()[0], false), "{row}");
         }
@@ -2806,19 +2820,46 @@ mod tests {
     }
 
     #[test]
+    fn service_options_are_independent_and_old_model_only_entries_keep_their_exact_meaning() {
+        let old = json!({"models":["@small"]});
+        let parsed = Options::parse(P::ProviderUse, &old).unwrap();
+        assert_eq!(parsed.to_json(), old);
+        let Options::ProviderUse(model_only) = parsed else {
+            panic!("provider options");
+        };
+        assert!(model_only.services.is_none());
+        let service_json = json!({"services":["@web","image-*"]});
+        let parsed = Options::parse(P::ProviderUse, &service_json).unwrap();
+        assert_eq!(parsed.to_json(), service_json);
+        let Options::ProviderUse(service_only) = parsed else {
+            panic!("provider options");
+        };
+        assert!(service_only.models.is_none());
+        assert!(
+            model_only.or(&service_only).services.is_none(),
+            "an entry without a service restriction still admits every enabled service"
+        );
+        assert!(Options::parse(P::ProviderUse, &json!({"services":[3]})).is_err());
+        assert!(Options::parse(P::ProviderUse, &json!({"service_names":["search"]})).is_err());
+    }
+
+    #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
             models: Some(vec!["a".into()]),
+            services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
             arrangements: None,
         };
         let other = ProviderUse {
             models: Some(vec!["b".into(), "a".into()]),
+            services: Some(vec!["fetch".into()]),
             efforts: None,
             arrangements: Some(vec![Arrangement::Separated]),
         };
         let both = one.or(&other);
         assert_eq!(both.models, Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(both.services, Some(vec!["search".into(), "fetch".into()]));
         assert_eq!(
             both.efforts, None,
             "an entry that names no efforts allows them all"
@@ -2888,7 +2929,7 @@ mod tests {
             json!({
                 "name": "thread.fork", "area": "thread", "level": "advanced", "with": "thread.manage",
                 "on": ["thread"], "label": "Fork", "allows": P::ThreadFork.allows(), "profiles": true,
-                "holders": ["role", "group", "members", "user"], "options_schema": null
+                "holders": ["role", "group", "members", "user", "agents"], "options_schema": null
             })
         );
         assert_eq!(written["choices"][1]["key"], "full_interact");

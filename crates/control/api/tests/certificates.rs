@@ -38,11 +38,20 @@ async fn fixture() -> Fixture {
     let db = Db::from_pool(test.pool.clone());
     let clock = ManualClock::new(clock::start());
     let authority = Arc::new(CertificateAuthority::create("Test", 3_650, &clock).unwrap());
+    let mut config = ServerConfig::default();
+    config
+        .gateway
+        .endpoints
+        .push(orch_config::server::GatewayEndpoint {
+            url: "wss://orch.example.com/link".to_owned(),
+            trust: "public".to_owned(),
+        });
+    let settings = CertificateSettings::from_config(&config);
     let service = CertificateService::new(
         db.clone(),
         Arc::new(clock.clone()),
         Arc::clone(&authority),
-        CertificateSettings::from_config(&ServerConfig::default()),
+        settings,
     );
     let user = {
         let mut conn = db.acquire().await.unwrap();
@@ -142,8 +151,9 @@ async fn a_token_enrolls_one_machine_that_belongs_to_whoever_made_the_token() {
     assert_eq!(
         reply.endpoints.len(),
         2,
-        "and the machine is told where to connect"
+        "both configured connection paths are advertised"
     );
+    assert_eq!(reply.endpoints, fixture.service.advertised_endpoints());
 
     // The same token again: it is gone.
     let again = fixture
@@ -458,6 +468,84 @@ async fn a_runtime(fixture: &Fixture) -> (Id, Id) {
     .await
     .unwrap();
     (host, runtime)
+}
+
+#[tokio::test]
+async fn runtime_enrollment_issuance_uses_the_callers_transaction_and_keeps_its_normal_token() {
+    let fixture = fixture().await;
+    let (_, runtime) = a_runtime(&fixture).await;
+    let request_token = TokenRequest {
+        created_by: fixture.user,
+        purpose: TokenFor::Runtime { runtime },
+        name_hint: Some("transaction-bound runtime".into()),
+    };
+    let mut tx = fixture.db.begin().await.unwrap();
+    let discarded = fixture
+        .service
+        .issue_runtime_token_in(&mut tx, &request_token)
+        .await
+        .unwrap();
+    let inside: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM enrollment_tokens WHERE runtime_id=$1 AND purpose='runtime'",
+    )
+    .bind(runtime)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(inside, 1);
+    let outside: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens WHERE runtime_id=$1")
+            .bind(runtime)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        outside, 0,
+        "the issuer must not publish through another connection"
+    );
+    tx.rollback().await.unwrap();
+    let absent: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM enrollment_tokens WHERE runtime_id=$1")
+            .bind(runtime)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        absent, 0,
+        "an aborted owner decision leaves no enrollment credential"
+    );
+    let refused = fixture
+        .service
+        .enroll(
+            &request(&discarded.token, &Fixture::csr()),
+            &Origin::default(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (refused.status, refused.code),
+        (410, "gone"),
+        "a rolled-back token is not redeemable"
+    );
+
+    let mut tx = fixture.db.begin().await.unwrap();
+    let issued = fixture
+        .service
+        .issue_runtime_token_in(&mut tx, &request_token)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let enrolled = fixture
+        .service
+        .enroll(&request(&issued.token, &Fixture::csr()), &Origin::default())
+        .await
+        .unwrap();
+    let mut conn = fixture.db.acquire().await.unwrap();
+    let current = orch_db::queries::environments::hosting::runtime(&mut conn, runtime)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.machine_id, Some(enrolled.machine_id));
 }
 
 #[tokio::test]

@@ -6,10 +6,10 @@
 //!
 //! What people tell the threads of a topic or of a project is in the module `announcements` beside this one.
 
-use crate::middleware::authorization;
+use crate::key_operations::native;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::routes::environments::{environments_of, places_for};
+use crate::routes::environments::environments_of;
 use crate::routes::nodes::view as node_view;
 use orch_api_contract::environment::{Environment, Place, PlaceListQuery};
 use orch_api_contract::nodes::{Node, NodeKind, Topic};
@@ -25,6 +25,7 @@ use orch_types::Id;
 use serde_json::json;
 
 mod announcements;
+mod operation;
 pub(crate) mod sync;
 
 pub use announcements::mount_announcements;
@@ -32,28 +33,24 @@ pub use announcements::mount_announcements;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::TopicEnvironmentList, environments)
+        .on_snapshot_read_with_optional_operation(
+            api::TopicEnvironmentList,
+            native::selected::<operation::Environments>,
+            environments,
+        )
         .on(api::TopicDefaultEnvironmentSet, default_environment_set)
-        .on(api::TopicPlaceList, places);
+        .on_snapshot_read_with_optional_operation(
+            api::TopicPlaceList,
+            native::selected::<operation::Places>,
+            places,
+        );
     sync::mount(registry);
 }
 
 /// The environments a topic's threads run in and those whose home it is, the default first, each as
 /// far as the caller may see it.
 async fn environments(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<Environment>> {
-    let topic = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let default = default_of(&mut conn, topic).await?;
-    let mut ids = rows::environments_under(&mut conn, topic).await?;
-    if let Some(default) = default
-        && !ids.contains(&default)
-    {
-        ids.push(default);
-    }
-    let mut listed = environments_of(&ctx, &mut conn, &principal, &ids).await?;
-    listed.sort_by_key(|environment| Some(environment.base.id) != default);
-    Ok(listed)
+    native::selected_read::<operation::Environments>(ctx, (), ()).await
 }
 
 /// The environment new threads of a topic join, if one was chosen.
@@ -150,6 +147,5 @@ async fn default_environment_set(
 /// Where a thread of this topic could run, for the caller: the hosts they may use for a new
 /// environment, then the environments they manage.
 async fn places(ctx: Ctx, query: PlaceListQuery, (): ()) -> ApiResult<Vec<Place>> {
-    let topic = ctx.id("id")?;
-    places_for(&ctx, topic, &query).await
+    native::selected_read::<operation::Places>(ctx, query, ()).await
 }

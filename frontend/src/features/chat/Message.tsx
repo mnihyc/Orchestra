@@ -6,6 +6,7 @@
  * right mouse button and on the keyboard's menu key. A group's events, a message being sent and one
  * that was not sent are drawn here too.
  */
+import { messageReferenceNumber } from '@/features/chat/messageReference';
 import { CornerUpLeft, EllipsisVertical, Pin, Reply } from 'lucide-react';
 import { memo, type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -96,6 +97,9 @@ export function messageEntries(
   }
   if (power.copy) entries.push({ id: 'copy-text', label: t('chat.actions.copyText'), onSelect: () => acts.copyText(message) });
   entries.push({ id: 'copy-link', label: t('chat.actions.copyLink'), onSelect: () => acts.copyLink(message) });
+  entries.push({ id: 'copy-reference', label: t('people.reference.copy'),
+    disabled: messageReferenceNumber(message) === null || acts.copyReference === undefined ? t('linkActions.referenceUnavailable') : false,
+    onSelect: () => acts.copyReference?.(message) });
   if (power.remove) {
     entries.push({ type: 'separator', id: 'before-delete' });
     entries.push({ id: 'delete', label: t('chat.actions.delete'), danger: true, onSelect: () => acts.remove(message) });
@@ -142,9 +146,9 @@ function Parts({ message }: { message: ChatMessage }): ReactNode {
           case 'pasted_text':
             return <AttachmentChips key={index} parts={[part]} readPaste={(paste) => readPastedText('chat', chat.id, paste)} />;
           case 'image':
-            return <ImageThumb key={index} chatId={chat.id} blob={part.blob} name={part.name} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
+            return <ImageThumb key={index} chatId={chat.id} messageId={message.id} blob={part.blob} name={part.name} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
           case 'attachment':
-            return <FileChip key={index} chatId={chat.id} blob={part.blob} name={part.name} size={part.size} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
+            return <FileChip key={index} chatId={chat.id} messageId={message.id} blob={part.blob} name={part.name} size={part.size} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
           case 'item_ref':
             return <QuotedItem key={index} threadId={part.thread_id} itemId={part.item_id} />;
         }

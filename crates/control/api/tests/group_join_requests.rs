@@ -17,6 +17,8 @@ use orch_api_contract::chats::{ChatGet, ChatJoinRequest, ChatJoinRequestBody};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::documents::{InlineRefKind, ReferencePreviewGet, ReferencePreviewGetQuery};
 use orch_types::{Id, Time};
+use support::FullApprovalReply;
+use support::FullRequestReply;
 
 fn reference(id: Id) -> ReferencePreviewGetQuery {
     ReferencePreviewGetQuery {
@@ -48,6 +50,7 @@ async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
         })
         .send()
         .await
+        .full_request()
         .problem();
     assert_eq!(past.code, ErrorCode::RequestInvalid);
     let made = room
@@ -61,6 +64,7 @@ async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
         })
         .send()
         .await
+        .full_request()
         .ok();
     let approval = &made.approvals[0];
     let orch_api_contract::approvals::ApprovalRequest::Access(request) = &approval.request else {
@@ -70,7 +74,7 @@ async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
     room.world
         .app
         .call(ApprovalDecide, &[&approval.id])
-        .token(&room.cai.token)
+        .token(&room.bea.token)
         .body(&ApprovalDecision::Access(AccessDecision {
             approve: true,
             expires_at: Some(end),
@@ -81,6 +85,7 @@ async fn a_group_join_request_carries_the_proposed_end_into_the_membership() {
         }))
         .send()
         .await
+        .full_approval()
         .ok();
     let saved: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT expires_at FROM chat_members WHERE chat_id=$1 AND user_id=$2")
@@ -122,6 +127,7 @@ async fn a_direct_chat_card_is_unnamed_and_has_no_join_form() {
         .body(&ChatJoinRequestBody::default())
         .send()
         .await
+        .full_request()
         .problem();
     assert_eq!(denied.code, ErrorCode::NotFound);
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM approvals WHERE object_id=$1")
@@ -184,6 +190,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             })
             .send()
             .await
+            .full_request()
             .ok();
         let id = made.approvals[0].id;
         assert_eq!(made.approvals[0].required_permission, "chat.interact");
@@ -201,6 +208,18 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
         .await
         .unwrap();
         assert_eq!(told, [room.bea.id()]);
+        // The current manager can hand an already pending request to another member.
+        room.world
+            .app
+            .call(
+                orch_api_contract::chats::ChatManagerSet,
+                &[&chat, &room.cai.id()],
+            )
+            .token(&room.bea.token)
+            .body(&orch_api_contract::chats::ChatManagerSetBody { manager: true })
+            .send()
+            .await
+            .ok();
         let other = room
             .world
             .app
@@ -222,6 +241,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             .body(&ChatJoinRequestBody::default())
             .send()
             .await
+            .full_request()
             .problem();
         assert_eq!(duplicate.code, ErrorCode::ConflictExists);
         let decided = room
@@ -239,6 +259,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             }))
             .send()
             .await
+            .full_approval()
             .ok();
         assert_eq!(decided.state, ApprovalState::Approved);
         let expected = days.map(|days| decided.decided_at.unwrap().get() + Duration::days(days));
@@ -301,6 +322,7 @@ async fn every_quick_grant_joins_the_group_and_expiry_removes_membership_and_gre
             }))
             .send()
             .await
+            .full_approval()
             .problem();
         assert_eq!(late.code, ErrorCode::ApprovalAlreadyDecided);
         if let Some(days) = days {

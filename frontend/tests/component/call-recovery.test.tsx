@@ -23,6 +23,23 @@ const rule = { id: 'busy', when: { kind: 'provider_busy' }, steps: [{ type: 'ret
 const recovery = (): CallRecovery => ({ state: 'scheduled', failure: { code: 'provider_busy', message: 'Synthetic capacity', retryable: true, window: null, said: null, resets_at: null, incomplete: false }, rule_id: 'busy', step: { type: 'retry', delay_secs: 60, times: 3, backoff: 2 }, attempt: 2, due_at: new Date(Date.now() + 42_000).toISOString(), detail: null, count: null, window_secs: null });
 
 for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows a lost session waiting for its machine and retains its causal history (${locale})`, async () => {
+    await setLocale(locale);
+    const held: CallRecovery = { ...recovery(), failure: { ...recovery().failure, code: 'session_lost' }, step: { type: 'continue', times: 1 }, attempt: 1, continuing: true, due_at: null, detail: 'machine_offline' };
+    const view = show(<CallRecoveryStatus recovery={held} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.details.machine_offline'));
+    expect(view.container).toHaveTextContent(i18n.t('calls.attempt', { attempt: '1', total: '1' }));
+    expect(view.container).not.toHaveTextContent(i18n.t('calls.needsAttention', { kind: i18n.t('calls.kinds.session_lost') }));
+    view.rerender(<CallRecoveryStatus recovery={{ ...held, state: 'running', detail: null }} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.continuing', { kind: recoveryCause('session_lost', i18n.t) }));
+    expect(markerSentence({ marker: 'call_recovery', data: { action: 'continue', rule: 'session-lost', kind: 'session_lost', attempt: 1, total: 1, automatic: true, input_id: 'input' } }, i18n.t, { locale })).toContain(recoveryCause('session_lost', i18n.t));
+    view.unmount();
+    show(<CallsRules shape={{ type: 'json' }} value={[rule]} label={i18n.t('calls.rules')} onChange={vi.fn()} />);
+    await userEvent.click(screen.getByRole('button', { name: /→/ }));
+    await userEvent.click(screen.getByRole('combobox', { name: i18n.t('calls.when') }));
+    expect(screen.getByRole('option', { name: i18n.t('calls.kinds.session_lost') })).toBeVisible();
+  });
+
   it(`shows administrative pauses without a vendor failure or an attempt count (${locale})`, async () => {
     await setLocale(locale);
     const view = show(<CallRecoveryStatus recovery={{ ...recovery(), state: 'waiting', due_at: null, detail: 'provider_switched_off' }} service />);
@@ -181,5 +198,59 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(view.container).toHaveTextContent('→');
     expect(view.container).toHaveTextContent(i18n.t('calls.waitPerson'));
     expect(view.container).not.toHaveTextContent('delay_secs');
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`edits an explicit capability route in the same rule and keeps its opaque configuration (${locale})`, async () => {
+    await setLocale(locale); useAppearance.setState({locale});
+    const change=vi.fn();
+    const candidate={provider_id:'provider',model:'',params:{},route:{route:'web_search.service-api',offering:{provider:'provider',offering:'public-search'},config:{fixture:'kept'}}};
+    const held={id:'search-fallback',when:{kind:'unavailable',purpose:'web_search'},steps:[{type:'failover',candidate},{type:'wait',until:'person'}]};
+    show(<CallsRules shape={{type:'json'}} value={[held]} label={i18n.t('calls.rules')} onChange={change} />);
+    await userEvent.click(screen.getByRole('button',{name:/→/}));
+    const dialog=screen.getByRole('dialog',{name:i18n.t('calls.editRule')});
+    expect(within(dialog).getByRole('combobox',{name:i18n.t('calls.destination')})).toHaveTextContent(i18n.t('calls.capabilityDestination'));
+    expect(within(dialog).queryByLabelText(i18n.t('calls.parameters'))).not.toBeInTheDocument();
+    expect(dialog).not.toHaveTextContent('fixture');
+    await userEvent.click(within(dialog).getByRole('combobox',{name:i18n.t('calls.purpose')}));
+    for(const purpose of ['web_search','page_fetch','image_generation'] as const) expect(screen.getByRole('option',{name:i18n.t(`calls.purposes.${purpose}`)})).toBeVisible();
+    await userEvent.keyboard('{Escape}');
+    fireEvent.change(within(dialog).getByLabelText(i18n.t('calls.offering')),{target:{value:'another-search'}});
+    await userEvent.click(within(dialog).getByRole('button',{name:i18n.t('common.save')}));
+    expect(change).toHaveBeenCalledExactlyOnceWith([{...held,steps:[{...held.steps[0],candidate:{...candidate,route:{...candidate.route,offering:{provider:'provider',offering:'another-search'}}}},held.steps[1]]}]);
+  });
+  it(`names a capability failover and the exhausted chain without showing backend configuration (${locale})`, async () => {
+    await setLocale(locale);
+    const candidate={provider_id:'provider',model:'',params:{},route:{route:'image_generation.delegation',offering:null,config:{private:'never-publish'}}};
+    const view=show(<CallRecoveryStatus recovery={{...recovery(),due_at:null,step:{type:'failover',candidate}}} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.capabilityDestination'));
+    expect(view.container).not.toHaveTextContent('never-publish');
+    view.rerender(<CallRecoveryStatus recovery={{...recovery(),state:'waiting',due_at:null,step:null,detail:'chain_exhausted'}} />);
+    expect(view.container).toHaveTextContent(i18n.t('calls.details.chain_exhausted'));
+  });
+}
+
+
+// EN: Thread → paused-service recovery → Resume service; the browser path is web-service-pause.spec.ts.
+// 中文：线程 → 暂停服务的恢复状态 → 恢复服务；浏览器路径见 web-service-pause.spec.ts。
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`shows and resumes a paused service without model replay or primary-provider switch controls (${locale})`, async () => {
+    await setLocale(locale);
+    const action = vi.fn();
+    const thread = { id: 'thread', name: 'Work', access: { permissions: ['thread.interact', 'thread.manage'] } } as unknown as Thread;
+    const paused: CallRecovery = { ...recovery(), service: 'web_search', state: 'waiting', due_at: null,
+      failure: { ...recovery().failure, code: 'unavailable' }, step: { type: 'wait', until: 'person' } };
+    const view = show(<><CallRecoveryStatus recovery={paused} /><CallRecoveryControls thread={thread} recovery={paused} pending={false} onAction={action} /></>);
+    expect(view.container).toHaveTextContent(i18n.t('calls.servicePausedPerson', { service: i18n.t('capabilityRoutes.names.web_search'), kind: i18n.t('calls.kinds.unavailable') }));
+    expect(screen.queryByRole('button', { name: i18n.t('calls.retry') })).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('calls.continue') })).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('calls.switch') })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('calls.resumeService') }));
+    expect(action).toHaveBeenCalledExactlyOnceWith('retry_now');
+    const reset = '2099-11-09T12:00:00Z';
+    view.rerender(<CallRecoveryStatus recovery={{ ...paused, state: 'scheduled', due_at: reset, step: { type: 'wait', until: 'reset' } }} />);
+    expect(view.container.querySelector('time')).toHaveAttribute('datetime', reset);
+    expect(view.container).toHaveTextContent(i18n.t('capabilityRoutes.names.web_search'));
   });
 }

@@ -1,5 +1,5 @@
 /** P1: a failed first setup is actionable, keeps its real queued input and fences late retry replies. */
-import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { client } from '@/api/client';
@@ -17,6 +17,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { threadViewOf, threadWriter, useThreadView } from '@/realtime/stores/thread';
 import { failedStart } from './failed-start-fixtures';
+import { World } from '../doubles/world';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ start: vi.fn<typeof EnvironmentsApi.startEnvironment>(), send: vi.fn<typeof ThreadsApi.sendInput>(), prepare: vi.fn<typeof SourceApi.prepareSource>(), change: vi.fn(), proceed: vi.fn() }));
@@ -98,8 +99,29 @@ it('uses current environment and thread authority independently and never submit
   expect(screen.queryByRole('button', { name: i18n.t('startRecovery.retry') })).not.toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: i18n.t('startRecovery.elsewhere') }));
   expect(calls.change).toHaveBeenCalledOnce(); expect(calls.start).not.toHaveBeenCalled();
-  act(() => threadWriter.apply(thread.id, { thread: { ...thread, seq: thread.seq + 1, environment_permissions: [], access: { ...thread.access, permissions: ['thread.view'] } } }));
+  act(() => threadWriter.apply(thread.id, { thread: { ...thread, seq: thread.seq + 1, can: { ...thread.can, place: false }, environment_permissions: [], access: { ...thread.access, permissions: ['thread.view'] } } }));
   expect(screen.queryByRole('button', { name: i18n.t('startRecovery.retry') })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: i18n.t('startRecovery.elsewhere') })).not.toBeInTheDocument();
   expect(queuedInputs(threadViewOf(thread.id))).toEqual([input]);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) it(`uses the reported placement capability independently of thread management (${locale}/${theme})`, async () => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  const { thread, input } = failedStart();
+  const permitted = { ...thread, can: { ...thread.can, place: true }, access: { ...thread.access, permissions: ['thread.view'] }, environment_permissions: [] };
+  const user = userEvent.setup(); draw(permitted, input);
+  expect(screen.queryByRole('button', { name: i18n.t('startRecovery.retry') })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: i18n.t('startRecovery.elsewhere') }));
+  expect(calls.change).toHaveBeenCalledExactlyOnceWith({ kind: 'thread', id: thread.id, name: thread.name }, { kind: 'switch', focus: 'environment' });
+  expect(queuedInputs(threadViewOf(thread.id))).toEqual([input]); expect(calls.send).not.toHaveBeenCalled();
+  const environment = thread.environment;
+  if (environment === null) throw new Error('The native failed environment is required');
+  const manager = new World().places.userOfName('grace');
+  act(() => threadWriter.apply(thread.id, { thread: { ...thread, seq: thread.seq + 1, environment: { ...environment, owner: manager }, can: { ...thread.can, place: false }, environment_permissions: [], access: { ...thread.access, permissions: ['thread.view', 'thread.manage'] } } }));
+  expect(screen.queryByRole('button', { name: i18n.t('startRecovery.elsewhere') })).not.toBeInTheDocument();
+  const recovery = document.querySelector('[data-environment-start-recovery]');
+  if (!(recovery instanceof HTMLElement)) throw new Error('The native recovery surface is required');
+  expect(within(recovery).getByRole('button', { name: manager.display_name, exact: true })).toBeVisible();
+  expect(within(recovery).queryByRole('button', { name: thread.owner.display_name, exact: true })).not.toBeInTheDocument();
+  expect(calls.send).not.toHaveBeenCalled(); expect(calls.prepare).not.toHaveBeenCalled();
 });

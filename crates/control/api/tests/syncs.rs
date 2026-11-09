@@ -76,7 +76,7 @@ async fn environment(world: &World) -> (resources::Company, Environment) {
         .token(&c.admin.token)
         .body(&MachineEnvironmentCreateBody {
             data_sources: None,
-            home_id: c.acme,
+            home_id: Some(c.acme),
             name: "Work".to_owned(),
             root: "/srv/ada/work".to_owned(),
             home_node_id: None,
@@ -86,7 +86,9 @@ async fn environment(world: &World) -> (resources::Company, Environment) {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content");
     (c, made)
 }
 
@@ -354,6 +356,8 @@ async fn private_thread(s: &Scene, by: &Who, name: &str) -> Id {
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id
 }

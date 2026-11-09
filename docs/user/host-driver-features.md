@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Read a host’s driver features
 screens: /resources/hosts/$id
 keywords: host, driver, features, unavailable, storage, capacity, cluster, ports, images
+summary: Read a host’s reported driver operations, availability reasons, capacity and storage.
 ---
 
 # Read a host’s driver features

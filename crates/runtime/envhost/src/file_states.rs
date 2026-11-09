@@ -957,6 +957,11 @@ impl FileStates {
             self.store.keep_reply(request, &result)?;
             return Ok(result);
         }
+        if request.kind == orch_link_contract::source::RecordKind::Restore {
+            return Err(HostError::NotFound(
+                "the original restore undo state is unavailable".to_owned(),
+            ));
+        }
         if request.record_days < 0 || request.max_bytes < 1 {
             return Err(HostError::Unsupported(
                 "recording limits are invalid".to_owned(),
@@ -1043,6 +1048,7 @@ impl FileStates {
                             entries.clone(),
                         )?;
                         let root = StateRoot {
+                            selected_paths: None,
                             snapshot_id: request.snapshot_id,
                             request_hash: Some(Hash::of(
                                 &serde_json::to_vec(request)
@@ -1123,6 +1129,7 @@ impl FileStates {
             .checked_add_signed(days)
             .ok_or_else(|| HostError::Unsupported("undo expiry is too large".to_owned()))?;
         let root = StateRoot {
+            selected_paths: None,
             snapshot_id: request.snapshot_id,
             request_hash: Some(Hash::of(
                 &serde_json::to_vec(request)

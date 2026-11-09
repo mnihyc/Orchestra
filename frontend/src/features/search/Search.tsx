@@ -5,6 +5,7 @@
  * A search that is too short, one that finds nothing, and one the server does not answer each say so in
  * words and say what to do about it. A result opens the thing it is part of, at the place where it was said.
  */
+import { AskAboutResults } from '@/features/summaries/SearchSummaries';
 import { useQuery } from '@tanstack/react-query';
 import { Search as SearchIcon, SearchX, SlidersHorizontal } from 'lucide-react';
 import { Fragment, type SyntheticEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -15,7 +16,12 @@ import { ApiError } from '@/api/client';
 import { tooShort } from '@/api/search';
 import { Filters } from '@/features/search/Filters';
 import { Hit } from '@/features/search/Hit';
-import { SEARCH_TABS, filtersOf, narrowing, readParams, restoredView, savedView, tabOf, withTab, type SearchParams } from '@/features/search/params';
+import { SEARCH_TABS, inOrg, filtersOf, narrowing, readParams, restoredView, savedView, tabOf, withTab, type SearchParams } from '@/features/search/params';
+import { OrgScope } from '@/features/search/OrgScope';
+import { groupHitIds, useHitOrgs } from '@/features/search/orgHits';
+import { keyOfHit } from '@/features/search/hits';
+import { KnownNodeChip } from '@/features/people/NamedChip';
+import { useSelectedOrg } from '@/shell/org';
 import { useSearchStream } from '@/features/search/useSearchStream';
 import { ActiveFilters } from '@/features/search/ActiveFilters';
 import { useFilterValues, type PersonFilter } from '@/features/search/filterValues';
@@ -43,6 +49,7 @@ const SEARCH_PAUSE_MS = 400;
 
 /** The words that were written into the address by this page last, so that its own change is told from a change made elsewhere. */
 let writtenByPage: string | undefined;
+class SearchPlaceOutside extends Error {}
 
 export interface SearchPageProps {
   params: SearchParams;
@@ -54,19 +61,26 @@ export function SearchPage({ params, onParams }: SearchPageProps) {
   const [restored, setRestored] = useState(() => restoredView(params, kept));
   const [resumed, setResumed] = useState(restored !== undefined);
   if (restored !== undefined && savedView(params) === savedView(restored) && params.q === restored.q) setRestored(undefined);
-  const shown = restored ?? params;
+  const selected = useSelectedOrg((state) => state.orgId);
+  const orgs = useQuery(orgsQuery);
+  const held = restored ?? params;
+  const org = held.org ?? selected ?? orgs.data?.[0]?.id;
+  const shown = { ...held, ...(org === undefined ? {} : { org }) };
+  useEffect(() => {
+    if (restored === undefined && params.org === undefined && org !== undefined) onParams({ ...params, org });
+  }, [onParams, org, params, restored]);
   const view = savedView(shown);
   useEffect(() => { keep(view); }, [keep, view]);
   useEffect(() => {
     if (restored === undefined) return;
-    onParams(restored);
-  }, [onParams, restored]);
+    onParams({ ...restored, ...(org === undefined ? {} : { org }) });
+  }, [onParams, org, restored]);
   return <SearchResults params={shown} onParams={(next) => {
-    if (savedView(next) !== view) setResumed(false);
+    if (savedView(next) !== view || next.org !== shown.org) setResumed(false);
     setRestored(undefined);
     onParams(next);
   }} onUnavailable={(error, person) => {
-    if (!resumed || !(error instanceof ApiError) || (error.status !== 403 && error.status !== 404)) return false;
+    if (!resumed || !(error instanceof SearchPlaceOutside || error instanceof ApiError && (error.status === 403 || error.status === 404))) return false;
     if (person !== undefined) {
       if (shown[person] === undefined) return false;
       const next = readParams({ ...shown, [person]: undefined });
@@ -122,12 +136,26 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
   }, [rested]);
 
   const filters = filtersOf(params);
-  const narrow = params.scope !== undefined;
+  const selected = useSelectedOrg((state) => state.orgId);
+  const orgsRead = useQuery(orgsQuery);
+  const orgs = orgsRead.data;
+  const needsPlaceRoot = params.org !== undefined && params.org !== 'all' && params.scope !== undefined && params.scope.toLowerCase() !== params.org.toLowerCase();
+  const wrongPlace = needsPlaceRoot && values.scope !== undefined && values.scope.org_id.toLowerCase() !== params.org?.toLowerCase();
+  const placePending = needsPlaceRoot && values.scope === undefined;
+  useEffect(() => {
+    if (wrongPlace) onUnavailable(new SearchPlaceOutside(t('search.org.outsidePlace')));
+    else if (needsPlaceRoot && values.scopeError !== null) onUnavailable(values.scopeError);
+  }, [needsPlaceRoot, onUnavailable, t, values.scopeError, wrongPlace]);
+  const scopeError = wrongPlace ? new SearchPlaceOutside(t('search.org.outsidePlace')) : needsPlaceRoot ? values.scopeError : null;
+  const ready = params.org !== undefined && !placePending && scopeError === null;
+  const narrow = filters.scope !== undefined;
   const length = tooShort(params.q ?? '', { narrow, streamed: true });
-  const search = useSearchStream(filters, length === null && text.trim() === (params.q ?? '').trim(), immediate, submitted, typedAt, onUnavailable);
-  const orgs = useQuery(orgsQuery).data;
+  const search = useSearchStream(filters, ready && length === null && text.trim() === (params.q ?? '').trim(), immediate, submitted, typedAt, onUnavailable);
   const slugOfOrg = useCallback((id: string) => orgs?.find((org) => org.id === id)?.slug ?? null, [orgs]);
   const hits = search.ids.flatMap((id) => search.hits[id] === undefined ? [] : [search.hits[id]]);
+  const roots = useHitOrgs(hits, orgs, params.org === 'all');
+  const rootIds = new Map(search.ids.map((id) => { const hit = search.hits[id]; return [id, hit === undefined ? null : roots.get(keyOfHit(hit)) ?? null] as const; }));
+  const groups = params.org === 'all' ? groupHitIds(search.ids, rootIds) : [{ root: null, ids: search.ids }];
   useEffect(() => {
     const watch = new MutationObserver(() => setDetails(document.querySelector('[data-search-result], [data-reference-card], [data-person-card], [data-search-rows] [data-state="open"], [data-search-rows] [aria-expanded="true"]') !== null));
     watch.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['data-state', 'aria-expanded']});
@@ -148,13 +176,14 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
 
   const meaningReason = search.reasons.meaning === undefined || search.reasons.meaning === null ? '' : t(`search.meaningReasons.${search.reasons.meaning}`, {defaultValue: search.reasons.meaning});
   const indexPaused = search.reasons.meaning === 'provider_disabled' || search.reasons.meaning === 'provider_removed';
-  const error = search.error ?? (search.unavailable.words === true ? new Error(t('search.wordsUnavailable')) : null);
+  const error = scopeError ?? (params.org === undefined && orgsRead.isError ? orgsRead.error : null) ?? search.error ?? (search.unavailable.words === true ? new Error(t('search.wordsUnavailable')) : null);
   const activeFilters = narrowing(params);
   const filtersLabel = activeFilters === 0 ? t('search.filters.button') : t('search.filters.active', { count: activeFilters });
 
   const resultPanel = <>
+    <div className="flex min-w-0 flex-wrap items-center gap-x-2"><OrgScope value={params.org} selected={selected} orgs={orgs} onChange={(org) => onParams(inOrg(params, org))} /></div>
     <ActiveFilters params={params} onParams={onParams} values={values} />
-    <section aria-label={t('search.results')} aria-busy={search.unfinished} className="flex min-w-0 flex-col gap-3">
+    <section aria-label={t('search.results')} aria-busy={search.unfinished || length === null && !ready && error === null} className="flex min-w-0 flex-col gap-3">
           {length === 'none' && (
             <EmptyState icon={<SearchIcon aria-hidden />} title={t('search.state.none')} />
           )}
@@ -164,43 +193,51 @@ function SearchResults({ params, onParams, onUnavailable }: SearchPageProps & {o
           {length === null && error !== null && (
             <ErrorAlert
               error={error}
-              message={search.unavailable.words === true ? t('search.wordsUnavailable') : undefined}
-              action={
+              message={wrongPlace ? t('search.org.outsidePlace') : search.unavailable.words === true ? t('search.wordsUnavailable') : undefined}
+              action={scopeError !== null ? <Button size="sm" onClick={() => onParams({ ...params, scope: undefined })}>{t('search.org.clearPlace')}</Button> :
                 <Button size="sm" onClick={() => setSubmitted((value) => value + 1)}>
                   {t('common.tryAgain')}
                 </Button>
               }
             />
           )}
-          {length === null && !search.unfinished && error === null && hits.length === 0 && (
+          {ready && length === null && !search.unfinished && error === null && hits.length === 0 && (
             <EmptyState
               icon={<SearchX aria-hidden />}
               title={t('search.state.nothing', { query: params.q ?? '' })}
               description={narrowing(params) > 0 ? t('search.state.nothingNarrow') : t('search.state.nothingAbout')}
+              action={params.org !== 'all' && (orgs?.length ?? 0) > 1 ? <AcrossOrgs params={params} onParams={onParams} /> : undefined}
             />
           )}
 
-          {length === null && <p role="status" className="min-h-5 text-sm text-text-muted tabular-nums">
-            {search.unfinished ? t('search.searching', {count: search.total, number: formatNumber(search.total, locale)}) : t('search.total', {count: search.total, number: formatNumber(search.total, locale)})}
+          {length === null && error === null && <p role="status" className="min-h-5 text-sm text-text-muted tabular-nums">
+            {!ready && error === null ? t('common.loading') : search.unfinished ? t('search.searching', {count: search.total, number: formatNumber(search.total, locale)}) : t('search.total', {count: search.total, number: formatNumber(search.total, locale)})}
             {search.unavailable.meaning === true && <> · <MeaningStatus label={t('search.meaningUnavailable')} reason={meaningReason} /></>}
             {search.unavailable.meaning !== true && indexPaused && <> · <MeaningStatus label={t('search.indexPaused')} reason={meaningReason} /></>}
             {search.unavailable.meaning !== true && !indexPaused && search.reasons.meaning !== undefined && search.reasons.meaning !== null && <span> · {t(`search.wordsOnly.${search.reasons.meaning}`, {defaultValue: search.reasons.meaning})}</span>}
           </p>}
           {hits.length > 0 && <>
+            <div className="flex justify-end"><AskAboutResults hits={hits} roots={roots} slugOfOrg={slugOfOrg} /></div>
             <ul data-search-rows className="flex flex-col gap-3 motion-safe:transition-[opacity] motion-safe:duration-150"
               onPointerOver={(event) => setHovered((event.target as HTMLElement).closest('li') !== null)}
               onPointerOut={(event) => setHovered(event.relatedTarget instanceof HTMLElement && event.currentTarget.contains(event.relatedTarget) && event.relatedTarget.closest('li') !== null)}
               onPointerLeave={() => setHovered(false)} onFocusCapture={() => setFocused(true)}
               onBlurCapture={(event) => {if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);}}>
-              {search.ids.map((id, index) => {
-                const hit = search.hits[id];
-                if (hit === undefined) return null;
-                const divider = search.settled && search.membership[id] === 'meaning' && (index === 0 || search.membership[search.ids[index - 1] ?? ''] !== 'meaning');
-                return <Fragment key={id}>
-                  {divider && <li role="separator" className="border-t border-border pt-2 text-sm text-text-muted">{t('search.similarMeaning')}</li>}
-                  <Hit hit={hit} slugOfOrg={slugOfOrg} labels={labels} foundBy={search.membership[id]} matchField={search.fields[id]} />
-                </Fragment>;
-              })}
+              {groups.flatMap((group, groupIndex) => [
+                ...(groups.length > 1 ? [<li key={`org:${group.root?.id ?? groupIndex}`} role="presentation" className="border-t border-border pt-2 text-sm text-text-muted" data-search-org-heading>
+                  <h3>{group.root === null ? t('search.org.unavailable') : <KnownNodeChip node={group.root} />}</h3>
+                </li>] : []),
+                ...group.ids.map((id, index) => {
+                  const hit = search.hits[id];
+                  if (hit === undefined) return null;
+                  const divider = search.settled && search.membership[id] === 'meaning' && (index === 0 || search.membership[group.ids[index - 1] ?? ''] !== 'meaning');
+                  return <Fragment key={id}>
+                    {divider && <li role="separator" className="border-t border-border pt-2 text-sm text-text-muted">{t('search.similarMeaning')}</li>}
+                    <Hit hit={hit} slugOfOrg={slugOfOrg} labels={labels} foundBy={search.membership[id]} matchField={search.fields[id]}
+                      {...(params.org === 'all' ? { org: roots.get(keyOfHit(hit)) ?? null } : {})} />
+                  </Fragment>;
+                }),
+              ])}
             </ul>
             <div className="flex justify-center border-t border-border py-2">
               {search.hasMore ? <Button variant="secondary" disabled={search.unfinished && search.expanded} onClick={search.more}>{t('search.more')}</Button>
@@ -238,4 +275,17 @@ function MeaningStatus({reason,label}:{reason:string;label:string}) {
   return <Tooltip content={reason} open={open} onOpenChange={setOpen}>
     <button type="button" title={reason} className="focus-inset rounded-sm text-left" onClick={()=>setOpen((before)=>!before)}>{label}</button>
   </Tooltip>;
+}
+
+/** One ordinary bounded read supplies a truthful hint; it never pages all orgs for a count. */
+function AcrossOrgs({ params, onParams }: SearchPageProps) {
+  const { t } = useTranslation();
+  const locale = useAppearance((state) => state.locale);
+  const all = inOrg(params, 'all');
+  // A count owns no rendered ordering; selecting All starts the results view's own stream.
+  const hint = useSearchStream(filtersOf(all), true, true, 0, 0, undefined, 'org-count');
+  const known = !hint.unfinished && hint.error === null && hint.total > 0;
+  const partial = hint.cursor !== null || Object.values(hint.unavailable).some(Boolean);
+  const count = formatNumber(hint.total, locale) + (partial ? '+' : '');
+  return <Button variant="secondary" size="sm" onClick={() => onParams(all)}>{known ? t('search.org.searchAllCount', { number: count }) : t('search.org.searchAll')}</Button>;
 }

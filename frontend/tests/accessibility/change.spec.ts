@@ -114,10 +114,10 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
   await openHistory(page);
   await conversation(page).getByText('Please fix it, and run the tests.').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Side thread from here…' }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Which tests cover the redirect?');
   await expectAccessibleInBothThemes(page);
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
 
   const lane = conversation(page).getByRole('region', { name: /^Side thread/ });
   await expect(lane.getByText(/^On the side, about/)).toBeVisible();
@@ -132,9 +132,9 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
 
   // The limit: the dialog that says how many are open, with a way to close each.
   await change.sides(MAIN, 3);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).click();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });

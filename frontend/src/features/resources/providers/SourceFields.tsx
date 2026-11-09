@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Choosing an existing program or an address, with write-only authorization and explicit consent for that address to receive a key. */
 import { useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -5,6 +6,7 @@ import { choiceOption } from '@/i18n/choices';
 import { DeclaredHint } from '@/features/resources/Hint';
 import type { Field } from '@/generated/api-types';
 import { Badge } from '@/ui/Badge';
+import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { FieldForm, initialValues, missingFields, type FormValues } from '@/ui/FieldForm';
@@ -17,7 +19,7 @@ import type { ResourceSubject } from '@/features/resource-facts/facts';
 
 /** Editable form state, never the stored source or a wire body. */
 export interface SourceDraft {
-  by: 'default' | 'program' | 'address' | 'none';
+  by: 'default' | 'builtin' | 'program' | 'address' | 'none';
   program: string;
   url: string;
   auth: 'none' | 'bearer' | 'header';
@@ -25,6 +27,7 @@ export interface SourceDraft {
   authorization: string;
   sendCredential: boolean;
   fields: FormValues;
+  removedSecrets?: readonly string[];
 }
 /** A program already offered at the keeper, projected from setup/runtime declarations. No command is accepted from this form. */
 export interface SourceProgram {
@@ -59,6 +62,8 @@ export interface SourceFieldsProps {
   authorizationSet: boolean;
   secretFieldsSet: readonly string[];
   addressFields?: readonly Field[];
+  defaultFields?: readonly Field[];
+  builtin?: { name:string; title:string; fields:readonly Field[] };
   warnings?: readonly ReactNode[];
 }
 
@@ -79,10 +84,12 @@ export function sourceUnencrypted(address:string):boolean { try { return new URL
 export function keepsAuthorization(value: SourceDraft, saved: SourceFieldsProps['savedAddress'], set: boolean): boolean {
   return set && saved !== null && value.url.trim() === saved.url && value.auth === saved.auth && value.header.trim() === saved.header;
 }
-export function sourceFault(value: SourceDraft, context: Pick<SourceFieldsProps,'programs' | 'httpAllowed' | 'canSendCredential' | 'savedAddress' | 'authorizationSet'> & Partial<Pick<SourceFieldsProps,'secretFieldsSet' | 'addressFields'>>): 'program' | 'url' | 'http' | 'header' | 'authorization' | 'credential' | 'fields' | null {
+export function sourceFault(value: SourceDraft, context: Pick<SourceFieldsProps,'programs' | 'httpAllowed' | 'canSendCredential' | 'savedAddress' | 'authorizationSet'> & Partial<Pick<SourceFieldsProps,'secretFieldsSet' | 'addressFields' | 'defaultFields' | 'builtin'>>): 'program' | 'url' | 'http' | 'header' | 'authorization' | 'credential' | 'fields' | null {
   const program=context.programs.find((program) => (program.choice ?? program.name) === value.program);
-  const fields=value.by === 'program' ? program?.fields ?? [] : value.by === 'address' ? context.addressFields ?? [] : [];
-  const missing=missingFields(fields,sourceValues(fields,value.fields)).filter((name) => !(context.secretFieldsSet ?? []).includes(name));
+  const fields=value.by === 'builtin' ? context.builtin?.fields ?? [] : value.by === 'program' ? program?.fields ?? [] : value.by === 'address' ? context.addressFields ?? [] : value.by === 'default' ? context.defaultFields ?? [] : [];
+  const missing=missingFields(fields,sourceValues(fields,value.fields)).filter((name) => !(context.secretFieldsSet ?? []).includes(name) || value.removedSecrets?.includes(name));
+  if (value.by === 'default') return missing.length > 0 ? 'fields' : null;
+  if (value.by === 'builtin') return context.builtin?.name !== value.program ? 'program' : missing.length > 0 ? 'fields' : null;
   if (value.by === 'program') return program === undefined ? 'program' : missing.length > 0 ? 'fields' : null;
   if (value.by !== 'address') return null;
   if (sourceHost(value.url.trim()) === null) return 'url';
@@ -94,7 +101,7 @@ export function sourceFault(value: SourceDraft, context: Pick<SourceFieldsProps,
   return null;
 }
 
-export function SourceFields({ element, value, onChange, programs, defaultTitle, defaultSummary, httpAllowed, canSendCredential, credentialKind, disabled = false, compact = false, savedAddress, authorizationSet, secretFieldsSet, addressFields = [], warnings = [], serverError, serverErrors = {} }: SourceFieldsProps) {
+export function SourceFields({ element, value, onChange, programs, defaultTitle, defaultSummary, httpAllowed, canSendCredential, credentialKind, disabled = false, compact = false, savedAddress, authorizationSet, secretFieldsSet, addressFields = [], defaultFields = [], builtin, warnings = [], serverError, serverErrors = {} }: SourceFieldsProps) {
   const { t } = useTranslation();
   const [confirm, setConfirm] = useState<{ url:string; host:string } | null>(null);
   const program = programs.find((program) => (program.choice ?? program.name) === value.program);
@@ -103,47 +110,55 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
   }));
   const addressErrors={url:serverErrors['address.url'],header:serverErrors['address.header'],auth:serverErrors['address.auth']};
   const known=new Set(['name','address.url','address.header','address.auth','authorization']);
-  const declared=program?.fields ?? addressFields;
+  const declared=value.by === 'builtin' ? builtin?.fields ?? [] : value.by === 'default' ? defaultFields : program?.fields ?? addressFields;
   const unplaced=Object.entries(serverErrors).filter(([key])=>!known.has(key) && !declared.some((field)=>key==='config.'+field.name || key==='secrets.'+field.name)).map(([,message])=>message);
   const groupError=serverError ?? (unplaced.length===0?undefined:unplaced.join(' '));
   const reportedMembers = program?.reports?.map((member) => t(`providerDetails.members.${member}`, { defaultValue: member })).join(', ') ?? '';
   const host = sourceHost(value.url.trim());
   const unencrypted = sourceUnencrypted(value.url);
   const kept = keepsAuthorization(value,savedAddress,authorizationSet);
-  const fault=sourceFault(value,{programs,httpAllowed,canSendCredential,savedAddress,authorizationSet,secretFieldsSet,addressFields});
+  const fault=sourceFault(value,{programs,httpAllowed,canSendCredential,savedAddress,authorizationSet,secretFieldsSet,addressFields,defaultFields,...(builtin===undefined?{}:{builtin})});
   const change = (patch: Partial<SourceDraft>) => onChange({ ...value,...patch });
   const fieldHelp = (field: Field) => {
-    const saved = secretFieldsSet.includes(field.name);
-    if (!saved && (field.help === null || field.help.trim() === '')) return null;
+    const saved = secretFieldsSet.includes(field.name) && !value.removedSecrets?.includes(field.name);
+    const removed = value.removedSecrets?.includes(field.name) === true;
+    const help = field.name === 'admin_key' ? t('providerSources.adminKeyHelp') : field.help;
+    if (!saved && !removed && (help === null || help.trim() === '')) return null;
     return <span className="inline-flex items-center gap-1">
       {saved && <span className="text-xs text-text-muted">{t('providerSources.setReplace')}</span>}
-      <DeclaredHint term={field.label} help={field.help} />
+      {saved && <Button size="sm" variant="ghost" type="button" onClick={() => change({fields:{...value.fields,[field.name]:''},removedSecrets:[...new Set([...(value.removedSecrets ?? []),field.name])]})}>{t('providerSources.removeSavedKey')}</Button>}
+      {removed && <span>{t('providerSources.keyWillBeRemoved')}</span>}
+      <DeclaredHint term={field.label} help={help} />
     </span>;
   };
   return <fieldset disabled={disabled} className="flex min-w-0 flex-col gap-3">
     <legend className="text-sm font-medium">{t(element === 'facts' ? 'providerSources.detailsFrom' : 'providerSources.modelsFrom')}</legend>
-    <Select<SourceDraft['by']> hideLabel error={groupError} label={t(element === 'facts' ? 'providerSources.detailsFrom' : 'providerSources.modelsFrom')} valueLabel={value.by === 'default' ? compact?defaultTitle:t('providerSources.default',{source:defaultTitle}) : undefined} value={value.by} onValueChange={(by) => change({by,authorization:'',sendCredential:false,fields:{}})} options={(compact?[
+    <Select<SourceDraft['by']> hideLabel error={groupError} label={t(element === 'facts' ? 'providerSources.detailsFrom' : 'providerSources.modelsFrom')} valueLabel={value.by === 'default' ? compact?defaultTitle:t('providerSources.default',{source:defaultTitle}) : value.by==='builtin'?builtin?.title:undefined} value={value.by} onValueChange={(by) => change({by,program:by==='builtin'?builtin?.name ?? '':value.program,authorization:'',sendCredential:false,fields:{},removedSecrets:[]})} options={(compact?[
       {value:'default' as const,label:defaultTitle},
+      ...(builtin===undefined?[]:[{value:'builtin' as const,label:builtin.title}]),
       ...(['program','address','none'] as const).map((by)=>({value:by,label:t(`choiceCatalog.sourceKind.${by==='none'&&element==='models'?'manual':by}.name`)})),
     ]:[
       {value:'default',...choiceOption(t,'sourceKind.default'),description:`${t('providerSources.default',{source:defaultTitle})}. ${defaultSummary}`},
+      ...(builtin===undefined?[]:[{value:'builtin' as const,label:builtin.title}]),
       {value:'program',...choiceOption(t,'sourceKind.program')}, {value:'address',...choiceOption(t,'sourceKind.address')},
       {value:'none',...choiceOption(t,element === 'facts' ? 'sourceKind.none' : 'sourceKind.manual')},
     ])} />
+    {value.by === 'default' && defaultFields.length > 0 && <FieldForm fields={defaultFields} values={sourceValues(defaultFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
+    {value.by === 'builtin' && builtin !== undefined && <FieldForm fields={builtin.fields} values={sourceValues(builtin.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
     {value.by === 'program' && <>
-      <Select label={t('providerSources.registeredProgram')} error={serverErrors.name} value={value.program} onValueChange={(name) => change({program:name,fields:sourceValues(programs.find((program) => (program.choice ?? program.name) === name)?.fields ?? [])})} options={programs.map((program) => {
+      <ResourcePicker pickerKey="resources.providers.SourceFields.providerSources.registeredProgram" label={t('providerSources.registeredProgram')} error={serverErrors.name} value={value.program} onValueChange={(name) => change({program:name,fields:sourceValues(programs.find((program) => (program.choice ?? program.name) === name)?.fields ?? []),removedSecrets:[]})} options={programs.map((program) => {
         const label = program.templateName === null || program.templateName === undefined ? program.title : t('providerSources.inTemplate', { program: program.title, template: program.templateName });
         const choice = { value: program.choice ?? program.name, label, description: program.summary };
         if (program.templateId === null || program.templateId === '' || program.templateName === null || program.templateName === undefined || program.templateName === '') return choice;
         const subject: ResourceSubject = { kind: 'template', template: { id: program.templateId, name: program.templateName } };
         const preview = resourcePreview(subject);
-        return { ...choice, fullLabel: label, name: <ResourceSentence text={label} resources={[{ label: program.templateName, subject }]} card={false} />, preview: { label: preview.label, content: preview.content, hint: preview.hint } };
+        return { ...choice, fullLabel: label, name: <ResourceSentence text={label} resources={[{ label: program.templateName, subject }]} card={false} />, preview: { label: preview.label, content: preview.content, hint: preview.hint, resource:preview.resource } };
       })} placeholder={t('providerSources.chooseProgram')} />
       {program === undefined ? <InlineAlert tone="info">{t('providerSources.programUnavailable')}</InlineAlert> : <>
         <p className="text-sm text-text-muted">{program.reports === null ? t('providerSources.reportsUnread') : element === 'models' ? t('providerSources.listsModels') : program.reports.length === 0 ? t('providerSources.reportsNone') : t('providerSources.reports',{members:reportedMembers})}</p>
         {program.command !== null && <p className="break-words text-sm"><span>{t('providerSources.registeredCommand')}{': '}</span><code>{program.command.join(' ')}</code></p>}
         {program.templateId !== null && <InlineAlert tone="info">{t('providerSources.templateProgram')}</InlineAlert>}
-        <FieldForm fields={program.fields} values={sourceValues(program.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next}})} />
+        <FieldForm fields={program.fields} values={sourceValues(program.fields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />
       </>}
     </>}
     {value.by === 'address' && <>
@@ -153,7 +168,7 @@ export function SourceFields({ element, value, onChange, programs, defaultTitle,
       <Select<SourceDraft['auth']> error={addressErrors.auth} label={t('providerSources.authorization')} value={value.auth} onValueChange={(auth) => change({auth,authorization:''})} options={[{value:'none',...choiceOption(t,'sourceAuthorization.none')},{value:'bearer',...choiceOption(t,'sourceAuthorization.bearer')},{value:'header',...choiceOption(t,'sourceAuthorization.header')}]} />
       {value.auth === 'header' && <Input label={t('providerSources.header')} error={addressErrors.header} value={value.header} autoComplete="off" onChange={(event) => change({header:event.target.value,authorization:''})} />}
       {value.auth !== 'none' && <PasswordInput label={t('providerSources.secret')} error={serverErrors.authorization} value={value.authorization} autoComplete="new-password" hint={t(kept ? 'providerSources.setReplace' : 'providerSources.writeOnly')} onChange={(event) => change({authorization:event.target.value})} />}
-      {savedAddress !== null && savedAddress.url === value.url.trim() && addressFields.length > 0 && <FieldForm fields={addressFields} values={sourceValues(addressFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next}})} />}
+      {savedAddress !== null && savedAddress.url === value.url.trim() && addressFields.length > 0 && <FieldForm fields={addressFields} values={sourceValues(addressFields,value.fields)} errors={declaredErrors} helpFor={fieldHelp} onChange={(name,next) => change({fields:{...value.fields,[name]:next},removedSecrets:(value.removedSecrets ?? []).filter((field)=>field!==name)})} />}
       {canSendCredential ? <Checkbox label={t('providerSources.sendKey')} checked={value.sendCredential} disabled={host === null || disabled} onCheckedChange={(checked) => { if (!checked) change({sendCredential:false}); else if (host !== null) setConfirm({url:value.url.trim(),host}); }} /> : credentialKind === 'none' ? null : <p className="text-sm text-text-muted">{t('providerSources.noSignIn')}</p>}
       {value.sendCredential && host !== null && <InlineAlert tone="warning">{t('providerSources.keyWillBeSent',{host})}</InlineAlert>}
       {warnings.map((warning,index) => <InlineAlert key={index} tone="warning">{warning}</InlineAlert>)}

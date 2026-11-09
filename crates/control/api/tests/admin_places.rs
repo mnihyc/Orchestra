@@ -56,13 +56,23 @@ async fn set_limits(
     closed: Option<bool>,
     flat: Option<bool>,
 ) -> orch_api_core::testing::Reply<Org> {
-    world
+    let reply = world
         .app
         .call(AdminOrgUpdate, &[&org])
         .token(&by.token)
         .body(&OrgLimitsChange { closed, flat })
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary administrative organization content")
+        }),
+    }
 }
 
 #[tokio::test]
@@ -449,27 +459,27 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         }
     };
     assert_eq!(
-        at_acme("invitations.max_hours").await.value,
-        Some(json!(720))
+        at_acme("retention.archive_idle_days").await.value,
+        Some(json!(0))
     );
 
     put(
         &world,
         &c.root,
-        "invitations.max_hours",
+        "retention.archive_idle_days",
         json!(24),
         Some(true),
     )
     .await
     .ok();
 
-    let locked = at_acme("invitations.max_hours").await;
+    let locked = at_acme("retention.archive_idle_days").await;
     assert_eq!(locked.value, Some(json!(24)));
     assert_eq!(locked.locked_by.as_ref().unwrap().scope, LockScope::System);
     assert!(!locked.writable);
     let refused = world
         .app
-        .call(NodeSettingSet, &[&c.acme, &"invitations.max_hours"])
+        .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
             value: json!(48),
@@ -484,7 +494,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
     put(
         &world,
         &c.root,
-        "invitations.max_hours",
+        "retention.archive_idle_days",
         json!(24),
         Some(false),
     )
@@ -492,7 +502,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
     .ok();
     world
         .app
-        .call(NodeSettingSet, &[&c.acme, &"invitations.max_hours"])
+        .call(NodeSettingSet, &[&c.acme, &"retention.archive_idle_days"])
         .token(&c.boss.token)
         .body(&NodeSettingSetBody {
             value: json!(48),
@@ -503,7 +513,7 @@ async fn a_setting_that_is_locked_decides_for_every_org_below_until_the_lock_is_
         .await
         .ok();
     assert_eq!(
-        at_acme("invitations.max_hours").await.value,
+        at_acme("retention.archive_idle_days").await.value,
         Some(json!(48))
     );
 }
