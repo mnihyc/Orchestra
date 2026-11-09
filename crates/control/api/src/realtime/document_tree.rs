@@ -2,12 +2,9 @@
 
 use super::{
     Fail, Inner,
-    subscriptions::{Access, SubState, Subscription, principal_for_connection, principal_of},
+    subscriptions::{Access, SubState, Subscription, principal_for_connection},
 };
-use crate::middleware::{
-    authentication::{Authed, Caller, Via},
-    requests::ApiError,
-};
+use crate::middleware::{authentication::Caller, requests::ApiError};
 use crate::registry::Ctx;
 use crate::routes::document_tree::metadata::{self, Projection};
 use orch_api_contract::{
@@ -46,15 +43,11 @@ fn identity(view: &DocumentTreeView) -> Id {
 
 async fn context(
     inner: &Inner,
-    conn: &mut Conn,
     principal: &Principal,
-    session: Id,
+    authed: crate::middleware::authentication::Authed,
     view: &DocumentTreeView,
 ) -> Result<Option<Ctx>, Fail> {
     let Some(app) = inner.app() else {
-        return Ok(None);
-    };
-    let Some(user) = orch_db::queries::identity::user_by_id(conn, principal.user()).await? else {
         return Ok(None);
     };
     let route = match view {
@@ -65,18 +58,11 @@ async fn context(
             orch_api_contract::document_tree::DocumentTreeEntryGet::ROUTE
         }
     };
-    Ok(Some(Ctx::for_tool(
-        app,
-        Caller::User(Arc::new(Authed {
-            user,
-            as_admin: principal.caller().as_admin(),
-            via: Via::Session {
-                session_id: session,
-            },
-        })),
-        route,
-        identity(view),
-    )))
+    Ok(Some(
+        Ctx::for_tool(app, Caller::User(Arc::new(authed)), route, identity(view))
+            .with_admitted_caller(principal.caller().clone())
+            .map_err(Fail::other)?,
+    ))
 }
 
 fn denied(error: ApiError) -> Result<Access, Fail> {
@@ -94,10 +80,11 @@ pub(crate) async fn decide(
     view: &DocumentTreeView,
 ) -> Result<Access, Fail> {
     let mut conn = inner.db.acquire().await?;
-    let Some(principal) = principal_of(inner, &mut conn, user).await? else {
+    let Some((principal, authed)) = super::subscriptions::reader_of(inner, &mut conn, user).await?
+    else {
         return Ok(Access::Forbidden);
     };
-    let Some(ctx) = context(inner, &mut conn, &principal, Id::nil(), view).await? else {
+    let Some(ctx) = context(inner, &principal, authed, view).await? else {
         return Ok(Access::NotFound);
     };
     let result = match view {
@@ -311,11 +298,12 @@ pub(crate) async fn current(
         crate::routes::resources::sealing::master_key().map_err(Fail::other)?;
     }
     let mut tx = orch_db::queries::feeds::begin_reading(&inner.db).await?;
-    let Some(principal) = principal_for_connection(inner, &mut tx, sub.connection()).await? else {
+    let Some((principal, authed)) =
+        super::subscriptions::reader_for_connection(inner, &mut tx, sub.connection()).await?
+    else {
         return Ok(());
     };
-    let Some(ctx) = context(inner, &mut tx, &principal, sub.connection().session(), view).await?
-    else {
+    let Some(ctx) = context(inner, &principal, authed, view).await? else {
         return Ok(());
     };
     let loaded = read(&ctx, &mut tx, &principal, view).await;

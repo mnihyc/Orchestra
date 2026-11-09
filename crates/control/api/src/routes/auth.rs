@@ -11,9 +11,12 @@
 //! The requests that answer `202` whatever the name or the address do the
 //! same work for every one, so that they tell nothing.
 
+pub(crate) mod account_read;
 mod bootstrap;
+pub(crate) mod creation;
 pub mod me;
 pub mod oidc;
+pub(crate) mod token_activity;
 pub mod tokens;
 
 use crate::middleware::authentication::{SESSION_PREFIX, new_token, token_hash};
@@ -34,8 +37,8 @@ use orch_api_contract::auth::{
     AuthEmailCodeSend, AuthEmailVerify, AuthEmailVerifyBody, AuthEmailVerifyResend,
     AuthEmailVerifyResendBody, AuthLogin, AuthLogout, AuthRecoveryCheck, AuthRecoveryConfirm,
     AuthRecoveryConfirmBody, AuthRecoveryStart, AuthRecoveryStartBody, AuthRefresh, AuthRegister,
-    AuthRegisterBody, AuthRegisterReply, AuthRegisterResult, AuthResult, RegistrationMode,
-    SignInProof, VerificationRequired,
+    AuthRegisterBody, AuthRegisterReply, AuthRegisterResult, AuthResult, AuthSessionRestore,
+    RegistrationMode, SignInProof, VerificationRequired,
 };
 use orch_api_contract::common::{ErrorCode, SESSION_COOKIE};
 use orch_db::audit::Actor;
@@ -45,11 +48,13 @@ use serde_json::json;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    registry.creation(AuthRegister, creation::register_binding());
     registry
         .on(AuthRegister, register)
         .on(AuthLogin, login)
         .on(AuthEmailCodeSend, email_code)
         .on(AuthRefresh, refresh)
+        .on(AuthSessionRestore, restore_session)
         .on(AuthLogout, logout)
         .on(AuthRecoveryStart, recovery)
         .on(AuthRecoveryCheck, recovery_check)
@@ -59,6 +64,7 @@ pub fn mount(registry: &mut Registry) {
     me::mount(registry);
     oidc::mount(registry);
     tokens::mount(registry);
+    token_activity::mount(registry);
 }
 
 /// `410 gone`: a link that was used, that ended, or that nobody made, which
@@ -222,6 +228,7 @@ async fn register(
                 &mut tx,
                 &user,
                 body.invitation.as_deref().unwrap_or_default(),
+                body.accepted_terms_hash.as_deref(),
             )
             .await
             .map_err(|error| {
@@ -265,6 +272,13 @@ async fn register(
             true,
         )
         .await?;
+        orch_db::idempotency::creation::observe_account(
+            &mut tx,
+            user.id,
+            "registered_account",
+            202,
+        )
+        .await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         return Ok(
             Answer::from(AuthRegisterReply::Pending(VerificationRequired {
@@ -282,6 +296,8 @@ async fn register(
         )),
         None => None,
     };
+    orch_db::idempotency::creation::observe_account(&mut tx, user.id, "registered_account", 201)
+        .await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     let Opened {
         result, cookies, ..
@@ -323,6 +339,20 @@ async fn email_code(
 fn session_value(ctx: &Ctx) -> Option<&str> {
     ctx.cookie(SESSION_COOKIE)
         .filter(|value| value.starts_with(SESSION_PREFIX))
+}
+
+/// Anonymous discovery is a successful empty result; a real cookie uses the
+/// same guarded refresh and session lifetime as every ordinary renewal.
+async fn restore_session(ctx: Ctx, (): (), (): ()) -> ApiResult<Answer<Option<AuthResult>>> {
+    if session_value(&ctx).is_none() {
+        return Ok(Answer::from(None).header(CACHE_CONTROL, NOT_KEPT));
+    }
+    let answer = refresh(ctx, (), ()).await?;
+    Ok(Answer {
+        body: Some(answer.body),
+        status: answer.status,
+        headers: answer.headers,
+    })
 }
 
 /// Gives a new access token to the browser that holds the session cookie, and

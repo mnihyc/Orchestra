@@ -12,10 +12,23 @@
 //! threads out, and the requests about threads are not bound here.
 
 pub mod activity;
+mod archive_operation;
 pub mod archive_plan;
+pub(crate) mod content_sources;
+mod creation_operation;
+mod creation_replay;
+mod deleted_orgs;
+mod hierarchy_operation;
+mod list_operation;
 pub mod make;
+mod metadata_mutation;
 pub mod moves;
+mod org_reading;
+pub(crate) mod overview;
+pub(crate) mod projection;
+pub(crate) mod read_sources;
 pub mod removal;
+mod shared_operation;
 pub mod tree;
 pub(crate) mod tree_work;
 pub mod view;
@@ -54,6 +67,19 @@ pub(crate) async fn action(ctx: &Ctx) -> ApiResult<(Ctx, Tx, Principal)> {
     Ok((current, tx, guard.principal().clone()))
 }
 
+/// The native Node-row serialization checkpoint, shared by actual metadata
+/// mutations. Call after any earlier Thread lock; callers keep their no-op order.
+pub(crate) async fn lock_node_change(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    id: Id,
+) -> ApiResult<(Ctx, transaction_guard::Guard)> {
+    if !hierarchy::lock(conn, id).await? {
+        return Err(ApiError::not_found());
+    }
+    transaction_guard::after_wait(ctx, conn).await
+}
+
 /// The most characters of a node's name: what the schema allows.
 pub const NAME_MAX_CHARS: usize = 120;
 /// The most characters of a node's description: what the schema allows.
@@ -70,14 +96,24 @@ pub const NEW_TOPIC: &str = "New topic";
 pub fn mount(registry: &mut Registry) {
     archive_plan::mount(registry);
     registry
-        .on(OrgList, org_list)
-        .on(OrgBySlugGet, org_by_slug)
-        .on(NodeGet, node_get)
-        .on(NodeChildList, child_list)
-        .on(NodeUpdate, node_update)
+        .on_with_operation(OrgList, org_reading::list, org_list)
+        .on_with_operation(OrgBySlugGet, org_reading::address, org_by_slug)
+        .on_with_operation(NodeGet, node_get_operation, node_get)
+        .on_with_operation(
+            orch_api_contract::nodes::OrgOverviewGet,
+            overview::prepare,
+            overview::get,
+        )
+        .on_with_operation(
+            orch_api_contract::nodes::NodeOverviewGet,
+            overview::node_prepare,
+            overview::node_get,
+        )
+        .on_with_optional_operation(NodeChildList, list_operation::children, child_list)
+        .on_with_operation(NodeUpdate, metadata_mutation::update, node_update)
         .on(NodeAuto, node_auto)
-        .on(NodeArchive, archive)
-        .on(NodeUnarchive, unarchive)
+        .on_with_operation(NodeArchive, archive_operation::change, archive)
+        .on_with_operation(NodeUnarchive, archive_operation::change, unarchive)
         .on(NodeSubscriptionSet, subscription_set)
         .on(NodeSubscriptionDelete, subscription_delete);
     make::mount(registry);
@@ -224,41 +260,12 @@ pub fn actor_name(ctx: &Ctx) -> ApiResult<String> {
 
 /// The orgs the caller belongs to or owns, their own first.
 async fn org_list(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<orch_api_contract::nodes::Org>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    orgs_for(&mut conn, &principal, ctx.now, principal.is_system_admin()).await
-}
-
-/// The same organization projection for the individual read and the shell bootstrap.
-pub(crate) async fn orgs_for(
-    conn: &mut Conn,
-    principal: &Principal,
-    now: chrono::DateTime<chrono::Utc>,
-    system_reach: bool,
-) -> ApiResult<Vec<orch_api_contract::nodes::Org>> {
-    let ids = hierarchy::visible_root_orgs(conn, principal.user(), system_reach).await?;
-    let nodes = view::visible(conn, principal, &ids, now, Policy::default()).await?;
-    Ok(nodes
-        .into_iter()
-        .filter_map(|node| match node {
-            Node::Org(org) => Some(org),
-            _ => None,
-        })
-        .collect())
+    org_reading::get_list(ctx, (), ()).await
 }
 
 /// An org by its short name or its address.
 async fn org_by_slug(ctx: Ctx, (): (), (): ()) -> ApiResult<orch_api_contract::nodes::Org> {
-    let address = ctx.param("slug")?.to_owned();
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let id = hierarchy::org_by_address(&mut conn, &address)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    match view::one(&mut conn, &principal, id, ctx.now, Policy::default()).await? {
-        Some(Node::Org(org)) => Ok(org),
-        _ => Err(ApiError::not_found()),
-    }
+    org_reading::get_address(ctx, (), ()).await
 }
 
 /// A node of any kind the caller may view.
@@ -269,12 +276,32 @@ async fn node_get(
 ) -> ApiResult<Node> {
     let id = ctx.id("id")?;
     let mut conn = ctx.app.db.begin_snapshot().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let answer = view::one(&mut conn, &principal, id, ctx.now, Policy::default())
         .await?
         .ok_or_else(threads_are_not_served_here)?;
     conn.commit().await.map_err(orch_db::DbError::from)?;
     Ok(answer)
+}
+
+fn node_get_operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    _caller: &'a orch_authz::Caller,
+    query: orch_api_contract::nodes::DeletedInspectionQuery,
+    (): (),
+) -> crate::registry::OperationFuture<'a> {
+    Box::pin(async move {
+        let selection = if query.inspect_deleted == Some(true) {
+            "NodeGet.inspect_deleted"
+        } else {
+            "NodeGet.read"
+        };
+        let target = crate::key_operations::targets::node_identity(conn, ctx.id("id")?).await?;
+        let mut operation = crate::registry::OperationPlan::new(ctx.route, selection)?;
+        operation.bind(0, target.object.kind, &[target])?;
+        Ok(operation)
+    })
 }
 
 /// A cursor is the identifier of the last node of the page before.
@@ -300,13 +327,17 @@ fn archived_ok(filter: ArchivedFilter, archived: bool) -> bool {
 /// What lies directly inside a node, by when it was made, as far as the
 /// caller may view it.
 async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Page<Listed<Node>>> {
-    if ctx.inspect_deleted {
-        let page = crate::middleware::inspection::children(ctx, query).await?;
-        return Ok(Page {
-            next_cursor: page.next_cursor,
-            items: page.items.into_iter().map(Listed::visible).collect(),
-        });
-    }
+    list_operation::read_children(ctx, query).await
+}
+
+/// The ordinary selector/window producer, reused on the current read connection.
+pub(super) async fn child_list_in(
+    ctx: &Ctx,
+    query: &NodeChildListQuery,
+    conn: &mut Conn,
+    principal: &Principal,
+    scope: Option<&projection::Projection<'_>>,
+) -> ApiResult<projection::Window<Node>> {
     let parent = ctx.id("id")?;
     let page = PageQuery {
         limit: query.limit,
@@ -315,10 +346,8 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
     let limit = usize::try_from(page.limit()).unwrap_or(usize::MAX);
     let filter = query.archived.unwrap_or_default();
     let mut after = cursor_of("cursor", query.cursor.as_deref())?;
-    let mut conn = ctx.app.db.begin_snapshot().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let child_kind = if let Some(kind) = query.kind {
-        let (_, parent_kind) = placed(&mut conn, parent).await?;
+        let (_, parent_kind) = placed(conn, parent).await?;
         let allowed = match parent_kind {
             NodeKind::Org => matches!(kind, NodeKind::Org | NodeKind::Project),
             NodeKind::Project => matches!(kind, NodeKind::Project | NodeKind::Topic),
@@ -341,10 +370,9 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
     loop {
         let rows = match child_kind {
             Some(kind) => {
-                hierarchy::presentation::children_of_kind(&mut conn, parent, kind, after, batch)
-                    .await?
+                hierarchy::presentation::children_of_kind(conn, parent, kind, after, batch).await?
             }
-            None => hierarchy::children_after(&mut conn, parent, after, batch).await?,
+            None => hierarchy::children_after(conn, parent, after, batch).await?,
         };
         let exhausted = i64::try_from(rows.len()).is_ok_and(|count| count < batch);
         let Some(last) = rows.last().map(|row| row.id) else {
@@ -352,7 +380,10 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
         };
         after = Some(last);
         let ids: Vec<Id> = rows.iter().map(|row| row.id).collect();
-        let nodes = view::visible(&mut conn, &principal, &ids, ctx.now, Policy::default()).await?;
+        let nodes = match scope {
+            Some(scope) => scope.visible(conn, &ids).await?,
+            None => view::visible(conn, principal, &ids, ctx.now, Policy::default()).await?,
+        };
         items.extend(
             nodes
                 .into_iter()
@@ -364,6 +395,7 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
         }
     }
     let more = items.len() > limit;
+    let witness = items.get(limit).map(node_id);
     items.truncate(limit);
     // The private children the caller administers stand once, on the first page, after what they may
     // read, sorted by name: an existence list that counts nothing and tells no work.
@@ -371,7 +403,7 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
         let candidates = match child_kind {
             Some(kind) => {
                 hierarchy::presentation::children_of_kind(
-                    &mut conn,
+                    conn,
                     parent,
                     kind,
                     None,
@@ -379,16 +411,17 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
                 )
                 .await?
             }
-            None => {
-                hierarchy::children_after(&mut conn, parent, None, PRIVATE_CHILDREN_MOST).await?
-            }
+            None => hierarchy::children_after(conn, parent, None, PRIVATE_CHILDREN_MOST).await?,
         };
         let ids: Vec<Id> = candidates
             .iter()
             .filter(|row| archived_ok(filter, row.archived_at.is_some()))
             .map(|row| row.id)
             .collect();
-        tree::private_rows(&mut conn, &principal, &ids).await?
+        match scope {
+            Some(scope) => scope.private_rows(conn, &ids).await?,
+            None => tree::private_rows(conn, principal, &ids).await?,
+        }
     } else {
         Vec::new()
     };
@@ -403,8 +436,10 @@ async fn child_list(ctx: Ctx, query: NodeChildListQuery, (): ()) -> ApiResult<Pa
             .chain(hidden.into_iter().map(Listed::hidden))
             .collect(),
     };
-    conn.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(answer)
+    Ok(projection::Window {
+        page: answer,
+        more: witness,
+    })
 }
 
 /// The most private children a first page names for an admin: an existence list, bounded so that the
@@ -462,34 +497,22 @@ pub async fn shown(ctx: &Ctx, conn: &mut Conn, principal: &Principal, id: Id) ->
         .ok_or_else(threads_are_not_served_here)
 }
 
-/// Renames a node or changes its description; either hands that field to
-/// the person until it is given back to automation.
-async fn node_update(ctx: Ctx, (): (), body: NodeUpdateBody) -> ApiResult<Node> {
-    let id = ctx.id("id")?;
-    let color = color::checked(body.color)?;
-    let own = color::own(body.color, body.custom_color.as_ref().map(Option::as_deref))?;
-    let name = body
-        .name
-        .as_deref()
-        .map(|name| clean_name("name", name))
-        .transpose()?;
-    let description = body
-        .description
-        .as_deref()
-        .map(|text| clean_description("description", text))
-        .transpose()?;
-    let (ctx, mut tx, principal) = action(&ctx).await?;
-    let (place, kind) = placed(&mut tx, id).await?;
-    // A README is one of the node's own documents, and one that is there; null names none.
-    let readme = match body.readme_document_id {
+/// The original native README association check, shared by early validation and
+/// the final locked metadata checkpoint; it adds no document View requirement.
+async fn readme_choice(
+    conn: &mut Conn,
+    node: Id,
+    choice: Option<Option<Id>>,
+) -> ApiResult<Option<Option<Id>>> {
+    Ok(match choice {
         None => None,
         Some(None) => Some(None),
         Some(Some(document)) => {
-            let row = orch_db::queries::documents::get(&mut tx, document)
+            let row = orch_db::queries::documents::get(conn, document)
                 .await?
                 .filter(|row| row.deleted_at.is_none())
                 .ok_or_else(ApiError::not_found)?;
-            if row.node_id != id {
+            if row.node_id != node {
                 return Err(ApiError::new(
                     ErrorCode::NodeWrongParent,
                     "a README is one of the place's own documents",
@@ -497,25 +520,44 @@ async fn node_update(ctx: Ctx, (): (), body: NodeUpdateBody) -> ApiResult<Node> 
             }
             Some(Some(document))
         }
-    };
-    if name.is_none()
-        && description.is_none()
-        && color.is_none()
-        && own.is_none()
-        && readme.is_none()
-    {
-        return shown(&ctx, &mut tx, &principal, id).await;
+    })
+}
+
+/// Renames a node or changes its description; either hands that field to
+/// the person until it is given back to automation.
+async fn node_update(ctx: Ctx, (): (), body: NodeUpdateBody) -> ApiResult<Node> {
+    let id = ctx.id("id")?;
+    // The same pure input normalization keeps its original early error order.
+    let _ = metadata_mutation::fields(&body)?;
+    let (ctx, mut tx, _) = action(&ctx).await?;
+    let initial = ctx.operation_data::<metadata_mutation::Update>()?;
+    if initial.noop() {
+        // The original no-op does not acquire a new Thread/Node lock or a revision.
+        return Ok(initial.before.clone());
     }
-    // Common metadata also belongs to the conversation feed. Lock the thread
-    // before updating its node, but allocate no number until the revision CAS
-    // succeeds: a stale answer must not contain an uncommitted sequence.
-    let is_thread = kind == NodeKind::Thread;
+    let is_thread = initial.kind == NodeKind::Thread;
     if is_thread {
         orch_db::queries::threads::lock(&mut tx, id)
             .await?
             .ok_or_else(ApiError::not_found)?;
     }
-    let before = shown(&ctx, &mut tx, &principal, id).await?;
+    let (ctx, guard) = lock_node_change(&ctx, &mut tx, id).await?;
+    let principal = guard.principal().clone();
+    let prepared = guard.operation_data::<metadata_mutation::Update>()?;
+    let metadata_mutation::Update {
+        fields,
+        place,
+        readme,
+        before,
+        ..
+    } = prepared.as_ref().clone();
+    let metadata_mutation::Fields {
+        color,
+        own,
+        name,
+        description,
+    } = fields;
+    guard.check_deadline(&ctx)?;
     let revision = hierarchy::presentation::change_with_own(
         &mut tx,
         id,
@@ -600,7 +642,7 @@ pub fn stale(current: &Node) -> ApiError {
     .with("current", current)
 }
 
-/// Hands the title, the description or the tags back to automation, or asks
+/// Hands the title or tags back to automation, or asks
 /// it for a new value.
 async fn node_auto(ctx: Ctx, (): (), body: NodeAutoBody) -> ApiResult<Node> {
     let id = ctx.id("id")?;
@@ -608,7 +650,6 @@ async fn node_auto(ctx: Ctx, (): (), body: NodeAutoBody) -> ApiResult<Node> {
     let (place, _) = placed(&mut tx, id).await?;
     let (field, key) = match body.field {
         AutoField::Title => (Field::Title, keys::AUTO_TITLE),
-        AutoField::Description => (Field::Description, keys::AUTO_DESCRIPTION),
         AutoField::Tags => (Field::Tags, keys::AUTO_TAGS),
     };
     let mode = setting::<String>(&mut tx, Place::Node(id), key)
@@ -624,7 +665,6 @@ async fn node_auto(ctx: Ctx, (): (), body: NodeAutoBody) -> ApiResult<Node> {
     let who = actor_name(&ctx)?;
     let word = match body.field {
         AutoField::Title => "title",
-        AutoField::Description => "description",
         AutoField::Tags => "tags",
     };
     let asked = match body.action {
@@ -671,61 +711,47 @@ async fn may_archive(conn: &mut Conn, principal: &Principal, id: Id, act: Act) -
 async fn archive(
     ctx: Ctx,
     (): (),
-    body: orch_api_contract::nodes::NodeArchiveBody,
-) -> ApiResult<orch_api_contract::nodes::NodeArchiveResult> {
-    change_archive(&ctx, true, &body).await
+    _body: orch_api_contract::nodes::NodeArchiveBody,
+) -> ApiResult<orch_api_contract::nodes::NodeArchiveResponse> {
+    change_archive(&ctx, true)
+        .await
+        .map_err(|error| archive_operation::problem(&ctx, error))
 }
 
 /// Takes a node out of the archive.
 async fn unarchive(
     ctx: Ctx,
     (): (),
-    body: orch_api_contract::nodes::NodeArchiveBody,
-) -> ApiResult<orch_api_contract::nodes::NodeArchiveResult> {
-    change_archive(&ctx, false, &body).await
+    _body: orch_api_contract::nodes::NodeArchiveBody,
+) -> ApiResult<orch_api_contract::nodes::NodeArchiveResponse> {
+    change_archive(&ctx, false)
+        .await
+        .map_err(|error| archive_operation::problem(&ctx, error))
 }
 
 async fn change_archive(
     ctx: &Ctx,
     archiving: bool,
-    body: &orch_api_contract::nodes::NodeArchiveBody,
-) -> ApiResult<orch_api_contract::nodes::NodeArchiveResult> {
+) -> ApiResult<orch_api_contract::nodes::NodeArchiveResponse> {
     let id = ctx.id("id")?;
-    let (current, mut tx, principal) = action(ctx).await?;
+    let (current, mut tx, _) = archive_operation::action(ctx).await?;
+    let (current, guard, bounds) = archive_operation::effect(&current, &mut tx, id).await?;
     let ctx = &current;
-    let (place, kind) = placed(&mut tx, id).await?;
-    let already_archived = archiving
-        && hierarchy::with_ancestors(&mut tx, &[id])
-            .await?
-            .iter()
-            .any(|row| row.id == id && row.archived_at.is_some());
-    // Repeating a settled archive checks the same authority without additional work.
-    let act = if archiving && !already_archived {
-        Act::Use
-    } else {
-        Act::Unarchive
-    };
-    may_archive(&mut tx, &principal, id, act).await?;
-    // The part that forks and switches: a side thread is closed (`DELETE`), and never archived.
-    if kind == NodeKind::Thread
-        && orch_db::queries::threads::forking::side_parent(&mut tx, id)
-            .await?
-            .is_some()
-    {
-        return Err(ApiError::new(
-            ErrorCode::ThreadSide,
-            "a side thread is closed and not archived",
+    let principal = guard.principal().clone();
+    let Some(archive_operation::NativePrefix::Change {
+        place,
+        before,
+        review,
+    }) = bounds.native.clone()
+    else {
+        return Err(ApiError::internal(
+            "an archive action lost its native operands",
         ));
-    }
-    let before = shown(ctx, &mut tx, &principal, id).await?;
-    ctx.app
-        .engine
-        .lock_archive_in(&mut tx, id)
-        .await
-        .map_err(ApiError::internal)?;
-    if let Some(current) =
-        archive_plan::verify(ctx, &mut tx, &principal, id, archiving, body).await?
-    {
+    };
+    // The original private confirmation DELETE is the first unaccepted SQL.
+    // All its caller/Kept/canonical-stamp reads were completed by this exact guard.
+    guard.check_deadline(ctx)?;
+    if let Some(current) = review.consume(&mut tx).await? {
         tx.commit().await.map_err(orch_db::DbError::from)?;
         return Err(ApiError::new(orch_api_contract::common::ErrorCode::ConflictStaleRevision,
             "The subtree or its work changed after this review. Nothing was archived; review the current plan.").with("current", current));
@@ -746,7 +772,7 @@ async fn change_archive(
                     .engine
                     .archive_in(&mut tx, id, principal.user(), principal.now())
                     .await
-                    .map_err(ApiError::internal)?,
+                    .map_err(ApiError::engine)?,
             )
         } else {
             None
@@ -778,15 +804,39 @@ async fn change_archive(
         .await?;
         hierarchy::stamp_subtree(&mut tx, id).await?;
     }
-    let node = shown(ctx, &mut tx, &principal, id).await?;
+    let (current, principal, bounds) =
+        archive_operation::response_bounds(ctx, &mut tx, &principal).await?;
+    let ctx = &current;
+    let node = archive_operation::read_node(ctx, &mut tx, &principal, id, &bounds).await?;
     let undo = if changed {
-        Some(archive_plan::make(ctx, &mut tx, &principal, id, !archiving).await?)
+        Some(archive_plan::make(ctx, &mut tx, &principal, id, !archiving, Some(&bounds)).await?)
     } else {
         None
     };
+    let revision = hierarchy::with_ancestors(&mut tx, &[id])
+        .await?
+        .into_iter()
+        .find(|row| row.id == id)
+        .ok_or_else(ApiError::not_found)?
+        .revision;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     ctx.app.engine.kick();
-    Ok(orch_api_contract::nodes::NodeArchiveResult { node, undo })
+    match node {
+        Some(node) if !ctx.key_receipt_required() => {
+            Ok(orch_api_contract::nodes::NodeArchiveResponse::Full(
+                Box::new(orch_api_contract::nodes::NodeArchiveResult { node, undo }),
+            ))
+        }
+        _ => Ok(orch_api_contract::nodes::NodeArchiveResponse::Receipt(
+            orch_api_contract::nodes::NodeArchiveReceipt {
+                projection: orch_api_contract::common::ReceiptProjection::Receipt,
+                node_id: id,
+                archiving,
+                revision,
+                undo: undo.as_ref().map(archive_operation::safe_body),
+            },
+        )),
+    }
 }
 
 /// The caller's own `Access` on a node, as the node shows it.
@@ -881,4 +931,5 @@ pub async fn require_manage(
 
 // Node icon colours and document visibility in tree summaries.
 mod color;
+pub(crate) mod tags;
 pub(crate) mod tree_docs;

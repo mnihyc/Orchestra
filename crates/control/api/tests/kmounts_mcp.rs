@@ -5,9 +5,19 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "kmounts_mcp/create_scopes.rs"]
+mod create_scopes;
+#[path = "kmounts_mcp/existing_scopes.rs"]
+mod existing_scopes;
+#[path = "kmounts_mcp/import_scopes.rs"]
+mod import_scopes;
+#[path = "kmounts_mcp/import_source.rs"]
+mod import_source;
 mod places;
 mod resources;
 mod support;
+#[path = "kmounts_mcp/update_scopes.rs"]
+mod update_scopes;
 
 use orch_api_contract::access::NewResourceAccess;
 use orch_api_contract::common::{ErrorCode, Listed};
@@ -54,7 +64,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let mut body = change(made.revision);
     assert_eq!(made.enabled_places, Some(0));
     world
@@ -112,7 +124,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(disabled.enabled_places, Some(0));
     body.expected_revision = disabled.revision;
     body.enabled = Some(true);
@@ -123,7 +137,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(enabled.enabled);
     body.expected_revision = enabled.revision;
     world
@@ -133,7 +149,9 @@ async fn enabling_a_disabled_server_records_one_safe_factual_line_and_repeating_
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let records:Vec<(Option<Id>,String,Json)> = sqlx::query_as("SELECT actor_id,summary,details FROM audit_log WHERE action='mcp.enabled' AND object_id=$1")
         .bind(made.id).fetch_all(&world.db.pool).await.unwrap();
     assert_eq!(records.len(), 1);
@@ -187,7 +205,7 @@ async fn environment(world: &World, c: &Company, add: bool) -> (Id, Id) {
         .token(&c.admin.token)
         .body(&MachineEnvironmentCreateBody {
             data_sources: None,
-            home_id: c.acme,
+            home_id: Some(c.acme),
             name: "Tools".into(),
             root: "/srv/mcp/work".into(),
             home_node_id: None,
@@ -197,7 +215,9 @@ async fn environment(world: &World, c: &Company, add: bool) -> (Id, Id) {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content");
     (env.base.id, machine)
 }
 
@@ -224,7 +244,9 @@ async fn a_remote_presets_authentication_is_sealed_rotated_and_never_read_back()
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.spec["authentication"]["secret"], "MCP_BEARER_TOKEN");
     assert_eq!(made.spec["tools_allow"], json!(["search"]));
     assert!(
@@ -250,7 +272,9 @@ async fn a_remote_presets_authentication_is_sealed_rotated_and_never_read_back()
         .body(&update)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let read = world
         .app
         .call(McpServerGet, &[&made.id])
@@ -339,7 +363,9 @@ async fn a_preset_has_current_revision_crud_and_no_foreign_access() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.owner.as_ref().unwrap().id, c.viewer.id());
     let listed = world
         .app
@@ -407,7 +433,9 @@ async fn a_preset_has_current_revision_crud_and_no_foreign_access() {
         .body(&change(made.revision))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(changed.description, "Changed");
     assert_eq!(changed.revision, made.revision + 1);
     let stale = world
@@ -478,7 +506,9 @@ async fn only_an_environment_manager_can_queue_one_server_restart_and_the_list_s
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE environments SET status='running',facts=jsonb_set(facts,'{mcp_servers}',$2) WHERE id=$1").bind(env).bind(json!([{"name":"flaky","state":"failed","reason":"The server ended (exit status: 7): [masked]","revision":3}])).execute(&world.db.pool).await.unwrap();
     sqlx::query("UPDATE machines SET online=true WHERE id=$1")
         .bind(machine)
@@ -543,6 +573,51 @@ async fn only_an_environment_manager_can_queue_one_server_restart_and_the_list_s
 }
 
 #[tokio::test]
+async fn an_unavailable_hosted_command_keeps_its_reported_state_and_reason_in_the_environment_read()
+{
+    let world = World::new().await;
+    let c = company(&world).await;
+    let (env, _) = environment(&world, &c, true).await;
+    let made = world
+        .app
+        .call(EnvironmentMcpServerCreate, &[&env])
+        .token(&c.admin.token)
+        .body(&EnvironmentMcpServerCreateBody {
+            name: "absent".into(),
+            description: None,
+            spec: spec(),
+            secrets: None,
+            enable: Some(true),
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap();
+    sqlx::query("UPDATE environments SET status='running',facts=jsonb_set(facts,'{mcp_servers}',$2) WHERE id=$1")
+        .bind(env).bind(json!([{"server_id":made.id,"name":"absent","state":"unavailable","reason":"the server command is absent","revision":0}]))
+        .execute(&world.db.pool).await.unwrap();
+    let shown = world
+        .app
+        .call(EnvironmentMcpGet, &[&env])
+        .token(&c.admin.token)
+        .send()
+        .await
+        .ok();
+    let server = shown
+        .servers
+        .iter()
+        .find(|server| server.server.id == made.id)
+        .unwrap();
+    assert_eq!(server.state, McpState::Unavailable);
+    assert_eq!(server.reason_code, Some(McpReasonCode::Unavailable));
+    assert_eq!(
+        server.reason.as_deref(),
+        Some("the server command is absent")
+    );
+}
+
+#[tokio::test]
 async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
     install_master_key(MasterKey::new([7; 32]));
     let world = World::new().await;
@@ -602,7 +677,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(made.environment.as_ref().unwrap().id, env);
     assert!(
         !serde_json::to_string(&made)
@@ -680,7 +757,9 @@ async fn an_environment_server_takes_local_policy_and_never_returns_a_secret() {
         .body(&change(made.revision))
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert_eq!(
         changed.description, "Changed",
         "the environment's manager needs no separate server page"
@@ -707,6 +786,26 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
     let world = World::new().await;
     let c = company(&world).await;
     let (env, machine) = environment(&world, &c, true).await;
+    let machine_home = orch_types::new_id();
+    {
+        let mut conn = world.conn().await;
+        orch_db::queries::hierarchy::testing::insert_node(
+            &mut conn,
+            machine_home,
+            "project",
+            Some(c.acme),
+            "Imported machine resources",
+            c.admin.id(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE machines SET home_id=$2 WHERE id=$1")
+            .bind(machine)
+            .bind(machine_home)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
     let found = json!([{"source":"codex","scope":"user","name":"search","directory":null,"transport":"stdio","digest":"one","tools":2}, {"source":"codex","scope":"directory","name":"folder-tool","directory":"tools","transport":"stdio","digest":"folder","tools":null}]);
     sqlx::query(
         "UPDATE environments SET facts=jsonb_build_object('mcp_found',$2::jsonb) WHERE id=$1",
@@ -748,12 +847,30 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     assert_eq!(imported.spec, json!({"transport":"stdio"}));
+    assert_eq!(imported.home.as_ref().unwrap().id, machine_home);
     assert_eq!(imported.machine.as_ref().unwrap().id, machine);
     assert_eq!(imported.imported.as_ref().unwrap().by.id, c.admin.id());
     assert!(!imported.imported.as_ref().unwrap().stale);
+    let moved = world
+        .app
+        .call(
+            orch_api_contract::resource_groups::ObjectHomeSet,
+            &[&"mcp-servers", &imported.id],
+        )
+        .token(&c.admin.token)
+        .body(&orch_api_contract::resource_groups::ResourceHomeSetBody {
+            home_id: c.acme,
+            expected_revision: Some(imported.revision),
+        })
+        .send()
+        .await
+        .ok();
+    assert!(moved.changed);
     let mut changed_found = found;
     changed_found[0]["digest"] = json!("two");
     sqlx::query(
@@ -783,9 +900,19 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .token(&c.admin.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary reimport preserves the full native server result");
     replied.await.unwrap();
     assert!(!reimported.imported.as_ref().unwrap().stale);
+    assert_eq!(reimported.home.as_ref().unwrap().id, c.acme);
+    let overridden: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("SELECT home_overridden_at FROM mcp_servers WHERE id=$1")
+            .bind(imported.id)
+            .fetch_one(&world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(overridden, Some(world.now()));
     assert!(reimported.revision > imported.revision);
     let project = EnvironmentMcpImportCreateBody {
         source: "codex".into(),
@@ -807,7 +934,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&project)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut disable = change(folder.revision);
     disable.enabled = Some(false);
@@ -818,7 +947,9 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .body(&disable)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     assert!(
         !disabled.enabled,
         "the retained resource starts explicitly disabled"
@@ -892,7 +1023,11 @@ async fn imports_and_reimports_store_only_safe_origin_and_forgetting_removes_the
         .ok();
     assert_eq!(retained.id, folder.id);
     assert!(!retained.enabled);
-    assert!(retained.machine.is_none());
+    assert_eq!(
+        retained.machine.as_ref().map(|row| row.id),
+        Some(machine),
+        "retirement keeps the imported definition's protected origin"
+    );
     assert!(retained.offerings.is_empty());
     assert_eq!(retained.spec, json!({"transport":"stdio"}));
     assert_eq!(retained.imported.as_ref().unwrap().scope, McpScope::Project);
@@ -931,7 +1066,9 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary import keeps its native full result");
     replied.await.unwrap();
     let mut conn = world.conn().await;
     let machine = orch_db::queries::resources::access_fixtures::insert_persons_machine(
@@ -944,6 +1081,7 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
     let policy = LocalPolicy {
         environment_roots: vec!["/srv/mcp".into()],
         mcp_add: true,
+        mcp_import: true,
         ..LocalPolicy::default()
     };
     sqlx::query(
@@ -971,6 +1109,17 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
     )
     .await
     .unwrap();
+    // Discovery is an explicit retained candidate; it is not a ready copied definition.
+    let proposal = json!({"reason":"different_definition","environment":other,"source":found});
+    sqlx::query("INSERT INTO mcp_server_offerings(server_id,machine_id,environment_id,state,source,proposal,seen_at,reason) VALUES($1,$2,$3,'found','{}'::jsonb,$4,$5,'different_definition')")
+        .bind(imported.id)
+        .bind(machine)
+        .bind(other)
+        .bind(proposal)
+        .bind(world.now())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     drop(conn);
     let shown = world
         .app
@@ -1029,7 +1178,9 @@ async fn selecting_a_different_found_definition_needs_both_server_management_and
         .body(&body)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary reviewed offering selection keeps its full native result");
     replied.await.unwrap();
     assert_eq!(selected.id, imported.id);
     assert!(

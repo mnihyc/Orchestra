@@ -94,7 +94,7 @@ test('the dialogs of an org’s settings: a member moved, held out and removed, 
 });
 
 test('a department’s sections and the settings editor with a lock above', async ({ page }) => {
-  await open(page, '/org/acme.research/settings/policies');
+  await open(page, '/org/acme.research/settings/defaults');
   await expect(page.locator('[data-setting="sandbox.mode"] [data-provenance="locked"]')).toBeVisible();
   await expectAccessibleSettled(page);
 
@@ -110,13 +110,13 @@ test('a department’s sections and the settings editor with a lock above', asyn
 
 test('a project’s settings, section by section, and a topic’s', async ({ page }) => {
   await open(page, `/project/${ACME.web}/settings`);
-  for (const section of ['', '?section=policies', '?section=tags', '?section=destinations']) {
+  for (const section of ['', '?section=defaults', '?section=tags', '?section=destinations']) {
     await page.goto(`/project/${ACME.web}/settings${section}`);
     const current = section.includes('policies') ? 'Defaults' : section.includes('tags') ? 'Tags' : section.includes('destinations') ? 'Outside Orch' : 'General';
     await expect(page.getByRole('heading', { name: current, level: 1 })).toBeVisible();
     await expectAccessibleSettled(page);
   }
-  for (const section of ['', '&section=policies', '&section=destinations']) {
+  for (const section of ['', '&section=defaults', '&section=destinations']) {
     await page.goto(`/topic/${ACME.fixLogin}?tab=settings${section}`);
     await expect(page.getByRole('navigation', { name: 'Sections of the settings of Fix login' })).toBeVisible();
     await expectAccessibleSettled(page);
@@ -135,7 +135,7 @@ for (const sections of [['general', 'members', 'policies'], ['tags', 'channels',
 }
 
 test('a project’s policies for somebody who may only read them', async ({ page }) => {
-  await open(page, `/project/${ACME.web}/settings?section=policies`, PEOPLE.vera);
+  await open(page, `/project/${ACME.web}/settings?section=defaults`, PEOPLE.vera);
   await expect(page.getByRole('heading', { name: 'Defaults', level: 1 })).toBeVisible();
   await expectAccessibleSettled(page);
 });

@@ -17,7 +17,7 @@ import { NOT_PICKING, TimelineContextValue, type TimelineContext, useTimelineCon
 import { ConversationLane } from '@/features/timeline/Lane';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { recentTurns } from '@/features/timeline/rows';
-import type { ViewProps } from '@/features/workbench/views';
+import { useViewShown, type ViewProps } from '@/features/workbench/views';
 import type { Item } from '@/generated/api-types';
 import { forgetThreadRead, useSocketStatus, useThreadFeed } from '@/realtime/live';
 import { allTabs } from '@/features/workbench/layout';
@@ -94,8 +94,11 @@ function ChildStream({ item, tool, panel }: { item: ToolItem; tool: ChildTool; p
 
 export function SubagentLane({ item, panel = false }: { item: ToolItem; panel?: boolean }) {
   const context = useTimelineContext();
+  const { t } = useTranslation();
   const tool = item.payload.tool;
-  if (tool.kind !== 'subagent' || context.childStreams?.includes(tool.child_stream) === true) return null;
+  if (tool.kind !== 'subagent' || item.thread_id !== (context.inspection?.threadId ?? context.threadId)
+    || context.childStreams?.includes(tool.child_stream) === true) return null;
+  if (tool.child_stream === '') return <p role="status" className="text-sm text-text-muted">{t('timeline.subagent.unavailable')}</p>;
   return <ChildStream item={item} tool={tool} panel={panel} />;
 }
 
@@ -121,9 +124,10 @@ function Panel({ threadId, itemId, continuationId }: { threadId: string; itemId:
 }
 
 export function SubagentPanel({ tab }: ViewProps) {
+  const shown = useViewShown();
   const threadId = tab.of?.thread;
   const itemId = tab.of?.item;
-  return threadId === undefined || itemId === undefined ? null : <OwnedPanel threadId={threadId} itemId={itemId}
+  return !shown || threadId === undefined || itemId === undefined ? null : <OwnedPanel threadId={threadId} itemId={itemId}
     tabId={tab.id} continuationId={tab.of?.continuation ?? null} />;
 }
 

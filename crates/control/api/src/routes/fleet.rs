@@ -15,22 +15,75 @@ use orch_db::{Conn, DbError};
 use orch_engine::updates::{self, Target, UpdateError};
 use orch_types::{Id, Time, new_id};
 
+mod recycle_operation;
+mod update_creation;
+
+mod update_operation;
+
 /// Binds fleet recycling and batch update requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(api::NodeEnvironmentRecycle, recycle)
-        .on(api::NodeEnvironmentUpdatePreflight, update_preflight)
-        .on(api::NodeEnvironmentUpdateCreate, update_create)
-        .on(api::EnvironmentUpdateBatchPreflight, update_all_preflight)
-        .on(api::EnvironmentUpdateBatchCreate, update_all_create);
-    registry
-        .on(
-            api::NodeEnvironmentMovePreflight,
-            environments::moves::batch_preflight,
+        .creation(
+            api::NodeEnvironmentUpdateCreate,
+            update_operation::confirmation::binding(),
         )
-        .on(
+        .creation(
+            api::EnvironmentUpdateBatchCreate,
+            update_creation::binding(),
+        )
+        .on_with_operation(
+            api::NodeEnvironmentRecycle,
+            crate::key_operations::native::effects::prepare::<recycle_operation::Recycle>,
+            recycle_operation::recycle,
+        )
+        .on_with_initial_operation(
+            api::NodeEnvironmentUpdatePreflight,
+            crate::key_operations::native::effects::initial::<update_operation::Preflight>,
+            crate::key_operations::native::effects::prepare::<update_operation::Preflight>,
+            update_operation::preflight,
+        )
+        .on_with_initial_operation(
+            api::NodeEnvironmentUpdateCreate,
+            crate::key_operations::native::effects::initial::<
+                update_operation::confirmation::Confirm,
+            >,
+            crate::key_operations::native::effects::prepare::<
+                update_operation::confirmation::Confirm,
+            >,
+            update_operation::confirmation::create,
+        )
+        .on_with_initial_operation(
+            api::EnvironmentUpdateBatchPreflight,
+            crate::key_operations::native::effects::initial::<update_operation::Preflight<true>>,
+            crate::key_operations::native::effects::prepare::<update_operation::Preflight<true>>,
+            update_operation::global_preflight,
+        )
+        .on_with_initial_operation(
+            api::EnvironmentUpdateBatchCreate,
+            crate::key_operations::native::effects::initial::<update_creation::Create>,
+            crate::key_operations::native::effects::prepare::<update_creation::Create>,
+            update_creation::create,
+        );
+    registry
+        .creation(
             api::NodeEnvironmentMoveCreate,
-            environments::moves::batch_create,
+            environments::moves::batch::confirmation::binding(),
+        )
+        .on_with_initial_operation(
+            api::NodeEnvironmentMovePreflight,
+            crate::key_operations::native::effects::initial::<environments::moves::batch::Preview>,
+            crate::key_operations::native::effects::prepare::<environments::moves::batch::Preview>,
+            environments::moves::batch::preflight,
+        )
+        .on_with_initial_operation(
+            api::NodeEnvironmentMoveCreate,
+            crate::key_operations::native::effects::initial::<
+                environments::moves::batch::confirmation::Confirm,
+            >,
+            crate::key_operations::native::effects::prepare::<
+                environments::moves::batch::confirmation::Confirm,
+            >,
+            environments::moves::batch::confirmation::create,
         );
 }
 
@@ -180,225 +233,4 @@ pub(crate) async fn recycle_ids(
         reply.candidates.push(candidate);
     }
     Ok(reply)
-}
-
-async fn recycle(ctx: Ctx, (): (), body: api::RecycleBody) -> ApiResult<api::RecycleReply> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let node = ctx.id("id")?;
-    authorization::require(
-        &mut conn,
-        &principal,
-        node,
-        authorization::VIEW,
-        orch_authz::Act::Use,
-        orch_authz::Policy::default(),
-    )
-    .await?;
-    let ids = envs::environments_under(&mut conn, node).await?;
-    drop(conn);
-    recycle_ids(&ctx, &ids, &body, None).await
-}
-
-async fn update_preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::NodeEnvironmentUpdatePreflightBody,
-) -> ApiResult<api::EnvironmentUpdateBatchPlan> {
-    let node = ctx.id("id")?;
-    plan_updates(ctx, body, Some(node)).await
-}
-
-async fn update_all_preflight(
-    ctx: Ctx,
-    (): (),
-    body: api::NodeEnvironmentUpdatePreflightBody,
-) -> ApiResult<api::EnvironmentUpdateBatchPlan> {
-    plan_updates(ctx, body, None).await
-}
-
-async fn plan_updates(
-    mut ctx: Ctx,
-    body: api::NodeEnvironmentUpdatePreflightBody,
-    node: Option<Id>,
-) -> ApiResult<api::EnvironmentUpdateBatchPlan> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.into_principal();
-    let mut ids = body.environment_ids;
-    ids.sort_unstable();
-    ids.dedup();
-    if let Some(node) = node {
-        authorization::require(
-            &mut tx,
-            &principal,
-            node,
-            authorization::VIEW,
-            orch_authz::Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await?;
-        let under = envs::environments_under(&mut tx, node).await?;
-        if ids.iter().any(|id| !under.contains(id)) {
-            return Err(ApiError::not_found());
-        }
-    }
-    let views = environments::environments_of(&ctx, &mut tx, &principal, &ids).await?;
-    let id = new_id();
-    let mut recipes = Vec::new();
-    let mut plans_shown = Vec::new();
-    let mut skipped = Vec::new();
-    for view in views {
-        let draft = match ctx
-            .app
-            .engine
-            .draft_update(
-                &mut tx,
-                &principal,
-                Target::Environment(view.base.id),
-                api::UpdatePreflightReason::Update,
-                None,
-            )
-            .await
-        {
-            Ok(draft) => draft,
-            Err(UpdateError::Denied) => {
-                skipped.push(api::EnvironmentUpdateSkipped {
-                    environment: view.base,
-                    reason: api::UpdateSkipReason::NoPermission,
-                });
-                continue;
-            }
-            Err(UpdateError::Blocked(_)) | Err(UpdateError::NotFound) => {
-                skipped.push(api::EnvironmentUpdateSkipped {
-                    environment: view.base,
-                    reason: api::UpdateSkipReason::NotUpdatable,
-                });
-                continue;
-            }
-            Err(error) => return Err(plans::refused(error)),
-        };
-        if draft.updates.is_empty() {
-            skipped.push(api::EnvironmentUpdateSkipped {
-                environment: view.base,
-                reason: api::UpdateSkipReason::UpToDate,
-            });
-            continue;
-        }
-        plans_shown.push(plans::environment_plan(&ctx, &mut tx, &principal, id, &draft).await?);
-        if draft.blockers.is_empty() {
-            recipes.push(draft.recipe);
-        }
-    }
-    let place = node.map_or(orch_settings::Place::System, orch_settings::Place::Node);
-    let options = updates::options(&mut tx, place, None)
-        .await
-        .map_err(plans::refused)?;
-    let parallel = orch_settings::get::<i64>(
-        &mut tx,
-        place,
-        orch_settings_contract::registry::keys::SWITCH_BATCH_PARALLEL,
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .unwrap_or(updates::DEFAULT_BATCH_PARALLEL);
-    let estimate = orch_engine::jobs::estimates::together(
-        &plans_shown
-            .iter()
-            .map(|p| p.estimate.clone())
-            .collect::<Vec<_>>(),
-        parallel,
-    );
-    plans::keep_batch(&ctx, &mut tx, id, node, &recipes, false).await?;
-    let executable = recipes.len() as i64;
-    let affected: Vec<_> = recipes
-        .iter()
-        .flat_map(|recipe| recipe.threads.iter().copied())
-        .collect();
-    let notify = Some(plans::audience(&ctx, &mut tx, &principal, &affected).await?);
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(api::EnvironmentUpdateBatchPlan {
-        notify,
-        preflight_id: id,
-        expires_at: Time::new(updates::expires(ctx.now)),
-        plans: plans_shown,
-        skipped,
-        executable,
-        options,
-        estimate,
-    })
-}
-
-async fn update_create(
-    ctx: Ctx,
-    query: orch_api_contract::forks::UpdateConfirmQuery,
-    body: ForkCreateBody,
-) -> ApiResult<api::EnvironmentBatch> {
-    let node = ctx.id("id")?;
-    create_updates(ctx, body, Some(node), query).await
-}
-
-async fn update_all_create(
-    ctx: Ctx,
-    query: orch_api_contract::forks::UpdateConfirmQuery,
-    body: ForkCreateBody,
-) -> ApiResult<api::EnvironmentBatch> {
-    create_updates(ctx, body, None, query).await
-}
-
-async fn create_updates(
-    mut ctx: Ctx,
-    body: ForkCreateBody,
-    node: Option<Id>,
-    query: orch_api_contract::forks::UpdateConfirmQuery,
-) -> ApiResult<api::EnvironmentBatch> {
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.into_principal();
-    if let Some(node) = node {
-        authorization::require(
-            &mut tx,
-            &principal,
-            node,
-            authorization::VIEW,
-            orch_authz::Act::Use,
-            orch_authz::Policy::default(),
-        )
-        .await?;
-    }
-    let drafts = plans::batch_drafts(&ctx, &mut tx, &principal, node, false, &body).await?;
-    if let Some(node) = node {
-        let under = envs::environments_under(&mut tx, node).await?;
-        if drafts
-            .iter()
-            .any(|draft| !under.contains(&draft.recipe.target.id()))
-        {
-            return Err(ApiError::not_found());
-        }
-    }
-    let batch_id = new_id();
-    let affected: Vec<_> = drafts
-        .iter()
-        .flat_map(|draft| draft.recipe.threads.iter().copied())
-        .collect();
-    let mut jobs = Vec::new();
-    for draft in drafts {
-        let environment = environments::show(&ctx, &mut tx, &principal, draft.recipe.target.id())
-            .await?
-            .base;
-        let row = orch_engine::jobs::recreate::queue(&mut tx, draft, Some(batch_id), ctx.now)
-            .await
-            .map_err(plans::refused)?;
-        jobs.push(api::EnvironmentBatchJob {
-            environment,
-            job: shown_jobs::view(&mut tx, &row).await?,
-        });
-    }
-    if query.notify.unwrap_or(true) {
-        plans::tell_update(&ctx, &mut tx, &affected, batch_id).await?;
-    }
-    orch_db::queries::jobs::forks::forget_preflight(&mut tx, body.preflight_id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    ctx.app.engine.kick();
-    Ok(api::EnvironmentBatch { batch_id, jobs })
 }

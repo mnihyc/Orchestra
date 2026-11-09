@@ -2,9 +2,8 @@
 
 use super::{Engine, EngineError};
 use crate::{
-    commands::{Outcome, Outgoing},
     history_pages::{Backward, Bundle, Forward, Source},
-    views::{People, item_view, turn_view},
+    views::People,
     written,
 };
 use futures::StreamExt;
@@ -12,10 +11,10 @@ use orch_db::{
     Conn,
     queries::{storage, thread_history_cuts as rows, threads},
 };
-use orch_link_contract::commands::{AgentReadSession, AgentReadSessionResult, SerialKey};
+use orch_link_contract::commands::AgentReadSessionResult;
 use orch_types::{Hash, Id, Json};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 /// How many turns are written at a time when a cut is read: enough that the queries of a page are shared by many turns,
 /// few enough that a page of written turns is held in memory without notice.
@@ -28,7 +27,7 @@ struct Rendered {
     /// Its line of the index, before the number of the line it begins at.
     preview: String,
     /// Its written form.
-    text: String,
+    text: crate::history_pages::Text,
 }
 
 /// The line of the index that names a turn: its number, when it began, who asked, what was asked and how it ended.
@@ -79,56 +78,32 @@ async fn render(
             ))
         })
         .collect::<Result<_, serde_json::Error>>()?;
-    let mut page: Vec<(
-        Vec<orch_db::queries::threads::ItemRow>,
-        orch_db::queries::threads::TurnRow,
-    )> = Vec::with_capacity(bundles.len());
-    let mut who: Vec<Id> = Vec::new();
-    for bundle in bundles {
-        let mut items = bundle.items;
-        items.retain(|item| item.kind != "reasoning");
-        who.extend(items.iter().filter_map(|item| item.author_id));
-        who.extend(bundle.turn.interrupted_by);
-        page.push((items, bundle.turn));
+    let mut who = BTreeSet::new();
+    for bundle in &bundles {
+        who.extend(bundle.authors()?);
     }
     let people = People::load(conn, who.iter().copied()).await?;
-    let names: HashMap<Id, String> = threads::people(conn, &who)
+    let names: HashMap<Id, String> = threads::people(conn, &who.into_iter().collect::<Vec<_>>())
         .await?
         .into_iter()
         .map(|person| (person.id, person.display_name))
         .collect();
-    let typed: Vec<_> = page
+    let infos = bundles
         .iter()
-        .map(|(items, turn)| {
-            Ok((
-                turn_view(turn, "", &people)?,
-                items
-                    .iter()
-                    .map(|item| item_view(item, &people))
-                    .collect::<Vec<_>>(),
-            ))
-        })
-        .collect::<Result<_, EngineError>>()?;
-    let mut approvals: Vec<Id> = Vec::new();
-    let mut streams: Vec<String> = Vec::new();
-    for (_, items) in &typed {
-        for item in items {
-            match &item.payload {
-                orch_api_contract::threads::ItemPayload::Approval(approval) => {
-                    approvals.push(approval.approval_id);
-                }
-                orch_api_contract::threads::ItemPayload::ToolCall(call) => {
-                    if let orch_api_contract::threads::ToolPayload::Subagent {
-                        child_stream, ..
-                    } = &call.tool
-                    {
-                        streams.push(child_stream.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+        .map(|bundle| bundle.presentation(&people))
+        .collect::<Result<Vec<_>, _>>()?;
+    let approvals: Vec<Id> = infos
+        .iter()
+        .flat_map(|info| info.approvals.iter().copied())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let streams: Vec<String> = infos
+        .iter()
+        .flat_map(|info| info.streams.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let mut beside = written::Beside::default();
     if !approvals.is_empty() {
         for body in rows::metadata_among(conn, cut.id, "approval", &approvals).await? {
@@ -144,41 +119,27 @@ async fn render(
     }
     if !streams.is_empty() {
         // Child streams are part of the captured tool result, never today's suffix.
-        let turn_ids: Vec<Id> = page.iter().map(|(_, turn)| turn.id).collect();
+        let turn_ids: Vec<Id> = bundles.iter().map(|bundle| bundle.turn.id).collect();
         beside.sub_agents = rows::last_sub_messages(conn, cut.id, &turn_ids, &streams).await?;
     }
-    let mut out = Vec::with_capacity(page.len());
-    for ((items, turn), (typed_turn, typed_items)) in page.iter().zip(&typed) {
-        let main: Vec<_> = typed_items
-            .iter()
-            .filter(|item| item.stream == "main")
-            .collect();
-        let first = items
-            .iter()
-            .find(|item| item.kind == "user_message" && item.turn_id == Some(turn.id));
-        let author = first
-            .and_then(|item| item.author_id)
+    let mut out = Vec::with_capacity(bundles.len());
+    for (bundle, info) in bundles.iter().zip(&infos) {
+        let author = info
+            .author
             .and_then(|id| names.get(&id))
             .map(String::as_str);
-        let asked = first
-            .into_iter()
-            .flat_map(|item| item.payload["parts"].as_array())
-            .flatten()
-            .filter_map(|part| part["text"].as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
         out.push(Rendered {
-            ordinal: i64::from(turn.ordinal),
-            preview: preview_of(turn, author, &asked),
-            text: written::turn_text(
-                &written::Part {
-                    turn: typed_turn,
-                    agent: agents.get(&turn.segment_id).map_or("Agent", String::as_str),
-                    items: main,
-                },
+            ordinal: i64::from(bundle.turn.ordinal),
+            preview: preview_of(&bundle.turn, author, &info.asked),
+            text: bundle.write(
+                &people,
                 &beside,
+                agents
+                    .get(&bundle.turn.segment_id)
+                    .map_or("Agent", String::as_str),
                 detail,
-            ),
+                info,
+            )?,
         });
     }
     Ok(out)
@@ -344,21 +305,19 @@ pub(crate) async fn transcript_file(
                 render(&mut conn, cut, bundles, written::Detail::Full).await?
             };
             for each in rendered {
-                let text = mask(each.text);
+                let text = crate::raw_events::mask_spooled(&redactor, &each.text)?;
                 let preview = mask(each.preview);
                 if turns > 0 {
                     body_file.write_all(b"\n").map_err(scratch_error)?;
                 }
-                body_file
-                    .write_all(text.as_bytes())
-                    .map_err(scratch_error)?;
+                text.copy_to(&mut body_file)?;
                 writeln!(
                     index_file,
                     "{}",
                     serde_json::to_string(&(offset, preview)).map_err(scratch_error)?
                 )
                 .map_err(scratch_error)?;
-                offset += text.lines().count() + 1;
+                offset += text.lines() + 1;
                 turns += 1;
             }
         }
@@ -533,19 +492,26 @@ pub(crate) async fn recent(
         return Ok(None);
     };
     let (from, to) = (first.ordinal, latest.ordinal);
-    let mut text = taken
-        .iter()
-        .map(|each| each.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if let Some(budget) = budget
-        && text.len() > budget
-    {
-        let mut end = budget;
-        while !text.is_char_boundary(end) {
-            end -= 1;
+    let mut text = String::new();
+    let mut clipped = false;
+    for each in &taken {
+        let room = budget.map(|budget| budget.saturating_sub(text.len()));
+        if !text.is_empty() {
+            if room == Some(0) {
+                clipped = true;
+                break;
+            }
+            text.push('\n');
         }
-        text.truncate(end);
+        let room = budget.map(|budget| budget.saturating_sub(text.len()));
+        let part = each.text.read(room)?;
+        clipped |= part.len() < each.text.len();
+        text.push_str(&part);
+        if clipped {
+            break;
+        }
+    }
+    if clipped {
         text.push_str("\n\n(This turn is cut here; the rest of it is in the transcript file.)");
     }
     Ok(Some(crate::summaries::Carried {
@@ -594,7 +560,8 @@ pub(crate) async fn summary_input(
             if !indexing && brief_used.saturating_add(size) <= brief_room {
                 brief_used += size;
                 left = left.saturating_sub(size);
-                brief.push(each.text);
+                // Materialize only a turn already proven to fit the summary's remaining budget.
+                brief.push(each.text.read(None)?);
                 continue;
             }
             indexing = true;
@@ -744,436 +711,8 @@ impl From<&AgentReadSessionResult> for NativeRecordEvidence {
     }
 }
 
-/// record_lines may retain only K..N and deliberately keeps those native
-/// ordinals. Counts/report plus contiguous 1..N coverage establish a prefix;
-/// warning prose and equality between two equally truncated suffixes do not.
-fn complete_native_record(
-    entries: &[orch_agent_contract::discovery::RecordedEntry],
-    evidence: &NativeRecordEvidence,
-) -> bool {
-    use orch_agent_contract::{
-        discovery::RecordedEntry,
-        history::{Fidelity, KindCounts},
-    };
-    let Ok(count) = i64::try_from(entries.len()) else {
-        return false;
-    };
-    if count == 0
-        || evidence.entries != count
-        || evidence.turns <= 0
-        || evidence.report.items_total != count
-        || evidence.report.fidelity == Fidelity::Summary
-        || !evidence.report.dropped.is_empty()
-    {
-        return false;
-    }
-    let mut last = 0_i64;
-    let mut kinds = BTreeMap::<String, KindCounts>::new();
-    for entry in entries {
-        let turn = entry.turn();
-        if turn <= 0 || (turn != last && last.checked_add(1) != Some(turn)) {
-            return false;
-        }
-        last = turn;
-        let kind = match entry {
-            RecordedEntry::Said(words) => {
-                if words.left_out != 0 {
-                    return false;
-                }
-                "user_message".to_owned()
-            }
-            RecordedEntry::Item(item) => {
-                let Ok(kind) = serde_json::to_value(item.content.kind()) else {
-                    return false;
-                };
-                let Some(kind) = kind.as_str() else {
-                    return false;
-                };
-                kind.to_owned()
-            }
-        };
-        kinds.entry(kind).or_default().kept += 1;
-    }
-    last == evidence.turns && kinds == evidence.report.by_kind
-}
-
-pub(crate) async fn native_boundary(
-    engine: &Engine,
-    cut: &rows::Cut,
-    machine: Id,
-    provider: Id,
-    agent: Id,
-    command: Id,
-) -> Result<Option<NativeBoundary>, EngineError> {
-    if let Some(old) = cut.artifacts.get("native_boundary") {
-        let boundary:NativeBoundary=serde_json::from_value(old.clone())
-            .map_err(|_|EngineError::unreadable("The retained native witness lacks complete typed record evidence; another child is not admitted."))?;
-        if boundary.record_size < 0
-            || boundary.record_size > orch_agent_contract::discovery::RECORD_MAX_BYTES as i64
-        {
-            return Err(EngineError::unreadable(
-                "The retained source record exceeds the native-record bound.",
-            ));
-        }
-        let bytes = read_bytes(
-            engine,
-            &serde_json::json!({"blob":boundary.record,"size":boundary.record_size}),
-        )
-        .await?;
-        let (entries, unknown) = orch_agent_contract::discovery::read_record(
-            std::str::from_utf8(&bytes).map_err(EngineError::unreadable)?,
-        );
-        if unknown != 0
-            || !complete_native_record(&entries, &boundary.evidence)
-            || boundary.ordinal == 0
-            || i64::from(boundary.record_last) != boundary.evidence.turns
-            || boundary.ordinal > boundary.record_last
-        {
-            // A retained operation may already own a child. Damaged/older
-            // evidence cannot authorize another method or replacement child.
-            return Err(EngineError::unreadable(
-                "The retained native witness does not certify a complete prefix; another child is not admitted.",
-            ));
-        }
-        return Ok(Some(boundary));
-    }
-    if cut.first_turn != 1 {
-        return Ok(None);
-    }
-    let (Some(segment), Some(native)) = (cut.source_segment_id, cut.source_native_ref.as_ref())
-    else {
-        return Ok(None);
-    };
-    {
-        // The proof matches the whole record of the session with every item of the cut. What takes more than a record can
-        // hold cannot be matched to a complete one, so nothing of it is read and the session is not asked for its record:
-        // first by the number of its items, which costs one pass over the cut's rows, and only for a cut of a size a record
-        // could hold, by the room the bodies take.
-        let mut conn = engine.db().acquire().await?;
-        let limit = super::native_proof_limit(&mut conn, cut.thread_id).await?;
-        let counted = rows::counts(&mut conn, cut.id).await?;
-        if counted.items.values().sum::<i64>() > super::native_proof_items(limit)
-            || rows::payload_bytes(&mut conn, cut.id).await? > limit
-        {
-            return Ok(None);
-        }
-    }
-    let (turns, items, aliases) = {
-        let mut conn = engine.db().acquire().await?;
-        (
-            rows::turns(&mut conn, cut.id, 1, i64::from(cut.last_turn)).await?,
-            rows::items_between(&mut conn, cut.id, 0, cut.captured_seq, None).await?,
-            rows::native_aliases(&mut conn, cut.id)
-                .await?
-                .into_iter()
-                .collect::<HashMap<_, _>>(),
-        )
-    };
-    if items.is_empty() {
-        return Ok(None);
-    }
-    let outcome = crate::commands::run(
-        engine.inner.commands.as_ref(),
-        Outgoing::new(
-            command,
-            machine,
-            SerialKey::Harness {
-                provider_id: provider,
-                agent_id: agent,
-            },
-            &AgentReadSession {
-                provider_id: provider,
-                agent_id: agent,
-                native_session_ref: native.clone(),
-                write: true,
-            },
-        )?,
-    )
-    .await?;
-    let read: AgentReadSessionResult = match outcome {
-        Outcome::Succeeded(value) => serde_json::from_value(value)?,
-        // This operation is a read, not child creation. A known failed record
-        // read cannot authorize a guessed native cut, but the already captured
-        // conversation may still take the ordinary neutral/file fallback.
-        Outcome::Failed(_) => return Ok(None),
-        _ => {
-            return Err(EngineError::unreadable(
-                "The original native record outcome is unconfirmed; no native boundary is guessed.",
-            ));
-        }
-    };
-    let Some(record) = read.record else {
-        return Ok(None);
-    };
-    if record.size < 0 || record.size > orch_agent_contract::discovery::RECORD_MAX_BYTES as i64 {
-        return Ok(None);
-    }
-    let store = engine
-        .blobs()
-        .ok_or_else(|| EngineError::unreadable("The native record store is unavailable."))?;
-    let mut stream = store
-        .get(&record.blob, None)
-        .await
-        .map_err(EngineError::unreadable)?
-        .body;
-    let mut bytes = Vec::new();
-    while let Some(piece) = stream.next().await {
-        let piece = piece.map_err(EngineError::unreadable)?;
-        if bytes.len().saturating_add(piece.len())
-            > orch_agent_contract::discovery::RECORD_MAX_BYTES
-        {
-            return Ok(None);
-        }
-        bytes.extend_from_slice(&piece);
-    }
-    if bytes.len() as i64 != record.size || Hash::of(&bytes) != record.blob {
-        return Err(EngineError::unreadable(
-            "The captured native record failed its identity check.",
-        ));
-    }
-    let text = std::str::from_utf8(&bytes).map_err(EngineError::unreadable)?;
-    let (entries, unreadable) = orch_agent_contract::discovery::read_record(text);
-    let evidence = NativeRecordEvidence::from(&read);
-    if unreadable != 0 || !complete_native_record(&entries, &evidence) {
-        return Ok(None);
-    }
-    let mut ordinals = BTreeMap::<Id, u32>::new();
-    let mut witnesses = BTreeMap::<u32, String>::new();
-    let mut matched = BTreeMap::new();
-    // Each recorded item is found by the name the adapter gave it, and each item of Orch by the name it is known by: a
-    // name is looked up, never searched for among all of them.
-    let mut recorded_by_name: HashMap<&str, Vec<&orch_agent_contract::discovery::RecordedItem>> =
-        HashMap::new();
-    for entry in &entries {
-        if let orch_agent_contract::discovery::RecordedEntry::Item(recorded) = entry {
-            recorded_by_name
-                .entry(recorded.native_ref.as_str())
-                .or_default()
-                .push(recorded);
-        }
-    }
-    let mut items_by_name: HashMap<&str, Vec<&orch_db::queries::threads::ItemRow>> = HashMap::new();
-    for item in &items {
-        if let Some(name) = aliases
-            .get(&item.id)
-            .map(String::as_str)
-            .or(item.native_ref.as_deref())
-        {
-            items_by_name.entry(name).or_default().push(item);
-        }
-    }
-    let before_orch_said: BTreeSet<&str> = items
-        .iter()
-        .filter(|item| item.before_orch && item.kind == "user_message")
-        .filter_map(|item| item.native_ref.as_deref())
-        .collect();
-    for item in items
-        .iter()
-        .filter(|item| matches!(item.kind.as_str(), "agent_message" | "tool_call" | "plan"))
-    {
-        let Some(reference) = aliases
-            .get(&item.id)
-            .map(String::as_str)
-            .or(item.native_ref.as_deref())
-        else {
-            return Ok(None);
-        };
-        if reference.starts_with("fork-copy:") {
-            return Ok(None);
-        }
-        let recorded = match recorded_by_name.get(reference).map(Vec::as_slice) {
-            Some([only]) => *only,
-            _ => return Ok(None),
-        };
-        let Some(ordinal) = u32::try_from(recorded.turn)
-            .ok()
-            .filter(|ordinal| *ordinal > 0)
-        else {
-            return Ok(None);
-        };
-        let content = serde_json::to_value(&recorded.content)?;
-        if content["kind"] != item.kind
-            || content["payload"] != item.payload
-            || recorded.stream != item.stream
-        {
-            // Timeline edits do not rewrite a native model's history. A shared
-            // ID alone is not proof that this frozen body is that native body.
-            return Ok(None);
-        }
-        matched.insert(item.id, recorded.native_ref.clone());
-        witnesses
-            .entry(ordinal)
-            .or_insert_with(|| reference.to_owned());
-        if let Some(turn) = item.turn_id {
-            if ordinals
-                .insert(turn, ordinal)
-                .is_some_and(|old| old != ordinal)
-            {
-                return Ok(None);
-            }
-        } else if !item.before_orch {
-            return Ok(None);
-        }
-    }
-    let mut previous = 0;
-    for turn in &turns {
-        let Some(ordinal) = ordinals.get(&turn.id).copied() else {
-            return Ok(None);
-        };
-        if ordinal <= previous {
-            return Ok(None);
-        }
-        previous = ordinal;
-    }
-    let ordinal = if turns.is_empty() {
-        witnesses.keys().next_back().copied()
-    } else {
-        Some(previous)
-    };
-    let Some(ordinal) = ordinal else {
-        return Ok(None);
-    };
-    let visible_ordinals: BTreeSet<_> = witnesses.keys().copied().collect();
-    for entry in entries
-        .iter()
-        .filter(|entry| entry.turn() <= i64::from(ordinal))
-    {
-        match entry {
-            orch_agent_contract::discovery::RecordedEntry::Said(words) => {
-                let before = before_orch_said.contains(words.native_ref.as_str());
-                if !before
-                    && !u32::try_from(words.turn)
-                        .ok()
-                        .is_some_and(|turn| visible_ordinals.contains(&turn))
-                {
-                    return Ok(None);
-                }
-            }
-            orch_agent_contract::discovery::RecordedEntry::Item(recorded) => {
-                if matches!(
-                    &recorded.content,
-                    orch_agent_contract::events::ItemContent::Marker(_)
-                ) {
-                    return Ok(None);
-                }
-                let item = match items_by_name
-                    .get(recorded.native_ref.as_str())
-                    .map(Vec::as_slice)
-                {
-                    Some([only]) => *only,
-                    _ => return Ok(None),
-                };
-                let content = serde_json::to_value(&recorded.content)?;
-                if content["kind"] != item.kind
-                    || content["payload"] != item.payload
-                    || recorded.stream != item.stream
-                {
-                    return Ok(None);
-                }
-                matched.insert(item.id, recorded.native_ref.clone());
-            }
-        }
-    }
-    let witness = witnesses
-        .get(&ordinal)
-        .ok_or_else(|| EngineError::unreadable("The native cut witness is absent."))?
-        .clone();
-    let record_last = entries
-        .iter()
-        .map(orch_agent_contract::discovery::RecordedEntry::turn)
-        .max()
-        .and_then(|last| u32::try_from(last).ok())
-        .ok_or_else(|| EngineError::unreadable("The native record turn boundary is invalid."))?;
-    let boundary = NativeBoundary {
-        source_segment: segment,
-        native_ref: native.clone(),
-        ordinal,
-        witness,
-        record: record.blob,
-        record_size: record.size,
-        record_last,
-        evidence,
-    };
-    let mut tx = engine.db().begin().await?;
-    rows::keep_native_aliases(&mut tx, cut.id, &serde_json::to_value(matched)?).await?;
-    if !rows::keep_artifact(
-        &mut tx,
-        cut.id,
-        "native_boundary",
-        &serde_json::to_value(&boundary)?,
-        &[record.blob],
-    )
-    .await?
-    {
-        return Err(EngineError::unreadable(
-            "The native boundary has another retained witness.",
-        ));
-    }
-    tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(Some(boundary))
-}
-
-/// Readback compares the whole captured native record prefix, including every
-/// ordered Said/tool/assistant/marker record. A marker subset is insufficient.
-/// The caller has already retained the successful child and must not fork again
-/// when this read is unknown or different.
-pub(crate) async fn verify_native_record(
-    engine: &Engine,
-    boundary: &NativeBoundary,
-    child: &AgentReadSessionResult,
-) -> Result<Hash, EngineError> {
-    if boundary.record_size < 0
-        || boundary.record_size > orch_agent_contract::discovery::RECORD_MAX_BYTES as i64
-    {
-        return Err(EngineError::unreadable(
-            "The retained source record exceeds the native-record bound.",
-        ));
-    }
-    let expected = read_bytes(
-        engine,
-        &serde_json::json!({"blob":boundary.record,"size":boundary.record_size}),
-    )
-    .await?;
-    let record = child.record.ok_or_else(|| {
-        EngineError::unreadable("The owned native child has no complete record readback.")
-    })?;
-    if record.size < 0 || record.size > orch_agent_contract::discovery::RECORD_MAX_BYTES as i64 {
-        return Err(EngineError::unreadable(
-            "The child record exceeds the existing native-record bound.",
-        ));
-    }
-    let actual = read_bytes(
-        engine,
-        &serde_json::json!({"blob":record.blob,"size":record.size}),
-    )
-    .await?;
-    let (before, unknown_before) = orch_agent_contract::discovery::read_record(
-        std::str::from_utf8(&expected).map_err(EngineError::unreadable)?,
-    );
-    let (after, unknown_after) = orch_agent_contract::discovery::read_record(
-        std::str::from_utf8(&actual).map_err(EngineError::unreadable)?,
-    );
-    if unknown_before != 0
-        || unknown_after != 0
-        || !complete_native_record(&before, &boundary.evidence)
-        || !complete_native_record(&after, &NativeRecordEvidence::from(child))
-        || child.turns != i64::from(boundary.ordinal)
-    {
-        return Err(EngineError::unreadable(
-            "The native record/report does not certify the complete prefix from native turn1; the successful child is retained without replacement.",
-        ));
-    }
-    let before: Vec<_> = before
-        .into_iter()
-        .filter(|entry| entry.turn() <= i64::from(boundary.ordinal))
-        .collect();
-    if before.is_empty() || before != after {
-        return Err(EngineError::unreadable(
-            "The owned child's complete native record differs from the confirmed source prefix; no activation or replacement child was admitted.",
-        ));
-    }
-    Ok(record.blob)
-}
+mod native;
+pub(crate) use native::{native_boundary, verify_native_record};
 
 /// Copy readable history, not another execution lane or pending queue. Every
 /// copied row is owned by the target root. The whole publication is one TX.
@@ -1211,7 +750,7 @@ pub(crate) async fn copy(
         .active_continuation_id;
     // The identity a copied row has in the target is made from the target's and the original's, in the database
     // (`md5(target || original)`), so that no table of all the identities exists to hold or to send: a history of any
-    // length is copied by the same statements, a page of items at a time. A reference to a row that the cut does not hold
+    // length copies its turns and items a page at a time. A reference to a row that the cut does not hold
     // is nothing, as it was when the identities were tabled.
     let items_held = rows::item_count(unit.conn, cut.id).await?;
     let copyable: bool = sqlx::query_scalar(
@@ -1264,17 +803,12 @@ pub(crate) async fn copy(
       WHERE r.cut_id=$2 AND r.kind='input'")
         .bind(target).bind(cut.id).bind(owner).bind(first)
         .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
-    sqlx::query("INSERT INTO turns SELECT p.* FROM thread_history_cut_rows r
-      CROSS JOIN LATERAL jsonb_populate_record(NULL::turns,r.body||jsonb_build_object(
-      'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
-      'segment_id',md5($1::text||(r.body->>'segment_id'))::uuid,'input_id',md5($1::text||(r.body->>'input_id'))::uuid,
-      'lease_id',NULL,'native_turn_ref','fork-copy:'||r.row_id::text,'native_end_confirmed',true,
-      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'files_end_manifest',NULL,'end_work',NULL,
-      'files_work_pending',false,'files_end_due',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,
-      'waiting_since',NULL,'seq_updated',$4::bigint,'completed_seq',$4::bigint)) p
-      WHERE r.cut_id=$2 AND r.kind='turn'")
-        .bind(target).bind(cut.id).bind(owner).bind(first)
-        .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    let mut turn_after = None;
+    while let Some(last) =
+        rows::copy_turns_page(unit.conn, cut.id, target, owner, first, turn_after).await?
+    {
+        turn_after = Some(last);
+    }
     sqlx::query("UPDATE thread_inputs i SET turn_id=CASE WHEN EXISTS(SELECT 1 FROM thread_history_cut_rows t
         WHERE t.cut_id=$1 AND t.kind='turn' AND t.row_id=(r.body->>'turn_id')::uuid)
         THEN md5($2::text||(r.body->>'turn_id'))::uuid END
@@ -1286,10 +820,12 @@ pub(crate) async fn copy(
       WHERE r.cut_id=$1 AND r.kind='input' ON CONFLICT DO NOTHING RETURNING blob),counts AS(
         SELECT blob,count(*) AS n FROM added GROUP BY blob) UPDATE blobs b SET pin_count=b.pin_count+c.n FROM counts c WHERE b.hash=c.blob")
         .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    // Copied payloads receive new positions in frozen order within the same raw reservation.
+    // Source markers remain readable at the source and consume no copy payload pages.
     let mut after = 0;
     let mut offset = 0_i64;
     loop {
-        let page = rows::item_bodies_page(unit.conn, cut.id, after).await?;
+        let page = rows::copy_item_bodies_page(unit.conn, cut.id, after).await?;
         let Some(last) = page.last() else { break };
         after = last["seq_created"]
             .as_i64()
@@ -1327,21 +863,12 @@ pub(crate) async fn copy(
             WHERE c.kind NOT IN ('user_message','marker') AND c.native_alias IS NOT NULL")
             .bind(cut.id).bind(target).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
     }
-    // Parents may occur on a later payload page. Restore their mapped identities
-    // only after all child/parent rows exist; no per-item query or FK guess.
+    // Parents may occur on a later payload page. Restore them from the same frozen selector,
+    // one bounded database page at a time, after every child and parent has been inserted.
     after = 0;
-    loop {
-        let page = rows::item_bodies_page(unit.conn, cut.id, after).await?;
-        let Some(last) = page.last() else { break };
-        after = last["seq_created"]
-            .as_i64()
-            .ok_or_else(|| EngineError::unreadable("A captured item position is missing."))?;
-        sqlx::query("UPDATE items i SET parent_item_id=md5($2::text||(b.body->>'parent_item_id'))::uuid
-          FROM jsonb_array_elements($1::jsonb) b(body) WHERE b.body->>'parent_item_id' IS NOT NULL
-            AND i.id=md5($2::text||(b.body->>'id'))::uuid AND EXISTS(SELECT 1 FROM thread_history_cut_members($3) p
-              WHERE p.item_id=(b.body->>'parent_item_id')::uuid AND p.kind<>'marker')")
-            .bind(serde_json::to_value(&page)?).bind(target).bind(cut.id)
-            .execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+    while let Some(last) = rows::restore_copy_parents_page(unit.conn, cut.id, target, after).await?
+    {
+        after = last;
     }
     sqlx::query("INSERT INTO approvals SELECT a.* FROM thread_history_cut_rows r
       CROSS JOIN LATERAL jsonb_populate_record(NULL::approvals,r.body||jsonb_build_object(

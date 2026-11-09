@@ -2,12 +2,14 @@
 //!
 //! An API provider is one upstream that one key opens, reached at one or more endpoints, each in a wire
 //! protocol and each with the options that protocol declares: how the key is presented, headers and query
-//! parameters that go with every request, and the names of headers whose values are secrets. What a protocol
-//! does not declare is refused when the provider is saved, and so is a header that the forwarder sets itself.
+//! parameters and model body defaults that go with every request, and the names of headers whose values are
+//! secrets. What a protocol does not declare is refused when the provider is saved, and so is a header that
+//! the forwarder sets itself.
 
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::routes::nodes::invalid;
 use orch_api_contract::resources::Upstream;
+use orch_model_contract::endpoint::standard_options;
 use orch_model_contract::protocol::{
     ANTHROPIC_MESSAGES, OPENAI_CHAT, OPENAI_EMBEDDINGS, OPENAI_RESPONSES,
 };
@@ -27,9 +29,6 @@ pub const PROTOCOLS: [&str; 4] = [
 
 /// How the key may be presented.
 const AUTH_MODES: [&str; 4] = ["bearer", "x-api-key", "header", "none"];
-
-/// The members an endpoint's options may have: what the built-in protocols declare.
-const OPTION_MEMBERS: [&str; 5] = ["auth", "auth_header", "headers", "query", "secret_headers"];
 
 /// Headers the forwarder sets itself, whatever the endpoint says: the connection's own.
 const FORWARDER_HEADERS: [&str; 10] = [
@@ -153,6 +152,10 @@ pub fn check(upstreams: &[Upstream], http_allowed: bool) -> ApiResult<Checked> {
             "an API provider has at least one endpoint",
         ));
     }
+    let declared_options: BTreeSet<String> = standard_options()
+        .into_iter()
+        .map(|field| field.name)
+        .collect();
     let mut kept: Vec<Upstream> = Vec::new();
     let mut protocols: Vec<String> = Vec::new();
     let mut secret_headers: BTreeSet<String> = BTreeSet::new();
@@ -190,7 +193,7 @@ pub fn check(upstreams: &[Upstream], http_allowed: bool) -> ApiResult<Checked> {
         };
         if let Some(unknown) = given
             .keys()
-            .find(|name| !OPTION_MEMBERS.contains(&name.as_str()))
+            .find(|name| !declared_options.contains(name.as_str()))
         {
             return Err(invalid(
                 &format!("{at}.options.{unknown}"),
@@ -303,6 +306,47 @@ pub fn check(upstreams: &[Upstream], http_allowed: bool) -> ApiResult<Checked> {
                     options.insert("query".to_owned(), Json::Object(query));
                 }
             }
+        }
+        if let Some(field) = given
+            .get("output_limit_field")
+            .filter(|value| !value.is_null())
+        {
+            let chosen: orch_model_contract::endpoint::OutputLimitField =
+                serde_json::from_value(field.clone()).map_err(|_| {
+                    invalid(
+                        &format!("{at}.options.output_limit_field"),
+                        "choose max_tokens or max_completion_tokens",
+                    )
+                })?;
+            options.insert("output_limit_field".to_owned(), json!(chosen));
+        }
+        if let Some(params) = given.get("params") {
+            orch_provider_contract::calls::completion_options(params)
+                .map_err(|reason| invalid(&format!("{at}.options.params"), reason))?;
+            if params.as_object().is_some_and(|params| !params.is_empty()) {
+                options.insert("params".to_owned(), params.clone());
+            }
+        }
+        if let Some(schemas) = given
+            .get("request_options")
+            .filter(|value| !value.is_null())
+        {
+            let parsed = serde_json::from_value::<orch_provider_contract::models::RequestOptions>(
+                schemas.clone(),
+            )
+            .map_err(|_| {
+                invalid(
+                    &format!("{at}.options.request_options"),
+                    "request options are schemas indexed by interface",
+                )
+            })?;
+            orch_provider_contract::models::ModelParameters {
+                request_options: Some(parsed),
+                ..Default::default()
+            }
+            .check_option_schemas()
+            .map_err(|reason| invalid(&format!("{at}.options.request_options"), reason))?;
+            options.insert("request_options".to_owned(), schemas.clone());
         }
         if !secret_names.is_empty() {
             secret_headers.extend(secret_names.iter().cloned());
@@ -467,6 +511,114 @@ mod tests {
         assert_eq!(
             checked.secret_headers.into_iter().collect::<Vec<_>>(),
             ["x-gateway-key"]
+        );
+    }
+
+    #[test]
+    fn declared_model_defaults_survive_save_in_the_runtime_endpoint_shape() {
+        use orch_model_contract::endpoint::{AuthMode, EndpointOptions};
+
+        let params = json!({
+            "service_tier":"priority", "temperature":0, "top_p":null,
+            "reasoning":{"effort":"high","summary":"concise"},
+            "vendor":{"flags":[true,null,{"n":3}]}
+        });
+        for protocol in PROTOCOLS {
+            let options = json!({
+                "auth":"header","auth_header":"x-key",
+                "headers":{"x-route":"a"},"query":{"v":"1"},
+                "secret_headers":["x-secret"],"params":params
+            });
+            let checked = check(
+                &[endpoint(protocol, "https://x.example/v1/", options.clone())],
+                false,
+            )
+            .unwrap();
+            assert_eq!(checked.upstreams[0].options, options);
+            assert_eq!(checked.upstreams[0].base_url, "https://x.example/v1");
+            assert!(!checked.keyless && !checked.clear_text);
+            assert!(checked.secret_headers.contains("x-secret"));
+            let runtime = EndpointOptions::parse(&checked.upstreams[0].options).unwrap();
+            assert_eq!(runtime.request_params(), params);
+            assert!(runtime.check(AuthMode::Bearer).is_ok());
+        }
+    }
+
+    #[test]
+    fn own_chat_output_limit_choices_survive_save_and_unknown_fields_are_refused() {
+        use orch_model_contract::endpoint::EndpointOptions;
+        for field in ["max_tokens", "max_completion_tokens"] {
+            let options = json!({"output_limit_field":field});
+            let saved = check(
+                &[endpoint(
+                    "openai-chat",
+                    "https://x.example/v1",
+                    options.clone(),
+                )],
+                false,
+            )
+            .unwrap();
+            assert_eq!(saved.upstreams[0].options, options);
+            assert_eq!(
+                EndpointOptions::parse(&saved.upstreams[0].options)
+                    .unwrap()
+                    .output_limit_field
+                    .unwrap()
+                    .as_str(),
+                field
+            );
+        }
+        for field in [
+            json!("max_output_tokens"),
+            json!("vendor_key"),
+            json!(1),
+            json!({}),
+        ] {
+            assert!(
+                check(
+                    &[endpoint(
+                        "openai-chat",
+                        "https://x.example/v1",
+                        json!({"output_limit_field":field})
+                    )],
+                    false
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn model_defaults_use_shared_object_and_owned_field_validation() {
+        let save = |options| {
+            check(
+                &[endpoint("openai-responses", "https://x.example", options)],
+                false,
+            )
+        };
+        for options in [json!(null), json!({}), json!({"params":{}})] {
+            assert_eq!(save(options).unwrap().upstreams[0].options, json!({}));
+        }
+        for params in [
+            json!(null),
+            json!([]),
+            json!(true),
+            json!("text"),
+            json!(1),
+            json!({"model":"another-model"}),
+            json!({"tools":[]}),
+            json!({"temperature":"hot"}),
+            json!({"effort":"high","reasoning_effort":"low"}),
+        ] {
+            assert!(save(json!({"params":params})).is_err());
+        }
+        assert_eq!(
+            save(json!({"auth":null,"headers":null,"query":null,"secret_headers":null}))
+                .unwrap()
+                .upstreams[0]
+                .options,
+            json!({}),
+            "the existing optional auth/header/query normalization is retained"
         );
     }
 }

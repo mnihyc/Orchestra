@@ -7,6 +7,8 @@
 
 mod admin_support;
 mod places;
+#[path = "admin_users/scoped_update.rs"]
+mod scoped_update;
 mod support;
 
 use admin_support::{Cast, api_token, assert_no_system_admin, cast, lines_of, refused_to};
@@ -58,13 +60,22 @@ async fn update(
     id: Id,
     body: &AdminUserUpdateBody,
 ) -> orch_api_core::testing::Reply<AdminUser> {
-    world
+    let reply = world
         .app
         .call(AdminUserUpdate, &[&id])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    orch_api_core::testing::Reply {
+        status: reply.status,
+        headers: reply.headers,
+        body: reply.body.map(|body| {
+            body.into_full()
+                .expect("this ordinary control requires the full account projection")
+        }),
+        raw: reply.raw,
+    }
 }
 
 fn acknowledged(body: AdminUserUpdateBody) -> AdminUserUpdateBody {
@@ -258,7 +269,9 @@ async fn an_admin_makes_a_person_with_an_own_org_and_a_link_that_lets_them_set_a
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account");
 
     assert_eq!(reply.user.base.username, "dan");
     assert_eq!(reply.user.base.display_name, "Dan Brown");
@@ -276,7 +289,18 @@ async fn an_admin_makes_a_person_with_an_own_org_and_a_link_that_lets_them_set_a
         401,
         "there is no password until the link is used"
     );
-    assert_eq!(use_link(&world, &reply.reset_url, NEW_PASSWORD).await, 204);
+    assert_eq!(
+        use_link(
+            &world,
+            reply
+                .reset_url
+                .as_deref()
+                .expect("the first account creation returns its one-time link"),
+            NEW_PASSWORD
+        )
+        .await,
+        204
+    );
     let signed = world
         .password_login("dan", NEW_PASSWORD, "203.0.113.1", "")
         .await;
@@ -332,7 +356,9 @@ async fn a_new_persons_own_org_starts_as_the_admin_who_makes_them_says() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account");
 
     let orgs = world
         .app
@@ -364,7 +390,9 @@ async fn a_person_who_is_made_a_system_admin_directly_leaves_the_line_of_it() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account");
 
     assert!(reply.user.is_system_admin);
     let granted = lines_of(&world, "user.admin_granted").await;
@@ -607,7 +635,9 @@ async fn an_unknown_person_and_a_service_account_are_nobody_to_change() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
 
     let nobody = update(&world, &c.root, orch_types::new_id(), &body)
         .await
@@ -646,12 +676,43 @@ async fn a_reset_link_sets_a_password_once_and_a_second_step_goes_only_when_the_
     let keeping = reset_link(&world, &c.root, bea.id, false).await;
 
     assert!(clearing.expires_at.get() > world.now());
-    assert_eq!(use_link(&world, &clearing.url, NEW_PASSWORD).await, 204);
+    assert_eq!(
+        use_link(
+            &world,
+            clearing
+                .url
+                .as_deref()
+                .expect("the first reset creation returns its one-time link"),
+            NEW_PASSWORD
+        )
+        .await,
+        204
+    );
     assert!(
-        use_link(&world, &clearing.url, "another password, long enough").await >= 400,
+        use_link(
+            &world,
+            clearing
+                .url
+                .as_deref()
+                .expect("the first reset creation returns its one-time link"),
+            "another password, long enough"
+        )
+        .await
+            >= 400,
         "a link works once"
     );
-    assert_eq!(use_link(&world, &keeping.url, NEW_PASSWORD).await, 204);
+    assert_eq!(
+        use_link(
+            &world,
+            keeping
+                .url
+                .as_deref()
+                .expect("the first reset creation returns its one-time link"),
+            NEW_PASSWORD
+        )
+        .await,
+        204
+    );
     let ada_in = world
         .password_login("ada", NEW_PASSWORD, "203.0.113.1", "")
         .await;

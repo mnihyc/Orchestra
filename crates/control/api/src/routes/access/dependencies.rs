@@ -1,7 +1,9 @@
 //! Permission-page dependencies resolved from the same defaults, model settings and giving rules as work.
 
+use super::page::NameBounds;
 use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
+use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::pages::PageKind;
 use orch_access_contract::permissions::{ObjectKind, Permission, ResourceKind};
 use orch_api_contract::access::{Dependency, DependencyObject, DependencyOpen};
@@ -15,6 +17,7 @@ use orch_db::queries::{resources, threads};
 use orch_settings::{Place, get};
 use orch_settings_contract::registry::keys;
 use orch_types::Id;
+use std::collections::HashMap;
 
 /// A configured choice can name a missing resource or one retained after removal.
 /// Neither is a live access dependency to offer. This projection does not replace the
@@ -66,29 +69,61 @@ async fn id_setting(conn: &mut Conn, node: Id, key: &str) -> ApiResult<Option<Id
         .map_err(ApiError::internal)
 }
 
-/// What a live page's permissions need elsewhere, with no invented defaults or ineligible decider names.
+/// The ordinary dependency decisions retained until the operation admits their sources.
+/// Payload-bearing names stay private and are not logged or serialized by this carrier.
+#[derive(Clone, Default)]
+pub(crate) struct PreparedDependencies {
+    found: Vec<depends::Dependency>,
+    policies: Policies,
+    homes: HashMap<Id, Option<Id>>,
+}
+
+impl PreparedDependencies {
+    /// The real resources whose existing dependency payload will be shown.
+    pub(crate) fn objects(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        self.found.iter().map(|each| each.object)
+    }
+
+    /// The places used only for optional, ordinarily redacted dependency provenance.
+    pub(crate) fn nodes(&self) -> impl Iterator<Item = Id> + '_ {
+        self.found.iter().filter_map(|each| each.through)
+    }
+}
+
+/// What a live page's permissions need elsewhere, with the ordinary projection unchanged.
 pub(super) async fn of_page(
     conn: &mut Conn,
     principal: &Principal,
     page: &PageView,
 ) -> ApiResult<Vec<Dependency>> {
+    let prepared = prepare_page(conn, principal, page).await?;
+    project_page(conn, principal, &prepared, None).await
+}
+
+/// Resolves the actual configured dependencies before their public names are projected.
+/// These are ordinary page-authorized decisions; preparing them grants no extra resource View.
+pub(crate) async fn prepare_page(
+    conn: &mut Conn,
+    principal: &Principal,
+    page: &PageView,
+) -> ApiResult<PreparedDependencies> {
     if page.page != PageKind::Live {
-        return Ok(Vec::new());
+        return Ok(PreparedDependencies::default());
     }
     let (found, policies) = match page.target {
         Target::Live(id) if page.kind == Some(orch_access_contract::roles::NodeKind::Thread) => {
             let Some(thread) = threads::thread(conn, id).await? else {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             };
             let settings = orch_engine::resolved::load(conn, id)
                 .await
                 .map_err(ApiError::internal)?;
             let Some((provider, model)) = thread.provider_id.zip(settings.model.as_deref()) else {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             };
             let (facts, policies) = current_resources(conn, &[provider]).await?;
             if current_choice(&facts, Some(provider), ResourceKind::Provider).is_none() {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             }
             let found = depends::of_thread(
                 conn,
@@ -167,45 +202,77 @@ pub(super) async fn of_page(
         }
         Target::Resource(object) if object.kind == ObjectKind::Provider => {
             let Some(provider) = resources::thread_engine::provider(conn, object.id).await? else {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             };
             let Some(profile) = provider
                 .agent_id
                 .filter(|_| provider.kind == "subscription")
             else {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             };
             let (facts, policies) = current_resources(conn, &[object.id, profile]).await?;
             if current_choice(&facts, Some(object.id), ResourceKind::Provider).is_none()
                 || current_choice(&facts, Some(profile), ResourceKind::Agent).is_none()
             {
-                return Ok(Vec::new());
+                return Ok(PreparedDependencies::default());
             }
             let found = depends::of_provider(conn, principal, object.id, profile, &policies)
                 .await
                 .map_err(ApiError::internal)?;
             (found, policies)
         }
-        _ => return Ok(Vec::new()),
+        _ => return Ok(PreparedDependencies::default()),
     };
+    let mut ids: Vec<_> = found.iter().map(|each| each.object.id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let homes = if ids.is_empty() {
+        HashMap::new()
+    } else {
+        resources::resource_facts(conn, &ids)
+            .await?
+            .into_iter()
+            .map(|row| (row.id, row.home_id))
+            .collect()
+    };
+    Ok(PreparedDependencies {
+        found,
+        policies,
+        homes,
+    })
+}
+
+/// Projects the prepared dependencies after their actual full resource sources are admitted.
+/// Optional through-node names keep their ordinary visibility and the operation's name bound.
+pub(crate) async fn project_page(
+    conn: &mut Conn,
+    principal: &Principal,
+    prepared: &PreparedDependencies,
+    bounds: Option<&NameBounds>,
+) -> ApiResult<Vec<Dependency>> {
+    let found = &prepared.found;
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
     let owners: Vec<_> = found.iter().filter_map(|each| each.owner).collect();
     let names = refusals::user_refs(conn, &owners).await?;
     let through: Vec<_> = found.iter().filter_map(|each| each.through).collect();
-    let places =
-        crate::routes::nodes::view::refs(conn, principal, &through, Policy::default()).await?;
+    let places = match bounds {
+        Some(bounds) => bounds.refs(conn, principal, &through).await?,
+        None => {
+            crate::routes::nodes::view::refs(conn, principal, &through, Policy::default()).await?
+        }
+    };
     let mut result = Vec::new();
     for each in found {
-        let home = resources::resource_facts(conn, &[each.object.id])
-            .await?
-            .first()
-            .and_then(|row| row.home_id);
+        let home = prepared.homes.get(&each.object.id).copied().flatten();
         let givers = requests::givers_for(
             conn,
             principal,
             each.object,
             &[each.permission],
             each.options.as_ref(),
-            policies.at(home),
+            prepared.policies.at(home),
         )
         .await
         .map_err(ApiError::internal)?;
@@ -219,7 +286,7 @@ pub(super) async fn of_page(
             object: DependencyObject {
                 kind: each.object.kind.as_str().to_owned(),
                 id: each.object.id,
-                name: each.name,
+                name: each.name.clone(),
                 owner: eligible_owner.and_then(|owner| names.get(&owner).cloned()),
             },
             permission: each.permission.as_str().to_owned(),

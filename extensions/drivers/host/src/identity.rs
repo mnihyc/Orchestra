@@ -83,6 +83,8 @@ pub(crate) fn launch(
     program: &Path,
     arguments: &[String],
 ) -> tokio::process::Command {
+    #[cfg(not(unix))]
+    let _ = identity;
     #[cfg(unix)]
     if nix::unistd::Uid::effective().as_raw() != identity.uid {
         let mut command = tokio::process::Command::new("runuser");

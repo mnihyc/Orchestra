@@ -147,6 +147,47 @@ fn has_host(options: &BindingOptions, host: Id) {
 }
 
 #[tokio::test]
+async fn creation_previews_report_the_one_viewer_environment_default_and_its_actual_source() {
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let app = &s.rig.world.app;
+    let initial = node_options(app, &s, s.tree.topic.base.id)
+        .await
+        .viewer_default
+        .unwrap();
+    assert!(!initial.value);
+    assert!(initial.source.node.is_none());
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.project.base.id),
+            "threads.let_viewers_in",
+            json!(true),
+        )
+        .await;
+    let inherited = node_options(app, &s, s.tree.topic.base.id)
+        .await
+        .viewer_default
+        .unwrap();
+    assert!(inherited.value);
+    assert_eq!(inherited.source.node.unwrap().id, s.tree.project.base.id);
+    s.rig
+        .world
+        .set_at(
+            Target::Node(s.tree.topic.base.id),
+            "threads.let_viewers_in",
+            json!(false),
+        )
+        .await;
+    let own = node_options(app, &s, s.tree.topic.base.id)
+        .await
+        .viewer_default
+        .unwrap();
+    assert!(!own.value);
+    assert_eq!(own.source.node.unwrap().id, s.tree.topic.base.id);
+}
+
+#[tokio::test]
 async fn both_binding_previews_offer_the_stored_host_with_only_one_database_connection() {
     let s = Scene::new().await;
     let thread = s.thread().await.base.id;
@@ -358,6 +399,96 @@ async fn an_unreported_harness_is_shown_from_storage_without_starting_or_probing
         s.rig.commands.issued_total(),
         before,
         "opening a starter never sends a discovery or inspection command to a machine"
+    );
+    assert_eq!(s.rig.commands.issued_of("turn.start"), 0);
+}
+
+#[tokio::test]
+async fn a_reported_program_failure_is_not_an_unreported_harness() {
+    let s = Scene::new().await;
+    s.rig.engine.stop();
+    let thread = s.thread().await.base.id;
+    sqlx::query("UPDATE agents SET descriptor = '{}'::jsonb WHERE id = $1")
+        .bind(s.on.agent)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    // A stored failure can precede the first session. Do not start an unrelated turn whose
+    // deferred observation or cleanup could race the read-only command-count assertion.
+    orch_db::queries::resources::thread_engine::set_harness_status(
+        &mut s.rig.db.acquire().await.unwrap(),
+        s.on.provider,
+        s.on.agent,
+        s.rig.machine_id,
+        &orch_db::queries::resources::thread_engine::HarnessReport {
+            status: "error",
+            detail: Some("The selected executable was not found."),
+            version: None,
+            sessions_open: 0,
+        },
+        s.rig.world.now(),
+    )
+    .await
+    .unwrap();
+    let before = s.rig.commands.issued_total();
+    let app = &s.rig.world.app;
+    let topic = node_options(app, &s, s.tree.topic.base.id).await;
+    let folder = node_options(app, &s, s.tree.project.base.id).await;
+    let existing = app
+        .call(ThreadBindingOptionsGet, &[&thread])
+        .token(&s.ada.token)
+        .send()
+        .await
+        .ok();
+    for options in [topic, folder, existing] {
+        let provider = options
+            .providers
+            .iter()
+            .find(|provider| provider.provider.id == s.on.provider)
+            .unwrap();
+        let agent = provider
+            .agents
+            .iter()
+            .find(|agent| agent.agent.id == s.on.agent)
+            .unwrap();
+        assert!(!agent.usable);
+        assert_eq!(agent.reason.as_deref(), Some("harness_error"));
+        let report = agent.program_report.as_ref().unwrap();
+        assert_eq!(
+            report.status,
+            orch_api_contract::resources::HarnessStatus::Error
+        );
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("The selected executable was not found.")
+        );
+    }
+    // Use does not disclose the provider's private process details.
+    let ordinary = app
+        .call(NodeBindingOptionsGet, &[&s.tree.topic.base.id])
+        .token(&s.eve.token)
+        .query(&NodeBindingOptionsGetQuery {
+            environment_id: Some(s.on.environment),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    let provider = ordinary
+        .providers
+        .iter()
+        .find(|provider| provider.provider.id == s.on.provider)
+        .unwrap();
+    let agent = provider
+        .agents
+        .iter()
+        .find(|agent| agent.agent.id == s.on.agent)
+        .unwrap();
+    assert!(agent.program_report.is_none());
+    assert_eq!(
+        s.rig.commands.issued_total(),
+        before,
+        "displaying stored failures never probes or starts a program"
     );
     assert_eq!(s.rig.commands.issued_of("turn.start"), 0);
 }

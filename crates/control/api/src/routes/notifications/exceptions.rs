@@ -1,8 +1,5 @@
 //! Personal exceptions use stored subscriptions, one bounded View projection and the bell's mutation.
-use crate::middleware::{
-    authorization,
-    requests::{ApiError, ApiResult},
-};
+use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::nodes;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -16,8 +13,8 @@ use orch_authz::{Policy, Principal};
 use orch_db::{Conn, DbError, queries::notifications::exceptions};
 use orch_types::Id;
 
-const CURSOR: &str = "notification-exceptions.v1:";
-fn after(query: &PageQuery) -> ApiResult<Option<Id>> {
+pub(super) const CURSOR: &str = "notification-exceptions.v1:";
+pub(super) fn after(query: &PageQuery) -> ApiResult<Option<Id>> {
     query
         .cursor
         .as_ref()
@@ -57,26 +54,11 @@ async fn page(
     let mut paths = nodes::view::viewable_ways(conn, principal, &ids, Policy::default()).await?;
     let mut items = Vec::new();
     for row in rows {
-        let Some(mut path) = paths.remove(&row.node_id) else {
-            continue;
-        };
-        let Some(node) = path
-            .pop()
-            .filter(|node| node.id == row.node_id && !node.redacted)
-        else {
-            continue;
-        };
-        let default_from = row
-            .default_from
-            .and_then(|id| path.iter().find(|node| node.id == id).cloned());
-        items.push(NotificationException {
-            node,
-            path,
-            level: serde_json::from_value(row.level.into()).map_err(ApiError::internal)?,
-            default_level: serde_json::from_value(row.default_level.into())
-                .map_err(ApiError::internal)?,
-            default_from,
-        });
+        if let Some(path) = paths.remove(&row.node_id)
+            && let Some(item) = project(&row, path)?
+        {
+            items.push(item);
+        }
     }
     Ok(Page { items, next_cursor })
 }
@@ -85,9 +67,35 @@ pub(super) async fn list(
     query: PageQuery,
     (): (),
 ) -> ApiResult<Page<NotificationException>> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    page(&mut conn, &principal, &query).await
+    crate::key_operations::native::selected_read::<super::exception_read::Exceptions>(
+        ctx,
+        query,
+        (),
+    )
+    .await
+}
+
+pub(super) fn project(
+    row: &orch_db::queries::notifications::exceptions::ExceptionRow,
+    mut path: Vec<orch_api_contract::nodes::NodeRef>,
+) -> ApiResult<Option<NotificationException>> {
+    let Some(node) = path
+        .pop()
+        .filter(|node| node.id == row.node_id && !node.redacted)
+    else {
+        return Ok(None);
+    };
+    let default_from = row
+        .default_from
+        .and_then(|id| path.iter().find(|node| node.id == id).cloned());
+    Ok(Some(NotificationException {
+        node,
+        path,
+        level: serde_json::from_value(row.level.clone().into()).map_err(ApiError::internal)?,
+        default_level: serde_json::from_value(row.default_level.clone().into())
+            .map_err(ApiError::internal)?,
+        default_from,
+    }))
 }
 pub(super) async fn change(
     ctx: Ctx,

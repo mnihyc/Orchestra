@@ -353,6 +353,12 @@ impl Default for Feeds {
 }
 
 impl Feeds {
+    #[cfg(test)]
+    pub(crate) fn test_background_seed(&self, feed: Feed, capture: Json) {
+        assert!(matches!(feed, Feed::ThreadBackground(_)));
+        lock(&self.lists).insert(feed, capture);
+    }
+
     /// Local tree/authority/reconnect wake; bounded-mailbox overflow requests one consolidated repair.
     pub(crate) fn document_tree_changed(&self, root: Option<Id>) {
         if !lock(&self.subs)
@@ -549,10 +555,7 @@ impl Feeds {
                 return Ok(offline);
             }
             if let Feed::ThreadBackground(thread) = sub.feed() {
-                let visible =
-                    super::background_watches::project(inner, sub.connection(), *thread, &data)
-                        .await?;
-                send(sub, &visible)?;
+                send_background(inner, sub, st, *thread, &data).await?;
             } else if matches!(sub.feed(), Feed::Job(_) | Feed::Fork(_)) {
                 match super::machine_views::progress(inner, sub.connection(), sub.feed()).await? {
                     Ok(visible) => {
@@ -656,7 +659,7 @@ async fn send_machine(
         }
         let cut = (
             sub.decided(),
-            sub.connection().session(),
+            sub.connection().decision_identity(),
             sub.connection().as_admin(),
         );
         let projected =
@@ -668,7 +671,7 @@ async fn send_machine(
         }
         if latest != epoch
             || expired
-            || sub.connection().session() != cut.1
+            || sub.connection().decision_identity() != cut.1
             || sub.connection().as_admin() != cut.2
         {
             continue;
@@ -698,6 +701,53 @@ async fn send_machine(
     }
 }
 
+/// Initial seed and broadcast delivery share one full background projection cut.
+async fn send_background(
+    inner: &Arc<Inner>,
+    sub: &Arc<Subscription>,
+    st: &mut super::subscriptions::SubState,
+    thread: Id,
+    data: &Json,
+) -> Result<(), Fail> {
+    loop {
+        if inner.stop.is_cancelled() {
+            return Ok(());
+        }
+        let epoch = super::sync::read_epoch(inner).await?;
+        if !inner.recheck(sub, st, epoch).await? {
+            return Ok(());
+        }
+        let cut = (
+            sub.decided(),
+            sub.connection().decision_identity(),
+            sub.connection().as_admin(),
+        );
+        let projected =
+            super::background_watches::project(inner, sub.connection(), thread, data).await;
+        let latest = super::sync::read_epoch(inner).await?;
+        // Read expiry before recheck replaces the old cached deadline, even at the same epoch.
+        let expired = sub.decided() != cut.0;
+        if !inner.recheck(sub, st, latest).await? {
+            return Ok(());
+        }
+        if latest != epoch
+            || expired
+            || sub.connection().decision_identity() != cut.1
+            || sub.connection().as_admin() != cut.2
+        {
+            continue;
+        }
+        match projected? {
+            super::background_watches::Projection::Current(visible) => send(sub, &visible)?,
+            super::background_watches::Projection::Changed => continue,
+            super::background_watches::Projection::Closed(reason) => {
+                inner.close_sub(sub, st, reason).await
+            }
+        }
+        return Ok(());
+    }
+}
+
 /// Project before the existing delivery fence; an identical visible row is no new event.
 async fn send_resource(
     inner: &Arc<Inner>,
@@ -715,7 +765,7 @@ async fn send_resource(
         }
         let cut = (
             sub.decided(),
-            sub.connection().session(),
+            sub.connection().decision_identity(),
             sub.connection().as_admin(),
         );
         let visible =
@@ -730,7 +780,7 @@ async fn send_resource(
         }
         if latest != epoch
             || expired
-            || sub.connection().session() != cut.1
+            || sub.connection().decision_identity() != cut.1
             || sub.connection().as_admin() != cut.2
         {
             // Reproject a changed cut; a new View decision cannot validate an old
@@ -981,7 +1031,7 @@ pub(crate) fn merge_directory(held: &mut Json, new: Json) {
         "observed_from":new["observed_from"]});
 }
 
-async fn deliver(
+pub(super) async fn deliver(
     inner: &Arc<Inner>,
     feed: &Feed,
     data: &Json,
@@ -1045,9 +1095,7 @@ async fn deliver(
                 }
             }
         } else if let Feed::ThreadBackground(thread) = feed {
-            let visible =
-                super::background_watches::project(inner, sub.connection(), *thread, data).await?;
-            send(&sub, &visible)?;
+            send_background(inner, &sub, &mut st, *thread, data).await?;
         } else if matches!(feed, Feed::Job(_) | Feed::Fork(_)) {
             match super::machine_views::progress(inner, sub.connection(), feed).await? {
                 Ok(visible) => {

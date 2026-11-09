@@ -271,8 +271,29 @@ async fn what_an_agent_may_not_read_answers_exactly_as_what_is_not_there() {
         "a conversation that is there and not its to read answers as one that is not there"
     );
     assert!(!message.contains("Kept") && !message.contains("A secret"));
-    // A thread of its own topic: listed, not readable.
+    // An unshared sibling supplies neither its identity nor its conversation.
     let beside = p.world.thread("Beside").await;
+    let hidden = ok(call(&p.world, p.reader, OrchTool::ListShared, json!({})).await);
+    assert!(
+        !hidden["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "Beside")
+    );
+    // A shared document supplies directory metadata while its conversation remains private.
+    let note = p
+        .world
+        .document_beside(
+            beside,
+            "Shared sibling note",
+            &["Only this document is shared."],
+        )
+        .await;
+    share(
+        &p.world, "document", note, "live", "doc.view", "any", p.reader,
+    )
+    .await;
     let top = ok(call(&p.world, p.reader, OrchTool::ListShared, json!({})).await);
     let beside_dir = entry(&top, "Beside")["path"].as_str().unwrap().to_owned();
     let asked = read(
@@ -281,7 +302,6 @@ async fn what_an_agent_may_not_read_answers_exactly_as_what_is_not_there() {
     )
     .await;
     assert_eq!(refused(&asked).0, "not_found");
-    let _ = beside;
 }
 
 fn refused_id(result: &orch_link_contract::commands::OrchToolResult) -> String {

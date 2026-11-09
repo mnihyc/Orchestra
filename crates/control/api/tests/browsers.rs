@@ -809,7 +809,9 @@ async fn the_idle_rule_is_optional_and_a_stopped_or_new_generation_environment_c
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary native session creation content");
     let display = browser.display.expect("a window has its display");
     sqlx::query("UPDATE environments SET generation=generation+1 WHERE id=$1")
         .bind(floor.environment)
@@ -912,7 +914,9 @@ async fn a_sign_in_is_kept_when_its_unit_stops_starts_and_is_recreated() {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("ordinary native session creation content");
         let cookies = floor.peer.rpc(json!({"cookies":current.id}));
         assert!(
             cookies["ok"]["cookies"]

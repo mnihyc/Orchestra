@@ -35,7 +35,7 @@ impl Summarizer for Held {
             name: "continuation-summary".into(),
             title: "Controlled history summary".into(),
             config_schema: json!({"type":"object"}),
-            fields: vec![SummaryField::Description],
+            fields: vec![SummaryField::Title],
             extensions: Default::default(),
         }
     }
@@ -111,7 +111,7 @@ async fn refresh(scene: &rig::Scene, thread: Id) -> Proof {
         .call(NodeAuto, &[&thread])
         .token(&scene.ada.token)
         .body(&NodeAutoBody {
-            field: AutoField::Description,
+            field: AutoField::Title,
             action: AutoAction::Refresh,
         })
         .send()
@@ -119,7 +119,7 @@ async fn refresh(scene: &rig::Scene, thread: Id) -> Proof {
     let status = reply.status;
     reply
         .body
-        .map_err(|problem| setup_failure("description refresh", status, problem))?;
+        .map_err(|problem| setup_failure("title refresh", status, problem))?;
     Ok(())
 }
 
@@ -164,7 +164,7 @@ async fn an_inflight_summary_keeps_its_old_usage_and_releases_only_its_claim_wit
     setting(
         &scene,
         scene.tree.topic.base.id,
-        "auto.description",
+        "auto.title",
         json!("summarizer"),
     )
     .await?;
@@ -194,7 +194,7 @@ async fn an_inflight_summary_keeps_its_old_usage_and_releases_only_its_claim_wit
             .iter()
             .any(|item| item.text.contains("Excluded second answer"))
     );
-    let description: String = sqlx::query_scalar("SELECT description FROM nodes WHERE id=$1")
+    let title: String = sqlx::query_scalar("SELECT name FROM nodes WHERE id=$1")
         .bind(thread)
         .fetch_one(scene.rig.db.pool())
         .await?;
@@ -207,13 +207,13 @@ async fn an_inflight_summary_keeps_its_old_usage_and_releases_only_its_claim_wit
     .await?;
     producer.release.add_permits(1);
     assert!(tokio::time::timeout(rig::PATIENCE, running).await???);
-    let after:(String,i64,Option<Id>,Option<Json>)=sqlx::query_as("SELECT n.description,s.last_seq,s.claimed_by,t.usage
+    let after:(String,i64,Option<Id>,Option<Json>)=sqlx::query_as("SELECT n.name,s.last_seq,s.claimed_by,t.usage
       FROM nodes n JOIN threads t ON t.node_id=n.id JOIN node_summary_state s ON s.node_id=n.id WHERE n.id=$1")
         .bind(thread).fetch_one(scene.rig.db.pool()).await?;
     assert_eq!(
         after,
-        (description, 0, None, None),
-        "a completed old answer cannot replace the selection's description, consume its reset cursor, or move old context"
+        (title, 0, None, None),
+        "a completed old answer cannot replace the selection's title, consume its reset cursor, or move old context"
     );
     refresh(&scene, thread).await?;
     assert!(scene.rig.engine.summarize_due(thread).await?);
@@ -230,11 +230,11 @@ async fn an_inflight_summary_keeps_its_old_usage_and_releases_only_its_claim_wit
         .collect::<Vec<_>>();
     assert!(texts.contains(&"Retained first input") && texts.contains(&"Retained first answer"));
     assert!(!texts.iter().any(|text| text.contains("Excluded second")));
-    let description: String = sqlx::query_scalar("SELECT description FROM nodes WHERE id=$1")
+    let title: String = sqlx::query_scalar("SELECT name FROM nodes WHERE id=$1")
         .bind(thread)
         .fetch_one(scene.rig.db.pool())
         .await?;
-    assert_eq!(description, "Retained current summary");
+    assert_eq!(title, "Retained current summary");
     let same: Vec<Json> =
         sqlx::query_scalar("SELECT to_jsonb(u) FROM usage_events u WHERE thread_id=$1 ORDER BY id")
             .bind(thread)

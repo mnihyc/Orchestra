@@ -7,13 +7,20 @@
 //! `thread.view` for a turn, and the chat's own reading for a chat. A caller who may not read the thing is answered
 //! as if nothing were there, with no word of what it is: their chip is plain text already.
 
+mod attachments;
+mod live_file;
+mod operation;
+#[cfg(test)]
+mod scopes;
+#[cfg(test)]
+mod source_waits;
+
 use std::collections::HashMap;
 
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::documents::build::{self, Cast, Wanted};
-use crate::routes::nodes::{invalid, view};
+use crate::routes::nodes::invalid;
 use chrono::{DateTime, Utc};
 use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::{NodePermission, Permission, PermissionName};
@@ -33,13 +40,13 @@ use orch_db::queries::{hierarchy, shares as share_rows};
 use orch_db::{Conn, DbError};
 use orch_documents::describe;
 use orch_documents::position::Position;
-use orch_link_contract::commands::{FsFetch, FsStat, SerialKey};
+use orch_link_contract::commands::{FsFetch, FsStat};
 use orch_types::Hash;
 use orch_types::{Id, Time};
 
 /// Binds this module's request.
 pub fn mount(registry: &mut Registry) {
-    registry.on(ReferencePreviewGet, preview);
+    registry.on_with_operation(ReferencePreviewGet, operation::resolve, preview);
 }
 
 /// What a card shows of a text: its first characters, with an ellipsis where there were more.
@@ -56,6 +63,7 @@ fn shown_text(text: &str) -> String {
 
 /// The card of a known reference, including its safe unavailable state.
 async fn preview(ctx: Ctx, query: ReferencePreviewQuery, (): ()) -> ApiResult<ReferencePreview> {
+    let opened = ctx.operation_data::<operation::Bound>()?;
     let mut shown = match readable_preview(&ctx, &query).await {
         Ok(shown) => shown,
         Err(error) if error.code() == orch_api_contract::common::ErrorCode::NotFound => {
@@ -65,6 +73,7 @@ async fn preview(ctx: Ctx, query: ReferencePreviewQuery, (): ()) -> ApiResult<Re
     };
     let (kind, id) = if let Some(unavailable) = &shown.unavailable {
         let Some(object) = &unavailable.object else {
+            operation::retain(&ctx, &query, &opened, false).await?;
             return Ok(shown);
         };
         (object.kind.clone(), object.id)
@@ -81,12 +90,15 @@ async fn preview(ctx: Ctx, query: ReferencePreviewQuery, (): ()) -> ApiResult<Re
             {
                 Some((id, InlineRefKind::Document)) => ("document".to_owned(), id),
                 Some((id, InlineRefKind::Chat)) => ("chat".to_owned(), id),
-                _ => return Ok(shown),
+                _ => {
+                    operation::retain(&ctx, &query, &opened, shown.unavailable.is_none()).await?;
+                    return Ok(shown);
+                }
             },
         }
     };
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     if shown.unavailable.is_none() {
         let next: Option<DateTime<Utc>> = sqlx::query_scalar("SELECT min(expires_at) FROM permission_entries WHERE object_kind=$1 AND object_id=$2 AND holder_kind='user' AND holder_id=$3 AND removed_at IS NULL AND expires_at>$4")
             .bind(&kind).bind(id).bind(principal.user()).bind(ctx.now).fetch_one(&mut *conn).await.map_err(DbError::from)?;
@@ -124,6 +136,7 @@ async fn preview(ctx: Ctx, query: ReferencePreviewQuery, (): ()) -> ApiResult<Re
             shown.access_requests = Some(requests);
         }
     }
+    operation::retain(&ctx, &query, &opened, shown.unavailable.is_none()).await?;
     Ok(shown)
 }
 
@@ -161,11 +174,12 @@ async fn readable_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult
         return Err(invalid("path", "belongs to a file reference"));
     }
     let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let names = operation::names(ctx)?;
     let shown = match query.kind {
-        InlineRefKind::Document => document(&mut conn, &principal, query, ctx.now).await?,
-        InlineRefKind::Node => node(&mut conn, &principal, query, ctx.now).await?,
-        InlineRefKind::Chat => chat(&mut conn, &principal, query).await?,
+        InlineRefKind::Document => document(&mut conn, &principal, query, ctx.now, &names).await?,
+        InlineRefKind::Node => node(&mut conn, &principal, query, ctx.now, &names).await?,
+        InlineRefKind::Chat => chat(&mut conn, &principal, query, &names).await?,
         InlineRefKind::File | InlineRefKind::EnvironmentFile => return Err(ApiError::not_found()),
     };
     conn.commit().await.map_err(DbError::from)?;
@@ -182,11 +196,11 @@ async fn unavailable_preview(
     use orch_api_contract::access::AccessRequestObject;
     use orch_api_contract::documents::ReferenceUnavailable;
     let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let target: Option<(String, Id, bool)> = match query.kind {
         InlineRefKind::Document => sqlx::query_as("SELECT 'document'::text,id,deleted_at IS NOT NULL FROM documents WHERE id=$1").bind(query.id).fetch_optional(&mut *conn).await,
         InlineRefKind::Node => sqlx::query_as("SELECT kind,id,deleted_at IS NOT NULL FROM nodes WHERE id=$1").bind(query.id).fetch_optional(&mut *conn).await,
-        InlineRefKind::Chat => sqlx::query_as("SELECT 'chat'::text,c.id,COALESCE(n.deleted_at IS NOT NULL,false) FROM chats c LEFT JOIN nodes n ON n.id=c.node_id WHERE c.id=$1").bind(query.id).fetch_optional(&mut *conn).await,
+        InlineRefKind::Chat => sqlx::query_as("SELECT 'chat'::text,c.id,COALESCE(n.deleted_at IS NOT NULL,false) FROM chats c LEFT JOIN nodes n ON n.id=COALESCE(c.node_id,c.home_id,c.org_id) WHERE c.id=$1").bind(query.id).fetch_optional(&mut *conn).await,
         InlineRefKind::EnvironmentFile => sqlx::query_as("SELECT 'environment'::text,id,deleted_at IS NOT NULL FROM environments WHERE id=$1").bind(query.id).fetch_optional(&mut *conn).await,
         InlineRefKind::File => sqlx::query_as("SELECT 'document'::text,d.id,d.deleted_at IS NOT NULL FROM document_files f JOIN documents d ON d.id=f.document_id WHERE f.id=$1 UNION ALL SELECT 'chat'::text,c.id,m.deleted_at IS NOT NULL FROM chat_file_references f JOIN chats c ON c.id=f.chat_id JOIN chat_messages m ON m.id=f.message_id WHERE f.id=$1 LIMIT 1").bind(query.id).fetch_optional(&mut *conn).await,
     }.map_err(DbError::from)?;
@@ -330,6 +344,7 @@ async fn document(
     principal: &Principal,
     query: &ReferencePreviewQuery,
     now: DateTime<Utc>,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<ReferencePreview> {
     let policy = Policy::default();
     allowed(
@@ -340,9 +355,23 @@ async fn document(
         .filter(|row| row.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
     let listed = build::standing(conn, principal, row.id, policy).await?;
-    let shown = build::reference(conn, principal, &row, &listed, now, policy).await?;
+    let shown = if names.limited {
+        let allowed = names
+            .nodes
+            .iter()
+            .copied()
+            .map(build::WrittenLabelSource::Node)
+            .collect::<Vec<_>>();
+        build::ProjectedDocumentRef::capture_allowed(
+            conn, principal, &row, &listed, now, policy, &allowed,
+        )
+        .await?
+        .document
+    } else {
+        build::reference(conn, principal, &row, &listed, now, policy).await?
+    };
     let part = match query.block {
-        Some(block) => block_part(conn, principal, row.id, block, policy).await?,
+        Some(block) => block_part(conn, principal, row.id, block, policy, names).await?,
         None => None,
     };
     Ok(ReferencePreview {
@@ -371,6 +400,7 @@ async fn block_part(
     document: Id,
     block: Id,
     policy: Policy,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<Option<ReferencePreviewPart>> {
     let live = rows::live_blocks(conn, document).await?;
     let parents: HashMap<Id, Option<Id>> = live.iter().map(|row| (row.id, row.parent_id)).collect();
@@ -397,11 +427,26 @@ async fn block_part(
     else {
         return Ok(None);
     };
-    let by = build::blocks_for(conn, principal, std::slice::from_ref(row), policy)
+    let blocks = if names.limited {
+        let allowed = names
+            .nodes
+            .iter()
+            .copied()
+            .map(build::WrittenLabelSource::Node)
+            .collect::<Vec<_>>();
+        build::ProjectedBlocks::capture_allowed(
+            conn,
+            principal,
+            std::slice::from_ref(row),
+            policy,
+            &allowed,
+        )
         .await?
-        .into_iter()
-        .next()
-        .and_then(|shown| shown.updated_by);
+        .blocks
+    } else {
+        build::blocks_for(conn, principal, std::slice::from_ref(row), policy).await?
+    };
+    let by = blocks.into_iter().next().and_then(|shown| shown.updated_by);
     Ok(Some(ReferencePreviewPart {
         part: RefPart::Block(block),
         number,
@@ -426,6 +471,7 @@ async fn node(
     principal: &Principal,
     query: &ReferencePreviewQuery,
     now: DateTime<Utc>,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<ReferencePreview> {
     let policy = Policy::default();
     allowed(
@@ -446,7 +492,8 @@ async fn node(
         .filter(|detail| detail.deleted_at.is_none())
         .ok_or_else(ApiError::not_found)?;
     let place = match detail.parent_id {
-        Some(parent) => view::refs(conn, principal, &[parent], policy)
+        Some(parent) => names
+            .refs(conn, principal, &[parent])
             .await?
             .remove(&parent),
         None => None,
@@ -470,7 +517,8 @@ async fn node(
         None => None,
     };
     let thread_display = if detail.kind == "thread" {
-        view::refs(conn, principal, &[detail.id], policy)
+        names
+            .refs(conn, principal, &[detail.id])
             .await?
             .remove(&detail.id)
             .and_then(|node| node.thread_display.map(|display| *display))
@@ -531,6 +579,7 @@ async fn chat(
     conn: &mut Conn,
     principal: &Principal,
     query: &ReferencePreviewQuery,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<ReferencePreview> {
     let row = chat_rows::chat(conn, query.id)
         .await?
@@ -543,9 +592,7 @@ async fn chat(
     }
     let policy = Policy::default();
     let place = match row.node_id {
-        Some(node) => view::refs(conn, principal, &[node], policy)
-            .await?
-            .remove(&node),
+        Some(node) => names.refs(conn, principal, &[node]).await?.remove(&node),
         None => None,
     };
     let title = match (&row.name, &place) {
@@ -557,7 +604,7 @@ async fn chat(
         }
     };
     let part = match query.message {
-        Some(number) => message_part(conn, principal, row.id, number, policy).await?,
+        Some(number) => message_part(conn, principal, row.id, number, policy, names).await?,
         None => None,
     };
     Ok(ReferencePreview {
@@ -586,6 +633,7 @@ async fn message_part(
     chat: Id,
     number: i64,
     policy: Policy,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<Option<ReferencePreviewPart>> {
     let Some(found) = share_rows::chat_messages_numbered(conn, chat, number, number)
         .await?
@@ -611,7 +659,20 @@ async fn message_part(
     if let Some(thread) = found.row.author_thread_id {
         wanted.node(thread);
     }
-    let cast = Cast::load(conn, principal, wanted, policy).await?;
+    let allowed = names
+        .nodes
+        .iter()
+        .copied()
+        .map(build::WrittenLabelSource::Node)
+        .collect();
+    let cast = Cast::load_for_labels(
+        conn,
+        principal,
+        wanted,
+        policy,
+        names.limited.then_some(&allowed),
+    )
+    .await?;
     Ok(Some(ReferencePreviewPart {
         part: RefPart::Message(number),
         number,
@@ -639,6 +700,9 @@ fn whole(kind: InlineRefKind, id: Id) -> ReferencePreviewQuery {
 
 struct FileTarget {
     preview: ReferencePreview,
+    attachment: Option<attachments::Witness>,
+    opening: Option<attachments::Opening>,
+    environment: Option<live_file::Opening>,
     blob: Option<Hash>,
     text: bool,
     place: Id,
@@ -646,9 +710,30 @@ struct FileTarget {
 
 /// Reads attachment ownership before asking for any bytes. An unknown identifier and an unreadable owner agree.
 async fn attachment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<FileTarget> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    attachment_target_on(&mut conn, &principal, query, ctx.now).await
+    use crate::middleware::transaction_guard::{self, HttpIdentityMode};
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let identity =
+        transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
+    let mut target = attachment_target_on(
+        &mut tx,
+        guard.principal(),
+        query,
+        guard.now().get(),
+        &operation::names(ctx)?,
+    )
+    .await?;
+    let opening = attachments::Opening {
+        identity,
+        accepted: guard.principal().caller().clone(),
+    };
+    opening.check(ctx)?;
+    guard.check_deadline(ctx)?;
+    tx.commit().await.map_err(DbError::from)?;
+    opening.check(ctx)?;
+    ctx.publication
+        .retain_deadline(opening.identity.expires_at)?;
+    target.opening = Some(opening);
+    Ok(target)
 }
 
 async fn attachment_target_on(
@@ -656,6 +741,7 @@ async fn attachment_target_on(
     principal: &Principal,
     query: &ReferencePreviewQuery,
     now: DateTime<Utc>,
+    names: &crate::routes::access::page::NameBounds,
 ) -> ApiResult<FileTarget> {
     let owner: Option<Id> =
         sqlx::query_scalar("SELECT document_id FROM document_files WHERE id=$1")
@@ -664,16 +750,28 @@ async fn attachment_target_on(
             .await
             .map_err(DbError::from)?;
     if let Some(owner) = owner {
-        let card = document(conn, principal, &whole(InlineRefKind::Document, owner), now).await?;
-        let file = rows::file(conn, owner, query.id)
-            .await?
-            .ok_or_else(ApiError::not_found)?;
+        let card = document(
+            conn,
+            principal,
+            &whole(InlineRefKind::Document, owner),
+            now,
+            names,
+        )
+        .await?;
+        let witness = super::files::FileWitness::load(conn, owner, query.id).await?;
+        let file = witness.held().clone();
         let place = card
             .place
             .as_ref()
             .map(|node| node.id)
             .ok_or_else(ApiError::not_found)?;
         return Ok(FileTarget {
+            opening: None,
+            environment: None,
+            attachment: Some(attachments::Witness::Document {
+                owner,
+                file: witness,
+            }),
             preview: ReferencePreview {
                 thread_display: None,
                 kind: InlineRefKind::File,
@@ -714,11 +812,19 @@ async fn attachment_target_on(
             .await
             .map_err(DbError::from)?;
     let (chat_id, message_id, carried) = saved.ok_or_else(ApiError::not_found)?;
-    let card = chat(conn, principal, &whole(InlineRefKind::Chat, chat_id)).await?;
+    let card = chat(conn, principal, &whole(InlineRefKind::Chat, chat_id), names).await?;
     let message = chat_rows::message(conn, chat_id, message_id)
         .await?
         .filter(|row| !row.is_deleted())
         .ok_or_else(ApiError::not_found)?;
+    let source = attachments::Witness::Chat {
+        reference: query.id,
+        chat: chat_id,
+        message: message_id,
+        carried,
+        content: attachments::message_content(&message.content)?,
+        at: message.created_at,
+    };
     let parts: Vec<orch_api_contract::chats::ChatPart> =
         serde_json::from_value(message.content).map_err(ApiError::internal)?;
     let files = chat_files(parts);
@@ -736,8 +842,11 @@ async fn attachment_target_on(
     let row = chat_rows::chat(conn, chat_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
-    let place = row.node_id.unwrap_or(row.org_id);
+    let place = row.home();
     Ok(FileTarget {
+        opening: None,
+        environment: None,
+        attachment: Some(source),
         preview: ReferencePreview {
             thread_display: None,
             kind: InlineRefKind::File,
@@ -819,15 +928,6 @@ pub(crate) fn chat_files(
     files
 }
 
-async fn environment_access(
-    ctx: &Ctx,
-    query: &ReferencePreviewQuery,
-) -> ApiResult<orch_db::queries::environments::workspace::EnvironmentRow> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(ctx, &mut conn).await?;
-    environment_access_on(&mut conn, &principal, query).await
-}
-
 async fn environment_access_on(
     conn: &mut Conn,
     principal: &Principal,
@@ -857,10 +957,23 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         .as_deref()
         .filter(|path| orch_documents::references::relative_path(path))
         .ok_or_else(|| invalid("path", "is a file path from the workspace root"))?;
-    let env = environment_access(ctx, query).await?;
+    // Keep the card's ordinary unavailable path before opening a native byte source.
+    // The live source repeats this door and all current/raw checks after every actual wait.
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    environment_access_on(&mut conn, &principal, query).await?;
+    drop(conn);
+    let mut opening = live_file::Opening::capture(ctx, query.id, path).await?;
+    let mut tx = ctx.app.db.begin().await?;
+    let frame = opening.current(ctx, &mut tx).await?;
+    let env = frame.value().clone();
+    tx.commit().await.map_err(DbError::from)?;
+    frame
+        .check_deadline(ctx.app.clock.as_ref())
+        .map_err(live_file::mapped)?;
     let mut conn = ctx.app.db.acquire().await?;
     let disabled = env.status == "disabled";
-    let principal = authorization::principal(ctx, &mut conn).await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
     let enable_path = if disabled
         && matches!(
             orch_authz::resources::check(
@@ -884,17 +997,17 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
     let cached = orch_db::queries::storage::cached_latest(&mut conn, env.id, path).await?;
     drop(conn);
     let (stat, missing): (Option<FileStat>, bool) = match machine {
-        Some(machine) => match crate::routes::workspace::live::run(
-            ctx,
-            machine,
-            SerialKey::None,
-            &FsStat {
-                environment_id: env.id,
-                mount: None,
-                path: path.to_owned(),
-            },
-        )
-        .await
+        Some(machine) => match opening
+            .run(
+                ctx,
+                machine,
+                &FsStat {
+                    environment_id: env.id,
+                    mount: None,
+                    path: path.to_owned(),
+                },
+            )
+            .await?
         {
             Ok(stat) => (Some(stat), false),
             Err(failure) => (None, failure.code() == Some("not_found")),
@@ -941,20 +1054,20 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
         .unwrap_or_default();
         drop(conn);
         if size.is_some_and(|size| size <= limit) {
-            let fetched = crate::routes::workspace::live::run(
-                ctx,
-                machine,
-                SerialKey::None,
-                &FsFetch {
-                    environment_id: env.id,
-                    mount: None,
-                    path: path.to_owned(),
-                    expect: None,
-                    max_bytes: Some(limit),
-                },
-            )
-            .await
-            .ok();
+            let fetched = opening
+                .run(
+                    ctx,
+                    machine,
+                    &FsFetch {
+                        environment_id: env.id,
+                        mount: None,
+                        path: path.to_owned(),
+                        expect: None,
+                        max_bytes: Some(limit),
+                    },
+                )
+                .await?
+                .ok();
             if let Some(file) = fetched.filter(|file| {
                 stat.as_ref().is_some_and(|stat| {
                     stat.entry.size == file.size
@@ -965,7 +1078,13 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                         && stat.hash.is_none_or(|hash| hash == file.hash)
                 })
             }) {
-                let mut conn = ctx.app.db.acquire().await?;
+                let mut conn = ctx.app.db.begin().await?;
+                let frame = opening.current(ctx, &mut conn).await?;
+                frame
+                    .into_parts()
+                    .first_effect
+                    .check(ctx.app.clock.as_ref())
+                    .map_err(live_file::mapped)?;
                 orch_db::queries::storage::register_blob(&mut conn, &file.hash, file.size, ctx.now)
                     .await?;
                 orch_db::queries::storage::record_cached(
@@ -980,11 +1099,19 @@ async fn environment_target(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResu
                     },
                 )
                 .await?;
+                let current = opening.current(ctx, &mut conn).await?;
+                conn.commit().await.map_err(DbError::from)?;
+                current
+                    .check_deadline(ctx.app.clock.as_ref())
+                    .map_err(live_file::mapped)?;
                 blob = Some(file.hash);
             }
         }
     }
     Ok(FileTarget {
+        opening: None,
+        environment: Some(opening),
+        attachment: None,
         preview: ReferencePreview {
             thread_display: None,
             kind: InlineRefKind::EnvironmentFile,
@@ -1035,6 +1162,14 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
         text: String::new(),
         by: None,
     });
+    if let Some(source) = &target.environment {
+        let mut tx = ctx.app.db.begin().await?;
+        let frame = source.current(ctx, &mut tx).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        frame
+            .check_deadline(ctx.app.clock.as_ref())
+            .map_err(live_file::mapped)?;
+    }
     if target.text
         && let (Some(line), Some(blob)) = (query.line, target.blob)
     {
@@ -1062,6 +1197,9 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             .as_ref()
             .and_then(|file| file.size)
             .map_or(bytes, |size| bytes.min(size));
+        if let Some(opening) = &target.opening {
+            opening.check(ctx)?;
+        }
         let text = if bytes > 0 {
             match ctx
                 .app
@@ -1084,6 +1222,9 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
         } else {
             None
         };
+        if let Some(opening) = &target.opening {
+            opening.check(ctx)?;
+        }
         if let Some(text) = text
             && let Some(text) = excerpt(&text, line, context)
         {
@@ -1096,27 +1237,72 @@ async fn file_preview(ctx: &Ctx, query: &ReferencePreviewQuery) -> ApiResult<Ref
             });
         }
     }
+    if let Some(opening) = &target.opening {
+        opening.check(ctx)?;
+    }
+    let opening = target.opening.take();
     // Native and blob reads hold no authority lock. Recheck the exact credential and current access at commit.
     let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
     if query.kind == InlineRefKind::EnvironmentFile {
-        let env = environment_access_on(&mut tx, guard.principal(), query).await?;
+        let source = target
+            .environment
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("the original environment file source was lost"))?;
+        let frame = source.current(ctx, &mut tx).await?;
+        let env = frame.value();
         if let Some(file) = &mut target.preview.file {
-            file.owner_name = env.name;
+            file.owner_name = env.name.clone();
         }
     } else {
-        let mut fresh =
-            attachment_target_on(&mut tx, guard.principal(), query, guard.now().get()).await?;
+        let opened = target
+            .attachment
+            .as_ref()
+            .ok_or_else(|| ApiError::internal("the native attachment source was not retained"))?;
+        opened.check(&mut tx, guard.principal()).await?;
+        let mut fresh = attachment_target_on(
+            &mut tx,
+            guard.principal(),
+            query,
+            guard.now().get(),
+            &operation::names(ctx)?,
+        )
+        .await?;
+        if fresh.attachment.as_ref() != Some(opened) {
+            return Err(ApiError::not_found());
+        }
         if fresh.text {
             fresh.preview.part = target.preview.part.take();
-            if fresh.blob != target.blob
-                && let Some(part) = &mut fresh.preview.part
-            {
-                part.text.clear();
-            }
         }
         target = fresh;
     }
+    guard.check_deadline(ctx)?;
     tx.commit().await.map_err(DbError::from)?;
+    guard.check_deadline(ctx)?;
+    if let Some(source) = target.attachment {
+        let opening = opening.ok_or_else(|| {
+            ApiError::internal("the native attachment lost its original HTTP reader")
+        })?;
+        opening.check(ctx)?;
+        crate::key_operations::publication::retain(
+            ctx,
+            &opening.accepted,
+            (
+                query.clone(),
+                ctx.operation_data::<operation::Bound>()?,
+                source,
+            ),
+            |ctx, conn, current, (query, bound, source)| {
+                Box::pin(async move {
+                    let current =
+                        operation::current_principal(ctx, conn, current, query, bound).await?;
+                    source.check(conn, &current).await
+                })
+            },
+        )?;
+    }
+    if let Some(source) = target.environment {
+        source.retain(ctx).await?;
+    }
     Ok(target.preview)
 }
 
@@ -1157,7 +1343,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1166,7 +1354,9 @@ mod tests {
             .bytes(b"first\nsecond\nthird\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let query = ReferencePreviewQuery {
             line: Some(2),
             ..whole(InlineRefKind::File, file.id)
@@ -1214,7 +1404,9 @@ mod tests {
             })
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .unwrap();
         let file = app
             .call(DocumentFileCreate, &[&doc.base.id])
             .token(&scene.ada.token)
@@ -1223,7 +1415,9 @@ mod tests {
             .bytes(b"fn first() {}\nfn second() {}\n")
             .send()
             .await
-            .ok();
+            .ok()
+            .into_full()
+            .expect("this native creation control requires its full response");
         let mut conn = scene.rig.db.acquire().await.unwrap();
         let held = rows::file(&mut conn, doc.base.id, file.id)
             .await
@@ -1336,6 +1530,7 @@ mod tests {
             403,
             "the canonical file door refuses this reader"
         );
+        let before_io:i64=sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind IN ('fs.stat','fs.fetch') AND body->>'environment_id'=$1::uuid::text").bind(scene.on.environment).fetch_one(&scene.rig.world.db.pool).await.unwrap();
         let refused = app
             .call(ReferencePreviewGet, &[])
             .token(&scene.cai.token)
@@ -1347,6 +1542,14 @@ mod tests {
             "the known target has a safe card without granting environment files"
         );
         assert!(!String::from_utf8_lossy(&refused.raw).contains("auth.rs"));
-        assert!(refused.ok().unavailable.is_some());
+        assert!(!String::from_utf8_lossy(&refused.raw).contains("fn second()"));
+        let safe = refused.ok();
+        assert!(safe.unavailable.is_some());
+        assert!(safe.file.is_none() && safe.part.is_none());
+        let after_io:i64=sqlx::query_scalar("SELECT count(*) FROM commands WHERE kind IN ('fs.stat','fs.fetch') AND body->>'environment_id'=$1::uuid::text").bind(scene.on.environment).fetch_one(&scene.rig.world.db.pool).await.unwrap();
+        assert_eq!(
+            after_io, before_io,
+            "a known unavailable card opens no native file reader"
+        );
     }
 }

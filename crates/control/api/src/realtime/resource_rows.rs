@@ -4,9 +4,8 @@
 use std::sync::Arc;
 
 use super::server::Connection;
-use super::subscriptions::principal_for_connection;
 use super::{Fail, Inner};
-use crate::middleware::authentication::{Authed, Caller, Via};
+use crate::middleware::authentication::Caller;
 use crate::middleware::requests::ApiResult;
 use crate::registry::Ctx;
 use crate::routes::resources::{
@@ -38,10 +37,8 @@ pub(crate) async fn project(
         return Ok(Some(legacy.clone()));
     };
     let mut conn = inner.db.acquire().await?;
-    let Some(principal) = principal_for_connection(inner, &mut conn, connection).await? else {
-        return Ok(None);
-    };
-    let Some(user) = orch_db::queries::identity::user_by_id(&mut conn, connection.user).await?
+    let Some((principal, authed)) =
+        super::subscriptions::reader_for_connection(inner, &mut conn, connection).await?
     else {
         return Ok(None);
     };
@@ -55,18 +52,9 @@ pub(crate) async fn project(
         ResourceKind::Mount => orch_api_contract::mounts::MountGet::ROUTE,
         ResourceKind::Skill => orch_api_contract::skills::SkillGet::ROUTE,
     };
-    let ctx = Ctx::for_tool(
-        app,
-        Caller::User(Arc::new(Authed {
-            as_admin: principal.caller().as_admin(),
-            user,
-            via: Via::Session {
-                session_id: connection.session(),
-            },
-        })),
-        route,
-        *id,
-    );
+    let ctx = Ctx::for_tool(app, Caller::User(Arc::new(authed)), route, *id)
+        .with_admitted_caller(principal.caller().clone())
+        .map_err(Fail::other)?;
     match read(&ctx, &mut conn, &principal, *kind, *id).await {
         Ok(row) => serde_json::to_value(ResourceEvent::Changed {
             row: Some(row),

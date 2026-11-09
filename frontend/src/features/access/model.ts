@@ -586,7 +586,13 @@ export type GeneralAccessPreset = 'defaults' | 'view' | 'interact' | 'manage' | 
 export type GeneralAccess = GeneralAccessPreset | 'custom';
 
 /** Everyone in a visible place is its explicit Viewer role, which includes the higher roles there. */
-export const generalHolder = (placeId: string, kind = 'thread'): HolderInput => kind === 'org' ? { kind: 'members', id: placeId } : { kind: 'role', role: 'viewer', at: placeId };
+export const generalHolder = (placeId: string | null, kind = 'thread'): HolderInput => {
+  if (kind === 'org') {
+    if (placeId === null) throw new Error('An org audience needs its actual org');
+    return { kind: 'members', id: placeId };
+  }
+  return { kind: 'role', role: 'viewer', at: placeId };
+};
 
 /** Each full line up to the chosen level is named explicitly, including the lower lines. */
 export function generalPermissions(catalogue: Catalogue, kind: string, preset: GeneralAccessPreset): Set<string> {
@@ -598,7 +604,7 @@ export function generalPermissions(catalogue: Catalogue, kind: string, preset: G
 export function generalAccessChange(
   catalogue: Catalogue,
   kind: string,
-  placeId: string,
+  placeId: string | null,
   preset: GeneralAccessPreset,
   page?: PermissionPage,
 ): PageChange {

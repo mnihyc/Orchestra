@@ -46,6 +46,9 @@ async fn found(world: &World, by: &Who, text: &str, kinds: &str) -> Vec<NameHit>
 async fn named_orgs_and_chats_have_the_same_stable_addresses_as_the_inventory() {
     let room = chat_world::Room::new().await;
     let direct = room.direct(&room.ada, &room.bea).await;
+    let group = room
+        .group(&room.ada, &[&room.bea], Some("Planning team"))
+        .await;
     room.say(&room.ada, room.chat, "The destination is here.")
         .await;
     let roots = found(&room.world, &room.ada, "acme", "org").await;
@@ -67,6 +70,11 @@ async fn named_orgs_and_chats_have_the_same_stable_addresses_as_the_inventory() 
             "login",
             room.chat,
             format!("/topic/{}?panel=chat&chat={}", room.topic, room.chat),
+        ),
+        (
+            "planning team",
+            group.base.id,
+            format!("/org/{}/messages?chat={}", room.root, group.base.id),
         ),
     ] {
         let quick = found(&room.world, &room.ada, text, "chat").await;
@@ -417,6 +425,8 @@ async fn a_tag_inherited_by_a_readable_topic_keeps_its_private_defining_place_re
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, private, "Readable work")
@@ -433,7 +443,9 @@ async fn a_tag_inherited_by_a_readable_topic_keeps_its_private_defining_place_re
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control expects the ordinary full tag response");
     assert!(found(&world, &bea, "handover", "tag").await.is_empty());
     let mut conn = world.conn().await;
     orch_db::queries::access::testing::add_entry(
@@ -511,6 +523,8 @@ async fn folder_paths_and_department_addresses_are_complete() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, folder, "Payment").await.base.id;
@@ -604,6 +618,8 @@ async fn private_names_never_fill_a_page_or_reveal_their_ancestor_names() {
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("this control expects the ordinary full project response")
         .base
         .id;
     let topic = make_topic(&world, &ada, secret, "Vault topic")

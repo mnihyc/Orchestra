@@ -15,6 +15,7 @@
 )]
 #![allow(dead_code, reason = "each test file uses a part of this")]
 
+pub mod corpus;
 pub mod forwarder;
 pub mod mcp;
 
@@ -88,6 +89,8 @@ pub struct DockerLauncher {
     prefix: String,
     /// Original native launch descriptions, including the prefix wire gate.
     pub launched: Mutex<Vec<LaunchSpec>>,
+    /// Isolated mock-provider transport; never part of the real agent profile.
+    mock_provider_env: Mutex<BTreeMap<String, String>>,
 }
 
 impl DockerLauncher {
@@ -96,6 +99,7 @@ impl DockerLauncher {
             mounts,
             names: Mutex::new(Vec::new()),
             launched: Mutex::new(Vec::new()),
+            mock_provider_env: Mutex::new(BTreeMap::new()),
             prefix: format!(
                 "orch-test-claude-{}-{}",
                 std::process::id(),
@@ -142,6 +146,11 @@ impl DockerLauncher {
 
 impl Launcher for DockerLauncher {
     fn command(&self, spec: &LaunchSpec) -> Command {
+        let mut actual = spec.clone();
+        actual
+            .env
+            .extend(self.mock_provider_env.lock().unwrap().clone());
+        let spec = &actual;
         if prefix_container_mode() {
             orch_testkit::prefix_history::prefix_native_args_offset(
                 &spec.program,
@@ -314,8 +323,7 @@ impl Rig {
         self.prefix_proof_succeeded = true;
     }
 
-    /// Starts the harness with its loopback somewhere else than the model server: the model is then
-    /// reached through the address in the profile's environment.
+    /// Starts the harness beside a tool listener; the isolated launcher supplies the mock model transport.
     pub async fn start_beside(&mut self, loopback: Loopback) -> AgentStarted {
         let env = BTreeMap::from([
             ("CLAUDE_CODE_MAX_RETRIES".to_owned(), "1".to_owned()),
@@ -348,9 +356,26 @@ impl Rig {
     async fn start_on(
         &mut self,
         config: serde_json::Value,
-        env: BTreeMap<String, String>,
+        mut env: BTreeMap<String, String>,
         loopback: Loopback,
     ) -> AgentStarted {
+        let mut mock_provider_env = BTreeMap::new();
+        if env.get("ANTHROPIC_BASE_URL") == Some(&self.model.url()) {
+            mock_provider_env.insert(
+                "ANTHROPIC_BASE_URL".into(),
+                env.remove("ANTHROPIC_BASE_URL").unwrap(),
+            );
+            if env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str) == Some(TOKEN) {
+                mock_provider_env.insert(
+                    "ANTHROPIC_AUTH_TOKEN".into(),
+                    env.remove("ANTHROPIC_AUTH_TOKEN").unwrap(),
+                );
+            }
+        }
+        *self.launcher.mock_provider_env.lock().unwrap() = mock_provider_env;
+        if std::env::var("ORCH_CLAUDE_FEATURE_FLAGS_OFF").as_deref() == Ok("1") {
+            env.insert("CLAUDE_CODE_DISABLE_FEATURE_FLAGS".into(), "1".into());
+        }
         if prefix_container_mode() {
             assert!(
                 self.program.is_none(),
@@ -359,6 +384,7 @@ impl Rig {
         }
         let start = AgentStart {
             provider_id: new_id(),
+            provider_kind: None,
             agent_id: new_id(),
             harness_kind: "claude-code".into(),
             profile: AgentProfile {
@@ -375,7 +401,7 @@ impl Rig {
         let started = self.adapter.start(start, self.sink.clone()).await.unwrap();
         if prefix_container_mode() {
             assert_eq!(
-                started.harness_version, "2.1.312",
+                started.harness_version, "2.1.319",
                 "container prefix proof requires the exact pinned native CLI"
             );
         }
@@ -435,51 +461,14 @@ impl Rig {
 
     /// The session of a thread working beside its own tools, forwarded through the model server.
     pub fn spec(&self, mode: SessionMode, native_session_ref: Option<&str>) -> SessionSpec {
-        SessionSpec {
-            settings: SessionSettings {
-                agent_id: new_id(),
-                thread_id: self.thread,
-                segment_id: self.segment,
-                mode,
-                native_session_ref: native_session_ref.map(str::to_owned),
-                upto_turn_ordinal: None,
-                workspace_root: self.directory(),
-                instruction_root_marker: false,
-                directory: self.directory(),
-                cwd: self.directory(),
-                mounts: Vec::new(),
-                model: "mock-large".into(),
-                effort: None,
-                params: json!({}),
-                approval_mode: ApprovalMode::Ask,
-                sandbox_mode: SandboxMode::Open,
-                instructions: String::new(),
-                available_models: vec!["mock-large".to_owned()],
-                subagent_limits: Default::default(),
-                memory: None,
-                arrangement: ArrangementType::KeySeparated,
-                orch_tools: Vec::new(),
-                orch_tool_schemas: Default::default(),
-                raw_events: false,
-                side_reading: None,
-                workspace_configuration: None,
-            },
-            session_key: self.session_key.clone(),
-            archive: None,
-            history: None,
-            provider: ProviderAccess::Forwarded {
-                provider_id: new_id(),
-                protocol: "anthropic-messages".into(),
-            },
-            exec: ExecAccess {
-                executor: None,
-                tool_set: None,
-                environment_id: new_id(),
-                generation: 1,
-            },
-            mcp: Vec::new(),
-            skills: None,
-        }
+        fixture_spec(
+            self.thread,
+            self.segment,
+            &self.directory(),
+            &self.session_key,
+            mode,
+            native_session_ref,
+        )
     }
 
     /// Opens a new session and takes the event that says so.
@@ -504,6 +493,8 @@ impl Rig {
     /// A turn with the given text, in the mode ask.
     pub fn turn(&self, text: &str) -> TurnStart {
         TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: self.thread,
             turn_id: new_id(),
@@ -745,4 +736,64 @@ pub fn tool_calls(events: &[SessionEvent]) -> Vec<&orch_agent_contract::events::
 /// Whether a path exists.
 pub fn exists(path: &Path) -> bool {
     path.exists()
+}
+
+/// The same typed session fixture for native and offline byte-transport actors; constructing it starts nothing.
+pub fn fixture_spec(
+    thread: Id,
+    segment: Id,
+    directory: &str,
+    session_key: &str,
+    mode: SessionMode,
+    native_session_ref: Option<&str>,
+) -> SessionSpec {
+    SessionSpec {
+        settings: SessionSettings {
+            native_model: None,
+            agent_id: new_id(),
+            thread_id: thread,
+            segment_id: segment,
+            mode,
+            native_session_ref: native_session_ref.map(str::to_owned),
+            upto_turn_ordinal: None,
+            workspace_root: directory.to_owned(),
+            instruction_root_marker: false,
+            directory: directory.to_owned(),
+            cwd: directory.to_owned(),
+            mounts: Vec::new(),
+            model: "mock-large".into(),
+            effort: None,
+            params: json!({}),
+            approval_mode: ApprovalMode::Ask,
+            sandbox_mode: SandboxMode::Open,
+            instructions: String::new(),
+            available_models: vec!["mock-large".to_owned()],
+            subagent_limits: Default::default(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
+            memory: None,
+            arrangement: ArrangementType::KeySeparated,
+            orch_tools: Vec::new(),
+            orch_tool_schemas: Default::default(),
+            raw_events: false,
+            side_reading: None,
+            workspace_configuration: None,
+        },
+        session_key: session_key.to_owned(),
+        archive: None,
+        history: None,
+        provider: ProviderAccess::Forwarded {
+            provider_id: new_id(),
+            protocol: "anthropic-messages".into(),
+        },
+        exec: ExecAccess {
+            executor: None,
+            tool_set: None,
+            environment_id: new_id(),
+            generation: 1,
+        },
+        mcp: Vec::new(),
+        skills: None,
+    }
 }

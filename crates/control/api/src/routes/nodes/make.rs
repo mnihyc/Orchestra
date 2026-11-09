@@ -17,23 +17,26 @@ use crate::middleware::authentication::Authed;
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
-use crate::sign_in::{origin, system_policy};
+use crate::sign_in::origin;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::pages::{PageChange, StoredKind, Whole};
+use orch_access_contract::permissions::ObjectKind;
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::auth::OrgCreation;
 use orch_api_contract::common::{ErrorCode, FieldFault};
 use orch_api_contract::nodes::{
-    NewNodeAccess, Node, NodeKind, Org, OrgChildCreate, OrgChildCreateBody, OrgCreate,
-    OrgCreateBody, Project, ProjectChildCreate, ProjectCreate, ProjectCreateBody, TopicCreate,
-    TopicCreateBody, TopicCreateReply, TopicWithThread,
+    NewNodeAccess, Node, NodeKind, OrgChildCreate, OrgCreate, ProjectChildCreate, ProjectCreate,
+    ProjectCreateBody, ProjectCreateResponse, TopicCreate, TopicCreateBody, TopicCreateReply,
+    TopicWithThread,
 };
 use orch_authz::pages::{self, Target};
-use orch_authz::{Policy, Principal, epoch, orgs};
-use orch_db::queries::{access, hierarchy, identity};
+use orch_authz::{Policy, Principal, orgs};
+use orch_db::queries::{hierarchy, identity};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time, new_id};
 use serde_json::json;
+
+mod organizations;
 
 /// The fewest characters of a root org's short name: the same as a username,
 /// whose namespace it shares.
@@ -46,11 +49,41 @@ pub const SLUG_MAX_CHARS: usize = 32;
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(OrgCreate, org_create)
-        .on(OrgChildCreate, org_child_create)
-        .on(ProjectCreate, project_create)
-        .on(ProjectChildCreate, project_child_create)
-        .on(TopicCreate, topic_create);
+        .creation(
+            OrgCreate,
+            organizations::replay_binding::<orch_api_contract::nodes::OrgCreateBody, true>(),
+        )
+        .creation(
+            OrgChildCreate,
+            organizations::replay_binding::<orch_api_contract::nodes::OrgChildCreateBody, false>(),
+        )
+        .creation(ProjectCreate, super::creation_replay::project::<false>())
+        .creation(
+            ProjectChildCreate,
+            super::creation_replay::project::<true>(),
+        )
+        .creation(TopicCreate, super::creation_replay::topic())
+        .on_with_operation(
+            OrgCreate,
+            crate::key_operations::native::effects::prepare::<organizations::Root>,
+            organizations::root,
+        )
+        .on_with_operation(
+            OrgChildCreate,
+            crate::key_operations::native::effects::prepare::<organizations::Child>,
+            organizations::child,
+        )
+        .on_with_operation(
+            ProjectCreate,
+            super::creation_operation::project,
+            project_create,
+        )
+        .on_with_operation(
+            ProjectChildCreate,
+            super::creation_operation::project_child,
+            project_child_create,
+        )
+        .on_with_optional_operation(TopicCreate, super::creation_operation::topic, topic_create);
 }
 
 /// The most numbered short names tried when one is offered in place of a taken one ("dep2-2" to "dep2-99"):
@@ -190,7 +223,19 @@ async fn make(
         Ok(first) => first,
         Err(error) => return Err(refusals::problem(conn, error).await),
     };
+    make_with_owner(ctx, conn, principal, new, first, || Ok(())).await
+}
+/// All native creators share this insertion after owner/placement preparation.
+async fn make_with_owner(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    new: &New<'_>,
+    first: Id,
+    before: impl FnOnce() -> ApiResult<()>,
+) -> ApiResult<Placed> {
     let id = new_id();
+    before()?;
     hierarchy::create(
         conn,
         &hierarchy::NewNode {
@@ -200,7 +245,6 @@ async fn make(
             name: new.name,
             name_by_person: new.name_by_person,
             description: new.description,
-            description_by_person: !new.description.is_empty(),
             owner: first,
             org: new.org,
             at: ctx.now,
@@ -267,77 +311,6 @@ fn error_of(error: &pages::ChangeError) -> ApiError {
     ApiError::internal(format!("a new node's page could not be set: {error}"))
 }
 
-/// Makes an org inside another, which people call a department.
-async fn org_child_create(ctx: Ctx, (): (), body: OrgChildCreateBody) -> ApiResult<Org> {
-    let parent = ctx.id("id")?;
-    let name = clean_name("name", &body.name)?;
-    let slug = clean_slug("slug", &body.slug, SLUG_MIN_CHARS)?;
-    let description = clean_description("description", body.description.as_deref().unwrap_or(""))?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let (place, kind) = super::placed(&mut tx, parent).await?;
-    if kind != NodeKind::Org {
-        return Err(ApiError::not_found());
-    }
-    slug_free(&mut tx, Some(parent), &slug).await?;
-    let rows = hierarchy::with_ancestors(&mut tx, &[parent]).await?;
-    let above = rows
-        .iter()
-        .find(|row| row.id == parent)
-        .map(|row| {
-            row.path
-                .iter()
-                .filter(|place| {
-                    rows.iter()
-                        .any(|row| row.id == **place && row.kind == "org")
-                })
-                .count()
-        })
-        .unwrap_or_default();
-    if orgs::limits(&mut tx, place.org)
-        .await
-        .map_err(ApiError::internal)?
-        .is_some_and(|limits| limits.flat)
-    {
-        return Err(
-            ApiError::new(ErrorCode::OrgFlat, "this tree holds no org inside it")
-                .with("org", refusals::named_node(&mut tx, place.org).await?),
-        );
-    }
-    let limit = ctx.app.config.limits.org_depth;
-    if !orgs::fits_depth(above + 1, limit) {
-        return Err(ApiError::new(
-            ErrorCode::OrgTooDeep,
-            format!("orgs may lie in one another {limit} deep at most"),
-        )
-        .with("limit", limit));
-    }
-    let made = make(
-        &ctx,
-        &mut tx,
-        &principal,
-        &New {
-            kind: "org",
-            parent: Some(parent),
-            name: &name,
-            name_by_person: true,
-            description: &description,
-            org: Some(hierarchy::NewOrg {
-                slug: &slug,
-                org_kind: "team",
-            }),
-            access: body.access,
-            invitation: None,
-        },
-    )
-    .await?;
-    if body.general == Some(true) {
-        make_general(&ctx, &mut tx, &principal, made.id).await?;
-    }
-    let node = shown(&ctx, &mut tx, &principal, made.id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    expect_org(node)
-}
-
 /// The project that a team's root org starts with, and that an org inside
 /// another is given when its maker asks.
 async fn make_general(ctx: &Ctx, conn: &mut Conn, principal: &Principal, org: Id) -> ApiResult<()> {
@@ -361,13 +334,6 @@ async fn make_general(ctx: &Ctx, conn: &mut Conn, principal: &Principal, org: Id
     Ok(())
 }
 
-fn expect_org(node: Node) -> ApiResult<Org> {
-    match node {
-        Node::Org(org) => Ok(org),
-        _ => Err(ApiError::internal("an org was made and is not one")),
-    }
-}
-
 /// Whether `caller` may make a team org now, by `orgs.created_by` as `creation` holds it: anybody
 /// signed in, a system admin in a browser session, or, while it is `invited`, the holder of an
 /// unused invitation to make one. A service identity makes none.
@@ -382,80 +348,22 @@ pub(crate) fn may_make_org(creation: OrgCreation, caller: &Authed) -> bool {
         }
 }
 
-/// Asks `orgs.created_by` in the action's transaction whether the caller may make a team org, and
-/// refuses with `org.creation_disabled` when it says no. Where an invitation is what lets them, it
-/// is used up here, in the same transaction as the org it makes, and returned for its audit row:
-/// of two requests at once on one invitation, one makes an org and the other is refused.
-async fn org_maker(ctx: &Ctx, conn: &mut Conn) -> ApiResult<Option<identity::OrgInvitation>> {
-    let caller = ctx.user()?;
-    let creation = system_policy(conn).await?.org_creation;
-    let refused = |why: &str| {
-        ApiError::new(ErrorCode::OrgCreationDisabled, why.to_owned()).with("org_creation", creation)
-    };
-    if caller.user.kind != "human" {
-        return Err(refused("a service identity makes no team org"));
-    }
-    match creation {
-        OrgCreation::Anyone => Ok(None),
-        _ if caller.is_system_admin() => Ok(None),
-        OrgCreation::Admins => Err(refused("only a system admin makes a team org here")),
-        OrgCreation::Invited => identity::take_org_invitation(conn, caller.id())
-            .await?
-            .map(Some)
-            .ok_or_else(|| {
-                refused("a team org is made here by a system admin, or by somebody a system admin invited to make one")
-            }),
-    }
-}
-
-/// Makes a root org of kind team, with the caller as its first owner and
-/// its first member, and a `General` project in it.
-async fn org_create(ctx: Ctx, (): (), body: OrgCreateBody) -> ApiResult<Org> {
-    let name = clean_name("name", &body.name)?;
-    let slug = clean_slug("slug", &body.slug, ROOT_SLUG_MIN_CHARS)?;
-    let (ctx, mut tx, principal) = Box::pin(super::action(&ctx)).await?;
-    let invitation = org_maker(&ctx, &mut tx).await?;
-    slug_free(&mut tx, None, &slug).await?;
-    let made = Box::pin(make(
-        &ctx,
-        &mut tx,
-        &principal,
-        &New {
-            kind: "org",
-            parent: None,
-            name: &name,
-            name_by_person: true,
-            description: "",
-            org: Some(hierarchy::NewOrg {
-                slug: &slug,
-                org_kind: "team",
-            }),
-            access: None,
-            invitation,
-        },
-    ))
-    .await?;
-    // Their domain is the org itself; the role they hold there is the one
-    // that owning gives.
-    access::add_member(&mut tx, made.id, principal.user(), made.id, None, ctx.now).await?;
-    epoch::bump(&mut tx).await.map_err(ApiError::internal)?;
-    Box::pin(make_general(&ctx, &mut tx, &principal, made.id)).await?;
-    // The caller was a member of nothing here when they were read: read them
-    // again to show the org as they now hold it.
-    let principal = Box::pin(authorization::principal(&ctx, &mut tx)).await?;
-    let node = shown(&ctx, &mut tx, &principal, made.id).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    expect_org(node)
-}
-
 /// Makes a project in an org, at whatever level it lies.
-async fn project_create(ctx: Ctx, (): (), body: ProjectCreateBody) -> ApiResult<Project> {
+async fn project_create(
+    ctx: Ctx,
+    (): (),
+    body: ProjectCreateBody,
+) -> ApiResult<ProjectCreateResponse> {
     make_project(&ctx, NodeKind::Org, &body).await
 }
 
 /// Makes a project inside a project, beside its topics: what the screens call a folder, and a project
 /// like any other, made in the same form by whoever opens topics there.
-async fn project_child_create(ctx: Ctx, (): (), body: ProjectCreateBody) -> ApiResult<Project> {
+async fn project_child_create(
+    ctx: Ctx,
+    (): (),
+    body: ProjectCreateBody,
+) -> ApiResult<ProjectCreateResponse> {
     make_project(&ctx, NodeKind::Project, &body).await
 }
 
@@ -466,7 +374,7 @@ async fn make_project(
     ctx: &Ctx,
     parent_kind: NodeKind,
     body: &ProjectCreateBody,
-) -> ApiResult<Project> {
+) -> ApiResult<ProjectCreateResponse> {
     let parent = ctx.id("id")?;
     let name = clean_name("name", &body.name)?;
     let description = clean_description("description", body.description.as_deref().unwrap_or(""))?;
@@ -503,16 +411,43 @@ async fn make_project(
         },
     )
     .await?;
-    let node = shown(ctx, &mut tx, &principal, made.id).await?;
+    let node = super::creation_operation::read(
+        ctx,
+        &mut tx,
+        &principal,
+        made.id,
+        if parent_kind == NodeKind::Org {
+            ObjectKind::Org
+        } else {
+            ObjectKind::Project
+        },
+        ObjectKind::Project,
+        ctx.route.name,
+    )
+    .await?;
     tx.commit().await.map_err(DbError::from)?;
+    if ctx.key_receipt_required() {
+        return Ok(ProjectCreateResponse::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Project),
+        ));
+    }
     match node {
-        Node::Project(project) => Ok(project),
+        Some(Node::Project(project)) => Ok(ProjectCreateResponse::full(project)),
+        None => Ok(ProjectCreateResponse::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Project),
+        )),
         _ => Err(ApiError::internal("a project was made and is not one")),
     }
 }
 
-/// Makes a topic in a project. A thread made with it is the threads routes'.
-async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+/// The rollbackable Topic-only prefix, shared by ordinary creation and the closed
+/// Topic-with-thread stage. It performs no environment, thread, job or input work.
+pub(crate) async fn topic_prefix(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    body: &TopicCreateBody,
+) -> ApiResult<Placed> {
     let parent = ctx.id("id")?;
     let name = body
         .name
@@ -520,15 +455,14 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
         .map(|name| clean_name("name", name))
         .transpose()?;
     let description = clean_description("description", body.description.as_deref().unwrap_or(""))?;
-    let (ctx, mut tx, principal) = super::action(&ctx).await?;
-    let (_, kind) = super::placed(&mut tx, parent).await?;
+    let (_, kind) = super::placed(conn, parent).await?;
     if kind != NodeKind::Project {
         return Err(ApiError::not_found());
     }
-    let made = make(
-        &ctx,
-        &mut tx,
-        &principal,
+    make(
+        ctx,
+        conn,
+        principal,
         &New {
             kind: "topic",
             parent: Some(parent),
@@ -540,7 +474,16 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
             invitation: None,
         },
     )
-    .await?;
+    .await
+}
+
+/// Makes a topic in a project. A thread made with it is the threads routes'.
+async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+    if ctx.topic_creation_prefix().is_some() {
+        return topic_with_thread_scoped(ctx, body).await;
+    }
+    let (ctx, mut tx, principal) = super::action(&ctx).await?;
+    let made = topic_prefix(&ctx, &mut tx, &principal, &body).await?;
     let thread = match body.first_thread.as_ref() {
         Some(first) => Some(
             crate::routes::threads::make::create_in(&ctx, &mut tx, &principal, made.id, first)
@@ -548,19 +491,39 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
         ),
         None => None,
     };
-    let node = shown(&ctx, &mut tx, &principal, made.id).await?;
+    let node = if body.first_thread.is_some() {
+        Some(shown(&ctx, &mut tx, &principal, made.id).await?)
+    } else {
+        super::creation_operation::read(
+            &ctx,
+            &mut tx,
+            &principal,
+            made.id,
+            ObjectKind::Project,
+            ObjectKind::Topic,
+            "TopicCreate.create",
+        )
+        .await?
+    };
     tx.commit().await.map_err(DbError::from)?;
+    if let Some(thread) = &thread {
+        if body
+            .first_thread
+            .as_ref()
+            .is_some_and(|first| first.first_input.is_some())
+        {
+            ctx.app.engine.wake(thread.base.id);
+        }
+        ctx.app.engine.kick();
+    }
+    if ctx.key_receipt_required() {
+        return Ok(TopicCreateReply::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Topic),
+        ));
+    }
     match node {
-        Node::Topic(topic) => {
+        Some(Node::Topic(topic)) => {
             if let Some(thread) = thread {
-                if body
-                    .first_thread
-                    .as_ref()
-                    .is_some_and(|first| first.first_input.is_some())
-                {
-                    ctx.app.engine.wake(thread.base.id);
-                }
-                ctx.app.engine.kick();
                 Ok(TopicCreateReply::WithThread(TopicWithThread {
                     topic,
                     thread,
@@ -569,6 +532,70 @@ async fn topic_create(ctx: Ctx, (): (), body: TopicCreateBody) -> ApiResult<Topi
                 Ok(TopicCreateReply::Topic(topic))
             }
         }
+        None => Ok(TopicCreateReply::Receipt(
+            super::creation_operation::receipt(made.id, NodeKind::Topic),
+        )),
         _ => Err(ApiError::internal("a topic was made and is not one")),
     }
+}
+
+async fn topic_with_thread_scoped(ctx: Ctx, body: TopicCreateBody) -> ApiResult<TopicCreateReply> {
+    let (ctx, mut tx, guard, topic) =
+        crate::key_operations::creation_stage::begin(&ctx, &body).await?;
+    let creation =
+        guard.operation_data::<crate::routes::threads::creation_operation::Creation>()?;
+    let principal = guard.into_principal();
+    let created = if let Some(created) = &creation.created {
+        created.clone()
+    } else {
+        let created = ctx
+            .app
+            .engine
+            .create_thread_in_transaction(
+                &mut tx,
+                principal.caller(),
+                &creation.new,
+                &creation.birth,
+                new_id(),
+                principal.now().get(),
+            )
+            .await;
+
+        match created {
+            Ok(created) => created,
+            Err(error) => return Err(crate::routes::threads::create_failed(&mut tx, error).await),
+        }
+    };
+    let first = body
+        .first_thread
+        .as_ref()
+        .and_then(|first| first.first_input.as_ref());
+    let receipt = crate::routes::threads::creation_operation::receipt(
+        &mut tx,
+        principal.user(),
+        created.thread,
+        topic,
+        first,
+    )
+    .await?;
+    let shown = crate::routes::threads::creation_operation::read(
+        &ctx,
+        &mut tx,
+        &principal,
+        &creation,
+        created.thread,
+        true,
+    )
+    .await?;
+    tx.commit().await.map_err(DbError::from)?;
+    if first.is_some() {
+        ctx.app.engine.wake(created.thread);
+    }
+    ctx.app.engine.kick();
+    Ok(match shown {
+        Some((thread, Some(topic))) if !ctx.key_receipt_required() => {
+            TopicCreateReply::WithThread(TopicWithThread { topic, thread })
+        }
+        _ => TopicCreateReply::ThreadReceipt(receipt),
+    })
 }

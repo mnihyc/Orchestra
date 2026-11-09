@@ -20,7 +20,9 @@ pub struct Occurrence {
 
 fn zone(timing: &InputTiming) -> ApiResult<Tz> {
     let name = match timing {
-        InputTiming::Once { zone, .. } | InputTiming::Repeat { zone, .. } => zone,
+        InputTiming::Once { zone, .. }
+        | InputTiming::Repeat { zone, .. }
+        | InputTiming::Cron { zone, .. } => zone,
     };
     name.parse()
         .map_err(|_| ApiError::invalid("timing.zone", "choose an IANA time zone"))
@@ -29,6 +31,12 @@ fn zone(timing: &InputTiming) -> ApiResult<Tz> {
 /// Checks an explicit civil time and a nonempty valid weekly selection.
 pub fn validate(timing: &InputTiming) -> ApiResult<()> {
     zone(timing)?;
+    if let InputTiming::Cron { expression, zone } = timing {
+        if zone != "UTC" {
+            return Err(ApiError::invalid("timing.zone", "cron expressions use UTC"));
+        }
+        super::cron::Cron::parse(expression)?;
+    }
     if let InputTiming::Repeat {
         frequency,
         time,
@@ -112,6 +120,9 @@ fn on(timing: &InputTiming, date: NaiveDate, tz: Tz) -> ApiResult<Option<Occurre
 /// Next strictly future occurrence; valid daily/weekly schedules have one within the next week.
 pub fn next(timing: &InputTiming, after: DateTime<Utc>) -> ApiResult<Occurrence> {
     validate(timing)?;
+    if let InputTiming::Cron { expression, .. } = timing {
+        return super::cron::Cron::parse(expression)?.next(after);
+    }
     let tz = zone(timing)?;
     if let InputTiming::Once { at, .. } = timing {
         if at.get() <= after {
@@ -153,6 +164,9 @@ pub fn latest_due(
     now: DateTime<Utc>,
 ) -> ApiResult<Occurrence> {
     validate(timing)?;
+    if let InputTiming::Cron { expression, .. } = timing {
+        return super::cron::Cron::parse(expression)?.latest(first, now);
+    }
     let tz = zone(timing)?;
     if let InputTiming::Once { at, .. } = timing {
         return Ok(Occurrence {
@@ -187,6 +201,9 @@ pub fn latest_due(
 
 /// Counts earlier coalesced civil dates with whole-week arithmetic, bounded remainder work.
 pub fn missed(timing: &InputTiming, first: DateTime<Utc>, last: &Occurrence) -> ApiResult<i64> {
+    if let InputTiming::Cron { expression, .. } = timing {
+        return super::cron::Cron::parse(expression)?.missed(first, last.due);
+    }
     let tz = zone(timing)?;
     let InputTiming::Repeat {
         frequency,

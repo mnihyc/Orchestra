@@ -8,6 +8,7 @@
 mod places;
 mod support;
 
+use crate::support::FullPermissionPageReply;
 use orch_api_contract::access::PermissionPageUpdate;
 use orch_api_contract::documents::{
     Author, DocumentGet, NodeDocumentCreate, NodeDocumentCreateBody,
@@ -35,7 +36,9 @@ async fn changing_the_first_owner_does_not_rewrite_the_person_who_made_the_docum
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     world
         .app
         .call(PermissionPageUpdate, &[&"documents", &made.base.id])
@@ -45,6 +48,7 @@ async fn changing_the_first_owner_does_not_rewrite_the_person_who_made_the_docum
         )
         .send()
         .await
+        .full_permission_page()
         .ok();
     let now = world
         .app

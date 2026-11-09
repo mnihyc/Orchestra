@@ -70,7 +70,7 @@ async fn scopes_of(
     document: Id,
 ) -> ApiResult<orch_types::Json> {
     Ok(
-        orch_authz::everything::project_search(conn, principal, None, &[document], &[], &[])
+        orch_authz::everything::project_related(conn, principal, document)
             .await
             .map_err(ApiError::internal)?
             .search_candidates(principal),

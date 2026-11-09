@@ -72,7 +72,7 @@ function Given({ thread, tab }: { thread: Thread; tab: ViewProps['tab'] }) {
   const record = tab.of?.givenThread === thread.id ? tab.of.givenRecord ?? null : null;
   const query = useInfiniteQuery(modelInputsQuery(thread.id, turn, record));
   const [search, setSearch] = useState('');
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const unique = new Map(query.data.pages.flatMap((page) => page.items).map((record) => [record.id, record]));
   const wanted = search.trim().toLocaleLowerCase();
   const records = [...unique.values()]

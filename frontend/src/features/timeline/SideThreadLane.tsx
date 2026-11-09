@@ -15,6 +15,7 @@ import { defaultThreadRead, resultThreadRead, sameThreadRead, type ThreadReadRef
 import { allTabs, setTabTarget } from '@/features/workbench/layout';
 import { useWorkbench } from '@/features/workbench/store';
 import { ContinuationNotice } from '@/features/thread/ContinuationNotice';
+import { AudienceBanner } from '@/features/thread/AudienceBanner';
 import { openChange } from '@/features/change/target';
 import { DraftMark } from '@/features/composer/DraftMark';
 import { AttachmentChips } from '@/features/composer/Attachments';
@@ -32,6 +33,7 @@ import { sideLaneKey, timelineUi, useThreadUi } from '@/features/timeline/state'
 import { revealView } from '@/features/workbench/openView';
 import { useViewShown, type ViewProps } from '@/features/workbench/views';
 import type { ContentPart, MarkerSideClosed, NodeRef, Thread, UserRef } from '@/generated/api-types';
+import { UserChip } from '@/ui/UserChip';
 import { holds } from '@/lib/permissions';
 import { isComposing } from '@/lib/shortcuts';
 import { forgetThreadRead, reloadThread, useSocketStatus, useThreadFeed } from '@/realtime/live';
@@ -250,7 +252,7 @@ function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwn
     itemsRef={itemsRoot} context={context} ids={view.order} loading={view.loaded === 'none'} empty={t('side.lane.empty')} agentHeads
     header={<>
       {panel && <><ThreadStateIcon display={thread.display} /><span className="min-w-0 wrap-anywhere font-medium">{thread.name}</span></>}
-      {!panel && by !== undefined && <span className="text-xs text-text-muted">{t('timeline.marker.sideStarted', { by: by.display_name })}</span>}
+      {!panel && by !== undefined && <span data-side-started-by className="inline-flex min-w-0 flex-wrap items-center gap-1 text-sm text-text-muted"><UserChip user={by} /><span>{t('side.lane.started')}</span></span>}
       {at !== undefined && <TimeOfDay at={at} className="text-xs text-text-muted" />}
       {!panel && <Button size="sm" variant="ghost" className="ml-auto" onClick={() => {
         const target: Record<string, string> = { thread: parentId, side: sideId };
@@ -264,7 +266,7 @@ function SideConversationBody({ parentId, sideId, panel = false, by, at, readOwn
       {(meId === thread.owner.id || context.canManage || parent.canManage) && <Button size="sm" variant="ghost" pending={close.isPending} disabled={!mayClose}
         onClick={() => close.mutate(sideId)}>{t('side.close')}</Button>}
     </>}
-    intro={<p className="text-xs text-text-muted">{thread.side_reading === null ? t('side.lane.modeUnknown') : t('side.ask.mode', { mode: t(`side.reading.${thread.side_reading}`) })}</p>}
+    intro={<><AudienceBanner thread={thread} /><p className="text-xs text-text-muted">{thread.side_reading === null ? t('side.lane.modeUnknown') : t('side.ask.mode', { mode: t(`side.reading.${thread.side_reading}`) })}</p></>}
     history={<>{view.hasOlder && <Button size="sm" variant="ghost" pending={reading} disabled={anchoring} onClick={() => void earlier()}>{t('side.lane.older')}</Button>}
       {view.loaded === 'window' && view.hasNewer && <Button size="sm" variant="ghost" onClick={jump}>{t('timeline.jump')}</Button>}
       {readError !== null && <ErrorState compact error={readError} onRetry={() => void earlier()} />}

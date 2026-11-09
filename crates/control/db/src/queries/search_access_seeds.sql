@@ -5,7 +5,7 @@ WITH selected_nodes AS (
  ORDER BY n.id LIMIT $5)
  UNION SELECT n.id FROM nodes n WHERE n.id=$1 OR n.id=ANY($4::uuid[])
  UNION SELECT d.node_id FROM documents d WHERE d.id=ANY($2::uuid[])
- UNION SELECT COALESCE(c.node_id,c.org_id) FROM chats c WHERE c.id=ANY($3::uuid[])
+ UNION SELECT COALESCE(c.node_id,c.home_id,c.org_id) FROM chats c WHERE c.id=ANY($3::uuid[])
  UNION (SELECT DISTINCT n.id FROM permission_rows p JOIN nodes n ON n.id=p.object_id
  WHERE p.object_kind='node' AND p.page='live' AND n.kind='thread' AND n.deleted_at IS NULL
    AND ($1::uuid IS NULL OR n.path @> ARRAY[$1::uuid])

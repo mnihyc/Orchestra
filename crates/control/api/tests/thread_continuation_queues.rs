@@ -76,6 +76,19 @@ async fn setup() -> Proof<(rig::Scene, Id, Retained, ThreadInput, ThreadInput)> 
         Time::new(scene.rig.world.now()),
     )
     .await?;
+    let selected_hold: (bool, bool) = sqlx::query_as(
+        "SELECT t.queue_held,c.queue_held FROM threads t JOIN thread_continuations c
+         ON c.id=t.active_continuation_id WHERE t.node_id=$1 AND c.id=$2",
+    )
+    .bind(thread)
+    .bind(view.child)
+    .fetch_one(scene.rig.db.pool())
+    .await?;
+    assert_eq!(
+        selected_hold,
+        (true, true),
+        "the selected native queue is held before accepting its new input"
+    );
     let selected = scene
         .say(
             &scene.ada,
@@ -87,6 +100,22 @@ async fn setup() -> Proof<(rig::Scene, Id, Retained, ThreadInput, ThreadInput)> 
         .await
         .ok()
         .input;
+    let inherited_hold: (bool, bool, bool) = sqlx::query_as(
+        "SELECT t.queue_held,c.queue_held,i.queue_held FROM threads t
+         JOIN thread_continuations c ON c.id=t.active_continuation_id
+         JOIN thread_inputs i ON i.continuation_id=c.id
+         WHERE t.node_id=$1 AND c.id=$2 AND i.id=$3",
+    )
+    .bind(thread)
+    .bind(view.child)
+    .bind(selected.id)
+    .fetch_one(scene.rig.db.pool())
+    .await?;
+    assert_eq!(
+        inherited_hold,
+        (true, true, true),
+        "the new input inherits its selected queue before any inactive edit or cancellation"
+    );
     Ok((scene, thread, view, old, selected))
 }
 
@@ -168,6 +197,14 @@ async fn inactive_delivery_and_stop_refuse_but_author_text_edits_and_cancellatio
     assert_eq!(
         edited.iter().find(|row| row.0 == view.child),
         before.iter().find(|row| row.0 == view.child)
+    );
+    let held: bool = sqlx::query_scalar("SELECT queue_held FROM thread_inputs WHERE id=$1")
+        .bind(selected.id)
+        .fetch_one(scene.rig.db.pool())
+        .await?;
+    assert!(
+        held,
+        "editing the inactive author input keeps the selected input held"
     );
     let denied = app
         .call(ThreadInputUpdate, &[&thread, &old.id])

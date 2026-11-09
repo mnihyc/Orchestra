@@ -1,4 +1,5 @@
 //! A runtime's life on a real Docker daemon, through a real gateway and API: stopped and started with its identity, recreated as a successor on the same volumes with its files kept while the old unit stays until told, and removed without its volumes; and a unit whose connector cannot enroll, reported failed and cleaned up.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,7 +17,7 @@ async fn a_runtime_is_stopped_and_started_recreated_on_its_volumes_with_its_file
     let Some(lab) = Lab::start().await else {
         return;
     };
-    let mut world = World::start(&lab.bridge).await;
+    let mut world = World::start(&lab).await;
     let mut node = NodeUnderTest::start(&world, &lab).await;
     let fleet = Fleet::new(&world, &lab, &node);
     let _program = fleet.prepare().await;
@@ -153,17 +154,45 @@ async fn a_unit_whose_connector_cannot_enroll_is_reported_failed_and_removed_and
     let Some(lab) = Lab::start().await else {
         return;
     };
-    let mut world = World::start(&lab.bridge).await;
-    let mut node = NodeUnderTest::start(&world, &lab).await;
+    let mut world = World::start(&lab).await;
+    // Unit entrances come from the node's trusted configuration, not a command's URL.
+    // This node stays connected, but its operator gives new units an unreachable entrance.
+    let lost_gateway = "wss://127.0.0.1:1";
+    let mut node = NodeUnderTest::start_with(
+        &world,
+        &lab.token,
+        &lab.system,
+        orch_node_core::drivers::Registrations::new().register(
+            orch_node::docker::NAME,
+            orch_node::docker::registration(lab.adjust()),
+        ),
+        |settings| {
+            settings.drivers = vec![orch_node::docker::NAME.to_owned()];
+            settings.docker.socket.clone_from(&lab.socket);
+            settings.managed_endpoint = lost_gateway.to_owned();
+        },
+        &[orch_node::docker::NAME],
+    )
+    .await;
     let fleet = Fleet::new(&world, &lab, &node);
     let _program = fleet.prepare().await;
 
     // The unit is given an address where nothing listens: its connector gives up, and the unit ends.
     let lost = fleet.unit("lost");
     fleet
-        .make(&lost, Some("wss://gateway.orch.internal:1"))
+        .make(&lost, None)
         .await
         .expect("made");
+    let container = lab.docker.inspect_container(&lost.name, None).await.unwrap();
+    assert!(
+        container
+            .config
+            .unwrap()
+            .env
+            .unwrap()
+            .contains(&format!("ORCH_GATEWAY_URL={lost_gateway}")),
+        "the actual unit must have the unreachable operator-owned entrance"
+    );
     fleet.start(&lost).await.expect("started");
     // The start may find the unit ended already and tell it failed in the driver's words; the node's watch of
     // the enrollment then says why, which is what the test waits for.

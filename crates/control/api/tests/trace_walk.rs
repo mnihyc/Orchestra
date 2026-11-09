@@ -130,6 +130,7 @@ async fn mcp(
                 .say(
                     state.thread,
                     Event::OrchToolCall(OrchToolCall {
+                        deadline: None,
                         turn_id: state.turn,
                         call_ref: call.clone(),
                         attempt: None,
@@ -448,11 +449,16 @@ async fn a_real_harness_tool_is_findable_for_its_original_person_and_deleted_his
         .ok();
     assert!(people_only.items.is_empty());
     // Deleting the place removes its environment by a job of its own, which tells its owner when it is
-    // over: that is the deletion's work, settled before the baseline of reads that change nothing.
+    // over: wait for that actual removal job, not an empty queue before the reaper schedules it.
+    // Its terminal state and completion notification commit together, before the read-only baseline.
     common::eventually("the deleted place's removal jobs end", || async {
         sqlx::query_scalar::<_, bool>(
-            "SELECT NOT EXISTS(SELECT 1 FROM jobs WHERE state IN ('queued','running'))",
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE environment_id=$1 AND kind=$2
+                           AND plan->>'runtime' IS NULL AND state NOT IN ('queued','running'))
+                AND NOT EXISTS(SELECT 1 FROM jobs WHERE state IN ('queued','running'))",
         )
+        .bind(world.environment)
+        .bind(orch_db::queries::jobs::kind::ENVIRONMENT_REMOVE)
         .fetch_one(world.pool.pool())
         .await
         .unwrap()
@@ -638,7 +644,9 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary retained lifecycle result stays full");
     host.wait_for(CommandKind::NodeRuntimeStart, 2).await;
     let repeated = app
         .call(EnvironmentRestore, &[&made.id])
@@ -648,7 +656,9 @@ async fn a_person_finds_a_removed_environment_inspects_its_frozen_day_and_restor
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary retained lifecycle result stays full");
     assert_eq!(repeated.id, job.id);
     let _restored = hosting::enroll(&world, host.started().unwrap()).await;
     let (state, _, error) = hosting::wait_over(&world, job.id).await;

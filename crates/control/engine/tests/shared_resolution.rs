@@ -83,6 +83,16 @@ async fn a_foreign_path_never_delivers_to_the_same_named_thread_in_the_senders_t
     let world = a_world_whose_agent_takes_tools().await;
     let sender = world.thread("Sender").await;
     let local = world.thread("Deploy").await;
+    share(
+        &world,
+        "node",
+        local,
+        "live",
+        "thread.interact",
+        "any",
+        sender,
+    )
+    .await;
     let topic = world.topic("Payments").await;
     let remote = thread_in_topic(&world, topic, "Deploy").await;
     share_threads_inside(&world, topic, sender, true).await;
@@ -221,6 +231,16 @@ async fn listing_and_sending_use_the_same_reserved_trimmed_name_and_random_id_ta
     let world = a_world_whose_agent_takes_tools().await;
     let sender = world.thread("Sender").await;
     let target = world.thread("  docs  ").await;
+    share(
+        &world,
+        "node",
+        target,
+        "live",
+        "thread.interact",
+        "any",
+        sender,
+    )
+    .await;
     world.thread("Docs").await;
     world
         .document_beside(world.topic, "Guide", &["The real document directory."])
