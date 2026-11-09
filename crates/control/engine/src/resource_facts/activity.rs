@@ -21,7 +21,8 @@ pub async fn accepts_request(
     accepts_context(conn, provider, model, None, None).await
 }
 
-/// Captured source work cannot spend through a profile or environment that is switched off.
+/// Captured source work cannot spend through a disabled resource. Vendor quota
+/// observations remain eligible; configured Orch caps are handled by their producers.
 pub async fn accepts_context(
     conn: &mut Conn,
     provider: Id,
@@ -29,7 +30,7 @@ pub async fn accepts_context(
     agent: Option<Id>,
     environment: Option<Id>,
 ) -> Result<bool, EngineError> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status='ready' AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN provider_models m ON m.provider_id=p.id AND m.model_name=$2 LEFT JOIN agents a ON a.id=p.agent_id LEFT JOIN environments e ON e.id=p.held_by_environment_id WHERE p.id=$1 AND p.deleted_at IS NULL AND p.status IN ('ready','exhausted') AND m.enabled AND (a.id IS NULL OR (NOT a.disabled AND a.deleted_at IS NULL)) AND (e.id IS NULL OR (e.status<>'disabled' AND e.deleted_at IS NULL)) AND ($3::uuid IS NULL OR EXISTS(SELECT 1 FROM agents source WHERE source.id=$3 AND NOT source.disabled AND source.deleted_at IS NULL)) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM environments source WHERE source.id=$4 AND source.status<>'disabled' AND source.deleted_at IS NULL)))").bind(provider).bind(model).bind(agent).bind(environment).fetch_one(conn).await.map_err(DbError::from)?)
 }
 
 /// A durable stop belongs to the accepted id and survives making its resource available again.
@@ -186,14 +187,77 @@ pub async fn read(conn: &mut Conn, target: &FactTarget) -> Result<Vec<Work>, Eng
     Ok(work)
 }
 
-/// Projects the same work records once; all stop/resume counts stay in this service.
-pub async fn project(
+/// Native activity sources and records; no consumer can supply visibility flags.
+pub struct PreparedProjection {
+    work: Vec<Work>,
+    sources: Vec<RawFacts>,
+    visibility: super::PreparedVisibility,
+}
+
+impl PreparedProjection {
+    /// Exact native thread identities licensing the projected work names.
+    pub fn name_sources(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        self.visibility.sources()
+    }
+
+    /// Additional operation restrictions only narrow names; native counts remain unchanged.
+    pub fn bound_sources(&mut self, allowed: &HashSet<(ObjectKind, Id)>) {
+        self.visibility.restrict_to(allowed);
+    }
+
+    /// Original native work memberships whose names the bounded projection emits.
+    pub fn named_work(&self) -> impl Iterator<Item = &Work> + '_ {
+        self.work.iter().filter(move |row| {
+            self.visibility.names(Some(ObjectRef {
+                kind: ObjectKind::Thread,
+                id: row.thread,
+            }))
+        })
+    }
+
+    /// The original native count/group projection over these prepared records.
+    #[must_use]
+    pub fn project(&self) -> ActivityFacts {
+        let projected = self.visibility.project(&self.sources);
+        let mut groups = Vec::new();
+        for (index, kind) in ["running", "waiting", "stopped"].into_iter().enumerate() {
+            let rows: Vec<_> = self.work.iter().filter(|row| row.kind == kind).collect();
+            let threads: HashSet<_> = rows.iter().map(|row| row.thread).collect();
+            let names = projected[index].dependents.first();
+            groups.push(ActivityGroup {
+                count: rows
+                    .iter()
+                    .fold(0_i64, |total, row| total.saturating_add(row.count)),
+                threads: i64::try_from(threads.len()).unwrap_or(i64::MAX),
+                visible: names.map(|group| group.visible.clone()).unwrap_or_default(),
+                hidden: names.map_or(0, |group| group.hidden),
+                since: rows.iter().map(|row| row.since).min().map(Time::new),
+            });
+        }
+        let mut groups = groups.into_iter();
+        let empty = || ActivityGroup {
+            count: 0,
+            threads: 0,
+            visible: Vec::new(),
+            hidden: 0,
+            since: None,
+        };
+        ActivityFacts {
+            running: groups.next().unwrap_or_else(empty),
+            waiting: groups.next().unwrap_or_else(empty),
+            stopped: groups.next().unwrap_or_else(empty),
+        }
+    }
+}
+
+/// Prepare the existing native work-name privacy before any consumer adds a source bound.
+pub async fn prepare_projection(
     conn: &mut Conn,
     principal: &Principal,
     target: &FactTarget,
     work: &[Work],
     at: Time,
-) -> Result<ActivityFacts, EngineError> {
+) -> Result<PreparedProjection, EngineError> {
     let mut sources = Vec::new();
     for kind in ["running", "waiting", "stopped"] {
         let mut by_thread = BTreeMap::new();
@@ -226,33 +290,24 @@ pub async fn project(
             uses: None,
         });
     }
-    let projected = super::project(conn, principal, Policy::default(), &sources).await?;
-    let mut groups = Vec::new();
-    for (index, kind) in ["running", "waiting", "stopped"].into_iter().enumerate() {
-        let rows: Vec<_> = work.iter().filter(|row| row.kind == kind).collect();
-        let threads: HashSet<_> = rows.iter().map(|row| row.thread).collect();
-        let names = projected[index].dependents.first();
-        groups.push(ActivityGroup {
-            count: rows
-                .iter()
-                .fold(0_i64, |total, row| total.saturating_add(row.count)),
-            threads: i64::try_from(threads.len()).unwrap_or(i64::MAX),
-            visible: names.map(|group| group.visible.clone()).unwrap_or_default(),
-            hidden: names.map_or(0, |group| group.hidden),
-            since: rows.iter().map(|row| row.since).min().map(Time::new),
-        });
-    }
-    let mut groups = groups.into_iter();
-    let empty = || ActivityGroup {
-        count: 0,
-        threads: 0,
-        visible: Vec::new(),
-        hidden: 0,
-        since: None,
-    };
-    Ok(ActivityFacts {
-        running: groups.next().unwrap_or_else(empty),
-        waiting: groups.next().unwrap_or_else(empty),
-        stopped: groups.next().unwrap_or_else(empty),
+    let visibility =
+        super::prepare_projection(conn, principal, Policy::default(), &sources).await?;
+    Ok(PreparedProjection {
+        work: work.to_vec(),
+        sources,
+        visibility,
     })
+}
+
+/// Projects the same work records once; all stop/resume counts stay in this service.
+pub async fn project(
+    conn: &mut Conn,
+    principal: &Principal,
+    target: &FactTarget,
+    work: &[Work],
+    at: Time,
+) -> Result<ActivityFacts, EngineError> {
+    Ok(prepare_projection(conn, principal, target, work, at)
+        .await?
+        .project())
 }

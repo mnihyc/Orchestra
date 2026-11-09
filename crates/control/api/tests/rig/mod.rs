@@ -6,6 +6,8 @@
 )]
 #![allow(dead_code, reason = "each test file uses some of what is here")]
 
+mod paid_commands;
+
 use crate::places::{Who, make_org, make_project, make_topic, person};
 use crate::support::World;
 use async_trait::async_trait;
@@ -114,9 +116,13 @@ pub fn engine_config() -> EngineConfig {
 // ---------------------------------------------------------------- the engine's commands
 
 struct Issued {
+    authority: Option<orch_engine::commands::CommandAuthority>,
+    return_source: Option<orch_engine::credentials::handover_authority::ReturnSource>,
     machine: Id,
     kind: String,
+    key: Option<String>,
     body: Json,
+    deadline: Time,
     handle: CommandHandle,
     at: DateTime<Utc>,
 }
@@ -126,6 +132,8 @@ struct Issued {
 pub struct ScriptedCommands {
     /// Optional exact native mapping used by operation tests; absent means unsupported.
     pub native: Mutex<Option<orch_api_contract::native::NativeCatalog>>,
+    db: Db,
+    access: Arc<dyn orch_engine::access::ResourceAccess>,
     link: ControllerLink,
     issued: Mutex<HashMap<Id, Issued>>,
     clock: Arc<dyn Clock>,
@@ -151,6 +159,30 @@ fn outcome_of(progress: &Progress) -> Option<Outcome> {
 }
 
 impl ScriptedCommands {
+    /// The actual immutable issued envelope, for exact test-only origin correlation.
+    /// Commands without authority keep None; private envelopes are never logged.
+    pub fn issued_authority(&self, id: Id) -> Option<orch_engine::commands::CommandAuthority> {
+        lock(&self.issued)
+            .get(&id)
+            .and_then(|entry| entry.authority.clone())
+    }
+
+    /// The actual issued envelope and its wire deadline, including in-process commands.
+    /// Reading it neither inserts a durable command nor supplies any admission.
+    pub fn issued_command(&self, id: Id) -> Option<(orch_engine::commands::RetainedCommand, Time)> {
+        lock(&self.issued).get(&id).map(|entry| {
+            (
+                orch_engine::commands::RetainedCommand {
+                    machine: entry.machine,
+                    kind: entry.kind.clone(),
+                    key: entry.key.clone(),
+                    body: entry.body.clone(),
+                },
+                entry.deadline,
+            )
+        })
+    }
+
     /// How many commands of any kind the API issued to the machine.
     pub fn issued_total(&self) -> usize {
         lock(&self.issued).len()
@@ -163,10 +195,65 @@ impl ScriptedCommands {
             .filter(|entry| entry.kind == kind)
             .count()
     }
+
+    /// A wait observes the same durable terminal receipt as the production dispatcher.
+    /// Commands without an admitted row remain solely in the scripted link.
+    async fn complete_admitted(&self, id: Id, outcome: Outcome) -> Result<Outcome, CommandsError> {
+        let error = match &outcome {
+            Outcome::Failed(error) => Some(
+                serde_json::to_value(error)
+                    .map_err(|error| CommandsError::Body(error.to_string()))?,
+            ),
+            _ => None,
+        };
+        let ending = match &outcome {
+            Outcome::Succeeded(value) => link_queries::Ending::Succeeded(value),
+            Outcome::Failed(_) => link_queries::Ending::Failed(error.as_ref().unwrap()),
+            Outcome::Expired => link_queries::Ending::Expired,
+            Outcome::Cancelled => link_queries::Ending::Cancelled,
+        };
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        link_queries::finish_command(&mut tx, id, &ending, self.clock.now())
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        let retained = link_queries::command(&mut tx, id)
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| CommandsError::Other(error.to_string()))?;
+        let Some(retained) = retained else {
+            return Ok(outcome);
+        };
+        match retained.state.as_str() {
+            "succeeded" => Ok(Outcome::Succeeded(retained.result.unwrap_or(Json::Null))),
+            "failed" => serde_json::from_value(retained.error.unwrap_or(Json::Null))
+                .map(Outcome::Failed)
+                .map_err(|error| CommandsError::Body(error.to_string())),
+            "expired" => Ok(Outcome::Expired),
+            "cancelled" => Ok(Outcome::Cancelled),
+            _ => Err(CommandsError::Other(
+                "the scripted command has no durable terminal receipt".into(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
 impl Commands for ScriptedCommands {
+    async fn retained_return_source(
+        &self,
+        id: Id,
+    ) -> Result<Option<orch_engine::credentials::handover_authority::ReturnSource>, CommandsError>
+    {
+        Ok(lock(&self.issued)
+            .get(&id)
+            .and_then(|entry| entry.return_source.clone()))
+    }
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         if command.kind != CommandKind::SessionNativeActions {
             return Err(CommandsError::Other(
@@ -197,22 +284,39 @@ impl Commands for ScriptedCommands {
         &self,
         id: Id,
     ) -> Result<Option<orch_engine::commands::RetainedCommand>, CommandsError> {
-        Ok(lock(&self.issued)
-            .get(&id)
-            .map(|entry| orch_engine::commands::RetainedCommand {
-                machine: entry.machine,
-                body: entry.body.clone(),
-            }))
+        Ok(self.issued_command(id).map(|(command, _)| command))
     }
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        mut command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
+        let before = if paid_commands::needs_journal(&command) {
+            command.deadline = Some(paid_commands::journal(self, &command, before).await?);
+            None
+        } else {
+            before
+        };
+        let deadline = command.deadline.unwrap_or_else(|| {
+            Time::new(
+                self.clock.now()
+                    + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())),
+            )
+        });
         let mut issued = lock(&self.issued);
         if issued.contains_key(&command.id) {
+            if let Some(check) = before {
+                check().map_err(CommandsError::BeforeEffect)?;
+            }
             return Ok(());
         }
         let now = self.clock.now();
-        let deadline = command.deadline.unwrap_or_else(|| {
-            Time::new(now + chrono::Duration::seconds(i64::from(command.kind.deadline_secs())))
-        });
+        let authority = command.authority.clone();
+        let return_source = command
+            .authority
+            .as_ref()
+            .and_then(|authority| authority.handover_source())
+            .cloned();
         let cmd = Cmd {
             id: command.id,
             kind: command.kind.as_str().to_owned(),
@@ -221,14 +325,22 @@ impl Commands for ScriptedCommands {
             body: command.body,
         };
         let kind = cmd.kind.clone();
+        let key = cmd.key.clone();
         let body = cmd.body.clone();
+        if let Some(check) = before {
+            check().map_err(CommandsError::BeforeEffect)?;
+        }
         let handle = self.link.commands().issue(cmd);
         issued.insert(
             command.id,
             Issued {
+                authority,
+                return_source,
                 machine: command.machine,
                 body,
                 kind,
+                key,
+                deadline,
                 handle,
                 at: now,
             },
@@ -255,7 +367,8 @@ impl Commands for ScriptedCommands {
             return Err(CommandsError::Other("there is no such command".to_owned()));
         };
         let progress = handle.wait().await;
-        outcome_of(&progress).ok_or(CommandsError::Stopping)
+        let outcome = outcome_of(&progress).ok_or(CommandsError::Stopping)?;
+        self.complete_admitted(id, outcome).await
     }
 
     async fn cancel(&self, id: Id) -> Result<bool, CommandsError> {
@@ -412,6 +525,14 @@ pub fn said(items: &[orch_api_contract::threads::Item]) -> Vec<String> {
 
 // ---------------------------------------------------------------- the rig
 
+/// A content-store decorator installed before the scripted engine starts.
+pub type BlobLayer = Box<
+    dyn FnOnce(
+            Arc<dyn orch_blob_contract::store::BlobStore>,
+        ) -> Arc<dyn orch_blob_contract::store::BlobStore>
+        + Send,
+>;
+
 /// The application, its database, a machine behind a hub, and the thread engine between them.
 pub struct Rig {
     pub world: World,
@@ -422,12 +543,40 @@ pub struct Rig {
     pub seen: Arc<Seen>,
     pub engine: Engine,
     pub db: Db,
+    applier: Option<tokio::task::JoinHandle<()>>,
+    _blob_directory: Option<tempfile::TempDir>,
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        if let Some(applier) = self.applier.take() {
+            applier.abort();
+        }
+        self.engine.stop();
+    }
 }
 
 impl Rig {
     /// A system with one machine that is online and has the roles of an agent, an environment and a provider.
     pub async fn new() -> Self {
-        let mut world = World::new().await;
+        Self::with_world(World::new().await).await
+    }
+
+    /// A rig whose API and engine share the deployed request profile.
+    pub async fn for_requests() -> Self {
+        Self::with_world(World::for_requests().await).await
+    }
+
+    /// Decorate the actual native supplier while retaining the same scripted machine and engine.
+    pub async fn with_blob_layer(layer: BlobLayer) -> Self {
+        Self::with_world_and_blobs(World::new().await, Some(layer)).await
+    }
+
+    async fn with_world(world: World) -> Self {
+        Self::with_world_and_blobs(world, None).await
+    }
+
+    async fn with_world_and_blobs(mut world: World, layer: Option<BlobLayer>) -> Self {
         let old = world.app.app.clone();
         let db = old.db.clone();
         let clock: Arc<dyn Clock> = Arc::clone(&old.clock);
@@ -470,8 +619,12 @@ impl Rig {
                 ..MachineSpec::default()
             },
         ));
+        let access: Arc<dyn orch_engine::access::ResourceAccess> =
+            Arc::new(AuthzAccess::new(Arc::clone(&clock)));
         let commands = Arc::new(ScriptedCommands {
             native: Mutex::new(None),
+            db: db.clone(),
+            access: Arc::clone(&access),
             link: link.clone(),
             issued: Mutex::new(HashMap::new()),
             clock: Arc::clone(&clock),
@@ -481,7 +634,7 @@ impl Rig {
             clock: Arc::clone(&clock),
             config: engine_config(),
             commands: commands.clone(),
-            access: Arc::new(AuthzAccess::new(Arc::clone(&clock))),
+            access,
             live: Arc::new(Discard),
         });
         // What keeps the files of a copy until the thread's next turn, as the API's own engine has.
@@ -490,7 +643,17 @@ impl Rig {
         )));
         // The content store, which the engine is given before it starts, as the API's own is: a fork's
         // or a switch's history is kept there, and the API reads from the same one.
-        let blobs = orch_api_core::blobs::Blobs::in_memory();
+        let (blobs, blob_directory) = match layer {
+            Some(layer) => {
+                let directory = tempfile::tempdir().unwrap();
+                let store = layer(orch_api_core::blobs::Blobs::in_memory().store());
+                (
+                    orch_api_core::blobs::Blobs::new(store, directory.path()),
+                    Some(directory),
+                )
+            }
+            None => (orch_api_core::blobs::Blobs::in_memory(), None),
+        };
         engine.attach_blobs(blobs.store());
         engine.start();
         let link_for_state =
@@ -512,7 +675,7 @@ impl Rig {
         let mut registry = Registry::new();
         orch_api_core::routes::mount(&mut registry);
         world.app = TestApp::over(state, world.app.clock.clone(), registry);
-        let rig = Self {
+        let mut rig = Self {
             world,
             hub,
             machine,
@@ -521,6 +684,8 @@ impl Rig {
             seen: Arc::new(Seen::default()),
             engine,
             db,
+            applier: None,
+            _blob_directory: blob_directory,
         };
         rig.answer_commands();
         rig.spawn_applier(link, notices);
@@ -535,16 +700,54 @@ impl Rig {
 
     /// What the API does with a machine's events: applies them in a transaction that moves the stream's
     /// cursor, and tells the link they are committed (or that they are not).
-    fn spawn_applier(&self, link: ControllerLink, mut notices: mpsc::UnboundedReceiver<Notice>) {
+    fn spawn_applier(
+        &mut self,
+        link: ControllerLink,
+        mut notices: mpsc::UnboundedReceiver<Notice>,
+    ) {
         let (pool, machine) = (self.db.clone(), self.machine_id);
         let engine = self.engine.clone();
         let clock = Arc::clone(&self.world.app.app.clock);
-        tokio::spawn(async move {
+        self.applier = Some(tokio::spawn(async move {
+            let committed = orch_api_core::thread_engine::EngineApplier::new(engine.clone());
             while let Some(notice) = notices.recv().await {
                 match notice {
                     Notice::Deliver(delivery) => {
                         let applied = async {
                             let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+                            if !orch_db::queries::machine_reports::accepts(
+                                &mut tx,
+                                machine,
+                                &delivery.stream,
+                                &delivery
+                                    .events
+                                    .iter()
+                                    .map(|event| (event.kind.as_str(), &event.body))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())?
+                            {
+                                return Ok(true);
+                            }
+                            if delivery.stream == Stream::Machine {
+                                for event in &delivery.events {
+                                    if let Ok(Event::MachineFacts(facts)) =
+                                        Event::decode(&event.kind, event.body.clone())
+                                    {
+                                        // This double keeps the accepted report; link-rate smoothing belongs to the API backplane.
+                                        sqlx::query("UPDATE machines SET facts=$2 WHERE id=$1")
+                                            .bind(machine)
+                                            .bind(
+                                                serde_json::to_value(facts)
+                                                    .map_err(|error| error.to_string())?,
+                                            )
+                                            .execute(&mut *tx)
+                                            .await
+                                            .map_err(|error| error.to_string())?;
+                                    }
+                                }
+                            }
                             engine
                                 .apply_events(&mut tx, machine, &delivery)
                                 .await
@@ -564,6 +767,9 @@ impl Rig {
                                 return Ok::<bool, String>(false);
                             }
                             tx.commit().await.map_err(|e| e.to_string())?;
+                            orch_api_core::backplane::EventApplier::committed(
+                                &committed, machine, &delivery,
+                            );
                             Ok(true)
                         }
                         .await;
@@ -587,7 +793,7 @@ impl Rig {
                     _ => {}
                 }
             }
-        });
+        }));
     }
 
     /// The scripted machine answers the commands a harness answers, and keeps what it was asked.
@@ -841,6 +1047,11 @@ impl Rig {
     /// A provider that runs the tests' agent, the agent profile that holds its login, a model, and an
     /// environment on the machine, all `owner`'s and homed in the org, each with `owner` in its Owners row.
     pub async fn resources(&self, owner: &Who, tree: &Tree) -> Resources {
+        self.resources_named(owner, tree, "Workspace").await
+    }
+
+    /// The same native fixture with a caller-selected environment name for repeated resources.
+    pub async fn resources_named(&self, owner: &Who, tree: &Tree, name: &str) -> Resources {
         let root = tree.org.base.id;
         let (agent, provider, environment, template) = (new_id(), new_id(), new_id(), new_id());
         let mut conn = self.db.acquire().await.unwrap();
@@ -891,7 +1102,7 @@ impl Rig {
         sqlx::query(
             "INSERT INTO environments (id, name, owner_id, org_id, placement, home_node_id, workspace_root,
                                        machine_id, template_id, generation, status, facts)
-             VALUES ($1, 'Workspace', $2, $3, 'managed', $4, '/workspace', $5, $6, 1, 'running', $7)",
+             VALUES ($1, $8, $2, $3, 'managed', $4, '/workspace', $5, $6, 1, 'running', $7)",
         )
         .bind(environment)
         .bind(owner.id())
@@ -900,6 +1111,7 @@ impl Rig {
         .bind(self.machine_id)
         .bind(template)
         .bind(json!({"executors":[{"kind":"orch-exec","available":true,"sandbox_modes":["read_only","workspace","open"],"tool_sets":["plain"]}]}))
+        .bind(name)
         .execute(&mut *conn)
         .await
         .unwrap();
@@ -1004,7 +1216,20 @@ pub struct Scene {
 
 impl Scene {
     pub async fn new() -> Self {
-        let rig = Rig::new().await;
+        Self::with_rig(Rig::new().await).await
+    }
+
+    /// A scene whose serving connections have the deployed request profile.
+    pub async fn for_requests() -> Self {
+        Self::with_rig(Rig::for_requests().await).await
+    }
+
+    /// Keep the native scripted supplier wrapped from its initial attachment.
+    pub async fn with_blob_layer(layer: BlobLayer) -> Self {
+        Self::with_rig(Rig::with_blob_layer(layer).await).await
+    }
+
+    async fn with_rig(rig: Rig) -> Self {
         let ada = rig.person("ada").await;
         let bea = rig.person("bea").await;
         let cai = rig.person("cai").await;
@@ -1064,6 +1289,8 @@ impl Scene {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
     }
 
     /// A thread made by Ada.
@@ -1081,7 +1308,8 @@ impl Scene {
         client_id: &str,
     ) -> orch_api_core::testing::Reply<orch_api_contract::threads::ThreadInputCreateReply> {
         use orch_api_contract::threads::{ThreadInputCreate, ThreadInputCreateBody};
-        self.rig
+        let reply = self
+            .rig
             .world
             .app
             .call(ThreadInputCreate, &[&thread])
@@ -1097,7 +1325,17 @@ impl Scene {
                 native_action: None,
             })
             .send()
-            .await
+            .await;
+        orch_api_core::testing::Reply {
+            status: reply.status,
+            headers: reply.headers,
+            body: reply.body.map(|response| {
+                response
+                    .into_full()
+                    .expect("a browser-session input keeps its full projection")
+            }),
+            raw: reply.raw,
+        }
     }
 
     /// Ada queues `words`, the machine takes the turn up, answers with `reply`, and the turn ends.
@@ -1115,4 +1353,72 @@ impl Scene {
         self.rig.run_turn(thread, nth, reply).await;
         self.rig.wait_state(thread, "idle").await;
     }
+}
+
+/// This queue proof uses the connected machine's implemented attachment protocol, not a
+/// managed template whose scripted driver cannot create a unit.
+pub async fn queue_environment(s: &Scene) -> Id {
+    use orch_api_contract::environment::{MachineEnvironmentCreate, MachineEnvironmentCreateBody};
+    use orch_driver_contract::descriptor::{DriverDescriptor, EnvironmentDataStorage};
+    use orch_link_contract::commands::ExecStartResult;
+
+    let descriptor = DriverDescriptor::registered_directories(
+        "test",
+        EnvironmentDataStorage {
+            made_by_orch: None,
+            existing_directory: true,
+            reason: None,
+        },
+    );
+    sqlx::query("UPDATE machines SET owner_id=$2,home_id=n.id,org_id=n.org_id,facts=jsonb_set(facts || $3,'{policy}',COALESCE(facts->'policy','{}') || $4) FROM users u, nodes n WHERE machines.id=$1 AND u.id=$2 AND n.id=u.personal_org_id")
+        .bind(s.rig.machine_id).bind(s.ada.id()).bind(json!({"environment_descriptor":descriptor}))
+        .bind(json!({"environment.roots":["/workspace"],"environment.remote_write":true,"agent.max_sandbox":"workspace"}))
+        .execute(s.rig.db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO permission_entries (id,object_kind,object_id,page,permission,holder_kind,holder_id,created_by,source)
+        VALUES ($1,'machine',$2,'live','access.own','user',$3,$3,'creation') ON CONFLICT DO NOTHING")
+        .bind(orch_types::new_id()).bind(s.rig.machine_id).bind(s.ada.id())
+        .execute(s.rig.db.pool()).await.unwrap();
+    s.rig.machine.handler.on(CommandKind::EnvAttach, |command| {
+        let Command::EnvAttach(body) = command else { unreachable!() };
+        Ok(CommandResult::EnvAttach(serde_json::from_value(json!({
+            "os":"linux","arch":"x86_64","shell":{"name":"sh","path":"/bin/sh"},
+            "user":"agent","home":"/home/agent","workspace_root":body.workspace_root.as_deref().unwrap_or("/workspace"),
+            "path_style":"posix","case_sensitive":true,"executors":[{"kind":"orch-exec","version":"1.0.0","available":true,
+                "reason":null,"sandbox_modes":["read_only","workspace","open"],"tool_sets":["plain"]}],
+            "mcp_found":[],"index":"full","mounts":[],"private_views":false,"suspend":false,"git":false,"generation":1
+        })).unwrap()))
+    });
+    s.rig.machine.handler.on(CommandKind::ExecStart, |command| {
+        let Command::ExecStart(body) = command else {
+            unreachable!()
+        };
+        assert_eq!(body.executor, "orch-exec");
+        Ok(CommandResult::ExecStart(ExecStartResult {
+            service: "exec".into(),
+            version: "1.0.0".into(),
+            tool_sets: vec!["plain".into()],
+        }))
+    });
+    s.rig
+        .world
+        .app
+        .call(MachineEnvironmentCreate, &[&s.rig.machine_id])
+        .token(&s.ada.token)
+        .body(&MachineEnvironmentCreateBody {
+            data_sources: None,
+            home_id: Some(s.tree.org.base.id),
+            name: "Queue workspace".into(),
+            root: "/workspace".into(),
+            home_node_id: Some(s.tree.topic.base.id),
+            remote_write: Some(true),
+            terminal: None,
+            access: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary directory registration retains full native content")
+        .base
+        .id
 }

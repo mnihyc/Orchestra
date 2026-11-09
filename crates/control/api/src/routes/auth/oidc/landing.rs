@@ -113,6 +113,7 @@ pub(super) async fn sign_in(
     identity: &VerifiedIdentity,
     invitation: Option<&str>,
     accept_invitation: bool,
+    accepted_terms_hash: Option<&str>,
     back: &str,
 ) -> ApiResult<Response> {
     let scope = if provider.auto_register || accept_invitation {
@@ -122,7 +123,15 @@ pub(super) async fn sign_in(
     };
     orch_db::queries::transaction_guard::request_scope(
         scope,
-        sign_in_inner(ctx, provider, identity, invitation, accept_invitation, back),
+        sign_in_inner(
+            ctx,
+            provider,
+            identity,
+            invitation,
+            accept_invitation,
+            accepted_terms_hash,
+            back,
+        ),
     )
     .await
 }
@@ -133,6 +142,7 @@ async fn sign_in_inner(
     identity: &VerifiedIdentity,
     invitation: Option<&str>,
     accept_invitation: bool,
+    accepted_terms_hash: Option<&str>,
     back: &str,
 ) -> ApiResult<Response> {
     let refused = |error: SignInError| Ok(redirect(&error.login_path()));
@@ -248,7 +258,7 @@ async fn sign_in_inner(
         let Some(token) = invitation else {
             return refused(SignInError::InviteRequired);
         };
-        match crate::routes::users::redeem(ctx, &mut tx, &user, token).await {
+        match crate::routes::users::redeem(ctx, &mut tx, &user, token, accepted_terms_hash).await {
             Ok(row) => Some(row),
             Err(error)
                 if error
@@ -485,6 +495,7 @@ pub(super) async fn link(
     ctx: &Ctx,
     provider: &IdentityProviderRow,
     identity: &VerifiedIdentity,
+    state: &SignInState,
     user: Id,
 ) -> ApiResult<Response> {
     let refused = |error: SignInError| {
@@ -502,6 +513,11 @@ pub(super) async fn link(
     };
     if person.suspended() {
         return refused(SignInError::Disabled);
+    }
+    // Stay in the existing personal-write transaction. Restore the original key's
+    // current restrictions and freshly admit this same account operation before linking.
+    if !super::authority::restore(&mut tx, state, user, ctx.app.clock.as_ref()).await? {
+        return refused(SignInError::StateExpired);
     }
     let Some(current_provider) = identity::identity_provider(&mut tx, provider.id).await? else {
         return refused(SignInError::Disabled);

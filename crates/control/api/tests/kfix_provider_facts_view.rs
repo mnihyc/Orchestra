@@ -8,10 +8,12 @@
 mod places;
 mod resources;
 mod support;
+use support::FullTokenReply as _;
 
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate};
 use orch_api_contract::resources::{
-    CreateProvider, ProviderCreate, ProviderGet, ProviderList, ProviderListQuery, Upstream,
+    CreateProvider, ProviderCreate, ProviderGet, ProviderList, ProviderListQuery, ProviderPlanGet,
+    ProviderPlanGetQuery, Upstream,
 };
 use serde_json::json;
 use support::World;
@@ -22,17 +24,19 @@ async fn credential(world: &World, owner: &places::Who, scope: &str) -> String {
         .call(MeTokenCreate, &[])
         .token(&owner.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Provider projection".to_owned(),
             scopes: Some(vec![scope.to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: orch_api_contract::auth::SensitiveProof {
+            proof: Some(orch_api_contract::auth::SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .expect("the first answer carries the secret")
@@ -69,6 +73,8 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .provider
         .base
         .id;
@@ -82,7 +88,11 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
     }
     let page_manager = credential(&world, &company.boss, "access.manage").await;
     let resource_manager = credential(&world, &company.boss, "provider.manage").await;
-    for token in [&company.admin.token, &page_manager, &resource_manager] {
+    for (token, metadata_visible) in [
+        (&company.admin.token, false),
+        (&page_manager, false),
+        (&resource_manager, true),
+    ] {
         let providers = world
             .app
             .call(ProviderList, &[])
@@ -116,11 +126,45 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
                 "{member} is omitted altogether without View"
             );
         }
+        let metadata = world
+            .app
+            .call(ProviderGet, &[&id])
+            .token(token)
+            .send()
+            .await;
+        let wire = if metadata_visible {
+            let metadata = metadata.ok();
+            assert_eq!(metadata.base.id, id);
+            assert!(metadata.facts.identity.is_none());
+            assert!(metadata.facts.plan.is_none());
+            assert!(metadata.facts.windows.is_empty());
+            assert!(metadata.facts_at.is_none());
+            assert!(metadata.facts_overridden.is_empty());
+            assert!(metadata.status_detail.is_none());
+            serde_json::to_string(&metadata).unwrap()
+        } else {
+            let problem = metadata.problem();
+            assert_eq!(
+                problem.code,
+                orch_api_contract::common::ErrorCode::AuthzDenied
+            );
+            serde_json::to_string(&problem).unwrap()
+        };
+        assert!(!wire.contains("private-vendor@example.test"));
+        assert!(!wire.contains("Private override"));
         assert_eq!(
             world
                 .app
-                .call(ProviderGet, &[&id])
+                .call(ProviderPlanGet, &[&id])
                 .token(token)
+                .query(&ProviderPlanGetQuery {
+                    from: "2026-10-01".into(),
+                    to: "2026-10-31".into(),
+                    metric: None,
+                    bucket: None,
+                    limit: None,
+                    cursor: None,
+                })
                 .send()
                 .await
                 .problem()
@@ -128,6 +172,17 @@ async fn page_administration_and_resource_management_do_not_expose_vendor_facts_
             orch_api_contract::common::ErrorCode::AuthzDenied
         );
     }
+    assert_eq!(
+        world
+            .app
+            .call(ProviderGet, &[&id])
+            .token(&company.stranger.token)
+            .send()
+            .await
+            .problem()
+            .code,
+        orch_api_contract::common::ErrorCode::AuthzDenied
+    );
     let viewer = credential(&world, &company.boss, "provider.view").await;
     for token in [&company.boss.token, &viewer] {
         let provider = world

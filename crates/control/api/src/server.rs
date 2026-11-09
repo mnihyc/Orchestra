@@ -22,7 +22,8 @@ use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{ConnectInfo, Extension, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use orch_api_contract::common::BASE_PATH;
+use orch_api_contract::common::{BASE_PATH, KEY_BASE_PATH};
+use orch_api_contract::surface::HttpSurface;
 use orch_pki::PkiError;
 use orch_pki::certificates::{Certificate, Identity, ServiceName};
 use orch_pki::verification::{
@@ -64,20 +65,15 @@ pub fn router(app: App, registry: Registry) -> Router {
     crate::realtime::browsers::install(&app);
     crate::realtime::displays::install(&app);
     crate::port_tools::install(&app);
+    crate::thread_read_tools::install(&app);
+    crate::input_schedules::install(&app);
+    app.engine
+        .attach_capability_services(Arc::clone(&app.builtin_sources));
+    crate::ask::recovery::install(&app);
     crate::realtime::browsers::recover(&app);
     crate::realtime::displays::recover(&app);
     let health = crate::routes::meta::health_router();
-    Router::new()
-        .route(
-            &format!("{BASE_PATH}{}", crate::realtime::SOCKET_ROUTE),
-            get(crate::realtime::server::socket),
-        )
-        .nest(
-            BASE_PATH,
-            registry
-                .into_router()
-                .route_layer(axum::middleware::from_fn(measured)),
-        )
+    http_routes(registry)
         .merge(health)
         // A request for a port's stable name goes to that port, whatever its path.
         .layer(axum::middleware::from_fn_with_state(
@@ -85,6 +81,40 @@ pub fn router(app: App, registry: Registry) -> Router {
             crate::ports_browser::dispatch,
         ))
         .with_state(app)
+}
+
+/// The shared production route mounts, also used by HTTP test fixtures without starting recovery.
+pub(crate) fn http_routes(registry: Registry) -> Router<App> {
+    let browser_has_routes = registry
+        .bound()
+        .iter()
+        .any(|route| HttpSurface::Browser.serves(route));
+    let key_has_routes = registry
+        .bound()
+        .iter()
+        .any(|route| HttpSurface::Key.serves(route));
+    let (browser, key) = registry.into_surface_routers();
+    let browser = if browser_has_routes {
+        browser.route_layer(axum::middleware::from_fn(measured))
+    } else {
+        browser
+    };
+    let key = if key_has_routes {
+        key.route_layer(axum::middleware::from_fn(measured))
+    } else {
+        key
+    };
+    Router::new()
+        .route(
+            &format!("{BASE_PATH}{}", crate::realtime::SOCKET_ROUTE),
+            get(crate::realtime::server::socket).layer(Extension(HttpSurface::Browser)),
+        )
+        .route(
+            &format!("{KEY_BASE_PATH}{}", crate::realtime::SOCKET_ROUTE),
+            get(crate::realtime::server::socket).layer(Extension(HttpSurface::Key)),
+        )
+        .nest(BASE_PATH, browser)
+        .nest(KEY_BASE_PATH, key)
 }
 
 /// Counts a request of the API and the time it took to answer, by the route it matched (its
@@ -393,7 +423,7 @@ pub fn internal_router(app: App, content: Router<App>) -> Router {
     crate::routes::downloads::mount(&mut downloads);
     Router::new()
         .route("/internal/backplane", get(backplane))
-        .nest(BASE_PATH, downloads.into_router())
+        .nest(BASE_PATH, downloads.into_router_for(HttpSurface::Browser))
         .merge(certificates::internal_routes())
         .merge(content)
         .with_state(app)

@@ -10,7 +10,15 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// The names shared code must not say, in lower case: each is found as a part of an identifier or of a string.
-const NAMES: [&str; 5] = ["codex", "claude", "openai", "anthropic", "deepseek"];
+const NAMES: [&str; 7] = [
+    "codex",
+    "claude",
+    "openai",
+    "anthropic",
+    "deepseek",
+    "openrouter",
+    "google",
+];
 
 /// A short name that is a program only as a whole word, so it is looked for as one.
 const WORDS: [&str; 1] = ["dsh"];
@@ -25,7 +33,7 @@ const PROTOCOL_IDS: [&str; 4] = [
 ];
 
 /// Directories where names belong, with why.
-const ALLOWED_DIRECTORIES: [(&str, &str); 4] = [
+const ALLOWED_DIRECTORIES: [(&str, &str); 3] = [
     (
         "crates/contracts/agent-programs/",
         "the manifests and the catalogue of the programs: data that names them",
@@ -35,10 +43,6 @@ const ALLOWED_DIRECTORIES: [(&str, &str); 4] = [
         "the test kit, the stress rig and these tools are not shipped code of the product",
     ),
     (
-        "crates/contracts/provider/src/",
-        "the sources of a key's facts are named by the provider they read, which is catalogue data",
-    ),
-    (
         "crates/platform/conformance/src/provider/",
         "conformance examples of the provider sources",
     ),
@@ -46,7 +50,7 @@ const ALLOWED_DIRECTORIES: [(&str, &str); 4] = [
 
 /// Files where names belong, with why: the composition roots (which choose what is built in), the settings examples
 /// and the catalogue the database is seeded from.
-const ALLOWED_FILES: [(&str, &str); 11] = [
+const ALLOWED_FILES: [(&str, &str); 5] = [
     (
         "apps/connector/src/composition.rs",
         "the connector's composition root chooses its adapters",
@@ -63,30 +67,6 @@ const ALLOWED_FILES: [(&str, &str); 11] = [
     (
         "crates/contracts/settings/src/examples.rs",
         "examples in the settings' help are data that names real programs",
-    ),
-    (
-        "crates/control/db/src/seeds.rs",
-        "the catalogue the system is seeded from, with the presets of API providers",
-    ),
-    (
-        "crates/contracts/model/src/protocol.rs",
-        "the wire protocols are implemented by extensions and named by their vendors' formats",
-    ),
-    (
-        "crates/runtime/connector/src/forwarder.rs",
-        "the forwarder relays the wire protocols, each by its own format",
-    ),
-    (
-        "crates/control/api/src/routes/resources/upstreams.rs",
-        "the titles of the wire protocols an upstream may speak",
-    ),
-    (
-        "crates/control/api/src/routes/resources/setup.rs",
-        "the titles of the wire protocols and the presets of API providers",
-    ),
-    (
-        "crates/control/engine/src/summaries/completion.rs",
-        "the request shapes of the wire protocols a summary may be asked in",
     ),
 ];
 
@@ -296,6 +276,9 @@ fn named(text: &str, kind: &Kind) -> Option<&'static str> {
     let mut lower = text.to_ascii_lowercase();
     for protocol in PROTOCOL_IDS {
         lower = lower.replace(protocol, "");
+        if *kind == Kind::Ident {
+            lower = lower.replace(&protocol.replace('-', "_"), "");
+        }
     }
     if let Some(name) = NAMES.iter().copied().find(|name| lower.contains(*name)) {
         return Some(name);
@@ -452,6 +435,16 @@ mod tests {
         assert!(exempt("apps/connector/src/composition.rs"));
         assert!(exempt("crates/contracts/agent-programs/src/registry.rs"));
         assert!(!exempt("crates/control/engine/src/turns.rs"));
+    }
+
+    #[test]
+    fn provider_contracts_and_seed_writers_have_no_vendor_exception() {
+        assert!(!exempt("crates/contracts/provider/src/builtins.rs"));
+        assert!(!exempt("crates/control/db/src/seeds.rs"));
+        for name in ["openrouter", "google", "deepseek", "anthropic", "openai"] {
+            assert!(!found(&format!(r#"fn select() {{ let vendor = "{name}"; }}"#)).is_empty());
+        }
+        assert!(found("const FORMAT: &str = OPENAI_RESPONSES;").is_empty());
     }
 
     #[test]

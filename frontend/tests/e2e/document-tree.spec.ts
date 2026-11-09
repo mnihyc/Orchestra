@@ -77,7 +77,10 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect(copied).toHaveCount(0);
     const deletion = fixture.requests.filter((request) => request.path === '/document-tree/operations' && request.body?.command === 'delete');
-    expect(deletion).toHaveLength(1); expect(deletion[0]?.body?.deletion_plan?.entries).toHaveLength(2);
+    expect(deletion).toHaveLength(1);
+    const membership = deletion[0]?.body?.deletion_plan;
+    if (membership === undefined || membership === null || !('entries' in membership)) throw new Error('The fixture deletion must carry its full observed membership');
+    expect(membership.entries).toHaveLength(2);
     await page.getByRole('radio', { name: 'Deleted', exact: true }).click();
     await expect(page.getByText('Experiments copy', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Restore', exact: true }).click();

@@ -6,6 +6,9 @@
  * are marked), and when the file changes under unsaved text shows both and lets the person decide.
  * A text longer than is read is shown to that point, read-only, with how much there is.
  */
+import { ContextMenu } from '@/ui/ContextMenu';
+import type { MenuEntry } from '@/ui/Menu';
+import { linkTo } from '@/lib/links';
 import { useViewSaveGuard } from '@/features/workbench/CloseViews';
 import { useQueryClient } from '@tanstack/react-query';
 import { AlignLeft, Link2, MessageSquarePlus, Save, Search, Undo2, WrapText } from 'lucide-react';
@@ -27,7 +30,7 @@ import { Combobox } from '@/ui/Combobox';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { copyText } from '@/ui/clipboard';
 import { environmentFileReference } from '@/features/people/references';
-import { sourceHasReference, sourceReference, useFileSource } from '../source';
+import { sourceHasReference, sourceLink, sourceReference, useFileSource } from '../source';
 
 import { addToMessage } from '../AddToMessage';
 import { changedLines } from '../AgentEdits';
@@ -47,7 +50,7 @@ interface Shown {
   version: string;
 }
 
-export default function CodeViewer({ door, path, head, line, lineRequest, tabId, whyReadOnly, thread, onText }: ViewerProps) {
+export default function CodeViewer({ door, path, head, line, endLine, lineRequest, tabId, whyReadOnly, thread, onText }: ViewerProps) {
   const source = useFileSource();
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -213,6 +216,17 @@ export default function CodeViewer({ door, path, head, line, lineRequest, tabId,
   const languageOptions = [{ value: PLAIN, label: t('files.code.plainText'), text: t('files.code.plainText') },
     ...LANGUAGES.map((entry) => ({ value: entry.id, label: entry.name, text: entry.name }))];
   const selectedLanguage = chosenLanguage ?? language?.id ?? PLAIN;
+  const copyAddress = (selection: boolean) => {
+    const part = selection && cursor?.selected === true ? { line: cursor.fromLine, endLine: cursor.toLine } : {};
+    const address = source === null ? linkTo({ kind: 'environment_file', id: door.environmentId, threadId: door.threadId, path }, part) : sourceLink(source, part);
+    if (address !== null) void copyText(address, t('common.linkCopied'));
+  };
+  const addressUnavailable = source !== null && sourceLink(source) === null;
+  const copyEntries: MenuEntry[] = [
+    { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), disabled: addressUnavailable ? t('fileMedia.noReference') : false, onSelect: () => copyAddress(false) },
+    { id: 'copy-lines', label: t('linkActions.copyLines'), disabled: addressUnavailable ? t('fileMedia.noReference') : cursor?.selected !== true ? t('linkActions.selectLines') : false, onSelect: () => copyAddress(true) },
+  ];
+
 
   return (
     <div className="@container flex h-full min-h-0 flex-col" data-viewer="code">
@@ -244,6 +258,8 @@ export default function CodeViewer({ door, path, head, line, lineRequest, tabId,
           </>
         )}
         <span className="flex-1" />
+        <IconButton size="sm" label={t('actions.copyLink.label')} icon={<Link2 aria-hidden />} blocked={addressUnavailable} reason={addressUnavailable ? t('fileMedia.noReference') : undefined} onClick={() => copyAddress(false)} />
+        {cursor?.selected === true && <IconButton size="sm" label={t('linkActions.copyLines')} icon={<Link2 aria-hidden />} blocked={addressUnavailable} reason={addressUnavailable ? t('fileMedia.noReference') : undefined} onClick={() => copyAddress(true)} />}
         <IconButton size="sm" label={t('people.reference.copy')} blocked={source !== null && !sourceHasReference(source)} reason={source !== null && !sourceHasReference(source) ? t('fileMedia.noReference') : undefined} icon={<Link2 aria-hidden />} onClick={() => {
           if (source !== null && !sourceHasReference(source)) return;
           const at = cursor?.selected === true ? cursor.fromLine : cursor?.line ?? line ?? 1;
@@ -256,7 +272,7 @@ export default function CodeViewer({ door, path, head, line, lineRequest, tabId,
       </div>
       <div className={comparing ? 'grid min-h-0 flex-1 grid-cols-1 grid-rows-2 gap-px bg-border @3xl:grid-cols-2 @3xl:grid-rows-1' : 'min-h-0 flex-1'}>
         <div className="min-h-0 min-w-0 bg-surface">
-          <CodeView
+          <ContextMenu label={t('files.code.label', { name: head.stat.name })} entries={copyEntries}><div className="h-full"><CodeView
             ref={code}
             className="h-full"
             text={shown.text}
@@ -270,12 +286,13 @@ export default function CodeViewer({ door, path, head, line, lineRequest, tabId,
             overlay={restored === null ? null : { version: restored.version, text: restored.text }}
             lit={marks}
             line={line}
+            endLine={endLine}
             lineRequest={lineRequest}
             onDirtyChange={onDirtyChange}
             onSettled={onSettled}
             onSave={() => void save()}
             onCursor={setCursor}
-          />
+          /></div></ContextMenu>
         </div>
         {comparing && arrived !== null && (
           <div className="flex min-h-0 min-w-0 flex-col bg-surface" data-testid="their-version">

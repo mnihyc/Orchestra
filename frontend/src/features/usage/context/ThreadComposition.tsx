@@ -105,7 +105,7 @@ export function ThreadComposition({ thread }: { thread: Thread }) {
       {query.isError ? (
         <ErrorAlert error={query.error} />
       ) : first === undefined ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={query} rows={3} />
       ) : !first.reports.tokens ? (
         <div data-usage-absent><EmptyState compact title={t('contextUsage.absent.noTokens', { harness })} /></div>
       ) : reported.length === 0 ? (

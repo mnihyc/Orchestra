@@ -29,8 +29,67 @@ async fn sweep(scene: &rig::Scene) {
     tx.commit().await.unwrap();
 }
 
+async fn collection_references(
+    conn: &mut orch_db::Conn,
+    thread: orch_types::Id,
+) -> serde_json::Value {
+    let references: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT cl.relname::text, att.attname::text, c.conname::text
+         FROM pg_constraint c JOIN pg_class cl ON cl.oid=c.conrelid
+         JOIN pg_attribute att ON att.attrelid=c.conrelid AND att.attnum=c.conkey[1]
+         WHERE c.contype='f' AND c.confrelid IN ('nodes'::regclass,'threads'::regclass)
+         AND c.confdeltype IN ('a','r') AND cardinality(c.conkey)=1 ORDER BY 1,2,3",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .unwrap();
+    let mut counts = serde_json::Map::new();
+    for (table, column, constraint) in references {
+        // Only quoted, plain names from the native schema enter this diagnostic statement.
+        for name in [&table, &column] {
+            assert!(
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            );
+        }
+        let statement = format!("SELECT count(*) FROM \"{table}\" WHERE \"{column}\"=$1");
+        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(statement))
+            .bind(thread)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        if count > 0 {
+            counts.insert(constraint, json!(count));
+        }
+    }
+    serde_json::Value::Object(counts)
+}
+
+async fn history_counts(
+    conn: &mut orch_db::Conn,
+    thread: orch_types::Id,
+) -> Vec<(orch_types::Id, i64, i64)> {
+    sqlx::query_as(
+        "SELECT c.continuation_id,sum(c.item_count)::bigint,sum(c.payload_bytes)::bigint
+         FROM thread_history_turn_counts c JOIN thread_continuations o ON o.id=c.continuation_id
+         WHERE o.thread_id=$1 GROUP BY c.continuation_id ORDER BY c.continuation_id",
+    )
+    .bind(thread)
+    .fetch_all(conn)
+    .await
+    .unwrap()
+}
+
 #[tokio::test]
 async fn completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_readable() {
+    if std::env::var_os("ORCH_TEST_PURGE_ERRORS").is_some() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("orch_db::queries::notifications::upkeep=debug")
+            .with_test_writer()
+            .try_init();
+    }
     let scene = rig::Scene::new().await;
     let dead = scene.thread_by(&scene.ada, "Removed thread").await.base.id;
     let live = scene
@@ -155,6 +214,14 @@ async fn completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_r
         .await
         .ok();
     scene.rig.world.advance(chrono::Duration::days(31));
+    let mut conn = scene.rig.db.acquire().await.unwrap();
+    let dead_counts = history_counts(&mut conn, dead).await;
+    let live_counts = history_counts(&mut conn, live).await;
+    assert!(
+        !dead_counts.is_empty(),
+        "native thread history must exercise its maintained count projection"
+    );
+    drop(conn);
     sweep(&scene).await;
     let mut conn = scene.rig.db.acquire().await.unwrap();
     let held: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
@@ -174,6 +241,11 @@ async fn completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_r
         .await
         .unwrap();
     assert_eq!(pins, 2, "rejected collection releases no content");
+    assert_eq!(
+        history_counts(&mut conn, dead).await,
+        dead_counts,
+        "an active job also preserves the retained thread's exact history counts"
+    );
     sqlx::query("UPDATE jobs SET state='succeeded',finished_at=$2 WHERE id=$1")
         .bind(job)
         .bind(scene.rig.world.now())
@@ -186,9 +258,27 @@ async fn completed_records_do_not_hold_deleted_threads_and_shared_bytes_remain_r
     let mut conn = scene.rig.db.acquire().await.unwrap();
     let gone:bool = sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM nodes WHERE id=$1) AND NOT EXISTS(SELECT 1 FROM approvals WHERE thread_id=$1) AND NOT EXISTS(SELECT 1 FROM leases WHERE thread_id=$1) AND NOT EXISTS(SELECT 1 FROM jobs WHERE node_id=$1) AND NOT EXISTS(SELECT 1 FROM secrets WHERE owner_id=$1)")
         .bind(dead).fetch_one(&mut *conn).await.unwrap();
-    assert!(
-        gone,
-        "completed private records and credentials must not hold the full thread"
+    if !gone {
+        let blockers: serde_json::Value = sqlx::query_scalar("SELECT jsonb_build_object(
+            'jobs_open',(SELECT count(*) FROM jobs WHERE node_id=$1 AND state IN ('queued','running')),
+            'jobs_closed',(SELECT count(*) FROM jobs WHERE node_id=$1 AND state NOT IN ('queued','running')),
+            'leases_open',(SELECT count(*) FROM leases WHERE thread_id=$1 AND closed_at IS NULL),
+            'leases_closed',(SELECT count(*) FROM leases WHERE thread_id=$1 AND closed_at IS NOT NULL),
+            'pending_approvals',(SELECT count(*) FROM approvals WHERE (node_id=$1 OR thread_id=$1) AND state='pending'),
+            'live_reviews',(SELECT count(*) FROM preflights WHERE node_id=$1 AND expires_at>$2),
+            'environment_homes',(SELECT count(*) FROM environments WHERE home_node_id=$1),
+            'history_sources',(SELECT count(*) FROM thread_history_cuts WHERE thread_id=$1))")
+            .bind(dead).bind(scene.rig.world.now()).fetch_one(&mut *conn).await.unwrap();
+        let references = collection_references(&mut conn, dead).await;
+        panic!(
+            "completed private records and credentials must not hold the full thread; structural references: {blockers}; native reference counts: {references}"
+        );
+    }
+    assert!(history_counts(&mut conn, dead).await.is_empty());
+    assert_eq!(
+        history_counts(&mut conn, live).await,
+        live_counts,
+        "collecting one thread leaves the surviving thread's count projection intact"
     );
     for hash in [blob.hash, list.hash] {
         let pins: i32 = sqlx::query_scalar("SELECT pin_count FROM blobs WHERE hash=$1")

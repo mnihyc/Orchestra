@@ -16,8 +16,8 @@ use axum::extract::State;
 use axum::response::{IntoResponse, Response};
 use http::StatusCode;
 use orch_api_contract::auth::{
-    AuthResult, HealthGet, LinkTrust, Meta, MetaBanner, MetaGet, MetaIdentityProvider, MetaLimits,
-    MetaLinkEndpoint, SetupCreate, SetupCreateBody, SignInProof,
+    HealthGet, LinkTrust, Meta, MetaBanner, MetaGet, MetaIdentityProvider, MetaLimits,
+    MetaLinkEndpoint, SetupCreate, SetupCreateBody, SetupCreateReply, SignInProof,
 };
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::threads::{IMAGE_UPLOAD_MAX_BYTES, INPUT_TEXT_MAX_CHARS};
@@ -29,6 +29,7 @@ use serde_json::json;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
+    registry.creation(SetupCreate, super::auth::creation::setup_binding());
     registry
         .on_raw(HealthGet, health)
         .on(MetaGet, meta)
@@ -72,31 +73,46 @@ pub fn health_router() -> axum::Router<App> {
 
 /// The address a connector reaches the server at, as the configuration
 /// names its trust.
-fn trust_of(word: &str) -> LinkTrust {
-    if word == "public" {
-        LinkTrust::Public
-    } else {
-        LinkTrust::Pinned
+fn trust_of(trust: orch_link_contract::enrollment::Trust) -> LinkTrust {
+    match trust {
+        orch_link_contract::enrollment::Trust::Public => LinkTrust::Public,
+        orch_link_contract::enrollment::Trust::Pinned => LinkTrust::Pinned,
     }
 }
 
 /// What a client may know before anybody has signed in.
 pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
+    let identity = authentication::authenticate(&ctx.app, &ctx.headers, ctx.now)
+        .await
+        .ok();
+    let caller = match &identity {
+        Some(Caller::User(authed)) => Some(authed.as_ref()),
+        _ => None,
+    };
     let mut conn = ctx.app.db.acquire().await?;
-    let policy = system_policy(&mut conn).await?;
+    on_connection(&ctx, &mut conn, caller).await
+}
+
+/// The public supplier on an existing read connection, using the actual restored HTTP identity.
+pub(crate) async fn on_connection(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    caller: Option<&crate::middleware::authentication::Authed>,
+) -> ApiResult<Meta> {
+    let policy = system_policy(conn).await?;
     let defs: Vec<_> = [keys::SYSTEM_BANNER, keys::STORAGE_MAX_BLOB_BYTES]
         .into_iter()
         .filter_map(registry::get)
         .collect();
-    let snapshot = Snapshot::load(&mut conn, Place::System, Wanted::Keys(&defs))
+    let snapshot = Snapshot::load(conn, Place::System, Wanted::Keys(&defs))
         .await
         .map_err(ApiError::internal)?;
     let banner: Option<MetaBanner> = setting(&snapshot, keys::SYSTEM_BANNER)?.flatten();
     let max_upload: Option<i64> = setting(&snapshot, keys::STORAGE_MAX_BLOB_BYTES)?;
     let email_code_login =
-        policy.mail() && identity::email_code_sign_in_set_somewhere(&mut conn).await?;
-    let needs_setup = identity::no_users_yet(&mut conn).await?;
-    let identity_providers = identity::enabled_identity_providers(&mut conn)
+        policy.mail() && identity::email_code_sign_in_set_somewhere(conn).await?;
+    let needs_setup = identity::no_users_yet(conn).await?;
+    let identity_providers = identity::enabled_identity_providers(conn)
         .await?
         .into_iter()
         .map(|(key, name, auto_register)| MetaIdentityProvider {
@@ -107,15 +123,14 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
         .collect();
     // Whoever the request says is asking learns whether they may make a team org now; nobody
     // signed in may not, and a token that does not hold is nobody here, as anywhere public.
-    let may_create_org = match authentication::authenticate(&ctx.app, &ctx.headers, ctx.now).await {
-        Ok(Caller::User(authed)) => may_make_org(policy.org_creation, &authed),
-        _ => false,
-    };
+    let may_create_org = caller.is_some_and(|caller| may_make_org(policy.org_creation, caller));
     let build = ctx.app.build;
     Ok(Meta {
         name: ctx.app.config.system.name.clone(),
         version: build.version.to_owned(),
         build: build.build_number.to_owned(),
+        public_url: ctx.app.config.system.public_url.clone(),
+        alternate_urls: ctx.app.config.system.alternate_urls.clone(),
         needs_setup,
         registration_mode: policy.registration,
         org_creation: policy.org_creation,
@@ -132,13 +147,15 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
         push_public_key: crate::routes::notifications::push_public_key(),
         link_endpoints: ctx
             .app
-            .config
-            .gateway
-            .endpoints
-            .iter()
+            .link
+            .certificates()
+            .gateway_discovery()
+            .gateways
+            .into_iter()
+            .flat_map(|gateway| gateway.endpoints)
             .map(|endpoint| MetaLinkEndpoint {
-                url: endpoint.url.clone(),
-                trust: trust_of(&endpoint.trust),
+                url: endpoint.url,
+                trust: trust_of(endpoint.trust),
             })
             .collect(),
         limits: MetaLimits {
@@ -149,15 +166,18 @@ pub(crate) async fn meta(ctx: Ctx, (): (), (): ()) -> ApiResult<Meta> {
     })
 }
 
+pub(crate) fn setup_settled() -> ApiError {
+    ApiError::new(ErrorCode::ConflictExists, "the system is set up already")
+}
+
 /// Makes the first system administrator, while there is no user, and signs
 /// them in.
-async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<AuthResult>> {
-    let settled = || ApiError::new(ErrorCode::ConflictExists, "the system is set up already");
+async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<SetupCreateReply>> {
     {
         // Not worth hashing a password for, when it is too late.
         let mut conn = ctx.app.db.acquire().await?;
         if !identity::no_users_yet(&mut conn).await? {
-            return Err(settled());
+            return Err(setup_settled());
         }
     }
     let clean = accounts::check(
@@ -177,7 +197,7 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Auth
     // Two requests that both found no user must not both make one.
     identity::lock_setup(&mut tx).await?;
     if !identity::no_users_yet(&mut tx).await? {
-        return Err(settled());
+        return Err(setup_settled());
     }
     // The mail server, if there is one, is not up yet at the first start, so
     // the address is kept as given.
@@ -195,6 +215,12 @@ async fn setup(ctx: Ctx, (): (), body: SetupCreateBody) -> ApiResult<Answer<Auth
     .await?;
     let how = json!({ "proofs": [SignInProof::Password], "setup": true });
     let opened = open_session(&ctx, &mut tx, &user, how).await?;
+    orch_db::idempotency::creation::observe_account(&mut tx, user.id, "setup_account", 200).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
-    Ok(opened.answer())
+    let answer = opened.answer();
+    Ok(Answer {
+        body: SetupCreateReply::full(answer.body),
+        status: answer.status,
+        headers: answer.headers,
+    })
 }

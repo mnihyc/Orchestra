@@ -249,13 +249,17 @@ pub async fn too_large(
     limit: Limit,
     policy: Policy,
 ) -> ApiError {
-    let value = settings.value_of(limit);
     let scope = node_named(conn, principal, settings.scope_of(limit), policy).await;
+    too_large_receipt(settings, limit).with("scope", scope)
+}
+
+/// The same operational limit without reading names of the place that set it.
+pub fn too_large_receipt(settings: &DocSettings, limit: Limit) -> ApiError {
+    let value = settings.value_of(limit);
     ApiError::new(
         ErrorCode::DocsTooLarge,
         format!("a document may hold at most {value} {}", limit.what()),
     )
     .with("limit", limit.word())
     .with("value", value)
-    .with("scope", scope)
 }

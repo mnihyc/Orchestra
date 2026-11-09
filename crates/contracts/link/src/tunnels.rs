@@ -304,6 +304,9 @@ pub struct TicketClaims {
     /// The generation of that environment when the tool ticket was issued.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_environment_generation: Option<i64>,
+    /// The executor build admitted to this tool channel; absent on older or other tickets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_executor_version: Option<String>,
     /// Port admission facts, absent from every other tunnel kind.
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     pub port: Option<crate::ports::PortTicketClaims>,
@@ -426,6 +429,9 @@ impl Ticket {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OpenErrorCode {
+    /// No configured common gateway could admit both ends; the detail names safe labels.
+    #[serde(rename = "tunnel.gateway_unreachable")]
+    GatewayUnreachable,
     /// The ticket is not one, is not signed by the system, or is not
     /// its presenter's.
     BadTicket,
@@ -469,6 +475,9 @@ pub enum Open {
 /// A request to open a channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OpenRequest {
+    /// Frozen carrier hints, never a replacement for the signed capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<Box<crate::gateways::TunnelPlan>>,
     /// The number the opener gives the channel on its session.
     #[serde(rename = "c")]
     pub channel: u32,
@@ -482,6 +491,9 @@ pub struct OpenRequest {
 /// A channel offered to its destination.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct OpenOffer {
+    /// Retained with this exact accepted channel; no new destination session is created by recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<crate::gateways::TunnelRetention>,
     /// The number the gateway gives the channel on the destination's
     /// session.
     #[serde(rename = "c")]
@@ -579,6 +591,15 @@ pub struct ChAck {
 /// The opener's request to carry a tunnel on from a new session.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub struct Resume {
+    /// Monotone opener attempt; an older carrier cannot steal a channel back after recovery.
+    #[serde(default, skip_serializing_if = "resume_epoch_is_zero")]
+    pub epoch: u64,
+    /// Set by the gateway only when its lost route map needs the destination's retained proof.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovering: bool,
+    /// The original observed host accept, retained rather than inferred during recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_peer: Option<crate::ports::HostPortPeer>,
     /// The number the channel has on the new session.
     #[serde(rename = "c")]
     pub channel: u32,
@@ -590,9 +611,16 @@ pub struct Resume {
     pub recv: u64,
 }
 
+fn resume_epoch_is_zero(epoch: &u64) -> bool {
+    *epoch == 0
+}
+
 /// The destination's word that a tunnel goes on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ResumeOk {
+    /// The same retained inside socket of a TCP port, never a new connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside: Option<orch_api_contract::ports::PortConnectionInside>,
     /// The channel.
     #[serde(rename = "c")]
     pub channel: u32,
@@ -1085,6 +1113,7 @@ mod tests {
             tool_set: None,
             tool_environment_id: None,
             tool_environment_generation: None,
+            tool_executor_version: None,
             port: None,
             exp: 1_791_500_000,
         }

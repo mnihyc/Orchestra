@@ -28,6 +28,12 @@ describe('the places a picker offers', () => {
     ]);
   });
 
+  it('opts into thread paths for settings while keeping deleted nodes out', () => {
+    const places = placesOfTree(rows, ' / ', true);
+    expect(places.find((place) => place.id === 'main')?.path).toBe('Acme / Web / Fix login / Main thread');
+    expect(places.some((place) => place.id === 'gone')).toBe(false);
+  });
+
   it('carries the colour each was given, null for the colour of its kind', () => {
     const colours = Object.fromEntries(placesOfTree(rows, ' / ').map((place) => [place.id, place.color]));
     expect(colours).toEqual({ org: 3, shop: null, checkout: null, web: 5, login: null });

@@ -9,9 +9,13 @@
 //! holds nothing on the environment and sees it only through a thread gets what that thread lets them see: whether
 //! its network is restricted and in force, and the lines of the threads they may view.
 
-use crate::middleware::authorization;
+use super::{network, reach_operation};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, Registry};
+use crate::routes::access::{
+    operations::{NameRoles, projection_names},
+    page::{NameBounds, NameSources},
+};
 use crate::routes::environments::reading::{self, Reading};
 use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{ObjectKind, Permission};
@@ -19,18 +23,42 @@ use orch_api_contract::environment::{
     self as api, AgentReachOverview, AgentReachOverviewBrowserProfile,
     AgentReachOverviewCredential, AgentReachOverviewMount, AgentReachOverviewSecrets,
 };
-use orch_api_contract::mounts::EnvMountState;
-use orch_authz::{Policy, Principal};
+use orch_api_contract::mounts::{EnvMount, EnvMountState};
+use orch_authz::{Caller, Policy, Principal, engine::Graph};
+use orch_db::queries::environments as rows;
 use orch_db::{Conn, DbError};
 use orch_settings_contract::registry::keys;
 use orch_types::{Id, Time};
+use std::collections::BTreeSet;
+
+const NAMES: NameRoles = NameRoles {
+    groups: None,
+    nodes: [
+        (ObjectKind::Org, "agent_reach_names_orgs"),
+        (ObjectKind::Project, "agent_reach_names_projects"),
+        (ObjectKind::Topic, "agent_reach_names_topics"),
+        (ObjectKind::Thread, "agent_reach_names_threads"),
+    ],
+    containers: None,
+};
+
+struct PreparedReach {
+    home: Id,
+    whole: bool,
+    network: network::PreparedNetwork,
+    secret_names: Option<Vec<String>>,
+    mounts: Option<Vec<EnvMount>>,
+    credentials: Vec<rows::ThreadArrangement>,
+    profiles: Option<Vec<String>>,
+    names: NameBounds,
+}
 
 /// The word of a thread that has no arrangement yet: no key is placed for it until its first turn.
 const UNBOUND: &str = "unbound";
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
-    registry.on(api::EnvironmentAgentReachGet, get);
+    registry.on_with_operation(api::EnvironmentAgentReachGet, operation, get);
 }
 
 /// Whether the caller holds `permission` on the environment, without refusing them: a part they may not read is
@@ -56,28 +84,6 @@ async fn holds(
     .is_allowed())
 }
 
-/// The arrangement of each thread of `threads`, and when the copy of a key it last had runs out.
-async fn arrangements(
-    conn: &mut Conn,
-    threads: &[Id],
-) -> Result<Vec<(Id, Option<String>, Option<Time>)>, DbError> {
-    let rows: Vec<(Id, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT t.node_id, t.arrangement, \
-           (SELECT l.copy_expires_at FROM leases l \
-             WHERE l.thread_id = t.node_id AND l.mode = 'shared' \
-             ORDER BY l.opened_at DESC LIMIT 1) \
-         FROM threads t WHERE t.node_id = ANY($1)",
-    )
-    .bind(threads)
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
-    Ok(rows
-        .into_iter()
-        .map(|(thread, arrangement, expires)| (thread, arrangement, expires.map(Time::new)))
-        .collect())
-}
-
 /// The line of one thread: its arrangement, and the expiry of a copy where the arrangement keeps a copy.
 fn credential_line(
     arrangement: Option<&str>,
@@ -94,57 +100,198 @@ fn credential_line(
     }
 }
 
-/// What the agents of the environment can reach, for this caller.
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<AgentReachOverview> {
-    let environment = ctx.id("id")?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let reading = reading::decide(&mut conn, &principal, environment).await?;
-    let whole = super::show(&ctx, &mut conn, &principal, environment).await?;
-    let view = match reading {
-        Reading::Whole => whole,
-        Reading::ThroughAThread => reading::through_a_thread(whole),
-    };
-    let whole_reader = matches!(reading, Reading::Whole);
-    let manages = whole_reader
-        && holds(
-            &mut conn,
+fn operation<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    (): (),
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let environment = ctx.id("id")?;
+        let mut plan = reach_operation::root(ctx, conn, caller).await?;
+        let principal = plan.preparation_principal(ctx, conn, caller).await?;
+        let reading = reading::decide(conn, &principal, environment)
+            .await
+            .map_err(|problem| reach_operation::error(caller, problem))?;
+        let row = super::queries::environments(conn, &[environment])
+            .await?
+            .pop()
+            .ok_or_else(ApiError::not_found)?;
+        let whole_reader = matches!(reading, Reading::Whole);
+        let manages = whole_reader
+            && holds(conn, &principal, environment, Permission::EnvironmentManage).await?;
+        let reads_files =
+            whole_reader && holds(conn, &principal, environment, Permission::FilesView).await?;
+        let sees_browsers =
+            whole_reader && holds(conn, &principal, environment, Permission::BrowserView).await?;
+        let network = network::prepare_environments(conn, &[environment])
+            .await?
+            .remove(&environment)
+            .ok_or_else(|| ApiError::internal("the Environment network was not resolved"))?;
+        let secret_names = if manages {
+            let mut names: Vec<String> = orch_settings::get(
+                conn,
+                orch_settings::Place::Environment(environment),
+                keys::ENV_SECRET_NAMES,
+            )
+            .await
+            .map_err(ApiError::internal)?
+            .unwrap_or_default();
+            names.sort();
+            names.dedup();
+            Some(names)
+        } else {
+            None
+        };
+        let mounts = if reads_files
+            && super::list_settings::load(conn, std::slice::from_ref(&row))
+                .await?
+                .has_mounts(environment)
+        {
+            orch_engine::mounts::views(conn, environment, principal.now().get())
+                .await
+                .map_err(ApiError::internal)?
+                .into_iter()
+                .filter(|mount| mount.state == EnvMountState::Attached)
+                .filter(|mount| mount.path.is_some())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mount_ids = mounts
+            .iter()
+            .map(|mount| mount.mount.id)
+            .collect::<BTreeSet<_>>();
+        let mount_ids =
+            reach_operation::mounts(conn, caller, &mut plan, "agent_reach_mounts", &mount_ids)
+                .await?;
+        let mounts = reads_files.then(|| {
+            mounts
+                .into_iter()
+                .filter(|mount| mount_ids.contains(&mount.mount.id))
+                .collect()
+        });
+
+        // Reuse the Environment view's actual ordinary Thread/Topic reference predicate.
+        // Topic visibility is not an additional key Read when no Topic content is returned.
+        let bound = rows::threads_in(conn, &[environment]).await?;
+        let referenced = bound
+            .iter()
+            .flat_map(|thread| [thread.thread_id, thread.topic_id])
+            .collect::<BTreeSet<_>>();
+        let known = crate::routes::nodes::view::reference_visibility(
+            conn,
             &principal,
-            environment,
-            Permission::EnvironmentManage,
+            &referenced.into_iter().collect::<Vec<_>>(),
+            Policy::default(),
         )
         .await?;
-    let reads_files =
-        whole_reader && holds(&mut conn, &principal, environment, Permission::FilesView).await?;
-    let sees_browsers =
-        whole_reader && holds(&mut conn, &principal, environment, Permission::BrowserView).await?;
-
-    let secrets = if manages {
-        let mut names: Vec<String> = orch_settings::get(
-            &mut conn,
-            orch_settings::Place::Environment(environment),
-            keys::ENV_SECRET_NAMES,
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .unwrap_or_default();
-        names.sort();
-        names.dedup();
-        AgentReachOverviewSecrets {
-            names: Some(names),
-            source: Some(view.home.clone()),
-        }
-    } else {
-        AgentReachOverviewSecrets {
-            names: None,
-            source: None,
-        }
-    };
-
-    let mounts = reads_files.then(|| {
-        view.mounts
+        let thread_ids = bound
             .iter()
-            .filter(|mount| mount.state == EnvMountState::Attached)
+            .filter(|thread| super::bound_thread_visible(thread, &known))
+            .map(|thread| thread.thread_id)
+            .collect::<BTreeSet<_>>();
+        let thread_ids =
+            reach_operation::threads(conn, caller, &mut plan, "agent_reach_threads", &thread_ids)
+                .await?;
+        let mut credentials =
+            rows::thread_arrangements(conn, &thread_ids.iter().copied().collect::<Vec<_>>())
+                .await?;
+        // The old reply iterated Environment threads_in (ordered by Thread ID), then
+        // looked up each arrangement. Keep that order independently of the batch query plan.
+        credentials.sort_by_key(|row| row.thread);
+        let mut name_sources = NameSources::default();
+        if whole_reader {
+            let graph = Graph::load(conn, &[row.home_node_id])
+                .await
+                .map_err(ApiError::internal)?;
+            let home = graph
+                .get(row.home_node_id)
+                .ok_or_else(ApiError::not_found)?;
+            name_sources.nodes.extend(home.path.iter().copied());
+            name_sources.nodes.extend(network.name_sources());
+        }
+        let mut names = projection_names(conn, caller, &mut plan, name_sources, &NAMES).await?;
+        // These exact Thread names/displays are already part of their admitted content Read;
+        // they do not require a separate read of every parent used for ordinary visibility.
+        names.nodes.extend(thread_ids);
+        let profiles = sees_browsers.then(|| {
+            ctx.app
+                .engine
+                .browsers()
+                .memory()
+                .profiles(environment)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|profile| profile.name)
+                .collect()
+        });
+        Ok(plan.with_data(PreparedReach {
+            home: row.home_node_id,
+            whole: whole_reader,
+            network,
+            secret_names,
+            mounts,
+            credentials,
+            profiles,
+            names,
+        }))
+    })
+}
+
+/// What the agents of the Environment can reach, through the same current ordinary producer.
+async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<AgentReachOverview> {
+    crate::key_operations::snapshot_read::run(ctx, snapshot).await
+}
+
+async fn snapshot(ctx: Ctx) -> ApiResult<AgentReachOverview> {
+    let mut conn = ctx.app.db.begin_snapshot().await?;
+    let principal = ctx.operation_principal(&mut conn).await?;
+    let prepared = ctx.operation_data::<PreparedReach>()?;
+    let thread_ids = prepared
+        .credentials
+        .iter()
+        .map(|row| row.thread)
+        .collect::<Vec<_>>();
+    let mut ids = thread_ids.clone();
+    if prepared.secret_names.is_some() {
+        ids.push(prepared.home);
+    }
+    let refs = prepared.names.refs(&mut conn, &principal, &ids).await?;
+    let credentials = prepared
+        .credentials
+        .iter()
+        .map(|row| {
+            let (placement, expires_at) = credential_line(
+                row.arrangement.as_deref(),
+                row.copy_expires_at.map(Time::new),
+            );
+            Ok(AgentReachOverviewCredential {
+                thread: refs
+                    .get(&row.thread)
+                    .cloned()
+                    .ok_or_else(ApiError::not_found)?,
+                placement,
+                expires_at,
+            })
+        })
+        .collect::<ApiResult<Vec<_>>>()?;
+    let secrets = AgentReachOverviewSecrets {
+        names: prepared.secret_names.clone(),
+        source: if prepared.secret_names.is_some() {
+            Some(
+                refs.get(&prepared.home)
+                    .cloned()
+                    .ok_or_else(ApiError::not_found)?,
+            )
+        } else {
+            None
+        },
+    };
+    let mounts = prepared.mounts.as_ref().map(|mounts| {
+        mounts
+            .iter()
             .filter_map(|mount| {
                 Some(AgentReachOverviewMount {
                     mount: mount.mount.clone(),
@@ -154,56 +301,53 @@ async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<AgentReachOverview> {
             })
             .collect()
     });
-
-    // One line for each thread the caller may view; the view already leaves the others out.
-    let threads: Vec<Id> = view.threads.iter().map(|thread| thread.thread.id).collect();
-    let found = arrangements(&mut conn, &threads).await?;
-    let credentials = view
-        .threads
-        .iter()
-        .map(|thread| {
-            let (arrangement, expires) = found
-                .iter()
-                .find(|(id, _, _)| *id == thread.thread.id)
-                .map_or((None, None), |(_, arrangement, expires)| {
-                    (arrangement.as_deref(), *expires)
-                });
-            let (placement, expires_at) = credential_line(arrangement, expires);
-            AgentReachOverviewCredential {
-                thread: thread.thread.clone(),
-                placement,
-                expires_at,
-            }
-        })
-        .collect();
-
-    let browser_profiles = sees_browsers.then(|| {
-        ctx.app
-            .engine
-            .browsers()
-            .memory()
-            .profiles(environment)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|profile| AgentReachOverviewBrowserProfile { name: profile.name })
+    let browser_profiles = prepared.profiles.as_ref().map(|profiles| {
+        profiles
+            .iter()
+            .map(|name| AgentReachOverviewBrowserProfile { name: name.clone() })
             .collect()
     });
-
-    let home_path = if whole_reader {
-        crate::routes::nodes::view::ways(&mut conn, &principal, &[view.home.id], Policy::default())
+    let home_path = if prepared.whole {
+        let mut paths = if prepared.names.limited {
+            crate::routes::nodes::view::ways_with_name_sources(
+                &mut conn,
+                &principal,
+                &[prepared.home],
+                Policy::default(),
+                &prepared.names.nodes,
+            )
             .await?
-            .remove(&view.home.id)
+        } else {
+            crate::routes::nodes::view::ways(
+                &mut conn,
+                &principal,
+                &[prepared.home],
+                Policy::default(),
+            )
+            .await?
+        };
+        paths.remove(&prepared.home)
     } else {
         None
     };
-    Ok(AgentReachOverview {
+    let network = if prepared.whole {
+        prepared
+            .network
+            .project(&mut conn, Some(&principal), Some(&prepared.names))
+            .await?
+    } else {
+        prepared.network.through_thread()
+    };
+    let shown = AgentReachOverview {
         home_path,
-        network: view.network,
+        network,
         secrets,
         mounts,
         credentials,
         browser_profiles,
-    })
+    };
+    conn.commit().await.map_err(DbError::from)?;
+    Ok(shown)
 }
 
 #[cfg(test)]

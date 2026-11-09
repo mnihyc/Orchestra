@@ -50,7 +50,9 @@ async fn agent_with_descriptor(world: &World, by: &Who, org: Id) -> Id {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     sqlx::query("UPDATE agents SET descriptor = $2 WHERE id = $1")
         .bind(made.base.id)
         .bind(descriptor())
@@ -446,6 +448,10 @@ fn stand_in_vendor() -> std::sync::Arc<orch_provider_contract::builtins::Builtin
             reports: vec![FactMember::Spend],
             ..Default::default()
         });
+        descriptor.set_admin_credential(orch_provider_contract::source::AdminCredential {
+            labels: [("en".into(), "Admin key".into())].into(),
+            reports: vec![FactMember::Spend],
+        });
         descriptor
     }
     fn at_its_host(base: &url::Url) -> bool {
@@ -567,4 +573,104 @@ async fn setup_offers_programs_only_from_provider_templates_the_caller_may_use_w
             .as_ref()
             .is_some_and(|template| template.id == hidden)
     }));
+}
+
+#[tokio::test]
+async fn default_source_admin_secrets_are_manager_only_sealed_and_independent_of_the_model_key() {
+    use orch_api_contract::resources::{
+        CreateProvider, ProviderCreate, ProviderSourcesSet, Upstream,
+    };
+    use orch_api_core::routes::resources::sealing::install_master_key;
+    use orch_db::secrets::MasterKey;
+    install_master_key(MasterKey::new([7; 32]));
+    let world = World::with_builtin_sources(stand_in_vendor()).await;
+    let c = company(&world).await;
+    let made = world
+        .app
+        .call(ProviderCreate, &[])
+        .token(&c.boss.token)
+        .body(&CreateProvider::Api {
+            runtime_machine_id: None,
+            name: "Independent source credentials".into(),
+            home_id: c.acme,
+            access: None,
+            arrangements: None,
+            runtime_config: None,
+            upstreams: vec![Upstream {
+                protocol: "openai-responses".into(),
+                base_url: "https://openrouter.ai/api/v1".into(),
+                options: json!({}),
+            }],
+            api_key: Some("test-model-secret".into()),
+            secrets: None,
+            key_machine_id: None,
+            sources: None,
+        })
+        .send()
+        .await
+        .ok()
+        .into_full()
+        .unwrap()
+        .provider;
+    let id = made.base.id;
+    // Do not start an unavailable keeper as part of a secret-storage test.
+    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+        .bind(id)
+        .execute(&world.db.pool)
+        .await
+        .unwrap();
+    let ordinary: Vec<u8> = sqlx::query_scalar(
+        "SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='api_key'",
+    )
+    .bind(id)
+    .fetch_one(&world.db.pool)
+    .await
+    .unwrap();
+    let denied = world.app.call(ProviderSourcesSet, &[&id]).token(&c.viewer.token)
+        .raw_body(&json!({"expected_revision":made.revision,"facts":{"by":"default","secrets":{"admin_key":"test-admin-first"}}})).send().await.problem();
+    assert_eq!(denied.code, ErrorCode::AuthzDenied);
+    let mut revision = made.revision;
+    for value in [
+        Some("test-admin-first"),
+        Some("test-admin-replacement"),
+        None,
+    ] {
+        let reply = world.app.call(ProviderSourcesSet, &[&id]).token(&c.boss.token)
+            .raw_body(&json!({"expected_revision":revision,"facts":{"by":"default","secrets":{"admin_key":value}}})).send().await;
+        for secret in [
+            "test-model-secret",
+            "test-admin-first",
+            "test-admin-replacement",
+        ] {
+            assert!(!String::from_utf8_lossy(&reply.raw).contains(secret));
+        }
+        let saved = reply.ok();
+        revision = saved.revision;
+        let admin: Option<Vec<u8>> = sqlx::query_scalar("SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='source:facts:field:admin_key'").bind(id).fetch_optional(&world.db.pool).await.unwrap();
+        assert_eq!(admin.is_some(), value.is_some());
+        if let (Some(cipher), Some(value)) = (admin, value) {
+            assert!(
+                !cipher
+                    .windows(value.len())
+                    .any(|bytes| bytes == value.as_bytes())
+            );
+            assert!(saved.sources.facts.secrets.contains(&"admin_key".into()));
+        } else {
+            assert_eq!(
+                serde_json::to_value(saved.facts_state.spend).unwrap(),
+                json!({"unsupported_because":{"reason":"needs_admin_key"}})
+            );
+        }
+        let model: Vec<u8> = sqlx::query_scalar("SELECT sealed FROM secrets WHERE owner_kind='provider' AND owner_id=$1 AND name='api_key'").bind(id).fetch_one(&world.db.pool).await.unwrap();
+        assert_eq!(
+            model, ordinary,
+            "source updates never replace or remove the model key"
+        );
+        let audit: Vec<serde_json::Value> = sqlx::query_scalar("SELECT details FROM audit_log WHERE object_id=$1 AND action='provider.sources_changed'").bind(id).fetch_all(&world.db.pool).await.unwrap();
+        assert!(
+            !serde_json::to_string(&audit)
+                .unwrap()
+                .contains("test-admin-")
+        );
+    }
 }

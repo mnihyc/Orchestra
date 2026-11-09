@@ -76,8 +76,19 @@ impl ProcessControls {
         }
         if self.memory {
             match resources.memory_mb {
-                Some(memory) => properties.push(format!("MemoryMax={memory}M")),
-                None if reset => properties.push("MemoryMax=infinity".into()),
+                Some(memory) => {
+                    properties.push(format!("MemoryMax={memory}M"));
+                    // The contract names a combined total; the native controller takes swap alone.
+                    let swap = resources
+                        .memory_swap_mb
+                        .unwrap_or(memory)
+                        .saturating_sub(memory);
+                    properties.push(format!("MemorySwapMax={swap}M"));
+                }
+                None if reset => {
+                    properties.push("MemoryMax=infinity".into());
+                    properties.push("MemorySwapMax=infinity".into());
+                }
                 None => {}
             }
         }
@@ -99,6 +110,36 @@ pub const PROBES: [&str; 3] = ["CPUQuota=100%", "MemoryMax=64M", "TasksMax=64"];
 mod tests {
     use super::*;
     #[test]
+    fn native_memory_limits_disable_swap_by_default_and_translate_explicit_combined_totals() {
+        let controls = ProcessControls {
+            memory: true,
+            ..Default::default()
+        };
+        for (total, swap_property) in [
+            (None, "MemorySwapMax=0M"),
+            (Some(64), "MemorySwapMax=0M"),
+            (Some(192), "MemorySwapMax=128M"),
+        ] {
+            assert_eq!(
+                controls.properties(
+                    &Resources {
+                        memory_mb: Some(64),
+                        memory_swap_mb: total,
+                        ..Default::default()
+                    },
+                    false,
+                ),
+                vec!["MemoryMax=64M", swap_property]
+            );
+        }
+        assert!(controls.properties(&Resources::default(), false).is_empty());
+        assert_eq!(
+            controls.properties(&Resources::default(), true),
+            vec!["MemoryMax=infinity", "MemorySwapMax=infinity"]
+        );
+    }
+
+    #[test]
     fn partial_native_support_never_promises_other_controllers_or_a_disk_quota() {
         let controls = ProcessControls {
             cpu: true,
@@ -113,6 +154,7 @@ mod tests {
         let resources = Resources {
             cpu_millis: Some(1250),
             memory_mb: Some(128),
+            memory_swap_mb: Some(256),
             pids: Some(8),
             disk_gb: Some(1),
             ..Default::default()

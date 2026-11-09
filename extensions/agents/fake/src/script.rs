@@ -38,6 +38,7 @@ use crate::events::{
 use crate::sessions::{Counter, LiveSession, PendingApproval, TurnRecord, append_note};
 
 pub mod browser;
+pub mod compatibility;
 pub mod display;
 pub mod manage;
 
@@ -81,6 +82,8 @@ pub struct OrchCall {
 /// One line of a script.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Directive {
+    /// Typed neutral tool/request/observation and upgrade fault controls.
+    Compatibility(compatibility::Directive),
     /// `say <text>`
     Say(String),
     /// `think <text>`
@@ -334,6 +337,9 @@ fn directive(line_no: usize, line: &str, top: bool) -> Result<Directive, ScriptE
         }
     };
     Ok(match keyword {
+        "tool" | "request" | "observe" | "unknown" | "diverged" | "reroute" | "fault" => {
+            Directive::Compatibility(compatibility::parse(line_no, keyword, rest)?)
+        }
         "say" => Directive::Say(text_of(rest)),
         "think" => Directive::Think(text_of(rest)),
         "plan" => {
@@ -1080,6 +1086,9 @@ impl Runner {
     ) -> Result<(), Flow> {
         self.alive()?;
         match directive {
+            Directive::Compatibility(directive) => {
+                self.compatibility(directive, stream, parent).await
+            }
             Directive::Say(text) => {
                 let phase = if stream == MAIN_STREAM {
                     self.says_left = self.says_left.saturating_sub(1);
@@ -2201,6 +2210,15 @@ pub const fn title_of(tool: OrchTool) -> &'static str {
         OrchTool::ClosePort => "Close a port's opening",
         OrchTool::ListPortConnections => "List who reached a port",
         OrchTool::Goal => "Report on the goal",
+        OrchTool::Schedule => "Schedule future work",
+        OrchTool::WebSearch => "Search the web",
+        OrchTool::WebFetch => "Read a web page",
+        OrchTool::ImageGeneration => "Generate images",
+        OrchTool::OrchDocs => "Read Orch's documentation",
+        OrchTool::Open => "Open a place or resource",
+        OrchTool::Search => "Search what the owner can read",
+        OrchTool::FindOperation => "Find an Orch operation",
+        OrchTool::Read => "Read through an Orch operation",
     }
 }
 

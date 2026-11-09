@@ -102,6 +102,8 @@ fn cap_input(node: Option<Id>) -> CapInput {
         subject: CapSubjectInput::Everyone,
         split: CapSplit::Shared,
         models: None,
+        services: None,
+        purposes: None,
         tiers: None,
         harness_kinds: None,
         meter: CapMeter::Tokens,
@@ -126,13 +128,21 @@ fn running(node: Option<Id>, amount: &str) -> CapInput {
 }
 
 async fn create(world: &World, by: &Who, input: &CapInput) -> Reply<UsageCap> {
-    world
+    let reply = world
         .app
         .call(UsageCapCreate, &[])
         .token(&by.token)
         .body(input)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary cap content")),
+    }
 }
 
 async fn made(world: &World, by: &Who, input: &CapInput) -> UsageCap {
@@ -142,6 +152,8 @@ async fn made(world: &World, by: &Who, input: &CapInput) -> UsageCap {
 fn update_body(revision: i64) -> UsageCapUpdateBody {
     UsageCapUpdateBody {
         models: None,
+        services: None,
+        purposes: None,
         tiers: None,
         harness_kinds: None,
         counted_from: None,
@@ -156,13 +168,21 @@ fn update_body(revision: i64) -> UsageCapUpdateBody {
 }
 
 async fn change(world: &World, by: &Who, cap: Id, body: &UsageCapUpdateBody) -> Reply<UsageCap> {
-    world
+    let reply = world
         .app
         .call(UsageCapUpdate, &[&cap])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary cap content")),
+    }
 }
 
 fn list_query(node: Option<Id>, provider: Option<Id>, system: bool) -> UsageCapListQuery {
@@ -1508,4 +1528,42 @@ async fn a_group_is_named_on_a_cap_as_a_provider_s_managers_may_name_one_and_not
     input.tiers = Some(vec!["fast mode".to_owned()]);
     let problem = create(&world, &t.admin, &input).await.problem();
     assert_eq!(path_of(&problem), "tiers");
+}
+
+#[tokio::test]
+async fn service_and_purpose_patterns_survive_native_cap_create_update_and_duplicate_checks() {
+    let world = World::new().await;
+    let t = team(&world).await;
+    let mut input = cap_input(Some(t.project));
+    input.services = Some(vec![
+        " Search-* ".into(),
+        "@images".into(),
+        "search-*".into(),
+    ]);
+    input.purposes = Some(vec![" Summary ".into(), "summary".into()]);
+    let cap = made(&world, &t.boss, &input).await;
+    assert_eq!(cap.services, vec!["@images", "search-*"]);
+    assert_eq!(cap.purposes, vec!["summary"]);
+    let mut update = update_body(cap.revision);
+    update.purposes = Some(vec!["page_fetch".into()]);
+    let changed = change(&world, &t.boss, cap.id, &update).await.ok();
+    assert_eq!(changed.purposes, vec!["page_fetch"]);
+    assert_eq!(changed.services, cap.services);
+    assert_eq!(changed.revision, cap.revision + 1);
+    let another = made(&world, &t.boss, &input).await;
+    assert_ne!(
+        another.id, cap.id,
+        "the different purpose is a distinct native definition"
+    );
+    let clash = change(
+        &world,
+        &t.boss,
+        another.id,
+        &UsageCapUpdateBody {
+            purposes: Some(vec!["page_fetch".into()]),
+            ..update_body(another.revision)
+        },
+    )
+    .await;
+    assert_eq!(clash.status, 409);
 }

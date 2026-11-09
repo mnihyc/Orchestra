@@ -121,7 +121,9 @@ async fn machine_manage_requests_an_audited_update_and_views_keep_the_running_ve
         .token(&manager.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary explicit update retains its complete native progress");
     assert_eq!(
         managed.status, "queued",
         "a shared manager need not be the machine's owner"
@@ -132,7 +134,9 @@ async fn machine_manage_requests_an_audited_update_and_views_keep_the_running_ve
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary explicit update retains its complete native progress");
     assert_eq!(requested.status, "queued");
     assert_eq!(requested.running_version, "0.0.0");
     let mut conn = world.conn().await;
@@ -175,7 +179,9 @@ async fn local_update_auto_off_is_a_visible_audited_refusal_without_a_drain_fenc
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary explicit update retains its complete native progress");
     assert_eq!(refused.status, "refused");
     assert!(refused.behind);
     let detail = refused.detail.unwrap();
@@ -288,7 +294,9 @@ async fn a_node_uses_its_host_manage_page_and_reports_its_own_version_and_comman
         .token(&manager.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control reads the full native Host update status");
     assert_eq!(
         shared.status, "queued",
         "Host Manage is sufficient without ownership"
@@ -299,7 +307,9 @@ async fn a_node_uses_its_host_manage_page_and_reports_its_own_version_and_comman
         .token(&owner.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this control reads the full native Host update status");
     assert_eq!(accepted.status, "queued");
     assert_eq!(accepted.running_version, "0.0.0");
     let mut conn = world.conn().await;

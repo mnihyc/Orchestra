@@ -43,6 +43,18 @@ function Form({initial='org-0',chosen,...props}:Omit<HomePickerProps,'value'|'on
   const [home,setHome]=useState(initial);return <HomePicker {...props} value={home} onChange={(next)=>{setHome(next);chosen?.(next);}}/>;
 }
 
+it('keeps a server-selected machine home unpinned until somebody chooses a home', async () => {
+  const chosen = vi.fn(); const user = userEvent.setup();
+  show(<Form initial="" defaultChoice="Machine home: Guests" chosen={chosen} />);
+  const picker = screen.getByRole('combobox', { name: i18n.t('resources.home.label') });
+  await waitFor(() => expect(picker).toHaveDisplayValue('Machine home: Guests'));
+  expect(chosen).not.toHaveBeenCalled(); expect(fetchTree).not.toHaveBeenCalled();
+  await user.click(picker); await user.click(screen.getByRole('option', { name: 'Team 7' }));
+  expect(chosen).toHaveBeenCalledExactlyOnceWith('org-7');
+  await user.click(picker); await user.click(screen.getByRole('option', { name: 'Machine home: Guests' }));
+  expect(chosen).toHaveBeenLastCalledWith('');
+});
+
 it('loads one selected org among ten, then only the newly chosen one',async()=>{
   show(<Form/>);
   await waitFor(()=>expect(fetchTree).toHaveBeenCalledTimes(1));

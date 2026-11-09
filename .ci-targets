@@ -1,0 +1,29 @@
+# Central runs on diag-25c + ci-browser bbb29ce5f + held-plan-ws d496a45f5 + ci-triage-c fa7a6dce1 (pre-split; orch-api-core). Leading NAME=value words are settings.
+# ci-browser RUST-B24-rest2 (node sessions; the list_scopes case) and RUST-B24-api
+test -p orch-node --test environment an_environment_made_over_http_is_a_container_whose_connector_enrolls_and_a_thread_in_it_runs_a_turn -- --exact --nocapture
+test -p orch-node --test images a_dockerfile_is_built_by_the_daemon_with_its_steps_told_to_the_job_and_a_failed_build_keeps_its_log -- --exact --nocapture
+test -p orch-node --test lifecycle a_runtime_is_stopped_and_started_recreated_on_its_volumes_with_its_files_kept_and_removed_without_them -- --exact --nocapture
+test -p orch-node --test lifecycle a_unit_whose_connector_cannot_enroll_is_reported_failed_and_removed_and_its_volumes_stay -- --exact --nocapture
+test -p orch-node --test milestone a_runtime_made_through_the_node_enrolls_with_its_single_use_token_and_is_online_at_the_api -- --exact --nocapture
+test -p orch-node --test uploads cancelling_a_dispatched_files_write_joins_the_real_connector_before_cancelled_and_keeps_the_authored_target -- --exact --nocapture
+test -p orch-node --test program the_program_enrolls_a_host_holds_its_session_tells_what_the_host_has_and_stops_when_told_to -- --exact --nocapture
+test -p orch-api-core --test hosted_environments list_scopes::individual::retained_environment_get_retries_a_changed_identity_snapshot_before_its_once_only_audit -- --exact --nocapture
+test -p orch-api-core --test component_updates a_node_uses_its_host_manage_page_and_reports_its_own_version_and_command -- --exact --nocapture
+test -p orch-api-core --test real_connector an_agent_on_a_real_connector_announces_and_another_thread_of_its_topic_is_started_by_it_as_the_topic_says -- --exact --nocapture
+test -p orch-api-core --test registration_moves host_and_machine_moves_keep_exact_enrollment_and_reset_access_and_tags_at_the_new_root -- --exact --nocapture
+test -p orch-api-core --test registration_moves attached_environments_and_current_source_policy_refuse_the_whole_registration_move -- --exact --nocapture
+test -p orch-api-core --test registration_moves registration_move_never_promotes_managers_or_inspecting_admins_to_owners -- --exact --nocapture
+test -p orch-api-core --test registration_moves a_late_native_page_reset_failure_rolls_back_registration_home_and_source_audit -- --exact --nocapture
+# held-plan-ws RUST-B24-rest2 (the nine Claude Code cases and its new unit cases)
+test -p orch-adapter-claude-code --test input_prefix a_fresh_prefix_session_excludes_the_actual_input_and_suffix_and_preserves_the_original -- --exact --nocapture
+test -p orch-adapter-claude-code --test input_prefix an_empty_native_prefix_preserves_the_complete_first_model_input -- --exact --nocapture
+test -p orch-adapter-claude-code --test input_prefix an_actual_queued_steer_keeps_its_native_guidance_and_refuses_a_user_message_checkpoint -- --exact --nocapture
+test -p orch-adapter-claude-code --test background_wake exact_end_stops_a_native_background_subagent_without_a_wake -- --exact --nocapture
+test -p orch-adapter-claude-code --test page_fetch changing_reader_with_owned_background_work_retries_without_a_second_input_or_killing_it -- --exact --nocapture
+test -p orch-adapter-claude-code --test upgrade_compatibility both_published_sdk_corpora_replay_every_supported_scenario_through_its_real_consumer -- --exact --nocapture
+test -p orch-adapter-claude-code --test turns a_sub_agent_works_in_a_stream_of_its_own_inside_the_call_that_started_it -- --exact --nocapture
+test -p orch-adapter-claude-code --test prompt_cases tools_answer_budget_and_handoff_claude_reach_separated_tools_without_a_runtime_file_substitute -- --exact --nocapture
+test -p orch-adapter-claude-code --test provider a_native_result_reports_its_known_search_zero_through_the_shared_counter_hook -- --exact --nocapture
+test -p orch-provider-contract --lib capabilities::counters::tests::an_explicit_resumed_zero_is_known_without_inventing_a_positive_delta_or_a_missing_zero -- --exact --nocapture
+test -p orch-adapter-claude-code --lib descriptor::tests::exact_input_prefix_support_is_a_closed_recorded_set -- --exact --nocapture
+test -p orch-adapter-claude-code --lib adapter::input_prefix::tests::a_transcript_from_an_unchecked_native_build_stays_unsupported -- --exact --nocapture

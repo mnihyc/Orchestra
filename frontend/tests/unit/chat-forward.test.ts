@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** Where a forward can go and what the choice comes to, and what quoting items of a thread into its chat does: the chat is found by the tree the page holds, quotes wait for its composer once, and the panel is brought to the front. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,24 +22,7 @@ import { type OrgTree, useTreeStore } from '@/realtime/stores/tree';
 import { ADA, chat, DORA, GRACE } from '../doubles/chat-rows';
 import { display } from '../doubles/thread-display';
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, ...more });
 
 describe('where a forward can go', () => {
   const nodes = [

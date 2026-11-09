@@ -1,39 +1,295 @@
 //! One ordinary share reviewed before applying it, with current holders, effects and the rules of its place.
 
 use super::{
-    page::{Names, entries_named_at, same},
+    page::{NameBounds, Names, entries_named_at_bounded, same},
     previews::worded,
     role_create_in, subject,
 };
+use crate::key_operations::targets;
 use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::transaction_guard;
-use crate::registry::Ctx;
-use crate::routes::nodes::{invalid, view};
+use crate::registry::{Ctx, OperationFuture, OperationPlan};
+use crate::routes::nodes::invalid;
 use crate::sign_in::origin;
+use orch_access_contract::key_scope::{KeyIdentityKind, KeyResolvedTarget, KeyTargetKind};
 use orch_access_contract::pages::{Holder, PageChange, PageKind};
 use orch_access_contract::permissions::{ObjectKind, Permission, Profile};
 use orch_access_contract::roles::PlaceRef;
 use orch_api_contract::access as api;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::{NodeKind, NodeOrSystem, NodeRef};
+use orch_api_contract::operations::TargetResolver;
 use orch_api_contract::share::{ShareParts, ShareTo, ShareWhat};
 use orch_authz::engine::{Frame, PageRef};
 use orch_authz::giving::{Acting, Giving};
 use orch_authz::pages::{self, ChangeError};
 use orch_authz::previews::{self, Before, Preview, Scope};
 use orch_authz::{
-    Policy, Principal,
+    Caller, Policy, Principal,
     things::{self, Thing},
 };
-use orch_db::queries::{chats, environments::capabilities};
+use orch_db::queries::{access as access_rows, chats, environments::capabilities, hierarchy};
 use orch_db::{Conn, DbError, Tx};
-use orch_engine::sharing::{ShareError, ShareTrial};
+use orch_engine::sharing::{PreparedAgentShare, ShareError, ShareTrial};
 use orch_settings::{Place, Snapshot, Wanted};
 use orch_settings_contract::provenance::{Source, SourceScope};
 use orch_settings_contract::registry::{self, keys};
-use orch_types::{Id, Json};
-use std::collections::BTreeMap;
+use orch_types::{Id, Json, Time};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Fresh trial operands from the common operation checkpoint. Never retained after rollback.
+struct PreparedPreview {
+    agent: Option<Result<PreparedAgentShare, ApiError>>,
+    names: NameBounds,
+}
+
+const NODE_FAMILIES: &[(&str, ObjectKind)] = &[
+    ("orgs", ObjectKind::Org),
+    ("projects", ObjectKind::Project),
+    ("topics", ObjectKind::Topic),
+    ("threads", ObjectKind::Thread),
+];
+fn role(plan: &OperationPlan, name: &str) -> ApiResult<usize> {
+    plan.variant().facets.iter().position(|facet| {
+        matches!(facet.target, TargetResolver::Resolved(found) | TargetResolver::ResolvedCollection(found) if found == name)
+    }).ok_or_else(|| ApiError::internal("the share preview role is not declared"))
+}
+fn bind(
+    plan: &mut OperationPlan,
+    name: &str,
+    kind: KeyTargetKind,
+    targets: &[KeyResolvedTarget],
+) -> ApiResult<()> {
+    let index = role(plan, name)?;
+    if targets.is_empty() {
+        plan.bind_empty(index)
+    } else {
+        plan.bind(index, kind, targets)
+    }
+}
+/// A missing proposed holder has no current protected metadata. Its ordinary trial still
+/// owns the refusal; preserving that trial avoids changing allowed:false into an early 404.
+fn current_holder(result: ApiResult<KeyResolvedTarget>) -> ApiResult<Option<KeyResolvedTarget>> {
+    match result {
+        Ok(target) => Ok(Some(target)),
+        Err(error) if error.problem.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn bind_nodes(
+    plan: &mut OperationPlan,
+    prefix: &str,
+    targets: &[KeyResolvedTarget],
+) -> ApiResult<()> {
+    for (suffix, kind) in NODE_FAMILIES {
+        let selected: Vec<_> = targets
+            .iter()
+            .filter(|target| target.object.kind == KeyTargetKind::Object(*kind))
+            .cloned()
+            .collect();
+        bind(
+            plan,
+            &format!("{prefix}_{suffix}"),
+            KeyTargetKind::Object(*kind),
+            &selected,
+        )?;
+    }
+    Ok(())
+}
+
+/// The existing preview keeps its own operation selection. It shares agent-source preparation,
+/// not the committing endpoint's operation identity or its authority.
+pub(super) fn resolve<'a>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    (): (),
+    body: api::SharePreviewBody,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let result = resolve_in(ctx, conn, caller, body).await;
+        if caller
+            .grant()
+            .and_then(|grant| grant.operation_scope())
+            .is_some()
+        {
+            result.map_err(crate::middleware::authorization::problem_without_content)
+        } else {
+            result
+        }
+    })
+}
+
+async fn resolve_in(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    caller: &Caller,
+    body: api::SharePreviewBody,
+) -> ApiResult<OperationPlan> {
+    let id = ctx.id("id")?;
+    let object = ctx.param("object")?;
+    if let api::SharePreviewBody::Agents { share } = &body
+        && !source_matches(object, id, share)
+    {
+        return Err(invalid("share.what", "must name the thing in the path"));
+    }
+    let holders = selected(&body)?;
+    let copying = matches!(&body, api::SharePreviewBody::Agents { share } if share.mode == orch_api_contract::threads::ShareMode::Snapshot);
+    let (source, place) = if object == "chats" {
+        if !matches!(&body, api::SharePreviewBody::Agents { .. }) {
+            return Err(ApiError::not_found());
+        }
+        let row = chats::chat(conn, id)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        (targets::from_chat(conn, &row).await?, Some(row.org_id))
+    } else {
+        let thing = subject::named(ctx)?.thing;
+        let (graph, site) = things::site(conn, thing)
+            .await
+            .map_err(|error| match error {
+                orch_authz::Error::NotFound(_) => ApiError::not_found(),
+                other => ApiError::internal(other),
+            })?;
+        (targets::from_site(&graph, &site)?, site.role_place)
+    };
+    let mut plan = OperationPlan::new(ctx.route, ctx.route.name)?;
+    bind(
+        &mut plan,
+        "preview_source",
+        source.object.kind,
+        std::slice::from_ref(&source),
+    )?;
+    bind(
+        &mut plan,
+        "preview_source_manage",
+        source.object.kind,
+        if copying {
+            &[]
+        } else {
+            std::slice::from_ref(&source)
+        },
+    )?;
+    let principal = plan.preparation_principal(ctx, conn, caller).await?;
+    if !matches!(&body, api::SharePreviewBody::Agents { .. }) {
+        let thing = subject::named(ctx)?.thing;
+        let (_, site) = things::site(conn, thing)
+            .await
+            .map_err(ApiError::internal)?;
+        let policy = subject::policy_of(conn, thing, &site).await?;
+        subject::require_view(conn, &principal, thing, policy).await?;
+        if !previews::may_share(conn, &principal, thing, policy)
+            .await
+            .map_err(ApiError::internal)?
+        {
+            return Err(ApiError::new(
+                ErrorCode::AuthzDenied,
+                "this thing cannot currently be shared by this caller",
+            ));
+        }
+    }
+    let (mut plan, agent) = if let api::SharePreviewBody::Agents { share } = &body {
+        let (plan, prepared) = crate::routes::share::operation::prepare_agents_trial(
+            ctx,
+            conn,
+            principal.caller(),
+            share,
+            plan,
+        )
+        .await?;
+        (plan, Some(prepared))
+    } else {
+        // These declarations describe no agent or copy effects in a Page/Role trial.
+        for (index, facet) in plan.variant().facets.clone().iter().enumerate() {
+            if let TargetResolver::ResolvedCollection(name) = facet.target
+                && (name.starts_with("share_")
+                    || name.starts_with("snapshot_")
+                    || name == "viewer_grant_sources")
+            {
+                plan.bind_empty(index)?;
+            }
+        }
+        (plan, None)
+    };
+    let mut candidates: BTreeSet<Id> = source.node_path().unwrap_or_default().into_iter().collect();
+    candidates.extend(place);
+    let mut held_nodes = Vec::new();
+    let mut held_groups = Vec::new();
+    let mut users = Vec::new();
+    for holder in &holders {
+        match *holder {
+            Holder::Group { id } => {
+                if let Some(target) = current_holder(targets::group(conn, id).await)? {
+                    candidates.extend(target.node_path().unwrap_or_default());
+                    held_groups.push(target);
+                }
+            }
+            Holder::Node { id } | Holder::Agents { id } | Holder::Members { id } => {
+                if let Some(target) = current_holder(targets::node(conn, id).await)? {
+                    candidates.extend(target.node_path().unwrap_or_default());
+                    held_nodes.push(target);
+                }
+            }
+            Holder::Role { at, .. } => {
+                if let Some(id) = at.or(place)
+                    && let Some(target) = current_holder(targets::node(conn, id).await)?
+                {
+                    candidates.extend(target.node_path().unwrap_or_default());
+                    held_nodes.push(target);
+                }
+            }
+            Holder::User { id } => users.push(id),
+            Holder::Everyone => {}
+        }
+    }
+    bind_nodes(&mut plan, "preview_holder", &held_nodes)?;
+    bind(
+        &mut plan,
+        "preview_groups",
+        KeyTargetKind::Identity(KeyIdentityKind::Group),
+        &held_groups,
+    )?;
+    let principal = plan
+        .preparation_principal(ctx, conn, principal.caller())
+        .await?;
+    // Domain-derived addresses and inherited rule provenance use the same optional node-name bound.
+    for (_, _, domain, _) in access_rows::holder_user_addresses(conn, &users).await? {
+        candidates.insert(domain);
+    }
+    let all = hierarchy::with_ancestors(conn, &candidates.into_iter().collect::<Vec<_>>()).await?;
+    let mut names = NameBounds {
+        limited: principal
+            .caller()
+            .grant()
+            .and_then(|grant| grant.operation_scope())
+            .is_some(),
+        ..NameBounds::default()
+    };
+    let mut named = Vec::new();
+    for node in all {
+        let target = targets::node_identity(conn, node.id).await?;
+        let Some((suffix, kind)) = NODE_FAMILIES
+            .iter()
+            .find(|(_, kind)| target.object.kind == KeyTargetKind::Object(*kind))
+        else {
+            continue;
+        };
+        let index = role(&plan, &format!("preview_name_{suffix}"))?;
+        if plan.permits_binding(
+            principal.caller(),
+            index,
+            KeyTargetKind::Object(*kind),
+            std::slice::from_ref(&target),
+        )? {
+            names.nodes.insert(node.id);
+            named.push(target);
+        }
+    }
+    bind_nodes(&mut plan, "preview_name", &named)?;
+    Ok(plan.with_data(PreparedPreview { agent, names }))
+}
 
 enum TrialError {
     Page(Box<ChangeError>),
@@ -43,6 +299,7 @@ enum TrialError {
 
 fn empty_effects() -> api::PagePreview {
     api::PagePreview {
+        owner_reads: None,
         pages: 0,
         orgs: None,
         gaining: Vec::new(),
@@ -63,8 +320,7 @@ fn selected(body: &api::SharePreviewBody) -> ApiResult<Vec<Holder>> {
     let mut holders = Vec::new();
     match body {
         api::SharePreviewBody::Page { change } => {
-            let change: PageChange =
-                same(change).ok_or_else(|| invalid("change", "is not a page change"))?;
+            let change: PageChange = crate::routes::notifications::person::page_change(change)?.0;
             if change.owners.is_some()
                 || change.whole.is_some()
                 || change.rows.iter().flatten().any(|row| {
@@ -154,8 +410,7 @@ async fn requested(
     let mut permissions = Vec::new();
     match body {
         api::SharePreviewBody::Page { change } => {
-            let change: PageChange =
-                same(change).ok_or_else(|| invalid("change", "is not a page change"))?;
+            let change: PageChange = crate::routes::notifications::person::page_change(change)?.0;
             for name in change.name.into_iter().flatten() {
                 permissions.extend(name.choice.permissions(site.kind));
                 if name.export.unwrap_or(true) {
@@ -283,6 +538,7 @@ async fn rules(
     place: Option<Id>,
     ports: bool,
     copying: bool,
+    bounds: &NameBounds,
 ) -> ApiResult<Vec<api::SharePreviewRule>> {
     let names = [
         keys::SHARING_ALLOW_HOLDERS,
@@ -307,7 +563,7 @@ async fn rules(
             continue;
         }
         let resolved = snapshot.resolve(def);
-        let source = rule_source(conn, principal, &resolved.source).await?;
+        let source = rule_source(conn, principal, &resolved.source, bounds).await?;
         out.push(api::SharePreviewRule {
             key: def.key.to_owned(),
             value: resolved.value.unwrap_or(Json::Null),
@@ -337,7 +593,7 @@ async fn rules(
                 .rev()
                 .find(|part| part.value.get(&definition.key).is_some())
             {
-                Some(part) => rule_source(conn, principal, &part.source).await?,
+                Some(part) => rule_source(conn, principal, &part.source, bounds).await?,
                 None => None,
             };
             out.push(api::SharePreviewRule {key:format!("capability.policy.{}",definition.key),value:serde_json::json!({"decision":policy.decision,"approver_scope":policy.approver_scope}),source,sharing:false});
@@ -350,9 +606,11 @@ async fn rule_source(
     conn: &mut Conn,
     principal: &Principal,
     source: &Source<Id>,
+    bounds: &NameBounds,
 ) -> ApiResult<Option<NodeOrSystem>> {
     match source.node {
-        Some(id) => Ok(view::refs(conn, principal, &[id], Policy::default())
+        Some(id) => Ok(bounds
+            .refs(conn, principal, &[id])
             .await?
             .remove(&id)
             .map(NodeOrSystem::Node)),
@@ -364,19 +622,36 @@ async fn agents(
     conn: &mut Conn,
     principal: &Principal,
     trial: ShareTrial,
+    now: Time,
+    bounds: &NameBounds,
 ) -> ApiResult<Vec<api::SharePreviewAgent>> {
     let ids: Vec<_> = trial.destinations.iter().map(|(id, _)| *id).collect();
-    let names = view::refs(conn, principal, &ids, Policy::default()).await?;
+    let names = bounds.refs(conn, principal, &ids).await?;
+    let mut viewer_entries = BTreeMap::new();
+    for record in &trial.live {
+        viewer_entries.insert(
+            record.to,
+            crate::routes::share::viewer_entries_bounded(conn, principal, record, bounds).await?,
+        );
+    }
+    let mut current =
+        match orch_engine::sharing::current::project(conn, &trial.live, None, now).await {
+            Ok(current) => current,
+            Err(error) => return Err(crate::routes::share::failed(conn, error).await),
+        };
     Ok(trial
         .destinations
         .into_iter()
         .map(|(id, future_threads)| {
             let live = trial.live.iter().find(|record| record.to == id);
-            let old = trial
-                .before
-                .iter()
-                .find(|record| record.to == id && record.inside == trial.inside);
+            let old = trial.before.iter().find(|record| {
+                record.to == id
+                    && record.inside == trial.inside
+                    && record.by == Some(principal.user())
+            });
             api::SharePreviewAgent {
+                effective_before: trial.effective_before.get(&id).cloned(),
+                viewer_entries: viewer_entries.get(&id).cloned().unwrap_or_default(),
                 to: names.get(&id).cloned().unwrap_or(NodeRef {
                     thread_display: None,
                     id,
@@ -390,6 +665,7 @@ async fn agents(
                     |record| record.parts,
                 ),
                 already_shared: old.map_or(ShareParts::default(), |record| record.parts),
+                current: live.and_then(|record| current.remove(&record.id)),
                 download: live.is_none_or(crate::routes::share::downloads),
                 future_threads,
                 copy: trial.copies.iter().find(|(to, _, _, _)| *to == id).map(
@@ -411,6 +687,7 @@ async fn rows(
     policy: Policy,
     inside: bool,
     selected: &[Holder],
+    bounds: &NameBounds,
 ) -> ApiResult<Vec<api::SharePreviewRow>> {
     let (_, site) = things::site(conn, thing)
         .await
@@ -434,7 +711,15 @@ async fn rows(
             .filter(|entry| selected.contains(&entry.holder))
             .cloned()
             .collect();
-        let named = entries_named_at(conn, principal, site.root, site.role_place, &entries).await?;
+        let named = entries_named_at_bounded(
+            conn,
+            principal,
+            site.root,
+            site.role_place,
+            &entries,
+            bounds,
+        )
+        .await?;
         for row in page.rows {
             let mut entries: Vec<_> = row
                 .entries
@@ -472,6 +757,8 @@ pub async fn create(
     let copying = matches!(&body,api::SharePreviewBody::Agents {share} if share.mode == orch_api_contract::threads::ShareMode::Snapshot);
     let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     ctx.now = guard.now().get();
+    let prepared = guard.operation_data::<PreparedPreview>()?;
+    let bounds = &prepared.names;
     let principal = guard.into_principal();
     let thing = if object == "chats" {
         None
@@ -523,7 +810,7 @@ pub async fn create(
         (Policy::default(), None, Some(row.org_id), Vec::new(), false)
     };
     let read_rules = if thing.is_some() {
-        rules(&ctx, &mut tx, &principal, scope, ports, copying).await?
+        rules(&ctx, &mut tx, &principal, scope, ports, copying, bounds).await?
     } else {
         Vec::new()
     };
@@ -545,11 +832,68 @@ pub async fn create(
         _ => (Vec::new(), 0),
     };
     let old_rows = match (thing, copying) {
-        (Some(thing), false) => rows(&mut tx, &principal, thing, policy, inside, &selected).await?,
+        (Some(thing), false) => {
+            rows(
+                &mut tx, &principal, thing, policy, inside, &selected, bounds,
+            )
+            .await?
+        }
         _ => Vec::new(),
     };
-    let attempted = apply(&ctx, &mut tx, &principal, thing, policy, &body).await;
+    let anchor = match thing {
+        Some(Thing::Node(id)) => Some(id),
+        _ => None,
+    };
+    let disclosure = match &body {
+        api::SharePreviewBody::Page { change } => {
+            crate::thread_read_tools::sharing::Before::take(
+                &ctx.app,
+                &mut tx,
+                anchor,
+                &("page", anchor, change),
+                false,
+                true,
+            )
+            .await?
+        }
+        api::SharePreviewBody::Role { give } => {
+            crate::thread_read_tools::sharing::Before::take(
+                &ctx.app,
+                &mut tx,
+                anchor,
+                &("role", anchor, give),
+                false,
+                true,
+            )
+            .await?
+        }
+        api::SharePreviewBody::Agents { share } => {
+            crate::thread_read_tools::sharing::Before::take(
+                &ctx.app,
+                &mut tx,
+                anchor,
+                &("agents", share),
+                share
+                    .parts
+                    .as_ref()
+                    .is_some_and(|parts| parts.timeline.is_some()),
+                share.inside.unwrap_or(true),
+            )
+            .await?
+        }
+    };
+    let attempted = apply(
+        &ctx,
+        &mut tx,
+        &principal,
+        thing,
+        policy,
+        &body,
+        prepared.agent.as_ref(),
+    )
+    .await;
     let mut answer = api::SharePreview {
+        owner_reads: None,
         allowed: false,
         revision,
         permissions: permissions
@@ -567,6 +911,7 @@ pub async fn create(
     };
     match attempted {
         Ok(trial) => {
+            answer.owner_reads = disclosure.disclosure(&ctx.app, &mut tx).await?;
             answer.allowed = true;
             answer.effects = effects(&mut tx, &principal, &before).await?;
             let already_view = worded(
@@ -579,11 +924,15 @@ pub async fn create(
             .await?;
             answer.already = already_view.gaining;
             answer.already_more = already.1 + already_view.more;
-            answer.holders = Names::holders(&mut tx, &principal, None, scope, &selected).await?;
+            answer.holders =
+                Names::holders_bounded(&mut tx, &principal, None, scope, &selected, bounds).await?;
             if let Some(thing) = thing
                 && !copying
             {
-                let new_rows = rows(&mut tx, &principal, thing, policy, inside, &selected).await?;
+                let new_rows = rows(
+                    &mut tx, &principal, thing, policy, inside, &selected, bounds,
+                )
+                .await?;
                 for mut old in old_rows {
                     if let Some(new) = new_rows.iter().find(|new| {
                         new.defaults == old.defaults
@@ -598,7 +947,8 @@ pub async fn create(
                 }
             }
             if let Some(trial) = trial {
-                answer.agents = agents(&mut tx, &principal, trial).await?;
+                answer.agents =
+                    agents(&mut tx, &principal, trial, Time::new(ctx.now), bounds).await?;
             }
             tx.rollback().await.map_err(DbError::from)?;
         }
@@ -608,8 +958,18 @@ pub async fn create(
             let mut refusal = match error {
                 TrialError::Api(error) => error,
                 TrialError::Page(error) => refusals::change_failed(&mut conn, *error).await,
-                TrialError::Agent(error) => crate::routes::share::failed(&mut conn, *error).await,
+                TrialError::Agent(error) => {
+                    crate::routes::share::failed_projected(&mut conn, *error, bounds.limited).await
+                }
             };
+            if principal
+                .caller()
+                .grant()
+                .and_then(|grant| grant.operation_scope())
+                .is_some()
+            {
+                refusal = crate::middleware::authorization::problem_without_content(refusal);
+            }
             // A chat's inspection is not membership or sharing authority: no preview is returned to that reader.
             if thing.is_none() || copying {
                 return Err(refusal);
@@ -628,12 +988,17 @@ async fn apply(
     thing: Option<Thing>,
     policy: Policy,
     body: &api::SharePreviewBody,
+    prepared: Option<&Result<PreparedAgentShare, ApiError>>,
 ) -> Result<Option<ShareTrial>, TrialError> {
     match body {
         api::SharePreviewBody::Page { change } => {
             let thing = thing.ok_or_else(|| TrialError::Api(ApiError::not_found()))?;
-            let change: PageChange = same(change)
-                .ok_or_else(|| TrialError::Api(invalid("change", "is not a page change")))?;
+            crate::routes::access::link_origin::check(tx, principal, change.link_origin)
+                .await
+                .map_err(TrialError::Api)?;
+            let change = crate::routes::notifications::person::page_change(change)
+                .map_err(TrialError::Api)?
+                .0;
             match thing {
                 Thing::Node(_) => {
                     pages::change(tx, principal, thing.target(), &change, policy, &origin(ctx))
@@ -677,7 +1042,20 @@ async fn apply(
         api::SharePreviewBody::Agents { share } => ctx
             .app
             .engine
-            .preview_agent_share_in(tx, principal, &origin(ctx), share)
+            .preview_prepared_agent_share_in(
+                tx,
+                principal,
+                &origin(ctx),
+                share,
+                prepared
+                    .ok_or_else(|| {
+                        TrialError::Api(ApiError::internal(
+                            "the agent preview has no fresh preparation",
+                        ))
+                    })?
+                    .as_ref()
+                    .map_err(|error| TrialError::Api(error.clone()))?,
+            )
             .await
             .map(Some)
             .map_err(|error| TrialError::Agent(Box::new(error))),

@@ -2,7 +2,8 @@
 
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::middleware::{authorization, transaction_guard};
-use crate::registry::{Ctx, Registry};
+use crate::registry::{Ctx, OperationFuture, OperationPlan, Registry};
+use orch_access_contract::decisions::ObjectRef;
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::ThroughThreadQuery;
@@ -11,7 +12,7 @@ use orch_api_contract::source::{
     EnvironmentSourcePrepare, EnvironmentSourcePrepareBody, RepositorySource,
 };
 use orch_api_contract::workspace::Job;
-use orch_authz::{Policy, Principal};
+use orch_authz::{Caller, CapturedOperation, Policy, Principal};
 use orch_db::{
     Conn,
     queries::{identity, threads},
@@ -24,12 +25,54 @@ use orch_link_contract::commands::Secret;
 use orch_link_contract::source::{GitAuthor, GitCommit, GitPush};
 use orch_types::{Id, new_id};
 
+mod preparation;
+
 /// Binds the source and publication requests declared by the canonical API.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(EnvironmentSourcePrepare, prepare)
-        .on(EnvironmentGitCommit, commit)
-        .on(EnvironmentGitPush, push);
+        .on_with_operation(
+            EnvironmentSourcePrepare,
+            crate::key_operations::native::effects::prepare::<preparation::Prepare>,
+            preparation::run,
+        )
+        .on_with_operation(EnvironmentGitCommit, publication, commit)
+        .on_with_operation(EnvironmentGitPush, publication, push);
+}
+
+// Both publication producers resolve the actual stored Environment. A nearby thread is
+// only the ordinary file-door context and supplies no environment or machine permission.
+fn publication<'a, B>(
+    ctx: &'a Ctx,
+    conn: &'a mut Conn,
+    caller: &'a Caller,
+    _query: ThroughThreadQuery,
+    _body: B,
+) -> OperationFuture<'a> {
+    Box::pin(async move {
+        let target = crate::key_operations::targets::page_object(
+            conn,
+            ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Environment,
+                id: ctx.id("id")?,
+            },
+        )
+        .await
+        .map_err(|error| {
+            if caller
+                .grant()
+                .is_some_and(|grant| grant.operation_scope().is_some())
+            {
+                authorization::problem_without_content(error)
+            } else {
+                error
+            }
+        })?;
+        let mut plan = OperationPlan::new(ctx.route, ctx.route.name)?;
+        for index in 0..plan.variant().facets.len() {
+            plan.bind(index, target.object.kind, std::slice::from_ref(&target))?;
+        }
+        Ok(plan)
+    })
 }
 
 pub(crate) fn make_error(error: MakeError) -> ApiError {
@@ -41,6 +84,7 @@ pub(crate) fn make_error(error: MakeError) -> ApiError {
         .with("job", source::reference(&job)),
         MakeError::NoEnvironment => ApiError::not_found(),
         MakeError::Db(error) => error.into(),
+        MakeError::Internal(error) => ApiError::engine(error),
     }
 }
 
@@ -50,13 +94,20 @@ async fn require(
     environment: Id,
     permission: Permission,
 ) -> ApiResult<()> {
-    authorization::require_resource(
+    authorization::require_resource_projected(
         conn,
         principal,
         ResourceKind::Environment,
         environment,
         permission,
         Policy::default(),
+        // Publication's queued snapshot contains no existing resource content. Its
+        // refusal must not turn an internal permission lookup into a named page read.
+        principal.caller().admitted_operation() == Some("EnvironmentGitCommit")
+            && principal
+                .caller()
+                .grant()
+                .is_some_and(|grant| grant.operation_scope().is_some()),
     )
     .await
 }
@@ -66,35 +117,46 @@ async fn complete(
     mut tx: orch_db::Tx,
     plan: Plan,
     now: orch_types::Time,
+    publication: Option<CapturedOperation>,
 ) -> ApiResult<Job> {
     let row = source::begin(&mut tx, plan, now.get())
         .await
         .map_err(make_error)?;
+    if let Some(origin) = publication {
+        source::publication_authority::retain(&mut tx, &row, &origin, now)
+            .await
+            .map_err(ApiError::engine)?;
+    }
+    // This is the actual immutable newly queued row, before commit/kick. Its result, log,
+    // error and native activity are absent; the existing public actor projection is retained.
     let shown = crate::routes::environments::jobs::view(&mut tx, &row).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     ctx.app.engine.kick();
     Ok(shown)
 }
 
-async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiResult<Job> {
+pub(super) async fn prepare_native(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: Principal,
+    body: EnvironmentSourcePrepareBody,
+) -> ApiResult<(
+    Plan,
+    orch_db::queries::environments::workspace::EnvironmentRow,
+)> {
     let environment = ctx.id("id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    require(
-        &mut tx,
-        guard.principal(),
-        environment,
-        Permission::EnvironmentManage,
-    )
-    .await?;
-    let door = super::door::open(&ctx, &mut tx, Some(body.thread_id)).await?;
+    require(conn, &principal, environment, Permission::EnvironmentManage).await?;
+    let door =
+        super::door::open_with_principal(ctx, conn, environment, Some(body.thread_id), principal)
+            .await?;
     door.may_write()?;
-    let machine = super::live::require_live(&ctx, &mut tx, &door.env).await?;
-    let row = threads::thread(&mut tx, body.thread_id)
+    let machine = super::live::require_live(ctx, conn, &door.env).await?;
+    let row = threads::thread(conn, body.thread_id)
         .await?
         .ok_or_else(ApiError::not_found)?;
     let frozen: RepositorySource = match &body.source {
         Some(accepted) => {
-            let current = source::resolved(&mut tx, row.node_id)
+            let current = source::resolved(conn, row.node_id)
                 .await
                 .map_err(ApiError::internal)?;
             if accepted != &current {
@@ -107,7 +169,7 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
         }
         None => match row.source.as_ref().and_then(|source| source.get("source")) {
             Some(value) => serde_json::from_value(value.clone()).map_err(ApiError::internal)?,
-            None => source::resolved(&mut tx, row.node_id)
+            None => source::resolved(conn, row.node_id)
                 .await
                 .map_err(ApiError::internal)?,
         },
@@ -123,7 +185,7 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
         .flatten();
     let action = if let Some(choice) = worktree {
         let record_days = orch_settings::get::<i64>(
-            &mut tx,
+            conn,
             orch_settings::Place::Environment(environment),
             orch_settings_contract::registry::keys::WORKSPACE_RECORD_DAYS,
         )
@@ -131,7 +193,7 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::internal("recording days are unset"))?;
         let max_bytes = orch_settings::get::<i64>(
-            &mut tx,
+            conn,
             orch_settings::Place::Environment(environment),
             orch_settings_contract::registry::keys::WORKSPACE_RECORD_MAX_BYTES,
         )
@@ -150,7 +212,7 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
             max_bytes,
         }
     } else {
-        let credential = source::credential(&mut tx, row.topic_id, &frozen)
+        let credential = source::credential(conn, row.topic_id, &frozen)
             .await
             .ok()
             .flatten();
@@ -201,7 +263,7 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
                                     "the original source credential scope changed; accept the current source before preparing it",
                                 ));
                             }
-                            credential = source::credential(&mut tx, row.topic_id, &frozen)
+                            credential = source::credential(conn, row.topic_id, &frozen)
                                 .await
                                 .ok()
                                 .flatten();
@@ -232,15 +294,17 @@ async fn prepare(ctx: Ctx, (): (), body: EnvironmentSourcePrepareBody) -> ApiRes
         generation: door.env.generation,
         machine,
         thread: Some(row.node_id),
-        caller: guard.user().id(),
-        token: guard
-            .principal()
+        caller: door.principal.user(),
+        token: door
+            .principal
             .caller()
             .grant()
             .and_then(|grant| grant.token()),
+        creator_origin: None,
+        scheduled_input: None,
         action,
     };
-    complete(&ctx, tx, plan, guard.now()).await
+    Ok((plan, door.env))
 }
 
 async fn commit(
@@ -304,9 +368,13 @@ async fn commit(
             .caller()
             .grant()
             .and_then(|grant| grant.token()),
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Commit { body: command },
     };
-    complete(&ctx, tx, plan, guard.now()).await
+    let origin =
+        CapturedOperation::capture(guard.principal().caller()).map_err(ApiError::internal)?;
+    complete(&ctx, tx, plan, guard.now(), Some(origin)).await
 }
 
 async fn push(ctx: Ctx, query: ThroughThreadQuery, body: EnvironmentGitPushBody) -> ApiResult<Job> {
@@ -376,7 +444,11 @@ async fn push(ctx: Ctx, query: ThroughThreadQuery, body: EnvironmentGitPushBody)
             .caller()
             .grant()
             .and_then(|grant| grant.token()),
+        creator_origin: None,
+        scheduled_input: None,
         action: Action::Push { body: command },
     };
-    complete(&ctx, tx, plan, guard.now()).await
+    let origin =
+        CapturedOperation::capture(guard.principal().caller()).map_err(ApiError::internal)?;
+    complete(&ctx, tx, plan, guard.now(), Some(origin)).await
 }

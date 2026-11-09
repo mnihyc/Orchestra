@@ -1,0 +1,8 @@
+{"direction":"to_harness","frame":{"jsonrpc":"2.0","id":{"$replay_capture":"init"},"method":"initialize","params":{"protocolVersion":1}},"subset":true}
+{"direction":"from_harness","frame":{"jsonrpc":"2.0","id":{"$replay_ref":"init"},"result":{"protocolVersion":1,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":{"mcpCapabilities":{"http":true},"promptCapabilities":{"image":true,"audio":false,"embeddedContext":false},"sessionCapabilities":{"close":{},"list":{},"resume":{}}},"authMethods":[]}}}
+{"direction":"to_harness","frame":{"jsonrpc":"2.0","id":{"$replay_capture":"open"},"method":"session/new"},"subset":true}
+{"direction":"from_harness","frame":{"jsonrpc":"2.0","id":{"$replay_ref":"open"},"result":{"sessionId":"fixture-session","configOptions":[{"id":"model","name":"Model","category":"model","type":"select","currentValue":"[\"orch\",\"scripted\"]","options":[{"group":"orch","name":"orch","options":[{"value":"[\"orch\",\"scripted\"]","name":"scripted"},{"value":"[\"orch\",\"second\"]","name":"second"}]}]}]}}}
+{"direction":"from_harness","frame":{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"fixture-session","update":{"sessionUpdate":"future_idle_update"}}}}
+{"direction":"to_harness","frame":{"jsonrpc":"2.0","id":{"$replay_capture":"close"},"method":"session/close","params":{"sessionId":"fixture-session"}},"subset":true}
+{"direction":"from_harness","frame":{"jsonrpc":"2.0","id":{"$replay_ref":"close"},"result":{}}}
+{"direction":"exit","code":0}

@@ -17,7 +17,7 @@ vi.mock('@/shell/screen',()=>({useScreenHeading:()=>undefined}));
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/usage/Export',()=>({Export:()=>null}));
 vi.mock('@/features/usage/Limits',()=>({Limits:()=> <Section id="order-limits" title="Limits"><p>One cap</p></Section>}));
-vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,planUsageQuery:()=>({queryKey:['order-plan'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})})}));
+vi.mock('@/api/planUsage',()=>({PLAN_PAGE_SIZE:20,creditUsageQuery:()=>({queryKey:['order-credit'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})}),planUsageQuery:()=>({queryKey:['order-plan'],queryFn:()=>Promise.resolve({items:[],next_cursor:null})})}));
 vi.mock('@/api/nodes',()=>({nodeQuery:(id:string)=>({queryKey:['order-node',id],queryFn:()=>Promise.resolve(org(id,'acme','Acme',userRef(me(1,'ada','Ada'))))}),orgsQuery:{queryKey:['order-orgs'],queryFn:()=>Promise.resolve([])},fetchTree:()=>Promise.resolve({nodes:[]})}));
 vi.mock('@/api/resources',()=>({providerQuery:(id:string)=>({queryKey:['order-provider',id],queryFn:()=>Promise.resolve(planProvider())})}));
 vi.mock('@/api/usage',async(load)=>({...await load<typeof UsageApi>(),
@@ -32,7 +32,7 @@ it.each(['me','place','provider'] as const)('keeps the summary-to-detail section
   const rendered=show(door==='provider' ? <ProviderUsage provider={planProvider()} /> : <Report scope={door==='me' ? {kind:'me'} : {kind:'node',id:'00000000-0000-4000-8000-000000000001'}} />);
   await screen.findByRole('heading',{name:'Records',level:2});
   const headings=screen.getAllByRole('heading',{level:2});
-  expect(headings.map((heading)=>heading.textContent)).toEqual([...(door==='provider' ? ['Plan'] : []),'Over time','Limits','Breakdown','Records']);
+  expect(headings.map((heading)=>heading.textContent)).toEqual([...(door==='provider' ? ['Provider usage'] : []),'Over time','Limits','Breakdown','Records']);
   const ordered=Array.from(rendered.container.querySelectorAll('ul[aria-label="Figures of the span"],h2'));
   expect(ordered[0]).toBe(screen.getByRole('list',{name:'Figures of the span'}));
   expect(screen.getAllByRole('heading',{name:'Limits',level:2})).toHaveLength(1);

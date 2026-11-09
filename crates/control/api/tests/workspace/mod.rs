@@ -1351,6 +1351,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id;
         let content = Content::over(&world.app.app);
@@ -1395,6 +1397,8 @@ impl Site {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }
@@ -1763,7 +1767,8 @@ pub mod ask {
 
     /// A directory made.
     pub async fn mkdir(site: &Site, by: &Who, path: &str) -> Reply<FileStat> {
-        site.app()
+        let reply = site
+            .app()
             .call(EnvironmentFileMkdir, &[&site.environment])
             .token(&by.token)
             .query(&ThroughThreadQuery {
@@ -1773,7 +1778,18 @@ pub mod ask {
                 path: path.to_owned(),
             })
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|value| match value {
+                orch_api_contract::workspace::FileMkdirResponse::Full(stat) => *stat,
+                orch_api_contract::workspace::FileMkdirResponse::Receipt(_) => {
+                    panic!("ordinary directory controls require confirmed native metadata")
+                }
+            }),
+        }
     }
 
     /// A path renamed.
@@ -1794,7 +1810,8 @@ pub mod ask {
 
     /// A path copied.
     pub async fn copy(site: &Site, by: &Who, from: &str, to: &str) -> Reply<FileStat> {
-        site.app()
+        let call = site
+            .app()
             .call(EnvironmentFileCopy, &[&site.environment])
             .token(&by.token)
             .query(&ThroughThreadQuery {
@@ -1803,9 +1820,18 @@ pub mod ask {
             .body(&FileFromToBody {
                 from: from.to_owned(),
                 to: to.to_owned(),
-            })
-            .send()
-            .await
+            });
+        let reply = call.send().await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|result| {
+                result
+                    .into_full()
+                    .expect("ordinary copying keeps native metadata")
+            }),
+        }
     }
 
     /// A path deleted.

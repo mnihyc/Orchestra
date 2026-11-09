@@ -7,12 +7,14 @@ import type {
   Approval,
   CommandAction,
   ContentPart,
+  Draft,
   FileChange,
   HarnessRequest,
   Item,
   ItemStatus,
   MarkerPayload,
   PlanStep,
+  ReviewComment,
   ThreadInput,
   ToolPayload,
   Turn,
@@ -21,6 +23,11 @@ import type {
 
 /** The moment rows are made at unless a test says another. */
 export const AT = '2026-10-01T10:00:00.000Z';
+
+/** One person's complete ordinary draft, including frozen review comments. */
+export function threadDraft(content: ContentPart[] = [], comments: ReviewComment[] = [], more: Partial<Draft> = {}): Draft {
+  return { content, delivery: 'queue', native_action: null, review_comments: comments, updated_at: AT, ...more };
+}
 
 interface ItemOptions {
   turn?: string | null;
@@ -293,6 +300,15 @@ export const ALLOW_DENY: HarnessRequest['options'] = [
   { id: 'allow_session', label: 'Allow for session', scope: 'session', style: 'allow', rule: null },
   { id: 'deny', label: 'Deny', scope: null, style: 'deny', rule: null },
 ];
+
+/** A native narrow thread rule keeps this command and directory, never session-wide permission. */
+export function commandThreadOptions(command: string, cwd: string): HarnessRequest['options'] {
+  return [
+    { id: 'allow_once', label: 'Allow once', scope: 'once', style: 'allow', rule: null },
+    { id: 'allow_thread', label: 'Allow for this thread', scope: 'thread', style: 'allow', rule: { type: 'command_exact', command, cwd } },
+    { id: 'deny', label: 'Deny', scope: null, style: 'deny', rule: null },
+  ];
+}
 
 export const LOGIN_DIFF = [
   '@@ -39,7 +39,7 @@ export function login(request: Request) {',

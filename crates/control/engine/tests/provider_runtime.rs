@@ -498,11 +498,25 @@ async fn a_runtime_is_stopped_by_a_person_with_its_volume_kept_and_started_again
     let _template = provider_template(&world).await;
     let provider = managed_subscription(&world, "Team Codex").await;
     let (runtime, unit) = made(&world, &host, provider).await;
-    world
-        .engine()
-        .stop_provider_runtime(provider, false, StopWhy::Person(world.ada))
+    // A harness report's foreign key pins the provider's identity, not its current machine.
+    // Stopping must not wait for that pin while the report can be waiting on a harness row.
+    let mut reference = world.pool.begin().await.unwrap();
+    let pinned: Id = sqlx::query_scalar("SELECT id FROM providers WHERE id=$1 FOR KEY SHARE")
+        .bind(provider)
+        .fetch_one(&mut *reference)
         .await
         .unwrap();
+    assert_eq!(pinned, provider);
+    tokio::time::timeout(
+        common::PATIENCE,
+        world
+            .engine()
+            .stop_provider_runtime(provider, false, StopWhy::Person(world.ada)),
+    )
+    .await
+    .expect("a harness identity pin must not block the acknowledged runtime stop")
+    .unwrap();
+    reference.rollback().await.unwrap();
     assert_eq!(host.count(K::NodeRuntimeStop), 1);
     assert_eq!(host.count(K::NodeRuntimeRemove), 0, "the unit is kept");
     assert_eq!(runtime_state(&world, runtime).await, "stopped");
@@ -685,6 +699,89 @@ async fn a_runtime_that_has_been_idle_for_as_long_as_its_setting_allows_is_stopp
         "running",
         "a sign-in that waits for the person keeps the runtime up"
     );
+}
+
+#[tokio::test]
+async fn a_native_background_task_keeps_an_idle_provider_runtime_busy_without_an_open_lease() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "background-runtime", 16_384).await;
+    let template = provider_template(&world).await;
+    let runtime = managed_world_provider(&world, &host, template).await;
+    let idle = managed_subscription(&world, "Idle control").await;
+    let (idle_runtime, _unit) = made(&world, &host, idle).await;
+    let thread = world.thread("Retained native work").await;
+    let (first, _) = world.running_turn(thread, "Begin").await;
+    let mut task = common::background::command(&world, thread, first.turn_id).await;
+    world
+        .say(
+            thread,
+            common::turn_ended(
+                first.turn_id,
+                orch_link_contract::events::TurnOutcome::Completed,
+            ),
+        )
+        .await;
+    world.wait_turn(first.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    let leases: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM leases WHERE provider_id=$1 AND closed_at IS NULL",
+    )
+    .bind(world.provider)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        leases, 0,
+        "this control exercises native task busy state independently of lease retention"
+    );
+    eventually("both provider harnesses to finish startup",||async {
+        sqlx::query_scalar::<_,i64>("SELECT count(DISTINCT provider_id) FROM harnesses WHERE provider_id=ANY($1) AND status='online'")
+            .bind([world.provider,idle]).fetch_one(world.pool.pool()).await.unwrap()==2
+    }).await;
+    let old = Utc::now() - Duration::hours(3);
+    sqlx::query(
+        "UPDATE runtimes SET created_at=$2,last_active_at=$2,updated_at=$2 WHERE id=ANY($1)",
+    )
+    .bind([runtime, idle_runtime])
+    .bind(old)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE turns SET created_at=$2,started_at=$2,completed_at=$2 WHERE thread_id=$1")
+        .bind(thread)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE harnesses SET last_active_at=$2 WHERE provider_id=ANY($1)")
+        .bind([world.provider, idle])
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    world
+        .set(world.root, "runtime.idle_stop_minutes", json!(60))
+        .await;
+    eventually("the idle provider control to stop", || async {
+        runtime_state(&world, idle_runtime).await == "stopped"
+    })
+    .await;
+    // Four ordinary 150ms reaper intervals, matching the existing lifecycle controls.
+    meanwhile(std::time::Duration::from_millis(600)).await;
+    assert_eq!(runtime_state(&world, runtime).await, "running");
+    task.state = orch_link_contract::background::BackgroundTaskState::Stopped;
+    common::background::update(&world, thread, task).await;
+    sqlx::query("UPDATE harnesses SET last_active_at=$2 WHERE provider_id=$1")
+        .bind(world.provider)
+        .bind(old)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    eventually("the provider becomes idle after its task ends", || async {
+        runtime_state(&world, runtime).await == "stopped"
+    })
+    .await;
 }
 
 #[tokio::test]

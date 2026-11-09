@@ -30,6 +30,7 @@ import type {
   RoleHeld,
   SharePreview,
   SharePreviewBody,
+  ShareParts,
   Problem,
   RowProfile,
   UserRef,
@@ -217,10 +218,10 @@ export class Access implements Part {
     this.requests.reset();
     this.clock = 0;
     this.groups = [
-      { group: { id: fixtureId(8, 1), name: 'Backend team', description: 'Who work on the services', member_count: 3, org_id: ACME.org }, members: ['grace', 'dora', 'linus'] },
-      { group: { id: fixtureId(8, 2), name: 'Design', description: '', member_count: 2, org_id: ACME.org }, members: ['margaret', 'vera'] },
-      { group: { id: fixtureId(0x30, 1), name: 'Operators', description: 'Who keeps the machines running', member_count: 2, org_id: ACME.org }, members: ['dora', 'grace'] },
-      { group: { id: fixtureId(0x30, 2), name: 'Interns', description: "This season's newcomers", member_count: 1, org_id: ACME.org }, members: ['linus'] },
+      { group: { revision: 1, id: fixtureId(8, 1), name: 'Backend team', description: 'Who work on the services', member_count: 3, org_id: ACME.org }, members: ['grace', 'dora', 'linus'] },
+      { group: { revision: 1, id: fixtureId(8, 2), name: 'Design', description: '', member_count: 2, org_id: ACME.org }, members: ['margaret', 'vera'] },
+      { group: { revision: 1, id: fixtureId(0x30, 1), name: 'Operators', description: 'Who keeps the machines running', member_count: 2, org_id: ACME.org }, members: ['dora', 'grace'] },
+      { group: { revision: 1, id: fixtureId(0x30, 2), name: 'Interns', description: "This season's newcomers", member_count: 1, org_id: ACME.org }, members: ['linus'] },
     ];
   }
 
@@ -768,8 +769,8 @@ export class Access implements Part {
   private givesOf(person: Person, page: StoredPage, rows: readonly PermissionRow[], held: ReadonlySet<string>, sharing: boolean, manages: boolean): PageGives {
     const holdersShare = this.holdersMayShare(page);
     // A defaults page is changed by whoever manages it, with the bound of what its pages' holders hold (not drawn by any form).
-    if (page.defaults) return { choices: manages ? [...CHOICES] : [], roles: [], agents: [], holders_share: holdersShare };
-    if (!sharing) return { choices: [], roles: [], agents: [], holders_share: holdersShare };
+    if (page.defaults) return { choices: manages ? [...CHOICES] : [], roles: [], agents: [], agent_parts: {}, holders_share: holdersShare };
+    if (!sharing) return { choices: [], roles: [], agents: [], agent_parts: {}, holders_share: holdersShare };
     const given = (permission: string) => rows.find((row) => row.permission === permission)?.can_give === true;
     const choices = CHOICES.filter((choice) => {
       const needed = (CATALOGUE.choices.find((entry) => entry.key === choice)?.permissions[page.kind] ?? []).filter((name) => rows.some((row) => row.permission === name));
@@ -783,7 +784,55 @@ export class Access implements Part {
       ...(mayAny(['thread.interact', 'chat.interact', 'doc.edit']) ? (['edit'] as const) : []),
       ...(held.has('doc.manage') ? (['manage'] as const) : []),
     ];
-    return { choices, roles, agents: isResource(page.path) ? [] : agents, holders_share: holdersShare };
+    return { choices, roles, agents: isResource(page.path) ? [] : agents, agent_parts: this.agentPartsOf(person, page), holders_share: holdersShare };
+  }
+
+  /** The extra source projection uses the same rows/holders/locks under ordinary authority.
+   * Human page choices and management retain their existing request principal above.
+   */
+  private agentPartsOf(person: Person, page: StoredPage): ShareParts {
+    if (page.defaults || isResource(page.path)) return {};
+    const ordinary: Person = { ...person, me: { ...person.me, is_system_admin: false } };
+    const live = this.rowsFor(page, ordinary);
+    if (!live.sharing) return {};
+    const given = (permission: string) => live.rows.some((row) => row.permission === permission && row.can_give);
+    const place = ['org', 'project', 'topic'].includes(page.kind);
+    const directThread = page.kind === 'thread';
+    const document = page.kind === 'document' || page.path === 'documents';
+    if (!place && !directThread && !document) return {};
+    const parts: ShareParts = {};
+    const level = (read: boolean, write: boolean) => write ? 'write' as const : read ? 'read' as const : null;
+    if (place || directThread) {
+      let canRead = given('thread.view'), canWrite = given('thread.interact'), canManage = given('thread.manage');
+      let canFork = given('thread.fork'), canArchive = given('thread.archive');
+      if (place) {
+        const defaults = this.pageOf('nodes', page.id, true);
+        const rows = this.rowsFor(defaults, ordinary).rows;
+        const administersPlace = this.owns(ordinary, page) || this.roleOf(ordinary, page.id) === 'admin';
+        const inside = (permission: string) => (['managed', 'connected'] as const).some((profile) => {
+          const selected = rows.filter((row) => row.profile === 'any' || row.profile === profile);
+          const row = selected.find((row) => row.permission === permission);
+          return row !== undefined && !(row.locked !== null && !row.locked.here)
+            && (administersPlace || this.heldOn(ordinary, defaults, selected).has(permission));
+        });
+        canRead = inside('thread.view'); canWrite = inside('thread.interact'); canManage = inside('thread.manage');
+        canFork = inside('thread.fork'); canArchive = inside('thread.archive');
+      }
+      const timeline = canManage ? 'manage' : level(canRead, canWrite);
+      if (canFork) parts.thread_fork = true;
+      if (canArchive) parts.thread_archive = true;
+      if (timeline !== null) parts.timeline = timeline;
+    }
+    if (place || directThread) {
+      const chats = given('chat.manage') ? 'manage' : level(given('chat.view'), given('chat.interact'));
+      if (chats !== null) parts.chat = chats;
+    }
+    if (place || directThread || document) {
+      if (given('doc.manage')) parts.documents = 'manage';
+      else if (given('doc.edit')) parts.documents = 'edit';
+      else if (given('doc.view')) parts.documents = 'read';
+    }
+    return parts;
   }
 
   /** The places and threads and documents inside a place that follow it, and those that stay apart because they were made private; as far as the reader may see them. */
@@ -1145,7 +1194,9 @@ export class Access implements Part {
       const page = this.pageOf('nodes', group.group.org_id, false);
       if (found[1] === 'GET') return { status: 200, body: this.groupInputs(id).map((input) => this.holderOf(input, page).holder) };
       if (!['user', 'group', 'role', 'members'].includes(String(body.kind))) throw new Refusal(400, 'request.invalid', 'a group contains people, groups, roles or org members');
-      const input = body as unknown as HolderInput;
+      const { expected_revision: expected, ...fields } = body;
+      if (found[1] === 'PUT' && expected !== undefined && expected !== group.group.revision) throw new Refusal(409, 'conflict.stale_revision', 'The group changed.', { current: { id, revision: group.group.revision } });
+      const input = fields as unknown as HolderInput;
       this.holderOf(input, page);
       if (input.kind === 'group' && found[1] === 'PUT' && !this.groupEdgeAllowed(id, input.id)) throw new Refusal(400, 'request.invalid', 'group nesting cannot contain a cycle or be deeper than five groups');
       if (input.kind === 'user') {
@@ -1158,6 +1209,7 @@ export class Access implements Part {
         group.holders = (group.holders ?? []).filter((holder) => JSON.stringify(holder) !== JSON.stringify(stored));
         if (found[1] === 'PUT') group.holders.push(stored);
       }
+      group.group.revision += 1;
       return { status: 204 };
     }
     if ((found = /^POST \/orgs\/([^/]+)\/groups$/.exec(route))) {
@@ -1165,7 +1217,7 @@ export class Access implements Part {
       this.world.places.need(person, orgId, 'members.manage');
       const name = typeof body.name === 'string' ? body.name.trim() : '';
       if (name === '') throw new Refusal(400, 'request.invalid', 'the request is not valid', { errors: [{ path: 'name', message: 'must not be empty' }] });
-      const made: Group = { id: randomUUID(), org_id: orgId, name, description: typeof body.description === 'string' ? body.description : '', member_count: 0 };
+      const made: Group = { revision: 1, id: randomUUID(), org_id: orgId, name, description: typeof body.description === 'string' ? body.description : '', member_count: 0 };
       this.groups.push({ group: made, members: [] });
       return { status: 200, body: made };
     }
@@ -1178,6 +1230,7 @@ export class Access implements Part {
       }
       if (typeof body.name === 'string' && body.name.trim() !== '') entry.group.name = body.name.trim();
       if (typeof body.description === 'string') entry.group.description = body.description;
+      entry.group.revision += 1;
       return { status: 200, body: this.groupLabel(entry.group.id) };
     }
     if ((found = /^GET \/groups\/([^/]+)\/members$/.exec(route))) {

@@ -6,7 +6,9 @@
 
 mod content;
 mod meaning;
+mod native;
 mod stream;
+mod stream_native;
 mod words;
 
 use crate::middleware::authorization::{self, refusals::user_refs};
@@ -57,10 +59,26 @@ const NAME_KINDS: &[&str] = &[
 /// Binds the requests that find things and what was written in them.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(NameSearchList, names)
-        .on(orch_api_contract::search::DocumentRelatedList, related)
-        .on(SearchList, content::search)
-        .on_raw(orch_api_contract::search::SearchStreamList, stream::search);
+        .on_snapshot_read_with_optional_operation(
+            NameSearchList,
+            crate::key_operations::native::selected::<native::NamesReader>,
+            names,
+        )
+        .on_snapshot_read_with_optional_operation(
+            orch_api_contract::search::DocumentRelatedList,
+            crate::key_operations::native::selected::<native::RelatedReader>,
+            related,
+        )
+        .on_snapshot_read_with_optional_operation(
+            SearchList,
+            crate::key_operations::native::selected::<native::ContentReader>,
+            crate::key_operations::native::selected_read::<native::ContentReader>,
+        )
+        .on_raw_read_with_optional_operation(
+            orch_api_contract::search::SearchStreamList,
+            crate::key_operations::native::selected::<stream_native::Opening>,
+            stream::search,
+        );
 }
 
 /// The complete lookup, including locks and access checks, shares the agent search deadline.
@@ -84,43 +102,30 @@ async fn related_page(
     ctx: Ctx,
     query: orch_api_contract::common::PageQuery,
 ) -> ApiResult<orch_api_contract::search::RelatedItems> {
-    let document = ctx.id("id")?;
-    let continued = query
-        .cursor
-        .as_deref()
-        .map(crate::routes::links::related_after)
-        .transpose()?;
-    let after = continued.as_ref().map(|(position, _)| *position);
-    let mut tx = ctx.app.db.begin_snapshot().await?;
-    let mut cancellation = rows::cancel_on_drop(&ctx.app.db, &mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    let page = ctx
-        .app
-        .engine
-        .related_page_for_person(
-            &mut tx,
-            &principal,
-            document,
-            after,
-            query.limit.map(|limit| {
-                usize::try_from(limit.clamp(1, orch_api_contract::common::MAX_LIMIT)).unwrap_or(1)
-            }),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .ok_or_else(ApiError::not_found)?;
-    if continued.is_some_and(|(_, fingerprint)| fingerprint != page.fingerprint) {
-        return Err(invalid("cursor", "the related list changed; start again"));
-    }
-    let mut answer = page.answer;
+    crate::key_operations::native::selected_read::<native::RelatedReader>(ctx, query, ()).await
+}
+
+async fn render_related(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    value: &native::PreparedRelated,
+) -> ApiResult<orch_api_contract::search::RelatedItems> {
+    let page = &value.page;
+    let mut answer = page.answer.clone();
     answer.next_cursor = page
         .next
         .map(|position| crate::routes::links::related_cursor(position, page.fingerprint))
         .transpose()?;
     let ids: Vec<_> = answer.items.iter().map(|item| item.id).collect();
-    let items = orch_db::queries::related::items(&mut tx, &ids).await?;
+    let items = orch_db::queries::related::items(conn, &ids).await?;
     let nodes: Vec<_> = items.iter().map(|item| item.node_id).collect();
-    let ways = view::ways(&mut tx, &principal, &nodes, Policy::default()).await?;
+    let mut ways = view::ways(conn, principal, &nodes, Policy::default()).await?;
+    if value.bounds.limited {
+        for path in ways.values_mut() {
+            path.retain(|part| value.bounds.nodes.contains(&part.id));
+        }
+    }
     let documents: Vec<_> = answer
         .items
         .iter()
@@ -128,8 +133,8 @@ async fn related_page(
         .map(|item| orch_engine::document_tree::Item::Document(item.id))
         .collect();
     let folders = orch_engine::document_tree::load_entries_in(
-        &mut tx,
-        orch_engine::document_tree::Actor::Person(&principal),
+        conn,
+        orch_engine::document_tree::Actor::Person(principal),
         &[],
         &documents,
         ctx.now.into(),
@@ -147,16 +152,15 @@ async fn related_page(
         };
         if result.kind == orch_api_contract::search::RelatedKind::Chat
             && result.name.is_empty()
-            && let Some(chat) = orch_db::queries::chats::chat(&mut tx, result.id).await?
+            && let Some(chat) = orch_db::queries::chats::chat(conn, result.id).await?
         {
-            let members = orch_db::queries::chats::members(&mut tx, chat.id).await?;
+            let members = orch_db::queries::chats::members(conn, chat.id).await?;
             if members
                 .iter()
                 .any(|member| member.active_at(ctx.now) && member.user_id != principal.user())
             {
                 result.name =
-                    crate::routes::chats::people_label(&mut tx, &principal, &chat, &members)
-                        .await?;
+                    crate::routes::chats::people_label(conn, principal, &chat, &members).await?;
             }
         }
         result.context = ways
@@ -179,10 +183,12 @@ async fn related_page(
             let Some(folder) = ancestors.get(&id) else {
                 break;
             };
-            path.push(orch_api_contract::search::RelatedAncestor {
-                id,
-                name: folder.title.clone(),
-            });
+            if !value.bounds.limited || value.bounds.containers.contains(&id) {
+                path.push(orch_api_contract::search::RelatedAncestor {
+                    id,
+                    name: folder.title.clone(),
+                });
+            }
             parent = match folder.parent {
                 orch_engine::document_tree::Directory::Container(id) => Some(id),
                 _ => None,
@@ -190,8 +196,6 @@ async fn related_page(
         }
         result.context.extend(path.into_iter().rev());
     }
-    cancellation.disarm();
-    tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(answer)
 }
 
@@ -241,115 +245,59 @@ async fn advanced_selection(
 }
 
 async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSearchPage> {
-    let limit = query.limit.unwrap_or(NAME_SEARCH_LIMIT_DEFAULT);
-    if limit == 0 || limit > NAME_SEARCH_LIMIT_MAX {
-        return Err(invalid("limit", "is outside the names page limits"));
-    }
-    let batch = i64::from(limit.max(NAME_SEARCH_LIMIT_DEFAULT)) * NAME_BATCH_PAGES;
-    let limit = usize::try_from(limit).map_err(ApiError::internal)?;
-    let kinds = kinds(query.kinds.as_deref(), NAME_KINDS)?;
-    let text = query.q.as_deref().unwrap_or_default().trim();
-    if !text.is_empty() && text.chars().count() < NAME_QUERY_MIN_CHARS {
-        return Err(invalid(
-            "q",
-            "type at least two characters, or leave it empty for recent visits",
-        ));
-    }
-    if !text.is_empty() && rows::Query::parse(text).terms().is_empty() {
-        return Err(invalid("q", "give at least one word or quoted phrase"));
-    }
-    let mut tx = ctx.app.db.begin().await?;
-    rows::snapshot(&mut tx).await?;
-    let principal = authorization::principal(&ctx, &mut tx).await?;
-    // The identities the roots are found from, as kept between requests (a system admin's roots are all of them).
-    let held = if principal.is_system_admin() {
-        None
-    } else {
-        Some(
-            orch_authz::holders::held(&mut tx, principal.user(), orch_types::Time::new(ctx.now))
-                .await
-                .map_err(ApiError::internal)?,
-        )
-    };
-    let roots = rows::name_roots(
-        &mut tx,
-        principal.user(),
-        principal.is_system_admin(),
-        ctx.now,
-        held.as_deref().map(|sets| &sets.held),
-    )
-    .await?;
-    let mut offset = 0;
-    let mut selected = Vec::new();
-    let mut admin_places = std::collections::HashMap::new();
-    let mut participation = std::collections::HashSet::new();
-    let mut partial = false;
-    for _ in 0..NAME_BATCHES_MAX {
-        let candidates = rows::names(
-            &mut tx,
-            &Names {
-                identifiers: None,
-                starred: query.starred.unwrap_or(false),
-                at: ctx.now,
-                user: principal.user(),
-                trees: principal.member_of(),
-                roots: &roots,
-                system_admin: principal.is_system_admin(),
-                text,
-                kinds: &kinds,
-                org: query.org_id,
-                offset,
-                limit: batch,
-            },
-        )
-        .await?;
-        let chat_ids: Vec<Id> = candidates
-            .iter()
-            .filter(|row| row.kind == "chat")
-            .map(|row| row.id)
-            .collect();
-        let chats = orch_db::queries::chats::chats(&mut tx, &chat_ids).await?;
-        let members = rows::participant_chats(&mut tx, principal.user(), &chat_ids).await?;
-        let searchable_chats: std::collections::HashSet<Id> = chats
-            .iter()
-            .filter(|chat| {
-                chat.node_id.is_some()
-                    || members.iter().any(|member| {
-                        member.id == chat.id
-                            && !principal.suspension().applies(&[member.org_id])
-                            && (principal.is_in_tree(member.org_id) || member.guest)
-                            && principal
-                                .caller()
-                                .permits(orch_access_contract::permissions::Permission::ChatView)
-                            && principal.caller().reaches(Some(&[member.org_id]))
-                    })
-            })
-            .map(|chat| chat.id)
-            .collect();
-        let count = i64::try_from(candidates.len()).map_err(ApiError::internal)?;
-        let visible = orch_engine::projections::visible_names(&mut tx, &principal, &candidates)
-            .await
-            .map_err(ApiError::internal)?;
-        admin_places.extend(
-            visible
-                .admin_access
-                .iter()
-                .map(|(key, place)| (key.clone(), *place)),
-        );
-        participation.extend(visible.participating.iter().cloned());
-        selected.extend(candidates.into_iter().filter(|row| {
-            visible.contains(&(row.kind.clone(), row.id))
-                && (row.kind != "chat" || searchable_chats.contains(&row.id))
-                && (!query.participating.unwrap_or(false)
-                    || visible.participating.contains(&(row.kind.clone(), row.id)))
-        }));
-        partial = count == batch || selected.len() > limit;
-        if selected.len() >= limit || count < batch {
-            break;
+    crate::key_operations::native::selected_read::<native::NamesReader>(ctx, query, ()).await
+}
+
+/// A composite uses this same native selector/rendering with its own declared scope.
+pub(crate) async fn names_in(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: NameSearchListQuery,
+    reading: Option<&crate::routes::nodes::overview::Reading<'_>>,
+) -> ApiResult<NameSearchPage> {
+    let value = match reading {
+        Some(reading) => {
+            native::select_names_for_overview(ctx, conn, principal, &query, reading).await?
         }
-        offset += count;
+        None => {
+            native::select_names(ctx, conn, principal.caller(), &query)
+                .await?
+                .0
+        }
+    };
+    let answer = render_names(ctx, conn, principal, &value).await?;
+    if let Some(reading) = reading {
+        reading
+            .remember_node_ids(
+                conn,
+                &answer.items.iter().map(|row| row.id).collect::<Vec<_>>(),
+            )
+            .await?;
+        for row in &answer.items {
+            for node in &row.path {
+                reading.reference(conn, node).await?;
+            }
+            if let Some(marker) = &row.admin_access
+                && let orch_api_contract::nodes::NodeOrSystem::Node(node) = &marker.place
+            {
+                reading.reference(conn, node).await?;
+            }
+        }
     }
-    selected.truncate(limit);
+    Ok(answer)
+}
+
+pub(super) async fn render_names(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    value: &native::PreparedNames,
+) -> ApiResult<NameSearchPage> {
+    let selected = &value.selected;
+    let admin_places = &value.admin_places;
+    let participation = &value.participation;
+    let partial = value.partial;
     let admin_ids: Vec<Id> = selected
         .iter()
         .filter_map(|row| {
@@ -358,16 +306,18 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
                 .and_then(|reach| reach.place.node())
         })
         .collect();
-    let admin_refs =
-        view::qualified_refs(&mut tx, &principal, &admin_ids, Policy::default()).await?;
+    let admin_refs = value
+        .bounds
+        .qualified_refs(conn, principal, &admin_ids)
+        .await?;
     let tag_ids: Vec<Id> = selected
         .iter()
         .filter(|row| row.kind == "tag")
         .map(|row| row.id)
         .collect();
-    let tag_rows = orch_db::queries::hierarchy::tags_by_id(&mut tx, &tag_ids).await?;
+    let tag_rows = orch_db::queries::hierarchy::tags_by_id(conn, &tag_ids).await?;
     let defining: Vec<Id> = tag_rows.iter().map(|tag| tag.node_id).collect();
-    let tag_places = view::refs(&mut tx, &principal, &defining, Policy::default()).await?;
+    let tag_places = value.bounds.refs(conn, principal, &defining).await?;
     let tags: std::collections::HashMap<Id, orch_api_contract::nodes::Tag> = tag_rows
         .into_iter()
         .filter_map(|tag| {
@@ -392,7 +342,7 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
     let colours = if place_ids.is_empty() {
         std::collections::HashMap::new()
     } else {
-        orch_db::queries::hierarchy::details(&mut tx, &place_ids, ctx.now)
+        orch_db::queries::hierarchy::details(conn, &place_ids, ctx.now)
             .await?
             .into_iter()
             .map(|row| {
@@ -423,7 +373,18 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
         })
         .filter_map(|row| row.node_id)
         .collect();
-    let ways = view::ways(&mut tx, &principal, &paths, Policy::default()).await?;
+    let ways = if value.bounds.limited {
+        view::ways_with_name_sources(
+            conn,
+            principal,
+            &paths,
+            Policy::default(),
+            &value.bounds.nodes,
+        )
+        .await?
+    } else {
+        view::ways(conn, principal, &paths, Policy::default()).await?
+    };
     let mut people: Vec<Id> = selected.iter().filter_map(|row| row.owner_id).collect();
     people.extend(
         selected
@@ -431,13 +392,13 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
             .filter(|row| row.kind == "user")
             .map(|row| row.id),
     );
-    let people = user_refs(&mut tx, &people).await?;
+    let people = user_refs(conn, &people).await?;
     let thread_ids: Vec<Id> = selected
         .iter()
         .filter(|row| row.kind == "thread")
         .map(|row| row.id)
         .collect();
-    let attention = orch_db::queries::source::attentions(&mut tx, &thread_ids)
+    let attention = orch_db::queries::source::attentions(conn, &thread_ids)
         .await?
         .into_iter()
         .map(|(id, value)| {
@@ -446,8 +407,19 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
                 .map_err(ApiError::internal)
         })
         .collect::<ApiResult<std::collections::HashMap<_, _>>>()?;
+    let grouping = value
+        .grouping
+        .render(
+            &ctx.app,
+            conn,
+            principal,
+            Some(&value.bounds),
+            Some(&value.resource_origins),
+        )
+        .await?;
     let found = selected
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|row| {
             let person = (row.kind == "user").then(|| people.get(&row.id)).flatten();
             let path = if matches!(
@@ -476,6 +448,7 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
                 person.map(|user| user.username.as_str()),
             );
             Ok(NameHit {
+                grouping: grouping.get(&(row.kind.clone(), row.id)).cloned(),
                 thread_display: path
                     .iter()
                     .find(|part| part.id == row.id)
@@ -500,7 +473,13 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
                 custom_color: colours.get(&row.id).and_then(|(_, own)| own.clone()),
                 username: person.map(|user| user.username.clone()),
                 avatar: person.map(|user| user.avatar.clone()),
-                address: row.address,
+                address: if value.bounds.limited
+                    && row.node_id.is_some_and(|id| !value.addresses.contains(&id))
+                {
+                    None
+                } else {
+                    row.address
+                },
                 path,
                 owner: row.owner_id.and_then(|id| people.get(&id).cloned()),
                 archived: row.archived,
@@ -508,7 +487,6 @@ async fn names(ctx: Ctx, query: NameSearchListQuery, (): ()) -> ApiResult<NameSe
             })
         })
         .collect::<ApiResult<Vec<_>>>()?;
-    tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(NameSearchPage {
         items: found,
         partial,

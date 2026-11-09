@@ -8,6 +8,9 @@
 mod places;
 mod support;
 
+use crate::support::FullMoveReply as _;
+use crate::support::FullTagReply as _;
+use futures::FutureExt as _;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::directory::{
     NodeTagCreate, NodeTagCreateBody, NodeTagList, TagDelete, TagUpdate, TagUpdateBody,
@@ -62,6 +65,7 @@ async fn move_review(world: &World, a: &Acme) -> NodeMovePlan {
         })
         .send()
         .await
+        .full_move()
         .ok()
 }
 
@@ -122,6 +126,7 @@ async fn a_confirmed_move_refuses_a_changed_subtree_or_new_destination_consequen
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.base.parent_id, Some(a.research));
 }
@@ -132,7 +137,11 @@ async fn a_move_review_reports_an_own_value_overridden_by_a_new_inherited_lock_w
     let world = World::new().await;
     let a = acme(&world).await;
     world
-        .set_at(Target::Node(a.web), "chat.enabled", json!(true))
+        .set_at(
+            Target::Node(a.web),
+            "retention.archive_idle_days",
+            json!(30),
+        )
         .await;
     {
         let mut conn = world.conn().await;
@@ -141,8 +150,8 @@ async fn a_move_review_reports_an_own_value_overridden_by_a_new_inherited_lock_w
             &orch_settings::write::Write {
                 actor: orch_db::audit::Actor::System,
                 target: Target::Node(a.research),
-                key: "chat.enabled",
-                value: json!(false),
+                key: "retention.archive_idle_days",
+                value: json!(0),
                 locked: Some(true),
                 expected_revision: None,
                 may_lock: true,
@@ -157,19 +166,23 @@ async fn a_move_review_reports_an_own_value_overridden_by_a_new_inherited_lock_w
     let setting = plan
         .settings
         .iter()
-        .find(|setting| setting.key == "chat.enabled")
+        .find(|setting| setting.key == "retention.archive_idle_days")
         .unwrap();
-    assert_eq!(setting.from, Some(json!(true)));
-    assert_eq!(setting.to, Some(json!(false)));
+    assert_eq!(setting.from, Some(json!(30)));
+    assert_eq!(setting.to, Some(json!(0)));
     assert!(
         matches!(&setting.locked_by, Some(orch_api_contract::nodes::NodeOrSystem::Node(node)) if node.id == a.research)
     );
     let mut conn = world.conn().await;
     assert_eq!(
-        orch_settings::get::<bool>(&mut conn, orch_settings::Place::Node(a.web), "chat.enabled")
-            .await
-            .unwrap(),
-        Some(true)
+        orch_settings::get::<i64>(
+            &mut conn,
+            orch_settings::Place::Node(a.web),
+            "retention.archive_idle_days"
+        )
+        .await
+        .unwrap(),
+        Some(30)
     );
 }
 
@@ -198,6 +211,7 @@ async fn a_project_is_moved_under_another_org_of_its_tree_and_all_inside_it_goes
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.base.parent_id, Some(a.research));
     assert_eq!(moved.base.revision, before + 1);
@@ -368,6 +382,7 @@ async fn a_department_is_moved_with_what_is_in_it_and_never_deeper_than_the_syst
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(moved.address, "acme.research.sales");
     assert_eq!(moved.depth, 2);
@@ -495,6 +510,7 @@ async fn the_plan_of_a_move_says_what_would_change_before_anything_does() {
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(plan.node.id, a.web);
     assert_eq!(plan.from.id, a.acme);
@@ -555,6 +571,7 @@ async fn a_plan_of_an_org_counts_its_members_and_names_what_stops_it() {
         })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(
         plan.addresses.members, 1,
@@ -567,6 +584,7 @@ async fn a_plan_of_an_org_counts_its_members_and_names_what_stops_it() {
         .body(&MovePreviewBody { parent_id: a.web })
         .send()
         .await
+        .full_move()
         .ok();
     assert_eq!(blocked.blockers.len(), 1);
     assert_eq!(blocked.blockers[0].code, "node.wrong_parent");
@@ -604,6 +622,7 @@ async fn tags_are_defined_at_any_place_and_listed_with_those_above() {
                 color: Some(color),
             })
             .send()
+            .map(|reply| reply.full_tag())
     };
     let urgent = define(&a.boss, a.acme, "urgent", 3).await.ok();
     assert_eq!(urgent.node.id, a.acme);
@@ -673,6 +692,7 @@ async fn automatic_tag_colors_are_unused_then_cycle_after_the_latest_manual_tag(
                 color: None,
             })
             .send()
+            .map(|reply| reply.full_tag())
             .await
             .ok();
         assert_eq!(
@@ -690,6 +710,7 @@ async fn automatic_tag_colors_are_unused_then_cycle_after_the_latest_manual_tag(
             color: Some(5),
         })
         .send()
+        .map(|reply| reply.full_tag())
         .await
         .ok();
     world.advance(chrono::Duration::milliseconds(1));
@@ -702,6 +723,7 @@ async fn automatic_tag_colors_are_unused_then_cycle_after_the_latest_manual_tag(
             color: None,
         })
         .send()
+        .map(|reply| reply.full_tag())
         .await
         .ok();
     assert_eq!(
@@ -729,7 +751,7 @@ async fn automatic_tag_colors_are_unused_then_cycle_after_the_latest_manual_tag(
             color: None,
         });
     let (left, right) = tokio::join!(left.send(), right.send());
-    let mut colors = [left.ok().color, right.ok().color];
+    let mut colors = [left.full_tag().ok().color, right.full_tag().ok().color];
     colors.sort_unstable();
     assert_eq!(colors, [0, 1]);
 }
@@ -747,6 +769,7 @@ async fn a_tag_is_renamed_and_deleting_it_takes_it_off_every_topic() {
             color: Some(2),
         })
         .send()
+        .map(|reply| reply.full_tag())
         .await
         .ok();
     world
@@ -772,6 +795,9 @@ async fn a_tag_is_renamed_and_deleting_it_takes_it_off_every_topic() {
         .send()
         .await
         .ok();
+    let renamed = renamed
+        .into_full()
+        .expect("ordinary tag update retains its full response");
     assert_eq!((renamed.name.as_str(), renamed.color), ("phone", 7));
     let Node::Topic(topic) = read(&world, &a.boss, a.login).await else {
         panic!("a topic stays one");

@@ -23,7 +23,9 @@
 //! came back to, the shells of an environment that ended, and, on every move of the authorization epoch,
 //! the shells whose opener lost what they were opened by.
 
+use super::ticket_origin::Origin as TicketOrigin;
 use crate::middleware::authentication::{new_token, token_hash};
+use crate::middleware::requests::{ApiError, ApiResult};
 use crate::realtime::Inner;
 use crate::registry::Ctx;
 use crate::state::App;
@@ -49,7 +51,7 @@ use orch_realtime_contract::terminal::{
 use orch_realtime_contract::version::CloseCode;
 use orch_types::{Id, Time};
 use std::collections::{HashMap, VecDeque};
-use std::future::poll_fn;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -115,13 +117,31 @@ pub enum Door {
 }
 
 /// A ticket as it is kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct Ticket {
-    /// The person it was given to.
-    pub user: Id,
+    id: Id,
+    surface: orch_api_contract::surface::HttpSurface,
+    origin: TicketOrigin,
+    shell: Option<ShellPlace>,
+    agent: Option<AgentPlace>,
     /// What it opens.
     pub door: Door,
     expires: DateTime<Utc>,
+}
+
+/// Actual physical shell facts captured only by its bound ticket producer.
+#[derive(Debug, Clone, Copy)]
+struct ShellPlace {
+    environment: Id,
+    machine: Option<Id>,
+    generation: i32,
+}
+
+/// The original agent/environment association, not a replacement thread's authority.
+#[derive(Debug, Clone, Copy)]
+struct AgentPlace {
+    environment: Id,
+    agent: Option<Id>,
 }
 
 /// What a live attachment is told from outside.
@@ -149,7 +169,7 @@ struct Live {
 /// The tickets given and the attachments held by one API process.
 #[derive(Default)]
 pub struct Sockets {
-    tickets: Mutex<HashMap<Vec<u8>, Ticket>>,
+    tickets: Arc<Mutex<HashMap<Vec<u8>, Ticket>>>,
     live: Mutex<HashMap<Key, Live>>,
     hub: Mutex<Option<TerminalHub>>,
     numbers: AtomicU64,
@@ -163,32 +183,152 @@ impl std::fmt::Debug for Sockets {
 
 impl Sockets {
     /// A ticket for `user` to open `door`, good for [`TERMINAL_TICKET_SECONDS`] from `now` and for one use.
-    pub fn issue(&self, now: DateTime<Utc>, user: Id, door: Door) -> TerminalTicket {
+    pub fn issue(&self, ctx: &Ctx, door: Door) -> ApiResult<TerminalTicket> {
+        let origin = TicketOrigin::capture(ctx)?;
+        self.issue_at(
+            ctx.app.clock.now(),
+            door,
+            ctx.http_surface()?,
+            origin,
+            None,
+            None,
+        )
+        .publish()
+    }
+
+    pub(crate) fn issue_shell(
+        &self,
+        ctx: &Ctx,
+        terminal: Id,
+        environment: Id,
+        machine: Option<Id>,
+        generation: i32,
+    ) -> ApiResult<TerminalTicket> {
+        self.issue_shell_pending(ctx, terminal, environment, machine, generation)?
+            .publish()
+    }
+
+    pub(crate) fn issue_shell_pending(
+        &self,
+        ctx: &Ctx,
+        terminal: Id,
+        environment: Id,
+        machine: Option<Id>,
+        generation: i32,
+    ) -> ApiResult<crate::middleware::idempotency::memory::Reservation<TerminalTicket>> {
+        let origin = TicketOrigin::capture(ctx)?;
+        if !matches!(
+            origin.operation(),
+            Some("TerminalTicketCreate" | "EnvironmentTerminalCreate")
+        ) {
+            return Err(ApiError::internal(
+                "a bound shell ticket needs its actual accepted operation",
+            ));
+        }
+        Ok(self.issue_at(
+            ctx.app.clock.now(),
+            Door::Shell(terminal),
+            ctx.http_surface()?,
+            origin,
+            Some(ShellPlace {
+                environment,
+                machine,
+                generation,
+            }),
+            None,
+        ))
+    }
+
+    pub(crate) fn issue_agent_pending(
+        &self,
+        ctx: &Ctx,
+        thread: Id,
+        environment: Id,
+        agent: Option<Id>,
+        control: bool,
+    ) -> ApiResult<crate::middleware::idempotency::memory::Reservation<TerminalTicket>> {
+        let origin = TicketOrigin::capture(ctx)?;
+        let selection = if control {
+            "AgentTerminalTicketCreate.control"
+        } else {
+            "AgentTerminalTicketCreate.view"
+        };
+        if origin.operation() != Some(selection) {
+            return Err(ApiError::internal(
+                "a bound agent ticket needs its actual accepted operation",
+            ));
+        }
+        Ok(self.issue_at(
+            ctx.app.clock.now(),
+            Door::Agent { thread, control },
+            ctx.http_surface()?,
+            origin,
+            None,
+            Some(AgentPlace { environment, agent }),
+        ))
+    }
+
+    fn issue_at(
+        &self,
+        now: DateTime<Utc>,
+        door: Door,
+        surface: orch_api_contract::surface::HttpSurface,
+        origin: TicketOrigin,
+        shell: Option<ShellPlace>,
+        agent: Option<AgentPlace>,
+    ) -> crate::middleware::idempotency::memory::Reservation<TerminalTicket> {
+        let id = orch_types::new_id();
         let token = new_token("tt_");
         let expires = now + chrono::Duration::seconds(i64::from(TERMINAL_TICKET_SECONDS));
         let mut tickets = lock(&self.tickets);
-        // Tickets nobody used do not pile up.
         tickets.retain(|_, held| held.expires > now);
         tickets.insert(
             token_hash(&token),
             Ticket {
-                user,
+                id,
+                surface,
+                origin,
+                shell,
+                agent,
                 door,
                 expires,
             },
         );
-        TerminalTicket {
-            ticket: token,
-            ticket_expires_at: Time::new(expires),
-        }
+        drop(tickets);
+        let hash = token_hash(&token);
+        let tickets = self.tickets.clone();
+        crate::middleware::idempotency::memory::Reservation::new(
+            id,
+            TerminalTicket {
+                ticket: token,
+                ticket_expires_at: Time::new(expires),
+            },
+            move || {
+                let mut tickets = lock(&tickets);
+                if tickets.get(&hash).is_some_and(|ticket| ticket.id == id) {
+                    tickets.remove(&hash);
+                }
+            },
+        )
     }
 
     /// Takes the ticket `token` out, if it is one that was given and has not run out: a ticket is
     /// good once.
-    pub fn redeem(&self, now: DateTime<Utc>, token: &str) -> Option<Ticket> {
-        lock(&self.tickets)
-            .remove(&token_hash(token))
-            .filter(|held| held.expires > now)
+    pub fn redeem(
+        &self,
+        now: DateTime<Utc>,
+        token: &str,
+        surface: orch_api_contract::surface::HttpSurface,
+    ) -> Option<Ticket> {
+        let mut tickets = lock(&self.tickets);
+        let hash = token_hash(token);
+        if tickets
+            .get(&hash)
+            .is_none_or(|held| held.surface != surface)
+        {
+            return None;
+        }
+        tickets.remove(&hash).filter(|held| held.expires > now)
     }
 
     /// Makes this process reach machines through `hub` and not through its link: for a test that has a
@@ -270,7 +410,7 @@ pub(crate) fn stop(inner: &Inner) {
 /// What the writer task sends the browser.
 enum Out {
     Data(Bytes),
-    Text(String),
+    Frame(TerminalServerFrame),
     Ping,
     Close(u16, String),
 }
@@ -315,16 +455,39 @@ async fn write(
     mut sink: SplitSink<WebSocket, Message>,
     mut out: mpsc::UnboundedReceiver<Out>,
     behind: Arc<Behind>,
+    authority: Attachment,
 ) {
     while let Some(item) = out.recv().await {
         let sent = match item {
             Out::Data(bytes) => {
                 let count = bytes.len();
-                let sent = sink.send(Message::Binary(bytes)).await;
+                let (accepted, reason) =
+                    send_native(&mut sink, &authority, Message::Binary(bytes)).await;
                 behind.handed_over(count);
-                sent
+                if !accepted {
+                    close_authority(&mut sink, reason).await;
+                    break;
+                }
+                Ok(())
             }
-            Out::Text(text) => sink.send(Message::Text(text.into())).await,
+            Out::Frame(frame) => {
+                let protected = matches!(
+                    frame,
+                    TerminalServerFrame::Ready(_) | TerminalServerFrame::Exit(_)
+                );
+                let message =
+                    Message::Text(serde_json::to_string(&frame).unwrap_or_default().into());
+                if protected {
+                    let (accepted, reason) = send_native(&mut sink, &authority, message).await;
+                    if !accepted {
+                        close_authority(&mut sink, reason).await;
+                        break;
+                    }
+                    Ok(())
+                } else {
+                    sink.send(message).await
+                }
+            }
             Out::Ping => sink.send(Message::Ping(Bytes::new())).await,
             Out::Close(code, reason) => {
                 let _ = sink
@@ -341,6 +504,42 @@ async fn write(
         }
     }
     let _ = sink.close().await;
+}
+
+/// Existing output capacity is awaited before the real owner checkpoint. Only exact
+/// accepted frame bytes may flush later; the key/session deadline is synchronous at start_send.
+async fn send_native(
+    sink: &mut SplitSink<WebSocket, Message>,
+    authority: &Attachment,
+    message: Message,
+) -> (bool, TerminalClosedReason) {
+    let mut reason = TerminalClosedReason::Revoked;
+    let accepted = super::publication::send(sink, authority.app.clock.as_ref(), async {
+        match authority.current_actor().await {
+            Ok((_, caller, session)) => Ok(Some((message, (caller, session)))),
+            Err(why) => {
+                reason = why;
+                Ok(None)
+            }
+        }
+    })
+    .await;
+    (matches!(accepted, Ok(true)), reason)
+}
+
+async fn close_authority(sink: &mut SplitSink<WebSocket, Message>, reason: TerminalClosedReason) {
+    let notice = TerminalServerFrame::Closed(TerminalClosedFrame { reason });
+    let _ = sink
+        .send(Message::Text(
+            serde_json::to_string(&notice).unwrap_or_default().into(),
+        ))
+        .await;
+    let _ = sink
+        .send(Message::Close(Some(CloseFrame {
+            code: NORMAL,
+            reason: String::new().into(),
+        })))
+        .await;
 }
 
 /// What the browser sent, as the pump needs it.
@@ -498,7 +697,9 @@ fn enter(
     let app = ctx.app.clone();
     let origin = crate::sign_in::origin(&ctx);
     // The ticket is taken now, so that the same address used twice is used once.
-    let ticket = sockets(&app).redeem(app.clock.now(), &query.ticket);
+    let ticket = ctx
+        .surface
+        .and_then(|surface| sockets(&app).redeem(app.clock.now(), &query.ticket, surface));
     upgrade
         .protocols(chosen)
         .max_message_size(MAX_TYPED_FRAME_BYTES)
@@ -528,7 +729,7 @@ fn enter(
                 return;
             };
             let who = Who {
-                user: ticket.user,
+                user: ticket.origin.user(),
                 control,
             };
             let attachment = Attachment {
@@ -536,6 +737,9 @@ fn enter(
                 target,
                 who,
                 origin,
+                credential: ticket.origin,
+                shell: ticket.shell,
+                agent: ticket.agent,
             };
             attachment.serve(sink, stream).await;
         })
@@ -558,11 +762,15 @@ struct Who {
 }
 
 /// A socket that has been let in.
+#[derive(Clone)]
 struct Attachment {
     app: App,
     target: Target,
     who: Who,
     origin: orch_db::audit::Origin,
+    credential: TicketOrigin,
+    shell: Option<ShellPlace>,
+    agent: Option<AgentPlace>,
 }
 
 /// How an attachment ended.
@@ -584,7 +792,7 @@ enum Ended {
 }
 
 fn frame(frame: &TerminalServerFrame) -> Out {
-    Out::Text(serde_json::to_string(frame).unwrap_or_default())
+    Out::Frame(frame.clone())
 }
 
 fn closed(reason: TerminalClosedReason) -> Out {
@@ -595,6 +803,172 @@ fn closed(reason: TerminalClosedReason) -> Out {
 const NORMAL: u16 = 1000;
 
 impl Attachment {
+    /// One effect-free, coherent current boundary for this actual retained door. It never
+    /// closes the native shell because a key changed; the existing opener keeper owns that.
+    /// The returned input capability can narrow an agent control stream to its existing view.
+    async fn current_actor(
+        &self,
+    ) -> Result<(bool, orch_authz::Caller, Option<Time>), TerminalClosedReason> {
+        let mut conn = self
+            .app
+            .db
+            .begin_snapshot()
+            .await
+            .map_err(|_| TerminalClosedReason::LinkLost)?;
+        let Some((caller, session_deadline)) = self
+            .credential
+            .restore_current(&mut conn, self.app.clock.as_ref())
+            .await
+            .map_err(|_| TerminalClosedReason::LinkLost)?
+        else {
+            return Err(TerminalClosedReason::Revoked);
+        };
+        let (control, checked) = match self.target {
+            Target::Shell(id) => {
+                let Some(row) = rows::get(&mut conn, id)
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                else {
+                    return Err(TerminalClosedReason::Exited);
+                };
+                if row.opened_by != self.who.user {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                if let Some(physical) = self.shell {
+                    let Some(site) = rows::site(&mut conn, row.environment_id)
+                        .await
+                        .map_err(|_| TerminalClosedReason::LinkLost)?
+                    else {
+                        return Err(TerminalClosedReason::EnvironmentStopped);
+                    };
+                    if row.environment_id != physical.environment
+                        || row.env_generation != physical.generation
+                        || site.generation != physical.generation
+                        || site.machine_id != physical.machine
+                    {
+                        return Err(TerminalClosedReason::EnvironmentStopped);
+                    }
+                }
+                let Some((principal, manage)) = self
+                    .credential
+                    .principal(
+                        &mut conn,
+                        caller,
+                        row.environment_id,
+                        match self.credential.operation() {
+                            Some("EnvironmentTerminalCreate") => "EnvironmentTerminalCreate",
+                            Some("TerminalTicketCreate") | None => "TerminalTicketCreate",
+                            Some(_) => return Err(TerminalClosedReason::Revoked),
+                        },
+                        self.app.clock.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                else {
+                    return Err(TerminalClosedReason::Revoked);
+                };
+                if !manage
+                    || !orch_authz::environments::stays_open(
+                        &mut conn,
+                        &principal,
+                        &orch_authz::environments::Shell {
+                            environment: row.environment_id,
+                            thread: row.thread_id,
+                            opened_by: row.opened_by,
+                        },
+                        orch_authz::Policy::default(),
+                    )
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                (true, principal.caller().clone())
+            }
+            Target::Agent(thread) => {
+                let Some(row) = orch_db::queries::threads::thread(&mut conn, thread)
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                else {
+                    return Err(TerminalClosedReason::Exited);
+                };
+                let Some(environment) = row.environment_id.filter(|_| row.deleted_at.is_none())
+                else {
+                    return Err(TerminalClosedReason::EnvironmentStopped);
+                };
+                if self.agent.is_some_and(|place| {
+                    place.environment != environment || place.agent != row.agent_id
+                }) {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                let selection = if self.who.control {
+                    "AgentTerminalTicketCreate.control"
+                } else {
+                    "AgentTerminalTicketCreate.view"
+                };
+                let Some((principal, scope_control)) = self
+                    .credential
+                    .principal(
+                        &mut conn,
+                        caller,
+                        environment,
+                        selection,
+                        self.app.clock.as_ref(),
+                    )
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                else {
+                    return Err(TerminalClosedReason::Revoked);
+                };
+                let object = orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Environment,
+                    id: environment,
+                };
+                if !orch_authz::resources::check(
+                    &mut conn,
+                    &principal,
+                    object,
+                    orch_access_contract::permissions::Permission::TerminalView,
+                    orch_authz::Policy::default(),
+                )
+                .await
+                .map_err(|_| TerminalClosedReason::LinkLost)?
+                .is_allowed()
+                {
+                    return Err(TerminalClosedReason::Revoked);
+                }
+                let control = self.who.control
+                    && scope_control
+                    && orch_authz::resources::check(
+                        &mut conn,
+                        &principal,
+                        object,
+                        orch_access_contract::permissions::Permission::TerminalManage,
+                        orch_authz::Policy::default(),
+                    )
+                    .await
+                    .map_err(|_| TerminalClosedReason::LinkLost)?
+                    .is_allowed();
+                (control, principal.caller().clone())
+            }
+        };
+        conn.commit()
+            .await
+            .map_err(|_| TerminalClosedReason::LinkLost)?;
+        if !super::ticket_origin::deadline_allows(
+            &checked,
+            session_deadline,
+            self.app.clock.as_ref(),
+        ) {
+            return Err(TerminalClosedReason::Revoked);
+        }
+        Ok((control, checked, session_deadline))
+    }
+
+    async fn current(&self) -> Result<bool, TerminalClosedReason> {
+        self.current_actor().await.map(|(control, _, _)| control)
+    }
+
     fn inner(&self) -> &Arc<Inner> {
         &self.app.realtime.inner
     }
@@ -602,7 +976,7 @@ impl Attachment {
     async fn serve(self, sink: SplitSink<WebSocket, Message>, stream: SplitStream<WebSocket>) {
         let behind = Arc::new(Behind::new());
         let (out, outgoing) = mpsc::unbounded_channel();
-        let writer = tokio::spawn(write(sink, outgoing, Arc::clone(&behind)));
+        let writer = tokio::spawn(write(sink, outgoing, Arc::clone(&behind), self.clone()));
         self.run(stream, &out, &behind).await;
         // Whatever the writer was handed is given a moment to reach the browser; a browser that takes
         // nothing is not waited for, and its socket is let go.
@@ -638,6 +1012,10 @@ impl Attachment {
                 return;
             }
         };
+        if let Err(reason) = self.current().await {
+            goodbye(reason);
+            return;
+        }
         let key = self.target.key();
         let (number, told) = self.inner().terminals.enter(key);
         let opened = self.open_tunnel(&ready).await;
@@ -808,14 +1186,18 @@ impl Attachment {
         else {
             return Err(TerminalClosedReason::EnvironmentStopped);
         };
-        Ok(Ready {
+        let ready = Ready {
             machine: places.machine,
             service: Service::Pty { terminal_id: id },
             size: (clamp_size(row.cols), clamp_size(row.rows)),
-        })
+        };
+        drop(conn);
+        self.current().await?;
+        Ok(ready)
     }
 
     async fn prepare_agent(&self, thread: Id) -> Result<Ready, TerminalClosedReason> {
+        self.current().await?;
         let shells = self.app.engine.shells();
         let fail = |error: &dyn std::fmt::Display| {
             tracing::warn!(%error, "the agent's terminal could not be attached");
@@ -955,17 +1337,68 @@ fn taken_by_another(error: &io::Error) -> bool {
 enum Io {
     Read(io::Result<usize>),
     Wrote(io::Result<usize>),
+    Refused(TerminalClosedReason),
+    ViewOnly,
 }
+
+/// Only unfinished asynchronous restoration; no completed proof survives a wait.
+type WriteCheck<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<(bool, orch_authz::Caller, Option<Time>), TerminalClosedReason>>
+            + Send
+            + 'a,
+    >,
+>;
 
 /// Reads from the tunnel and writes to it in one step, whichever can go on, so that a shell that waits
 /// for its input to be taken is never left unread, and the other way round.
-async fn io_step(tunnel: &mut Tunnel, buffer: &mut [u8], read: bool, write: Option<&[u8]>) -> Io {
+async fn io_step<'a>(
+    tunnel: &mut Tunnel,
+    buffer: &mut [u8],
+    read: bool,
+    write: Option<&[u8]>,
+    authority: &'a Attachment,
+    authorization: &mut Option<WriteCheck<'a>>,
+) -> Io {
     poll_fn(|cx| {
-        if let Some(data) = write
-            && let Poll::Ready(result) = Pin::new(&mut *tunnel).poll_write(cx, data)
-        {
-            return Poll::Ready(Io::Wrote(result));
+        if let Some(data) = write {
+            let checked = match authorization
+                .get_or_insert_with(|| Box::pin(authority.current_actor()))
+                .as_mut()
+                .poll(cx)
+            {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(checked) => checked,
+            };
+            // A completed proof is consumed now; it never stays cached across a wait.
+            *authorization = None;
+            match checked {
+                Err(reason) => return Poll::Ready(Io::Refused(reason)),
+                Ok((false, _, _)) => return Poll::Ready(Io::ViewOnly),
+                Ok((true, caller, session_deadline)) => {
+                    if !super::ticket_origin::deadline_allows(
+                        &caller,
+                        session_deadline,
+                        authority.app.clock.as_ref(),
+                    ) {
+                        return Poll::Ready(Io::Refused(TerminalClosedReason::Revoked));
+                    }
+                    // The current transaction ended before this synchronous queue boundary.
+                    match Pin::new(&mut *tunnel).poll_write(cx, data) {
+                        Poll::Ready(result) => return Poll::Ready(Io::Wrote(result)),
+                        Poll::Pending => {
+                            // None of these bytes was accepted. The next native wake must
+                            // complete a NEW check, not reuse the completed proof above.
+                            *authorization = Some(Box::pin(authority.current_actor()));
+                        }
+                    }
+                }
+            }
+        } else {
+            *authorization = None;
         }
+        // Only an unpolled next check can remain here; no read transaction spans
+        // native data I/O. Output retains its own final current-Read publisher.
         if read {
             let mut into = ReadBuf::new(&mut *buffer);
             match Pin::new(&mut *tunnel).poll_read(cx, &mut into) {
@@ -1002,11 +1435,14 @@ impl Pump<'_> {
         let inner = Arc::clone(self.attachment.inner());
         let mut buffer = vec![0_u8; READ_BYTES];
         let mut tick = tokio::time::interval(inner.tuning.tick);
+        let mut permission_epoch = inner.epoch.subscribe();
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let heartbeat = Duration::from_secs(u64::from(inner.tuning.heartbeat_secs));
         let mut last_ping = Instant::now();
         let mut last_touch = Instant::now();
         let mut last_data = Instant::now();
+        let mut last_authority = Instant::now();
+        let mut authorization: Option<WriteCheck<'_>> = None;
         loop {
             let paused = self.behind.paused();
             let writing = self.typed.front().cloned();
@@ -1019,17 +1455,39 @@ impl Pump<'_> {
                     Some(Told::Over(reason)) => return Ended::Over(reason),
                     Some(Told::GoingAway) | None => return Ended::GoingAway,
                 },
-                event = next_event(&mut self.events) => match event {
-                    Some(TunnelEvent::Exit { code }) => self.exit = Some(code),
-                    Some(TunnelEvent::Resize { .. }) => {}
-                    None => self.events = None,
+                event = next_event(&mut self.events) => {
+                    authorization = None;
+                    match event {
+                        Some(TunnelEvent::Exit { code }) => self.exit = Some(code),
+                        Some(TunnelEvent::Resize { .. }) => {}
+                        None => self.events = None,
+                    }
+                },
+                changed = permission_epoch.changed() => {
+                    // The selected authority epoch invalidates unfinished old work.
+                    authorization = None;
+                    if changed.is_err() { return Ended::GoingAway; }
+                    permission_epoch.borrow_and_update();
+                    match self.attachment.current().await {
+                        Ok(false) => self.typed.clear(),
+                        Ok(true) => {},
+                        Err(reason) => return Ended::Over(reason),
+                    }
+                    last_authority = Instant::now();
                 },
                 input = self.inbox.recv(), if self.typed.len() < TYPED_QUEUE => {
-                    if let Some(ended) = self.browser_said(input) {
+                    // Finish/drop the old DB work before another selected-message check
+                    // or resize can wait on the pool or touch the native channel.
+                    authorization = None;
+                    let current_control = match self.attachment.current().await {
+                        Ok(control) => control,
+                        Err(reason) => return Ended::Over(reason),
+                    };
+                    if let Some(ended) = self.browser_said(input, current_control) {
                         return ended;
                     }
                 }
-                step = io_step(&mut self.tunnel, &mut buffer, !paused, writing.as_deref()) => match step {
+                step = io_step(&mut self.tunnel, &mut buffer, !paused, writing.as_deref(), self.attachment, &mut authorization) => match step {
                     Io::Read(Ok(0)) => return self.tunnel_ended(None),
                     Io::Read(Ok(count)) => {
                         last_data = Instant::now();
@@ -1045,12 +1503,33 @@ impl Pump<'_> {
                         }
                     }
                     Io::Wrote(Err(error)) => return self.tunnel_ended(Some(&error)),
+                    Io::Refused(reason) => return Ended::Over(reason),
+                    Io::ViewOnly => self.typed.clear(),
                 },
                 () = self.behind.resumed.notified(), if paused => {}
                 () = tokio::time::sleep_until(last_data + EXIT_DRAIN), if draining && !paused => {
                     return self.exit.map_or(Ended::LinkLost, Ended::Exit);
                 }
                 _ = tick.tick() => {
+                    // Reuse the existing keeper's one-second cadence for idle key expiry or
+                    // personal changes that do not announce a shared authorization epoch.
+                    // Input, every resumed write and output delivery keep their own boundaries.
+                    if last_authority.elapsed() >= KEEP_EVERY {
+                        // A tick must not cancel/restart an in-flight restore, nor hold
+                        // its connection while waiting for a second check on the pool.
+                        // Complete that existing check and discard its result as a write
+                        // proof; the next native write still obtains its own fresh check.
+                        let current = match authorization.take() {
+                            Some(mut pending) => pending.as_mut().await.map(|(control, _, _)| control),
+                            None => self.attachment.current().await,
+                        };
+                        match current {
+                            Ok(false) => self.typed.clear(),
+                            Ok(true) => {},
+                            Err(reason) => return Ended::Over(reason),
+                        }
+                        last_authority = Instant::now();
+                    }
                     if self.heard.silent_for() >= inner.tuning.silence {
                         return Ended::BrowserGone;
                     }
@@ -1058,7 +1537,8 @@ impl Pump<'_> {
                         last_ping = Instant::now();
                         let _ = self.out.send(Out::Ping);
                     }
-                    if last_touch.elapsed() >= TOUCH_EVERY {
+                    if last_touch.elapsed() >= TOUCH_EVERY && authorization.is_none() {
+                        // Defer DB housekeeping while an unfinished restore owns a pool slot.
                         last_touch = Instant::now();
                         self.touch();
                     }
@@ -1090,13 +1570,15 @@ impl Pump<'_> {
     }
 
     /// What the browser sent. Some where it ends the attachment.
-    fn browser_said(&mut self, input: Option<In>) -> Option<Ended> {
+    fn browser_said(&mut self, input: Option<In>, current_control: bool) -> Option<Ended> {
         match input {
             None | Some(In::Gone) => Some(Ended::BrowserGone),
             Some(In::Fault(code, reason)) => Some(Ended::Fault(code, reason)),
             Some(In::Typed(bytes)) => {
                 // Only a screen that has the right to type is passed on; a watcher's keys are not.
-                if self.attachment.who.control || matches!(self.attachment.target, Target::Shell(_))
+                if current_control
+                    && (self.attachment.who.control
+                        || matches!(self.attachment.target, Target::Shell(_)))
                 {
                     self.counted.0 += i64::try_from(bytes.len()).unwrap_or(i64::MAX);
                     self.typed.push_back(bytes);
@@ -1104,8 +1586,9 @@ impl Pump<'_> {
                 None
             }
             Some(In::Resize(cols, rows_)) => {
-                let may = self.attachment.who.control
-                    || matches!(self.attachment.target, Target::Shell(_));
+                let may = current_control
+                    && (self.attachment.who.control
+                        || matches!(self.attachment.target, Target::Shell(_)));
                 if may && (1..=SIZE_MAX).contains(&cols) && (1..=SIZE_MAX).contains(&rows_) {
                     self.tunnel.resize(cols, rows_);
                     if let Target::Shell(id) = self.attachment.target {
@@ -1194,6 +1677,44 @@ impl Inner {
                     }
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use orch_api_contract::surface::HttpSurface;
+
+    #[test]
+    fn surface_terminal_ticket_keeps_its_original_door_until_matching_redemption() {
+        for surface in [HttpSurface::Browser, HttpSurface::Key] {
+            let sockets = Sockets::default();
+            let user = orch_types::new_id();
+            let door = Door::Shell(orch_types::new_id());
+            let now = Utc::now();
+            let via = crate::middleware::authentication::Via::Session {
+                session_id: orch_types::new_id(),
+            };
+            let origin =
+                TicketOrigin::from_caller(&orch_authz::Caller::session(user), &via).unwrap();
+            let ticket = sockets
+                .issue_at(now, door, surface, origin, None, None)
+                .publish()
+                .unwrap();
+            let foreign = if surface == HttpSurface::Browser {
+                HttpSurface::Key
+            } else {
+                HttpSurface::Browser
+            };
+            assert!(sockets.redeem(now, &ticket.ticket, foreign).is_none());
+            let kept = sockets
+                .redeem(now, &ticket.ticket, surface)
+                .expect("wrong plane must not consume a terminal ticket");
+            assert_eq!(kept.surface, surface);
+            assert_eq!(kept.origin.user(), user);
+            assert_eq!(kept.door, door);
+            assert!(sockets.redeem(now, &ticket.ticket, surface).is_none());
         }
     }
 }

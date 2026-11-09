@@ -731,7 +731,7 @@ impl World {
         let mut master = [0u8; 32];
         rand::fill(&mut master[..]);
         let api = start_api(&db, &clock, &secrets, &config, master).await;
-        let gateway = start_gateway(&clock, &secrets, api.port, listener).await;
+        let gateway = start_gateway(&clock, &secrets, &config, api.port, listener).await;
         gateway.gateway.wait_for_backplane().await;
         Self {
             db,
@@ -922,11 +922,12 @@ async fn start_api(
 async fn start_gateway(
     clock: &Arc<dyn Clock>,
     secrets: &Secrets,
+    config: &ServerConfig,
     api_port: u16,
     pinned: TcpListener,
 ) -> Running {
     let settings = Settings {
-        gateway_id: "test-gateway".to_owned(),
+        gateway_id: config.gateway.gateway_id.clone(),
         version: "0.0.0-test".to_owned(),
         backplane_url: format!("wss://127.0.0.1:{api_port}/internal/backplane"),
         heartbeat_secs: 20,
@@ -1008,6 +1009,16 @@ impl NodeUnderTest {
         settings.system_name = system.to_owned();
         let clock = Arc::clone(&world.clock);
         let data = DataDir::open(data_dir.path()).unwrap();
+        // Discovery uses the local entrance too. Units resolve the advertised gateway name;
+        // this node runs on the host and uses the listener's reachable pinned address.
+        let reach = world.gateway_url();
+        data.update_config(|config| {
+            config.endpoints = vec![orch_config::connector::ConnectorEndpoint {
+                url: reach.clone(),
+                trust: "pinned".to_owned(),
+            }];
+        })
+        .unwrap();
         let host_token = world
             .token(
                 TokenFor::Host { home: None },
@@ -1018,7 +1029,7 @@ impl NodeUnderTest {
             &data,
             &HostEnrollment {
                 delegate_policy: false,
-                address: world.gateway_url(),
+                address: reach,
                 token: host_token,
                 name: format!("orch-test-node-{token}-host"),
             },
@@ -1028,16 +1039,6 @@ impl NodeUnderTest {
         )
         .await
         .expect("the host could not enroll");
-        // The system tells machines to reach the gateway as `gateway.orch.internal`, which only the units
-        // resolve; the node, on the host, reaches it at the address it listens on.
-        let reach = world.gateway_url();
-        data.update_config(move |config| {
-            config.endpoints = vec![orch_config::connector::ConnectorEndpoint {
-                url: reach,
-                trust: "pinned".to_owned(),
-            }];
-        })
-        .unwrap();
         // The machine is enrolled: its policy can be written now, as the settings that follow it are.
         adjust(&mut settings);
         let prepared = Prepared::open(&settings).unwrap();

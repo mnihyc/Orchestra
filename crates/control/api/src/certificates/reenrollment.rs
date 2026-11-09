@@ -2,7 +2,109 @@
 
 use super::*;
 use orch_db::queries::resources::reenrollment as rows;
+use orch_engine::enrollment_authority::{AgainOrigin, AgainToken};
 use orch_pki::enrollment::{Enrolled, IssuedToken};
+
+pub(super) struct Issuer {
+    packet: AgainOrigin,
+    caller: orch_authz::Caller,
+    until: Option<Time>,
+}
+impl Issuer {
+    pub(super) fn check(&self, service: &CertificateService) -> Result<(), LinkFault> {
+        if !self
+            .caller
+            .key_deadline_allows(service.inner.clock.as_ref())
+            || self
+                .until
+                .is_some_and(|until| until.get() <= service.inner.clock.now())
+        {
+            return Err(issuer_closed());
+        }
+        Ok(())
+    }
+    async fn refresh(
+        &mut self,
+        service: &CertificateService,
+        conn: &mut orch_db::Conn,
+    ) -> Result<(), LinkFault> {
+        let (caller, until) = self
+            .packet
+            .current(conn, service.inner.clock.as_ref())
+            .await
+            .map_err(|error| LinkFault::internal(&error))?
+            .ok_or_else(issuer_closed)?;
+        self.caller = caller;
+        self.until = match (self.until, until) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.check(service)
+    }
+}
+fn issuer_closed() -> LinkFault {
+    LinkFault::new(
+        403,
+        "enrollment_issuer_closed",
+        "The original enrollment issuer no longer permits this replacement.",
+    )
+}
+
+/// Match the native creator-before-reservation lock order; the locked ledger is checked again below.
+pub(super) async fn issuer_locks(
+    service: &CertificateService,
+    conn: &mut orch_db::Conn,
+    hash: &[u8],
+) -> Result<(), LinkFault> {
+    let Some(value) = resources::replacement_issuer_origin(conn, hash).await? else {
+        return Ok(());
+    };
+    let packet: AgainOrigin = serde_json::from_value(value).map_err(|_| issuer_closed())?;
+    if packet
+        .current(conn, service.inner.clock.as_ref())
+        .await
+        .map_err(|error| LinkFault::internal(&error))?
+        .is_none()
+    {
+        return Err(issuer_closed());
+    }
+    Ok(())
+}
+
+/// Only actual stored issuer provenance enters this guard; an absent legacy packet stays legacy.
+pub(super) async fn issuer(
+    service: &CertificateService,
+    conn: &mut orch_db::Conn,
+    token: &TokenRow,
+) -> Result<Option<Issuer>, LinkFault> {
+    let Some(value) = resources::enrollment_issuer_origin(conn, &token.token_hash).await? else {
+        return Ok(None);
+    };
+    let packet: AgainOrigin = serde_json::from_value(value).map_err(|_| issuer_closed())?;
+    let binding = AgainToken {
+        machine: token.again_machine_id.ok_or_else(issuer_closed)?,
+        hash: token.token_hash.clone(),
+        issuer: token.created_by,
+        purpose: token.purpose.clone(),
+        expires: Time::new(token.expires_at),
+    };
+    if !packet.matches(&binding) {
+        return Err(issuer_closed());
+    }
+    let (caller, until) = packet
+        .current(conn, service.inner.clock.as_ref())
+        .await
+        .map_err(|error| LinkFault::internal(&error))?
+        .ok_or_else(issuer_closed)?;
+    let expires = Time::new(token.expires_at);
+    let issuer = Issuer {
+        packet,
+        caller,
+        until: Some(until.map_or(expires, |until| until.min(expires))),
+    };
+    issuer.check(service)?;
+    Ok(Some(issuer))
+}
 
 pub(super) async fn token(
     service: &CertificateService,
@@ -42,16 +144,26 @@ pub(super) async fn finish(
     service: &CertificateService,
     conn: &mut orch_db::Conn,
     token: &TokenRow,
-    machine: Id,
     validated: Enrolled,
     request: &EnrollRequest,
     origin: &Origin,
+    issuer: Option<&mut Issuer>,
 ) -> Result<EnrollReply, LinkFault> {
     let inner = &service.inner;
+    let machine = token
+        .again_machine_id
+        .ok_or_else(|| LinkFault::from(EnrollRefusal::Gone))?;
     let row = rows::lock(conn, machine)
         .await?
         .filter(|row| row.deleted_at.is_none() && row.lost_at.is_none())
         .ok_or_else(|| LinkFault::from(EnrollRefusal::Gone))?;
+    if let Some(issuer) = issuer.as_ref() {
+        issuer.check(service)?;
+    }
+    let mut issuer = issuer;
+    if let Some(issuer) = issuer.as_mut() {
+        issuer.refresh(service, conn).await?;
+    }
     // The ordinary enrollment validator has checked the token, pin, protocol, roles and CSR.
     // The token alone chooses the retained identity; the CSR's subject never does.
     let csr = CertificateRequest::from_pem(&request.csr_pem)
@@ -63,6 +175,9 @@ pub(super) async fn finish(
         inner.clock.as_ref(),
     )?;
     let now = utc(inner.clock.time());
+    if let Some(issuer) = issuer.as_ref() {
+        issuer.check(service)?;
+    }
     rows::activate(
         conn,
         &row,
@@ -76,6 +191,9 @@ pub(super) async fn finish(
         now,
     )
     .await?;
+    if let Some(issuer) = issuer.as_ref() {
+        issuer.check(service)?;
+    }
     if !resources::spend_enrollment_token(conn, &token.token_hash, machine, now).await? {
         return Err(EnrollRefusal::Gone.into());
     }
@@ -89,11 +207,16 @@ pub(super) async fn finish(
     );
     entry.details = serde_json::json!({"again": true, "serial": hex::encode(certificate.serial())});
     audit::append(conn, &entry, origin, now).await?;
+    if let Some(issuer) = issuer.as_ref() {
+        issuer.check(service)?;
+    }
+    let advertisement = inner.advertisement();
     Ok(EnrollReply {
+        gateways: advertisement.gateways,
         machine_id: machine,
         certificate_pem: certificate.pem(),
         ca_pem: inner.authority.certificate_pem(),
-        endpoints: super::endpoints_for_machine(conn, machine, &inner.settings.endpoints).await?,
+        endpoints: super::endpoints_for_machine(conn, machine, &advertisement.endpoints).await?,
         system: EnrollReplySystem {
             name: inner.settings.system_name.clone(),
             public_url: inner.settings.public_url.clone(),

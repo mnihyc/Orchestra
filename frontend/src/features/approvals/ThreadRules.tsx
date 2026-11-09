@@ -8,12 +8,14 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
-import { api, ok } from '@/api/client';
+import { ApiError, api, ok } from '@/api/client';
 import { matcherWords } from '@/features/approvals/Harness';
 import { GuideLink } from '@/features/help/GuideLink';
 import type { ThreadApprovalRule } from '@/generated/api-types';
 import { Button } from '@/ui/Button';
-import { ErrorAlert } from '@/ui/ErrorState';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
+import { StateLine } from '@/ui/StateLine';
+import { UserChip } from '@/ui/UserChip';
 import { RelativeTime } from '@/ui/RelativeTime';
 
 const rulesKey = (threadId: string) => ['thread', threadId, 'approval-rules'] as const;
@@ -28,15 +30,24 @@ export function ThreadRules({ threadId, writable }: { threadId: string; writable
   });
   const revoke = useMutation({
     mutationFn: (ruleId: string) => ok(api.DELETE('/threads/{id}/approval-rules/{rule_id}', { params: { path: { id: threadId, rule_id: ruleId } } })),
+    onSuccess: async () => { await rules.refetch(); },
   });
   // Only whoever manages the thread reads its rules; nobody else is shown an empty list as if there were none.
-  if (!writable || rules.data === undefined) return null;
+  if (!writable) return null;
+  const unavailable = rules.error instanceof ApiError && [401, 403, 404, 410].includes(rules.error.status);
+  const inactiveReason = (reason: ThreadApprovalRule['reason']) => reason === 'revoked'
+    ? t('approvals.rules.reasonRevoked') : reason === 'binding_changed'
+      ? t('approvals.rules.reasonBindingChanged') : t('approvals.rules.reasonUnavailable');
   return (
     <section aria-label={t('approvals.rules.title')} className="flex flex-col gap-2 border-t border-border px-3 py-3" data-approval-rules>
       <h3 className="text-sm font-medium text-text">{t('approvals.rules.title')}</h3>
       <GuideLink guide="how-approvals-work" target={{ kind: 'node', id: threadId }} />
       <p className="text-xs text-text-muted">{t('approvals.rules.lead')}</p>
-      {rules.data.length === 0 ? (
+      {rules.isError ? unavailable ? <StateLine compact message={t('implicitAvailability.detailsUnavailable')} /> : <ErrorState compact error={rules.error} title={t('approvals.rules.unavailable')}
+        onRetry={() => void rules.refetch()}
+        action={<Button size="sm" pending={rules.isFetching} onClick={() => void rules.refetch()}>{t('common.tryAgain')}</Button>} />
+        : rules.data === undefined ? <StateLine compact role="status" message={t('approvals.rules.checking')} />
+        : rules.data.length === 0 ? (
         <EmptyState compact title={t('approvals.rules.none')} />
       ) : (
         <ul className="flex flex-col gap-2">
@@ -44,8 +55,8 @@ export function ThreadRules({ threadId, writable }: { threadId: string; writable
             <li key={rule.id} className="flex flex-col gap-1 text-sm">
               <span className="font-mono text-xs wrap-anywhere text-text">{matcherWords(rule.matcher, t)}</span>
               <span className="flex flex-wrap items-center gap-x-2 text-xs text-text-muted">
-                {rule.by.display_name} · <RelativeTime at={rule.at} />
-                {!rule.active && <span>{t('approvals.rules.inactive')}</span>}
+                <UserChip user={rule.by} size="row" /> · <RelativeTime at={rule.at} />
+                {!rule.active && <><span>{t('approvals.rules.inactive')}</span><span>{inactiveReason(rule.reason)}</span></>}
               </span>
               {rule.active && (
                 <Button size="sm" variant="secondary" className="self-start" pending={revoke.isPending && revoke.variables === rule.id} disabled={revoke.isPending} onClick={() => revoke.mutate(rule.id)}>
