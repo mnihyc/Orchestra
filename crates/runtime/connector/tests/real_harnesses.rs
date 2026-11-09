@@ -55,6 +55,47 @@ impl Harness {
     }
 }
 
+/// Session observations have no owned turn; a tool or turn-scoped marker is never an idle observation.
+fn idle_observation(
+    kind: &str,
+    body: &serde_json::Value,
+    markers: &mut std::collections::BTreeSet<String>,
+) -> bool {
+    use orch_agent_contract::events::{ErrorPayload, MarkerPayload};
+    if kind != "item.completed" || body["status"] != "completed" {
+        return false;
+    }
+    let Some(reference) = body["native_ref"]
+        .as_str()
+        .filter(|reference| !reference.is_empty())
+    else {
+        return false;
+    };
+    if let Ok(MarkerPayload::HarnessChanged(data)) =
+        serde_json::from_value::<MarkerPayload>(body["payload"].clone())
+    {
+        if data.turn_id.is_none() {
+            markers.insert(reference.into());
+            return true;
+        }
+        return false;
+    }
+    let Ok(error) = serde_json::from_value::<ErrorPayload>(body["payload"].clone()) else {
+        return false;
+    };
+    matches!(
+        error.code.as_str(),
+        "harness_diverged" | "mcp_server_failed"
+    ) && error
+        .details
+        .as_ref()
+        .and_then(|details| details.get("turn_id"))
+        .is_none_or(serde_json::Value::is_null)
+        && markers.iter().any(|marker| {
+            reference == format!("{marker}-notice") || reference == format!("{marker}:notice")
+        })
+}
+
 /// The adapter of the harness, started through a launcher that runs it in a container.
 fn registry(
     harness: Harness,
@@ -126,6 +167,7 @@ async fn hosted_turn(harness: Harness) {
     let home = format!("harness/{}/{}", p.rig.provider, p.rig.agent);
     let start: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
         "provider_id": p.rig.provider, "agent_id": p.rig.agent, "harness_kind": harness.kind(),
+        "provider_kind": "api",
         "profile": { "harness_version": null, "config": {}, "env": {} }, "home": home
     }))
     .unwrap();
@@ -168,9 +210,7 @@ async fn hosted_turn(harness: Harness) {
         inspected.contains(harness.token_variable()),
         "the harness is given the token of the listener in its environment: {inspected}"
     );
-    p.rig
-        .wait_for(p.thread, p.segment, "turn.completed", 1)
-        .await;
+    p.wait_for_turn_event("turn.completed", 1).await;
 
     // Events arrived in order, and the controller saw no gap or repeat.
     let kinds = p.rig.kinds(p.thread, p.segment);
@@ -184,17 +224,37 @@ async fn hosted_turn(harness: Harness) {
         Some("turn.completed"),
         "{kinds:?}"
     );
-    let first_item = kinds
+    let events = p.rig.applied(p.thread, p.segment);
+    let started_at = events
         .iter()
-        .position(|kind| kind.starts_with("item."))
+        .position(|event| event.kind == "turn.started")
         .unwrap();
-    let started_at = kinds
+    let mut idle_markers = std::collections::BTreeSet::new();
+    for event in events[..started_at]
         .iter()
-        .position(|kind| kind == "turn.started")
-        .unwrap();
+        .filter(|event| event.kind.starts_with("item."))
+    {
+        assert!(
+            idle_observation(&event.kind, &event.body, &mut idle_markers),
+            "only idle session observations may precede the turn: {} {:?}",
+            event.kind,
+            event.body
+        );
+    }
+    let turn = &events[started_at].body["turn_id"];
+    assert!(turn.is_string(), "the start identifies its actual turn");
+    let first_item = events
+        .iter()
+        .position(|event| event.kind == "item.started" && event.body["turn_id"] == *turn)
+        .unwrap_or_else(|| {
+            panic!(
+                "the native turn produced no owned item: {}",
+                p.turn_diagnostics()
+            )
+        });
     assert!(
         started_at < first_item,
-        "the turn starts before its items: {kinds:?}"
+        "the turn starts before its owned items: {kinds:?}"
     );
     assert!(
         p.rig.controller.violations().is_empty(),
@@ -269,4 +329,51 @@ async fn one_turn_of_codex_hosted_by_the_connector_goes_through_the_forwarder_wi
 async fn one_turn_of_claude_code_hosted_by_the_connector_goes_through_the_forwarder_with_a_key_the_harness_never_sees()
  {
     hosted_turn(Harness::Claude).await;
+}
+
+#[test]
+fn opening_observations_allow_no_tool_or_turn_owned_item_before_the_turn() {
+    use orch_agent_contract::events::{MarkerHarnessChanged, MarkerPayload};
+    use orch_api_contract::usage::UsageMeasurement;
+    let data = MarkerHarnessChanged {
+        program: "Fixture".into(),
+        change: "session_status".into(),
+        subject: None,
+        previous: UsageMeasurement::Unsupported,
+        value: json!("opened"),
+        expected: UsageMeasurement::Unsupported,
+        changed: false,
+        diverged: false,
+        next_turn: false,
+        turn_id: None,
+        reported_at: serde_json::from_value(json!("2026-01-01T00:00:00Z")).unwrap(),
+    };
+    let payload =
+        serde_json::to_value(MarkerPayload::HarnessChanged(Box::new(data.clone()))).unwrap();
+    let marker = json!({"native_ref":"opening","status":"completed","payload":payload});
+    let mut known = std::collections::BTreeSet::new();
+    assert!(idle_observation("item.completed", &marker, &mut known));
+    let notice = json!({"native_ref":"opening-notice","status":"completed","payload":{
+        "code":"harness_diverged","message":"Fixture observation","retryable":false}});
+    assert!(idle_observation("item.completed", &notice, &mut known));
+    let mut owned = data;
+    owned.turn_id = Some(orch_types::new_id());
+    let owned = json!({"native_ref":"turn-owned","status":"completed","payload":serde_json::to_value(MarkerPayload::HarnessChanged(Box::new(owned))).unwrap()});
+    assert!(!idle_observation("item.completed", &owned, &mut known));
+    assert!(!idle_observation("item.started", &marker, &mut known));
+    assert!(!idle_observation(
+        "item.completed",
+        &json!({"native_ref":"tool","status":"completed","payload":{"tool":{"kind":"command"}}}),
+        &mut known
+    ));
+    let mut turn_notice = notice.clone();
+    turn_notice["payload"]["details"] = json!({"turn_id":orch_types::new_id()});
+    assert!(!idle_observation(
+        "item.completed",
+        &turn_notice,
+        &mut known
+    ));
+    let mut unlinked = notice;
+    unlinked["native_ref"] = json!("unlinked-notice");
+    assert!(!idle_observation("item.completed", &unlinked, &mut known));
 }

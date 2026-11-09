@@ -10,10 +10,30 @@
 use crate::access::AccessFault;
 use crate::commands::CommandsError;
 use orch_db::DbError;
+use orch_types::Id;
 
 /// A part the engine stands on failed, or what it stores does not read.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    /// A capability returned a safe reported refusal, including its actual allowance reset.
+    #[error("{0}")]
+    Capability(Box<crate::tools::capability_service::CapabilityFailure>),
+    /// Ask's configured window cannot hold its required reserves.
+    #[error(
+        "ask.context_tokens leaves no room for conversation history after ask.max_output_tokens and ask.turn_tool_bytes are reserved. Increase ask.context_tokens or reduce those reserves."
+    )]
+    AskContextNoRoom,
+    /// Even a summary and the current question cannot fit the selected model.
+    #[error("This conversation is too long for {0}; start a new one or keep it as a thread.")]
+    AskContextTooLong(String),
+    /// A lifecycle change must first review and end the thread's live native work.
+    #[error(
+        "Background tasks are still running. Review and end them before changing this session."
+    )]
+    BackgroundRunning(Id),
+    /// An entry point refused its first effect. Preserve the opaque original error for that caller.
+    #[error(transparent)]
+    BeforeEffect(Box<dyn std::error::Error + Send + Sync>),
     /// A requested informational mount comparison could not read one of its locations.
     #[error("{0}")]
     MountFingerprint(String),

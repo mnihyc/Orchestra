@@ -1,7 +1,9 @@
 ---
+group: providers
 title: Choose and read provider details
 screens: /thread/$threadId, /resources/providers, /resources/providers/$id, /resources/machines, /resources/templates
 keywords: how do I choose provider details, facts source, models source, SourceChoice, balances, spend, reset, Not read yet, None reported, Does not report, Unencrypted, providers.allow_http_upstreams, Last program error, interrupted
+summary: Read provider observations with their source, missing-data state and reset options.
 ---
 
 # Choose and read provider details
@@ -21,6 +23,20 @@ reaches it. Examples fill those same fields. Keys are added afterwards in
 **Sign-in and keys**. Creating a provider does not wait for its runtime to
 answer; its page shows the saved setup while the live connection brings its
 observations.
+
+For an API endpoint, **Advanced → Request defaults** accepts additional body options as JSON.
+The request's explicit values win, and Orch keeps ownership of the model, prompt, tools,
+output budget and credentials. Fixed and secret headers and query parameters keep their
+existing fields. A custom option is configuration, not proof that the upstream supports it.
+
+A summarizer has the same kind of options in `auto.summarizer.params`. Its endpoint defaults
+apply first, its model's configured defaults next, and the summarizer's explicit options last.
+For OpenAI Responses, enable the model's speed as ID `priority`, label **Fast**, and choose
+that ID for its default, request options, rates and caps. Request ID `fast` is the documented
+alias; usage keeps the actual reported `priority` separately from what was requested.
+Anthropic Messages uses `speed: "fast"`, with any required beta header in the endpoint's
+headers. Compatible Gemini, DeepSeek and other endpoints use their documented fields;
+choosing a format does not grant a model a speed it does not offer.
 
 In a provider's Settings, open **Where its details come from**. Facts
 and Models have their own choices. **Default** explains the actual
@@ -65,6 +81,87 @@ an unread fact is never a guessed zero. Delete stays in the page menu, and
 is also available if its stored details cannot be shown. Its ordinary access
 and in-use checks still apply.
 
+## Request options
+
+On **Sign-in and keys → Endpoints → Advanced**, **Allowed request options** sets
+JSON Schema rules by interface. On **Models**, use a group's **Options…**
+to set the same rules for every model in that existing group. A model's
+own **Edit options…** keeps its individual rules.
+
+The model's rule supplies a field's form first, then the last group in
+its saved group order, then earlier groups, then the endpoint. Every
+layer still limits the final request. For example, an endpoint allowing
+temperature from 0 to 1, a group limiting it to 0.5 and a model starting
+at 0.25 produce a 0.25 default; a request for 0.75 is refused. A model's
+more permissive form cannot remove the group's limit. This applies to
+forwarded program calls and Orch's own model calls. Changes are used
+for the next turn or call; a current lease keeps its accepted snapshot.
+
+`providers.model_groups_max` sets how many groups a model may join at
+this home. It starts at 8 and can be raised. Reducing it leaves existing
+memberships intact; models may still be edited or removed from groups.
+Setting it to 0 permits no new memberships. The field uses this setting
+in both **Add model** and the model's editor.
+
+For a shared setup, put the endpoint's common rules in Advanced, add
+**frontier** to the relevant models, then open **frontier → Options…**
+and set that group's rules. Leave a model's own rules empty to use the
+shared form. Saving one group preserves the others; malformed JSON or
+a stale revision keeps the draft open with the error.
+
+## Thread options
+
+Open a thread's **Parameters → Request options**. A forwarded API thread shows
+the fields its provider opened, grouped by interface. Choose an enum from its
+list; a fixed value is read-only. Program sign-ins keep their program's native
+controls. An undeclared field is not a thread choice.
+
+Each interface's values use the existing **agent parameters** setting, with the
+same source, lock and revision. Reset that row to follow the place's inherited
+choice again; other parameters and interfaces keep their choices. A refused
+change keeps the draft and shows the error. The permission to manage the thread
+and any lock above still decide whether the controls may be changed.
+
+Choices apply on the **next turn**. A running turn keeps its lease's values,
+including after a connection or runtime restart. The actual outgoing interface
+uses its choices after translation; the final request must still fit every
+endpoint, group and model rule. For example, choosing a verbosity from the
+provider's list can replace the program's value, but cannot override a fixed
+region or enable an option the provider has closed. Switching the model may
+require resetting choices that its new entry does not open.
+
+Codex's **Access** choice also works on a forwarded API endpoint when the
+interface supports it and a provider manager enabled the program for the model.
+Choose it in the composer's **Model and effort** dialog. The choice applies to
+the next turn and stays with that turn's lease across retries and restarts.
+Ordinary access adds no program selector to a Responses request. Programs merely
+reported by the provider remain unavailable until a manager enables them.
+
+## Confirmed values
+
+In **Models**, **Reported values** opens a small read-only card on a saved model
+or a suggestion. Each value says **From the vendor** or **From catalogue**.
+Only an actual supplied vendor value receives the first label. A catalogue
+mapping remains a proposal; an unknown or older source says **Source not confirmed**.
+The card keeps the model observation's own time, with **Time not reported** when
+none was supplied. A newer balance or plan read does not date an old model report.
+
+**Vendor differs** names fields whose reported value differs from the saved
+proposal or choice. The card shows the reported value; the saved entry and your
+overrides stay in effect until you edit them. Reading or refreshing never enables
+a model, a speed, search or a paid service. A reported maximum context describes
+what is available; it is separate from the context a manager opened to threads.
+Prices retain the source's reported decimal precision. Missing values are not zero.
+
+A reported **Family** can offer **Add … group…** beside the model. It opens the
+existing model editor with that membership proposed, keeping its other groups.
+Review, edit or remove it, then choose **Save**; Cancel changes nothing. Only a
+vendor-supplied family that already fits the group-name rules is proposed—no
+group is guessed from a model's name. A new report never changes membership.
+The configured group allowance still applies, including zero; remove another
+membership or the proposal when needed. An open draft keeps the family you
+chose even if a later observation names another one.
+
 ## Read the four states
 
 | The card says | What it means |
@@ -86,6 +183,13 @@ for a manager to enable; nothing is silently switched on. Orch also
 reads a minute after a vendor-reported reset. Its compact provider
 caption uses the binding windows, else a first reported balance, else
 a first spend row. Without permitted facts it cannot invent room.
+
+In **Models → Edit options… → Model report**, read the endpoint's reported
+input and output windows, capability support, model line and retirement
+schedule. A scheduled date is not a statement that a model has retired.
+Missing facts stay absent, and a new report does not switch on search,
+larger contexts or other paid options. Saving the model keeps these facts
+separate from the options a manager enabled.
 
 ## Program exits
 
@@ -127,3 +231,22 @@ pages ship in Help's **Build your own** section. They contain generated
 shapes/bounds/errors and the exact Python program/address examples used
 by the conformance suite. A provider manager selects existing code;
 the machine or trusted template's writer registers it.
+
+## Request option rules
+
+On Models, open a model's editor and choose a Request format. Documented fields have compact rule controls: No explicit rule, Constrain or Block. Choose allowed values without selecting a default; a default is a separate choice. Identifier rules can fix provider-authored text or strip a value. These rules narrow the existing endpoint/model limits; a documented tier is not enabled merely by appearing in the catalogue.
+
+Raw JSON keeps custom fields, native agent rules and unfamiliar schema keywords. A malformed draft stays visible until corrected. A custom parent schema remains raw rather than being replaced by a compact control. No explicit property rule may still be blocked by a closed parent schema or another layer.
+
+Endpoints expose the same schema controls when their format declares Request options. Fixed public headers use the existing header map; secret headers keep their separate control. Advanced retains other names and values. Body defaults remain separate from schema rules.
+
+The catalogue follows the request formats, including [Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Messages](https://platform.claude.com/docs/en/api/messages/create) and configured endpoint extensions. A field's presence in documentation does not establish model support.
+
+
+## Service backends
+
+In an API provider's **Settings → Services**, Orch lists services declared for its saved endpoints. Discovery leaves every service disabled. **Edit service** lets a provider manager enable one, keep its declared groups or choose service groups, and save an optional price in Orch credits. Saving these choices starts no search, page read or model request and chooses no thread backend. A service unavailable on its runtime keeps its cause beside the control.
+
+Catalogue prices are estimates in their original currency. An explicit saved price in Orch credits is what Orch counts; a vendor's reported total stays beside it for comparison. Clearing the custom price restores the catalogue estimate. Editing preserves other services and future configuration fields. A stale provider revision is refused so another manager's change is not overwritten.
+
+A thread uses a paid backend only after its capability is explicitly set to **Service** and its backend names an enabled offering. Provider Use, service/model allowlists and purpose caps apply to the original person or native work source on every request. A provider's model list and service list remain independent. Unset keeps the program's default and selects no paid fallback.

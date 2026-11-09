@@ -208,7 +208,7 @@ function NewImport({ target, onClose }: { target: Extract<ImportTarget, { kind: 
       </>}
       {step === 'review' && <>
         {planBusy && <StateLine compact role="status" message={t('importWizard.dialog.checking')} />}
-        {latest === undefined || standing.node === undefined || request === null ? plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : <SkeletonRows rows={5} />
+        {latest === undefined || standing.node === undefined || request === null ? plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : <SkeletonRows read={plan} rows={5} />
           : <fieldset disabled={plan.isPlaceholderData || plan.isError || start.isPending || uncertain} aria-busy={planBusy} className="min-w-0">
             <ImportReview node={standing.node} request={request} plan={latest}
               rows={plan.data?.pages.flatMap((page) => page.objects.items) ?? []} hasMore={plan.hasNextPage} loadingMore={plan.isFetchingNextPage} moreError={plan.isFetchNextPageError ? plan.error : null}

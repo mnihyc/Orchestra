@@ -7,6 +7,7 @@
 mod places;
 mod rig;
 mod support;
+use support::FullApprovalReply;
 
 use orch_api_contract::approvals::{
     ApprovalDecide, ApprovalDecision, ApprovalState, HarnessAnswersDecision,
@@ -142,6 +143,7 @@ async fn a_question_is_in_its_item_for_the_manager_and_viewer_with_only_the_mana
         .body(&answer)
         .send()
         .await
+        .full_approval()
         .problem();
     assert_eq!(refused.code, ErrorCode::AuthzDenied);
     let answered = s
@@ -153,6 +155,7 @@ async fn a_question_is_in_its_item_for_the_manager_and_viewer_with_only_the_mana
         .body(&answer)
         .send()
         .await
+        .full_approval()
         .ok();
     assert_eq!(answered.approval.state, ApprovalState::Answered);
     let current = sync(&s, &s.ada, thread).await;

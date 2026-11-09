@@ -1,6 +1,7 @@
 /** Every container, section and tab stays visible and reachable by pointer and keyboard at every workbench width. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
+import { showWorkbenchView } from './workbench-support.ts';
 
 const right = (page: Page) => page.locator('[data-workbench-bar="right"]');
 async function chooseContainer(page: Page, name: string) {
@@ -225,21 +226,28 @@ test('Open view lists the screen views with their containers and reveals a hidde
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
   await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.getByRole('textbox', { name: 'Message to the agent', exact: true })).toBeVisible();
+  await showWorkbenchView(page, 'Outline');
   await right(page).getByRole('button', { name: 'Conversation actions' }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Outline', exact: true }).click();
-  await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  if (await right(page).isVisible()) await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  await expect(right(page)).toBeHidden();
   await page.keyboard.press('Control+k');
   const finder = page.getByRole('dialog', { name: 'Find', exact: true });
   await finder.getByRole('combobox').fill('> Open view');
   await finder.getByRole('option', { name: /^Open view…/ }).click();
   const chooser = page.getByRole('dialog', { name: 'Views' });
   await expect(chooser.getByRole('option', { name: /^Outline/ })).toContainText('Conversation');
-  await expect(chooser.getByRole('option', { name: /^Documents/ })).toContainText('Team');
+  const documents = chooser.locator('[role="option"][data-value="commands:view.open.documents"]');
+  await expect(documents).toHaveAccessibleName('Place documents');
+  await expect(documents).toContainText('Team');
   await chooser.getByRole('combobox').fill('Outline');
   await chooser.getByRole('option', { name: /^Outline/ }).click();
-  await expect(section(page, 'Outline')).toHaveAttribute('aria-expanded', 'true');
-  await expect(section(page, 'Outline')).toBeFocused();
-  await right(page).getByRole('button', { name: 'Add a view' }).click();
+  const revealed = right(page).getByRole('region', { name: 'Outline', exact: true });
+  await expect(revealed).toBeVisible();
+  await expect(revealed.getByText('Nothing to go to yet', { exact: true })).toBeVisible();
+  await expect(revealed).toBeFocused();
+  await page.locator('[data-screen-titlebar]').getByRole('button', { name: 'Add a view', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Views' })).toBeVisible();
   await page.keyboard.press('Escape');
 });

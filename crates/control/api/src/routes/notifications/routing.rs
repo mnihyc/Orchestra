@@ -25,6 +25,8 @@ use orch_worker_core::bot_links::{self, LinkError};
 use orch_worker_core::routes::{self as route_logic, Change, RouteError};
 use std::collections::BTreeMap;
 
+pub(super) mod creation;
+
 /// The channel the path names, if it reaches the caller: a channel of
 /// somebody else's is not there for them.
 async fn reaching(ctx: &Ctx, conn: &mut orch_db::Conn) -> ApiResult<(Id, ChannelRow)> {
@@ -236,7 +238,11 @@ pub async fn remove(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
 /// Makes the link that opens a bot with a code, good for ten minutes, for a
 /// channel whose notifier links people. When the caller presses Start there,
 /// the route is linked and their feed says so.
-pub async fn link_create(ctx: Ctx, (): (), (): ()) -> ApiResult<NotificationRouteLink> {
+pub async fn link_create(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::notifications::NotificationRouteLinkResponse> {
     let me = ctx.user()?.id();
     let mut tx = ctx.app.db.begin().await?;
     let (_, row) = reaching(&ctx, &mut tx).await?;
@@ -253,19 +259,25 @@ pub async fn link_create(ctx: Ctx, (): (), (): ()) -> ApiResult<NotificationRout
             LinkError::Db(error) => error.into(),
             LinkError::Channel(error) => ApiError::internal(error),
         })?;
+    orch_db::idempotency::creation::observe_with(&mut tx,Some(me),"notification_route_link",started.route,
+        serde_json::json!({"channel":row.id,"hash":started.code_hash,"expires":Time::new(started.expires_at)})).await?;
     tx.commit().await.map_err(DbError::from)?;
-    Ok(NotificationRouteLink {
-        url: started.url,
-        expires_at: Time::new(started.expires_at),
-    })
+    Ok(
+        orch_api_contract::notifications::NotificationRouteLinkResponse::full(
+            NotificationRouteLink {
+                url: started.url,
+                expires_at: Time::new(started.expires_at),
+            },
+        ),
+    )
 }
 
 /// Switches the caller's route off and unlinks it: where a bot had them, it
 /// forgets the chat.
 pub async fn delete(ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let mut tx = ctx.app.db.begin().await?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
     let (channel, _) = reaching(&ctx, &mut tx).await?;
-    route_logic::end(&mut tx, ctx.user()?.id(), channel, ctx.now).await?;
+    route_logic::end(&mut tx, guard.user().id(), channel, guard.now().get()).await?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(())
 }

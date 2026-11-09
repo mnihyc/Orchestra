@@ -33,9 +33,22 @@ pub fn mount(registry: &mut Registry) {
         .on(AdminProgramGet, get)
         .on(AdminProgramBuildList, builds)
         .on(AdminProgramBuildSet, set_build)
-        .on(AdminProgramBuildCheck, check_build)
+        .on_with_operation(
+            AdminProgramBuildCheck,
+            crate::key_operations::direct::declared,
+            check_build,
+        )
         .on(AdminProgramVersionGet, version_get)
-        .on(AdminProgramVersionFetch, version_fetch)
+        .on_with_initial_operation(
+            AdminProgramVersionFetch,
+            crate::key_operations::native::effects::initial::<
+                super::catalogue::fetch::Action<super::catalogue::fetch::Program>,
+            >,
+            crate::key_operations::native::effects::prepare::<
+                super::catalogue::fetch::Action<super::catalogue::fetch::Program>,
+            >,
+            version_fetch,
+        )
         .on(AdminProgramChannelsRead, channels_read);
 }
 
@@ -77,16 +90,12 @@ async fn channels_read(ctx: Ctx, (): (), (): ()) -> ApiResult<ProgramChannelRead
         kept: super::catalogue::read_channels(ctx, Some(kind)).await?,
     })
 }
-async fn version_fetch(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuild>> {
-    admin_of(&ctx)?;
-    super::catalogue::fetch_exact(
-        ctx,
-        orch_api_contract::admin::HarnessVersionFetchBody {
-            environment_id: None,
-            node_id: None,
-        },
-    )
-    .await
+async fn version_fetch(
+    ctx: Ctx,
+    (): (),
+    (): (),
+) -> ApiResult<orch_api_contract::admin::HarnessFetchResponse> {
+    super::catalogue::fetch::run::<super::catalogue::fetch::Program>(ctx).await
 }
 async fn version_get(ctx: Ctx, (): (), (): ()) -> ApiResult<Vec<HarnessBuild>> {
     admin_of(&ctx)?;

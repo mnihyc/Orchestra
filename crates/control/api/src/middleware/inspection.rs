@@ -30,6 +30,62 @@ pub(crate) struct Info {
     pub reads: Vec<Id>,
 }
 
+/// The successful native snapshot's exact retained association, shared with its reply.
+/// Failed snapshot attempts never publish a retained scope or an audit obligation.
+#[derive(Debug, Default)]
+pub(crate) struct Snapshot(std::sync::Mutex<Option<Option<Info>>>);
+fn same(old: Option<&Info>, fresh: Option<&Info>) -> bool {
+    match (old, fresh) {
+        (None, None) => true,
+        (Some(old), Some(fresh)) => {
+            old.kind == fresh.kind
+                && old.id == fresh.id
+                && old.deletion == fresh.deletion
+                && old.reads.iter().collect::<std::collections::BTreeSet<_>>()
+                    == fresh.reads.iter().collect()
+        }
+        _ => false,
+    }
+}
+impl Snapshot {
+    pub(crate) fn get(&self) -> ApiResult<Option<Option<Info>>> {
+        self.0
+            .lock()
+            .map(|held| held.clone())
+            .map_err(|_| ApiError::internal("inspection snapshot state is poisoned"))
+    }
+    pub(crate) fn check(&self, supplied: Option<&Info>, fresh: Option<&Info>) -> ApiResult<()> {
+        if supplied.is_some() && !same(supplied, fresh)
+            || self.get()?.is_some_and(|held| !same(held.as_ref(), fresh))
+        {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "the retained inspection changed",
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn publish(&self, info: Option<Info>) -> ApiResult<()> {
+        let mut held = self
+            .0
+            .lock()
+            .map_err(|_| ApiError::internal("inspection snapshot state is poisoned"))?;
+        if held
+            .as_ref()
+            .is_some_and(|old| !same(old.as_ref(), info.as_ref()))
+        {
+            return Err(ApiError::new(
+                ErrorCode::ConflictStaleRevision,
+                "the retained inspection changed",
+            ));
+        }
+        if held.is_none() {
+            *held = Some(info);
+        }
+        Ok(())
+    }
+}
+
 /// Rejects the inspection flag everywhere except the listed stored-content GET readers.
 pub(crate) fn requested(
     route: &orch_api_contract::routes::Route,
@@ -427,6 +483,37 @@ pub(crate) async fn children(
     ctx: Ctx,
     query: orch_api_contract::nodes::NodeChildListQuery,
 ) -> ApiResult<orch_api_contract::common::Page<orch_api_contract::nodes::Node>> {
+    let mut conn = ctx.app.db.acquire().await?;
+    let principal = authorization::principal(&ctx, &mut conn).await?;
+    let (page, inspections) = children_in(&ctx, &query, &mut conn, &principal, None).await?;
+    drop(conn);
+    for info in inspections {
+        let mut child = ctx.for_id(info.id);
+        child.inspection = Some(info);
+        finish(&child).await?;
+    }
+    Ok(orch_api_contract::common::Page {
+        next_cursor: page.page.next_cursor,
+        items: page
+            .page
+            .items
+            .into_iter()
+            .filter_map(orch_api_contract::common::Listed::into_visible)
+            .collect(),
+    })
+}
+
+/// The same native retained-child producer without audit effects during preparation.
+pub(crate) async fn children_in(
+    ctx: &Ctx,
+    query: &orch_api_contract::nodes::NodeChildListQuery,
+    conn: &mut Conn,
+    principal: &Principal,
+    scope: Option<&crate::routes::nodes::projection::Projection<'_>>,
+) -> ApiResult<(
+    crate::routes::nodes::projection::Window<orch_api_contract::nodes::Node>,
+    Vec<Info>,
+)> {
     use orch_api_contract::{
         common::{DEFAULT_LIMIT, MAX_LIMIT, Page},
         nodes::Node,
@@ -442,18 +529,30 @@ pub(crate) async fn children(
                 .map_err(|_| ApiError::invalid("cursor", "is not a cursor of this list"))
         })
         .transpose()?;
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
     let mut entries = Vec::new();
     loop {
         let ids:Vec<Id>=sqlx::query_scalar("SELECT id FROM nodes WHERE parent_id=$1 AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3").bind(parent).bind(after).bind(i64::from(MAX_LIMIT)).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         if ids.is_empty() {
             break;
         }
+        let selected = match scope {
+            Some(scope) => scope.selected(conn, &ids).await?,
+            None => Vec::new(),
+        };
+        let selected_ids: std::collections::HashSet<_> =
+            selected.iter().filter_map(|row| row.object.id).collect();
+        let scoped_principal = match scope {
+            Some(scope) if !selected.is_empty() => Some(scope.principal(conn, &selected).await?),
+            _ => None,
+        };
+        let principal = scoped_principal.as_ref().unwrap_or(principal);
         for id in &ids {
             after = Some(*id);
             let mut child = ctx.for_id(*id);
-            let info = match prepare(&child, &mut conn, &principal).await {
+            if scope.is_some() && !selected_ids.contains(id) {
+                continue;
+            }
+            let info = match prepare(&child, conn, principal).await {
                 Ok(info) => info,
                 Err(error)
                     if matches!(
@@ -467,8 +566,8 @@ pub(crate) async fn children(
             };
             if info.is_none()
                 && authorization::require(
-                    &mut conn,
-                    &principal,
+                    conn,
+                    principal,
                     *id,
                     authorization::VIEW,
                     orch_authz::Act::Use,
@@ -482,15 +581,18 @@ pub(crate) async fn children(
             let read_ids = info.as_ref().map(|i| i.reads.clone()).unwrap_or_default();
             let node = trace::read_scope(
                 &read_ids,
-                crate::routes::nodes::view::one(
-                    &mut conn,
-                    &principal,
-                    *id,
-                    ctx.now,
-                    Policy::default(),
-                ),
+                crate::routes::nodes::view::one(conn, principal, *id, ctx.now, Policy::default()),
             )
             .await?;
+            let node = match (scope, node) {
+                (Some(scope), Some(node)) => {
+                    trace::read_scope(&read_ids, scope.project(conn, principal, vec![node]))
+                        .await?
+                        .into_iter()
+                        .next()
+                }
+                (_, node) => node,
+            };
             let Some(mut node) = node else {
                 continue;
             };
@@ -531,6 +633,9 @@ pub(crate) async fn children(
         }
     }
     let more = entries.len() > limit;
+    let witness = entries
+        .get(limit)
+        .map(|(node, _)| crate::routes::nodes::node_id(node));
     entries.truncate(limit);
     let next_cursor = more
         .then(|| {
@@ -541,9 +646,110 @@ pub(crate) async fn children(
         .flatten()
         .transpose()?;
     let mut items = Vec::with_capacity(entries.len());
+    let mut inspections = Vec::new();
     for (node, child) in entries {
-        finish(&child).await?;
-        items.push(node);
+        if let Some(info) = child.inspection {
+            inspections.push(info);
+        }
+        items.push(orch_api_contract::common::Listed::visible(node));
     }
-    Ok(Page { items, next_cursor })
+    Ok((
+        crate::routes::nodes::projection::Window {
+            page: Page { items, next_cursor },
+            more: witness,
+        },
+        inspections,
+    ))
+}
+
+/// A list retains its own operation identity while reusing each actual child's native
+/// restoration/deletion checks and inspection audit. No child-reader admission is borrowed.
+pub(crate) async fn finish_child(
+    ctx: &Ctx,
+    info: &Info,
+    node: &orch_api_contract::nodes::Node,
+) -> ApiResult<()> {
+    let (mut tx, guard) = transaction_guard::begin(ctx).await?;
+    let scope = crate::routes::nodes::projection::Projection::new(
+        ctx,
+        guard.principal().caller(),
+        "NodeChildList.inspect_deleted",
+    )?;
+    // This audit is an actual current checkpoint. Rebind the original selected
+    // payload's typed sources too: a repaged current list cannot authorize old
+    // environment/binding/README content after the same key lost that Read.
+    let response = scope
+        .finish(&mut tx, std::slice::from_ref(node), &[], None)
+        .await?;
+    response
+        .read_response(ctx, &mut tx, guard.principal().caller(), |_, _| {
+            Box::pin(async { Ok(()) })
+        })
+        .await?
+        .ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::AuthzDenied,
+                "the node inspection is no longer allowed",
+            )
+        })?;
+    let child = ctx.for_id(info.id);
+    let current = prepare(&child, &mut tx, guard.principal()).await?;
+    if current
+        .as_ref()
+        .is_some_and(|current| current.deletion != info.deletion)
+    {
+        return Err(ApiError::new(
+            ErrorCode::ConflictStaleRevision,
+            "the deletion changed during inspection",
+        ));
+    }
+    if current.is_some() {
+        record(&child, &mut tx, guard.principal(), info, guard.now()).await?;
+    }
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    #![allow(clippy::unwrap_used, reason = "test assertions fail by panicking")]
+    use super::*;
+    fn info() -> Info {
+        Info {
+            kind: "document".into(),
+            id: Id::from_u128(1),
+            deletion: Some(Id::from_u128(2)),
+            reads: vec![Id::from_u128(1), Id::from_u128(3)],
+            banner: DeletedInspection {
+                deleted_at: Time::new(chrono::DateTime::UNIX_EPOCH),
+                deleted_by: None,
+                purge_at: Time::new(chrono::DateTime::UNIX_EPOCH),
+                readonly: true,
+            },
+        }
+    }
+    #[test]
+    fn successful_snapshot_keeps_exact_deletion_and_read_scope_without_auto_upgrade() {
+        let state = Snapshot::default();
+        let original = info();
+        assert!(state.get().unwrap().is_none());
+        state.publish(Some(original.clone())).unwrap();
+        state.check(None, Some(&original)).unwrap();
+        assert!(state.check(None, None).is_err());
+        for field in 0..4 {
+            let mut different = original.clone();
+            match field {
+                0 => different.id = Id::from_u128(9),
+                1 => different.deletion = Some(Id::from_u128(9)),
+                2 => different.reads.push(Id::from_u128(9)),
+                _ => different.kind = "document_container".into(),
+            }
+            assert!(state.check(None, Some(&different)).is_err());
+            assert!(state.publish(Some(different)).is_err());
+        }
+        let live = Snapshot::default();
+        live.publish(None).unwrap();
+        assert!(live.check(None, Some(&original)).is_err());
+        assert!(live.publish(Some(original)).is_err());
+    }
 }

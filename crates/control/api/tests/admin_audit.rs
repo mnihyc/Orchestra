@@ -65,7 +65,9 @@ async fn some_acts(world: &World, c: &Cast) {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account");
 }
 
 async fn trail(world: &World, by: &Who, query: &AdminAuditListQuery) -> Page<AuditEntry> {

@@ -32,6 +32,7 @@ import { KeptLayers } from '@/features/resources/hosts/KeptLayers';
 import { DriverFeatures } from '@/features/resources/hosts/DriverFeatures';
 import { MountsHere } from '@/features/resources/mounts/Here';
 import { MachinePolicyTab } from '@/features/resources/machines/Policy';
+import { MachineGatewayStatus } from '@/features/gateways/MachineGatewayStatus';
 import { EnvironmentDirectoriesHere } from '@/features/resources/environments/DataSources';
 import { Hint } from '@/features/help/Hint';
 import { useHelpOpener } from '@/features/help/open';
@@ -55,7 +56,7 @@ import { Meter } from '@/ui/Meter';
 import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { SettingRow } from '@/ui/SettingRow';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { StatusDot } from '@/ui/StatusDot';
 import { type Column, Table } from '@/ui/Table';
 import { linkClasses } from '@/ui/link';
@@ -67,10 +68,10 @@ export { HOST_TABS, type HostTab };
 /** The sentinel of the "when it is full" choice that follows the system again: a radio group cannot hold nothing. */
 const FOLLOW_SYSTEM = 'system';
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -228,6 +229,7 @@ function Overview({ host }: { host: Host }) {
           ]}
         />
       </Section>
+      <MachineGatewayStatus machineId={host.machine.id} online={host.machine.online} />
       <ResourceDetails><Facts compact rows={[{ name: t('hosts.overview.address'), value: host.address }]} /><Capacity host={host} /><Drivers host={host} /></ResourceDetails>
     </div>
   );
@@ -375,7 +377,7 @@ export function HostScreen({ hostId, tab, onTab }: HostScreenProps) {
   const back = useResourceHeading('hosts', Server, query.data?.name ?? t(query.isPending ? 'common.loading' : 'access.area.host'), query.data?.id);
   const acts = useHostActs({ onSettings: () => onTab('settings'), afterDelete: () => void navigate({ to: '/resources/hosts' }) });
 
-  if (query.isPending) return <Skeletons />;
+  if (query.isPending) return <Skeletons read={query} />;
   if (query.isError) return query.error instanceof ApiError && query.error.code.startsWith('ports.')
     ? <div className="p-6"><PortFault error={query.error} onRefresh={() => void query.refetch()} /></div>
     : <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;

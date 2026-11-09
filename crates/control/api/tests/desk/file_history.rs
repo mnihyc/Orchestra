@@ -33,6 +33,8 @@ async fn a_file_from_the_agents_workspace_is_downloaded_whole_and_its_history_is
         .send()
         .await
         .ok()
+        .into_full()
+        .unwrap()
         .base
         .id;
     let now = s.rig.world.now();
@@ -113,7 +115,7 @@ async fn a_file_from_the_agents_workspace_is_downloaded_whole_and_its_history_is
     let call_ref = new_id().to_string();
     tokio::time::timeout(rig::PATIENCE, s.rig.engine.answer_tool_call(&CallContext {
         machine: s.rig.machine_id, thread, turn, call_ref: call_ref.clone(), attempt: None,
-        tool: OrchTool::EditDocument, arguments: json!({ "command": "attach", "path": format!("id:{document}"), "file": "out/result.bin" }),
+        tool: OrchTool::EditDocument, arguments: json!({ "command": "attach", "path": format!("id:{document}"), "file": "out/result.bin", "place": false }),
     })).await.unwrap().unwrap();
     rig::eventually("the attachment tool result", || async {
         s.rig.seen.of_kind(CommandKind::OrchToolResult).iter().any(|command| matches!(command,
@@ -240,7 +242,9 @@ async fn a_persons_upload_replacement_and_removal_use_the_same_named_history_wit
         .bytes(b"a,b\n1,2\n")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     let replacement = d
         .world
         .app
@@ -253,7 +257,9 @@ async fn a_persons_upload_replacement_and_removal_use_the_same_named_history_wit
         .bytes(b"a,b\n3,4\n")
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this native creation control requires its full response");
     assert_eq!(replacement.id, first.id);
     let first_span = d
         .world

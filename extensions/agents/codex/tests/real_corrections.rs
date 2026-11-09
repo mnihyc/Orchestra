@@ -1,4 +1,4 @@
-//! Stop ends the current turn's terminals, and a vendor refusal ends the turn on its first notice.
+//! Explicitly schema-declared synthetic controls retain ownership; unoffered pinned controls are never probed.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -215,13 +215,27 @@ impl Scripted {
             }
         }));
         state.set(Arc::clone(&fake.state)).ok().unwrap();
+        // These positive control fixtures declare a synthetic future build. Neither shipped pin offers these methods.
+        fake.state.set_version("0.170.0");
         let (sink, events) = EventSink::channel();
         let home = tempfile::tempdir().unwrap();
-        let mut adapter = CodexAdapter::with_launcher(fake.clone());
+        let mut schema: Json =
+            serde_json::from_str(include_str!("../schema/0.167.0/app-server.schema.json")).unwrap();
+        schema["definitions"]["ClientRequest"]["oneOf"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({"properties":{"method":{"enum":["thread/backgroundTerminals/list"]}}}),
+                json!({"properties":{"method":{"enum":["thread/backgroundTerminals/terminate"]}}}),
+            ]);
+        let mut adapter = CodexAdapter::with_launcher(fake.clone())
+            .with_native_schema("0.170.0".into(), schema)
+            .unwrap();
         adapter
             .start(
                 AgentStart {
                     provider_id: new_id(),
+                    provider_kind: None,
                     agent_id: new_id(),
                     harness_kind: "codex".into(),
                     profile: AgentProfile::default(),
@@ -290,6 +304,8 @@ impl Scripted {
         self.turns += 1;
         self.adapter
             .start_turn(TurnStart {
+                native_model: None,
+                native_wake: None,
                 plan: false,
                 thread_id: self.thread,
                 turn_id: id,

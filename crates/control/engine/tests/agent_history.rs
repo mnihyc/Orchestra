@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use common::{World, queued, turn_ended};
+use common::{World, eventually, queued, turn_ended};
 use orch_agent_contract::history::NativeHistoryFact;
 use orch_authz::Caller;
 use orch_blob_contract::store::BlobStore;
@@ -85,6 +85,18 @@ async fn completed(world: &World) -> (Id, Id) {
     (thread, world.segment_of(thread).await)
 }
 
+/// Inventory may yield to an already running pass; these refusal controls need its actual result.
+async fn inventory_owned(world: &World, segment: Id) {
+    eventually("native history ownership to be measured", || async {
+        world.engine().inventory_agent_history().await.unwrap();
+        rows::get(&mut world.pool.acquire().await.unwrap(), segment)
+            .await
+            .unwrap()
+            .is_some_and(|history| history.owned && history.started_by_orch)
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn batched_native_observations_preserve_aliases_stale_identity_and_failed_measurement_facts()
 {
@@ -139,7 +151,14 @@ async fn batched_native_observations_preserve_aliases_stale_identity_and_failed_
     )
     .await
     .unwrap();
-    let observed: Vec<(Id, Option<i64>, Option<chrono::DateTime<chrono::Utc>>, i64, Option<String>)> =
+    type StoredHistoryObservation = (
+        Id,
+        Option<i64>,
+        Option<chrono::DateTime<chrono::Utc>>,
+        i64,
+        Option<String>,
+    );
+    let observed: Vec<StoredHistoryObservation> =
         sqlx::query_as("SELECT id,agent_history_bytes,agent_history_removed_at,agent_history_measured_revision,agent_history_error
             FROM segments WHERE id=ANY($1)")
             .bind([segment, alias]).fetch_all(&mut *conn).await.unwrap();
@@ -226,9 +245,15 @@ async fn an_unsaid_handoff_follows_a_resumed_alias_and_only_delivered_notices_ar
     .await
     .unwrap();
     assert!(
-        orch_db::queries::threads::end_segment(&mut tx, segment, "switch", world.clock.now(), seq)
-            .await
-            .unwrap()
+        orch_db::queries::threads::end_segment(
+            &mut tx,
+            segment,
+            "switched",
+            world.clock.now(),
+            seq
+        )
+        .await
+        .unwrap()
     );
     sqlx::query("INSERT INTO segments(id,thread_id,continuation_id,ordinal,agent_id,provider_id,environment_id,machine_id,
             env_generation,arrangement,executor,tool_set,credential_path,native_session_ref,started_by,started_at,seq_updated)
@@ -383,13 +408,12 @@ async fn a_successful_close_queues_a_stored_measurement_even_when_the_clock_does
         assert_eq!(dirty[0].measure_revision, revision);
         drop(conn);
         if revision == 3 {
-            world.refuse(
-                K::AgentHistoryManage,
-                vec![CommandError::new(
+            world.machine.handler.on(K::AgentHistoryManage, |_| {
+                Err(CommandError::new(
                     ErrorCode::Unsupported,
                     "This home does not support native history inventory",
-                )],
-            );
+                ))
+            });
         }
         world
             .engine()
@@ -446,7 +470,7 @@ async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_histor
     world.engine().retain_agent_history().await.unwrap();
     assert!(removed.lock().unwrap().is_empty());
     assert!(
-        rows::get(&mut *world.pool.acquire().await.unwrap(), segment)
+        rows::get(&mut world.pool.acquire().await.unwrap(), segment)
             .await
             .unwrap()
             .unwrap()
@@ -458,7 +482,7 @@ async fn the_idle_setting_removes_at_seven_days_and_zero_keeps_the_native_histor
         .await;
     world.engine().retain_agent_history().await.unwrap();
     assert_eq!(removed.lock().unwrap().len(), 1);
-    let history = rows::get(&mut *world.pool.acquire().await.unwrap(), segment)
+    let history = rows::get(&mut world.pool.acquire().await.unwrap(), segment)
         .await
         .unwrap()
         .unwrap();
@@ -521,7 +545,7 @@ async fn an_observation_cannot_remove_history_after_a_new_turn_won_the_thread_lo
     serve_history(&world);
     let (thread, segment) = completed(&world).await;
     world.engine().inventory_agent_history().await.unwrap();
-    let observed = rows::get(&mut *world.pool.acquire().await.unwrap(), segment)
+    let observed = rows::get(&mut world.pool.acquire().await.unwrap(), segment)
         .await
         .unwrap()
         .unwrap();
@@ -534,7 +558,7 @@ async fn an_observation_cannot_remove_history_after_a_new_turn_won_the_thread_lo
     );
     tx.commit().await.unwrap();
     assert!(
-        !rows::removing(&mut *world.pool.acquire().await.unwrap(), thread)
+        !rows::removing(&mut world.pool.acquire().await.unwrap(), thread)
             .await
             .unwrap()
     );
@@ -585,7 +609,7 @@ async fn measuring_an_unavailable_harness_never_starts_it_or_runs_its_attach_com
     world.engine().inventory_agent_history().await.unwrap();
     assert_eq!(world.ran(K::AgentStart), starts);
     assert_eq!(world.ran(K::UnitAfterUp), hooks);
-    let history = rows::get(&mut *world.pool.acquire().await.unwrap(), segment)
+    let history = rows::get(&mut world.pool.acquire().await.unwrap(), segment)
         .await
         .unwrap()
         .unwrap();
@@ -648,7 +672,7 @@ async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal(
         let world = World::new().await;
         serve_history(&world);
         let (thread, segment) = completed(&world).await;
-        world.engine().inventory_agent_history().await.unwrap();
+        inventory_owned(&world, segment).await;
         let mut conn = world.pool.acquire().await.unwrap();
         let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
         sqlx::query("INSERT INTO approvals(id,kind,thread_id,node_id,title,request,required_permission) VALUES($1,'harness',$2,$2,'Waiting',$3,'')")
@@ -684,7 +708,7 @@ async fn waiting_and_held_inputs_and_pending_plans_and_approvals_refuse_removal(
     world.wait_state(thread, "idle").await;
     world.wait_followed_up(thread).await;
     assert!(world.sync(thread).await.thread.queue.held);
-    world.engine().inventory_agent_history().await.unwrap();
+    inventory_owned(&world, segment).await;
     assert_eq!(world.input_state(input.input.id).await.0, "pending");
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
@@ -778,19 +802,21 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
         (None, None, Some(json!({"kind":"prefix","value":created}))),
         (None, None, Some(json!({"kind":"resumed","value":resumed}))),
     ] {
+        let mut tx = world.pool.begin().await.unwrap();
         sqlx::query("UPDATE thread_continuations SET native_source=NULL,native_prefix=$2,native_creation=$3,
             native_creation_result=$4,open_result=$5 WHERE thread_id=$1")
             .bind(thread).bind(&prefix).bind(creation).bind(created).bind(prepared)
-            .execute(&mut *conn).await.unwrap();
+            .execute(&mut *tx).await.unwrap();
         assert_eq!(
-            rows::refusal(&mut conn, &history).await.unwrap(),
+            rows::refusal(&mut tx, &history).await.unwrap(),
             Some("history.in_use")
         );
         assert!(
-            !rows::claim(&mut conn, &history, new_id(), None, world.clock.now())
+            !rows::claim(&mut tx, &history, new_id(), None, world.clock.now())
                 .await
                 .unwrap()
         );
+        tx.rollback().await.unwrap();
     }
     drop(conn);
     world.shutdown().await;
@@ -798,16 +824,87 @@ async fn retained_native_creation_and_open_receipts_protect_their_exact_child_hi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
-    let world = World::new().await;
-    serve_history(&world);
-    let (_thread, segment) = completed(&world).await;
+    use orch_agent_contract::discovery::NativeSession;
+    use orch_agent_contract::history::{Fidelity, ReportBuilder};
+    use orch_engine::adoption::Adoption;
+    use orch_link_contract::commands::{AgentDiscoverSessionsResult, AgentReadSessionResult};
+
+    let world = World::observed().await;
+    let removed = serve_history(&world);
+    serve_native_generations(&world, false);
+    let native = "external-native-history";
+    let mut descriptor = common::descriptor();
+    descriptor["capabilities"]["discover_sessions"] = json!(true);
+    world.declares(descriptor).await;
+    world
+        .machine
+        .handler
+        .on(K::AgentDiscoverSessions, move |_| {
+            Ok(CommandResult::AgentDiscoverSessions(
+                AgentDiscoverSessionsResult {
+                    sessions: vec![NativeSession {
+                        native_session_ref: native.into(),
+                        title: Some("Adopted conversation".into()),
+                        cwd: Some("/workspace".into()),
+                        updated_at: None,
+                        adopted_thread_id: None,
+                    }],
+                },
+            ))
+        });
+    world.machine.handler.on(K::AgentReadSession, |_| {
+        Ok(CommandResult::AgentReadSession(AgentReadSessionResult {
+            model: Some(common::MODEL.into()),
+            effort: None,
+            turns: 0,
+            entries: 0,
+            record: None,
+            report: ReportBuilder::new().finish(Fidelity::Lossless),
+        }))
+    });
+    orch_db::queries::access::testing::add_entry(
+        &mut world.pool.acquire().await.unwrap(),
+        &orch_db::queries::access::PageKey::new("agent", world.agent, "live"),
+        "any",
+        "agent.use",
+        ("user", Some(world.ada), None),
+        None,
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let adopted = world
+        .engine()
+        .adopt_thread(
+            &Caller::session(world.ada),
+            Adoption {
+                agent_access: None,
+                topic: world.topic,
+                provider: world.provider,
+                agent: world.agent,
+                native_session_ref: native.into(),
+                environment: Some(world.environment),
+                name: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (thread, segment) = (adopted.thread, adopted.segment);
+    world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Continue the adopted conversation"),
+        )
+        .await
+        .unwrap();
+    world
+        .run_turn(thread, 0, "The adopted conversation continues")
+        .await;
+    world.wait_state(thread, "idle").await;
+    world.wait_followed_up(thread).await;
     let mut conn = world.pool.acquire().await.unwrap();
-    orch_db::queries::adoption::mark_adopted(&mut conn, segment)
-        .await
-        .unwrap();
-    orch_db::queries::adoption::mark_opened(&mut conn, segment)
-        .await
-        .unwrap();
     assert!(
         !rows::get(&mut conn, segment)
             .await
@@ -819,12 +916,20 @@ async fn adopted_native_history_is_excluded_even_in_a_managed_provider_home() {
     world.engine().inventory_agent_history().await.unwrap();
     let mut conn = world.pool.acquire().await.unwrap();
     let history = rows::get(&mut conn, segment).await.unwrap().unwrap();
+    assert_eq!(history.native_session_ref, native);
     assert_eq!(history.error.as_deref(), Some("history.not_owned"));
     assert!(!history.owned && history.removed_at.is_none());
     assert_eq!(
         rows::refusal(&mut conn, &history).await.unwrap(),
         Some("history.not_owned")
     );
+    assert!(removed.lock().unwrap().is_empty());
+    for (_, body) in world.commands.issued_bodies("agent.history.manage") {
+        let body: orch_link_contract::commands::AgentHistoryManage =
+            serde_json::from_value(body).unwrap();
+        assert!(!body.remove);
+        assert!(body.sources.iter().all(|source| !source.started_by_orch));
+    }
     drop(conn);
     world.shutdown().await;
 }
@@ -930,17 +1035,69 @@ async fn recovery(import_neutral: bool, missing: bool, choice: &str) {
         )
         .await
         .unwrap();
+    let held = if file {
+        let original = world.turn_starts(thread)[0].turn_id;
+        let mut held = None;
+        common::eventually(
+            "the recovery start to reach the held native handler",
+            || {
+                held = world
+                    .commands
+                    .issued_commands(K::TurnStart.as_str())
+                    .into_iter()
+                    .chain(world.commands.issued_commands(K::TurnStartFenced.as_str()))
+                    .find_map(|(_, command)| {
+                        if world.machine.handler.runs_of(command.id) == 0 {
+                            return None;
+                        }
+                        let start = match command.command().unwrap() {
+                            Command::TurnStart(start) => start,
+                            Command::TurnStartFenced(start) => *start.turn,
+                            _ => return None,
+                        };
+                        (start.thread_id == thread && start.turn_id != original).then_some(start)
+                    });
+                let reached = held.is_some();
+                async move { reached }
+            },
+        )
+        .await;
+        let held = held.unwrap();
+        assert!(
+            !held.text.contains("Obsolete recovery context"),
+            "{}",
+            held.text
+        );
+        assert!(
+            held.text.contains("Remember the copper key"),
+            "{}",
+            held.text
+        );
+        assert!(
+            held.text.contains(&format!(".orch/handoff/{thread}.md")),
+            "{}",
+            held.text
+        );
+        assert!(held.text.contains("Continue using what you remember"));
+        assert_eq!(world.count("SELECT count(*) FROM items WHERE thread_id=$1 AND payload->>'marker'='agent_history'",thread).await, 0,
+            "an opened native session has not yet received its file handoff");
+        world.machine.handler.release();
+        Some(held)
+    } else {
+        None
+    };
     let next = world.turn_start(thread, 1).await;
+    if let Some(held) = held {
+        assert_eq!(
+            next, held,
+            "the acknowledged handoff is exactly the held command"
+        );
+    }
     assert!(
         !next.text.contains("Obsolete recovery context"),
         "{}",
         next.text
     );
-    if file {
-        assert_eq!(world.count("SELECT count(*) FROM items WHERE thread_id=$1 AND payload->>'marker'='agent_history'",thread).await, 0,
-            "an opened native session has not yet received its file handoff");
-        world.machine.handler.release();
-    }
     let opens = world.commands.issued_bodies("session.open");
     let opened = opens
         .iter()

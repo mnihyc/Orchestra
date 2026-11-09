@@ -10,7 +10,9 @@ mod places;
 mod realtime_support;
 mod support;
 
+use crate::support::FullDiscussionCreationReply as _;
 use desk::{paragraph, put, remove, rewrite};
+use futures::FutureExt as _;
 use orch_api_contract::documents::{
     DocumentDelete, DocumentDiscussionCreate, DocumentDiscussionCreateBody, DocumentOp,
     DocumentOpsCreate, DocumentOpsCreateBody, DocumentOpsCreateReply, DocumentSyncGet,
@@ -55,6 +57,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
             .base
             .id
     }
@@ -77,6 +81,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .expect("the browser session receives the full document reply")
     }
 
     /// A person with a role on the topic, and their token.
@@ -338,6 +344,7 @@ async fn a_discussion_arrives_whole_with_the_document_whenever_anything_in_it_ch
             client_id: new_id().to_string(),
         })
         .send()
+        .map(|reply| reply.full_discussion())
         .await
         .ok();
     let frame = next_of(&mut reader, "sync").await;
@@ -404,7 +411,7 @@ async fn a_description_written_under_the_title_reaches_every_open_copy_with_the_
     );
     let shown = &frame["data"]["document"];
     assert_eq!(shown["description"], "What ships when\nand who decides");
-    assert_eq!(shown["description_source"], "user");
+    assert!(shown.get("description_source").is_none());
     assert_eq!(shown["description_line"], "What ships when");
 }
 

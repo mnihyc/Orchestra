@@ -1,0 +1,63 @@
+{
+  "OpenAI": {
+    "upstreams": [
+      {
+        "protocol": "openai-responses",
+        "base_url": "https://api.openai.com/v1"
+      }
+    ],
+    "credential_hints": [
+      {
+        "prefix": "sk-admin-",
+        "role": "admin",
+        "field": "admin_key"
+      }
+    ]
+  },
+  "Anthropic": {
+    "upstreams": [
+      {
+        "protocol": "anthropic-messages",
+        "base_url": "https://api.anthropic.com"
+      }
+    ],
+    "credential_hints": [
+      {
+        "prefix": "sk-ant-admin01-",
+        "role": "admin",
+        "field": "admin_key"
+      }
+    ]
+  },
+  "OpenRouter": {
+    "upstreams": [
+      {
+        "protocol": "openai-chat",
+        "base_url": "https://openrouter.ai/api/v1"
+      },
+      {
+        "protocol": "anthropic-messages",
+        "base_url": "https://openrouter.ai/api"
+      }
+    ],
+    "credential_hints": [
+      {
+        "prefix": "sk-or-v1-",
+        "role": "model"
+      }
+    ]
+  },
+  "DeepSeek": {
+    "note": "Serves both formats on the same key.",
+    "upstreams": [
+      {
+        "protocol": "openai-responses",
+        "base_url": "https://api.deepseek.com"
+      },
+      {
+        "protocol": "anthropic-messages",
+        "base_url": "https://api.deepseek.com/anthropic"
+      }
+    ]
+  }
+}

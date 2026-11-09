@@ -264,9 +264,9 @@ pub(super) fn check(cancel: &AtomicBool) -> io::Result<()> {
     }
 }
 
-pub(super) struct CancelOnDrop(pub(super) Option<Arc<AtomicBool>>);
+pub(crate) struct CancelOnDrop(pub(crate) Option<Arc<AtomicBool>>);
 impl CancelOnDrop {
-    pub(super) fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.0 = None;
     }
 }

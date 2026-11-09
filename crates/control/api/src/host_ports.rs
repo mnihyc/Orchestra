@@ -92,6 +92,12 @@ pub async fn ask(
             &HostPortsCheck { ports, revision },
         )
         .await?;
+    gateway_address(app, machine, &mut answer).await;
+    app.host_ports.remember(host, answer.proposal.clone());
+    Ok(answer)
+}
+
+async fn gateway_address(app: &App, machine: Id, answer: &mut HostPortsCheckResult) {
     if answer.proposal.values.incoming_address.is_none() {
         let seen = match app.db.acquire().await {
             Ok(mut conn) => orch_db::queries::resources::machine(&mut conn, machine)
@@ -106,8 +112,6 @@ pub async fn ask(
             SEEN_SOURCE.clone_into(&mut answer.proposal.sources.incoming_address);
         }
     }
-    app.host_ports.remember(host, answer.proposal.clone());
-    Ok(answer)
 }
 
 /// How long a publication's tickets hold. The system signs them anew each time it publishes, which it does again
@@ -514,7 +518,8 @@ async fn take_again(
 
 /// Asks the node of `host` for a proposal in the background, once at a time for a host, when this application has
 /// none; a node that does not answer leaves none, and the next reader asks again.
-pub fn ask_in_background(app: &App, host: Id, machine: Id) {
+pub fn ask_in_background(ctx: &crate::registry::Ctx, host: Id, machine: Id) {
+    let app = &ctx.app;
     if !app.host_ports.begin(host) {
         return;
     }
@@ -522,13 +527,123 @@ pub fn ask_in_background(app: &App, host: Id, machine: Id) {
         proposals: app.host_ports.clone(),
         host,
     };
-    let app = app.clone();
+    let ctx = ctx.clone();
     tokio::spawn(async move {
         let _finished = finished;
-        if let Err(error) = ask(&app, host, machine, None, 0).await {
+        if let Err(error) = ask_for_reader(&ctx, host, machine).await {
             tracing::debug!(%error, %host, "the host's node gave no proposal for its ports");
         }
     });
+}
+
+async fn ask_for_reader(
+    ctx: &crate::registry::Ctx,
+    host: Id,
+    machine: Id,
+) -> crate::middleware::requests::ApiResult<()> {
+    use crate::middleware::{
+        authentication::Via,
+        requests::ApiError,
+        transaction_guard::{self, HttpIdentityMode},
+    };
+    use orch_api_contract::common::ErrorCode;
+    use orch_engine::commands::{CommandAuthority, HostPortsProbe, Outgoing};
+    let app = &ctx.app;
+    let command = Outgoing::new(
+        orch_types::new_id(),
+        machine,
+        SerialKey::Machine,
+        &HostPortsCheck {
+            ports: None,
+            revision: 0,
+        },
+    )
+    .map_err(ApiError::internal)?;
+    let mut tx = app.db.begin().await?;
+    let identity =
+        transaction_guard::current_http_identity(ctx, &mut tx, HttpIdentityMode::Read).await?;
+    transaction_guard::guard_user(&identity.user)?;
+    let session = match &identity.user.via {
+        Via::Session { session_id } => Some(*session_id),
+        Via::Token { .. } | Via::OwnerRead { .. } => None,
+    };
+    let origin = HostPortsProbe::capture(
+        &mut tx,
+        &identity.caller,
+        session,
+        identity.expires_at,
+        host,
+        &command,
+        app.clock.as_ref(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let raw = crate::key_operations::native::http_origin::capture_operation(
+        ctx,
+        &mut tx,
+        origin.origin(),
+    )
+    .await?;
+    let authority = crate::key_operations::native::http_origin::bind(
+        &raw,
+        &command,
+        CommandAuthority::host_ports_probe(origin.clone()),
+    )?;
+    identity.check_deadline(app)?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    identity.check_deadline(app)?;
+    let dispatcher = app.link.dispatcher();
+    dispatcher
+        .issue_stored_before(
+            crate::dispatch::StoredCommand {
+                id: Some(command.id),
+                machine: command.machine,
+                kind: command.kind.as_str().into(),
+                key: command.key.wire(),
+                deadline: command.deadline,
+                body: command.body.clone(),
+                authority: Some(authority.clone()),
+            },
+            Box::new(|| {
+                identity
+                    .check_deadline(app)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+            }),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+    let mut answer = dispatcher
+        .wait_for::<HostPortsCheck>(command.id)
+        .await
+        .map_err(ApiError::internal)?;
+    gateway_address(app, machine, &mut answer).await;
+    let mut tx = app.db.begin().await?;
+    let (delivered, raw) =
+        crate::key_operations::native::http_origin::delivery(ctx, &mut tx, &authority, command.id)
+            .await?;
+    let Some((caller, until)) = delivered
+        .scope(origin.current(&mut tx, app.clock.as_ref()))
+        .await
+        .map_err(ApiError::engine)?
+    else {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the Host proposal reader is no longer current",
+        ));
+    };
+    if !caller.key_deadline_allows(app.clock.as_ref())
+        || until.is_some_and(|end| end.get() <= app.clock.now())
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the Host proposal reader has ended",
+        ));
+    }
+    crate::key_operations::native::http_origin::check(ctx, &raw)?;
+    app.host_ports.remember(host, answer.proposal);
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    crate::key_operations::native::http_origin::check(ctx, &raw)?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -8,7 +8,10 @@ async fn a_full_fork_keeps_the_identified_native_turn_prefix_and_its_original_li
     let mut rig = Rig::start("input-prefix")
         .await
         .ok_or("the real pinned native harness is required")?;
-    assert_eq!(rig.boot().await.harness_version, "0.165.0");
+    assert_eq!(
+        rig.boot().await.harness_version,
+        common::expected_native_version()
+    );
     let source = new_id();
     let initial = rig.spec(source, SessionMode::New, None);
     let original = rig.adapter.open_session(initial).await?;

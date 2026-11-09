@@ -34,7 +34,7 @@ interface Watch {
   stop: () => void;
   /** How many documents the place's row said it holds when they were last asked for. */
   count: number;
-  /** The stamp of the place's row then: a document made, renamed, moved or deleted moves it. */
+  /** The document namespace stamp then: making, renaming, moving or deleting a document moves it. */
   seq: number;
   /** How many views watch it. */
   users: number;
@@ -103,7 +103,7 @@ function unwatch(nodeId: string): void {
   put(nodeId, null);
 }
 
-/** The place says it holds another number of documents than when they were read, or its row was stamped since (a
+/** The place says it holds another number of documents than when they were read, or its namespace was stamped since (a
  * document beside it was renamed): they are read again. */
 function recount(nodeId: string, count: number, seq: number): void {
   const held = watched.get(nodeId);
@@ -125,7 +125,7 @@ export function retryDocs(nodeId: string): void {
 
 /**
  * Watches the documents beside the given places for as long as the calling view is shown. `wanted` names
- * each place with the number of documents its row says it holds and the stamp of that row, as `id:count:seq`,
+ * each place with the number of documents its row says it holds and its document namespace stamp, as `id:count:seq`,
  * sorted, so that the same places as they were are the same text from one drawing to the next.
  */
 export function useTreeDocsOf(wanted: string): DocsByNode {

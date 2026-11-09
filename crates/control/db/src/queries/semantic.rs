@@ -34,6 +34,12 @@ pub async fn root_orgs(conn: &mut Conn) -> Result<Vec<(Id, String)>, DbError> {
     .await?)
 }
 
+/// The same live-root selector for one actual administrative subject, bounded before reading its name.
+pub async fn root_org(conn: &mut Conn, org: Id) -> Result<Option<(Id, String)>, DbError> {
+    Ok(sqlx::query_as("SELECT id,name FROM nodes WHERE id=$1 AND kind='org' AND parent_id IS NULL AND deleted_at IS NULL")
+        .bind(org).fetch_optional(conn).await?)
+}
+
 /// The root org of a node, while the node is live.
 pub async fn org_of(conn: &mut Conn, node: Id) -> Result<Option<Id>, DbError> {
     Ok(
@@ -249,6 +255,8 @@ pub struct GenerationRow {
     pub provider_fingerprint: Vec<u8>,
     /// Who named this generation's model; none after that person was removed.
     pub writer_id: Option<Id>,
+    /// Private native administrative request that produced or explicitly retained it.
+    pub administration_id: Option<Id>,
     /// The model, by the name that is sent.
     pub model_name: String,
     /// The length asked of the model; `None` for its own.
@@ -272,7 +280,7 @@ pub struct GenerationRow {
 }
 
 const GENERATION_COLUMNS: &str =
-    "id, org_id, provider_id, provider_fingerprint, writer_id, model_name, asked_dimensions, dimensions, query_prefix,
+    "id, org_id, provider_id, provider_fingerprint, writer_id, administration_id, model_name, asked_dimensions, dimensions, query_prefix,
     document_prefix, chunking, probe, state, created_at, activated_at";
 
 /// The org's generations that are not retired: the one that answers and the one being built, if any.
@@ -299,6 +307,8 @@ pub struct NewGeneration<'a> {
     pub provider_fingerprint: &'a [u8],
     /// Who named its model and answers for its use.
     pub writer_id: Option<Id>,
+    /// Original native administrative request, if this generation belongs to one.
+    pub administration_id: Option<Id>,
     /// The model.
     pub model_name: &'a str,
     /// The length asked for.
@@ -319,8 +329,8 @@ pub struct NewGeneration<'a> {
 pub async fn insert_generation(conn: &mut Conn, new: &NewGeneration<'_>) -> Result<(), DbError> {
     sqlx::query(
         "INSERT INTO search_generations (id, org_id, provider_id, model_name, asked_dimensions, query_prefix,
-                document_prefix, chunking, state, created_at, activated_at, provider_fingerprint, writer_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $9 = 'active' THEN $10 END, $11, $12)",
+                document_prefix, chunking, state, created_at, activated_at, provider_fingerprint, writer_id, administration_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CASE WHEN $9 = 'active' THEN $10 END, $11, $12, $13)",
     )
     .bind(new.id)
     .bind(new.org_id)
@@ -334,6 +344,7 @@ pub async fn insert_generation(conn: &mut Conn, new: &NewGeneration<'_>) -> Resu
     .bind(new.at)
     .bind(new.provider_fingerprint)
     .bind(new.writer_id)
+    .bind(new.administration_id)
     .execute(conn)
     .await?;
     Ok(())
@@ -439,6 +450,19 @@ pub async fn make_index(conn: &mut Conn, generation: Id, dimensions: i32) -> Res
     )))
     .execute(conn)
     .await?;
+    Ok(())
+}
+
+/// The native DDL serialization footprint, acquired before a generation writer's first effect.
+pub async fn lock_vector_tables(conn: &mut Conn) -> Result<(), DbError> {
+    let present: bool = sqlx::query_scalar("SELECT to_regclass('search_vectors') IS NOT NULL")
+        .fetch_one(&mut *conn)
+        .await?;
+    if present {
+        sqlx::query("LOCK TABLE search_vectors,search_item_vectors IN ACCESS EXCLUSIVE MODE")
+            .execute(conn)
+            .await?;
+    }
     Ok(())
 }
 
@@ -557,7 +581,7 @@ pub async fn changed_sources(
            SELECT 'conversation', t.node_id, t.next_seq, COALESCE(t.last_activity_at, n.updated_at), n.name
              FROM threads t JOIN nodes n ON n.id = t.node_id
              LEFT JOIN search_sources s ON s.kind = 'conversation' AND s.source_id = t.node_id AND s.generation_id = $3
-            WHERE n.org_id = $1 AND t.side_of IS NULL AND t.state NOT IN ('starting','running','waiting_approval')
+            WHERE n.org_id = $1 AND NOT n.unlisted AND t.side_of IS NULL AND t.state NOT IN ('starting','running','waiting_approval')
               AND (s.source_id IS NULL OR t.next_seq <> s.marker OR n.name <> s.title)
               AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id = ANY(n.path) AND gone.deleted_at IS NOT NULL)
            UNION ALL
@@ -702,7 +726,7 @@ pub async fn save_cut(
     stored: i64,
 ) -> Result<Vec<ChunkRow>, DbError> {
     let node: Option<Id>=sqlx::query_scalar("SELECT CASE $1::text WHEN 'document' THEN (SELECT node_id FROM documents WHERE id=$2)
-       WHEN 'conversation' THEN $2::uuid ELSE (SELECT COALESCE(node_id,org_id) FROM chats WHERE id=$2) END")
+       WHEN 'conversation' THEN $2::uuid ELSE (SELECT COALESCE(node_id,home_id,org_id) FROM chats WHERE id=$2) END")
        .bind(&source.kind).bind(source.id).fetch_one(&mut *conn).await?;
     let node = node.unwrap_or(org);
     let tokens: i64 = pieces.iter().map(|piece| i64::from(piece.tokens)).sum();

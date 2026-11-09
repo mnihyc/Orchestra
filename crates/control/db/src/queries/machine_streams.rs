@@ -26,6 +26,22 @@ pub async fn bind_segment(
         == 1)
 }
 
+/// The immutable harness source recorded for this actual thread and segment, when bound.
+pub async fn segment_machine(
+    conn: &mut Conn,
+    thread: Id,
+    segment: Id,
+) -> Result<Option<Id>, DbError> {
+    Ok(sqlx::query_scalar::<_, Option<Id>>(
+        "SELECT machine_id FROM segments WHERE thread_id=$1 AND id=$2",
+    )
+    .bind(thread)
+    .bind(segment)
+    .fetch_optional(conn)
+    .await?
+    .flatten())
+}
+
 /// Whether this machine is the recorded source of this segment of this thread.
 pub async fn owns_segment(
     conn: &mut Conn,

@@ -136,7 +136,7 @@ export function Hosts() {
         }
       >
         {hosts.isPending ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows read={hosts} rows={3} />
         ) : hosts.isError ? (
           <ErrorState error={hosts.error} retrying={hosts.isRefetching} onRetry={() => void hosts.refetch()} />
         ) : hosts.data.length === 0 ? (

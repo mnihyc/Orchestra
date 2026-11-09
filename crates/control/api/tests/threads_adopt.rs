@@ -7,16 +7,19 @@
 
 mod places;
 mod rig;
+#[path = "threads_adopt/scopes.rs"]
+mod scopes;
 mod support;
 
 use orch_api_contract::common::ErrorCode;
+use orch_api_contract::environment::EnvironmentGet;
 use orch_api_contract::nodes::{
     AdoptPlan, FieldSource, ThreadAdopt, ThreadAdoptBody, ThreadAdoptPreview,
 };
 use orch_api_contract::resources::ProviderHarnessSessionList;
 use orch_api_contract::threads::{
-    AdoptHistoryMissing, AdoptModelReason, Item, ItemPayload, MarkerPayload, Thread,
-    ThreadItemList, ThreadItemListQuery,
+    AdoptHistoryMissing, AdoptModelReason, Item, ItemPayload, MarkerPayload, ThreadItemList,
+    ThreadItemListQuery,
 };
 use orch_link_contract::commands::{
     AgentDiscoverSessionsResult, AgentReadSessionResult, AgentStartResult, Command, CommandKind,
@@ -141,13 +144,14 @@ async fn adopt(
     native: &str,
     environment: Option<Id>,
     name: Option<&str>,
-) -> orch_api_core::testing::Reply<Thread> {
+) -> orch_api_core::testing::Reply<orch_api_contract::nodes::ThreadAdoptResponse> {
     s.rig
         .world
         .app
         .call(ThreadAdopt, &[&s.tree.topic.base.id])
         .token(&by.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: native.to_owned(),
@@ -190,7 +194,11 @@ async fn a_session_begun_by_hand_becomes_a_thread_in_the_folder_that_holds_its_d
     let work = registered(&s, "/work").await;
     let web = registered(&s, "/work/web").await;
 
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(thread.base.owner.username, "ada", "it is the caller's");
     assert_eq!(
         thread.environment.as_ref().map(|each| each.id),
@@ -215,7 +223,11 @@ async fn a_session_begun_by_hand_becomes_a_thread_in_the_folder_that_holds_its_d
     );
 
     // A session that ran in the folder itself, and one that ran below the folder of another.
-    let whole = adopt(&s, &s.ada, "native-c", None, None).await.ok();
+    let whole = adopt(&s, &s.ada, "native-c", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(whole.environment.as_ref().map(|each| each.id), Some(work));
     assert_eq!(directory_of(&s, whole.base.id).await, "");
 
@@ -242,7 +254,11 @@ async fn a_directory_below_the_folder_is_the_directory_of_the_thread() {
     let s = Scene::new().await;
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, Some("Mine")).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, Some("Mine"))
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(directory_of(&s, thread.base.id).await, "web");
     assert_eq!(thread.base.name, "Mine");
     assert_eq!(
@@ -294,7 +310,11 @@ async fn the_first_turn_opens_the_session_as_one_that_was_adopted_and_asks_nothi
     let s = Scene::new().await;
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     s.rig
         .world
         .set_at(Target::Node(thread.base.id), "agent.model", json!(MODEL))
@@ -415,7 +435,13 @@ async fn what_the_session_held_before_comes_with_it_once_as_items_from_the_sessi
     the_harness_lists_its_sessions(&s).await;
     the_harness_recorded(&s, Some(MODEL), &two_turns()).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok().base.id;
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content")
+        .base
+        .id;
 
     let items = items_of(&s, thread).await;
     let before: Vec<&Item> = items.iter().filter(|item| item.before_orch).collect();
@@ -488,7 +514,11 @@ async fn the_thread_runs_on_the_model_the_session_ran_on_where_the_provider_offe
     the_harness_lists_its_sessions(&s).await;
     the_harness_recorded(&s, Some(MODEL), &two_turns()).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(thread.model.as_deref(), Some(MODEL));
     assert_eq!(
         thread.effort.as_deref(),
@@ -507,7 +537,11 @@ async fn a_model_the_provider_does_not_offer_is_left_for_a_person_to_choose_and_
     the_harness_lists_its_sessions(&s).await;
     the_harness_recorded(&s, Some("gpt-elsewhere"), &two_turns()).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(thread.model, None, "a person chooses one");
     let line = adopted_line(&items_of(&s, thread.base.id).await);
     assert_eq!(line.session_model.as_deref(), Some("gpt-elsewhere"));
@@ -519,7 +553,11 @@ async fn a_harness_that_cannot_read_what_it_recorded_still_gives_the_session_and
     let s = Scene::new().await;
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     let items = items_of(&s, thread.base.id).await;
     assert!(items.iter().all(|item| !item.before_orch));
     let line = adopted_line(&items);
@@ -535,7 +573,11 @@ async fn a_manager_retries_missing_adopted_history_once_without_sending_it_or_ch
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
     a_history_read_fails(&s);
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     let id = thread.base.id;
     let before = adopted_line(&items_of(&s, id).await);
     assert_eq!(
@@ -552,7 +594,9 @@ async fn a_manager_retries_missing_adopted_history_once_without_sending_it_or_ch
         .token(&s.ada.token)
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary retry answers with the full thread");
     assert_eq!(
         tried.model, thread.model,
         "recovering history does not silently choose a model"
@@ -598,7 +642,13 @@ async fn a_history_retry_needs_thread_manage_and_a_failed_retry_preserves_its_re
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
     a_history_read_fails(&s);
-    let id = adopt(&s, &s.ada, "native-a", None, None).await.ok().base.id;
+    let id = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content")
+        .base
+        .id;
     let viewer = s.rig.person("viewer").await;
     s.rig
         .lets_use("node", id, "thread.view", &viewer, json!({}))
@@ -647,7 +697,13 @@ async fn a_retry_imports_the_original_history_and_keeps_later_session_work_out_o
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
     a_history_read_fails(&s);
-    let id = adopt(&s, &s.ada, "native-a", None, None).await.ok().base.id;
+    let id = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content")
+        .base
+        .id;
     let mut record = two_turns();
     record.push(json!({"entry":"said","native_ref":"said:after-adoption","turn":3,"text":"Later work in the session","left_out":0,"at":"2026-10-12T09:00:00.000Z"}));
     the_harness_recorded(&s, Some(MODEL), &record).await;
@@ -690,7 +746,13 @@ async fn the_before_orch_band_says_the_native_failure_and_offline_machine_queues
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
     a_history_read_fails(&s);
-    let id = adopt(&s, &s.ada, "native-a", None, None).await.ok().base.id;
+    let id = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content")
+        .base
+        .id;
     let status = s
         .rig
         .world
@@ -770,7 +832,13 @@ async fn an_adapter_without_a_session_reader_says_so_once_and_offers_no_retry() 
     let s = Scene::new().await;
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
-    let id = adopt(&s, &s.ada, "native-a", None, None).await.ok().base.id;
+    let id = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content")
+        .base
+        .id;
     let reads = s.rig.commands.issued_of("agent.read_session");
     let status = s
         .rig
@@ -813,6 +881,7 @@ async fn plan(
         .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
         .token(&s.ada.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: native.to_owned(),
@@ -838,6 +907,27 @@ async fn the_plan_says_where_it_would_stand_the_model_and_the_history_before_any
     assert_eq!(planned.turns, 2);
     assert_eq!(planned.name, "Fix the login");
     assert_eq!(planned.adopted_thread_id, None);
+    let access = planned
+        .agent_access
+        .as_ref()
+        .expect("the admitted selected-topic preview carries actual source bounds");
+    assert_eq!(
+        access
+            .choices
+            .iter()
+            .map(|choice| choice.where_)
+            .collect::<Vec<_>>(),
+        [
+            orch_api_contract::nodes::AgentAccessWhere::Nothing,
+            orch_api_contract::nodes::AgentAccessWhere::Thread,
+            orch_api_contract::nodes::AgentAccessWhere::Topic,
+            orch_api_contract::nodes::AgentAccessWhere::Project,
+        ]
+    );
+    assert!(
+        access.choices[1].parts.timeline.is_none(),
+        "the new thread's conversation is intrinsic, not another gift"
+    );
     let threads: i64 =
         sqlx::query_scalar("SELECT count(*) FROM segments WHERE native_session_ref = 'native-a'")
             .fetch_one(s.rig.db.pool())
@@ -848,12 +938,24 @@ async fn the_plan_says_where_it_would_stand_the_model_and_the_history_before_any
     // A session whose folder is registered nowhere: the plan names the folder to register first.
     let elsewhere = plan(&s, "native-b", None).await.ok();
     assert_eq!(elsewhere.environment, None);
+    assert!(
+        elsewhere.agent_access.is_none(),
+        "an unregistered environment has no invented prospective bounds"
+    );
     assert_eq!(elsewhere.register_first.as_deref(), Some("/elsewhere/api"));
 
     // Once adopted, the plan names the thread that has it.
-    let thread = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let thread = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     let after = plan(&s, "native-a", None).await.ok();
     assert_eq!(after.adopted_thread_id, Some(thread.base.id));
+    assert!(
+        after.agent_access.is_none(),
+        "an existing adopted holder receives no new creation offer"
+    );
 }
 
 #[tokio::test]
@@ -868,6 +970,7 @@ async fn the_plan_tells_nothing_to_those_who_may_not_adopt() {
         .call(ThreadAdoptPreview, &[&s.tree.topic.base.id])
         .token(&s.cai.token)
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: "native-a".to_owned(),
@@ -886,7 +989,11 @@ async fn a_session_is_taken_in_by_one_thread() {
     let s = Scene::new().await;
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
-    let first = adopt(&s, &s.ada, "native-a", None, None).await.ok();
+    let first = adopt(&s, &s.ada, "native-a", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     let again = adopt(&s, &s.ada, "native-a", None, None).await.problem();
     assert_eq!(again.code, ErrorCode::ConflictExists);
     assert_eq!(again.extra["existing_id"], json!(first.base.id));
@@ -963,21 +1070,54 @@ async fn what_making_a_thread_needs_is_asked_and_the_harness_tells_nothing_to_th
         0,
         "the machine was not asked for the sessions of somebody who may not use the provider"
     );
-    // Somebody who may use the provider and manages no environment of the machine finds none to put it in,
-    // and one who names an environment they do not manage is refused for it.
+    // Use of the provider alone finds no usable environment. Naming one still requires its Use.
     let none = adopt(&s, &s.eve, "native-a", None, None).await.problem();
     assert_eq!(none.code, ErrorCode::EnvironmentNoneUsable);
     let not_theirs = adopt(&s, &s.eve, "native-a", Some(work), None)
         .await
         .problem();
     assert_eq!(not_theirs.code, ErrorCode::AuthzDenied);
-    assert!(missing_permissions(&not_theirs).contains(&"environment.manage".to_owned()));
+    assert!(missing_permissions(&not_theirs).contains(&"environment.use".to_owned()));
+    s.rig
+        .lets_use("environment", work, "environment.use", &s.eve, json!({}))
+        .await;
+    let held = s
+        .rig
+        .world
+        .app
+        .call(EnvironmentGet, &[&work])
+        .token(&s.eve.token)
+        .send()
+        .await
+        .ok()
+        .access
+        .permissions;
+    assert!(
+        held.iter()
+            .any(|permission| permission == "environment.use")
+    );
+    assert!(
+        !held
+            .iter()
+            .any(|permission| permission == "environment.manage")
+    );
+    let made = adopt(&s, &s.eve, "native-a", Some(work), None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
+    assert_eq!(
+        made.environment.as_ref().map(|environment| environment.id),
+        Some(work)
+    );
+    assert_eq!(made.base.owner.id, s.eve.id());
     let anonymous = s
         .rig
         .world
         .app
         .call(ThreadAdopt, &[&s.tree.topic.base.id])
         .body(&ThreadAdoptBody {
+            agent_access: None,
             provider_id: s.on.provider,
             agent_id: s.on.agent,
             native_session_ref: "native-a".to_owned(),
@@ -996,7 +1136,11 @@ async fn a_session_is_taken_in_without_a_name_under_one_of_its_own_or_a_plain_on
     the_harness_lists_its_sessions(&s).await;
     registered(&s, "/work").await;
     registered(&s, "/elsewhere").await;
-    let untitled = adopt(&s, &s.ada, "native-b", None, None).await.ok();
+    let untitled = adopt(&s, &s.ada, "native-b", None, None)
+        .await
+        .ok()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     assert_eq!(untitled.base.name, "Adopted session");
     assert_eq!(untitled.base.title_source, FieldSource::Auto);
 }
@@ -1014,7 +1158,13 @@ async fn two_requests_that_take_in_one_session_at_once_make_one_thread_and_refus
         .into_iter()
         .partition(Result::is_ok);
     assert_eq!((made.len(), refused.len()), (1, 1), "one of them wins");
-    let thread = made.into_iter().next().unwrap().unwrap();
+    let thread = made
+        .into_iter()
+        .next()
+        .unwrap()
+        .unwrap()
+        .into_full()
+        .expect("ordinary adoption retains full native content");
     let problem = refused.into_iter().next().unwrap().unwrap_err();
     assert_eq!(problem.code, ErrorCode::ConflictExists);
     assert_eq!(problem.extra["existing_id"], json!(thread.base.id));

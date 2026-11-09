@@ -9,15 +9,15 @@ use orch_api_contract::common::ErrorCode;
 use orch_api_contract::environment::{EnvironmentMcpImportCreate, EnvironmentMcpImportCreateBody};
 use orch_api_contract::routes::Endpoint;
 use orch_db::queries::{identity, resources, transaction_guard};
-use orch_link_contract::mcp_import::{McpImportAnswer, McpImportAsk};
+use orch_link_contract::mcp_import::{McpForgetAsk, McpImportAnswer, McpImportAsk, McpLocalAsk};
 use orch_types::Id;
 use std::sync::{Arc, Weak};
 
 /// The application hook called only after the backplane pins the authenticated machine/session pair.
 #[async_trait]
 pub trait Handler: Send + Sync {
-    /// Files the import through the ordinary environment import producer, never a machine-chosen user.
-    async fn import(&self, machine: Id, request: McpImportAsk) -> McpImportAnswer;
+    /// Applies the ordinary import or deletion producer, never a machine-chosen user.
+    async fn import(&self, machine: Id, request: McpLocalAsk) -> McpImportAnswer;
     /// A scoped read/peer refresh, never a person-selected identity or port-opening decision.
     async fn local_ports(
         &self,
@@ -72,11 +72,13 @@ impl Handler for Requests {
                 "the system is stopping",
             );
         };
-        crate::local_ports::answer(&app, machine, request).await
+        // Boxed: the answer's future is the deepest in this crate; inline it would push the
+        // compiler's layout queries past their depth limit.
+        Box::pin(crate::local_ports::answer(&app, machine, request)).await
     }
-    async fn import(&self, machine: Id, request: McpImportAsk) -> McpImportAnswer {
+    async fn import(&self, machine: Id, request: McpLocalAsk) -> McpImportAnswer {
         let Some(app) = self.app.upgrade() else {
-            return unavailable(request.request_id, "the system is stopping");
+            return unavailable(request.request_id(), "the system is stopping");
         };
         import_from_machine(&app, machine, request).await
     }
@@ -84,14 +86,20 @@ impl Handler for Requests {
 
 /// Applies a request whose machine identity came from the live link, never from its payload.
 /// A non-browser owner principal has ordinary holdings and no system-admin override.
-pub async fn import_from_machine(app: &App, machine: Id, request: McpImportAsk) -> McpImportAnswer {
-    let id = request.request_id;
-    match file(app, machine, request).await {
-        Ok(server) => McpImportAnswer {
+pub async fn import_from_machine(app: &App, machine: Id, request: McpLocalAsk) -> McpImportAnswer {
+    let id = request.request_id();
+    let result = match request {
+        McpLocalAsk::Import(request) => file(app, machine, request).await.map(|server| {
+            (server, format!("Imported MCP server {server} and switched it on in this environment; its copy is kept on this machine."))
+        }),
+        McpLocalAsk::Forget(request) => forget(app, machine, request).await,
+    };
+    match result {
+        Ok((server, detail)) => McpImportAnswer {
             request_id: id,
             server_id: Some(server),
             code: None,
-            detail: format!("Imported MCP server {server}; its copy is kept on this machine."),
+            detail,
         },
         Err(error) => McpImportAnswer {
             request_id: id,
@@ -100,6 +108,68 @@ pub async fn import_from_machine(app: &App, machine: Id, request: McpImportAsk) 
             detail: error.problem.detail,
         },
     }
+}
+
+async fn forget(app: &App, machine: Id, request: McpForgetAsk) -> ApiResult<(Id, String)> {
+    let selector = request.forget;
+    let name = selector.name.trim();
+    if name.is_empty() {
+        return Err(crate::routes::nodes::invalid(
+            "name",
+            "name the imported server to forget",
+        ));
+    }
+    // Two results suffice to reject ambiguity; never choose another import by rank or a current digest.
+    let exact: Option<Id> = name.parse().ok();
+    let mut ids: Vec<Id> = sqlx::query_scalar(
+        "SELECT id FROM mcp_servers WHERE imported AND deleted_at IS NULL AND machine_id=$1
+         AND (id=$2 OR name=$3) AND ($4::text IS NULL OR spec->'imported'->>'source'=$4)
+         ORDER BY id LIMIT 2",
+    )
+    .bind(machine)
+    .bind(exact)
+    .bind(name)
+    .bind(selector.from.as_deref())
+    .fetch_all(app.db.pool())
+    .await
+    .map_err(orch_db::DbError::from)?;
+    if ids.is_empty() {
+        ids = sqlx::query_scalar(
+            "SELECT id FROM mcp_servers WHERE imported AND deleted_at IS NULL AND machine_id=$1
+             AND spec->'imported'->>'name'=$2 AND ($3::text IS NULL OR spec->'imported'->>'source'=$3)
+             ORDER BY id LIMIT 2",
+        )
+        .bind(machine)
+        .bind(name)
+        .bind(selector.from.as_deref())
+        .fetch_all(app.db.pool())
+        .await
+        .map_err(orch_db::DbError::from)?;
+    }
+    if ids.len() > 1 {
+        return Err(crate::routes::nodes::invalid(
+            "name",
+            "several imports match; use the resource's alias or exact identifier",
+        ));
+    }
+    let server = ids.pop().ok_or_else(ApiError::not_found)?;
+    let removed = crate::routes::resources::mcp::forget_from_machine(
+        app,
+        machine,
+        server,
+        request.request_id,
+    )
+    .await?;
+    Ok((
+        server,
+        if removed {
+            format!("Forgot MCP server {server}; its copy was removed from this machine.")
+        } else {
+            format!(
+                "Forgot MCP server {server} in Orch; removal of its local copy is not confirmed."
+            )
+        },
+    ))
 }
 
 async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
@@ -152,6 +222,8 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
             token_id: Id::nil(),
             scopes: vec!["*".to_owned()],
             node_id: None,
+            operation_scope: None,
+            expires_at: None,
         },
     };
     // This value is for projections/audit only, never passed to an HTTP credential guard.
@@ -184,8 +256,8 @@ async fn file(app: &App, machine: Id, request: McpImportAsk) -> ApiResult<Id> {
             scope: request.scope,
             name: request.name,
             directory: request.directory,
-            as_name: None,
-            enable: Some(false),
+            as_name: request.as_name,
+            enable: Some(true),
         },
         request.request_id,
         true,

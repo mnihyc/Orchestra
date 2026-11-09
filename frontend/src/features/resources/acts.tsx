@@ -5,8 +5,9 @@
  * An act the reader may not do is not offered in a row. Rows that are ticked have the acts they all take
  * above the table, and an act that destroys names what it is about to destroy before it does it.
  */
+import { linkTo, type LinkObject } from '@/lib/links';
 import type { TFunction } from 'i18next';
-import { Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
+import { Copy, Ellipsis, LoaderCircle, Pencil, Share2 } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -115,9 +116,9 @@ export function shareAct(t: TFunction, target: AccessTarget, access: Pick<Resour
 }
 
 /** Copies the address of a screen, and says that it did, or that the browser would not let it. */
-export function useCopyLink(): (path: string) => void {
+export function useCopyLink(): (thing: LinkObject) => void {
   const { t } = useTranslation();
-  return (path) => void copyText(`${location.origin}${path}`, t('common.linkCopied'));
+  return (thing) => void copyText(linkTo(thing), t('common.linkCopied'));
 }
 
 /** Which rows have an act under way, and the means to carry an act out so that its row says so until the answer comes. */
@@ -304,16 +305,18 @@ export function useSelection<Row>(rows: readonly Row[], keyOf: (row: Row) => str
   };
 }
 
+const selectionFrame = 'inline-flex min-h-(--control-sm) items-center [&>div]:self-center [&_.choice-toggle]:mt-0';
+
 /** The box that ticks one row, named by the row. */
 export function RowBox({ name, checked, onChange }: { name: string; checked: boolean; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.select', { name })}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The box at the head of the column, which ticks every row there is. */
 export function AllBox({ checked, onChange }: { checked: boolean | 'indeterminate'; onChange: (on: boolean) => void }) {
   const { t } = useTranslation();
-  return <Checkbox label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} />;
+  return <div className={selectionFrame}><Checkbox presentation="compact" label={<span className="sr-only">{t('resources.bulk.selectAll')}</span>} checked={checked} onCheckedChange={onChange} /></div>;
 }
 
 /** The acts the ticked rows share, above the table. */
@@ -420,4 +423,10 @@ export function BulkNames({ names, lead }: { names: readonly string[]; lead: str
       </ul>
     </span>
   );
+}
+
+/** Copying an address needs no permission to change the named resource. */
+export function copyLinkAct(t: TFunction, thing: LinkObject): Act {
+  return { id: 'copy-link', label: t('actions.copyLink.label'), icon: <Copy aria-hidden />,
+    run: () => void copyText(linkTo(thing), t('common.linkCopied')) };
 }

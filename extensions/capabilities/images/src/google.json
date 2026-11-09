@@ -1,0 +1,155 @@
+{
+  "contract": 1,
+  "endpoint_rules": [
+    {
+      "when": {
+        "type": "object",
+        "required": [
+          "scheme",
+          "host",
+          "path",
+          "port",
+          "has_credentials",
+          "has_query",
+          "has_fragment"
+        ],
+        "properties": {
+          "scheme": {
+            "const": "https"
+          },
+          "host": {
+            "const": "generativelanguage.googleapis.com"
+          },
+          "path": {
+            "enum": [
+              "/v1beta/openai",
+              "/v1beta/openai/"
+            ]
+          },
+          "port": {
+            "type": "null"
+          },
+          "has_credentials": {
+            "const": false
+          },
+          "has_query": {
+            "const": false
+          },
+          "has_fragment": {
+            "const": false
+          }
+        }
+      },
+      "endpoints": {
+        "images": {
+          "address": "https://generativelanguage.googleapis.com/v1beta/openai",
+          "interface": "openai-images",
+          "credential_role": "model"
+        }
+      },
+      "offerings": {
+        "gemini-2.5-flash-image": {
+          "title": "gemini-2.5-flash-image",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gemini-2.5-flash-image"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gemini-2.5-flash-image"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "response_format": {
+                "enum": [
+                  "b64_json"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gemini-3-pro-image-preview": {
+          "title": "gemini-3-pro-image-preview",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gemini-3-pro-image-preview"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gemini-3-pro-image-preview"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "response_format": {
+                "enum": [
+                  "b64_json"
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "x_docs": "https://ai.google.dev/gemini-api/docs/openai#generate-an-image"
+}

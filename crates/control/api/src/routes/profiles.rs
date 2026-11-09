@@ -1,200 +1,56 @@
 //! Personal pages, visible pins, work by day and direct shares between people, with recorded inspection of otherwise closed pages.
 
+mod activity_read;
+mod profile_read;
+mod shares_read;
+pub(crate) use profile_read::node_authority_preserved;
+
 use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{invalid, view};
-use chrono::{Duration, Offset};
+use chrono::Offset;
 use orch_access_contract::permissions::{NodePermission, Permission, PermissionName};
-use orch_api_contract::common::{Page, PageQuery};
 use orch_api_contract::nodes::NodeRef;
 use orch_api_contract::users::{
-    MeProfilePinsSet, MeProfilePinsSetBody, MeProfileUpdate, MeProfileUpdateBody, ProfileActivity,
-    ProfileActivityDay, ProfileActivityGet, ProfileActivityRecent, ProfileAudience, ProfileGet,
-    ProfileLocalTime, ProfilePin, ProfilePinInput, ProfileSettings, UserProfile, UserShare,
-    UserSharesGet,
+    MeProfilePinsSet, MeProfilePinsSetBody, MeProfileUpdate, MeProfileUpdateBody,
+    ProfileActivityGet, ProfileAudience, ProfileGet, ProfileLocalTime, ProfilePin, ProfilePinInput,
+    ProfileSettings, UserProfile, UserSharesGet,
 };
 use orch_authz::{Act, Policy, Principal, nodes};
 use orch_db::queries::{access, chats, documents, identity, profiles};
-use orch_db::usage::rollup;
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Time};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 // The page's published bounds keep the small identity page small.
 const BIO_CHARS: usize = 2000;
 const SHORT_CHARS: usize = 40;
 const LINK_URL_CHARS: usize = 500;
 const ITEMS_MAX: usize = 6;
-// The calendar includes today and the preceding 370 UTC days: exactly 53 weeks.
-const ACTIVITY_DAYS: i64 = 53 * 7;
-// The page shows the eight most recently used topics.
-const RECENT_MAX: usize = 8;
 // UTC offsets are returned as whole minutes.
 const SECONDS_PER_MINUTE: i32 = 60;
 
 /// Binds personal-page requests and the direct shares shown on a person's card.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(ProfileGet, get)
-        .on(ProfileActivityGet, activity)
+        .on_snapshot_read_with_optional_operation(
+            ProfileGet,
+            crate::key_operations::native::selected::<profile_read::Profile>,
+            crate::key_operations::native::selected_read::<profile_read::Profile>,
+        )
+        .on_snapshot_read_with_optional_operation(
+            ProfileActivityGet,
+            crate::key_operations::native::selected::<activity_read::Activity>,
+            crate::key_operations::native::selected_read::<activity_read::Activity>,
+        )
         .on(MeProfileUpdate, update)
         .on(MeProfilePinsSet, set_pins)
-        .on(UserSharesGet, shares);
-}
-
-async fn shares(ctx: Ctx, query: PageQuery, (): ()) -> ApiResult<Page<UserShare>> {
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let person = identity::user_by_id(&mut tx, ctx.id("id")?)
-        .await?
-        .filter(|person| person.kind == "human")
-        .ok_or_else(ApiError::not_found)?;
-    let other = Principal::load(
-        &mut tx,
-        orch_authz::Caller::session(person.id),
-        Time::new(ctx.now),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let mut after = match query.cursor.as_deref() {
-        None => None,
-        Some(text) => {
-            let bad = || invalid("cursor", "is not a cursor of this list");
-            let (kind, id) = text.split_once('|').ok_or_else(bad)?;
-            if !matches!(kind, "node" | "document" | "document_container") {
-                return Err(bad());
-            }
-            Some((kind.to_owned(), id.parse::<Id>().map_err(|_| bad())?))
-        }
-    };
-    let limit = usize::try_from(query.limit()).map_err(ApiError::internal)?;
-    let batch = i64::from(query.limit()) + 1;
-    if principal.user() == person.id {
-        tx.commit().await.map_err(DbError::from)?;
-        return Ok(Page::last(Vec::new()));
-    }
-    let mut found = Vec::new();
-    // Read until there are enough *visible* rows. A private first batch cannot hide a later share.
-    while found.len() <= limit {
-        let candidates = profiles::direct_shares(
-            &mut tx,
-            principal.user(),
-            person.id,
-            ctx.now,
-            after.as_ref().map(|(kind, id)| (kind.as_str(), *id)),
-            batch,
-        )
-        .await?;
-        let at_end = candidates.len() <= limit;
-        if candidates.is_empty() {
-            break;
-        }
-        let ids: Vec<_> = candidates
-            .iter()
-            .filter(|(kind, _)| kind == "node")
-            .map(|(_, id)| *id)
-            .collect();
-        let theirs: HashSet<_> = nodes::holding(
-            &mut tx,
-            &other,
-            &ids,
-            PermissionName::OfNode(NodePermission::View),
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .map(|each| each.id)
-        .collect();
-        let ids: Vec<_> = nodes::holding(
-            &mut tx,
-            &principal,
-            &ids,
-            PermissionName::OfNode(NodePermission::View),
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        .map_err(ApiError::internal)?
-        .into_iter()
-        .filter(|each| theirs.contains(&each.id))
-        .map(|each| each.id)
-        .collect();
-        let mut node_refs = view::refs(&mut tx, &principal, &ids, Policy::default()).await?;
-        let doc_ids: Vec<_> = candidates
-            .iter()
-            .filter(|(kind, _)| matches!(kind.as_str(), "document" | "document_container"))
-            .map(|(_, id)| *id)
-            .collect();
-        let theirs: HashSet<_> =
-            orch_authz::documents::listed(&mut tx, &other, &doc_ids, Policy::default())
-                .await
-                .map_err(ApiError::internal)?
-                .into_iter()
-                .filter(|each| each.holds(Permission::DocView))
-                .map(|each| each.document.id)
-                .collect();
-        let mut held: HashMap<_, _> =
-            orch_authz::documents::listed(&mut tx, &principal, &doc_ids, Policy::default())
-                .await
-                .map_err(ApiError::internal)?
-                .into_iter()
-                .filter(|each| {
-                    theirs.contains(&each.document.id) && each.holds(Permission::DocView)
-                })
-                .map(|each| (each.document.id, each))
-                .collect();
-        let entries: Vec<_> = documents::get_many(&mut tx, &doc_ids)
-            .await?
-            .into_iter()
-            .filter(|row| row.deleted_at.is_none())
-            .filter_map(|row| held.remove(&row.id).map(|each| (row, each)))
-            .collect();
-        let mut folders:HashMap<_,_>=documents::containers::get_many(&mut tx,&doc_ids).await?.into_iter()
-            .filter(|row|row.deleted_at.is_none() && held.contains_key(&row.id))
-            .map(|row|(row.id,orch_api_contract::document_tree::DocumentContainerRef {id:row.id,
-                kind:orch_api_contract::document_tree::DocumentContainerMark::DocumentContainer,name:Some(row.name),redacted:false})).collect();
-        let mut doc_refs: HashMap<_, _> = crate::routes::documents::build::refs(
-            &mut tx,
-            &principal,
-            &entries,
-            ctx.now,
-            Policy::default(),
-        )
-        .await?
-        .into_iter()
-        .map(|doc| (doc.id, doc))
-        .collect();
-        for (kind, id) in &candidates {
-            let item = match kind.as_str() {
-                "node" => node_refs.remove(id).map(|node| UserShare::Node { node }),
-                "document_container" => folders
-                    .remove(id)
-                    .map(|folder| UserShare::DocumentContainer { folder }),
-                _ => doc_refs.remove(id).map(|document| UserShare::Document {
-                    document: Box::new(document),
-                }),
-            };
-            if let Some(item) = item {
-                found.push((format!("{kind}|{id}"), item));
-            }
-        }
-        after = candidates.last().cloned();
-        if at_end {
-            break;
-        }
-    }
-    let more = found.len() > limit;
-    found.truncate(limit);
-    let next_cursor = more
-        .then(|| found.last().map(|(cursor, _)| cursor.clone()))
-        .flatten();
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(Page {
-        items: found.into_iter().map(|(_, item)| item).collect(),
-        next_cursor,
-    })
+        .on_snapshot_read_with_optional_operation(
+            UserSharesGet,
+            crate::key_operations::native::selected::<shares_read::Shares>,
+            crate::key_operations::native::selected_read::<shares_read::Shares>,
+        );
 }
 
 struct Opened {
@@ -204,15 +60,11 @@ struct Opened {
     inspected: Option<NodeRef>,
 }
 
-async fn open(
-    _ctx: &Ctx,
+async fn open_person(
     conn: &mut Conn,
     principal: &Principal,
-    username: &str,
+    person: identity::UserRow,
 ) -> ApiResult<Opened> {
-    let person = identity::user_by_username(conn, username)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
     let page = profiles::get(conn, person.id).await?;
     let memberships = access::memberships(conn, person.id).await?;
     let ordinary = principal.user() == person.id
@@ -409,6 +261,18 @@ async fn shown(
     principal: &Principal,
     opened: Opened,
 ) -> ApiResult<UserProfile> {
+    let pins = pins(conn, principal, opened.person.id, ctx.now).await?;
+    shown_parts(ctx, conn, principal, &opened, pins, None).await
+}
+
+async fn shown_parts(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    opened: &Opened,
+    pins: Vec<ProfilePin>,
+    places: Option<&BTreeSet<Id>>,
+) -> ApiResult<UserProfile> {
     let is_me = principal.user() == opened.person.id;
     let mut domain_ids: Vec<Id> = opened
         .memberships
@@ -417,6 +281,7 @@ async fn shown(
         .map(|m| m.domain_id)
         .collect();
     domain_ids.extend(opened.person.personal_org_id);
+    domain_ids.retain(|id| places.is_none_or(|places| places.contains(id)));
     let visible: HashSet<Id> = nodes::holding(
         conn,
         principal,
@@ -469,8 +334,7 @@ async fn shown(
         .await?
         .remove(&opened.person.id)
         .ok_or_else(ApiError::not_found)?;
-    let pins = pins(conn, principal, opened.person.id, ctx.now).await?;
-    let can_message = may_message(conn, principal, &opened).await?;
+    let can_message = may_message(conn, principal, opened).await?;
     let audience = match opened.page.audience.as_str() {
         "orgs" => ProfileAudience::Orgs,
         "private" => ProfileAudience::Private,
@@ -485,108 +349,17 @@ async fn shown(
         user,
         joined_at: Time::new(opened.person.created_at),
         is_me,
-        bio: opened.page.bio,
-        pronouns: opened.page.pronouns,
-        links: serde_json::from_value(opened.page.links).map_err(ApiError::internal)?,
+        bio: opened.page.bio.clone(),
+        pronouns: opened.page.pronouns.clone(),
+        links: serde_json::from_value(opened.page.links.clone()).map_err(ApiError::internal)?,
         local_time,
         member_of,
         personal_org,
         pins,
         activity: is_me || opened.page.show_activity,
         can_message,
-        inspected: opened.inspected,
+        inspected: opened.inspected.clone(),
         settings,
-    })
-}
-
-async fn get(ctx: Ctx, (): (), (): ()) -> ApiResult<UserProfile> {
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let opened = open(&ctx, &mut tx, &principal, ctx.param("username")?).await?;
-    let profile = shown(&ctx, &mut tx, &principal, opened).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(profile)
-}
-
-async fn activity(ctx: Ctx, (): (), (): ()) -> ApiResult<ProfileActivity> {
-    let (ctx, mut tx, principal) = crate::routes::nodes::action(&ctx).await?;
-    let opened = open(&ctx, &mut tx, &principal, ctx.param("username")?).await?;
-    if !opened.page.show_activity && principal.user() != opened.person.id {
-        return Err(ApiError::not_found());
-    }
-    let to = ctx.now.date_naive();
-    let from = to - Duration::days(ACTIVITY_DAYS - 1);
-    let rows = rollup::profile_days(&mut tx, opened.person.id, from, to).await?;
-    let ids: Vec<Id> = rows
-        .iter()
-        .map(|row| row.thread_id)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    // Exactly one question for every thread in the calendar, before any work is summed.
-    let visible: HashSet<Id> = nodes::holding(
-        &mut tx,
-        &principal,
-        &ids,
-        PermissionName::OfNode(NodePermission::View),
-        Act::Use,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?
-    .into_iter()
-    .map(|each| each.id)
-    .collect();
-    let mut days = BTreeMap::<chrono::NaiveDate, i64>::new();
-    let mut recent = HashMap::new();
-    for row in rows
-        .into_iter()
-        .filter(|row| visible.contains(&row.thread_id))
-    {
-        *days.entry(row.day).or_default() += row.turns;
-        recent
-            .entry(row.topic_id)
-            .and_modify(|at: &mut chrono::DateTime<chrono::Utc>| *at = (*at).max(row.last_at))
-            .or_insert(row.last_at);
-    }
-    let topic_ids: Vec<Id> = recent.keys().copied().collect();
-    let topics = nodes::holding(
-        &mut tx,
-        &principal,
-        &topic_ids,
-        PermissionName::OfNode(NodePermission::View),
-        Act::Use,
-        Policy::default(),
-    )
-    .await
-    .map_err(ApiError::internal)?;
-    let topic_ids: Vec<Id> = topics.into_iter().map(|each| each.id).collect();
-    let refs = view::refs(&mut tx, &principal, &topic_ids, Policy::default()).await?;
-    let mut recent: Vec<_> = recent
-        .into_iter()
-        .filter_map(|(id, at)| {
-            refs.get(&id).cloned().map(|node| ProfileActivityRecent {
-                node,
-                last_at: Time::new(at),
-            })
-        })
-        .collect();
-    recent.sort_by(|a, b| b.last_at.cmp(&a.last_at).then(a.node.id.cmp(&b.node.id)));
-    recent.truncate(RECENT_MAX);
-    let total = days.values().sum();
-    let days = days
-        .into_iter()
-        .map(|(day, turns)| ProfileActivityDay {
-            day: day.to_string(),
-            turns,
-        })
-        .collect();
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(ProfileActivity {
-        from: from.to_string(),
-        to: to.to_string(),
-        days,
-        total,
-        recent,
     })
 }
 

@@ -1,6 +1,7 @@
 //! Live port measurements and single-use channel admissions over the existing backplane.
 
 use crate::middleware::requests::{ApiError, ApiResult};
+use crate::realtime::ticket_origin::{self, Origin as TicketOrigin};
 use crate::registry::Ctx;
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::ports::*;
@@ -18,6 +19,7 @@ pub const USE_SECONDS: i64 = 30;
 const QUERY_DEADLINE: Duration = Duration::from_secs(15);
 struct Use {
     ctx: Ctx,
+    origin: Option<TicketOrigin>,
     environment: Id,
     generation: i64,
     port: u16,
@@ -32,11 +34,9 @@ struct Use {
 #[derive(Clone)]
 enum Who {
     /// A signed-in caller, asked again with their own credential (a helper, own use).
-    Session(Box<Ctx>),
+    Credential(TicketOrigin, &'static str),
     /// A link's holder: the link is asked again.
     Link,
-    /// A person who entered by the browser route, asked again by who they are.
-    Person(Id),
 }
 
 #[derive(Clone)]
@@ -52,10 +52,14 @@ struct Active {
 }
 
 /// A browser's entry to one port's stable name: a person by their sign-in, or a link's holder.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BrowserEntry {
+    /// The actual native entry-code/cookie identity, independent of its random secret.
+    pub id: Id,
     /// The person who entered, or none for a link's holder.
     pub person: Option<Id>,
+    /// Native accepted operation/credential; no bearer secret or fabricated session.
+    pub(crate) origin: Option<TicketOrigin>,
     /// The environment of the port.
     pub environment: Id,
     /// The port.
@@ -220,6 +224,36 @@ impl PortRuntime {
         expires: Time,
         id: Id,
     ) -> ApiResult<PortUse> {
+        self.admit_before(
+            ctx,
+            environment,
+            port,
+            transport,
+            opening,
+            ticket,
+            expires,
+            id,
+            || Ok(()),
+        )
+    }
+
+    /// The native first-effect check runs after the actual cache serialization lock.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the canonical use fields and native first effect remain independent"
+    )]
+    pub(crate) fn admit_before(
+        &self,
+        ctx: &Ctx,
+        environment: &EnvironmentFull,
+        port: u16,
+        transport: PortTransport,
+        opening: Option<Id>,
+        ticket: String,
+        expires: Time,
+        id: Id,
+        before: impl FnOnce() -> ApiResult<()>,
+    ) -> ApiResult<PortUse> {
         self.admit_as(
             ctx,
             environment,
@@ -230,6 +264,7 @@ impl PortRuntime {
             ticket,
             expires,
             id,
+            before,
         )
     }
 
@@ -259,6 +294,7 @@ impl PortRuntime {
             ticket,
             expires,
             id,
+            || Ok(()),
         )
     }
 
@@ -277,10 +313,15 @@ impl PortRuntime {
         ticket: String,
         expires: Time,
         id: Id,
+        before: impl FnOnce() -> ApiResult<()>,
     ) -> ApiResult<PortUse> {
         let now = Time::new(ctx.app.clock.now());
+        let origin = if by_link {
+            None
+        } else {
+            Some(TicketOrigin::capture(ctx)?)
+        };
         let mut uses = lock(&self.uses);
-        uses.retain(|_, usage| usage.expires > now);
         // No more unused handles than the environment could carry connections and senders.
         let limits = orch_link::ports::limits_of(&ctx.app.config.link);
         let unused_handles = orch_link::ports::count(limits.connections_max)
@@ -288,7 +329,7 @@ impl PortRuntime {
             .saturating_add(orch_link::ports::count(limits.udp_senders_max));
         if uses
             .values()
-            .filter(|u| u.environment == environment.id)
+            .filter(|u| u.environment == environment.id && u.expires > now)
             .count()
             >= unused_handles
         {
@@ -297,10 +338,13 @@ impl PortRuntime {
                     .retry_after(USE_SECONDS as u64),
             );
         }
+        before()?;
+        uses.retain(|_, usage| usage.expires > now);
         uses.insert(
             id,
             Use {
                 ctx: ctx.clone(),
+                origin,
                 environment: environment.id,
                 generation: i64::from(environment.generation),
                 port,
@@ -321,6 +365,25 @@ impl PortRuntime {
             ticket_expires_at: expires,
         })
     }
+    fn take_use(
+        &self,
+        id: Id,
+        proof: &str,
+        surface: orch_api_contract::surface::HttpSurface,
+    ) -> ApiResult<Use> {
+        let mut uses = lock(&self.uses);
+        if uses
+            .get(&id)
+            .is_none_or(|usage| usage.proof != proof || usage.ctx.surface != Some(surface))
+        {
+            return Err(ApiError::new(
+                ErrorCode::PortsNotAllowed,
+                "the use is unknown or consumed",
+            ));
+        }
+        uses.remove(&id).ok_or_else(ApiError::not_found)
+    }
+
     /// Opens a channel once after the entry owner observes its actual outside peer.
     /// The peer comes from the transport, never a client-selected address.
     pub async fn open_channel(
@@ -328,17 +391,9 @@ impl PortRuntime {
         id: Id,
         proof: &str,
         outside: SocketAddr,
+        surface: orch_api_contract::surface::HttpSurface,
     ) -> ApiResult<Tunnel> {
-        let usage = {
-            let mut uses = lock(&self.uses);
-            if uses.get(&id).is_none_or(|u| u.proof != proof) {
-                return Err(ApiError::new(
-                    ErrorCode::PortsNotAllowed,
-                    "the use is unknown or consumed",
-                ));
-            }
-            uses.remove(&id).ok_or_else(ApiError::not_found)?
-        };
+        let usage = self.take_use(id, proof, surface)?;
         if usage.expires <= Time::new(usage.ctx.app.clock.now()) {
             return Err(ApiError::new(
                 ErrorCode::PortsNotAllowed,
@@ -346,6 +401,7 @@ impl PortRuntime {
             ));
         }
         let now = Time::new(usage.ctx.app.clock.now());
+        let mut credential_deadline = None;
         let (tx, env, caller, revision, audience) = if usage.by_link {
             let mut tx = usage.ctx.app.db.begin().await?;
             let env = crate::routes::ports::environment(&mut tx, usage.environment).await?;
@@ -372,8 +428,28 @@ impl PortRuntime {
                 Some(orch_engine::port_capabilities::kind_of(&row.kind)),
             )
         } else {
-            let (mut tx, guard) = crate::middleware::transaction_guard::begin(&usage.ctx).await?;
+            let mut tx = usage.ctx.app.db.begin().await?;
             let env = crate::routes::ports::environment(&mut tx, usage.environment).await?;
+            let origin = usage.origin.as_ref().ok_or_else(|| {
+                ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "the original port credential is absent",
+                )
+            })?;
+            let (principal, deadline) = origin
+                .required_principal(
+                    &mut tx,
+                    env.id,
+                    "EnvironmentPortUseCreate",
+                    usage.ctx.app.clock.as_ref(),
+                )
+                .await?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::PortsNotAllowed,
+                        "the original port credential no longer admits this use",
+                    )
+                })?;
             if i64::from(env.generation) != usage.generation {
                 return Err(ApiError::new(
                     ErrorCode::PortsUnavailable,
@@ -382,20 +458,18 @@ impl PortRuntime {
             }
             crate::routes::ports::may_use(
                 &mut tx,
-                guard.principal(),
+                &principal,
                 &env,
                 usage.port,
                 usage.transport,
                 usage.opening,
             )
             .await?;
-            let user = crate::middleware::authorization::refusals::user_refs(
-                &mut tx,
-                &[guard.principal().user()],
-            )
-            .await?
-            .remove(&guard.principal().user())
-            .ok_or_else(ApiError::not_found)?;
+            let user =
+                crate::middleware::authorization::refusals::user_refs(&mut tx, &[principal.user()])
+                    .await?
+                    .remove(&principal.user())
+                    .ok_or_else(ApiError::not_found)?;
             let (revision, audience) = if let Some(opening) = usage.opening {
                 let row = orch_db::queries::ports::opening(&mut tx, opening)
                     .await?
@@ -407,6 +481,17 @@ impl PortRuntime {
             } else {
                 (env.revision, None)
             };
+            if !ticket_origin::deadline_allows(
+                principal.caller(),
+                deadline,
+                usage.ctx.app.clock.as_ref(),
+            ) {
+                return Err(ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "the original port credential expired",
+                ));
+            }
+            credential_deadline = Some((principal.caller().clone(), deadline));
             (tx, env, PortCaller::Person { user }, revision, audience)
         };
         let claims = orch_link_contract::ports::PortTicketClaims {
@@ -436,6 +521,17 @@ impl PortRuntime {
             .port_use(id, machine, claims, usage.expires)
             .map_err(ApiError::internal)?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
+        if credential_deadline
+            .as_ref()
+            .is_some_and(|(caller, deadline)| {
+                !ticket_origin::deadline_allows(caller, *deadline, usage.ctx.app.clock.as_ref())
+            })
+        {
+            return Err(ApiError::new(
+                ErrorCode::PortsNotAllowed,
+                "the original port credential expired before channel opening",
+            ));
+        }
         let tunnel = usage
             .ctx
             .app
@@ -454,7 +550,15 @@ impl PortRuntime {
             who: if usage.by_link {
                 Who::Link
             } else {
-                Who::Session(Box::new(usage.ctx))
+                Who::Credential(
+                    usage.origin.clone().ok_or_else(|| {
+                        ApiError::new(
+                            ErrorCode::PortsNotAllowed,
+                            "the original port credential is absent",
+                        )
+                    })?,
+                    "EnvironmentPortUseCreate",
+                )
             },
             environment: usage.environment,
             generation: usage.generation,
@@ -476,6 +580,18 @@ impl PortRuntime {
     /// The transport of a use that waits for its socket; none for an unknown or spent use.
     pub fn pending_transport(&self, id: Id) -> Option<PortTransport> {
         lock(&self.uses).get(&id).map(|usage| usage.transport)
+    }
+
+    /// A transaction that failed before publishing a newly minted handle discards only it.
+    pub(crate) fn discard_use(&self, id: Id) {
+        lock(&self.uses).remove(&id);
+    }
+
+    pub(crate) fn discard_code(&self, code: &str, id: Id) {
+        let mut codes = lock(&self.codes);
+        if codes.get(code).is_some_and(|entry| entry.id == id) {
+            codes.remove(code);
+        }
     }
 
     /// Retires unused handles when an opening ends.
@@ -520,7 +636,7 @@ impl PortRuntime {
     }
 
     async fn current(active: &Active) -> ApiResult<()> {
-        if let Who::Person(person) = &active.who {
+        if let Who::Credential(origin, selection) = &active.who {
             let mut tx = active.app.db.begin().await?;
             let env = crate::routes::ports::environment(&mut tx, active.environment).await?;
             if i64::from(env.generation) != active.generation {
@@ -529,18 +645,15 @@ impl PortRuntime {
                     "the runtime generation changed",
                 ));
             }
-            let principal = orch_authz::Principal::load(
-                &mut tx,
-                orch_authz::tokens::Caller::session(*person),
-                Time::new(active.app.clock.now()),
-            )
-            .await
-            .map_err(|_| {
-                ApiError::new(
-                    ErrorCode::PortsNotAllowed,
-                    "the person can no longer use this port",
-                )
-            })?;
+            let (principal, deadline) = origin
+                .required_principal(&mut tx, env.id, selection, active.app.clock.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    ApiError::new(
+                        ErrorCode::PortsNotAllowed,
+                        "the person can no longer use this port",
+                    )
+                })?;
             crate::routes::ports::may_use(
                 &mut tx,
                 &principal,
@@ -551,6 +664,16 @@ impl PortRuntime {
             )
             .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
+            if !ticket_origin::deadline_allows(
+                principal.caller(),
+                deadline,
+                active.app.clock.as_ref(),
+            ) {
+                return Err(ApiError::new(
+                    ErrorCode::PortsNotAllowed,
+                    "the original port credential expired",
+                ));
+            }
             return Ok(());
         }
         if matches!(active.who, Who::Link) {
@@ -579,28 +702,7 @@ impl PortRuntime {
             tx.commit().await.map_err(orch_db::DbError::from)?;
             return Ok(());
         }
-        let Who::Session(ctx) = &active.who else {
-            return Err(ApiError::internal("a channel without a known admission"));
-        };
-        let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
-        let env = crate::routes::ports::environment(&mut tx, active.environment).await?;
-        if i64::from(env.generation) != active.generation {
-            return Err(ApiError::new(
-                ErrorCode::PortsUnavailable,
-                "the runtime generation changed",
-            ));
-        }
-        crate::routes::ports::may_use(
-            &mut tx,
-            guard.principal(),
-            &env,
-            active.port,
-            active.transport,
-            active.opening,
-        )
-        .await?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        Ok(())
+        Err(ApiError::internal("a channel without a known admission"))
     }
     /// Rechecks each current reader/credential independently of the opening's decider.
     pub async fn recheck(&self) {
@@ -625,11 +727,25 @@ impl PortRuntime {
     /// Keeps a single-use code that enters a browser into one port's stable name, for the
     /// ordinary short life of a use.
     pub fn enter_code(&self, entry: BrowserEntry, now: Time) -> String {
+        match self.enter_code_before(entry, now, || Ok::<(), std::convert::Infallible>(())) {
+            Ok(code) => code,
+            Err(never) => match never {},
+        }
+    }
+
+    /// The producer owns this opaque once-only check; cache allocation makes no ACL decision.
+    pub(crate) fn enter_code_before<E>(
+        &self,
+        entry: BrowserEntry,
+        now: Time,
+        before: impl FnOnce() -> Result<(), E>,
+    ) -> Result<String, E> {
         let code = entry_token();
         let mut codes = lock(&self.codes);
+        before()?;
         codes.retain(|_, kept| kept.expires > now);
         codes.insert(code.clone(), entry);
-        code
+        Ok(code)
     }
 
     /// Takes a code once, for the name it was made for and before it lapses.
@@ -691,7 +807,7 @@ impl PortRuntime {
         port: u16,
         opening: Option<Id>,
         caller: PortCaller,
-        person: Option<Id>,
+        origin: Option<TicketOrigin>,
         revision: i64,
         outside: SocketAddr,
         id: Id,
@@ -744,7 +860,9 @@ impl PortRuntime {
             })?;
         let active = Active {
             app: app.clone(),
-            who: person.map_or(Who::Link, Who::Person),
+            who: origin.map_or(Who::Link, |origin| {
+                Who::Credential(origin, "EnvironmentPortEnter")
+            }),
             environment: env.id,
             generation: i64::from(env.generation),
             port,
@@ -752,6 +870,13 @@ impl PortRuntime {
             opening,
             closer: tunnel.closer(),
         };
+        if Self::current(&active).await.is_err() {
+            active.closer.close();
+            return Err(ApiError::new(
+                ErrorCode::PortsNotAllowed,
+                "admission ended while the inside socket opened",
+            ));
+        }
         lock(&self.active).insert(id, active);
         Ok(tunnel)
     }
@@ -1012,4 +1137,62 @@ pub fn start(
         }
         app.cache.ports().clear();
     })
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use orch_api_contract::routes::Endpoint;
+    use orch_api_contract::surface::HttpSurface;
+
+    #[tokio::test]
+    async fn surface_port_use_refusal_preserves_the_same_proof_and_origin() {
+        let db = orch_testkit::database::TestDb::fresh().await;
+        let app = crate::testing::TestApp::new(
+            orch_db::Db::from_pool(db.pool.clone()),
+            orch_testkit::clock::manual(),
+            crate::registry::Registry::new(),
+        );
+        for surface in [HttpSurface::Browser, HttpSurface::Key] {
+            let runtime = PortRuntime::default();
+            let id = orch_types::new_id();
+            let mut ctx = Ctx::for_tool(
+                app.app.clone(),
+                crate::middleware::authentication::Caller::Anonymous,
+                PortLinkUseCreate::ROUTE,
+                id,
+            );
+            // Test only the stored protocol origin/removal. No account or business authority is claimed.
+            ctx.surface = Some(surface);
+            let now = Time::new(ctx.now);
+            lock(&runtime.uses).insert(
+                id,
+                Use {
+                    ctx,
+                    origin: None,
+                    environment: orch_types::new_id(),
+                    generation: 1,
+                    port: 8080,
+                    transport: PortTransport::Tcp,
+                    opening: None,
+                    by_link: true,
+                    expires: now,
+                    proof: "synthetic-proof".into(),
+                },
+            );
+            let foreign = if surface == HttpSurface::Browser {
+                HttpSurface::Key
+            } else {
+                HttpSurface::Browser
+            };
+            assert!(runtime.take_use(id, "synthetic-proof", foreign).is_err());
+            assert!(runtime.take_use(id, "wrong-proof", surface).is_err());
+            let kept = runtime
+                .take_use(id, "synthetic-proof", surface)
+                .expect("foreign attempt must not remove the original admission");
+            assert_eq!(kept.ctx.surface, Some(surface));
+            assert_eq!(kept.proof, "synthetic-proof");
+            assert!(runtime.take_use(id, "synthetic-proof", surface).is_err());
+        }
+    }
 }

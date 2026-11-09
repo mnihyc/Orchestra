@@ -1,6 +1,6 @@
 //! One visible holder search: people, custom groups, roles, members by domain and the work in a place.
 
-use crate::middleware::authorization::{self, refusals};
+use crate::middleware::authorization::refusals;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use orch_access_contract::permissions::{NodePermission, PermissionName};
@@ -13,6 +13,45 @@ use orch_authz::{Act, Policy};
 use orch_db::queries::{access, identity};
 use orch_types::Id;
 use std::collections::{HashMap, HashSet};
+
+pub(crate) mod scoped;
+
+/// The same native locator grammar feeds candidate discovery and presentation.
+struct Words {
+    text: String,
+    members: bool,
+    every: bool,
+}
+
+impl Words {
+    fn new(query: &HolderSearchQuery) -> Self {
+        let text = query.q.trim().to_lowercase();
+        let (members, every, text) = if let Some(rest) = text
+            .strip_prefix("members of ")
+            .or_else(|| text.strip_prefix("成员 "))
+        {
+            (true, false, rest.to_owned())
+        } else if let Some(rest) = ["every ", "everyone ", "all ", "所有人 ", "全部 "]
+            .iter()
+            .find_map(|prefix| text.strip_prefix(prefix))
+        {
+            (false, true, rest.to_owned())
+        } else {
+            (false, false, text)
+        };
+        Self {
+            text,
+            members,
+            every,
+        }
+    }
+
+    fn parts(&self) -> (&str, &str) {
+        self.text
+            .split_once(' ')
+            .map_or((self.text.as_str(), ""), |(path, tail)| (path, tail.trim()))
+    }
+}
 
 /// A suffix need not start at the root. A partial last short name completes to a visible place.
 fn address_matches(address: &str, wanted: &str) -> bool {
@@ -95,12 +134,25 @@ pub(crate) async fn search(
     query: HolderSearchQuery,
     (): (),
 ) -> ApiResult<HolderSearchReply> {
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    let all = access::holder_places(&mut conn).await?;
+    crate::key_operations::native::selected_read::<scoped::Holders>(ctx, query, ()).await
+}
+
+async fn select(
+    ctx: &Ctx,
+    conn: &mut orch_db::Conn,
+    caller: &orch_authz::Caller,
+    query: &HolderSearchQuery,
+) -> ApiResult<(
+    scoped::Selected,
+    Vec<crate::key_operations::native::Facts<orch_api_contract::access_sources::Source>>,
+)> {
+    let words = Words::new(query);
+    let all = access::holder_places(conn).await?;
+    let mut frame = scoped::Frame::load(ctx, conn, caller, query, &words, &all).await?;
+    let principal = frame.principal(ctx, conn, caller).await?;
     let ids: Vec<Id> = all.iter().map(|place| place.id).collect();
     let visible: HashSet<Id> = orch_authz::nodes::holding(
-        &mut conn,
+        conn,
         &principal,
         &ids,
         PermissionName::OfNode(NodePermission::View),
@@ -116,16 +168,17 @@ pub(crate) async fn search(
         all.iter().map(|place| (place.id, place)).collect();
     // Members may know the names of org ancestors without their full View; keep that normal name cut.
     let known: HashSet<Id> =
-        crate::routes::nodes::view::refs(&mut conn, &principal, &ids, Policy::default())
+        crate::routes::nodes::view::refs(conn, &principal, &ids, Policy::default())
             .await?
             .into_iter()
             .filter_map(|(id, node)| (!node.redacted).then_some(id))
+            .filter(|id| frame.allows_name(*id))
             .collect();
     let mut start = query.place_id;
     if let Some(id) = start
         && !by_id.contains_key(&id)
     {
-        start = orch_db::queries::hierarchy::with_ancestors(&mut conn, &[id])
+        start = orch_db::queries::hierarchy::with_ancestors(conn, &[id])
             .await?
             .iter()
             .filter(|node| node.kind != "thread")
@@ -136,23 +189,8 @@ pub(crate) async fn search(
         .org_id
         .and_then(|id| by_id.get(&id).map(|place| place.root))
         .or_else(|| start.and_then(|id| by_id.get(&id).map(|place| place.root)));
-    let text = query.q.trim().to_lowercase();
-    let (members, every, text) = if let Some(rest) = text
-        .strip_prefix("members of ")
-        .or_else(|| text.strip_prefix("成员 "))
-    {
-        (true, false, rest)
-    } else if let Some(rest) = ["every ", "everyone ", "all ", "所有人 ", "全部 "]
-        .iter()
-        .find_map(|prefix| text.strip_prefix(prefix))
-    {
-        (false, true, rest)
-    } else {
-        (false, false, text.as_str())
-    };
-    let (path, tail) = text
-        .split_once(' ')
-        .map_or((text, ""), |(path, tail)| (path, tail.trim()));
+    let (members, every, text) = (words.members, words.every, words.text.as_str());
+    let (path, tail) = words.parts();
     let wanted_role = role_word(tail);
     let direct_role = role_word(path).filter(|_| tail.is_empty());
     let completing_role = tail.is_empty()
@@ -190,13 +228,13 @@ pub(crate) async fn search(
             address == path || address.ends_with(&format!(".{path}"))
         });
     }
-    let orgs: Vec<Id> = all
+    let group_rows = frame
+        .groups
         .iter()
-        .filter(|place| place.kind == "org" && visible.contains(&place.id))
-        .map(|place| place.id)
+        .filter(|group| visible.contains(&group.org_id))
+        .cloned()
         .collect();
-    let group_rows = access::groups_in_orgs(&mut conn, &orgs).await?;
-    let groups = crate::routes::directory::groups_named(&mut conn, &principal, group_rows).await?;
+    let groups = crate::routes::directory::groups_named(conn, &principal, group_rows).await?;
     let mut items = Vec::new();
     for place in &matched {
         let human = human_place(place, &by_id, &known);
@@ -212,6 +250,10 @@ pub(crate) async fn search(
         };
         let outside = home.is_some_and(|root| root != place.root);
         let mut add = |input, holder, locator| {
+            if !frame.allows_node(place.id) {
+                return;
+            }
+            frame.record_node(place, &known);
             items.push(HolderCandidate {
                 input,
                 holder,
@@ -310,6 +352,7 @@ pub(crate) async fn search(
                             group.name.to_lowercase().starts_with(tail)
                         })
             }) {
+                frame.record_group(group.id, group.org_id, &place.path, &by_id, &known);
                 let group_place = by_id
                     .get(&group.org_id)
                     .map_or(human.clone(), |org| human_place(org, &by_id, &known));
@@ -318,6 +361,7 @@ pub(crate) async fn search(
                     holder: Holder::Group {
                         group: Group {
                             id: group.id,
+                            revision: group.revision,
                             org_id: group.org_id,
                             place: Some(group_place.clone()),
                             name: group.name.clone(),
@@ -350,11 +394,13 @@ pub(crate) async fn search(
                 continue;
             };
             let human = human_place(place, &by_id, &known);
+            frame.record_group(group.id, group.org_id, &place.path, &by_id, &known);
             items.push(HolderCandidate {
                 input: HolderInput::Group { id: group.id },
                 holder: Holder::Group {
                     group: Group {
                         id: group.id,
+                        revision: group.revision,
                         org_id: group.org_id,
                         place: Some(human.clone()),
                         name: group.name.clone(),
@@ -377,24 +423,12 @@ pub(crate) async fn search(
     {
         let is_mail = path.contains('@') && !path.starts_with('@');
         let is_address = path.contains('.') && !is_mail;
-        let username = if is_mail {
-            path
-        } else {
-            path.rsplit('.')
-                .next()
-                .unwrap_or(path)
-                .trim_start_matches('@')
-        };
-        let mut people =
-            identity::search_users(&mut conn, principal.user(), username, None, 30).await?;
-        if path.starts_with('@') && people.iter().any(|person| person.username == username) {
-            people.retain(|person| person.username == username);
-        }
+        let people: Vec<_> = frame.people.iter().map(|row| row.user.clone()).collect();
         let user_ids: Vec<Id> = people.iter().map(|person| person.id).collect();
-        let refs = refusals::user_refs(&mut conn, &user_ids).await?;
-        let addresses = access::holder_user_addresses(&mut conn, &user_ids).await?;
+        let refs = refusals::user_refs(conn, &user_ids).await?;
+        let addresses = access::holder_user_addresses(conn, &user_ids).await?;
         let local: HashSet<Id> = match home {
-            Some(root) => access::local_holders_among(&mut conn, root, &user_ids)
+            Some(root) => access::local_holders_among(conn, root, &user_ids)
                 .await?
                 .into_iter()
                 .collect(),
@@ -407,10 +441,18 @@ pub(crate) async fn search(
                 .map(|(_, root, domain, address)| {
                     let safe = by_id.get(domain).map_or_else(
                         || format!("@{}", person.username),
-                        |place| format!("{}.{}", safe_address(place, &known), person.username),
+                        |place| {
+                            let prefix = safe_address(place, &known);
+                            if prefix.is_empty() {
+                                format!("@{}", person.username)
+                            } else {
+                                format!("{prefix}.{}", person.username)
+                            }
+                        },
                     );
                     (
                         *root,
+                        *domain,
                         if safe.is_empty() {
                             address.clone()
                         } else {
@@ -419,9 +461,10 @@ pub(crate) async fn search(
                     )
                 })
                 .collect();
-            person_addresses.sort_by_key(|(root, address)| (Some(*root) != home, address.clone()));
+            person_addresses
+                .sort_by_key(|(root, _, address)| (Some(*root) != home, address.clone()));
             if is_address {
-                person_addresses.retain(|(_, address)| {
+                person_addresses.retain(|(_, _, address)| {
                     address == path || address.ends_with(&format!(".{path}"))
                 });
             }
@@ -431,9 +474,15 @@ pub(crate) async fn search(
             let Some(user) = refs.get(&person.id) else {
                 continue;
             };
+            frame.record_account(
+                person.id,
+                person_addresses.first().map(|(_, domain, _)| *domain),
+                &by_id,
+                &known,
+            );
             let address = person_addresses.first().map_or_else(
                 || format!("@{}", person.username),
-                |(_, address)| address.clone(),
+                |(_, _, address)| address.clone(),
             );
             let mut user = user.clone();
             user.address = Some(address.clone());
@@ -454,5 +503,12 @@ pub(crate) async fn search(
             .then_with(|| one.place.cmp(&other.place))
             .then_with(|| one.locator.cmp(&other.locator))
     });
-    Ok(HolderSearchReply { items })
+    let (witness, facts) = frame.finish(ctx, caller)?;
+    Ok((
+        scoped::Selected {
+            reply: HolderSearchReply { items },
+            witness,
+        },
+        facts,
+    ))
 }

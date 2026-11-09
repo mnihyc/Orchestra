@@ -6,11 +6,17 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (a future tag is allowed only when warming caches)
+        description: Release version tag (a future tag is allowed for rehearsal or cache warming)
         required: true
+        default: v0.1.2
         type: string
+      rehearsal:
+        description: Build and assemble the dispatched snapshot without creating a tag, release or images
+        required: true
+        default: false
+        type: boolean
       warm_caches:
-        description: Warm caches from the default branch without creating a draft or publishing images
+        description: Warm caches from the default branch without publishing a release or images
         required: true
         default: false
         type: boolean
@@ -44,25 +50,36 @@ jobs:
       contents: read
       actions: read
     outputs:
-      tag: ${{ steps.gate.outputs.tag || steps.warm.outputs.tag }}
-      version: ${{ steps.gate.outputs.version || steps.warm.outputs.version }}
-      commit: ${{ steps.gate.outputs.commit || steps.warm.outputs.commit }}
+      tag: ${{ steps.gate.outputs.tag || steps.rehearsal.outputs.tag || steps.warm.outputs.tag }}
+      version: ${{ steps.gate.outputs.version || steps.rehearsal.outputs.version || steps.warm.outputs.version }}
+      commit: ${{ steps.gate.outputs.commit || steps.rehearsal.outputs.commit || steps.warm.outputs.commit }}
       source_frontend: ${{ steps.source.outputs.frontend }}
+      ci_ref: ${{ steps.gate.outputs.ci_ref || steps.rehearsal.outputs.ci_ref }}
+      native_matrix: ${{ steps.contract.outputs.native_matrix }}
+      package_matrix: ${{ steps.contract.outputs.package_matrix }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.warm_caches && github.sha || inputs.tag || github.ref_name }}
+          ref: ${{ (inputs.warm_caches || inputs.rehearsal) && github.sha || inputs.tag || github.ref_name }}
           fetch-depth: 0
       - name: Prepare a cache-only build of the default branch
         if: inputs.warm_caches
         id: warm
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REHEARSAL: ${{ inputs.rehearsal }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
           PUBLISH_IMAGES: ${{ inputs.publish_images }}
         run: python3 .github/scripts/release_warmup.py
+      - name: Pin the non-publishing snapshot rehearsal
+        if: inputs.rehearsal
+        id: rehearsal
+        env:
+          WARM_CACHES: ${{ inputs.warm_caches }}
+          PUBLISH_IMAGES: ${{ inputs.publish_images }}
+        run: python3 .github/scripts/release_rehearsal.py
       - name: Gate the exact tag and commit
-        if: ${{ !inputs.warm_caches }}
+        if: ${{ !inputs.warm_caches && !inputs.rehearsal }}
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,29 +90,56 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          COMMIT: ${{ steps.gate.outputs.commit || steps.rehearsal.outputs.commit }}
         run: python3 .github/scripts/release_source.py
       - name: Refuse image publication during repackaging
         if: inputs.source_run_id && inputs.publish_images
         run: |
-          echo '::error::Repackaging only creates packages and a draft; publish images in a separate approved run.'
+          echo '::error::Repackaging only creates packages and a release; publish images in a separate approved run.'
           exit 1
+      - name: Record the exact schema, transport and platform inputs
+        id: contract
+        env:
+          COMMIT: ${{ steps.gate.outputs.commit || steps.rehearsal.outputs.commit || steps.warm.outputs.commit }}
+          RELEASE_MODE: ${{ inputs.warm_caches && 'warm' || inputs.rehearsal && 'rehearsal' || 'release' }}
+        run: python3 .github/scripts/release_contract.py record --commit "$COMMIT" --tag "$RELEASE_TAG" --mode "$RELEASE_MODE" --out .tmp/release-inputs.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-inputs
+          path: .tmp/release-inputs.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
       - name: Release helper behavior
         run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
       - name: Lint the workflows in the pinned tooling image
         run: python3 .github/scripts/workflow_lint.py
+
+  ci:
+    if: ${{ !inputs.warm_caches }}
+    needs: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 310
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - name: Wait for the exact ref and commit's full CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CI_REF: ${{ needs.gate.outputs.ci_ref }}
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: python3 .github/scripts/release_ci.py --ref "$CI_REF" --commit "$COMMIT" ${{ inputs.rehearsal && '--require-dispatch' || '' }}
 
   native:
     needs: gate
     if: ${{ !inputs.source_run_id }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-24.04, target: x86_64-unknown-linux-musl}
-          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl}
-          - {os: macos-15-intel, target: x86_64-apple-darwin}
-          - {os: macos-15, target: aarch64-apple-darwin}
-          - {os: windows-2022, target: x86_64-pc-windows-msvc}
+      matrix: ${{ fromJSON(needs.gate.outputs.native_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
@@ -139,12 +183,28 @@ jobs:
       - name: Native tests, connector build and actual version command
         if: runner.os != 'Linux'
         run: python .github/scripts/release_native.py --target ${{ matrix.target }} --out .tmp/native
+      - name: Observe the candidate connector on its native platform
+        id: observe
+        if: runner.os != 'Linux' && !inputs.warm_caches
+        env:
+          COMMIT: ${{ needs.gate.outputs.commit }}
+        run: python .github/scripts/release_observe.py --target ${{ matrix.target }} --native .tmp/native --out observations
+      - name: Retain native platform observations even on failure
+        if: always() && runner.os != 'Linux' && !inputs.warm_caches
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inv15-${{ matrix.target }}
+          path: observations/${{ matrix.target }}.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: native-${{ matrix.target }}
           path: .tmp/native/*
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
   frontend:
     needs: gate
@@ -181,6 +241,7 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 14
+          overwrite: true
 
   package:
     needs: [gate, native, frontend]
@@ -193,13 +254,15 @@ jobs:
       actions: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-24.04, arch: x86_64}
-          - {os: ubuntu-24.04-arm, arch: aarch64}
+      matrix: ${{ fromJSON(needs.gate.outputs.package_matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    # Six hours: with one build job (the control API's release build against a hosted runner's memory, D-1657) the
+    # server took 105 minutes and the static programs as long again on the fourth rehearsal; the unnesting brings it down.
+    timeout-minutes: 360
     env:
+      # One rustc at a time inside the builder: the control API crate's release build alone takes most of a hosted
+      # runner's memory since the deep async layouts (D-1657); the musl CI job compiles the same crate with -j 1.
+      CARGO_BUILD_JOBS: '1'
       ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
       ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
       ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
@@ -254,24 +317,25 @@ jobs:
           path: .tmp/package/*
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
   images:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_images && !inputs.warm_caches
-    needs: [gate, package]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_images && !inputs.warm_caches && !inputs.rehearsal
+    needs: [gate, ci, assemble]
     environment: release-images
     permissions:
       contents: read
       packages: write
+      actions: read
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-24.04, arch: x86_64}
-          - {os: ubuntu-24.04-arm, arch: aarch64}
+      matrix: ${{ fromJSON(needs.gate.outputs.package_matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
       GH_TOKEN: ${{ github.token }}
+      REHEARSAL: ${{ inputs.rehearsal }}
+      WARM_CACHES: ${{ inputs.warm_caches }}
       ORCH_RELEASE_VERSION: ${{ needs.gate.outputs.version }}
       ORCH_RELEASE_TAG: ${{ needs.gate.outputs.tag }}
       ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
@@ -287,17 +351,16 @@ jobs:
           path: .tmp/image/*.json
           if-no-files-found: error
           retention-days: 14
+          overwrite: true
 
-  draft:
-    if: always() && !inputs.warm_caches && needs.gate.result == 'success' && needs.package.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
-    needs: [gate, package, images]
+  assemble:
+    if: ${{ !inputs.warm_caches }}
+    needs: [gate, package]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
-      contents: write
-      packages: write
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -307,16 +370,45 @@ jobs:
         with:
           pattern: package-*
           path: .tmp/packages
+      - name: Assemble both architectures and verify the complete candidate
+        env:
+          RELEASE_BASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.gate.outputs.tag }}
+        run: python3 .github/scripts/release_assemble.py --inputs .tmp/packages --out .tmp/release --base-url "$RELEASE_BASE_URL"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: verified-release
+          path: .tmp/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: always() && !cancelled() && !inputs.warm_caches && !inputs.rehearsal && needs.gate.result == 'success' && needs.ci.result == 'success' && needs.assemble.result == 'success' && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    needs: [gate, ci, assemble, images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/release-counters
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.gate.outputs.commit }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: verified-release
+          path: .tmp/release
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.images.result == 'success'
         with:
           pattern: image-*
           path: .tmp/images
-      - name: Assemble both architectures and verify the complete release
-        env:
-          RELEASE_BASE_URL: ${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.gate.outputs.tag }}
-        run: python3 .github/scripts/release_assemble.py --inputs .tmp/packages --out .tmp/release --base-url "$RELEASE_BASE_URL"
-      - name: Create the reviewed draft without replacing assets
+      - name: Publish the verified release after rechecking CI
         env:
           PUBLISH_IMAGES: ${{ needs.images.result == 'success' }}
+          REHEARSAL: ${{ inputs.rehearsal }}
+          WARM_CACHES: ${{ inputs.warm_caches }}
         run: python3 .github/scripts/release_publish.py --release .tmp/release --repo "$GITHUB_REPOSITORY" --images .tmp/images

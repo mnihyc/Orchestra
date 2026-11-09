@@ -63,7 +63,12 @@ export class UploadTask {
   private completing = false;
   private pending: Promise<UploadedBlob> | null = null;
 
-  constructor(readonly file: File, private readonly requests: UploadTransport = browserTransport()) {}
+  readonly file: File;
+  private readonly requests: UploadTransport;
+
+  constructor(file: File, requests: UploadTransport = browserTransport()) {
+    this.file = file; this.requests = requests;
+  }
 
   /** The receipt lets a cancelled workspace batch report measured partial progress. */
   get uploadId(): string | null { return this.session?.upload_id ?? null; }

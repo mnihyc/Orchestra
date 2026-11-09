@@ -1,3 +1,5 @@
+import { resourceCardRead } from './resource-card-readers';
+import { TestRouter } from './TestRouter';
 /** Usable provider search owns its native pages; the surrounding setting owns every write. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
@@ -5,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { type ReactNode, useState } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { applyRow } from '@/api/cache';
+import { providerDefaultKey } from '@/api/defaultsOpening';
 import type * as Client from '@/api/client';
 import { ApiError, client } from '@/api/client';
 import { ProviderDefaultChoice } from '@/features/settings/ProviderChoice';
@@ -21,7 +24,7 @@ const calls = vi.hoisted(() => ({ read: vi.fn<(path: string, options?: Options) 
   changed: vi.fn(), edited: vi.fn(), submit: vi.fn(), create: vi.fn() }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
-  return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => ({ data: await calls.read(path, options), response: new Response() }) } };
+  return { ...actual, api: { ...actual.api, GET: async (path: string, options?: Options) => resourceCardRead(path, options) ?? ({ data: await calls.read(path, options), response: new Response() }) } };
 });
 vi.mock('@/features/navigation/placeLabels', () => ({ useKnownPlaces: () => new Map([['hidden home', [{ id: home.id, name: 'Private cached home', above: [] }]]]) }));
 vi.mock('@/features/resources/ResourceCreation', () => ({ ResourceCreateButton: ({ onCreated }: { onCreated?: (id: string) => void }) => {
@@ -59,9 +62,12 @@ function Harness({ value = current.id, disabled = false }: { value?: string | nu
   </form>;
 }
 const clients: QueryClient[] = [];
-function draw(ui: ReactNode) {
+function draw(ui: ReactNode, name: Provider | ApiError | null = current) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); clients.push(queries);
-  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider>{ui}</TooltipProvider></QueryClientProvider>) };
+  // This is the independent current-name member supplied by the bounded opening.
+  if (name instanceof ApiError) queries.getQueryCache().build(queries, { queryKey: providerDefaultKey(current.id) }).setState({ status: 'error', error: name, data: undefined });
+  else if (name !== null) queries.setQueryData(providerDefaultKey(name.id), name);
+  return { queries, ...render(<QueryClientProvider client={queries}><TestRouter><TooltipProvider>{ui}</TooltipProvider></TestRouter></QueryClientProvider>) };
 }
 const field = () => screen.getByRole('combobox', { name: label });
 const list = () => within(screen.getByRole('listbox', { name: label }));
@@ -86,6 +92,16 @@ it.each(['en', 'zh-CN'] as const)('shows a provider label for an inner recovery 
   untouched();
 });
 
+
+it.each(['en', 'zh-CN'] as const)('reads an unreported current provider only after its picker opens (%s)', async (locale) => {
+  await setLocale(locale); const user = userEvent.setup(); draw(<Harness />, null);
+  expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')); expect(calls.read).not.toHaveBeenCalled();
+  await user.click(field());
+  await waitFor(() => expect(list().getByRole('option', { name: current.name })).toBeVisible());
+  expect(names()).toHaveLength(1); expect(reads()).toHaveLength(1);
+  await user.keyboard('{Escape}'); expect(field()).toHaveValue(current.name); untouched();
+});
+
 it('browses thirteen usable rows, follows an empty native page, deduplicates and restores input focus after the final pager disappears', async () => {
   calls.read.mockImplementation((path, options) => {
     if (path === '/providers/{id}') return Promise.resolve(current);
@@ -96,9 +112,15 @@ it('browses thirteen usable rows, follows an empty native page, deduplicates and
   await waitFor(() => expect(field()).toHaveValue(current.name)); expect(reads()).toHaveLength(0);
   await user.click(field()); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(14));
   expect(list().getByRole('option', { name: current.name })).toHaveAttribute('aria-disabled', 'true');
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
   await user.keyboard('{Enter}'); await waitFor(() => expect(reads()).toHaveLength(2));
   await waitFor(() => expect(field()).toHaveFocus()); expect(list().getAllByRole('option')).toHaveLength(14);
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.collapse', { name: home.name }) })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('link', { name: home.name })).toHaveFocus();
+  await user.tab(); expect(screen.getByRole('button', { name: i18n.t('resourceGroups.sharingOf', { name: home.name }) })).toHaveFocus();
   await user.tab(); expect(screen.getByRole('button', { name: i18n.t('ui.pagination.more') })).toHaveFocus();
   await user.keyboard('{Enter}'); await waitFor(() => expect(list().getAllByRole('option')).toHaveLength(15));
   expect(screen.queryByRole('button', { name: i18n.t('ui.pagination.more') })).not.toBeInTheDocument();
@@ -107,7 +129,7 @@ it('browses thirteen usable rows, follows an empty native page, deduplicates and
   expect(args()).toEqual([request, { ...request, cursor: 'after-first' }, { ...request, cursor: 'after-empty' }]); untouched();
   await user.click(list().getByRole('option', { name: late.name })); expect(field()).toHaveValue(late.name);
   expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id); expect(calls.edited).toHaveBeenCalledTimes(1); expect(calls.submit).not.toHaveBeenCalled();
-  expect(names()).toHaveLength(1);
+  expect(names()).toHaveLength(0);
 });
 
 it('uses native q and one explicit retry, then clears the query and restores the committed name without editing the setting', async () => {
@@ -132,7 +154,7 @@ it('uses native q and one explicit retry, then clears the query and restores the
 
 it('can select another admitted provider while the independent current-name read is pending, without accepting its later name', async () => {
   const pending = deferred<Provider>(); calls.read.mockImplementation((path) => path === '/providers/{id}' ? pending.promise : Promise.resolve(page([late])));
-  const user = userEvent.setup(); draw(<Harness />); expect(field()).toHaveValue(i18n.t('places.providerDefault.loading'));
+  const user = userEvent.setup(); draw(<Harness />, null); expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')); expect(names()).toHaveLength(0);
   await user.click(field()); await user.click(await screen.findByRole('option', { name: late.name }));
   await act(async () => { pending.resolve(current); await Promise.resolve(); });
   expect(field()).toHaveValue(late.name); expect(calls.changed).toHaveBeenCalledExactlyOnceWith(late.id); expect(names()).toHaveLength(1); expect(calls.submit).not.toHaveBeenCalled();
@@ -154,11 +176,11 @@ it.each([403, 404])('keeps a private current provider Managed after %i even when
 });
 
 it('recovers a closed current-name failure with exactly one read and keeps the candidate list closed on restored focus', async () => {
-  calls.read.mockRejectedValueOnce(failure()).mockResolvedValue(current);
-  const user = userEvent.setup(); draw(<Harness />); await screen.findByRole('alert');
+  calls.read.mockResolvedValue(current);
+  const user = userEvent.setup(); draw(<Harness />, failure()); await screen.findByRole('alert');
   await user.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
   await waitFor(() => expect(field()).toHaveValue(current.name)); await waitFor(() => expect(field()).toHaveFocus());
-  expect(field()).toHaveAttribute('aria-expanded', 'false'); expect(names()).toHaveLength(2); expect(reads()).toHaveLength(0); untouched();
+  expect(field()).toHaveAttribute('aria-expanded', 'false'); expect(names()).toHaveLength(1); expect(reads()).toHaveLength(0); untouched();
 });
 
 it('ends the old reader session, drops its names and ignores its in-flight candidates', async () => {
@@ -168,10 +190,10 @@ it('ends the old reader session, drops its names and ignores its in-flight candi
   await user.click(field()); await waitFor(() => expect(reads()).toHaveLength(1));
   calls.read.mockRejectedValue(failure('authz.denied'));
   await act(async () => { client.session.setState({ readerVersion: 2 }); await Promise.resolve(); });
-  await waitFor(() => expect(field()).toHaveValue(i18n.t('settings.compact.managed')));
+  await waitFor(() => expect(field()).toHaveValue(i18n.t('places.providerDefault.selected')));
   await act(async () => { pending.resolve(page([late])); await Promise.resolve(); });
   expect(screen.queryByRole('listbox')).not.toBeInTheDocument(); expect(screen.queryByText(current.name)).not.toBeInTheDocument();
-  expect(screen.queryByText(late.name)).not.toBeInTheDocument(); expect(reads()).toHaveLength(1); expect(names()).toHaveLength(2); untouched();
+  expect(screen.queryByText(late.name)).not.toBeInTheDocument(); expect(reads()).toHaveLength(1); expect(names()).toHaveLength(0); untouched();
 });
 
 it('hides cached rows on a permission failure from the next native page', async () => {
@@ -249,15 +271,20 @@ it('preserves an admitted current identity while a native disabled update remove
   await user.keyboard('{Enter}'); untouched(); await user.keyboard('{Escape}'); expect(field()).toHaveValue(current.name); expect(reads()).toHaveLength(1);
 });
 
-it('shows Managed after a native withdrawal and rereads it on authority repair', async () => {
+it('holds a withdrawn name closed until the repaired picker explicitly opens', async () => {
+  const user = userEvent.setup();
   const view = draw(<Harness />); await waitFor(() => expect(field()).toHaveValue(current.name));
   await act(async () => { applyRow(view.queries, { kind: 'provider', id: current.id, value: null }); await Promise.resolve(); });
   expect(view.queries.getQueryCache().find({ queryKey: ['provider', current.id, 'default-choice', `${owner.id}:1`] })?.state.data).toBeNull();
   await waitFor(() => expect(field()).toHaveValue(i18n.t('settings.compact.managed')));
   expect(screen.queryByRole('button', { name: i18n.t('common.tryAgain') })).not.toBeInTheDocument();
   await act(async () => { await view.queries.invalidateQueries({queryKey:['provider',current.id]}); });
+  expect(names()).toHaveLength(0);
+  await user.click(field());
+  await waitFor(() => expect(list().getByRole('option', { name: current.name })).toBeVisible());
+  await user.keyboard('{Escape}');
   await waitFor(() => expect(field()).toHaveValue(current.name));
-  expect(names()).toHaveLength(2); expect(reads()).toHaveLength(0); untouched();
+  expect(names()).toHaveLength(1); expect(reads()).toHaveLength(1); untouched();
 });
 
 it('never fills a redacted provider home from the cached place names used for disambiguation', async () => {

@@ -1,3 +1,4 @@
+import { resourceCardRead } from './resource-card-readers';
 /** Hints keep their ordinary and warning states; card reads stay independent of the number of names on screen. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { screen, waitFor } from '@testing-library/react';
@@ -12,13 +13,22 @@ import { detailEnvironment, detailHost } from './resource-detail-fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
 import { choiceCap } from '../unit/resource-facts-fixtures';
 import type { CapStatus } from '@/generated/api-types';
-import { show } from './support';
+import { show as showFrame } from './support';
+import type { ReactNode } from 'react';
+
+function show(ui: ReactNode) {
+  const cache = new QueryClient({ defaultOptions: queryClient.getDefaultOptions() });
+  return showFrame(<QueryClientProvider client={cache}>{ui}</QueryClientProvider>);
+}
 
 const requests = vi.hoisted(() => ({ provider: vi.fn<(id: string) => void>(), caps: [] as CapStatus[] }));
-vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: async (_path: string, options: { params: { path: { id: string } } }) => {
+vi.mock('@/api/client', async (load) => ({ ...await load<object>(), api: { GET: async (path: string, options: { params: { path: { id: string; object?: string } } }) => {
   const id = options.params.path.id;
-  requests.provider(id);
   const { planProvider } = await import('../unit/provider-plan-fixtures');
+  const auxiliary = resourceCardRead(path, options);
+  if (auxiliary !== null) return auxiliary;
+  if (path !== '/providers/{id}') throw new Error(`Unexpected resource-card read ${path}`);
+  requests.provider(id);
   return { data: planProvider({ id, name: `Provider ${id}`, choice_usage: { caps: requests.caps, performance: [], observed_at: '2026-10-25T12:00:00Z' } }), error: undefined, response: new Response(null, { status: 200 }) };
 } } }));
 beforeEach(() => { requests.provider.mockClear(); requests.caps = []; });

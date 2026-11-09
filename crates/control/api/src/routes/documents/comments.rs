@@ -9,10 +9,10 @@
 //! added or changed. `client_id` is the comment's own identifier: a request
 //! sent twice answers as the first did.
 
-use super::{build, notices};
+use super::{DocumentRow, build, notices};
 use crate::middleware::authorization::{self, refusals};
 use crate::middleware::requests::{ApiError, ApiResult};
-use crate::middleware::transaction_guard;
+use crate::middleware::transaction_guard::{self, Guard};
 use crate::registry::{Ctx, Registry};
 use crate::routes::nodes::{actor_name, invalid};
 use chrono::{DateTime, Utc};
@@ -20,36 +20,49 @@ use orch_access_contract::audit::AuditAction;
 use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
 use orch_api_contract::access::MissingAccess;
-use orch_api_contract::common::{ErrorCode, FieldFault, Page, PageQuery, Problem};
+use orch_api_contract::common::{ErrorCode, FieldFault, Problem};
 use orch_api_contract::documents::{
-    DiscussionResolvedFilter, DocumentComment, DocumentCommentCreate, DocumentCommentCreateBody,
-    DocumentCommentDelete, DocumentCommentList, DocumentCommentListQuery, DocumentCommentPage,
-    DocumentCommentReactionSet, DocumentCommentReactionSetBody, DocumentCommentUpdate,
-    DocumentCommentUpdateBody, DocumentDiscussion, DocumentDiscussionCreate,
-    DocumentDiscussionCreateBody, DocumentDiscussionList, DocumentDiscussionListQuery,
-    DocumentDiscussionResolve, DocumentDiscussionResolveBody, Inline,
+    DocumentComment, DocumentCommentCreate, DocumentCommentCreateBody, DocumentCommentDelete,
+    DocumentCommentList, DocumentCommentReactionSet, DocumentCommentReactionSetBody,
+    DocumentCommentUpdate, DocumentCommentUpdateBody, DocumentCommentUpdateResponse,
+    DocumentDiscussionCreate, DocumentDiscussionCreateBody, DocumentDiscussionList,
+    DocumentDiscussionResolve, DocumentDiscussionResolveBody, DocumentDiscussionResolveResponse,
+    Inline,
 };
 use orch_authz::documents::{self, State};
 use orch_authz::{Act, Error as AuthError, Policy, Principal};
-use orch_db::queries::documents::discussions::{self, Answered, Cursor, NewComment, Opened, Which};
-use orch_db::{Conn, DbError};
+use orch_db::queries::documents::discussions::{self, Answered, Cursor, NewComment, Opened};
+use orch_db::{Conn, DbError, Tx};
 use orch_documents::blocks::Fault;
 use orch_documents::comments;
 use orch_types::Id;
 use serde_json::json;
 
+mod creators;
 mod edit_replay;
+mod readers;
+mod writers;
 
 /// Binds this module's requests.
 pub fn mount(registry: &mut Registry) {
     registry
-        .on(DocumentDiscussionList, list)
-        .on(DocumentCommentList, list_comments)
-        .on(DocumentDiscussionCreate, open)
-        .on(DocumentCommentCreate, answer)
-        .on(DocumentDiscussionResolve, resolve)
-        .on(DocumentCommentUpdate, edit)
-        .on(DocumentCommentDelete, delete)
+        .on_with_operation(
+            DocumentDiscussionList,
+            readers::discussions,
+            readers::discussions_get,
+        )
+        .on_with_operation(
+            DocumentCommentList,
+            readers::comments,
+            readers::comments_get,
+        )
+        .creation(DocumentDiscussionCreate, creators::discussion_binding())
+        .creation(DocumentCommentCreate, creators::comment_binding())
+        .on_with_operation(DocumentDiscussionCreate, creators::opening, open)
+        .on_with_operation(DocumentCommentCreate, creators::answering, answer)
+        .on_with_operation(DocumentDiscussionResolve, writers::resolve, resolve)
+        .on_with_operation(DocumentCommentUpdate, writers::edit, edit)
+        .on_with_operation(DocumentCommentDelete, writers::delete, delete)
         .on(DocumentCommentReactionSet, react);
 }
 
@@ -110,6 +123,130 @@ async fn may_change_own(conn: &mut Conn, principal: &Principal, document: Id) ->
     }
 }
 
+/// The three native Rule prefixes are rebuilt by their existing operation producer.
+/// Their retained outcomes belong to the final guard after the document-row wait.
+pub(super) enum EditPrefix {
+    NotAuthor,
+    Deleted,
+    Repeated(discussions::CommentRow),
+    Stale(discussions::CommentRow),
+    Ready(discussions::CommentRow),
+}
+
+pub(super) struct DeletePrefix {
+    known: discussions::CommentRow,
+    by_someone_else: bool,
+}
+
+pub(super) async fn resolve_prefix(
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+    discussion: Id,
+) -> ApiResult<discussions::DiscussionRow> {
+    super::live(conn, document).await?;
+    let policy = Policy::default();
+    match documents::check_all(
+        conn,
+        principal,
+        document,
+        &[Permission::DocEdit],
+        Act::Use,
+        State::Live,
+        policy,
+    )
+    .await
+    {
+        Ok(Decision::Allowed { .. }) => {}
+        Ok(Decision::Refused(refusal)) => {
+            // The native editor path needs no added View gate. Only the author
+            // alternative requires current View and the unarchived document.
+            if !discussions::wrote_in(conn, discussion, principal.user()).await? {
+                return Err(refusals::denied(conn, refusal).await?);
+            }
+            may_change_own(conn, principal, document).await?;
+        }
+        Err(error) => return Err(refusals::problem(conn, error).await),
+    }
+    discussions::get(conn, document, discussion)
+        .await?
+        .map(|full| full.discussion)
+        .ok_or_else(ApiError::not_found)
+}
+
+async fn edit_prefix(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+    comment: Id,
+    attempt: Option<&edit_replay::Attempt>,
+) -> ApiResult<EditPrefix> {
+    super::live(conn, document).await?;
+    authorization::require_document(
+        conn,
+        principal,
+        document,
+        Permission::DocView,
+        Policy::default(),
+    )
+    .await?;
+    let known = discussions::comment(conn, document, comment)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if known.author_id != principal.user() {
+        return Ok(EditPrefix::NotAuthor);
+    }
+    may_change_own(conn, principal, document).await?;
+    if known.deleted_at.is_some() {
+        return Ok(EditPrefix::Deleted);
+    }
+    if let Some(attempt) = attempt {
+        if let Some(recorded) = edit_replay::find(ctx, conn, &known, attempt).await? {
+            return Ok(EditPrefix::Repeated(recorded));
+        }
+        if known.seq_updated != attempt.expected_seq {
+            return Ok(EditPrefix::Stale(known));
+        }
+    }
+    Ok(EditPrefix::Ready(known))
+}
+
+pub(super) async fn delete_prefix(
+    conn: &mut Conn,
+    principal: &Principal,
+    document: Id,
+    comment: Id,
+) -> ApiResult<DeletePrefix> {
+    super::live(conn, document).await?;
+    let policy = Policy::default();
+    authorization::require_document(conn, principal, document, Permission::DocView, policy).await?;
+    let known = discussions::comment(conn, document, comment)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    let by_someone_else = known.author_id != principal.user();
+    if by_someone_else {
+        authorization::require_document(conn, principal, document, Permission::DocManage, policy)
+            .await?;
+    } else {
+        may_change_own(conn, principal, document).await?;
+    }
+    Ok(DeletePrefix {
+        known,
+        by_someone_else,
+    })
+}
+
+/// Keep the existing early admission and actual native scope/document locks. The
+/// last guard rebuilds the complete native effect-free prefix on this connection.
+async fn begin_change(ctx: &Ctx, document: Id) -> ApiResult<(Ctx, Tx, Guard, DocumentRow)> {
+    let (mut tx, _initial) = transaction_guard::begin(ctx).await?;
+    orch_db::queries::documents::containers::lock_document_scope(&mut tx, document).await?;
+    let row = super::live_locked(&mut tx, document).await?;
+    let (current, guard) = transaction_guard::after_wait(ctx, &mut tx).await?;
+    Ok((current, tx, guard, row))
+}
+
 /// A comment as the caller reads it.
 async fn comment_for(
     conn: &mut Conn,
@@ -121,26 +258,6 @@ async fn comment_for(
     let cast = build::Cast::load(conn, principal, wanted, Policy::default()).await?;
     cast.comment(row)
         .ok_or_else(|| ApiError::internal("the author of a comment is not there"))
-}
-
-/// A discussion as the caller reads it.
-async fn discussion_for(
-    conn: &mut Conn,
-    principal: &Principal,
-    document: Id,
-    full: &discussions::Full,
-) -> ApiResult<DocumentDiscussion> {
-    build::discussions_for(
-        conn,
-        principal,
-        document,
-        std::slice::from_ref(full),
-        Policy::default(),
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| ApiError::internal("a discussion could not be shown"))
 }
 
 /// The words of a comment as plain text, for a notice to quote.
@@ -165,134 +282,29 @@ fn read_cursor(text: Option<&str>) -> ApiResult<Option<Cursor>> {
     }))
 }
 
-/// The discussions beside a document, the newest answer first.
-async fn list(
-    ctx: Ctx,
-    query: DocumentDiscussionListQuery,
-    (): (),
-) -> ApiResult<Page<DocumentDiscussion>> {
-    let id = ctx.id("id")?;
-    let paging = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(paging.limit()).unwrap_or(usize::MAX);
-    let after = read_cursor(query.cursor.as_deref())?;
-    let which = match query.resolved.unwrap_or_default() {
-        DiscussionResolvedFilter::Exclude => Which::Open,
-        DiscussionResolvedFilter::Include => Which::All,
-        DiscussionResolvedFilter::Only => Which::Resolved,
-    };
-    let mut conn = ctx.app.db.acquire().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    super::live(&mut conn, id).await?;
-    let found = discussions::list(
-        &mut conn,
-        id,
-        which,
-        after,
-        i64::try_from(limit + 1).unwrap_or(i64::MAX),
-    )
-    .await?;
-    let more = found.len() > limit;
-    let shown: Vec<_> = found.into_iter().take(limit).collect();
-    let fulls: Vec<discussions::Full> = shown.iter().map(|(full, _)| full.clone()).collect();
-    let items =
-        build::discussions_for(&mut conn, &principal, id, &fulls, Policy::default()).await?;
-    let next_cursor = more
-        .then(|| {
-            shown.last().map(|(full, active)| {
-                format!("{}|{}", active.timestamp_micros(), full.discussion.id)
-            })
-        })
-        .flatten();
-    Ok(Page { items, next_cursor })
-}
-
-/// Reads one comment page after rechecking the document and discussion boundary.
-async fn list_comments(
-    ctx: Ctx,
-    query: DocumentCommentListQuery,
-    (): (),
-) -> ApiResult<DocumentCommentPage> {
-    let document = ctx.id("id")?;
-    let discussion = ctx.id("discussion_id")?;
-    let paging = PageQuery {
-        limit: query.limit,
-        cursor: query.cursor.clone(),
-    };
-    let limit = usize::try_from(paging.limit()).unwrap_or(200);
-    let after = read_cursor(query.cursor.as_deref())?;
-    let mut conn = orch_db::queries::feeds::begin_reading(&ctx.app.db).await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
-    super::live(&mut conn, document).await?;
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM document_discussions WHERE document_id=$1 AND id=$2)",
-    )
-    .bind(document)
-    .bind(discussion)
-    .fetch_one(&mut *conn)
-    .await
-    .map_err(DbError::from)?;
-    if !exists {
-        return Err(ApiError::new(
-            ErrorCode::NotFound,
-            "the discussion is not there",
-        ));
-    }
-    let found = discussions::comments_page(
-        &mut conn,
-        discussion,
-        after,
-        i64::try_from(limit + 1).unwrap_or(201),
-    )
-    .await?;
-    let more = found.len() > limit;
-    let shown: Vec<_> = found.into_iter().take(limit).collect();
-    let mut wanted = build::Wanted::default();
-    for row in &shown {
-        wanted.comment(row);
-    }
-    let cast = build::Cast::load(&mut conn, &principal, wanted, Policy::default()).await?;
-    let items = shown
-        .iter()
-        .rev()
-        .filter_map(|row| cast.comment(row))
-        .collect();
-    let next_cursor = more
-        .then(|| {
-            shown
-                .last()
-                .map(|row| format!("{}|{}", row.created_at.timestamp_micros(), row.id))
-        })
-        .flatten();
-    let wrote = discussions::wrote_in(&mut conn, discussion, principal.user()).await?;
-    conn.commit().await.map_err(DbError::from)?;
-    Ok(DocumentCommentPage {
-        items,
-        next_cursor,
-        wrote,
-    })
-}
-
 /// Opens a discussion on a block, with its first comment.
 async fn open(
     mut ctx: Ctx,
     (): (),
     body: DocumentDiscussionCreateBody,
-) -> ApiResult<DocumentDiscussion> {
+) -> ApiResult<orch_api_contract::documents::DocumentDiscussionCreateResponse> {
     let id = ctx.id("id")?;
     let first = client_id(&body.client_id)?;
     let content = comments::check_content(&body.content).map_err(invalid_faults)?;
     let quote = comments::clean_quote(body.quote.as_deref())
         .map_err(|fault| invalid(&fault.path, &fault.message))?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
+    let (current, mut tx, guard, _) = begin_change(&ctx, id).await?;
+    ctx = current;
     let principal = guard.principal().clone();
-    let content = super::build::label_written(&mut tx, &principal, content).await?;
+    let ready = guard.operation_data::<creators::Ready>()?;
+    let content = if ready.repeated {
+        content
+    } else {
+        ready.labels.apply(content)?
+    };
     let stored = serde_json::to_value(&content).map_err(ApiError::internal)?;
     let row = super::live(&mut tx, id).await?;
-    let opened = discussions::open(
+    let opened = discussions::open_before(
         &mut tx,
         id,
         body.block_id,
@@ -303,6 +315,7 @@ async fn open(
             content: &stored,
         },
         ctx.now,
+        || guard.check_deadline(&ctx),
     )
     .await?;
     let full = match opened {
@@ -332,7 +345,8 @@ async fn open(
             *full
         }
     };
-    let shown = discussion_for(&mut tx, &principal, row.id, &full).await?;
+    let shown = creators::accepted_discussion(&ctx, &mut tx, &principal, &full).await?;
+    guard.check_deadline(&ctx)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(shown)
 }
@@ -342,18 +356,23 @@ async fn answer(
     mut ctx: Ctx,
     (): (),
     body: DocumentCommentCreateBody,
-) -> ApiResult<DocumentComment> {
+) -> ApiResult<orch_api_contract::documents::DocumentCommentCreateResponse> {
     let id = ctx.id("id")?;
     let discussion = ctx.id("discussion_id")?;
     let written = client_id(&body.client_id)?;
     let content = comments::check_content(&body.content).map_err(invalid_faults)?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
+    let (current, mut tx, guard, _) = begin_change(&ctx, id).await?;
+    ctx = current;
     let principal = guard.principal().clone();
-    let content = super::build::label_written(&mut tx, &principal, content).await?;
+    let ready = guard.operation_data::<creators::Ready>()?;
+    let content = if ready.repeated {
+        content
+    } else {
+        ready.labels.apply(content)?
+    };
     let stored = serde_json::to_value(&content).map_err(ApiError::internal)?;
     let row = super::live(&mut tx, id).await?;
-    let answered = discussions::answer(
+    let answered = discussions::answer_before(
         &mut tx,
         id,
         discussion,
@@ -363,6 +382,7 @@ async fn answer(
             content: &stored,
         },
         ctx.now,
+        || guard.check_deadline(&ctx),
     )
     .await?;
     let comment = match answered {
@@ -391,7 +411,8 @@ async fn answer(
             *comment
         }
     };
-    let shown = comment_for(&mut tx, &principal, &comment).await?;
+    let shown = creators::accepted_comment(&ctx, &mut tx, &principal, &comment).await?;
+    guard.check_deadline(&ctx)?;
     tx.commit().await.map_err(DbError::from)?;
     Ok(shown)
 }
@@ -402,163 +423,147 @@ async fn resolve(
     mut ctx: Ctx,
     (): (),
     body: DocumentDiscussionResolveBody,
-) -> ApiResult<DocumentDiscussion> {
-    let id = ctx.id("id")?;
-    let discussion = ctx.id("discussion_id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let policy = Policy::default();
-    super::live(&mut tx, id).await?;
-    match documents::check_all(
-        &mut tx,
-        &principal,
-        id,
-        &[Permission::DocEdit],
-        Act::Use,
-        State::Live,
-        policy,
-    )
-    .await
-    {
-        Ok(Decision::Allowed { .. }) => {}
-        Ok(Decision::Refused(refusal)) => {
-            // Whoever wrote in the discussion may resolve it; whether there is
-            // one is told to nobody who is refused.
-            let wrote = discussions::wrote_in(&mut tx, discussion, principal.user()).await?;
-            if !wrote {
-                return Err(refusals::denied(&mut tx, refusal).await?);
-            }
-            may_change_own(&mut tx, &principal, id).await?;
-        }
-        Err(error) => return Err(refusals::problem(&mut tx, error).await),
+) -> ApiResult<DocumentDiscussionResolveResponse> {
+    let result = async {
+        let id = ctx.id("id")?;
+        let discussion = ctx.id("discussion_id")?;
+        let (current, mut tx, guard, _) = begin_change(&ctx, id).await?;
+        ctx = current;
+        let principal = guard.principal().clone();
+        writers::pending(&ctx, &principal);
+        let prepared = guard.operation_data::<writers::PreparedWrite>()?;
+        let writers::Native::Resolve(known) = &prepared.native else {
+            return Err(ApiError::internal("the resolve prefix changed kind"));
+        };
+        guard.check_deadline(&ctx)?;
+        discussions::resolve_prepared(
+            &mut tx,
+            known.document_id,
+            known.id,
+            body.resolved,
+            principal.user(),
+            ctx.now,
+        )
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+        let full = discussions::get(&mut tx, id, discussion)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        let shown = writers::discussion(&ctx, &mut tx, &principal, &full).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(writers::finish_discussion(&ctx, &full, shown))
     }
-    discussions::get(&mut tx, id, discussion)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    discussions::resolve(
-        &mut tx,
-        id,
-        discussion,
-        body.resolved,
-        principal.user(),
-        ctx.now,
-    )
-    .await?
-    .ok_or_else(ApiError::not_found)?;
-    let full = discussions::get(&mut tx, id, discussion)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let shown = discussion_for(&mut tx, &principal, id, &full).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    .await;
+    authorization::projected_result(ctx, std::future::ready(result), false).await
 }
 
 /// Edits a comment: its author alone.
-async fn edit(mut ctx: Ctx, (): (), body: DocumentCommentUpdateBody) -> ApiResult<DocumentComment> {
-    let id = ctx.id("id")?;
-    let comment = ctx.id("comment_id")?;
-    let content = comments::check_content(&body.content).map_err(invalid_faults)?;
-    let attempt = edit_replay::attempt(&body)?;
-    let (mut tx, _admission) = transaction_guard::begin(&ctx).await?;
-    orch_db::queries::documents::containers::lock_document_scope(&mut tx, id).await?;
-    super::live_locked(&mut tx, id).await?;
-    // Initial authority precedes the scope/row locks. Recheck the same guarded
-    // identity after that wait, including a credential deadline crossed in it.
-    let guard = transaction_guard::check(&ctx, &mut tx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let content = super::build::label_written(&mut tx, &principal, content).await?;
-    let stored = serde_json::to_value(&content).map_err(ApiError::internal)?;
-    authorization::require_document(
-        &mut tx,
-        &principal,
-        id,
-        Permission::DocView,
-        Policy::default(),
-    )
-    .await?;
-    let known = discussions::comment(&mut tx, id, comment)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if known.author_id != principal.user() {
-        return Err(not_the_author(id));
-    }
-    may_change_own(&mut tx, &principal, id).await?;
-    if known.deleted_at.is_some() {
-        return Err(ApiError::not_found());
-    }
-    if let Some(attempt) = &attempt {
-        if let Some(recorded) = edit_replay::find(&ctx, &mut tx, &known, attempt).await? {
-            let shown = comment_for(&mut tx, &principal, &recorded).await?;
-            tx.commit().await.map_err(DbError::from)?;
-            return Ok(shown);
+async fn edit(
+    mut ctx: Ctx,
+    (): (),
+    body: DocumentCommentUpdateBody,
+) -> ApiResult<DocumentCommentUpdateResponse> {
+    let result = async {
+        let id = ctx.id("id")?;
+        let _comment = ctx.id("comment_id")?;
+        let content = comments::check_content(&body.content).map_err(invalid_faults)?;
+        let attempt = edit_replay::attempt(&body)?;
+        let (current, mut tx, guard, _) = begin_change(&ctx, id).await?;
+        ctx = current;
+        let principal = guard.principal().clone();
+        writers::pending(&ctx, &principal);
+        let prepared = guard.operation_data::<writers::PreparedWrite>()?;
+        let content = prepared.labels.apply(content)?;
+        let stored = serde_json::to_value(&content).map_err(ApiError::internal)?;
+        let writers::Native::Edit(prefix) = &prepared.native else {
+            return Err(ApiError::internal("the comment edit prefix changed kind"));
+        };
+        let known = match prefix {
+            EditPrefix::NotAuthor => {
+                // Preserve the existing static error and its optional Read projection.
+                writers::empty(&ctx, &mut tx, &principal).await?;
+                return Err(not_the_author(id));
+            }
+            EditPrefix::Deleted => return Err(ApiError::not_found()),
+            EditPrefix::Repeated(recorded) => {
+                let shown = writers::comment(&ctx, &mut tx, &principal, recorded).await?;
+                tx.commit().await.map_err(DbError::from)?;
+                return Ok(writers::finish_comment(&ctx, recorded, shown));
+            }
+            EditPrefix::Stale(known) => {
+                let shown = writers::comment(&ctx, &mut tx, &principal, known).await?;
+                let expected_seq = attempt
+                    .as_ref()
+                    .ok_or_else(|| ApiError::internal("a stale comment has no edit attempt"))?
+                    .expected_seq;
+                let mut problem = ApiError::new(
+                    ErrorCode::ConflictStaleRevision,
+                    "the comment changed after this draft was begun",
+                )
+                .with("expected_seq", expected_seq);
+                if let Some(shown) = shown {
+                    problem = problem.with("current_comment", shown);
+                }
+                return Err(problem);
+            }
+            EditPrefix::Ready(known) => known,
+        };
+        guard.check_deadline(&ctx)?;
+        let edited = discussions::edit_prepared(&mut tx, known, &stored, ctx.now)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if let Some(attempt) = &attempt {
+            edit_replay::keep(&ctx, &mut tx, &edited, attempt).await?;
         }
-        if known.seq_updated != attempt.expected_seq {
-            return Err(ApiError::new(
-                ErrorCode::ConflictStaleRevision,
-                "the comment changed after this draft was begun",
-            )
-            .with("expected_seq", attempt.expected_seq)
-            .with(
-                "current_comment",
-                comment_for(&mut tx, &principal, &known).await?,
-            ));
-        }
+        let shown = writers::comment(&ctx, &mut tx, &principal, &edited).await?;
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(writers::finish_comment(&ctx, &edited, shown))
     }
-    let edited = discussions::edit(&mut tx, id, comment, &stored, ctx.now)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if let Some(attempt) = &attempt {
-        edit_replay::keep(&ctx, &mut tx, &edited, attempt).await?;
-    }
-    let shown = comment_for(&mut tx, &principal, &edited).await?;
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(shown)
+    .await;
+    authorization::projected_result(ctx, std::future::ready(result), false).await
 }
 
 /// Deletes a comment, which stays as an emptied line: its author, or whoever
 /// manages the document, whose deleting is written to the audit trail.
 async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
-    let id = ctx.id("id")?;
-    let comment = ctx.id("comment_id")?;
-    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
-    ctx.now = guard.now().get();
-    let principal = guard.principal().clone();
-    let policy = Policy::default();
-    let row = super::live(&mut tx, id).await?;
-    authorization::require_document(&mut tx, &principal, id, Permission::DocView, policy).await?;
-    let known = discussions::comment(&mut tx, id, comment)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    let by_someone_else = known.author_id != principal.user();
-    if by_someone_else {
-        authorization::require_document(&mut tx, &principal, id, Permission::DocManage, policy)
+    let result = async {
+        let id = ctx.id("id")?;
+        let comment = ctx.id("comment_id")?;
+        let (current, mut tx, guard, row) = begin_change(&ctx, id).await?;
+        ctx = current;
+        let prepared = guard.operation_data::<writers::PreparedWrite>()?;
+        let writers::Native::Delete(prefix) = &prepared.native else {
+            return Err(ApiError::internal("the comment delete prefix changed kind"));
+        };
+        let known = &prefix.known;
+        let by_someone_else = prefix.by_someone_else;
+        let was_deleted = known.deleted_at.is_some();
+        // Empty acknowledgement was completed in the final effect-free producer;
+        // no Read/credential re-decision follows an accepted tombstone or audit.
+        guard.check_deadline(&ctx)?;
+        discussions::delete_prepared(&mut tx, known, ctx.now)
+            .await?
+            .ok_or_else(ApiError::not_found)?;
+        if by_someone_else && !was_deleted {
+            let who = actor_name(&ctx)?;
+            super::record(
+                &ctx,
+                &mut tx,
+                orch_db::audit::action!(AuditAction::DocumentCommentDeleted),
+                &row,
+                &format!(
+                    "{who} deleted a comment by somebody else on \"{}\"",
+                    row.title
+                ),
+                json!({ "comment": comment, "author": known.author_id }),
+            )
             .await?;
-    } else {
-        may_change_own(&mut tx, &principal, id).await?;
+        }
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(())
     }
-    let was_deleted = known.deleted_at.is_some();
-    discussions::delete(&mut tx, id, comment, ctx.now)
-        .await?
-        .ok_or_else(ApiError::not_found)?;
-    if by_someone_else && !was_deleted {
-        let who = actor_name(&ctx)?;
-        super::record(
-            &ctx,
-            &mut tx,
-            orch_db::audit::action!(AuditAction::DocumentCommentDeleted),
-            &row,
-            &format!(
-                "{who} deleted a comment by somebody else on \"{}\"",
-                row.title
-            ),
-            json!({ "comment": comment, "author": known.author_id }),
-        )
-        .await?;
-    }
-    tx.commit().await.map_err(DbError::from)?;
-    Ok(())
+    .await;
+    authorization::projected_result(ctx, std::future::ready(result), false).await
 }
 
 /// Puts the caller's reaction to a comment on, or takes it off.

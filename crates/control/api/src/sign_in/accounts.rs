@@ -194,7 +194,7 @@ pub struct How {
 }
 
 /// A conflict in the public namespace, with the form field that can be corrected.
-fn public_name_conflict() -> ApiError {
+pub(crate) fn public_name_conflict() -> ApiError {
     ApiError::new(ErrorCode::ConflictExists, "that public name is taken").with(
         "errors",
         vec![FieldFault {

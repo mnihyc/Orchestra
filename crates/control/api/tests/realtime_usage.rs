@@ -13,6 +13,53 @@ use orch_types::{Id, new_id};
 use realtime_support::{Client, Rig};
 use serde_json::{Value, json};
 
+async fn system_usage_admin_mode(rig: &Rig, on: bool) {
+    use orch_api_contract::{
+        auth::{AdminModeSetBody, MeAdminModeSet},
+        routes::Endpoint,
+    };
+    let route = MeAdminModeSet::ROUTE;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let response = client
+        .request(
+            route.method.as_str().parse().unwrap(),
+            format!("http://{}/api/v1{}", rig.server.addr, route.path),
+        )
+        .bearer_auth(&rig.token)
+        .json(&AdminModeSetBody { as_admin: on })
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.text().await.unwrap();
+    assert!(status.is_success(), "{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn system_usage_live_rows_require_the_actual_current_admin_mode() {
+    let rig = Rig::new().await;
+    let thread = rig.thread("System request stream").await;
+    let (other, _) = rig.person("system-usage-other").await;
+    sqlx::query("UPDATE users SET is_system_admin=true WHERE id=$1")
+        .bind(rig.ada)
+        .execute(rig.pool.pool())
+        .await
+        .unwrap();
+    system_usage_admin_mode(&rig, true).await;
+    let request = record(&rig, other, thread).await;
+    let mut client = Client::signed_in(rig.server.addr, &rig.token).await;
+    client.sub(1, "usage:system", None).await;
+    client.expect("subscribed").await;
+    assert!(
+        ids(&client.expect("event").await).contains(&request.to_string()),
+        "system rows include the other recorded actor"
+    );
+    system_usage_admin_mode(&rig, false).await;
+    assert_eq!(client.expect("closed").await["reason"], "revoked");
+    drop(client);
+    rig.server.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_empty_usage_subscription_and_its_first_revision_keep_the_socket_open() {
     let rig = Rig::new().await;

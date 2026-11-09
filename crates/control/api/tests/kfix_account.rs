@@ -8,7 +8,10 @@
 mod chat_world;
 mod places;
 mod support;
+use support::FullInvitationReply as _;
+use support::FullRoleReply as _;
 
+use crate::support::FreshInvitationCreateReply as InvitationCreateReply;
 use chat_world::Room;
 use chrono::Duration;
 use orch_api_contract::access::Role;
@@ -18,13 +21,15 @@ use orch_api_contract::auth::{
     AuthRecoveryConfirm, AuthRecoveryConfirmBody, AuthRegister, AuthRegisterBody,
     AuthRegisterReply, MeGet, MeUpdate, MeUpdateBody,
 };
-use orch_api_contract::chats::{ChatGet, ChatKind, ChatMemberRemove};
+use orch_api_contract::chats::{
+    ChatGet, ChatKind, ChatManagerSet, ChatManagerSetBody, ChatMemberRemove,
+};
 use orch_api_contract::common::ErrorCode;
 use orch_api_contract::nodes::NodeGet;
 use orch_api_contract::routes::Endpoint;
 use orch_api_contract::users::{
-    InvitationAccept, InvitationAcceptBody, InvitationCreate, InvitationCreateBody,
-    InvitationCreateReply, InvitationKind, InvitationLookup, Me, UserGet,
+    InvitationAccept, InvitationAcceptBody, InvitationCreate, InvitationCreateBody, InvitationKind,
+    InvitationLookup, Me, UserGet,
 };
 use orch_api_core::testing::Reply;
 use orch_db::queries::{access, identity};
@@ -161,6 +166,7 @@ async fn invite(
         .body(body)
         .send()
         .await
+        .full_invitation()
 }
 
 async fn accept(
@@ -173,10 +179,12 @@ async fn accept(
         .call(InvitationAccept, &[])
         .token(&by.token)
         .body(&InvitationAcceptBody {
+            accepted_terms_hash: None,
             token: token.to_owned(),
         })
         .send()
         .await
+        .full_invitation()
 }
 
 async fn update(world: &World, by: &Who, body: Value) -> Reply<Me> {
@@ -289,6 +297,15 @@ async fn a_chat_inspector_cannot_turn_reading_into_an_invitation_or_a_seat() {
     .await
     .ok();
     // A retained link whose maker has become an inspector gives no membership.
+    // Keep a genuine second manager so the native leave does not empty its management.
+    room.world
+        .app
+        .call(ChatManagerSet, &[&group.base.id, &room.bea.id()])
+        .token(&room.cai.token)
+        .body(&ChatManagerSetBody { manager: true })
+        .send()
+        .await
+        .ok();
     room.world
         .app
         .call(ChatMemberRemove, &[&group.base.id, &room.cai.id()])
@@ -598,6 +615,7 @@ async fn a_removed_node_or_a_withdrawn_makers_role_returns_no_navigation_target(
         })
         .send()
         .await
+        .full_role()
         .ok();
     let mut conn = room.world.conn().await;
     assert!(
@@ -885,6 +903,7 @@ async fn public_name_conflicts_identify_the_username_and_availability_never_chec
             .app
             .call(AuthRegister, &[])
             .body(&AuthRegisterBody {
+                accepted_terms_hash: None,
                 accept_invitation: false,
                 username: name.to_owned(),
                 display_name: "Person".to_owned(),
@@ -927,6 +946,7 @@ async fn public_name_conflicts_identify_the_username_and_availability_never_chec
         .app
         .call(AuthRegister, &[])
         .body(&AuthRegisterBody {
+            accepted_terms_hash: None,
             accept_invitation: false,
             username: "freshperson".to_owned(),
             display_name: "Person".to_owned(),
@@ -954,6 +974,7 @@ async fn confirmation_registration_has_no_session_and_a_known_email_has_the_same
             .app
             .call(AuthRegister, &[])
             .body(&AuthRegisterBody {
+                accepted_terms_hash: None,
                 accept_invitation: false,
                 username: name.to_owned(),
                 display_name: "Person".to_owned(),
@@ -990,6 +1011,8 @@ async fn create_with_reset(
         .send()
         .await
         .ok()
+        .into_full()
+        .expect("the ordinary user creation fixture receives its full native account")
 }
 
 async fn redeem(world: &World, url: &str) -> Reply<()> {
@@ -1020,21 +1043,57 @@ async fn an_admin_created_reset_link_reports_its_real_expiry_and_can_be_redeemed
     assert_eq!(timely.expires_at, Time::new(ends));
     assert_eq!(late.expires_at, timely.expires_at);
     world.advance(ends - world.now() - Duration::milliseconds(1));
-    assert_eq!(redeem(&world, &timely.reset_url).await.status, 204);
     assert_eq!(
-        redeem(&world, &timely.reset_url).await.problem().code,
+        redeem(
+            &world,
+            timely
+                .reset_url
+                .as_deref()
+                .expect("the first reset link is available")
+        )
+        .await
+        .status,
+        204
+    );
+    assert_eq!(
+        redeem(
+            &world,
+            timely
+                .reset_url
+                .as_deref()
+                .expect("the first reset link is available")
+        )
+        .await
+        .problem()
+        .code,
         ErrorCode::Gone
     );
     world.advance(Duration::milliseconds(1));
     assert_eq!(
-        redeem(&world, &late.reset_url).await.problem().code,
+        redeem(
+            &world,
+            late.reset_url
+                .as_deref()
+                .expect("the first reset link is available")
+        )
+        .await
+        .problem()
+        .code,
         ErrorCode::Gone
     );
     let trail: Vec<Value> = sqlx::query_scalar("SELECT details FROM audit_log ORDER BY at")
         .fetch_all(&world.db.pool)
         .await
         .unwrap();
-    for link in [&timely.reset_url, &late.reset_url] {
+    for link in [
+        timely
+            .reset_url
+            .as_deref()
+            .expect("the first reset link is available"),
+        late.reset_url
+            .as_deref()
+            .expect("the first reset link is available"),
+    ] {
         let secret = link.rsplit('/').next().unwrap();
         assert!(!serde_json::to_string(&trail).unwrap().contains(secret));
     }

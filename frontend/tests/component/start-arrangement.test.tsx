@@ -38,10 +38,10 @@ describe('the ways an agent can be placed', () => {
     expect(rows[1]).toHaveAccessibleName('Run with provider');
     expect(rows[2]).toHaveAccessibleName('Copy sign-in access');
     expect(rows[0]).toBeChecked();
-    expect(screen.getByText('Default')).toBeVisible();
+    expect(screen.getByText('Suggested')).toBeVisible();
     const first = rows[0];
     if (first === undefined) throw new Error('The first ranked arrangement is missing');
-    expect(first).toHaveAccessibleDescription(expect.stringContaining('Default'));
+    expect(first).toHaveAccessibleDescription(expect.stringContaining('Suggested'));
     expect(document.querySelector('[data-choice-selected-description]')).toBeNull();
     expect(screen.getByRole('radio', { name: 'Forward model calls' })).toBeChecked();
   });
@@ -79,6 +79,6 @@ describe('the ways an agent can be placed', () => {
     const answer = options({ providers: [provider('p1', { agents: [agent('a1', { reason: 'harness_unreported' })] })] });
     show(<ArrangementSection resolved={resolve(answer, NO_PICKS, SUGGEST)} refreshing={false} onChange={() => undefined} />);
     expect(screen.queryByRole('radiogroup')).toBeNull();
-    expect(screen.getByText(/The machine has not reported what this agent can do yet/)).toBeVisible();
+    expect(screen.getByText(i18n.t('start.arrangement.waiting'))).toBeVisible();
   });
 });

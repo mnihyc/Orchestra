@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Storage cleanup
 screens: /storage, /resources/providers/$id, /resources/agents/$id, /resources/environments/$id, /resources/templates/$id, /resources/hosts/$id, /resources/machines/$id, /resources/mounts/$id, /resources/skills/$id, /admin, /org/$slug, /project/$projectId, /topic/$topicId
 keywords: storage, cleanup, caches, images, tool versions, retention, restore, unused releases, Off, cleanup.unused_keep_days, cleanup.release_keep_count, uninstall, purge, orch-node, orch-connector
+summary: Review unused caches, retained data and releases before freeing storage or uninstalling.
 ---
 
 # Storage cleanup

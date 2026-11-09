@@ -8,6 +8,7 @@ import { EmptyState } from '@/ui/EmptyState';
 
 import type { Item } from '@/generated/api-types';
 import { isSafeHref } from '@/lib/markdown';
+import { webAction } from './webAction';
 
 type SearchItem = Extract<Item, { kind: 'tool_call' }>;
 
@@ -15,10 +16,14 @@ export function WebSearchDisplay({ item }: { item: SearchItem }) {
   const { t } = useTranslation();
   const tool = item.payload.tool;
   if (tool.kind !== 'web_search') return null;
-  if (tool.results.length === 0) return <EmptyState compact title={t('timeline.web.noResults')} />;
+  const action = webAction(tool);
+  const target = action.type === 'open_page' || action.type === 'find_in_page' ? action.url : null;
+  const results = target !== null && !tool.results.some((result) => result.url === target) ? [{ url: target, title: '' }, ...tool.results] : tool.results;
+  if (results.length === 0) return action.type === 'search' ? <EmptyState compact title={t('timeline.web.noResults')} />
+    : action.type === 'other' ? null : <p className="text-sm text-text-muted">{t('timeline.web.noAddress')}</p>;
   return (
     <ul className="flex flex-col gap-1">
-      {tool.results.map((result) => (
+      {results.map((result) => (
         <li key={result.url} className="flex min-w-0 flex-col text-sm">
           {isSafeHref(result.url) ? (
             <a href={result.url} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-text underline underline-offset-2">

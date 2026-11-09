@@ -126,9 +126,13 @@ async fn events_whose_frames_are_dropped_repeated_and_swapped_are_each_applied_o
 async fn a_session_lost_in_the_middle_of_a_batch_is_made_up_for_without_a_second_effect() {
     let rig = rig(MachineSpec::default(), true);
     rig.machine.link.connected().await;
-    rig.hub.faults().cut_after(Direction::Up, None, 40);
-    rig.hub.faults().cut_after(Direction::Up, None, 90);
-    // Paced, so that the events go in many small batches and there are frames to cut in the middle of.
+    // Cut actual event frames even when publication is coalesced into fewer batches.
+    rig.hub
+        .faults()
+        .cut_at_event(Direction::Up, &rig.stream, 40);
+    rig.hub
+        .faults()
+        .cut_at_event(Direction::Up, &rig.stream, 90);
     for n in 0..400 {
         rig.machine.publish(&rig.stream, &title(n)).await;
         if n % 4 == 3 {
@@ -143,6 +147,7 @@ async fn a_session_lost_in_the_middle_of_a_batch_is_made_up_for_without_a_second
     );
     assert_exactly_once_in_order(&rig, 400);
     assert!(rig.hub.faults().connections() >= 3);
+    assert_eq!(rig.hub.faults().fired(), 2, "both event cuts fired once");
 }
 
 #[tokio::test]

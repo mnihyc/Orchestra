@@ -1,4 +1,5 @@
 //! The first thing the node has to get right, against a real Docker daemon, a real gateway and a real API: a managed runtime made through the node from a small image, its connector enrolled with the single-use token it was given and online at the API.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

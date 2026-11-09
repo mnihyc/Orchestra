@@ -85,7 +85,21 @@ impl Engine {
         query: &str,
         offset: i64,
         expected: Option<Id>,
+        filter: Option<orch_types::Json>,
+    ) -> Result<Meaning, EngineError> {
+        self.meaning_filtered_for_origin(org, query, offset, expected, filter, None)
+            .await
+    }
+
+    /// The same native query with its actual reader/source retained through provider dispatch.
+    pub async fn meaning_filtered_for_origin(
+        &self,
+        org: Id,
+        query: &str,
+        offset: i64,
+        expected: Option<Id>,
         mut filter: Option<orch_types::Json>,
+        origin: Option<super::query_origin::QueryOrigin>,
     ) -> Result<Meaning, EngineError> {
         let mut conn = self.db().begin().await?;
         let mut metadata_cancellation =
@@ -231,25 +245,35 @@ impl Engine {
             let vector = if let Some(vector) = cached {
                 vector
             } else {
-                let vector =
-                    match tokio::time::timeout(wait, self.embed_texts(org, &asked, texts)).await {
-                        Err(_) => return Ok(Meaning::Unavailable("query_timeout".into())),
-                        Ok(Ok(mut made)) => made.pop().unwrap_or_default(),
-                        Ok(Err(EmbedError::Engine(error))) => return Err(error),
-                        Ok(Err(EmbedError::Unavailable { reason, .. })) => {
-                            return Ok(Meaning::Unavailable(reason.into()));
-                        }
-                        Ok(Err(EmbedError::Failed { timed_out, .. })) => {
-                            return Ok(Meaning::Unavailable(
-                                if timed_out {
-                                    "query_timeout"
-                                } else {
-                                    "provider"
-                                }
-                                .into(),
-                            ));
-                        }
-                    };
+                let work = match (origin.as_ref(), asked.writer) {
+                    (Some(origin), Some(writer)) => Some(origin.work(&active, writer)),
+                    // Preserve the native no-writer outcome before any embedding admission.
+                    (Some(_), None) => return Ok(Meaning::Unavailable("access".into())),
+                    (None, _) => None,
+                };
+                let vector = match tokio::time::timeout(
+                    wait,
+                    self.embed_texts_for_query(org, &asked, texts, work),
+                )
+                .await
+                {
+                    Err(_) => return Ok(Meaning::Unavailable("query_timeout".into())),
+                    Ok(Ok(mut made)) => made.pop().unwrap_or_default(),
+                    Ok(Err(EmbedError::Engine(error))) => return Err(error),
+                    Ok(Err(EmbedError::Unavailable { reason, .. })) => {
+                        return Ok(Meaning::Unavailable(reason.into()));
+                    }
+                    Ok(Err(EmbedError::Failed { timed_out, .. })) => {
+                        return Ok(Meaning::Unavailable(
+                            if timed_out {
+                                "query_timeout"
+                            } else {
+                                "provider"
+                            }
+                            .into(),
+                        ));
+                    }
+                };
                 if cache_secs > 0 && cache_entries > 0 {
                     let mut cache = self.db().begin().await?;
                     let mut cancellation =
