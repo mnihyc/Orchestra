@@ -1,41 +1,41 @@
 [
   {
     "kind": "codex",
-    "version": "0.165.0",
+    "version": "0.167.0",
     "os": "linux",
     "arch": "x86_64",
-    "url": "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-x86_64-unknown-linux-musl.tar.gz",
-    "sha256": "e97c4463d7f146692a955d7b0e1c8cf48f97cd4d616cd45c5dcab2e8d9743316",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "3bbf75e83de6b58aed28f2cf6e33ad423ec31fd4700a1457b94be557ea5a7c6e",
     "is_default": true,
     "source": "release"
   },
   {
     "kind": "codex",
-    "version": "0.165.0",
+    "version": "0.167.0",
     "os": "linux",
     "arch": "aarch64",
-    "url": "https://github.com/openai/codex/releases/download/rust-v0.165.0/codex-package-aarch64-unknown-linux-musl.tar.gz",
-    "sha256": "c8b2844fdef57498572db960344aee8c836ce9f75c203379da0a9c3a334fc3b7",
+    "url": "https://github.com/openai/codex/releases/download/rust-v0.167.0/codex-package-aarch64-unknown-linux-musl.tar.gz",
+    "sha256": "0de261ecf1e7f3028a7952f03fca2093f749277d38590b78bb32f8567756bbb7",
     "is_default": true,
     "source": "release"
   },
   {
     "kind": "claude-code",
-    "version": "2.1.312",
+    "version": "2.1.319",
     "os": "linux",
     "arch": "x86_64",
-    "url": "https://downloads.claude.ai/claude-code-releases/2.1.312/linux-x64/claude",
-    "sha256": "4f4178ce41d83e23341ebfbaecdbcf8ea6bf7baea0690025abe49eeec3a5d01d",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.319/linux-x64/claude",
+    "sha256": "dabafec82ca1319fa43d8be36a10fc61b1d11821cb98ad5df04ad95e199b8eed",
     "is_default": true,
     "source": "release"
   },
   {
     "kind": "claude-code",
-    "version": "2.1.312",
+    "version": "2.1.319",
     "os": "linux",
     "arch": "aarch64",
-    "url": "https://downloads.claude.ai/claude-code-releases/2.1.312/linux-arm64/claude",
-    "sha256": "dc4af28917455e009d26704b82a438353a06149e825b6cdf782908b2d28661f5",
+    "url": "https://downloads.claude.ai/claude-code-releases/2.1.319/linux-arm64/claude",
+    "sha256": "a7e687fd1cb054d651c7588223de3786c99d4c682365e3c3ae1e59ce7f3a591f",
     "is_default": true,
     "source": "release"
   },

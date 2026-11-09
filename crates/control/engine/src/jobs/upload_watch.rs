@@ -88,38 +88,41 @@ pub(crate) struct Watched<T> {
 ///
 /// Showing is for the person, and never fails the command: a read that does not go through is
 /// tried again a second later.
-pub(crate) async fn watching<T>(
+pub(crate) fn watching<T>(
     job: &Job,
     machine: Id,
     command: Id,
     share: f64,
     wait: impl Future<Output = T>,
     succeeded: impl FnOnce(&T) -> bool,
-) -> Watched<T> {
-    let mut watch = Watch::begin(job, machine, command, share).await;
-    let result = {
-        tokio::pin!(wait);
-        let watcher = watch.run(job);
-        tokio::pin!(watcher);
-        tokio::select! {
-            result = &mut wait => result,
-            never = &mut watcher => match never {},
-        }
-    };
-    let succeeded = succeeded(&result);
-    if !succeeded {
-        watch.reached = match watch.retained(job).await {
-            Ok(confirmed) => confirmed,
-            Err(error) => {
-                tracing::debug!(%error, job = %job.id(), "the remaining partial upload could not be confirmed");
-                None
+) -> impl Future<Output = Watched<T>> {
+    let wait = Box::pin(wait);
+    async move {
+        let mut watch = Watch::begin(job, machine, command, share).await;
+        let result = {
+            tokio::pin!(wait);
+            let watcher = Box::pin(watch.run(job));
+            tokio::pin!(watcher);
+            tokio::select! {
+                result = &mut wait => result,
+                never = &mut watcher => match never {},
             }
         };
-    }
-    watch.clear(job, succeeded).await;
-    Watched {
-        result,
-        reached: watch.reached,
+        let succeeded = succeeded(&result);
+        if !succeeded {
+            watch.reached = match watch.retained(job).await {
+                Ok(confirmed) => confirmed,
+                Err(error) => {
+                    tracing::debug!(%error, job = %job.id(), "the remaining partial upload could not be confirmed");
+                    None
+                }
+            };
+        }
+        watch.clear(job, succeeded).await;
+        Watched {
+            result,
+            reached: watch.reached,
+        }
     }
 }
 

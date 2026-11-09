@@ -14,7 +14,7 @@ import { createThread } from '@/api/threads';
 import { letThreadViewersIn } from '@/features/access/doors';
 import { generalAccessChange, type GeneralAccessPreset, indexCatalogue } from '@/features/access/model';
 import type { PlaceRef } from '@/features/navigation/places';
-import type { CreateThread, Thread } from '@/generated/api-types';
+import type { AgentAccessChoice, CreateThread, Thread } from '@/generated/api-types';
 import { newActKey } from '@/lib/requests';
 import { i18n } from '@/i18n';
 
@@ -45,6 +45,8 @@ export interface StartPlan {
   temporary?: boolean;
   privately: boolean;
   generalAccess?: GeneralAccessPreset;
+  /** The exact reach and areas confirmed before creation and its first input. */
+  agentAccess?: AgentAccessChoice;
   letIntoEnvironment?: boolean;
   /** What was typed: the first message. */
   message: string;
@@ -81,8 +83,11 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
   };
 
   const run = useMutation({
-    mutationFn: async (plan: StartPlan): Promise<Thread> => {
+    mutationFn: async (asked: StartPlan) => {
       const person = client.session.getState().userId;
+      const plan = { ...asked, place: { ...asked.place },
+        ...(asked.agentAccess === undefined ? {} : { agentAccess: { ...asked.agentAccess, parts: { ...asked.agentAccess.parts } } }) };
+      const inputId = firstInput.current;
       const { place, resolved } = plan;
       if (resolved.provider === null || resolved.agent === null || resolved.model === null || resolved.arrangement === null) {
         throw new Error('the choices are not whole');
@@ -91,10 +96,11 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
       const chosen = { agent: resolved.agent.id, provider: resolved.provider.id, model: resolved.model.model_name,
         arrangement: resolved.arrangement, effort: resolved.effort,
         environment: resolved.environment === null ? null : { id: resolved.environment.environment.id, name: resolved.environment.environment.name } };
+      const newEnvironment = resolved.fresh ? structuredClone(resolved.newEnvironment ?? {}) : undefined;
       const intent = JSON.stringify({ place: place.id, provider: chosen.provider, agent: chosen.agent, model: chosen.model,
         effort: chosen.effort, arrangement: chosen.arrangement, environment: chosen.environment?.id ?? null,
-        name: plan.name, directory: plan.directory, temporary: plan.temporary, prepareSource: plan.prepareSource,
-        privately: plan.privately, generalAccess: plan.generalAccess, message: plan.message });
+        name: plan.name, directory: plan.directory, newEnvironment, temporary: plan.temporary, prepareSource: plan.prepareSource,
+        privately: plan.privately, generalAccess: plan.generalAccess, agentAccess: plan.agentAccess, message: plan.message });
       let thread = accepted.current?.intent === intent ? accepted.current.thread : null;
       if (thread === null) {
         setStep('check');
@@ -102,17 +108,18 @@ export function useStart(onStarted: (thread: Thread) => void): Starting {
         setStep('thread');
         const access = plan.generalAccess === undefined ? plan.privately ? 'private' as const : undefined
           : plan.generalAccess === 'defaults' ? undefined
-          : generalAccessChange(indexCatalogue(await queryClient.query(permissionsQuery)), 'thread', place.id, plan.generalAccess);
+          : generalAccessChange(indexCatalogue(await queryClient.query(permissionsQuery)), 'thread', place.kind === 'topic' ? place.id : null, plan.generalAccess);
         const body: CreateThread = {
           ...(plan.name === '' ? {} : { name: plan.name }),
           binding: { agent_id: chosen.agent, provider_id: chosen.provider, arrangement: chosen.arrangement },
           model: chosen.model,
           ...(chosen.effort === null ? {} : { effort: chosen.effort }),
-          environment: chosen.environment === null ? { new: { ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: chosen.environment.id },
+          environment: chosen.environment === null ? { new: { ...newEnvironment, ...(plan.temporary === true ? { config: { 'env.lifetime': 'thread' } } : {}) } } : { use: chosen.environment.id },
           ...(plan.directory === '' ? {} : { directory: plan.directory }),
           ...(plan.prepareSource === undefined ? {} : { prepare_source: plan.prepareSource }),
           ...(access === undefined ? {} : { access }),
-          ...(plan.message === '' ? {} : { first_input: { content: [{ type: 'text' as const, text: plan.message }], client_id: firstInput.current } }),
+          ...(plan.agentAccess === undefined ? {} : { agent_access: plan.agentAccess }),
+          ...(plan.message === '' ? {} : { first_input: { content: [{ type: 'text' as const, text: plan.message }], client_id: inputId } }),
         };
         const key = keyOf({ step: 'thread', place: place.id, body });
         thread = place.kind === 'topic' ? await createThread(place.id, body, key) : await createTopicAndThread(place.id, body, key);

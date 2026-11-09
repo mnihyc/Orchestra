@@ -270,6 +270,21 @@ impl Displays {
                     return Err(DisplayFailure::Engine(EngineError::ToolCallIdentity));
                 }
                 if row.state == "open" {
+                    if orch_db::idempotency::creation::captures(
+                        request.requester.person(),
+                        "display_creation",
+                    ) {
+                        orch_db::idempotency::creation::observe_with_status(
+                            &mut tx,
+                            request.requester.person(),
+                            "display_creation",
+                            row.id,
+                            serde_json::json!({"environment":row.environment_id}),
+                            201,
+                        )
+                        .await?;
+                        tx.commit().await.map_err(orch_db::DbError::from)?;
+                    }
                     return Ok(row.clone());
                 }
             }
@@ -325,6 +340,15 @@ impl Displays {
                     .await
                     .map_err(orch_db::DbError::from)?;
             }
+            orch_db::idempotency::creation::observe_with_status(
+                &mut tx,
+                request.requester.person(),
+                "display_creation",
+                id,
+                serde_json::json!({"environment":site.id}),
+                201,
+            )
+            .await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
             (site, geometry)
         };
@@ -554,23 +578,51 @@ impl Displays {
         origin: &Origin,
     ) -> Result<Option<rows::DisplayRow>, DisplayFailure> {
         let mut tx = self.engine.inner.db.begin().await?;
-        let Some(before) = rows::get(&mut tx, id).await? else {
+        let closed = self
+            .close_in(&mut tx, id, reason, requester, origin, None)
+            .await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        match closed {
+            Some((row, site)) => {
+                self.finish_close(id, &site, row.is_some()).await;
+                Ok(row)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The same close writer on the caller's guarded connection; no native I/O runs here.
+    pub async fn close_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        id: Id,
+        reason: &str,
+        requester: Requester,
+        origin: &Origin,
+        expected_environment: Option<Id>,
+    ) -> Result<Option<(Option<rows::DisplayRow>, rows::Site)>, DisplayFailure> {
+        let Some(before) = rows::get(conn, id).await? else {
             return Ok(None);
         };
-        rows::lock(&mut tx, before.environment_id).await?;
-        let site = rows::site(&mut tx, before.environment_id)
+        // API guards bind this exact stored Environment before entering the writer.
+        // Other existing lifecycle/tool callers keep their ordinary unbound writer contract.
+        if expected_environment.is_some_and(|environment| environment != before.environment_id) {
+            return Err(DisplayFailure::NotFound);
+        }
+        rows::lock(conn, before.environment_id).await?;
+        let site = rows::site(conn, before.environment_id)
             .await?
             .ok_or(DisplayFailure::NotFound)?;
-        self.check(&mut tx, &site, &requester).await?;
+        self.check(conn, &site, &requester).await?;
         if let Requester::Agent(thread) = requester
             && (before.opened_by.is_some() || before.thread_id != Some(thread))
         {
             return Err(DisplayFailure::Invalid("not_yours".to_owned()));
         }
-        let row = rows::close(&mut tx, id, reason, self.engine.inner.clock.now()).await?;
+        let row = rows::close(conn, id, reason, self.engine.inner.clock.now()).await?;
         if let Some(row) = &row {
             history(
-                &mut tx,
+                conn,
                 &site,
                 &requester,
                 audit::name!("display.closed"),
@@ -581,14 +633,17 @@ impl Displays {
             )
             .await?;
         }
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        if row.is_some() && site.machine_online == Some(true) {
+        Ok(Some((row, site)))
+    }
+
+    /// Complete the already committed close using its actual captured site and ordinary cleanup.
+    pub async fn finish_close(&self, id: Id, site: &rows::Site, changed: bool) {
+        if changed && site.machine_online == Some(true) {
             let _ = self
-                .ask(&site, new_id(), &DisplayClose { display_id: id })
+                .ask(site, new_id(), &DisplayClose { display_id: id })
                 .await;
         }
         self.changed(site.id).await;
-        Ok(row)
     }
 
     /// Applies only the current owning connector's report in its acknowledgement transaction.

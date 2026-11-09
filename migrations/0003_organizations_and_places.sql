@@ -15,6 +15,7 @@ CREATE TABLE favorites (
 CREATE INDEX favorites_position_idx ON favorites USING btree (user_id, "position", kind, id);
 
 CREATE TABLE nodes (
+    unlisted boolean DEFAULT false NOT NULL,
     id uuid NOT NULL,
     kind text NOT NULL,
     parent_id uuid,
@@ -23,7 +24,6 @@ CREATE TABLE nodes (
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
     title_source text DEFAULT 'user'::text NOT NULL,
-    description_source text DEFAULT 'auto'::text NOT NULL,
     tags_source text DEFAULT 'auto'::text NOT NULL,
     auto_updated_at timestamp with time zone,
     color smallint,
@@ -50,7 +50,6 @@ CREATE TABLE nodes (
     CONSTRAINT nodes_color_check CHECK (((color >= 1) AND (color <= 12))),
     CONSTRAINT nodes_custom_color_check CHECK ((custom_color ~ '^#[0-9a-f]{6}$'::text)),
     CONSTRAINT nodes_description_check CHECK ((char_length(description) <= 4000)),
-    CONSTRAINT nodes_description_source_check CHECK ((description_source = ANY (ARRAY['user'::text, 'auto'::text]))),
     CONSTRAINT nodes_kind_check CHECK ((kind = ANY (ARRAY['org'::text, 'project'::text, 'topic'::text, 'thread'::text]))),
     CONSTRAINT nodes_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 120))),
     CONSTRAINT nodes_tags_source_check CHECK ((tags_source = ANY (ARRAY['user'::text, 'auto'::text]))),
@@ -134,7 +133,7 @@ CREATE TABLE org_members (
     moved_at timestamp with time zone,
     moved_by uuid,
     CONSTRAINT org_members_pkey PRIMARY KEY (org_id, user_id),
-    CONSTRAINT org_members_domain_id_fkey FOREIGN KEY (domain_id) REFERENCES nodes(id),
+    CONSTRAINT org_members_domain_id_fkey FOREIGN KEY (domain_id) REFERENCES nodes(id) DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT org_members_invited_by_fkey FOREIGN KEY (invited_by) REFERENCES users(id),
     CONSTRAINT org_members_moved_by_fkey FOREIGN KEY (moved_by) REFERENCES users(id),
     CONSTRAINT org_members_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id) ON DELETE CASCADE,
@@ -237,6 +236,7 @@ CREATE TABLE topics (
 
 CREATE TABLE groups (
     id uuid NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
     org_id uuid NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
@@ -248,6 +248,8 @@ CREATE TABLE groups (
     CONSTRAINT groups_created_by_fkey FOREIGN KEY (created_by) REFERENCES users(id),
     CONSTRAINT groups_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
+
+CREATE TRIGGER groups_revision BEFORE UPDATE ON groups FOR EACH ROW EXECUTE FUNCTION orch_row_revision();
 
 CREATE UNIQUE INDEX groups_org_name_key ON groups USING btree (org_id, lower(name));
 
@@ -344,3 +346,5 @@ CREATE TABLE group_members (
 CREATE INDEX group_members_nested_idx ON group_members USING btree (member_group_id) WHERE (member_group_id IS NOT NULL);
 
 CREATE TRIGGER access_changed AFTER INSERT OR DELETE OR UPDATE ON group_members FOR EACH ROW EXECUTE FUNCTION access_changed();
+
+CREATE TRIGGER group_members_revision AFTER INSERT OR DELETE OR UPDATE ON group_members FOR EACH ROW EXECUTE FUNCTION orch_group_holder_revision();

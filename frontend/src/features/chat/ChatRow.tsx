@@ -1,7 +1,7 @@
 /** One row of a list of chats: avatars, name, the first line of the last message, its time, the unread dot and the mentions, and the row's menu.
  *
  * Rows the reader only reads (the chats of other people, which they read as an admin) are drawn
- * without a bell or a menu. The list response carries each preview, so drawing rows needs no
+ * without personal notification controls. Group Message and Share acts remain available. The list response carries each preview, so drawing rows needs no
  * extra message requests.
  */
 import { useMutation } from '@tanstack/react-query';
@@ -9,13 +9,16 @@ import { Link } from '@tanstack/react-router';
 import { BellOff, EyeOff, MessagesSquare } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import { useOpenPath } from '@/features/chat/open';
+import { useGroupActions } from '@/features/chat/groupActions';
+import { KnownNodeChip } from '@/features/people/NamedChip';
 import { setChatState } from '@/api/chats';
-import { failed } from '@/features/chat/acts';
+import { acknowledgeReceipt, failed } from '@/features/chat/acts';
 import { chatTitle } from '@/features/chat/ChatView';
 import { PersonThingProvider } from '@/features/people/personContext';
 import type { MessagesSearch } from '@/features/chat/Messages';
 import { plain } from '@/features/chat/text';
-import type { Chat } from '@/generated/api-types';
+import type { Chat } from '@/api/chat-contract';
 import { statesWriter, useChatUnread } from '@/realtime/stores/chat';
 import { Avatar } from '@/ui/Avatar';
 import { AvatarStack } from '@/ui/AvatarStack';
@@ -61,7 +64,7 @@ export function ChatRow({
   selected: boolean;
   me: string | null;
   search: MessagesSearch;
-  /** Rows of chats the reader only reads are drawn without a bell or a menu. */
+  /** Administrative inspections have no personal notification controls. */
   quiet?: boolean;
 }) {
   const { t } = useTranslation();
@@ -79,12 +82,12 @@ export function ChatRow({
     onSuccess: (next) => {
       statesWriter.put(next);
     },
-    onError: (error) => failed(t('chat.failed.bell'), error),
+    onError: (error) => { if (!acknowledgeReceipt(error)) failed(t('chat.failed.bell'), error); },
   });
 
-  const entries: MenuEntry[] = quiet
-    ? []
-    : [
+  const open = useOpenPath();
+  const group = useGroupActions(chat.kind === 'group' ? chat : null, open);
+  const personal: MenuEntry[] = quiet ? [] : [
         {
           id: 'mute',
           action: muted ? 'unmute' : 'mute', label: muted ? t('chat.row.unmute') : t('chat.row.mute'),
@@ -92,13 +95,15 @@ export function ChatRow({
           onSelect: () => change.mutate({ level: muted ? null : 'off' }),
         },
         { id: 'hide', label: t('chat.row.hide'), icon: <EyeOff aria-hidden />, onSelect: () => change.mutate({ hidden: true }) },
-      ];
+    ];
+  const entries: MenuEntry[] = [...group.entries, ...personal];
 
   return (
-    <ContextMenu label={t('actions.actions.named', { name })} entries={entries} disabled={quiet}>
+    <ContextMenu label={t('actions.actions.named', { name })} entries={entries} disabled={entries.length === 0}>
       <li className={cx('group relative flex items-center gap-3 rounded-md px-3 py-2 hover:bg-bg-subtle', selected && 'bg-bg-muted hover:bg-bg-muted')}>
         {directPerson === undefined && <span className={cx('flex w-8 shrink-0 justify-center', chat.kind !== 'node' && 'relative z-10')}>{chat.kind === 'node' ? <MessagesSquare size={16} aria-hidden className="text-text-muted" /> : rowAvatars(chat, me)}</span>}
         <div className="flex min-w-0 flex-1 flex-col">
+          {chat.kind === 'group' && chat.home != null && <div className="min-w-0 text-sm text-text-muted"><KnownNodeChip node={chat.home} /></div>}
           <div className="flex items-baseline gap-2">
             {directPerson !== undefined && <span className="relative z-10 min-w-0"><UserChip user={directPerson} size={32} thing={{ kind: 'chat', id: chat.id }} nameClassName={unread ? 'font-semibold' : ''} /></span>}
             <Link
@@ -131,7 +136,7 @@ export function ChatRow({
             {muted && <BellOff size={16} aria-label={t('chat.row.muted')} className="shrink-0 text-text-subtle" />}
           </div>
         </div>
-        {!quiet && (
+        {entries.length > 0 && (
           <span className="relative z-10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
             <Menu
               label={t('actions.actions.named', { name })}

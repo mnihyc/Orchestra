@@ -443,17 +443,19 @@ describe('what a message offers its reader', () => {
     const user = userEvent.setup();
     drawn(shown, options);
     await user.click(screen.getByRole('button', { name: /^Actions/ }));
+    const reference = screen.getByRole('menuitem', { name: new RegExp(`^${i18n.t('people.reference.copy')}`) });
+    expect(reference).toHaveAttribute('aria-disabled', 'true');
     return screen.getAllByRole('menuitem').map((item) => item.textContent);
   }
 
   it('is, for what the reader wrote, everything but nothing to hide: reply, forward, select, edit, pin, copy, and delete last', async () => {
     const entries = await menuOf(message(1, { author: ADA }), { me: ADA.id });
-    expect(entries).toEqual(['Reply', 'Forward…', 'Select', 'Edit', 'Pin', 'Copy text', 'Copy link', 'Delete']);
+    expect(entries).toEqual(['Reply', 'Forward…', 'Select', 'Edit', 'Pin', 'Copy text', 'Copy link', 'Copy reference Message reference unavailable', 'Delete']);
   });
 
   it('is, for what another wrote, without edit and delete, unless the reader moderates the chat', async () => {
     const theirs = message(1, { author: DORA });
-    expect(await menuOf(theirs, { me: ADA.id })).toEqual(['Reply', 'Forward…', 'Select', 'Pin', 'Copy text', 'Copy link']);
+    expect(await menuOf(theirs, { me: ADA.id })).toEqual(['Reply', 'Forward…', 'Select', 'Pin', 'Copy text', 'Copy link', 'Copy reference Message reference unavailable']);
   });
 
   it('lets a moderator delete what another wrote', async () => {
@@ -463,11 +465,24 @@ describe('what a message offers its reader', () => {
 
   it('is only to read, forward, select and link in a chat that cannot be written in', async () => {
     const reading = chat({ kind: 'group', node: null, members: [DORA, GRACE], can: { admin_only: [], participating: false, send: false, moderate: false, export: false, reason: 'inspecting' } });
-    expect(await menuOf(message(1, { author: DORA }), { me: ADA.id, chat: reading })).toEqual(['Forward…', 'Select', 'Copy text', 'Copy link']);
+    expect(await menuOf(message(1, { author: DORA }), { me: ADA.id, chat: reading })).toEqual(['Forward…', 'Select', 'Copy text', 'Copy link', 'Copy reference Message reference unavailable']);
   });
 
   it('is only to select and link for a message that was deleted', async () => {
-    expect(await menuOf(message(1, { author: ADA, deleted: true, parts: [] }), { me: ADA.id })).toEqual(['Select', 'Copy link']);
+    expect(await menuOf(message(1, { author: ADA, deleted: true, parts: [] }), { me: ADA.id })).toEqual(['Select', 'Copy link', 'Copy reference Message reference unavailable']);
+  });
+
+  it.each(['en', 'zh-CN'] as const)('copies a reported message reference only through its supplied action (%s)', async (locale) => {
+    await setLocale(locale);
+    const reported = { ...message(1), reference_number: 3 };
+    const action = vi.fn();
+    const user = userEvent.setup();
+    show(inChat({ chat: GROUP, acts: { ...acts(), copyReference: action } }, <ol><Message head message={reported} /></ol>));
+    await user.click(screen.getByRole('button', { name: /Actions|操作/ }));
+    const copy = screen.getByRole('menuitem', { name: i18n.t('people.reference.copy') });
+    expect(copy).not.toHaveAttribute('aria-disabled', 'true');
+    await user.click(copy);
+    expect(action).toHaveBeenCalledExactlyOnceWith(reported);
   });
 
   it('puts Unpin where Pin was for a message that is pinned', async () => {

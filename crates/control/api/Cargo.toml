@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "orch-api-core"
 description = "API application hosting HTTP, realtime and the machine backplane."
 version.workspace = true
@@ -8,7 +9,22 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-link/test-observers", "orch-api-base/test-observers", "orch-api-threads/test-observers", "orch-api-documents/test-observers", "orch-api-resources/test-observers", "orch-api-environments/test-observers", "orch-api-admin/test-observers", "orch-api-collaboration/test-observers", "orch-api-interactive/test-observers"]
+test-support = []
+
 [dependencies]
+inventory.workspace = true
+orch-api-base.workspace = true
+orch-api-threads.workspace = true
+orch-api-documents.workspace = true
+orch-api-resources.workspace = true
+orch-api-environments.workspace = true
+orch-api-admin.workspace = true
+orch-api-collaboration.workspace = true
+orch-api-interactive.workspace = true
+blake3.workspace = true
 argon2.workspace = true
 async-trait.workspace = true
 axum.workspace = true
@@ -61,6 +77,7 @@ orch-types.workspace = true
 orch-worker-core.workspace = true
 p256.workspace = true  # the registry's signature of an npm package version
 rand.workspace = true
+regex.workspace = true
 rustix.workspace = true
 # The agent programs' release channels are read from here (a mirror where the server cannot reach the vendors).
 reqwest.workspace = true
@@ -91,6 +108,14 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+orch-api-base = { workspace = true, features = ["test-support"] }
+orch-api-threads = { workspace = true, features = ["test-support"] }
+orch-api-documents = { workspace = true, features = ["test-support"] }
+orch-api-resources = { workspace = true, features = ["test-support"] }
+orch-api-environments = { workspace = true, features = ["test-support"] }
+orch-api-admin = { workspace = true, features = ["test-support"] }
+orch-api-collaboration = { workspace = true, features = ["test-support"] }
+orch-api-interactive = { workspace = true, features = ["test-support"] }
 orch-telemetry.workspace = true
 orch-summarizer-contract.workspace = true
 orch-blob-local.workspace = true
@@ -109,3 +134,2119 @@ tokio-tungstenite.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "access"
+path = "base/tests/access.rs"
+
+[[test]]
+name = "access_everything"
+path = "base/tests/access_everything.rs"
+
+[[test]]
+name = "access_previews"
+path = "base/tests/access_previews.rs"
+
+[[test]]
+name = "access_requests"
+path = "base/tests/access_requests.rs"
+
+[[test]]
+name = "access_transfer"
+path = "base/tests/access_transfer.rs"
+
+[[test]]
+name = "account_key_proofs"
+path = "base/tests/account_key_proofs.rs"
+
+[[test]]
+name = "account_native_scopes"
+path = "base/tests/account_native_scopes.rs"
+
+[[test]]
+name = "accounts"
+path = "base/tests/accounts.rs"
+
+[[test]]
+name = "action_guard_resolver_deadlines"
+path = "base/tests/action_guard_resolver_deadlines.rs"
+
+[[test]]
+name = "activity_depth"
+path = "base/tests/activity_depth.rs"
+
+[[test]]
+name = "admin_audit"
+path = "base/tests/admin_audit.rs"
+
+[[test]]
+name = "admin_catalogue"
+path = "base/tests/admin_catalogue.rs"
+
+[[test]]
+name = "admin_messages"
+path = "base/tests/admin_messages.rs"
+
+[[test]]
+name = "admin_mode"
+path = "base/tests/admin_mode.rs"
+
+[[test]]
+name = "admin_mode_availability"
+path = "base/tests/admin_mode_availability.rs"
+
+[[test]]
+name = "admin_native_scopes"
+path = "base/tests/admin_native_scopes.rs"
+
+[[test]]
+name = "admin_person_credentials"
+path = "base/tests/admin_person_credentials.rs"
+
+[[test]]
+name = "admin_places"
+path = "base/tests/admin_places.rs"
+
+[[test]]
+name = "admin_system"
+path = "base/tests/admin_system.rs"
+
+[[test]]
+name = "admin_token_inventory"
+path = "base/tests/admin_token_inventory.rs"
+
+[[test]]
+name = "admin_users"
+path = "base/tests/admin_users.rs"
+
+[[test]]
+name = "agent_creation_scopes"
+path = "base/tests/agent_creation_scopes.rs"
+
+[[test]]
+name = "agent_duplicates"
+path = "base/tests/agent_duplicates.rs"
+
+[[test]]
+name = "agent_list_scopes"
+path = "base/tests/agent_list_scopes.rs"
+
+[[test]]
+name = "agent_reach"
+path = "base/tests/agent_reach.rs"
+
+[[test]]
+name = "agent_schedules"
+path = "base/tests/agent_schedules.rs"
+
+[[test]]
+name = "agent_terminal_recovery"
+path = "base/tests/agent_terminal_recovery.rs"
+
+[[test]]
+name = "agents"
+path = "base/tests/agents.rs"
+
+[[test]]
+name = "agents_receiving_place"
+path = "base/tests/agents_receiving_place.rs"
+
+[[test]]
+name = "announcement_preparation"
+path = "base/tests/announcement_preparation.rs"
+
+[[test]]
+name = "announcement_scopes"
+path = "base/tests/announcement_scopes.rs"
+
+[[test]]
+name = "announcements"
+path = "base/tests/announcements.rs"
+
+[[test]]
+name = "api_surface_sockets"
+path = "base/tests/api_surface_sockets.rs"
+
+[[test]]
+name = "api_surface_tickets"
+path = "base/tests/api_surface_tickets.rs"
+
+[[test]]
+name = "api_surfaces"
+path = "base/tests/api_surfaces.rs"
+
+[[test]]
+name = "approval_operation_scopes"
+path = "base/tests/approval_operation_scopes.rs"
+
+[[test]]
+name = "approvals"
+path = "base/tests/approvals.rs"
+
+[[test]]
+name = "archive_operation_scopes"
+path = "base/tests/archive_operation_scopes.rs"
+
+[[test]]
+name = "archive_plan"
+path = "base/tests/archive_plan.rs"
+
+[[test]]
+name = "ask"
+path = "base/tests/ask.rs"
+
+[[test]]
+name = "ask_tools_native_origin"
+path = "base/tests/ask_tools_native_origin.rs"
+
+[[test]]
+name = "audit_emitters"
+path = "base/tests/audit_emitters.rs"
+
+[[test]]
+name = "audit_tolerant"
+path = "base/tests/audit_tolerant.rs"
+
+[[test]]
+name = "background_wake_reads"
+path = "base/tests/background_wake_reads.rs"
+
+[[test]]
+name = "binder"
+path = "base/tests/binder.rs"
+
+[[test]]
+name = "binding_options"
+path = "base/tests/binding_options.rs"
+
+[[test]]
+name = "binding_readiness"
+path = "base/tests/binding_readiness.rs"
+
+[[test]]
+name = "binding_set"
+path = "base/tests/binding_set.rs"
+
+[[test]]
+name = "blob_housekeeping"
+path = "base/tests/blob_housekeeping.rs"
+
+[[test]]
+name = "blob_origin_candidates"
+path = "base/tests/blob_origin_candidates.rs"
+
+[[test]]
+name = "bootstrap"
+path = "base/tests/bootstrap.rs"
+
+[[test]]
+name = "bound"
+path = "base/tests/bound.rs"
+
+[[test]]
+name = "browsers"
+path = "base/tests/browsers.rs"
+
+[[test]]
+name = "call_recovery"
+path = "base/tests/call_recovery.rs"
+
+[[test]]
+name = "certificates"
+path = "base/tests/certificates.rs"
+
+[[test]]
+name = "chat_creation_scopes"
+path = "base/tests/chat_creation_scopes.rs"
+
+[[test]]
+name = "chat_duplicates"
+path = "base/tests/chat_duplicates.rs"
+
+[[test]]
+name = "chat_files"
+path = "base/tests/chat_files.rs"
+
+[[test]]
+name = "chat_group_mutation_scopes"
+path = "base/tests/chat_group_mutation_scopes.rs"
+
+[[test]]
+name = "chat_list_scopes"
+path = "base/tests/chat_list_scopes.rs"
+
+[[test]]
+name = "chat_mention_operation_scopes"
+path = "base/tests/chat_mention_operation_scopes.rs"
+
+[[test]]
+name = "chat_message_list_scopes"
+path = "base/tests/chat_message_list_scopes.rs"
+
+[[test]]
+name = "chat_message_update_scopes"
+path = "base/tests/chat_message_update_scopes.rs"
+
+[[test]]
+name = "chat_mutation_scopes"
+path = "base/tests/chat_mutation_scopes.rs"
+
+[[test]]
+name = "chat_name_scopes"
+path = "base/tests/chat_name_scopes.rs"
+
+[[test]]
+name = "chat_operation_sources"
+path = "base/tests/chat_operation_sources.rs"
+
+[[test]]
+name = "chat_personal_operation_scopes"
+path = "base/tests/chat_personal_operation_scopes.rs"
+
+[[test]]
+name = "chat_personal_selected_sources"
+path = "base/tests/chat_personal_selected_sources.rs"
+
+[[test]]
+name = "chat_read_all_scopes"
+path = "base/tests/chat_read_all_scopes.rs"
+
+[[test]]
+name = "chat_reader_scopes"
+path = "base/tests/chat_reader_scopes.rs"
+
+[[test]]
+name = "chat_receipts"
+path = "base/tests/chat_receipts.rs"
+
+[[test]]
+name = "chat_reference_numbers"
+path = "base/tests/chat_reference_numbers.rs"
+
+[[test]]
+name = "chats_content"
+path = "base/tests/chats_content.rs"
+
+[[test]]
+name = "chats_export"
+path = "base/tests/chats_export.rs"
+
+[[test]]
+name = "chats_forward"
+path = "base/tests/chats_forward.rs"
+
+[[test]]
+name = "chats_node"
+path = "base/tests/chats_node.rs"
+
+[[test]]
+name = "chats_people"
+path = "base/tests/chats_people.rs"
+
+[[test]]
+name = "chats_resource_homes"
+path = "base/tests/chats_resource_homes.rs"
+
+[[test]]
+name = "chats_resource_managers"
+path = "base/tests/chats_resource_managers.rs"
+
+[[test]]
+name = "chats_resource_visibility"
+path = "base/tests/chats_resource_visibility.rs"
+
+[[test]]
+name = "chats_threads"
+path = "base/tests/chats_threads.rs"
+
+[[test]]
+name = "cluster_retained"
+path = "base/tests/cluster_retained.rs"
+
+[[test]]
+name = "command_http_receipts"
+path = "base/tests/command_http_receipts.rs"
+
+[[test]]
+name = "component_updates"
+path = "base/tests/component_updates.rs"
+
+[[test]]
+name = "connected_program_versions"
+path = "base/tests/connected_program_versions.rs"
+
+[[test]]
+name = "content"
+path = "base/tests/content.rs"
+
+[[test]]
+name = "copy_out_ask"
+path = "base/tests/copy_out_ask.rs"
+
+[[test]]
+name = "copy_out_exports"
+path = "base/tests/copy_out_exports.rs"
+
+[[test]]
+name = "creation_availability"
+path = "base/tests/creation_availability.rs"
+
+[[test]]
+name = "creation_catalogue"
+path = "base/tests/creation_catalogue.rs"
+
+[[test]]
+name = "creation_replays"
+path = "base/tests/creation_replays.rs"
+
+[[test]]
+name = "credential_collections"
+path = "base/tests/credential_collections.rs"
+
+[[test]]
+name = "custom_color"
+path = "base/tests/custom_color.rs"
+
+[[test]]
+name = "defaults_opening"
+path = "base/tests/defaults_opening.rs"
+
+[[test]]
+name = "delete_plan"
+path = "base/tests/delete_plan.rs"
+
+[[test]]
+name = "destination_operation_scopes"
+path = "base/tests/destination_operation_scopes.rs"
+
+[[test]]
+name = "directory"
+path = "base/tests/directory.rs"
+
+[[test]]
+name = "directory_native_scopes"
+path = "base/tests/directory_native_scopes.rs"
+
+[[test]]
+name = "document_comment_creation_replays"
+path = "base/tests/document_comment_creation_replays.rs"
+
+[[test]]
+name = "document_comment_edit_replay"
+path = "base/tests/document_comment_edit_replay.rs"
+
+[[test]]
+name = "document_comment_reader_scopes"
+path = "base/tests/document_comment_reader_scopes.rs"
+
+[[test]]
+name = "document_comment_writer_deadlines"
+path = "base/tests/document_comment_writer_deadlines.rs"
+
+[[test]]
+name = "document_comment_writer_scopes"
+path = "base/tests/document_comment_writer_scopes.rs"
+
+[[test]]
+name = "document_comments"
+path = "base/tests/document_comments.rs"
+
+[[test]]
+name = "document_containers"
+path = "base/tests/document_containers.rs"
+
+[[test]]
+name = "document_convert"
+path = "base/tests/document_convert.rs"
+
+[[test]]
+name = "document_copy_scopes"
+path = "base/tests/document_copy_scopes.rs"
+
+[[test]]
+name = "document_creation_scopes"
+path = "base/tests/document_creation_scopes.rs"
+
+[[test]]
+name = "document_creator"
+path = "base/tests/document_creator.rs"
+
+[[test]]
+name = "document_discovery"
+path = "base/tests/document_discovery.rs"
+
+[[test]]
+name = "document_entry_metadata"
+path = "base/tests/document_entry_metadata.rs"
+
+[[test]]
+name = "document_entry_scopes"
+path = "base/tests/document_entry_scopes.rs"
+
+[[test]]
+name = "document_export"
+path = "base/tests/document_export.rs"
+
+[[test]]
+name = "document_export_files"
+path = "base/tests/document_export_files.rs"
+
+[[test]]
+name = "document_feed"
+path = "base/tests/document_feed.rs"
+
+[[test]]
+name = "document_file_creation_scopes"
+path = "base/tests/document_file_creation_scopes.rs"
+
+[[test]]
+name = "document_file_reader_scopes"
+path = "base/tests/document_file_reader_scopes.rs"
+
+[[test]]
+name = "document_files"
+path = "base/tests/document_files.rs"
+
+[[test]]
+name = "document_history"
+path = "base/tests/document_history.rs"
+
+[[test]]
+name = "document_import_files"
+path = "base/tests/document_import_files.rs"
+
+[[test]]
+name = "document_label_sources"
+path = "base/tests/document_label_sources.rs"
+
+[[test]]
+name = "document_list_scopes"
+path = "base/tests/document_list_scopes.rs"
+
+[[test]]
+name = "document_move_review_scopes"
+path = "base/tests/document_move_review_scopes.rs"
+
+[[test]]
+name = "document_move_scopes"
+path = "base/tests/document_move_scopes.rs"
+
+[[test]]
+name = "document_navigation"
+path = "base/tests/document_navigation.rs"
+
+[[test]]
+name = "document_ops"
+path = "base/tests/document_ops.rs"
+
+[[test]]
+name = "document_pages_scopes"
+path = "base/tests/document_pages_scopes.rs"
+
+[[test]]
+name = "document_purge"
+path = "base/tests/document_purge.rs"
+
+[[test]]
+name = "document_reader_scopes"
+path = "base/tests/document_reader_scopes.rs"
+
+[[test]]
+name = "document_readers"
+path = "base/tests/document_readers.rs"
+
+[[test]]
+name = "document_restore_scopes"
+path = "base/tests/document_restore_scopes.rs"
+
+[[test]]
+name = "document_summary_options"
+path = "base/tests/document_summary_options.rs"
+
+[[test]]
+name = "document_tree_delete_scopes"
+path = "base/tests/document_tree_delete_scopes.rs"
+
+[[test]]
+name = "document_tree_list_scopes"
+path = "base/tests/document_tree_list_scopes.rs"
+
+[[test]]
+name = "document_tree_operation_scopes"
+path = "base/tests/document_tree_operation_scopes.rs"
+
+[[test]]
+name = "document_version_reader_scopes"
+path = "base/tests/document_version_reader_scopes.rs"
+
+[[test]]
+name = "documents"
+path = "base/tests/documents.rs"
+
+[[test]]
+name = "doors"
+path = "base/tests/doors.rs"
+
+[[test]]
+name = "downloads"
+path = "base/tests/downloads.rs"
+
+[[test]]
+name = "environment_addresses"
+path = "base/tests/environment_addresses.rs"
+
+[[test]]
+name = "environment_duplicates"
+path = "base/tests/environment_duplicates.rs"
+
+[[test]]
+name = "environment_git_operation_scopes"
+path = "base/tests/environment_git_operation_scopes.rs"
+
+[[test]]
+name = "environment_incarnation"
+path = "base/tests/environment_incarnation.rs"
+
+[[test]]
+name = "environment_readiness"
+path = "base/tests/environment_readiness.rs"
+
+[[test]]
+name = "environments"
+path = "base/tests/environments.rs"
+
+[[test]]
+name = "error_words"
+path = "base/tests/error_words.rs"
+
+[[test]]
+name = "everything_operation_scopes"
+path = "base/tests/everything_operation_scopes.rs"
+
+[[test]]
+name = "everything_resources"
+path = "base/tests/everything_resources.rs"
+
+[[test]]
+name = "everything_scale"
+path = "base/tests/everything_scale.rs"
+
+[[test]]
+name = "exec_version_overrides"
+path = "base/tests/exec_version_overrides.rs"
+
+[[test]]
+name = "executor_ticket_build"
+path = "base/tests/executor_ticket_build.rs"
+
+[[test]]
+name = "export_rules"
+path = "base/tests/export_rules.rs"
+
+[[test]]
+name = "exports"
+path = "base/tests/exports.rs"
+
+[[test]]
+name = "exports_limits"
+path = "base/tests/exports_limits.rs"
+
+[[test]]
+name = "first_steps"
+path = "base/tests/first_steps.rs"
+
+[[test]]
+name = "folders"
+path = "base/tests/folders.rs"
+
+[[test]]
+name = "folders_announced"
+path = "base/tests/folders_announced.rs"
+
+[[test]]
+name = "foreign_machine_uploads"
+path = "base/tests/foreign_machine_uploads.rs"
+
+[[test]]
+name = "forks"
+path = "base/tests/forks.rs"
+
+[[test]]
+name = "forward_destination_plans"
+path = "base/tests/forward_destination_plans.rs"
+
+[[test]]
+name = "forward_operation_scopes"
+path = "base/tests/forward_operation_scopes.rs"
+
+[[test]]
+name = "forwarded_address_api"
+path = "base/tests/forwarded_address_api.rs"
+
+[[test]]
+name = "forwarded_edge"
+path = "base/tests/forwarded_edge.rs"
+
+[[test]]
+name = "forwarding_threads"
+path = "base/tests/forwarding_threads.rs"
+
+[[test]]
+name = "gateways"
+path = "base/tests/gateways.rs"
+
+[[test]]
+name = "general_access"
+path = "base/tests/general_access.rs"
+
+[[test]]
+name = "giving"
+path = "base/tests/giving.rs"
+
+[[test]]
+name = "group_join_requests"
+path = "base/tests/group_join_requests.rs"
+
+[[test]]
+name = "group_list_scopes"
+path = "base/tests/group_list_scopes.rs"
+
+[[test]]
+name = "group_operation_scopes"
+path = "base/tests/group_operation_scopes.rs"
+
+[[test]]
+name = "harness_checks"
+path = "base/tests/harness_checks.rs"
+
+[[test]]
+name = "hidden_rows"
+path = "base/tests/hidden_rows.rs"
+
+[[test]]
+name = "hierarchy_bulk_writer_deadline"
+path = "base/tests/hierarchy_bulk_writer_deadline.rs"
+
+[[test]]
+name = "hierarchy_native_scopes"
+path = "base/tests/hierarchy_native_scopes.rs"
+
+[[test]]
+name = "history_native_scopes"
+path = "base/tests/history_native_scopes.rs"
+
+[[test]]
+name = "holder_model"
+path = "base/tests/holder_model.rs"
+
+[[test]]
+name = "holder_search_native_scopes"
+path = "base/tests/holder_search_native_scopes.rs"
+
+[[test]]
+name = "host_get_scopes"
+path = "base/tests/host_get_scopes.rs"
+
+[[test]]
+name = "host_list_scopes"
+path = "base/tests/host_list_scopes.rs"
+
+[[test]]
+name = "host_ports"
+path = "base/tests/host_ports.rs"
+
+[[test]]
+name = "host_update_scopes"
+path = "base/tests/host_update_scopes.rs"
+
+[[test]]
+name = "hosted_environments"
+path = "base/tests/hosted_environments.rs"
+
+[[test]]
+name = "hosts"
+path = "base/tests/hosts.rs"
+
+[[test]]
+name = "imports"
+path = "base/tests/imports.rs"
+
+[[test]]
+name = "imports_history"
+path = "base/tests/imports_history.rs"
+
+[[test]]
+name = "input_operation_sources"
+path = "base/tests/input_operation_sources.rs"
+
+[[test]]
+name = "input_schedules"
+path = "base/tests/input_schedules.rs"
+
+[[test]]
+name = "installation_records"
+path = "base/tests/installation_records.rs"
+
+[[test]]
+name = "interactive_close_scopes"
+path = "base/tests/interactive_close_scopes.rs"
+
+[[test]]
+name = "interactive_creation_replays"
+path = "base/tests/interactive_creation_replays.rs"
+
+[[test]]
+name = "interactive_ticket_scopes"
+path = "base/tests/interactive_ticket_scopes.rs"
+
+[[test]]
+name = "invitation_authority_after"
+path = "base/tests/invitation_authority_after.rs"
+
+[[test]]
+name = "invitation_operation_scopes"
+path = "base/tests/invitation_operation_scopes.rs"
+
+[[test]]
+name = "invitation_roles"
+path = "base/tests/invitation_roles.rs"
+
+[[test]]
+name = "kadmin_fresh_proof"
+path = "base/tests/kadmin_fresh_proof.rs"
+
+[[test]]
+name = "kadmin_outsiders"
+path = "base/tests/kadmin_outsiders.rs"
+
+[[test]]
+name = "kadmin_second_step"
+path = "base/tests/kadmin_second_step.rs"
+
+[[test]]
+name = "kadmin_tokens"
+path = "base/tests/kadmin_tokens.rs"
+
+[[test]]
+name = "karchive_delete"
+path = "base/tests/karchive_delete.rs"
+
+[[test]]
+name = "karchive_retention"
+path = "base/tests/karchive_retention.rs"
+
+[[test]]
+name = "kept_subscription_list"
+path = "base/tests/kept_subscription_list.rs"
+
+[[test]]
+name = "key_activity"
+path = "base/tests/key_activity.rs"
+
+[[test]]
+name = "kfeeds_live"
+path = "base/tests/kfeeds_live.rs"
+
+[[test]]
+name = "kfeeds_permissions"
+path = "base/tests/kfeeds_permissions.rs"
+
+[[test]]
+name = "kfix_access"
+path = "base/tests/kfix_access.rs"
+
+[[test]]
+name = "kfix_account"
+path = "base/tests/kfix_account.rs"
+
+[[test]]
+name = "kfix_binding"
+path = "base/tests/kfix_binding.rs"
+
+[[test]]
+name = "kfix_chatviews"
+path = "base/tests/kfix_chatviews.rs"
+
+[[test]]
+name = "kfix_deploy"
+path = "base/tests/kfix_deploy.rs"
+
+[[test]]
+name = "kfix_documents"
+path = "base/tests/kfix_documents.rs"
+
+[[test]]
+name = "kfix_envreads"
+path = "base/tests/kfix_envreads.rs"
+
+[[test]]
+name = "kfix_private_pages"
+path = "base/tests/kfix_private_pages.rs"
+
+[[test]]
+name = "kfix_provenance"
+path = "base/tests/kfix_provenance.rs"
+
+[[test]]
+name = "kfix_provider_facts_view"
+path = "base/tests/kfix_provider_facts_view.rs"
+
+[[test]]
+name = "kfix_resource_readers"
+path = "base/tests/kfix_resource_readers.rs"
+
+[[test]]
+name = "kfix_role_scopes"
+path = "base/tests/kfix_role_scopes.rs"
+
+[[test]]
+name = "kfix_schemas"
+path = "base/tests/kfix_schemas.rs"
+
+[[test]]
+name = "kfix_settings"
+path = "base/tests/kfix_settings.rs"
+
+[[test]]
+name = "kfix_sharing_policy"
+path = "base/tests/kfix_sharing_policy.rs"
+
+[[test]]
+name = "kfix_upload"
+path = "base/tests/kfix_upload.rs"
+
+[[test]]
+name = "kguard_admin"
+path = "base/tests/kguard_admin.rs"
+
+[[test]]
+name = "kguard_content"
+path = "base/tests/kguard_content.rs"
+
+[[test]]
+name = "kguard_engine"
+path = "base/tests/kguard_engine.rs"
+
+[[test]]
+name = "kguard_nodes"
+path = "base/tests/kguard_nodes.rs"
+
+[[test]]
+name = "kguard_resources"
+path = "base/tests/kguard_resources.rs"
+
+[[test]]
+name = "kguard_rest"
+path = "base/tests/kguard_rest.rs"
+
+[[test]]
+name = "kguard_threads"
+path = "base/tests/kguard_threads.rs"
+
+[[test]]
+name = "kinstall_template"
+path = "base/tests/kinstall_template.rs"
+
+[[test]]
+name = "kmounts_files"
+path = "base/tests/kmounts_files.rs"
+
+[[test]]
+name = "kmounts_import"
+path = "base/tests/kmounts_import.rs"
+
+[[test]]
+name = "kmounts_mcp"
+path = "base/tests/kmounts_mcp.rs"
+
+[[test]]
+name = "koidc"
+path = "base/tests/koidc.rs"
+
+[[test]]
+name = "ktestkit"
+path = "base/tests/ktestkit.rs"
+
+[[test]]
+name = "kvnc_core"
+path = "base/tests/kvnc_core.rs"
+
+[[test]]
+name = "kvnc_filter"
+path = "base/tests/kvnc_filter.rs"
+
+[[test]]
+name = "link_grants"
+path = "base/tests/link_grants.rs"
+
+[[test]]
+name = "links"
+path = "base/tests/links.rs"
+
+[[test]]
+name = "links_scale"
+path = "base/tests/links_scale.rs"
+
+[[test]]
+name = "loss"
+path = "base/tests/loss.rs"
+
+[[test]]
+name = "machine_again_scopes"
+path = "base/tests/machine_again_scopes.rs"
+
+[[test]]
+name = "machine_data_inventory"
+path = "base/tests/machine_data_inventory.rs"
+
+[[test]]
+name = "machine_enrollment_home"
+path = "base/tests/machine_enrollment_home.rs"
+
+[[test]]
+name = "machine_enrollment_progress_scopes"
+path = "base/tests/machine_enrollment_progress_scopes.rs"
+
+[[test]]
+name = "machine_get_scopes"
+path = "base/tests/machine_get_scopes.rs"
+
+[[test]]
+name = "machine_leaf_reader_scopes"
+path = "base/tests/machine_leaf_reader_scopes.rs"
+
+[[test]]
+name = "machine_list_scopes"
+path = "base/tests/machine_list_scopes.rs"
+
+[[test]]
+name = "machine_policy_scopes"
+path = "base/tests/machine_policy_scopes.rs"
+
+[[test]]
+name = "machine_probe_scopes"
+path = "base/tests/machine_probe_scopes.rs"
+
+[[test]]
+name = "machine_program_admission"
+path = "base/tests/machine_program_admission.rs"
+
+[[test]]
+name = "machine_program_scopes"
+path = "base/tests/machine_program_scopes.rs"
+
+[[test]]
+name = "machine_reenrollment"
+path = "base/tests/machine_reenrollment.rs"
+
+[[test]]
+name = "machine_registration"
+path = "base/tests/machine_registration.rs"
+
+[[test]]
+name = "machine_revoke_scopes"
+path = "base/tests/machine_revoke_scopes.rs"
+
+[[test]]
+name = "machine_role_scopes"
+path = "base/tests/machine_role_scopes.rs"
+
+[[test]]
+name = "machine_update_scopes"
+path = "base/tests/machine_update_scopes.rs"
+
+[[test]]
+name = "machines"
+path = "base/tests/machines.rs"
+
+[[test]]
+name = "manage_is_the_thing"
+path = "base/tests/manage_is_the_thing.rs"
+
+[[test]]
+name = "matrix_access"
+path = "base/tests/matrix_access.rs"
+
+[[test]]
+name = "matrix_names"
+path = "base/tests/matrix_names.rs"
+
+[[test]]
+name = "mcp_creation_scopes"
+path = "base/tests/mcp_creation_scopes.rs"
+
+[[test]]
+name = "mcp_delete_scopes"
+path = "base/tests/mcp_delete_scopes.rs"
+
+[[test]]
+name = "mcp_duplicates"
+path = "base/tests/mcp_duplicates.rs"
+
+[[test]]
+name = "mcp_reader_scopes"
+path = "base/tests/mcp_reader_scopes.rs"
+
+[[test]]
+name = "me"
+path = "base/tests/me.rs"
+
+[[test]]
+name = "member_ending_native_scopes"
+path = "base/tests/member_ending_native_scopes.rs"
+
+[[test]]
+name = "member_holdings_native_scopes"
+path = "base/tests/member_holdings_native_scopes.rs"
+
+[[test]]
+name = "member_move_native_scopes"
+path = "base/tests/member_move_native_scopes.rs"
+
+[[test]]
+name = "members"
+path = "base/tests/members.rs"
+
+[[test]]
+name = "metrics_observations"
+path = "base/tests/metrics_observations.rs"
+
+[[test]]
+name = "model_entries"
+path = "base/tests/model_entries.rs"
+
+[[test]]
+name = "model_request_audience"
+path = "base/tests/model_request_audience.rs"
+
+[[test]]
+name = "mount_creation_scopes"
+path = "base/tests/mount_creation_scopes.rs"
+
+[[test]]
+name = "mount_duplicates"
+path = "base/tests/mount_duplicates.rs"
+
+[[test]]
+name = "mount_fingerprint_problem"
+path = "base/tests/mount_fingerprint_problem.rs"
+
+[[test]]
+name = "mount_use_scopes"
+path = "base/tests/mount_use_scopes.rs"
+
+[[test]]
+name = "moves_tags"
+path = "base/tests/moves_tags.rs"
+
+[[test]]
+name = "native_actions"
+path = "base/tests/native_actions.rs"
+
+[[test]]
+name = "native_resource_family_scopes"
+path = "base/tests/native_resource_family_scopes.rs"
+
+[[test]]
+name = "node_chat_opening_scopes"
+path = "base/tests/node_chat_opening_scopes.rs"
+
+[[test]]
+name = "node_creation_operation_scopes"
+path = "base/tests/node_creation_operation_scopes.rs"
+
+[[test]]
+name = "node_delete_native_scopes"
+path = "base/tests/node_delete_native_scopes.rs"
+
+[[test]]
+name = "node_delete_review_native_scopes"
+path = "base/tests/node_delete_review_native_scopes.rs"
+
+[[test]]
+name = "node_list_operation_scopes"
+path = "base/tests/node_list_operation_scopes.rs"
+
+[[test]]
+name = "node_move_operation_scopes"
+path = "base/tests/node_move_operation_scopes.rs"
+
+[[test]]
+name = "node_presentation"
+path = "base/tests/node_presentation.rs"
+
+[[test]]
+name = "node_presentation_feed"
+path = "base/tests/node_presentation_feed.rs"
+
+[[test]]
+name = "node_restore_native_scopes"
+path = "base/tests/node_restore_native_scopes.rs"
+
+[[test]]
+name = "node_setting_native_scopes"
+path = "base/tests/node_setting_native_scopes.rs"
+
+[[test]]
+name = "nodes"
+path = "base/tests/nodes.rs"
+
+[[test]]
+name = "nodes_lists"
+path = "base/tests/nodes_lists.rs"
+
+[[test]]
+name = "notification_exceptions"
+path = "base/tests/notification_exceptions.rs"
+
+[[test]]
+name = "notification_names"
+path = "base/tests/notification_names.rs"
+
+[[test]]
+name = "notifications_channels"
+path = "base/tests/notifications_channels.rs"
+
+[[test]]
+name = "notifications_destinations"
+path = "base/tests/notifications_destinations.rs"
+
+[[test]]
+name = "notifications_feed"
+path = "base/tests/notifications_feed.rs"
+
+[[test]]
+name = "notifications_inbox"
+path = "base/tests/notifications_inbox.rs"
+
+[[test]]
+name = "notifications_routes"
+path = "base/tests/notifications_routes.rs"
+
+[[test]]
+name = "notifications_told"
+path = "base/tests/notifications_told.rs"
+
+[[test]]
+name = "object_transfer_operation_scopes"
+path = "base/tests/object_transfer_operation_scopes.rs"
+
+[[test]]
+name = "offline_checksums"
+path = "base/tests/offline_checksums.rs"
+
+[[test]]
+name = "operation_resolvers"
+path = "base/tests/operation_resolvers.rs"
+
+[[test]]
+name = "org_changed"
+path = "base/tests/org_changed.rs"
+
+[[test]]
+name = "org_contents"
+path = "base/tests/org_contents.rs"
+
+[[test]]
+name = "org_creation"
+path = "base/tests/org_creation.rs"
+
+[[test]]
+name = "org_home_live"
+path = "base/tests/org_home_live.rs"
+
+[[test]]
+name = "org_home_work"
+path = "base/tests/org_home_work.rs"
+
+[[test]]
+name = "org_overview"
+path = "base/tests/org_overview.rs"
+
+[[test]]
+name = "org_people_counts"
+path = "base/tests/org_people_counts.rs"
+
+[[test]]
+name = "org_reader_operation_scopes"
+path = "base/tests/org_reader_operation_scopes.rs"
+
+[[test]]
+name = "org_terms"
+path = "base/tests/org_terms.rs"
+
+[[test]]
+name = "org_token_refusal_privacy"
+path = "base/tests/org_token_refusal_privacy.rs"
+
+[[test]]
+name = "org_token_scopes"
+path = "base/tests/org_token_scopes.rs"
+
+[[test]]
+name = "outbound_ca"
+path = "base/tests/outbound_ca.rs"
+
+[[test]]
+name = "outside_creation"
+path = "base/tests/outside_creation.rs"
+
+[[test]]
+name = "ownership_settings_native_scopes"
+path = "base/tests/ownership_settings_native_scopes.rs"
+
+[[test]]
+name = "page_dependencies"
+path = "base/tests/page_dependencies.rs"
+
+[[test]]
+name = "page_people_chips"
+path = "base/tests/page_people_chips.rs"
+
+[[test]]
+name = "page_transfer_operation_scopes"
+path = "base/tests/page_transfer_operation_scopes.rs"
+
+[[test]]
+name = "people_asking"
+path = "base/tests/people_asking.rs"
+
+[[test]]
+name = "people_creation"
+path = "base/tests/people_creation.rs"
+
+[[test]]
+name = "people_discussion_delivery"
+path = "base/tests/people_discussion_delivery.rs"
+
+[[test]]
+name = "people_discussions"
+path = "base/tests/people_discussions.rs"
+
+[[test]]
+name = "people_document_mentions"
+path = "base/tests/people_document_mentions.rs"
+
+[[test]]
+name = "people_mentions"
+path = "base/tests/people_mentions.rs"
+
+[[test]]
+name = "people_notify"
+path = "base/tests/people_notify.rs"
+
+[[test]]
+name = "people_posting"
+path = "base/tests/people_posting.rs"
+
+[[test]]
+name = "people_put_back"
+path = "base/tests/people_put_back.rs"
+
+[[test]]
+name = "people_reactions"
+path = "base/tests/people_reactions.rs"
+
+[[test]]
+name = "people_reading"
+path = "base/tests/people_reading.rs"
+
+[[test]]
+name = "people_scale"
+path = "base/tests/people_scale.rs"
+
+[[test]]
+name = "people_search"
+path = "base/tests/people_search.rs"
+
+[[test]]
+name = "people_storage"
+path = "base/tests/people_storage.rs"
+
+[[test]]
+name = "permission_reader_scopes"
+path = "base/tests/permission_reader_scopes.rs"
+
+[[test]]
+name = "person_shares"
+path = "base/tests/person_shares.rs"
+
+[[test]]
+name = "personal"
+path = "base/tests/personal.rs"
+
+[[test]]
+name = "personal_native_scopes"
+path = "base/tests/personal_native_scopes.rs"
+
+[[test]]
+name = "personal_notification_scope"
+path = "base/tests/personal_notification_scope.rs"
+
+[[test]]
+name = "personal_state_scope"
+path = "base/tests/personal_state_scope.rs"
+
+[[test]]
+name = "ports_core"
+path = "base/tests/ports_core.rs"
+
+[[test]]
+name = "private_documents"
+path = "base/tests/private_documents.rs"
+
+[[test]]
+name = "profiles"
+path = "base/tests/profiles.rs"
+
+[[test]]
+name = "program_admin"
+path = "base/tests/program_admin.rs"
+
+[[test]]
+name = "prompt_walk"
+path = "base/tests/prompt_walk.rs"
+
+[[test]]
+name = "provider_admin_sources"
+path = "base/tests/provider_admin_sources.rs"
+
+[[test]]
+name = "provider_aux_reader_scopes"
+path = "base/tests/provider_aux_reader_scopes.rs"
+
+[[test]]
+name = "provider_creation_inline_scopes"
+path = "base/tests/provider_creation_inline_scopes.rs"
+
+[[test]]
+name = "provider_creation_scopes"
+path = "base/tests/provider_creation_scopes.rs"
+
+[[test]]
+name = "provider_credit_history"
+path = "base/tests/provider_credit_history.rs"
+
+[[test]]
+name = "provider_credit_schema"
+path = "base/tests/provider_credit_schema.rs"
+
+[[test]]
+name = "provider_crud_scopes"
+path = "base/tests/provider_crud_scopes.rs"
+
+[[test]]
+name = "provider_duplicates"
+path = "base/tests/provider_duplicates.rs"
+
+[[test]]
+name = "provider_harness"
+path = "base/tests/provider_harness.rs"
+
+[[test]]
+name = "provider_list_scopes"
+path = "base/tests/provider_list_scopes.rs"
+
+[[test]]
+name = "provider_managed"
+path = "base/tests/provider_managed.rs"
+
+[[test]]
+name = "provider_model_operation_scopes"
+path = "base/tests/provider_model_operation_scopes.rs"
+
+[[test]]
+name = "provider_models"
+path = "base/tests/provider_models.rs"
+
+[[test]]
+name = "provider_name_operation_scopes"
+path = "base/tests/provider_name_operation_scopes.rs"
+
+[[test]]
+name = "provider_plan"
+path = "base/tests/provider_plan.rs"
+
+[[test]]
+name = "provider_policy"
+path = "base/tests/provider_policy.rs"
+
+[[test]]
+name = "provider_read_latency"
+path = "base/tests/provider_read_latency.rs"
+
+[[test]]
+name = "provider_recovery"
+path = "base/tests/provider_recovery.rs"
+
+[[test]]
+name = "provider_resets"
+path = "base/tests/provider_resets.rs"
+
+[[test]]
+name = "provider_services"
+path = "base/tests/provider_services.rs"
+
+[[test]]
+name = "provider_setup"
+path = "base/tests/provider_setup.rs"
+
+[[test]]
+name = "provider_setup_scopes"
+path = "base/tests/provider_setup_scopes.rs"
+
+[[test]]
+name = "provider_sources"
+path = "base/tests/provider_sources.rs"
+
+[[test]]
+name = "providers"
+path = "base/tests/providers.rs"
+
+[[test]]
+name = "pure_agent_gifts"
+path = "base/tests/pure_agent_gifts.rs"
+
+[[test]]
+name = "reaches"
+path = "base/tests/reaches.rs"
+
+[[test]]
+name = "real_connector"
+path = "base/tests/real_connector.rs"
+
+[[test]]
+name = "realtime_chats"
+path = "base/tests/realtime_chats.rs"
+
+[[test]]
+name = "realtime_continuations"
+path = "base/tests/realtime_continuations.rs"
+
+[[test]]
+name = "realtime_daily_work"
+path = "base/tests/realtime_daily_work.rs"
+
+[[test]]
+name = "realtime_diagnostics"
+path = "base/tests/realtime_diagnostics.rs"
+
+[[test]]
+name = "realtime_environment"
+path = "base/tests/realtime_environment.rs"
+
+[[test]]
+name = "realtime_ephemeral"
+path = "base/tests/realtime_ephemeral.rs"
+
+[[test]]
+name = "realtime_feeds"
+path = "base/tests/realtime_feeds.rs"
+
+[[test]]
+name = "realtime_fixture_lifecycle"
+path = "base/tests/realtime_fixture_lifecycle.rs"
+
+[[test]]
+name = "realtime_large_gap"
+path = "base/tests/realtime_large_gap.rs"
+
+[[test]]
+name = "realtime_machine_views"
+path = "base/tests/realtime_machine_views.rs"
+
+[[test]]
+name = "realtime_origins"
+path = "base/tests/realtime_origins.rs"
+
+[[test]]
+name = "realtime_presence_processes"
+path = "base/tests/realtime_presence_processes.rs"
+
+[[test]]
+name = "realtime_raw_sources"
+path = "base/tests/realtime_raw_sources.rs"
+
+[[test]]
+name = "realtime_rows_cost"
+path = "base/tests/realtime_rows_cost.rs"
+
+[[test]]
+name = "realtime_socket"
+path = "base/tests/realtime_socket.rs"
+
+[[test]]
+name = "realtime_switches"
+path = "base/tests/realtime_switches.rs"
+
+[[test]]
+name = "realtime_threads"
+path = "base/tests/realtime_threads.rs"
+
+[[test]]
+name = "realtime_topic_members"
+path = "base/tests/realtime_topic_members.rs"
+
+[[test]]
+name = "realtime_usage"
+path = "base/tests/realtime_usage.rs"
+
+[[test]]
+name = "recordings"
+path = "base/tests/recordings.rs"
+
+[[test]]
+name = "recovery_codes"
+path = "base/tests/recovery_codes.rs"
+
+[[test]]
+name = "refaccess"
+path = "base/tests/refaccess.rs"
+
+[[test]]
+name = "reference_preview"
+path = "base/tests/reference_preview.rs"
+
+[[test]]
+name = "registration_moves"
+path = "base/tests/registration_moves.rs"
+
+[[test]]
+name = "related_items"
+path = "base/tests/related_items.rs"
+
+[[test]]
+name = "related_scale"
+path = "base/tests/related_scale.rs"
+
+[[test]]
+name = "removal"
+path = "base/tests/removal.rs"
+
+[[test]]
+name = "request_intent_scopes"
+path = "base/tests/request_intent_scopes.rs"
+
+[[test]]
+name = "reset_links"
+path = "base/tests/reset_links.rs"
+
+[[test]]
+name = "resource_facts"
+path = "base/tests/resource_facts.rs"
+
+[[test]]
+name = "resource_getter_scopes"
+path = "base/tests/resource_getter_scopes.rs"
+
+[[test]]
+name = "resource_groups"
+path = "base/tests/resource_groups.rs"
+
+[[test]]
+name = "resource_lists"
+path = "base/tests/resource_lists.rs"
+
+[[test]]
+name = "resource_pages"
+path = "base/tests/resource_pages.rs"
+
+[[test]]
+name = "resource_resume"
+path = "base/tests/resource_resume.rs"
+
+[[test]]
+name = "resource_summaries"
+path = "base/tests/resource_summaries.rs"
+
+[[test]]
+name = "retained_scopes"
+path = "base/tests/retained_scopes.rs"
+
+[[test]]
+name = "review_feed_end"
+path = "base/tests/review_feed_end.rs"
+
+[[test]]
+name = "role_error_mode_guard"
+path = "base/tests/role_error_mode_guard.rs"
+
+[[test]]
+name = "role_operation_scopes"
+path = "base/tests/role_operation_scopes.rs"
+
+[[test]]
+name = "runtime_updates"
+path = "base/tests/runtime_updates.rs"
+
+[[test]]
+name = "schedule_operation_scopes"
+path = "base/tests/schedule_operation_scopes.rs"
+
+[[test]]
+name = "screen_openings"
+path = "base/tests/screen_openings.rs"
+
+[[test]]
+name = "search_content"
+path = "base/tests/search_content.rs"
+
+[[test]]
+name = "search_meaning"
+path = "base/tests/search_meaning.rs"
+
+[[test]]
+name = "search_names"
+path = "base/tests/search_names.rs"
+
+[[test]]
+name = "search_native_scopes"
+path = "base/tests/search_native_scopes.rs"
+
+[[test]]
+name = "search_projection"
+path = "base/tests/search_projection.rs"
+
+[[test]]
+name = "security_release_mirror"
+path = "base/tests/security_release_mirror.rs"
+
+[[test]]
+name = "security_skill_source"
+path = "base/tests/security_skill_source.rs"
+
+[[test]]
+name = "semantic_admin"
+path = "base/tests/semantic_admin.rs"
+
+[[test]]
+name = "semantic_embeddings"
+path = "base/tests/semantic_embeddings.rs"
+
+[[test]]
+name = "semantic_index"
+path = "base/tests/semantic_index.rs"
+
+[[test]]
+name = "service_accounts"
+path = "base/tests/service_accounts.rs"
+
+[[test]]
+name = "service_email_subject"
+path = "base/tests/service_email_subject.rs"
+
+[[test]]
+name = "service_key_issuance"
+path = "base/tests/service_key_issuance.rs"
+
+[[test]]
+name = "service_token_sign_in"
+path = "base/tests/service_token_sign_in.rs"
+
+[[test]]
+name = "session_others"
+path = "base/tests/session_others.rs"
+
+[[test]]
+name = "setting_reach"
+path = "base/tests/setting_reach.rs"
+
+[[test]]
+name = "settings"
+path = "base/tests/settings.rs"
+
+[[test]]
+name = "share_native_scopes"
+path = "base/tests/share_native_scopes.rs"
+
+[[test]]
+name = "share_operation_scopes"
+path = "base/tests/share_operation_scopes.rs"
+
+[[test]]
+name = "share_preview"
+path = "base/tests/share_preview.rs"
+
+[[test]]
+name = "shared_document_projection_batching"
+path = "base/tests/shared_document_projection_batching.rs"
+
+[[test]]
+name = "shared_list_operation_scopes"
+path = "base/tests/shared_list_operation_scopes.rs"
+
+[[test]]
+name = "shares"
+path = "base/tests/shares.rs"
+
+[[test]]
+name = "shares_manage"
+path = "base/tests/shares_manage.rs"
+
+[[test]]
+name = "sign_in"
+path = "base/tests/sign_in.rs"
+
+[[test]]
+name = "skill_duplicates"
+path = "base/tests/skill_duplicates.rs"
+
+[[test]]
+name = "skills"
+path = "base/tests/skills.rs"
+
+[[test]]
+name = "snapshot_inspection"
+path = "base/tests/snapshot_inspection.rs"
+
+[[test]]
+name = "standalone_creation"
+path = "base/tests/standalone_creation.rs"
+
+[[test]]
+name = "summaries"
+path = "base/tests/summaries.rs"
+
+[[test]]
+name = "syncs"
+path = "base/tests/syncs.rs"
+
+[[test]]
+name = "template_creation_scopes"
+path = "base/tests/template_creation_scopes.rs"
+
+[[test]]
+name = "template_duplicates"
+path = "base/tests/template_duplicates.rs"
+
+[[test]]
+name = "template_import_prerequisites"
+path = "base/tests/template_import_prerequisites.rs"
+
+[[test]]
+name = "template_import_scopes"
+path = "base/tests/template_import_scopes.rs"
+
+[[test]]
+name = "template_list_scopes"
+path = "base/tests/template_list_scopes.rs"
+
+[[test]]
+name = "templates"
+path = "base/tests/templates.rs"
+
+[[test]]
+name = "terminal_close_scopes"
+path = "base/tests/terminal_close_scopes.rs"
+
+[[test]]
+name = "terminal_create_scopes"
+path = "base/tests/terminal_create_scopes.rs"
+
+[[test]]
+name = "terminal_recording_scopes"
+path = "base/tests/terminal_recording_scopes.rs"
+
+[[test]]
+name = "terminals_connector"
+path = "base/tests/terminals_connector.rs"
+
+[[test]]
+name = "terminals_http"
+path = "base/tests/terminals_http.rs"
+
+[[test]]
+name = "terminals_sockets"
+path = "base/tests/terminals_sockets.rs"
+
+[[test]]
+name = "thread_access"
+path = "base/tests/thread_access.rs"
+
+[[test]]
+name = "thread_approval_items"
+path = "base/tests/thread_approval_items.rs"
+
+[[test]]
+name = "thread_child_windows"
+path = "base/tests/thread_child_windows.rs"
+
+[[test]]
+name = "thread_context"
+path = "base/tests/thread_context.rs"
+
+[[test]]
+name = "thread_continuation_cancel"
+path = "base/tests/thread_continuation_cancel.rs"
+
+[[test]]
+name = "thread_continuation_exports"
+path = "base/tests/thread_continuation_exports.rs"
+
+[[test]]
+name = "thread_continuation_late"
+path = "base/tests/thread_continuation_late.rs"
+
+[[test]]
+name = "thread_continuation_queues"
+path = "base/tests/thread_continuation_queues.rs"
+
+[[test]]
+name = "thread_continuation_reads"
+path = "base/tests/thread_continuation_reads.rs"
+
+[[test]]
+name = "thread_continuation_search"
+path = "base/tests/thread_continuation_search.rs"
+
+[[test]]
+name = "thread_continuation_summaries"
+path = "base/tests/thread_continuation_summaries.rs"
+
+[[test]]
+name = "thread_continuation_tokens"
+path = "base/tests/thread_continuation_tokens.rs"
+
+[[test]]
+name = "thread_creator_deep_operation_scopes"
+path = "base/tests/thread_creator_deep_operation_scopes.rs"
+
+[[test]]
+name = "thread_creator_discovery_scopes"
+path = "base/tests/thread_creator_discovery_scopes.rs"
+
+[[test]]
+name = "thread_creator_initial_files_scopes"
+path = "base/tests/thread_creator_initial_files_scopes.rs"
+
+[[test]]
+name = "thread_creator_operation_scopes"
+path = "base/tests/thread_creator_operation_scopes.rs"
+
+[[test]]
+name = "thread_display"
+path = "base/tests/thread_display.rs"
+
+[[test]]
+name = "thread_display_live"
+path = "base/tests/thread_display_live.rs"
+
+[[test]]
+name = "thread_engine"
+path = "base/tests/thread_engine.rs"
+
+[[test]]
+name = "thread_environment_readers"
+path = "base/tests/thread_environment_readers.rs"
+
+[[test]]
+name = "thread_goal_scopes"
+path = "base/tests/thread_goal_scopes.rs"
+
+[[test]]
+name = "thread_history_pages"
+path = "base/tests/thread_history_pages.rs"
+
+[[test]]
+name = "thread_history_scale"
+path = "base/tests/thread_history_scale.rs"
+
+[[test]]
+name = "thread_instructions"
+path = "base/tests/thread_instructions.rs"
+
+[[test]]
+name = "thread_move"
+path = "base/tests/thread_move.rs"
+
+[[test]]
+name = "thread_opening_scopes"
+path = "base/tests/thread_opening_scopes.rs"
+
+[[test]]
+name = "thread_read_tools"
+path = "base/tests/thread_read_tools.rs"
+
+[[test]]
+name = "thread_session_configuration"
+path = "base/tests/thread_session_configuration.rs"
+
+[[test]]
+name = "thread_terminalization"
+path = "base/tests/thread_terminalization.rs"
+
+[[test]]
+name = "threads_adopt"
+path = "base/tests/threads_adopt.rs"
+
+[[test]]
+name = "threads_bound"
+path = "base/tests/threads_bound.rs"
+
+[[test]]
+name = "threads_drive"
+path = "base/tests/threads_drive.rs"
+
+[[test]]
+name = "threads_end_to_end"
+path = "base/tests/threads_end_to_end.rs"
+
+[[test]]
+name = "threads_make"
+path = "base/tests/threads_make.rs"
+
+[[test]]
+name = "threads_raw"
+path = "base/tests/threads_raw.rs"
+
+[[test]]
+name = "threads_read"
+path = "base/tests/threads_read.rs"
+
+[[test]]
+name = "threads_settings"
+path = "base/tests/threads_settings.rs"
+
+[[test]]
+name = "threads_start_source"
+path = "base/tests/threads_start_source.rs"
+
+[[test]]
+name = "timezones"
+path = "base/tests/timezones.rs"
+
+[[test]]
+name = "token_role_reach"
+path = "base/tests/token_role_reach.rs"
+
+[[test]]
+name = "token_sign_in_acts"
+path = "base/tests/token_sign_in_acts.rs"
+
+[[test]]
+name = "topic_count_privacy"
+path = "base/tests/topic_count_privacy.rs"
+
+[[test]]
+name = "topic_native_scopes"
+path = "base/tests/topic_native_scopes.rs"
+
+[[test]]
+name = "trace_history"
+path = "base/tests/trace_history.rs"
+
+[[test]]
+name = "trace_readers"
+path = "base/tests/trace_readers.rs"
+
+[[test]]
+name = "trace_walk"
+path = "base/tests/trace_walk.rs"
+
+[[test]]
+name = "transaction_guards"
+path = "base/tests/transaction_guards.rs"
+
+[[test]]
+name = "typed_path_operations"
+path = "base/tests/typed_path_operations.rs"
+
+[[test]]
+name = "typed_resource_operations"
+path = "base/tests/typed_resource_operations.rs"
+
+[[test]]
+name = "typed_thread_operations"
+path = "base/tests/typed_thread_operations.rs"
+
+[[test]]
+name = "undo_delete"
+path = "base/tests/undo_delete.rs"
+
+[[test]]
+name = "undo_delete_exact"
+path = "base/tests/undo_delete_exact.rs"
+
+[[test]]
+name = "uniform_places"
+path = "base/tests/uniform_places.rs"
+
+[[test]]
+name = "upload_inventory"
+path = "base/tests/upload_inventory.rs"
+
+[[test]]
+name = "uploads"
+path = "base/tests/uploads.rs"
+
+[[test]]
+name = "usage_caps"
+path = "base/tests/usage_caps.rs"
+
+[[test]]
+name = "usage_figures"
+path = "base/tests/usage_figures.rs"
+
+[[test]]
+name = "usage_native_scopes"
+path = "base/tests/usage_native_scopes.rs"
+
+[[test]]
+name = "usage_rates"
+path = "base/tests/usage_rates.rs"
+
+[[test]]
+name = "usage_tier_states"
+path = "base/tests/usage_tier_states.rs"
+
+[[test]]
+name = "users"
+path = "base/tests/users.rs"
+
+[[test]]
+name = "workspace_access"
+path = "base/tests/workspace_access.rs"
+
+[[test]]
+name = "workspace_connector"
+path = "base/tests/workspace_connector.rs"
+
+[[test]]
+name = "workspace_copy_scopes"
+path = "base/tests/workspace_copy_scopes.rs"
+
+[[test]]
+name = "workspace_files"
+path = "base/tests/workspace_files.rs"
+
+[[test]]
+name = "workspace_jobs_scopes"
+path = "base/tests/workspace_jobs_scopes.rs"
+
+[[test]]
+name = "workspace_looking"
+path = "base/tests/workspace_looking.rs"
+
+[[test]]
+name = "workspace_mkdir_scopes"
+path = "base/tests/workspace_mkdir_scopes.rs"
+
+[[test]]
+name = "workspace_pages"
+path = "base/tests/workspace_pages.rs"
+
+[[test]]
+name = "workspace_processes"
+path = "base/tests/workspace_processes.rs"
+
+[[test]]
+name = "workspace_snapshots"
+path = "base/tests/workspace_snapshots.rs"
+
+[[test]]
+name = "workspace_source"
+path = "base/tests/workspace_source.rs"
+
+[[test]]
+name = "workspace_source_scopes"
+path = "base/tests/workspace_source_scopes.rs"

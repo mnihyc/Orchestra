@@ -569,16 +569,17 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
             break;
         }
         assert!(page.len() <= 3);
-        forward.extend(page.into_iter().map(|bundle| {
-            (
+        for bundle in page {
+            forward.push((
                 bundle.turn.ordinal,
                 bundle
                     .items
-                    .iter()
-                    .map(|item| (item.id, item.kind.clone()))
+                    .into_vec()?
+                    .into_iter()
+                    .map(|item| (item.id, item.kind))
                     .collect::<Vec<_>>(),
-            )
-        }));
+            ));
+        }
     }
     assert_eq!(forward, expected);
     for id in loose_ids {
@@ -609,16 +610,17 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
         if page.is_empty() {
             break;
         }
-        backward.extend(page.into_iter().map(|bundle| {
-            (
+        for bundle in page {
+            backward.push((
                 bundle.turn.ordinal,
                 bundle
                     .items
-                    .iter()
-                    .map(|item| (item.id, item.kind.clone()))
+                    .into_vec()?
+                    .into_iter()
+                    .map(|item| (item.id, item.kind))
                     .collect::<Vec<_>>(),
-            )
-        }));
+            ));
+        }
     }
     backward.reverse();
     assert_eq!(backward, expected);
@@ -639,7 +641,13 @@ async fn pages_of_turns_give_the_turns_and_items_the_whole_reading_gives_and_a_t
 #[tokio::test]
 async fn a_transcript_written_in_pages_is_the_file_the_whole_reading_wrote_on_a_small_thread()
 -> Proof {
+    let began = std::time::Instant::now();
+    eprintln!("history small diagnostic phase=fixture_wait");
     let world = common::World::new().await;
+    eprintln!(
+        "history small diagnostic phase=fixture_ready elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let store = std::sync::Arc::new(
         orch_blob_local::LocalBlobStore::open(
             std::env::temp_dir().join(format!("orch-pages-{}", new_id())),
@@ -1014,7 +1022,20 @@ async fn a_summary_of_a_large_cut_reads_only_the_brief_tail_and_newest_older_ind
 #[tokio::test]
 async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_transcript_and_its_copy_a_page_at_a_time()
 -> Proof {
+    let began = std::time::Instant::now();
+    eprintln!("history scale diagnostic phase=fixture_wait");
     let world = common::World::new().await;
+    let database = world
+        .pool
+        .pool()
+        .connect_options()
+        .get_database()
+        .unwrap_or("unknown")
+        .to_owned();
+    eprintln!(
+        "history scale diagnostic phase=fixture_ready database={database} elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let store = std::sync::Arc::new(
         orch_blob_local::LocalBlobStore::open(
             std::env::temp_dir().join(format!("orch-pages-{}", new_id())),
@@ -1023,8 +1044,20 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     );
     world.engine().attach_blobs(store);
     let thread = conversation(&world, 1).await?;
+    eprintln!(
+        "history scale diagnostic phase=grow_begin elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     world.grow_history(thread, SCALE_TURNS).await;
+    eprintln!(
+        "history scale diagnostic phase=grow_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let cut = captured(&world, thread).await?;
+    eprintln!(
+        "history scale diagnostic phase=capture_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let mut conn = world.pool.acquire().await?;
     let counted = cuts::counts(&mut conn, cut.id).await?;
     assert_eq!(counted.turns, SCALE_TURNS);
@@ -1051,8 +1084,16 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         "{reading} statements read the end of the cut"
     );
     drop(conn);
+    eprintln!(
+        "history scale diagnostic phase=carry_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     // The transcript: every turn, a page at a time. What is held is a page, and what is written is the file.
     let artifact = cut::transcript_file(&world.engine(), &cut, "transcript").await?;
+    eprintln!(
+        "history scale diagnostic phase=transcript_end elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     assert_eq!(artifact.turns, SCALE_TURNS);
     let store = world.engine().blobs().ok_or("no store")?;
     let mut body = store.get(&artifact.blob, None).await?.body;
@@ -1081,11 +1122,46 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     // the identities of all of them held or sent. (Such a table of 400,000 items was sent again with each of 800 pages.)
     let target = world.thread("A copy of a long history").await;
     let target_segment = world.segment_of(target).await;
-    let mut tx = world.pool.begin().await?;
-    // A fork publishes through the API pool, whose statement budget is 15 seconds.
-    sqlx::query("SET LOCAL statement_timeout='15s'")
-        .execute(&mut *tx)
+    let initial_items: Vec<Json> = sqlx::query_scalar(
+        "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 ORDER BY seq_created,id",
+    )
+    .bind(target)
+    .fetch_all(world.pool.pool())
+    .await?;
+    assert_eq!(initial_items.len(), 1);
+    assert_eq!(
+        initial_items[0]["kind"], "marker",
+        "the target's creation is its own history"
+    );
+    // Only publication uses the production request profile; bulk fixture setup keeps its own pool.
+    let request_defaults = orch_config::ServerConfig::default().database;
+    let requests = orch_db::Db::connect_with_limits(
+        &world.db.url,
+        1,
+        std::time::Duration::from_millis(request_defaults.slow_statement_ms),
+        std::time::Duration::from_millis(request_defaults.slow_acquire_ms),
+        orch_db::pool::Limits::REQUESTS,
+    )
+    .await?;
+    let mut tx = requests.begin().await?;
+    let profile: (String, String, String) = sqlx::query_as(
+        "SELECT current_setting('jit'),current_setting('statement_timeout'),
+          current_setting('idle_in_transaction_session_timeout')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    assert_eq!(
+        profile,
+        ("off".to_owned(), "15s".to_owned(), "10s".to_owned()),
+        "the copy uses the API connection's actual profile"
+    );
+    let backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *tx)
         .await?;
+    eprintln!(
+        "history scale diagnostic phase=copy_begin database={database} backend={backend} elapsed_ms={}",
+        began.elapsed().as_millis()
+    );
     let (copied, statements) = Statements::of(async {
         let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
         fork_history::copy_conversation(
@@ -1100,6 +1176,11 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
     })
     .await;
+    eprintln!(
+        "history scale diagnostic phase=copy_end success={} statements={statements} elapsed_ms={}",
+        copied.is_ok(),
+        began.elapsed().as_millis()
+    );
     copied?;
     tx.commit().await?;
     let pages = 2 * SCALE_TURNS / cuts::PAGE;
@@ -1108,12 +1189,22 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
         "{statements} statements copied {pages} pages of items"
     );
     let copy: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1)",
+        "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),(SELECT count(*) FROM items WHERE thread_id=$1 AND kind<>'marker')",
     )
     .bind(target)
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(copy, (SCALE_TURNS, 2 * SCALE_TURNS));
+    let remaining_metadata: Vec<Json> = sqlx::query_scalar(
+        "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND kind='marker' ORDER BY seq_created,id",
+    )
+    .bind(target)
+    .fetch_all(world.pool.pool())
+    .await?;
+    assert_eq!(
+        remaining_metadata, initial_items,
+        "the target's metadata is unchanged and source markers were omitted"
+    );
     // An identity in the copy is made from the target's and the original's.
     let (made, derived): (Id, Id) = sqlx::query_as(
         "SELECT t.id, md5($1::text||o.id::text)::uuid FROM turns t, turns o
@@ -1124,6 +1215,160 @@ async fn a_cut_of_two_hundred_thousand_turns_gives_its_carry_from_the_end_its_tr
     .fetch_one(world.pool.pool())
     .await?;
     assert_eq!(made, derived);
+    requests.pool().close().await;
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_pages_keep_empty_turns_and_restore_a_later_parent_from_its_frozen_body() -> Proof {
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let total = cuts::PAGE + 1;
+    world.grow_history(source, total).await;
+    sqlx::query(
+        "DELETE FROM items i USING turns t WHERE i.turn_id=t.id AND t.thread_id=$1 AND t.ordinal=2",
+    )
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    let (child, parent, parent_seq): (Id, Id, i64) = sqlx::query_as(
+        "SELECT child.id,parent.id,parent.seq_created FROM items child JOIN turns first_turn ON first_turn.id=child.turn_id
+         CROSS JOIN items parent JOIN turns last_turn ON last_turn.id=parent.turn_id
+         WHERE first_turn.thread_id=$1 AND first_turn.ordinal=1 AND child.kind='agent_message'
+           AND last_turn.thread_id=$1 AND last_turn.ordinal=$2 AND parent.kind='agent_message'",
+    ).bind(source).bind(i32::try_from(total)?).fetch_one(world.pool.pool()).await?;
+    sqlx::query("UPDATE items SET parent_item_id=$2 WHERE id=$1")
+        .bind(child)
+        .bind(parent)
+        .execute(world.pool.pool())
+        .await?;
+    let held_payload: Json = sqlx::query_scalar("SELECT payload FROM items WHERE id=$1")
+        .bind(child)
+        .fetch_one(world.pool.pool())
+        .await?;
+    let held = captured(&world, source).await?;
+    let before_parent: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM thread_history_cut_members($1) WHERE seq_created<$2",
+    )
+    .bind(held.id)
+    .bind(parent_seq)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert!(
+        before_parent >= cuts::PAGE,
+        "the parent belongs to a later item page"
+    );
+    sqlx::query("UPDATE items SET parent_item_id=NULL,payload=jsonb_build_object('text','changed after capture'),
+        seq_updated=(SELECT next_seq FROM threads WHERE node_id=$2) WHERE id=$1")
+        .bind(child).bind(source).execute(world.pool.pool()).await?;
+    sqlx::query("UPDATE threads SET next_seq=next_seq+1 WHERE node_id=$1")
+        .bind(source)
+        .execute(world.pool.pool())
+        .await?;
+    let target = world.thread("A bounded frozen copy").await;
+    let segment = world.segment_of(target).await;
+    let mut tx = world.pool.begin().await?;
+    let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+    cut::copy(&mut unit, &held, target, segment, None).await?;
+    unit.finish().await?;
+    tx.commit().await?;
+    let turns: i64 = sqlx::query_scalar("SELECT count(*) FROM turns WHERE thread_id=$1")
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    assert_eq!(turns, total, "metadata pages retain the turn without items");
+    let empty_items: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM items i JOIN turns t ON t.id=i.turn_id
+        WHERE t.thread_id=$1 AND t.ordinal=2",
+    )
+    .bind(target)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(empty_items, 0);
+    let (copied_parent, expected_parent, payload): (Option<Id>, Id, Json) = sqlx::query_as(
+        "SELECT parent_item_id,md5($1::text||$3::uuid::text)::uuid,payload FROM items
+         WHERE thread_id=$1 AND id=md5($1::text||$2::uuid::text)::uuid",
+    )
+    .bind(target)
+    .bind(child)
+    .bind(parent)
+    .fetch_one(world.pool.pool())
+    .await?;
+    assert_eq!(copied_parent, Some(expected_parent));
+    assert_eq!(
+        payload, held_payload,
+        "parent restoration uses the captured body"
+    );
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_malformed_frozen_parent_rolls_back_every_copied_row() -> Proof {
+    let world = common::World::new().await;
+    let source = conversation(&world, 1).await?;
+    let child: Id = sqlx::query_scalar(
+        "SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1",
+    )
+    .bind(source)
+    .fetch_one(world.pool.pool())
+    .await?;
+    let held = captured(&world, source).await?;
+    sqlx::query(
+        "UPDATE items SET payload=jsonb_build_object('text','changed after capture'),
+        seq_updated=(SELECT next_seq FROM threads WHERE node_id=$2) WHERE id=$1",
+    )
+    .bind(child)
+    .bind(source)
+    .execute(world.pool.pool())
+    .await?;
+    sqlx::query("UPDATE threads SET next_seq=next_seq+1 WHERE node_id=$1")
+        .bind(source)
+        .execute(world.pool.pool())
+        .await?;
+    // Deliberate private-record damage, which ordinary typed item writes cannot produce.
+    let damaged = sqlx::query(
+        "UPDATE thread_history_cut_items SET body=jsonb_set(body,'{parent_item_id}',
+        to_jsonb('invalid-copy-parent'::text)) WHERE cut_id=$1 AND item_id=$2 AND body IS NOT NULL",
+    )
+    .bind(held.id)
+    .bind(child)
+    .execute(world.pool.pool())
+    .await?;
+    assert_eq!(damaged.rows_affected(), 1);
+    let target = world.thread("An unpublished damaged copy").await;
+    let segment = world.segment_of(target).await;
+    const STATE: &str = "SELECT (SELECT count(*) FROM turns WHERE thread_id=$1),
+        (SELECT count(*) FROM items WHERE thread_id=$1),next_seq FROM threads WHERE node_id=$1";
+    let before: (i64, i64, i64) = sqlx::query_as(STATE)
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    let mut tx = world.pool.begin().await?;
+    let result = {
+        let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+        cut::copy(&mut unit, &held, target, segment, None).await
+    };
+    match result {
+        Err(crate::error::EngineError::Db(orch_db::DbError::Other(sqlx::Error::Database(
+            error,
+        )))) => {
+            assert_eq!(error.code().as_deref(), Some("22P02"));
+        }
+        other => {
+            return Err(format!("malformed parent metadata was not rejected: {other:?}").into());
+        }
+    }
+    tx.rollback().await?;
+    let after: (i64, i64, i64) = sqlx::query_as(STATE)
+        .bind(target)
+        .fetch_one(world.pool.pool())
+        .await?;
+    assert_eq!(
+        after, before,
+        "no copied row or reserved position was published"
+    );
     world.shutdown().await;
     Ok(())
 }
@@ -1165,11 +1410,12 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
         .await?
         .ok_or("absent")?
         .active_continuation_id;
-    fn check(bundle: Bundle, ordinal: i64, expected: &[(i32, Id)]) {
+    fn check(bundle: Bundle, ordinal: i64, expected: &[(i32, Id)]) -> Proof {
         assert_eq!(i64::from(bundle.turn.ordinal), ordinal);
         let answers: Vec<Id> = bundle
             .items
-            .iter()
+            .into_vec()?
+            .into_iter()
             .filter(|item| item.kind == "agent_message")
             .map(|item| item.id)
             .collect();
@@ -1179,6 +1425,7 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             .map(|(_, id)| *id)
             .collect();
         assert_eq!(answers, wanted, "answer membership of turn {ordinal}");
+        Ok(())
     }
     for source in [Source::Live { thread, view }, Source::Cut(&cut)] {
         let mut forward = Forward::between(source, &mut conn, (1, TURNS), false).await?;
@@ -1196,7 +1443,7 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             }
             assert!(page.len() <= ASKED);
             for bundle in page {
-                check(bundle, ordinal, &expected);
+                check(bundle, ordinal, &expected)?;
                 ordinal += 1;
             }
             page = forward.next(&mut conn, ASKED).await?;
@@ -1218,7 +1465,7 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
             }
             assert!(page.len() <= ASKED);
             for bundle in page {
-                check(bundle, ordinal, &expected);
+                check(bundle, ordinal, &expected)?;
                 ordinal -= 1;
             }
             page = backward.next(&mut conn, ASKED).await?;
@@ -1231,6 +1478,548 @@ async fn sparse_turns_keep_their_items_without_looking_ahead_through_the_empty_h
         );
     }
     drop(conn);
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn copy_pages_skip_markers_but_keep_order_identity_and_the_reserved_sequence() -> Proof {
+    let world = common::World::new().await;
+    let mut queries = Vec::new();
+    let mut positions = Vec::new();
+    let mut raw_counts = Vec::new();
+    for extra_markers in [0, 3 * cuts::PAGE] {
+        let source = conversation(&world, 1).await?;
+        if extra_markers != 0 {
+            let next: i64 = world
+                .scalar("SELECT next_seq FROM threads WHERE node_id=$1", source)
+                .await;
+            let added = sqlx::query(
+                "WITH seed AS MATERIALIZED (
+                   SELECT i.* FROM items i WHERE i.thread_id=$1 AND i.kind='marker'
+                     AND i.turn_id IS NOT NULL ORDER BY i.seq_created LIMIT 1)
+                 INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$2::bigint) g(n)
+                 CROSS JOIN LATERAL jsonb_populate_record(NULL::items,to_jsonb(seed)||jsonb_build_object(
+                   'id',md5($1::text||':extra-marker:'||g.n::text)::uuid,'native_ref',NULL,
+                   'seq_created',$3::bigint+g.n,'seq_updated',$3::bigint+g.n,
+                   'parent_item_id',NULL,'model_input_id',NULL,'pinned_at',NULL,'pinned_by',NULL,'chat_refs',0)) copied",
+            ).bind(source).bind(extra_markers).bind(next).execute(world.pool.pool()).await?;
+            assert_eq!(added.rows_affected(), u64::try_from(extra_markers)?);
+            sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
+                .bind(source)
+                .bind(next + extra_markers + 1)
+                .execute(world.pool.pool())
+                .await?;
+        }
+        let held = captured(&world, source).await?;
+        let mut conn = world.pool.acquire().await?;
+        let raw = cuts::item_count(&mut conn, held.id).await?;
+        let marker_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM thread_history_cut_members($1) WHERE kind='marker'",
+        )
+        .bind(held.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        let page = cuts::items_page(&mut conn, held.id, 0, i64::MAX, None).await?;
+        assert_eq!(i64::try_from(page.len())?, raw.min(cuts::PAGE));
+        assert!(
+            page.iter().any(|item| item.kind == "marker"),
+            "ordinary readers retain markers"
+        );
+        let expected = page
+            .into_iter()
+            .filter(|item| item.kind != "marker")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected.len(),
+            2,
+            "the markers follow the same real input and answer"
+        );
+        assert_eq!(raw - marker_count, 2);
+        raw_counts.push(raw);
+        drop(conn);
+
+        let target = world.thread("A marker-aware copy").await;
+        let segment = world.segment_of(target).await;
+        let initial: Vec<Json> = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 ORDER BY seq_created,id",
+        )
+        .bind(target)
+        .fetch_all(world.pool.pool())
+        .await?;
+        assert_eq!(initial.len(), 1);
+        assert_eq!(
+            initial[0]["kind"], "marker",
+            "the target has its own creation line"
+        );
+        let first: i64 = world
+            .scalar("SELECT next_seq FROM threads WHERE node_id=$1", target)
+            .await;
+        let mut tx = world.pool.begin().await?;
+        let (copied, count) = Statements::of(async {
+            let mut unit = crate::unit::Unit::new(&mut tx, world.clock.now());
+            cut::copy(&mut unit, &held, target, segment, None).await?;
+            unit.finish().await?;
+            Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await;
+        copied?;
+        tx.commit().await?;
+        assert!(count > 0, "the SQL statement observer recorded this copy");
+        eprintln!("history copy marker control markers={extra_markers} statements={count}");
+        queries.push(count);
+        let next: i64 = world
+            .scalar("SELECT next_seq FROM threads WHERE node_id=$1", target)
+            .await;
+        assert_eq!(
+            next,
+            first + raw + 2,
+            "the same raw reservation and final stamp remain"
+        );
+        let unchanged: Vec<Json> = sqlx::query_scalar(
+            "SELECT to_jsonb(i) FROM items i WHERE thread_id=$1 AND kind='marker' ORDER BY seq_created,id",
+        ).bind(target).fetch_all(world.pool.pool()).await?;
+        assert_eq!(
+            unchanged, initial,
+            "copying preserves the target's own metadata and copies no source marker"
+        );
+        let made = orch_db::queries::thread_history::items_between(
+            &mut *world.pool.acquire().await?,
+            target,
+            target,
+            0,
+            i64::MAX,
+            None,
+        )
+        .await?;
+        let made = made
+            .into_iter()
+            .filter(|item| item.kind != "marker")
+            .collect::<Vec<_>>();
+        assert_eq!(made.len(), expected.len());
+        let mut stamped = Vec::new();
+        for (made, old) in made.iter().zip(&expected) {
+            let expected_id: Id = sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                .bind(target)
+                .bind(old.id)
+                .fetch_one(world.pool.pool())
+                .await?;
+            let expected_turn: Option<Id> =
+                sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                    .bind(target)
+                    .bind(old.turn_id)
+                    .fetch_one(world.pool.pool())
+                    .await?;
+            assert_eq!(made.id, expected_id);
+            assert_eq!(made.turn_id, expected_turn);
+            assert_eq!(made.kind, old.kind);
+            let mut payload = old.payload.clone();
+            if old.kind == "user_message" {
+                let input: Id = serde_json::from_value(payload["input_id"].clone())?;
+                let copied_input: Id =
+                    sqlx::query_scalar("SELECT md5($1::text||$2::uuid::text)::uuid")
+                        .bind(target)
+                        .bind(input)
+                        .fetch_one(world.pool.pool())
+                        .await?;
+                payload["input_id"] = serde_json::to_value(copied_input)?;
+                assert!(made.native_ref.is_none());
+            } else {
+                assert_eq!(
+                    made.native_ref.as_deref(),
+                    Some(format!("fork-copy:{}", old.id).as_str())
+                );
+            }
+            assert_eq!(made.payload, payload);
+            assert_eq!(made.seq_updated, made.seq_created);
+            stamped.push(made.seq_created);
+        }
+        assert!(stamped.windows(2).all(|pair| pair[0] < pair[1]));
+        let forward = orch_db::queries::thread_history::items_between(
+            &mut *world.pool.acquire().await?,
+            target,
+            target,
+            made[0].seq_created,
+            i64::MAX,
+            None,
+        )
+        .await?;
+        assert_eq!(
+            forward
+                .iter()
+                .filter(|item| item.kind != "marker")
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![made[1].id]
+        );
+        positions.push((first, stamped));
+        let after_raw = cuts::item_count(&mut *world.pool.acquire().await?, held.id).await?;
+        assert_eq!(
+            after_raw, raw,
+            "the retained source membership is untouched"
+        );
+    }
+    assert_eq!(raw_counts[1] - raw_counts[0], 3 * cuts::PAGE);
+    assert_eq!(
+        queries[1], queries[0],
+        "discarded marker-only pages add no copy/read/parent queries"
+    );
+    for (first, stamped) in positions {
+        assert_eq!(
+            stamped,
+            vec![first + 1, first + 2],
+            "new copied payloads receive dense positions in their frozen order"
+        );
+    }
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn maintained_plan_totals_use_frozen_payload_sizes_and_cut_positions_after_source_changes()
+-> Proof {
+    use orch_db::queries::thread_continuations::{
+        self as continuations, NewContinuation, QueueRow,
+    };
+    let world = common::World::new().await;
+    let thread = conversation(&world, 3).await?;
+    let mut conn = world.pool.acquire().await?;
+    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
+    let owner = row.active_continuation_id;
+    let before = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
+    let position: i64 = sqlx::query_scalar("SELECT next_seq FROM threads WHERE node_id=$1")
+        .bind(thread)
+        .fetch_one(&mut *conn)
+        .await?;
+    let input: Id =
+        sqlx::query_scalar("SELECT input_id FROM turns WHERE thread_id=$1 AND ordinal=1")
+            .bind(thread)
+            .fetch_one(&mut *conn)
+            .await?;
+    let frozen = new_id();
+    continuations::insert(
+        &mut conn,
+        &NewContinuation {
+            id: frozen,
+            thread,
+            parent: owner,
+            before_input: input,
+            actor: world.ada,
+            at: world.clock.now(),
+            seq: position,
+            queue: QueueRow {
+                held: false,
+                held_by: None,
+                held_at: None,
+                revision: 1,
+            },
+        },
+    )
+    .await?;
+    continuations::freeze_prefix(&mut conn, thread, owner, frozen, 4, position, position - 1)
+        .await?;
+    let frozen_before = thread_history::range_counts(&mut conn, thread, frozen, 1, 3).await?;
+    assert_eq!(frozen_before, before);
+    let cut = captured(&world, thread).await?;
+    let cut_counts = cuts::counts(&mut conn, cut.id).await?;
+    let cut_size = cuts::payload_bytes(&mut conn, cut.id).await?;
+    let all_positions = cuts::item_count(&mut conn, cut.id).await?;
+    let expected: i64=sqlx::query_scalar("SELECT COALESCE(sum(payload_bytes),0)::bigint FROM items WHERE thread_id=$1 AND continuation_id=$2 AND stream='main'")
+        .bind(thread).bind(owner).fetch_one(&mut *conn).await?;
+    assert_eq!(
+        cut_size, expected,
+        "current and frozen sizes both measure decoded payloads"
+    );
+    let changed: Id=sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1")
+        .bind(thread).fetch_one(&mut *conn).await?;
+    sqlx::query("UPDATE items SET payload=jsonb_set(payload,'{text}',to_jsonb(repeat('large compressible text ',10000))),seq_updated=$2 WHERE id=$1")
+        .bind(changed).bind(position).execute(&mut *conn).await?;
+    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
+        .bind(thread)
+        .bind(position + 1)
+        .execute(&mut *conn)
+        .await?;
+    let current = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
+    let expected: i64=sqlx::query_scalar("SELECT sum(payload_bytes)::bigint FROM items WHERE thread_id=$1 AND continuation_id=$2 AND stream='main' AND kind<>'reasoning' AND turn_id IS NOT NULL")
+        .bind(thread).bind(owner).fetch_one(&mut *conn).await?;
+    assert_eq!(current.bytes, expected);
+    assert!(
+        current.bytes > before.bytes + 100000,
+        "compressed storage must not reduce decoded accounting"
+    );
+    assert_eq!(
+        thread_history::range_counts(&mut conn, thread, frozen, 1, 3).await?,
+        before
+    );
+    assert_eq!(cuts::counts(&mut conn, cut.id).await?, cut_counts);
+    assert_eq!(cuts::payload_bytes(&mut conn, cut.id).await?, cut_size);
+    sqlx::query("DELETE FROM items WHERE id=$1")
+        .bind(changed)
+        .execute(&mut *conn)
+        .await?;
+    let deleted = thread_history::range_counts(&mut conn, thread, owner, 1, 3).await?;
+    assert_eq!(
+        deleted.items["agent_message"],
+        before.items["agent_message"] - 1
+    );
+    assert_eq!(cuts::item_count(&mut conn, cut.id).await?, all_positions);
+    assert_eq!(cuts::payload_bytes(&mut conn, cut.id).await?, cut_size);
+    assert_eq!(cuts::row_count(&mut conn, cut.id, "turn").await?, 3);
+    assert_eq!(cuts::max_ordinal(&mut conn, cut.id, "turn").await?, 3);
+    // Ordinary counter queries seek the requested turn summaries, not every selected payload.
+    let one = thread_history::range_counts(&mut conn, thread, owner, 2, 2).await?;
+    assert_eq!(one.turns, 1);
+    assert_eq!(one.items["agent_message"], 1);
+    drop(conn);
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_turn_over_many_pages_is_spooled_in_both_directions_and_written_without_a_turn_vector()
+-> Proof {
+    let world = common::World::new().await;
+    let thread = conversation(&world, 1).await?;
+    let mut conn = world.pool.acquire().await?;
+    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
+    let seed:Id=sqlx::query_scalar("SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' ORDER BY seq_created LIMIT 1").bind(thread).fetch_one(&mut *conn).await?;
+    let base: i64 = sqlx::query_scalar("SELECT next_seq+1000 FROM threads WHERE node_id=$1")
+        .bind(thread)
+        .fetch_one(&mut *conn)
+        .await?;
+    let added = cuts::PAGE * 3 + 7;
+    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE id=$1)
+      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$3::bigint) n
+      CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
+        'id',md5($1::text||':spooled:'||n::text)::uuid,'native_ref',NULL,'seq_created',$2+n,'seq_updated',$2+n,
+        'payload',jsonb_build_object('text','spooled answer '||n::text,'text_len',20,'phase',NULL))) copied")
+      .bind(seed).bind(base).bind(added).execute(&mut *conn).await?;
+    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
+        .bind(thread)
+        .bind(base + added + 1)
+        .execute(&mut *conn)
+        .await?;
+    let cut = captured(&world, thread).await?;
+    for source in [
+        Source::Live {
+            thread,
+            view: row.active_continuation_id,
+        },
+        Source::Cut(&cut),
+    ] {
+        let mut forward = Forward::between(source, &mut conn, (1, 1), true).await?;
+        let mut page = forward.next(&mut conn, 1).await?;
+        let bundle = page.pop().ok_or("one complete turn")?;
+        assert_eq!(
+            bundle.items.held(),
+            0,
+            "a multi-page turn stays in private file storage"
+        );
+        let mut count = 0;
+        let mut previous = 0;
+        for item in bundle.items.iter() {
+            let item = item?;
+            assert!(item.seq_created > previous);
+            previous = item.seq_created;
+            count += 1;
+        }
+        assert!(count >= added as usize);
+        let people = crate::views::People::load(&mut conn, bundle.authors()?).await?;
+        let info = bundle.presentation(&people)?;
+        let written = bundle.write(
+            &people,
+            &written::Beside::default(),
+            "Agent",
+            Detail::Full,
+            &info,
+        )?;
+        let text = written.read(None)?;
+        assert!(text.contains("spooled answer 1"));
+        assert!(text.contains(&format!("spooled answer {added}")));
+        assert_eq!(
+            text.matches("**Agent:** spooled answer ").count(),
+            added as usize
+        );
+        let mut backward = Backward::between(source, &mut conn, (1, 1), 1, true).await?;
+        let mut page = backward.next(&mut conn, 1).await?;
+        let bundle = page.pop().ok_or("one reversed complete turn")?;
+        assert_eq!(bundle.items.held(), 0);
+        let mut reverse_count = 0;
+        let mut previous = 0;
+        for item in bundle.items.iter() {
+            let item = item?;
+            assert!(item.seq_created > previous);
+            previous = item.seq_created;
+            reverse_count += 1;
+        }
+        assert_eq!(reverse_count, count);
+    }
+    drop(conn);
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn before_item_supplier_reads_every_page_and_exports_a_history_with_no_synthetic_turn()
+-> Proof {
+    let world = common::World::new().await;
+    let template = conversation(&world, 1).await?;
+    let target = world.thread("Before import only").await;
+    let mut conn = world.pool.acquire().await?;
+    let template_row = threads::thread(&mut conn, template)
+        .await?
+        .ok_or("template")?;
+    let target_row = threads::thread(&mut conn, target).await?.ok_or("target")?;
+    let segment = if let Some(segment) = target_row.current_segment_id {
+        segment
+    } else {
+        let segment = new_id();
+        sqlx::query("INSERT INTO segments SELECT copied.* FROM segments s CROSS JOIN LATERAL jsonb_populate_record(NULL::segments,to_jsonb(s)||jsonb_build_object(
+          'id',$2::uuid,'thread_id',$3::uuid,'continuation_id',$3::uuid,'ordinal',1,'native_session_ref',NULL)) copied WHERE s.id=$1")
+          .bind(template_row.current_segment_id).bind(segment).bind(target).execute(&mut *conn).await?;
+        segment
+    };
+    let count = cuts::PAGE * 2 + 7;
+    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE thread_id=$1 AND kind='agent_message' LIMIT 1)
+      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,$4::bigint) n CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
+        'id',md5($3::text||':before:'||n::text)::uuid,'thread_id',$3::uuid,'continuation_id',$3::uuid,'segment_id',$2::uuid,
+        'turn_id',NULL,'model_input_id',NULL,'native_ref',NULL,'before_orch',true,'seq_created',n,'seq_updated',n,
+        'payload',jsonb_build_object('text','before answer '||n::text,'text_len',20,'phase',NULL))) copied")
+      .bind(template).bind(segment).bind(target).bind(count).execute(&mut *conn).await?;
+    sqlx::query("UPDATE threads SET current_segment_id=$2,next_seq=$3 WHERE node_id=$1")
+        .bind(target)
+        .bind(segment)
+        .bind(count + 1)
+        .execute(&mut *conn)
+        .await?;
+    let mut supplier = cuts::BeforeItems::new(target, target);
+    let mut seen = 0;
+    let mut pages = 0;
+    let mut previous = 0;
+    loop {
+        let page = supplier.next(&mut conn).await?;
+        if page.is_empty() {
+            break;
+        }
+        pages += 1;
+        assert!(page.len() <= cuts::PAGE as usize);
+        for item in page {
+            assert!(item.before_orch);
+            assert!(item.turn_id.is_none());
+            assert!(item.seq_created > previous);
+            previous = item.seq_created;
+            seen += 1;
+        }
+    }
+    assert_eq!(seen, count);
+    assert_eq!(pages, 3);
+    let row = threads::thread(&mut conn, target)
+        .await?
+        .ok_or("before-only thread")?;
+    let temporary = tempfile::tempdir()?;
+    let file = temporary.path().join("before.md");
+    let output =
+        crate::summaries::indexed_transcript_file(&mut conn, &row, None, None, &file).await?;
+    assert_eq!(output.turns, 0);
+    let text = std::fs::read_to_string(file)?;
+    assert!(text.contains("before answer 1"));
+    assert!(text.contains(&format!("before answer {count}")));
+    assert!(!text.contains("## Turn 1"));
+    drop(conn);
+    world.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn decoded_page_bytes_follow_the_frozen_revision_and_always_make_progress_on_large_items()
+-> Proof {
+    let world = common::World::new().await;
+    let thread = conversation(&world, 1).await?;
+    let mut conn = world.pool.acquire().await?;
+    let row = threads::thread(&mut conn, thread).await?.ok_or("absent")?;
+    let seed: Id = sqlx::query_scalar(
+        "SELECT id FROM items WHERE thread_id=$1 AND kind='agent_message' LIMIT 1",
+    )
+    .bind(thread)
+    .fetch_one(&mut *conn)
+    .await?;
+    let base: i64 = sqlx::query_scalar("SELECT next_seq+1000 FROM threads WHERE node_id=$1")
+        .bind(thread)
+        .fetch_one(&mut *conn)
+        .await?;
+    let size = thread_history::PAGE_BYTES / 2 + 1;
+    sqlx::query("WITH seed AS MATERIALIZED(SELECT to_jsonb(i) body FROM items i WHERE id=$1)
+      INSERT INTO items SELECT copied.* FROM seed,generate_series(1,3) n CROSS JOIN LATERAL jsonb_populate_record(NULL::items,seed.body||jsonb_build_object(
+        'id',md5($1::text||':large:'||n::text)::uuid,'native_ref',NULL,'seq_created',$2+n,'seq_updated',$2+n,
+        'payload',jsonb_build_object('text',repeat('z',$3::integer),'text_len',$3::bigint,'phase',NULL))) copied")
+      .bind(seed).bind(base).bind(size).execute(&mut *conn).await?;
+    sqlx::query("UPDATE threads SET next_seq=$2 WHERE node_id=$1")
+        .bind(thread)
+        .bind(base + 4)
+        .execute(&mut *conn)
+        .await?;
+    let page = reading::items_bounded(
+        &mut conn,
+        thread,
+        row.active_continuation_id,
+        Some(base),
+        true,
+        Some("main"),
+        cuts::PAGE,
+    )
+    .await?;
+    assert_eq!(
+        page.len(),
+        2,
+        "a byte target admits its boundary item, never the whole large-item range"
+    );
+    let next = reading::items_bounded(
+        &mut conn,
+        thread,
+        row.active_continuation_id,
+        Some(page[1].seq_created),
+        true,
+        Some("main"),
+        cuts::PAGE,
+    )
+    .await?;
+    assert_eq!(next.len(), 1);
+    let changed = page[0].id;
+    drop((page, next));
+    let cut = captured(&world, thread).await?;
+    sqlx::query("UPDATE items SET payload=jsonb_build_object('text','short','text_len',5,'phase',NULL),seq_updated=$2 WHERE id=$1")
+        .bind(changed).bind(base+4).execute(&mut *conn).await?;
+    let frozen = cuts::items_page_bounded(
+        &mut conn,
+        cut.id,
+        base,
+        cut.captured_seq,
+        Some("main"),
+        false,
+    )
+    .await?;
+    assert_eq!(
+        frozen.len(),
+        2,
+        "the frozen byte measure does not shrink to the newer source body"
+    );
+    assert_eq!(
+        frozen[0].payload["text"].as_str().ok_or("text")?.len(),
+        size as usize
+    );
+    drop(frozen);
+    let live = reading::items_bounded(
+        &mut conn,
+        thread,
+        row.active_continuation_id,
+        Some(base),
+        true,
+        Some("main"),
+        cuts::PAGE,
+    )
+    .await?;
+    assert_eq!(live.len(), 3);
+    drop((live, conn));
     world.shutdown().await;
     Ok(())
 }

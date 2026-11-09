@@ -195,3 +195,78 @@ fn provider_side_web_search_remains_inside_one_response_and_its_one_count_report
     assert_eq!(measured.request_ms.value(), Some(&3500));
     assert_eq!(measured.speed_milli.value(), Some(&21_333));
 }
+
+#[test]
+fn parallel_tool_item_references_stay_with_their_actual_model_request() {
+    let mut requests = Requests::default();
+    requests.asked("main", at(0));
+    let first = requests.running("main").unwrap();
+    for (offset, id) in [(100, "call-a"), (110, "call-b")] {
+        let reports = requests.observe(
+            "item/started",
+            &json!({"threadId":"main","item":{"type":"commandExecution","id":id}}),
+            at(offset),
+            None,
+        );
+        assert!(reports.iter().all(|request| request.id == first.id));
+    }
+    let completed=requests.observe("thread/tokenUsage/updated",&json!({"threadId":"main","tokenUsage":{"last":{"inputTokens":10,"outputTokens":2,"totalTokens":12}}}),at(120),None);
+    assert_eq!(completed.len(), 1);
+    assert_eq!(
+        completed[0].tool_refs.as_deref(),
+        Some(["call-a".to_owned(), "call-b".to_owned()].as_slice())
+    );
+    for id in ["call-a", "call-b"] {
+        requests.observe(
+            "item/completed",
+            &json!({"threadId":"main","item":{"type":"commandExecution","id":id}}),
+            at(300),
+            None,
+        );
+    }
+    let next = requests.running("main").unwrap();
+    assert_ne!(next.id, first.id);
+    assert_eq!(next.tool_refs, Some(Vec::new()));
+}
+
+#[test]
+fn native_retry_names_its_predecessor_instead_of_resetting_a_recovery_ordinal() {
+    let mut requests = Requests::default();
+    requests.asked("main", at(0));
+    let original = requests.running("main").unwrap();
+    let reports=requests.observe("error",&json!({"threadId":"main","willRetry":true,"error":{"message":"rate limit exceeded","codexErrorInfo":"rateLimitExceeded"}}),at(50),None);
+    let next = requests.running("main").unwrap();
+    let failed = reports
+        .iter()
+        .find(|request| {
+            matches!(
+                request.outcome,
+                Some(orch_agent_contract::requests::RequestOutcome::Error { .. })
+            )
+        })
+        .unwrap();
+    assert_eq!(failed.previous_ref.as_deref(), Some(original.id.as_str()));
+    assert_eq!(next.retry_of.as_deref(), Some(failed.id.as_str()));
+    assert_eq!(next.attempt, Some(2));
+}
+
+#[test]
+fn anonymous_failure_events_have_session_turn_sequence_identity_without_inferred_boundaries() {
+    let mut requests = Requests::default();
+    let event = json!({"threadId":"native-session","turnId":"native-turn","willRetry":false,"error":{"message":"The request was rate limited","codexErrorInfo":"rateLimitExceeded"}});
+    let first = requests.observe("error", &event, at(100), None);
+    let second = requests.observe("error", &event, at(100), None);
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_eq!(first[0].id, "native-session:native-turn:failure:1");
+    assert_eq!(second[0].id, "native-session:native-turn:failure:2");
+    for request in first.iter().chain(second.iter()) {
+        assert!(request.provider_request_id.is_none());
+        assert!(request.asked.is_none());
+        assert!(request.first_output.is_none());
+        assert!(request.end.is_none());
+        assert!(request.tokens.input_tokens.is_none());
+        assert!(request.tokens.output_tokens.is_none());
+        request.check().unwrap();
+    }
+}

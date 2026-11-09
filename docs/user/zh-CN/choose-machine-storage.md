@@ -5,6 +5,7 @@ keywords: 存储, 磁盘, 机器, 主机, 模板, env.storage, runtime.storage, 
 heading_id.配置命名存储: configure-named-storages
 heading_id.替换主机模板路径: replace-host-template-paths
 heading_id.设置共同默认值: set-common-defaults
+summary: 为工作区、主目录和运行时数据选择机器提供的命名存储。
 ---
 
 # 选择机器保存数据的位置

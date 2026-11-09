@@ -12,6 +12,14 @@
 //! given. A request that is the same for all of them answers with a
 //! [`Resource`].
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Field, Id, Json, Revision, Time};
@@ -96,7 +104,7 @@ pub enum ProviderStatus {
     NeedsSetup,
     /// Ready.
     Ready,
-    /// It has no room left for now.
+    /// The vendor last reported exhaustion; observational, never a local quota gate.
     Exhausted,
     /// Something is wrong.
     Error,
@@ -158,7 +166,7 @@ pub use orch_provider_contract::facts::{
 /// What a model can be run with at a provider, and a model as a list gives it, written once with the
 /// provider's contract.
 pub use orch_provider_contract::models::{
-    ModelOffered, ModelParameters, ModelSuggestion, Rate, RateAbove, ServiceTier,
+    ModelOffered, ModelParameters, ModelReport, ModelSuggestion, Rate, RateAbove, ServiceTier,
 };
 pub use orch_provider_contract::source::{
     SourceCredential, SourceDescriptor, SourceDescriptorFacts, SourceDescriptorModels,
@@ -189,6 +197,14 @@ pub enum MachineStatus {
 /// A machine that is registered with the system.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Machine {
+    /// Management-visible apparent file sizes from the connector's regular observation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_directory: Option<crate::storage::MachineDataInventory>,
+    /// Its stored home and native grouping metadata.
+    #[serde(default, flatten)]
+    pub grouping: crate::resource_groups::ResourceGrouping,
+    /// The current stored revision, which a guarded role change names.
+    pub revision: Revision,
     /// When its identity was permanently declared lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_at: Option<Time>,
@@ -256,6 +272,30 @@ pub struct ComponentUpdate {
     pub detail: Option<String>,
     /// The local command, including when local policy refuses the web action.
     pub command: String,
+}
+
+/// A Host update acknowledgement without the physical program's existing versions or progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HostUpdateNowReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual Host controlled by this operation.
+    pub host_id: Id,
+    /// Its selected intrinsic physical program.
+    pub machine_id: Id,
+    /// Whether this action filed a fresh native request, including a local-policy refusal.
+    pub requested: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing native progress when this operation may read it, or its safe acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum HostUpdateNowResponse {
+        /// Same-operation Read admits the existing native program status.
+        Full(ComponentUpdate),
+        /// Safe accepted identities and whether a fresh request was filed.
+        Receipt(HostUpdateNowReceipt),
+    }
 }
 
 /// A limit of the plan that has been reached.
@@ -339,8 +379,11 @@ pub struct ProviderFacts {
 }
 
 /// Where each member of a provider's facts stands, and the list of its models.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderFactsState {
+    /// Existing member states for explicitly described credit fields; absent on older providers.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, MemberState>,
     /// Who the credential belongs to.
     pub identity: MemberState,
     /// How the credential was given, and when it lapses.
@@ -516,12 +559,27 @@ pub struct Upstream {
     pub base_url: String,
     /// What the protocol's endpoint options allow: how the key is presented (`auth`: `bearer`,
     /// `x-api-key`, `header` or `none`), `headers`, `query`, and `secret_headers`, which are
-    /// given as names and whose values are written with `ProviderSecretSet`.
+    /// given as names and whose values are written with `ProviderSecretSet`; `params` provides model
+    /// request body defaults while explicit request values and Orch-owned fields retain precedence.
     pub options: Json,
 }
 
-/// A named list of endpoints that fills the form of a new provider in. A provider does not refer
-/// to it afterwards.
+/// A weak credential-format hint declared by a provider preset, never an authentication result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCredentialHint {
+    /// A public key-format prefix, never key material or proof that a credential works.
+    pub prefix: String,
+    /// Suggested credential role; unknown roles are retained for later extensions.
+    pub role: String,
+    /// The existing source-secret field for a non-model role, where declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
+    /// Future hint metadata is preserved without inventing support for it.
+    #[serde(flatten, default)]
+    pub extensions: BTreeMap<String, Json>,
+}
+
+/// A named list of endpoints that fills a new provider's form; the stored provider does not refer to it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderPreset {
     /// Its name.
@@ -541,6 +599,9 @@ pub struct ProviderPreset {
     /// The suggested vector length for an embeddings model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
+    /// Weak proposals only; vendor observations and a person's overrides take precedence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_hints: Vec<ProviderCredentialHint>,
 }
 
 /// A harness, named by its kind and by what it is called. Every payload that says which harness a thing
@@ -652,6 +713,9 @@ pub struct ProviderSetupRuntimeTemplate {
 /// Everything the page that adds a provider needs, for the caller, in one answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderSetup {
+    /// Grouping of the actual resource references offered by this compound picker.
+    #[serde(default)]
+    pub grouping: Vec<crate::resource_groups::ResourceChoiceGrouping>,
     /// Usable physical machines and the services each actually declares for the two independent locations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machines: Option<Vec<ProviderSetupMachine>>,
@@ -778,6 +842,9 @@ pub struct ProviderModel {
     pub display_name: String,
     /// What it can be run with here.
     pub parameters: ModelParameters,
+    /// Effective provider option schemas, including declared tier/program lists; keyed by protocol.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub option_constraints: std::collections::BTreeMap<String, Json>,
     /// What its tokenizer comes to, for the estimates where nobody counted.
     pub token_estimate: crate::programs::TokenEstimate,
     /// The groups its managers put it in (`frontier`, `small`): names of their own, by which a cap,
@@ -789,8 +856,8 @@ pub struct ProviderModel {
     pub source: ModelSource,
 }
 
-/// The most groups one model can be in.
-pub const MODEL_GROUPS_MAX: usize = 8;
+/// The shipped default for the configurable number of groups per model.
+pub const MODEL_GROUPS_DEFAULT: i64 = 8;
 /// The most characters in the name of a group.
 pub const MODEL_GROUP_NAME_MAX: usize = 40;
 
@@ -973,6 +1040,21 @@ pub struct ProviderSignInSupport {
 /// Placement is a derived label for that runtime, rather than a stored capability or policy.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Provider {
+    /// Declared service choices visible with the provider's ordinary View; no endpoint or credential data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_catalogue: Option<Vec<ProviderServiceOffering>>,
+    /// Manager choices for extension-declared services; discovery alone never enables them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub service_offerings: BTreeMap<String, orch_provider_contract::services::ServiceConfig>,
+    /// Request option declarations on its existing named model groups.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_group_options: BTreeMap<String, orch_provider_contract::models::ModelGroupOptions>,
+    /// The configured membership limit at this provider's home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_groups_max: Option<i64>,
+    /// Protected origin and native contextual availability, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Window projections on the single-provider read; absent on lists and without View.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_forecasts: Option<BTreeMap<String, orch_provider_contract::forecast::UsageForecast>>,
@@ -1068,6 +1150,22 @@ pub struct Provider {
     pub access: ResourceAccess,
 }
 
+/// Safe service metadata and manager choices for the existing provider editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderServiceOffering {
+    pub id: String,
+    pub title: String,
+    pub capabilities: Vec<String>,
+    pub enabled: bool,
+    pub available: bool,
+    pub groups: Vec<String>,
+    pub declared_groups: Vec<String>,
+    pub units: Vec<String>,
+    pub catalogue_prices: BTreeMap<String, orch_provider_contract::capabilities::Price>,
+    pub prices: BTreeMap<String, orch_provider_contract::capabilities::Price>,
+    pub explicit_prices: Vec<String>,
+}
+
 /// Permitted facts used by provider and model choices without a request for each option.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderChoiceUsage {
@@ -1084,6 +1182,9 @@ pub struct ProviderChoiceUsage {
 /// puts it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Agent {
+    /// Protected origin and native contextual availability, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Readable providers that keep this profile or currently use it for a thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<Vec<ProviderRef>>,
@@ -1172,6 +1273,9 @@ pub struct HostRunning {
 /// whoever its page names, wherever they work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Host {
+    /// Protected origin and native contextual availability, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
     /// When this host was permanently declared lost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lost_at: Option<Time>,
@@ -1282,6 +1386,9 @@ pub struct HostKeptLayers {
 /// A recipe for units: environments, or the runtimes of providers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Template {
+    /// Protected origin and native contextual availability, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
     /// The template's identifier.
     pub id: Id,
     /// Its name.
@@ -1334,6 +1441,9 @@ pub struct McpServerImported {
 /// An MCP server that environments can be given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct McpServer {
+    /// The origin and native per-machine judgements, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
     /// Current machine offerings; the resource stays when this list is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub offerings: Vec<McpServerOffering>,
@@ -1683,6 +1793,108 @@ pub struct ProviderWriteReply {
     pub warning: Option<String>,
 }
 
+/// A provider actually created, without disclosing its configuration or borrowed metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCreateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// Actual newly created provider.
+    pub provider_id: Id,
+    /// Revision accepted by the creation transaction.
+    pub revision: Revision,
+    /// Creation or inline-sign-in outcome; never a provider's stored content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+crate::common::full_or_receipt! {
+    /// Ordinary provider creation view or its restricted committed acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderCreateResponse {
+        /// Existing full wire shape, including a creation warning.
+        Full(ProviderWriteReply),
+        /// Safe identities and outcome only.
+        Receipt(ProviderCreateReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// A machine's ordinary provider registration view or its restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineProviderCreateResponse {
+        /// Existing full provider wire shape.
+        Full(Provider),
+        /// Safe identities and outcome only.
+        Receipt(ProviderCreateReceipt),
+    }
+}
+
+/// A provider change acknowledgement without existing provider metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The provider actually changed (or checked by a no-op).
+    pub provider_id: Id,
+    /// Its revision at the accepted mutation checkpoint.
+    pub revision: Revision,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary full provider change reply, or its safe restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderUpdateResponse {
+        /// Existing provider content admitted by this operation's Read facet.
+        Full(ProviderWriteReply),
+        /// No provider configuration, facts or names.
+        Receipt(ProviderUpdateReceipt),
+    }
+}
+
+/// A model write acknowledgement without the provider's existing model configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderModelWriteReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual governing provider.
+    pub provider_id: Id,
+    /// The actual model entry written.
+    pub model_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary full model entry, or the same write's restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderModelWriteResponse {
+        /// Existing model configuration admitted by this operation's Read facet.
+        Full(ProviderModel),
+        /// No routing/display name, parameters or groups.
+        Receipt(ProviderModelWriteReceipt),
+    }
+}
+
+/// Actual entries newly written by an accepted suggestion batch; existing entries are not included.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderModelSuggestionAcceptReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual governing provider.
+    pub provider_id: Id,
+    /// IDs from the newly inserted model rows, empty on an already-listed batch.
+    pub model_ids: Vec<Id>,
+}
+
+crate::common::full_or_receipt! {
+    /// Full accepted models/provider content or only the actual batch acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderModelSuggestionAcceptResponse {
+        /// Existing content admitted by this operation's Read facet.
+        Full(ProviderModelSuggestionAcceptReply),
+        /// Actual inserted IDs without suggestion/provider contents.
+        Receipt(ProviderModelSuggestionAcceptReceipt),
+    }
+}
+
 /// Any of the resources that have a page of their own, which a request that is the same for all of
 /// them answers with.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1869,6 +2081,14 @@ pub enum CreateProvider {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUpdateBody {
+    /// Replaces manager choices for declared services; empty clears all service opt-ins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_offerings:
+        Option<BTreeMap<String, orch_provider_contract::services::ServiceConfig>>,
+    /// Replaces request option declarations on named model groups; empty clears them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_group_options:
+        Option<BTreeMap<String, orch_provider_contract::models::ModelGroupOptions>>,
     /// A new name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -1961,6 +2181,45 @@ pub struct ProviderRuntimeUpdateBatchPreflightReply {
     pub estimate: Estimate,
 }
 
+/// Identifiers and existing skip outcomes from a managed batch preview without content Read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderRuntimeUpdateBatchPreflightReceipt {
+    /// This reply contains acceptance facts only.
+    pub projection: crate::common::ReceiptProjection,
+    /// The saved plan that can be confirmed once.
+    pub preflight_id: Id,
+    /// The existing plan's expiry.
+    pub expires_at: Time,
+    /// The number of plans without blockers.
+    pub executable: i64,
+    /// Actual executable Providers, without their names.
+    pub provider_ids: Vec<Id>,
+    /// Actual planned Providers with ordinary blockers.
+    pub blocked: Vec<Id>,
+    /// Visible requested identifiers left out by the ordinary producer.
+    pub skipped: Vec<ProviderUpdateSkipReceipt>,
+}
+
+crate::common::full_or_receipt! {
+    /// The normal preview or its content-free operation receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderRuntimeUpdateBatchPreflightResponse {
+        /// The explicit receipt discriminator is checked before an empty Full shape.
+        Receipt(ProviderRuntimeUpdateBatchPreflightReceipt),
+        /// The ordinary existing-content projection.
+        Full(ProviderRuntimeUpdateBatchPreflightReply),
+    }
+}
+
+/// A visible requested identifier and its ordinary skip outcome, without its name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderUpdateSkipReceipt {
+    /// The visible requested Provider.
+    pub provider_id: Id,
+    /// Its existing skip classification.
+    pub reason: ProviderUpdateSkipReason,
+}
+
 /// The job of one provider of a batch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ProviderBatchJob {
@@ -1978,6 +2237,80 @@ pub struct ProviderBatch {
     pub batch_id: Id,
     /// The jobs.
     pub jobs: Vec<ProviderBatchJob>,
+}
+
+/// Accepted jobs, without the existing Provider or live job projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderBatchReceipt {
+    /// This reply contains acceptance facts only.
+    pub projection: crate::common::ReceiptProjection,
+    /// The existing batch identity.
+    pub batch_id: Id,
+    /// Jobs actually queued in the accepted transaction.
+    pub jobs: Vec<ProviderBatchJobReceipt>,
+}
+
+/// One accepted provider-runtime job, without existing resource content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderBatchJobReceipt {
+    /// The actual affected Provider.
+    pub provider_id: Id,
+    /// Its accepted job.
+    pub job_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary batch projection or its acceptance-only alternative.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderBatchResponse {
+        /// Prioritize the explicit discriminator even when the job list is empty.
+        Receipt(ProviderBatchReceipt),
+        /// The normal named Provider/job projection.
+        Full(ProviderBatch),
+    }
+}
+
+/// Actual affected Providers and the ordinary producer's optional named content sources.
+const fn provider_runtime_batch_facets() -> [Facet; 9] {
+    [
+        Facet::required(
+            Manage,
+            &[Object(K::Provider)],
+            Target::ResolvedCollection("affected_providers"),
+        ),
+        Facet::response_content(
+            &[Object(K::Provider)],
+            Target::ResolvedCollection("batch_providers"),
+        ),
+        Facet::response_content(
+            &[Object(K::Host)],
+            Target::ResolvedCollection("batch_hosts"),
+        ),
+        Facet::response_content(
+            &[Object(K::Template)],
+            Target::ResolvedCollection("batch_templates"),
+        ),
+        Facet::response_content(
+            &[Object(K::Machine)],
+            Target::ResolvedCollection("batch_machines"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("batch_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("batch_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("batch_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("batch_names_threads"),
+        ),
+    ]
 }
 
 /// A thread that is bound to a provider.
@@ -2051,6 +2384,30 @@ pub struct ProviderResetConsumeReply {
     pub outcome: String,
     /// The provider with the resulting facts.
     pub provider: Provider,
+}
+
+/// A confirmed reset's safe acknowledgement without the provider's existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderResetConsumeReceipt {
+    /// This response contains identifiers and outcome, without provider facts or metadata.
+    pub projection: crate::common::ReceiptProjection,
+    /// The provider whose confirmed reset was attempted.
+    pub provider_id: Id,
+    /// The caller's logical request identity, also on replay.
+    pub request_id: Id,
+    /// The vendor's own outcome, also on replay.
+    pub outcome: String,
+}
+
+crate::common::full_or_receipt! {
+    /// The existing full reply or the same operation's explicit restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ProviderResetConsumeResponse {
+        /// Existing provider content, only when this operation may disclose it.
+        Full(ProviderResetConsumeReply),
+        /// Safe acceptance/outcome without provider content.
+        Receipt(ProviderResetConsumeReceipt),
+    }
 }
 
 /// Who last used a reset, shown until the reset windows next begin.
@@ -2213,7 +2570,7 @@ pub struct ProviderModelCreateBody {
     /// `context_window`; `default_context` is at most `context_max` and needs one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parameters: Option<ModelParameters>,
-    /// The groups to put it in: at most [`MODEL_GROUPS_MAX`], each named as [`is_model_group_name`]
+    /// The groups to put it in, within the home's configured limit, each named as [`is_model_group_name`]
     /// says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<String>>,
@@ -2277,6 +2634,44 @@ pub struct OrgAgentCreateBody {
     pub harness_kind: String,
     /// Which build of the harness to run, and how.
     pub profile: Json,
+}
+
+/// A committed profile creation without its stored individual metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OrgAgentCreateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual profile committed by this creation.
+    pub agent_id: Id,
+}
+
+/// The native profile body or its truthful creation acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum OrgAgentCreateResponse {
+    /// The ordinary individual profile body under current response Read.
+    Full(Box<Agent>),
+    /// A truthful creation acknowledgement without stored profile metadata.
+    Receipt(OrgAgentCreateReceipt),
+}
+
+impl OrgAgentCreateResponse {
+    /// Keep full content and restricted acknowledgement distinct.
+    pub fn into_full(self) -> Result<Agent, OrgAgentCreateReceipt> {
+        match self {
+            Self::Full(agent) => Ok(*agent),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// The registered machine profile or its actual accepted identity without stored content.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineAgentCreateResponse {
+        Full(Agent),
+        Receipt(OrgAgentCreateReceipt),
+    }
 }
 
 /// Changes an agent profile.
@@ -2429,6 +2824,34 @@ pub struct TemplateImportReply {
     pub notes: Vec<TemplateImportNote>,
 }
 
+/// A completed template identity without its stored recipe or metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TemplateCreateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual committed template.
+    pub template_id: Id,
+}
+
+/// Native full Template or its truthful completed identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TemplateCreateResponse {
+    /// The same native personalized template under current response Read.
+    Full(Box<Template>),
+    /// The completed creation without existing content.
+    Receipt(TemplateCreateReceipt),
+}
+impl TemplateCreateResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<Template, TemplateCreateReceipt> {
+        match self {
+            Self::Full(template) => Ok(*template),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Changes a template. A change to its spec does not affect running units until they are updated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -2456,6 +2879,9 @@ pub struct McpServerListQuery {
     /// Only those whose home is that org or an org inside it, with the system's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<Id>,
+    /// Judge these options in this readable environment; unavailable ones stay listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<Id>,
 }
 
 /// Makes an MCP server. One that is imported from a machine is made by importing it into an
@@ -2480,6 +2906,35 @@ pub struct McpServerCreateBody {
     pub access: Option<NewResourceAccess>,
 }
 
+/// A truthful completed preset identity without its stored definition or metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerCreateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual committed preset.
+    pub server_id: Id,
+}
+
+/// Native MCP result or the completed identity when current response Read is closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum McpServerCreateResponse {
+    /// The same personalized native server definition, without secret values.
+    Full(Box<McpServer>),
+    /// The accepted creation without existing content.
+    Receipt(McpServerCreateReceipt),
+}
+
+impl McpServerCreateResponse {
+    /// Extract the full native result while preserving restricted acknowledgement.
+    pub fn into_full(self) -> Result<McpServer, McpServerCreateReceipt> {
+        match self {
+            Self::Full(server) => Ok(*server),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Changes an MCP server. Of one that was imported from a machine only `name`, `description` and
 /// `enabled` change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2502,6 +2957,55 @@ pub struct McpServerUpdateBody {
     pub enabled: Option<bool>,
     /// The revision the caller saw.
     pub expected_revision: Revision,
+}
+
+/// The actual completed change without a stored definition or resource metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerUpdateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The changed native server.
+    pub server_id: Id,
+    /// The revision produced by this change.
+    pub revision: Revision,
+}
+
+/// Current native content or the truthful completed change when Read is unavailable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum McpServerUpdateResponse {
+    /// The same personalized native server definition, without secret values.
+    Full(Box<McpServer>),
+    /// The accepted change without existing content.
+    Receipt(McpServerUpdateReceipt),
+}
+
+/// The exact native copy outcome without existing configuration or offering metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct McpServerImportReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub server_id: Id,
+    pub revision: Option<Revision>,
+    pub selected: bool,
+    pub cleanup_queued: bool,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary stored-server view or the original completed native import's receipt.
+    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
+    pub enum McpServerImportResponse {
+        Full(McpServer),
+        Receipt(McpServerImportReceipt),
+    }
+}
+
+impl McpServerUpdateResponse {
+    /// Extract full native content while retaining the restricted acknowledgement.
+    pub fn into_full(self) -> Result<McpServer, McpServerUpdateReceipt> {
+        match self {
+            Self::Full(server) => Ok(*server),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// A role hosted by the connector; Node is enrolled through the host's separate program.
@@ -2545,12 +3049,128 @@ pub struct MachineUpdateBody {
     pub name: String,
 }
 
+/// A committed Machine rename without the existing individual metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineUpdateReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The physical Machine whose name was updated.
+    pub machine_id: Id,
+}
+
+/// The native individual body or a truthful committed rename acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MachineUpdateResponse {
+    /// Existing metadata admitted by this operation's current Read.
+    Full(Box<Machine>),
+    /// The existing Machine metadata is unavailable to the current reader.
+    Receipt(MachineUpdateReceipt),
+}
+
+impl MachineUpdateResponse {
+    /// Keep the full native body and its restricted acknowledgement distinct.
+    pub fn into_full(self) -> Result<Machine, MachineUpdateReceipt> {
+        match self {
+            Self::Full(machine) => Ok(*machine),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The accepted physical registration without existing machine metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineRevokeReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual Machine whose withdrawal was accepted, including an already revoked one.
+    pub machine_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The native machine body or its accepted withdrawal acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineRevokeResponse {
+        Full(Machine),
+        Receipt(MachineRevokeReceipt),
+    }
+}
+
+/// A completed probe without disclosure of retained Machine facts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineProbeReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The physical Machine whose reported facts were retained.
+    pub machine_id: Id,
+}
+
+/// A newly issued replacement credential without retained installation paths or roles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineEnrollmentAgainReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The retained physical identity this new token enrolls again.
+    pub machine_id: Id,
+    /// Newly generated one-use credential, never replayed from retained storage.
+    pub token: String,
+    /// Native expiry of that new credential.
+    pub expires_at: Time,
+    /// Newly generated one-way issuer recovery reference.
+    pub receipt: Option<String>,
+}
+
+/// An explicit native update choice without existing software or installation progress.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineUpdateNowReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The physical program whose update choice completed.
+    pub machine_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// Native update progress or the accepted choice's identity alone.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineUpdateNowResponse {
+        /// Existing operational facts under this operation's own Read.
+        Full(ComponentUpdate),
+        /// The update choice completed without existing progress or versions.
+        Receipt(MachineUpdateNowReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// Newly issued replacement credential, with retained installation commands only under Read.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineEnrollmentAgainResponse {
+        /// The old native enrollment body under this operation's current Read.
+        Full(EnrollmentToken),
+        /// The generated credential remains usable with the operator's local configuration.
+        Receipt(MachineEnrollmentAgainReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// Native Machine content or the completed facts probe's identity alone.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineProbeResponse {
+        /// Current native content under this operation's own Read.
+        Full(Machine),
+        /// The probe completed without old content.
+        Receipt(MachineProbeReceipt),
+    }
+}
+
 /// Change a physical connector's offered roles; Node remains hosted by orch-node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MachineRolesSetBody {
     /// Environment, agent and/or provider, without duplicates and with at least one role.
     pub roles: Vec<String>,
+    /// Refuses an outdated machine snapshot; omitted preserves the existing behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
 }
 
 /// The actual physical program's role editing capability and enforcing policy.
@@ -2575,6 +3195,30 @@ pub struct MachineRolesChange {
     pub reconnecting: bool,
 }
 
+/// The native role selection completed without existing individual Machine metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineRolesReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The physical connector that accepted the role selection.
+    pub machine_id: Id,
+    /// The newly accepted role names.
+    pub requested_roles: Vec<String>,
+    /// Whether the native supervisor is reconnecting for this accepted selection.
+    pub reconnecting: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// Native individual readback or the generated role-selection outcome alone.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachineRolesResponse {
+        /// The existing individual Machine body under this operation's Read.
+        Full(MachineRolesChange),
+        /// Accepted role selection without existing Machine content.
+        Receipt(MachineRolesReceipt),
+    }
+}
+
 /// Registers a provider whose runtime is a machine of the caller's. It is shared from its home
 /// with whomever its page names, of whatever org, and needs no second registration for that; one
 /// registered again in another org is another provider there.
@@ -2583,8 +3227,9 @@ pub struct MachineRolesChange {
 pub enum MachineProviderCreateBody {
     /// The login that a harness already has there.
     Subscription {
-        /// Its home: the caller's domain or an org inside it.
-        home_id: Id,
+        /// Its home; omitted uses the machine's registered Org/Project home.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        home_id: Option<Id>,
         /// Its name.
         name: String,
         /// A profile of this machine.
@@ -2595,8 +3240,9 @@ pub enum MachineProviderCreateBody {
     },
     /// An API whose key is set on the machine.
     Api {
-        /// Its home: the caller's domain or an org inside it.
-        home_id: Id,
+        /// Its home; omitted uses the machine's registered Org/Project home.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        home_id: Option<Id>,
         /// Its name.
         name: String,
         /// Its endpoints.
@@ -2610,6 +3256,26 @@ pub enum MachineProviderCreateBody {
 /// Keys of a machine's local policy and the values to give them. A key the machine has not
 /// delegated is refused, and nothing is changed.
 pub type MachinePolicyUpdateBody = BTreeMap<String, Json>;
+
+/// A completed native policy choice without retained local policy or Machine content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachinePolicyReceipt {
+    /// Identifies the restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual physical Machine whose native policy choice completed.
+    pub machine_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// Native policy content or the accepted choice's identity alone.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum MachinePolicyResponse {
+        /// Current native content under this operation's Read.
+        Full(MachinePolicy),
+        /// Policy choice completed without old content.
+        Receipt(MachinePolicyReceipt),
+    }
+}
 
 /// The hosts the caller may view, use or manage, or administers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -2726,16 +3392,114 @@ pub struct HostDeleteQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderPlanGetQuery {
+    /// Which reported quantities to read; the existing subscription response when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metric: Option<ProviderHistoryMetric>,
     /// First UTC date, included.
     pub from: String,
     /// Last UTC date, included.
     pub to: String,
     /// The report's chart bucket; day when absent.
     pub bucket: Option<crate::usage::UsageBucket>,
-    /// Windows in this page, bounded by the ordinary page limit.
+    /// Windows or complete credit groups in this page, bounded by the ordinary page limit.
     pub limit: Option<u32>,
-    /// The last window of this same observation snapshot.
+    /// The last complete window/group of this same metric and observation snapshot.
     pub cursor: Option<String>,
+}
+
+/// The quantities in the provider's existing usage history route.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderHistoryMetric {
+    /// Included subscription windows, with their existing reset and consumption semantics.
+    #[default]
+    Subscription,
+    /// Observed credit balance or paid usage, without inferred charges.
+    Credits,
+}
+
+/// Existing subscription JSON stays unchanged; credit quantities have their own truthful shape.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ProviderHistorySeries {
+    /// The existing subscription series.
+    Subscription(ProviderPlanSeries),
+    /// Actual amount observations.
+    Credits(ProviderCreditSeries),
+}
+
+/// Identifies the amount variant of a history response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCreditSeriesKind {
+    /// Provider-reported amounts, separate from Orch ledger credits.
+    Credits,
+}
+
+/// The normalized source member that supplied an amount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCreditMember {
+    /// An account or plan balance.
+    Balances,
+    /// A source's spending observation.
+    Spend,
+    /// Paid use beyond an included subscription.
+    ExtraUsage,
+}
+
+/// Distinct reported quantities; none is inferred from another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCreditQuantity {
+    /// A reported remaining balance.
+    Remaining,
+    /// A reported total credit amount.
+    Total,
+    /// Reported usage in the source's own unit.
+    Used,
+    /// A spending limit, not funded balance.
+    Limit,
+}
+
+/// One exact, source-observed amount at its actual timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCreditPoint {
+    /// Actual source observation time, not the chart bucket boundary.
+    pub at: Time,
+    /// Exact decimal text; null is missing, off, unlimited or explicitly cleared, never zero.
+    pub amount: Option<String>,
+    /// Explicit unlimited status, where supplied.
+    pub unlimited: Option<bool>,
+    /// Explicit paid-use enablement, where supplied.
+    pub enabled: Option<bool>,
+    /// An actual missing/off observation was omitted during bounded chart selection.
+    pub gap_before: bool,
+}
+
+/// One quantity with a fixed source generation, member, unit and scale.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProviderCreditSeries {
+    /// The discriminator; subscription JSON remains unchanged.
+    pub kind: ProviderCreditSeriesKind,
+    /// Opaque identity of this quantity.
+    pub series_id: String,
+    /// Opaque shared identity for quantities of the same source, item, unit and scale.
+    pub group_id: String,
+    /// Actual normalized member.
+    pub member: ProviderCreditMember,
+    /// Existing source item id; empty for extra_usage.
+    pub item_id: String,
+    /// What the amount measures.
+    pub quantity: ProviderCreditQuantity,
+    /// The source's item label, where supplied.
+    pub label: Option<String>,
+    /// The reported unit; null remains unknown.
+    pub unit: Option<String>,
+    /// Scale of the reported amount; null means no separate scale was supplied.
+    pub decimal_places: Option<u32>,
+    /// At most the existing provider-history point bound, with actual timestamps and gaps.
+    pub points: Vec<ProviderCreditPoint>,
 }
 
 /// A plan window's measured current values and bucketed consumption history.
@@ -2806,51 +3570,286 @@ pub struct PlanWindowReset {
     pub count: i64,
 }
 
+/// The existing provider read and optional, dynamically projected source names.
+pub(crate) const fn provider_aux_read_facets() -> [Facet; 5] {
+    [
+        Facet::required(
+            Read,
+            &[Object(K::Provider)],
+            Target::TypedPath {
+                parameter: "id",
+                kind: Object(K::Provider),
+            },
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Org)],
+            Target::ResolvedCollection("provider_aux_names_orgs"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Project)],
+            Target::ResolvedCollection("provider_aux_names_projects"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("provider_aux_names_topics"),
+        ),
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("provider_aux_names_threads"),
+        ),
+    ]
+}
+
+/// Only actually emitted bound threads need a same-operation Thread Read.
+const fn provider_threads_read_facets() -> [Facet; 6] {
+    let [provider, org, project, topic, thread] = provider_aux_read_facets();
+    [
+        provider,
+        Facet::required(
+            Read,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("provider_aux_threads"),
+        ),
+        org,
+        project,
+        topic,
+        thread,
+    ]
+}
+
+/// The selected native place whose work-share bounds a contextual resource projection.
+/// No context is projected by the ordinary full resource read.
+pub const RESOURCE_READ_CONTEXT: &str = "resource_read_context";
+
+const fn resource_read_context_facet() -> Facet {
+    Facet::response_content(
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::ResolvedCollection(RESOURCE_READ_CONTEXT),
+    )
+}
+
+/// A collection's primary proof covers actual Provider results; full payload sources are
+/// response content so checked-empty reads do not require grants for absent Group/name rows.
+const fn provider_list_read_facets() -> [Facet; 7] {
+    [
+        Facet::required(
+            Read,
+            &[Object(K::Provider)],
+            Target::ResolvedCollection("results"),
+        ),
+        Facet::response_content(
+            &[Identity(I::Group)],
+            Target::ResolvedCollection("provider_groups"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("provider_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("provider_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("provider_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("provider_names_threads"),
+        ),
+        resource_read_context_facet(),
+    ]
+}
+
+/// Setup retains its existing management root and reads only the actual external offers.
+/// Protected source labels are optional; a valid root can return the public catalogue alone.
+const fn provider_setup_facets() -> [Facet; 8] {
+    [
+        Facet::required(
+            Manage,
+            &[Object(K::Provider)],
+            Target::Resolved("setup_target"),
+        ),
+        Facet::response_content(
+            &[Object(K::Agent)],
+            Target::ResolvedCollection("setup_agents"),
+        ),
+        Facet::response_content(
+            &[Object(K::Machine)],
+            Target::ResolvedCollection("setup_machines"),
+        ),
+        Facet::response_content(
+            &[Object(K::Template)],
+            Target::ResolvedCollection("setup_templates"),
+        ),
+        Facet::response_content(
+            &[Object(K::Org)],
+            Target::ResolvedCollection("setup_names_orgs"),
+        ),
+        Facet::response_content(
+            &[Object(K::Project)],
+            Target::ResolvedCollection("setup_names_projects"),
+        ),
+        Facet::response_content(
+            &[Object(K::Topic)],
+            Target::ResolvedCollection("setup_names_topics"),
+        ),
+        Facet::response_content(
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("setup_names_threads"),
+        ),
+    ]
+}
+
 crate::endpoints! {
     /// Lists the providers the caller owns or holds a permission on, of whatever org, each as far as the caller may see it.
-    ProviderList: GET "/providers", User, query ProviderListQuery, none, json crate::common::Page<crate::common::Listed<Provider>>, 200;
+    ProviderList: GET "/providers", User, query ProviderListQuery, none, json crate::common::Page<crate::common::Listed<Provider>>, 200,
+        operation Op::facets(&provider_list_read_facets());
     /// Gives everything the page that adds a provider needs, for the caller, in one answer.
-    ProviderSetupGet: GET "/provider-setup", Rule("provider_id: provider.manage and org_id is its home; otherwise org_id is the caller's domain or an org inside it, or an org on which they hold settings.manage"), query ProviderSetupGetQuery, none, json ProviderSetup, 200;
+    ProviderSetupGet: GET "/provider-setup", Rule("provider_id: provider.manage and org_id is its home; otherwise org_id is the caller's domain or an org inside it, or an org on which they hold settings.manage"), query ProviderSetupGetQuery, none, json ProviderSetup, 200,
+        operation Op::facets(&provider_setup_facets());
     /// Makes a managed provider, the caller's own, with the job that makes its runtime; it may start a sign-in at once.
-    ProviderCreate: POST "/providers", Rule("its home is the caller's domain or an org inside it and the members of that home may make providers there; else settings.manage on that org"), none, json CreateProvider, json ProviderWriteReply, 200;
+    ProviderCreate: POST "/providers", Rule("its home is the caller's domain or an org inside it and the members of that home may make providers there; else settings.manage on that org"), none, json CreateProvider, json ProviderCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Provider)], Target::Resolved("home")),
+            Facet::response_content(&[Object(K::Provider)], Target::Resolved("created_provider")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+        ]));
     /// Reads a provider.
-    ProviderGet: GET "/providers/{id}", Rule("any permission on the provider"), none, none, json Provider, 200;
+    ProviderGet: GET "/providers/{id}", Rule("any permission on the provider"), none, none, json Provider, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) }),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+            resource_read_context_facet(),
+        ]);
     /// Reads the visible plan windows' current measurements, usage history and start-over markers.
-    ProviderPlanGet: GET "/providers/{id}/plan", Permission("provider.view"), query ProviderPlanGetQuery, none, json crate::common::Page<ProviderPlanSeries>, 200;
+    ProviderPlanGet: GET "/providers/{id}/plan", Permission("provider.view"), query ProviderPlanGetQuery, none, json crate::common::Page<ProviderHistorySeries>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Changes a provider; a change its running runtime cannot take is stored and listed in its runtime's updates.
-    ProviderUpdate: PATCH "/providers/{id}", Permission("provider.manage"), none, json ProviderUpdateBody, json ProviderWriteReply, 200;
+    ProviderUpdate: PATCH "/providers/{id}", Permission("provider.manage"), none, json ProviderUpdateBody, json ProviderUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Provider)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Provider)], Target::PermissionObject),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+        ]));
     /// Brings a handed-over credential home.
-    ProviderHandoverReturn: POST "/providers/{id}/handover/return", Rule("provider.manage, or environment.manage on the holding environment"), none, json ProviderHandoverReturnBody, json Provider, 200;
+    ProviderHandoverReturn: POST "/providers/{id}/handover/return", Rule("provider.manage, or environment.manage on the holding environment"), none, json ProviderHandoverReturnBody, json ProviderUpdateResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "provider",
+                selector: "current provider manager",
+                facets: &[
+                    Facet::required(Manage, &[Object(K::Provider)], Target::Path("id")),
+                    Facet::response_content(&[Object(K::Provider)], Target::Path("id")),
+                    Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+                    Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+                    Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+                    Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+                    Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+                ],
+            },
+            Variant {
+                name: "holding_environment",
+                selector: "current manager of holding environment",
+                facets: &[
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Environment)],
+                        Target::Resolved("holding_environment"),
+                    ),
+                    Facet::required(Manage, &[Object(K::Provider)], Target::Path("id")),
+                    Facet::response_content(&[Object(K::Provider)], Target::Path("id")),
+                    Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+                    Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+                    Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+                    Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+                    Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+                ],
+            },
+        ]));
     /// Deletes a provider that no thread is bound to, signing its harness out first and retiring its runtime.
     ProviderDelete: DELETE "/providers/{id}", Permission("provider.manage"), none, none, none, 204;
     /// Switches a provider off.
-    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200;
+    ProviderDisable: POST "/providers/{id}/disable", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Switches a provider on again.
-    ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200;
+    ProviderEnable: POST "/providers/{id}/enable", Permission("provider.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Starts a managed provider's runtime by hand.
-    ProviderStart: POST "/providers/{id}/start", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200;
+    ProviderStart: POST "/providers/{id}/start", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Stops a managed provider's runtime by hand; refused while a turn runs on it unless told to interrupt.
-    ProviderStop: POST "/providers/{id}/stop", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200;
+    ProviderStop: POST "/providers/{id}/stop", Permission("provider.manage"), none, json ProviderStartStopBody, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Plans an update of a provider's runtime, or a plain recreation, before anything is done.
     ProviderRuntimeUpdatePreflight: POST "/providers/{id}/runtime/updates/preflight", Permission("provider.manage"), none, json UpdatePreflightBody, json ProviderUpdatePlan, 200;
     /// Carries out a plan of an update as a job; the runtime and every thread bound to the provider are locked at once.
-    ProviderRuntimeUpdateCreate: POST "/providers/{id}/runtime/updates", Permission("provider.manage"), query UpdateConfirmQuery, json ForkCreateBody, json Job, 202;
+    ProviderRuntimeUpdateCreate: POST "/providers/{id}/runtime/updates", Permission("provider.manage"), query UpdateConfirmQuery, json ForkCreateBody, json crate::workspace::JobCreationResponse, 202,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Plans the update of several providers' runtimes together.
-    ProviderRuntimeUpdateBatchPreflight: POST "/providers/runtime/updates/preflight", Rule("provider.manage, on each provider"), none, json ProviderRuntimeUpdateBatchPreflightBody, json ProviderRuntimeUpdateBatchPreflightReply, 200;
+    ProviderRuntimeUpdateBatchPreflight: POST "/providers/runtime/updates/preflight", Rule("provider.manage, on each provider"), none, json ProviderRuntimeUpdateBatchPreflightBody, json ProviderRuntimeUpdateBatchPreflightResponse, 200,
+        operation Op::receipt(&Op::facets(&provider_runtime_batch_facets()));
     /// Carries out a plan of several updates: one job for each plan without blockers, a few at a time, each rolling back alone.
-    ProviderRuntimeUpdateBatchCreate: POST "/providers/runtime/updates", Rule("provider.manage, on each provider"), query UpdateConfirmQuery, json ForkCreateBody, json ProviderBatch, 202;
+    ProviderRuntimeUpdateBatchCreate: POST "/providers/runtime/updates", Rule("provider.manage, on each provider"), query UpdateConfirmQuery, json ForkCreateBody, json ProviderBatchResponse, 202,
+        operation Op::receipt(&Op::facets(&provider_runtime_batch_facets()));
     /// Lists the threads bound to a provider that the caller may view, of whatever org, and how many more there are.
-    ProviderThreadList: GET "/providers/{id}/threads", Rule("any permission on the provider"), query PageQuery, none, json ProviderThreadListReply, 200;
+    ProviderThreadList: GET "/providers/{id}/threads", Rule("any permission on the provider"), query PageQuery, none, json ProviderThreadListReply, 200,
+        operation Op::facets(&provider_threads_read_facets());
     /// Restarts the harness of one agent profile on a provider; its sessions reopen at their next turn.
-    ProviderHarnessRestart: POST "/providers/{id}/harnesses/{agent_id}/restart", Permission("provider.manage"), none, none, json Provider, 200;
+    ProviderHarnessRestart: POST "/providers/{id}/harnesses/{agent_id}/restart", Permission("provider.manage"), none, none, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the conversations a provider's harness already holds, for adapters that can discover them.
-    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), none, none, json Vec<NativeSession>, 200;
+    ProviderHarnessSessionList: GET "/providers/{id}/harnesses/{agent_id}/sessions", Permission("provider.use"), none, none, json Vec<NativeSession>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::PermissionObject);
     /// Saves an API key, asks the configured facts/model sources, and returns the provider; never the key.
-    ProviderKeySet: PUT "/providers/{id}/key", Permission("provider.manage"), none, json ProviderKeySetBody, json Provider, 200;
+    ProviderKeySet: PUT "/providers/{id}/key", Permission("provider.manage"), none, json ProviderKeySetBody, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Writes the value of one secret header of a provider's endpoints; write-only, like the key.
-    ProviderSecretSet: PUT "/providers/{id}/secrets/{name}", Permission("provider.manage"), none, json ProviderSecretSetBody, none, 204;
+    ProviderSecretSet: PUT "/providers/{id}/secrets/{name}", Permission("provider.manage"), none, json ProviderSecretSetBody, none, 204,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Signs a provider in, or in again, by one of its adapter's methods.
-    ProviderLoginStart: POST "/providers/{id}/login", Permission("provider.manage"), none, json ProviderLoginStartBody, json LoginState, 200;
+    ProviderLoginStart: POST "/providers/{id}/login", Permission("provider.manage"), none, json ProviderLoginStartBody, json LoginState, 200,
+        operation Op::legacy_tokens(&["ProviderLoginStart.import"], &Op::variants(&[
+            Variant {
+                name: "interactive",
+                selector: "the chosen adapter method has LoginKind::Interactive",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Provider)],
+                    Target::PermissionObject,
+                )],
+            },
+            Variant {
+                name: "import",
+                selector: "the chosen adapter method has LoginKind::Import",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Object(K::Provider)],
+                    Target::PermissionObject,
+                )],
+            },
+        ]));
     /// Gives back what a running sign-in asked for.
     ProviderLoginInput: POST "/providers/{id}/login/input", Permission("provider.manage"), none, json ProviderLoginInputBody, json LoginState, 200;
     /// Reads where a provider's sign-in stands.
@@ -2858,132 +3857,264 @@ crate::endpoints! {
     /// Cancels a running sign-in.
     ProviderLoginCancel: POST "/providers/{id}/login/cancel", Permission("provider.manage"), none, none, json LoginState, 200;
     /// Signs a provider's harness out.
-    ProviderLogout: POST "/providers/{id}/logout", Permission("provider.manage"), none, none, json Provider, 200;
+    ProviderLogout: POST "/providers/{id}/logout", Permission("provider.manage"), none, none, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Asks the provider's connector for its status and usage, and waits up to ten seconds for the answer.
     ProviderRefresh: POST "/providers/{id}/refresh", Permission("provider.view"), none, json ProviderRefreshBody, json Provider, 200;
-    /// Uses the exact reset credit a browser user with provider management confirmed.
-    ProviderResetConsume: POST "/providers/{id}/resets/consume", Rule("browser session with provider.manage"), none, json ProviderResetConsumeBody, json ProviderResetConsumeReply, 200;
+    /// Uses the exact reset credit and available count explicitly confirmed by a current provider manager.
+    ProviderResetConsume: POST "/providers/{id}/resets/consume", Rule("provider.manage; the exact current reset and available count must be confirmed"), none, json ProviderResetConsumeBody, json ProviderResetConsumeResponse, 200,
+        operation Op::legacy_tokens(&[], &Op::receipt(&Op::returning(
+            Manage, &[Object(K::Provider)], Target::Resolved("provider"),
+        )));
     /// Sets the facts that are written in by hand over what the provider reports.
-    ProviderFactsOverridesSet: PUT "/providers/{id}/facts-overrides", Permission("provider.manage"), none, json ProviderFactsOverridesSetBody, json Provider, 200;
+    ProviderFactsOverridesSet: PUT "/providers/{id}/facts-overrides", Permission("provider.manage"), none, json ProviderFactsOverridesSetBody, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Chooses where a provider's facts, models and key presentation come from, and reads the chosen sources once at once.
-    ProviderSourcesSet: PUT "/providers/{id}/sources", Permission("provider.manage"), none, json ProviderSourcesSetBody, json Provider, 200;
+    ProviderSourcesSet: PUT "/providers/{id}/sources", Permission("provider.manage"), none, json ProviderSourcesSetBody, json Provider, 200,
+        operation Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject);
     /// Lists the models a provider lists.
-    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200;
+    ProviderModelList: GET "/providers/{id}/models", Rule("any permission on the provider"), none, none, json Vec<ProviderModel>, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::TypedPath { parameter: "id", kind: Object(K::Provider) });
     /// Adds a model to a provider, with the groups it is in and what it can be run with there; `409 conflict.exists` for a routing or display name the provider already has, `400 request.invalid` for a default that is not among what is enabled, a `context_max` below the window, a `default_context` above `context_max` or given without one, and a group that is badly named or more than eight.
-    ProviderModelCreate: POST "/providers/{id}/models", Permission("provider.manage"), none, json ProviderModelCreateBody, json ProviderModel, 200;
+    ProviderModelCreate: POST "/providers/{id}/models", Permission("provider.manage"), none, json ProviderModelCreateBody, json ProviderModelWriteResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Changes a model of a provider: its display name, what it can be run with, its groups, whether it may be chosen; the same refusals as when it is added.
-    ProviderModelUpdate: PATCH "/providers/{id}/models/{model_id}", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, json ProviderModelUpdateBody, json ProviderModel, 200;
+    ProviderModelUpdate: PATCH "/providers/{id}/models/{model_id}", Permission("provider.manage"), query crate::resource_facts::ResourcePauseQuery, json ProviderModelUpdateBody, json ProviderModelWriteResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Provider)], Target::PermissionObject));
     /// Removes a model from a provider.
     ProviderModelDelete: DELETE "/providers/{id}/models/{model_id}", Permission("provider.manage"), none, none, none, 204;
     /// Lists the models that discovery suggests for a provider.
     ProviderModelSuggestionList: GET "/providers/{id}/models/suggestions", Permission("provider.manage"), none, none, json Vec<ModelSuggestion>, 200;
     /// Adds the suggested models that were chosen; the speeds, the access programs and the larger context they list are put under `offered`, and none of them is enabled.
-    ProviderModelSuggestionAccept: POST "/providers/{id}/models/suggestions/accept", Permission("provider.manage"), none, json ProviderModelSuggestionAcceptBody, json ProviderModelSuggestionAcceptReply, 200;
+    ProviderModelSuggestionAccept: POST "/providers/{id}/models/suggestions/accept", Permission("provider.manage"), none, json ProviderModelSuggestionAcceptBody, json ProviderModelSuggestionAcceptResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Provider)], Target::PermissionObject),
+            Facet::response_content(&[Object(K::Provider)], Target::PermissionObject),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+        ]));
     /// Lists the agent profiles the caller may view, use or manage, or administers, of whatever org.
-    AgentList: GET "/agents", User, query AgentListQuery, none, json Vec<crate::common::Listed<Agent>>, 200;
+    AgentList: GET "/agents", User, query AgentListQuery, none, json Vec<crate::common::Listed<Agent>>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Agent)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Provider)], Target::ResolvedCollection("agent_providers")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("agent_machines")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("agent_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("agent_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("agent_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("agent_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("agent_names_threads")),
+            resource_read_context_facet(),
+        ]);
     /// Makes an agent profile in an org.
-    OrgAgentCreate: POST "/orgs/{id}/agents", Permission("settings.manage"), none, json OrgAgentCreateBody, json Agent, 200;
+    OrgAgentCreate: POST "/orgs/{id}/agents", Permission("settings.manage"), none, json OrgAgentCreateBody, json OrgAgentCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::agent_sources::CREATE_FACETS));
     /// Reads an agent profile.
-    AgentGet: GET "/agents/{id}", Rule("any permission on the agent profile"), none, none, json Agent, 200;
+    AgentGet: GET "/agents/{id}", Rule("any permission on the agent profile"), none, none, json Agent, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Agent)], Target::TypedPath { parameter: "id", kind: Object(K::Agent) }),
+            Facet::response_content(&[Object(K::Provider)], Target::ResolvedCollection("agent_providers")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("agent_machines")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("agent_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("agent_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("agent_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("agent_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("agent_names_threads")),
+            resource_read_context_facet(),
+        ]);
     /// Changes an agent profile.
-    AgentUpdate: PATCH "/agents/{id}", Permission("agent.manage"), query crate::resource_facts::ResourcePauseQuery, json AgentUpdateBody, json Agent, 200;
+    AgentUpdate: PATCH "/agents/{id}", Permission("agent.manage"), query crate::resource_facts::ResourcePauseQuery, json AgentUpdateBody, json Agent, 200,
+        operation Op::returning(Manage, &[Object(K::Agent)], Target::PermissionObject);
     /// Deletes an agent profile that no thread is bound to.
     AgentDelete: DELETE "/agents/{id}", Permission("agent.manage"), none, none, none, 204;
     /// Lists the adapters the system has, built in and external.
-    HarnessKindList: GET "/harness-kinds", User, none, none, json Vec<HarnessKindInfo>, 200;
+    HarnessKindList: GET "/harness-kinds", User, none, none, json Vec<HarnessKindInfo>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the executors the system knows, with the tool sets of each and what an environment's exec node can offer of it.
-    HarnessExecutorList: GET "/harness-executors", User, none, none, json Vec<crate::programs::ExecutorInfo>, 200;
+    HarnessExecutorList: GET "/harness-executors", User, none, none, json Vec<crate::programs::ExecutorInfo>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Registers a profile for a harness installed on a machine of the caller's.
-    MachineAgentCreate: POST "/machines/{id}/agents", Rule("machine.use; the home is the caller's domain or an org inside it"), none, json MachineAgentCreateBody, json Agent, 200;
+    MachineAgentCreate: POST "/machines/{id}/agents", Rule("machine.use; the home is the caller's domain or an org inside it"), none, json MachineAgentCreateBody, json MachineAgentCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::agent_sources::MACHINE_CREATE_FACETS));
     /// Lists the templates the caller may view, use or manage, or administers, of whatever org and of both kinds unless one is asked for.
-    TemplateList: GET "/templates", User, query TemplateListQuery, none, json Vec<crate::common::Listed<Template>>, 200;
+    TemplateList: GET "/templates", User, query TemplateListQuery, none, json Vec<crate::common::Listed<Template>>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Template)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("template_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("template_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("template_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("template_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("template_names_threads")),
+        ]);
     /// Makes a template, the caller's own.
-    TemplateCreate: POST "/templates", Rule("its home is the caller's domain or an org inside it and the members of that home may make templates there; else settings.manage on that org; a system admin when it has no home, when the driver is restricted, or for what only an admin may save"), none, json TemplateCreateBody, json Template, 200;
+    TemplateCreate: POST "/templates", Rule("its home is the caller's domain or an org inside it and the members of that home may make templates there; else settings.manage on that org; a system admin when it has no home, when the driver is restricted, or for what only an admin may save"), none, json TemplateCreateBody, json TemplateCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::template_sources::CREATE_FACETS));
     /// Proposes the spec of a template from a file a driver can read; nothing is saved.
-    TemplateImport: POST "/templates/import", Rule("as making a template for that home and driver"), none, json TemplateImportBody, json TemplateImportReply, 200;
+    TemplateImport: POST "/templates/import", Rule("as making a template for that home and driver"), none, json TemplateImportBody, json TemplateImportReply, 200,
+        operation Op::facets(&crate::template_import_sources::FACETS);
     /// Checks a configuration against the reported driver schema and unit rules without saving it.
-    TemplateCheck: POST "/templates/check", User, none, json TemplateCheckBody, json TemplateCheckReply, 200;
+    TemplateCheck: POST "/templates/check", User, none, json TemplateCheckBody, json TemplateCheckReply, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Reads a template.
-    TemplateGet: GET "/templates/{id}", Rule("any permission on the template"), none, none, json Template, 200;
+    TemplateGet: GET "/templates/{id}", Rule("any permission on the template"), none, none, json Template, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Template)], Target::TypedPath { parameter: "id", kind: Object(K::Template) }),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("template_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("template_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("template_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("template_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("template_names_threads")),
+        ]);
     /// Changes a template; running units are not affected until they are updated.
-    TemplateUpdate: PATCH "/templates/{id}", Permission("template.manage"), none, json TemplateUpdateBody, json Template, 200;
+    TemplateUpdate: PATCH "/templates/{id}", Permission("template.manage"), none, json TemplateUpdateBody, json Template, 200,
+        operation Op::returning(Manage, &[Object(K::Template)], Target::PermissionObject);
     /// Deletes a template that nothing uses.
-    TemplateDelete: DELETE "/templates/{id}", Permission("template.manage"), none, none, none, 204;
+    TemplateDelete: DELETE "/templates/{id}", Permission("template.manage"), none, none, none, 204,
+        operation Op::returning(Manage, &[Object(K::Template)], Target::TypedPath { parameter: "id", kind: Object(K::Template) });
     /// Lists the capabilities an environment can be given.
-    CapabilityList: GET "/capabilities", User, none, none, json Vec<CapabilityDef>, 200;
+    CapabilityList: GET "/capabilities", User, none, none, json Vec<CapabilityDef>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the drivers the system's hosts report, with what each declares.
-    DriverList: GET "/drivers", User, none, none, json Vec<DriverInfo>, 200;
+    DriverList: GET "/drivers", User, none, none, json Vec<DriverInfo>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Lists the MCP servers the caller may view, use or manage, or administers, of whatever org.
-    McpServerList: GET "/mcp-servers", User, query McpServerListQuery, none, json Vec<crate::common::Listed<McpServer>>, 200;
+    McpServerList: GET "/mcp-servers", User, query McpServerListQuery, none, json Vec<crate::common::Listed<McpServer>>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::McpServer)], Target::ResolvedCollection("results")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("mcp_context")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("mcp_machines")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("mcp_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("mcp_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("mcp_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("mcp_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("mcp_names_threads")),
+        ]);
     /// Makes an MCP server, the caller's own.
-    McpServerCreate: POST "/mcp-servers", Rule("its home is the caller's domain or an org inside it and the members of that home may make MCP servers there; else settings.manage on that org; a system admin when it has no home"), none, json McpServerCreateBody, json McpServer, 200;
+    McpServerCreate: POST "/mcp-servers", Rule("its home is the caller's domain or an org inside it and the members of that home may make MCP servers there; else settings.manage on that org; a system admin when it has no home"), none, json McpServerCreateBody, json McpServerCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::mcp_sources::CREATE_FACETS));
     /// Reads an MCP server.
-    McpServerGet: GET "/mcp-servers/{id}", Rule("any permission on the MCP server"), none, none, json McpServer, 200;
+    McpServerGet: GET "/mcp-servers/{id}", Rule("any permission on the MCP server"), none, none, json McpServer, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::McpServer), Object(K::Environment)], Target::Resolved("server")),
+            Facet::response_content(&[Object(K::Environment)], Target::ResolvedCollection("mcp_environment")),
+            Facet::response_content(&[Object(K::Machine)], Target::ResolvedCollection("mcp_machines")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("mcp_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("mcp_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("mcp_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("mcp_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("mcp_names_threads")),
+        ]);
     /// Changes an MCP server; of one imported from a machine only its name, description and switch change.
-    McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServer, 200;
+    McpServerUpdate: PATCH "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, json McpServerUpdateBody, json McpServerUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::mcp_sources::UPDATE_FACETS));
     /// Deletes an MCP server; one imported from a machine has that machine's connector forget its copy.
-    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204;
+    McpServerDelete: DELETE "/mcp-servers/{id}", Rule("mcp.manage; for a server of one environment's own, environment.manage on that environment"), none, none, none, 204,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Object(K::McpServer)], Target::Resolved("server_subject")),
+            Facet::required(Manage, &[Object(K::Machine)], Target::ResolvedCollection("forgotten_copies")),
+        ]);
     /// Takes the definition of an imported MCP server again from where it was found.
-    McpServerReimport: POST "/mcp-servers/{id}/reimport", Rule("mcp.manage, and what importing it needs"), none, none, json McpServer, 200;
+    McpServerReimport: POST "/mcp-servers/{id}/reimport", Rule("mcp.manage, and what importing it needs"), none, none, json McpServerImportResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::mcp_sources::IMPORT_FACETS));
     /// Uses a manager-selected native definition from a machine that reported it.
-    McpOfferingUse: POST "/mcp-servers/{id}/offerings/{machine_id}/use", Rule("mcp.manage and authority to import from the offering machine"), none, json McpOfferingUseBody, json McpServer, 200;
+    McpOfferingUse: POST "/mcp-servers/{id}/offerings/{machine_id}/use", Rule("mcp.manage and authority to import from the offering machine"), none, json McpOfferingUseBody, json McpServerImportResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::mcp_sources::IMPORT_FACETS));
     /// Lists the machines visible to the caller, with their current access facts.
-    MachineList: GET "/machines", User, none, none, json Vec<Machine>, 200;
+    MachineList: GET "/machines", User, none, none, json Vec<Machine>, 200,
+        operation Op::facets(&crate::machine_sources::LIST_FACETS);
     /// Asks for a token with which a machine enrolls, with the commands that use it.
-    MachineEnrollmentTokenCreate: POST "/machines/enrollment-tokens", User, none, json MachineEnrollmentTokenCreateBody, json EnrollmentToken, 200;
+    MachineEnrollmentTokenCreate: POST "/machines/enrollment-tokens", User, none, json MachineEnrollmentTokenCreateBody, json EnrollmentToken, 200,
+        operation Op::single(Manage, &[Object(K::Machine)], Target::CurrentAccount);
     /// Issues a token that enrolls the same machine again, preserving its page and registrations.
-    MachineEnrollmentAgainTokenCreate: POST "/machines/{id}/enrollment-tokens", Rule("machine.manage, or host.manage on its node facade"), none, none, json EnrollmentToken, 200;
+    MachineEnrollmentAgainTokenCreate: POST "/machines/{id}/enrollment-tokens", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineEnrollmentAgainResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Reads a machine.
-    MachineGet: GET "/machines/{id}", Rule("machine.view, or host.view on its node facade"), none, none, json Machine, 200;
+    MachineGet: GET "/machines/{id}", Rule("machine.view, or host.view on its node facade"), none, none, json Machine, 200,
+        operation Op::facets(&crate::machine_sources::GET_FACETS);
     /// Read installation readiness; creates no token or other resource.
-    MachineEnrollmentInfoGet: GET "/machines/enrollment-options", User, none, none, json MachineEnrollmentInfo, 200;
+    MachineEnrollmentInfoGet: GET "/machines/enrollment-options", User, none, none, json MachineEnrollmentInfo, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Reads only this person's enrollment progress using the resource's current native permissions.
-    MachineEnrollmentStatusGet: GET "/machines/enrollment-status/{receipt}", crate::routes::Access::Session, none, none, json EnrollmentProgress, 200;
+    MachineEnrollmentStatusGet: GET "/machines/enrollment-status/{receipt}", crate::routes::Access::Session, none, none, json EnrollmentProgress, 200,
+        operation Op::facets(&crate::machine_sources::ENROLLMENT_FACETS);
     /// Renames a machine.
-    MachineUpdate: PATCH "/machines/{id}", Rule("machine.manage, or host.manage on its node facade"), none, json MachineUpdateBody, json Machine, 200;
+    MachineUpdate: PATCH "/machines/{id}", Rule("machine.manage, or host.manage on its node facade"), none, json MachineUpdateBody, json MachineUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::UPDATE_FACETS));
     /// Saves delegated connector roles and reconnects after its answer is journaled.
-    MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesChange, 200;
+    MachineRolesSet: PUT "/machines/{id}/roles", Rule("machine.manage; machine.roles must be handed over and enabled"), none, json MachineRolesSetBody, json MachineRolesResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
     /// Requests a verified physical connector update, drained under its local update.auto policy.
-    MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json ComponentUpdate, 200;
+    MachineUpdateNow: POST "/machines/{id}/update", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineUpdateNowResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::AGAIN_FACETS));
     /// Requests the same verified procedure for a host's node, after its units finish their turns.
-    HostUpdateNow: POST "/hosts/{id}/update", Rule("host.manage"), none, none, json ComponentUpdate, 200;
+    HostUpdateNow: POST "/hosts/{id}/update", Rule("host.manage"), none, none, json HostUpdateNowResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Host)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Host)], Target::Path("id")),
+        ]));
     /// Withdraws a machine's registration and drops its session at once.
-    MachineRevoke: POST "/machines/{id}/revoke", Rule("machine.manage, or host.manage on its node facade"), none, none, json Machine, 200;
+    MachineRevoke: POST "/machines/{id}/revoke", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineRevokeResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::REVOKE_FACETS));
     /// Registers a provider whose runtime is the machine: the login its harness has there, or an API whose key is set there.
-    MachineProviderCreate: POST "/machines/{id}/providers", Rule("machine.use; the home is the caller's domain or an org inside it"), none, json MachineProviderCreateBody, json Provider, 200;
+    MachineProviderCreate: POST "/machines/{id}/providers", Rule("machine.use; the home is the caller's domain or an org inside it"), none, json MachineProviderCreateBody, json MachineProviderCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Machine)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Provider)], Target::Resolved("home")),
+            Facet::response_content(&[Object(K::Provider)], Target::Resolved("created_provider")),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("provider_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("provider_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("provider_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("provider_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("provider_names_threads")),
+        ]));
     /// Asks the machine for its facts again.
-    MachineProbe: POST "/machines/{id}/probe", Rule("machine.manage, or host.manage on its node facade"), none, none, json Machine, 200;
+    MachineProbe: POST "/machines/{id}/probe", Rule("machine.manage, or host.manage on its node facade"), none, none, json MachineProbeResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::UPDATE_FACETS));
     /// Reads the local policy of a machine as it last reported it.
-    MachinePolicyGet: GET "/machines/{id}/policy", Rule("machine.view, or host.view on its host page; managers of hosted environments/providers read their binding sections without machine management"), none, none, json MachinePolicy, 200;
+    MachinePolicyGet: GET "/machines/{id}/policy", Rule("machine.view, or host.view on its host page; managers of hosted environments/providers read their binding sections without machine management"), none, none, json MachinePolicy, 200,
+        operation Op::single(Read, &[Object(K::Machine)], Target::Path("id"));
     /// Changes keys of a machine's local policy that its owner handed over, key by key; nothing changes if any is refused.
-    MachinePolicyUpdate: PATCH "/machines/{id}/policy", Rule("machine.manage, or host.manage on its host page; only keys handed to Orch, with every explicit local value enforced"), none, json MachinePolicyUpdateBody, json MachinePolicy, 200;
+    MachinePolicyUpdate: PATCH "/machines/{id}/policy", Rule("machine.manage, or host.manage on its host page; only keys handed to Orch, with every explicit local value enforced"), none, json MachinePolicyUpdateBody, json MachinePolicyResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
     /// The executors this machine can offer, with their tool sets: those of the connector's release, which carries
     /// the registry's executors, and the executor plugins the machine reported. The policy screen offers these and no
     /// others for `exec.offers`.
-    MachineExecutorList: GET "/machines/{id}/executors", Rule("machine.view or host.view"), none, none, json Vec<crate::programs::MachineExecutor>, 200;
+    MachineExecutorList: GET "/machines/{id}/executors", Rule("machine.view or host.view"), none, none, json Vec<crate::programs::MachineExecutor>, 200,
+        operation Op::single(Read, &[Object(K::Machine)], Target::Path("id"));
     /// The latest program registry reported by this machine; no command or idle polling.
-    MachineProgramsGet: GET "/machines/{id}/programs", Rule("machine.view or host.view"), none, none, json MachinePrograms, 200;
+    MachineProgramsGet: GET "/machines/{id}/programs", Rule("machine.view or host.view"), none, none, json MachinePrograms, 200,
+        operation Op::single(Read, &[Object(K::Machine)], Target::Path("id"));
     /// Registers, tests, removes or reloads a program through the same native registry.
-    MachineProgramsChange: POST "/machines/{id}/programs", Rule("machine.manage or host.manage; remote registration also requires its delegated local policy key"), none, json MachineProgramsCommand, json MachinePrograms, 200;
+    MachineProgramsChange: POST "/machines/{id}/programs", Rule("machine.manage or host.manage; remote registration also requires its delegated local policy key"), none, json MachineProgramsCommand, json crate::machine_programs::MachineProgramsResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::machine_sources::ACK_FACETS));
     /// Lists the hosts the caller may view, use or manage, or administers, of whatever org.
-    HostList: GET "/hosts", User, query HostListQuery, none, json Vec<crate::common::Listed<Host>>, 200;
+    HostList: GET "/hosts", User, query HostListQuery, none, json Vec<crate::common::Listed<Host>>, 200,
+        operation Op::facets(&crate::resource_reads::HOST.facets::<7>(Target::ResolvedCollection("results")));
     /// Asks for a token with which a host enrolls.
-    HostEnrollmentTokenCreate: POST "/hosts/enrollment-tokens", Rule("its home is the caller's domain or an org inside it and the members of that home may add hosts there; else settings.manage on that org; a system admin when it has no home"), none, json HostEnrollmentTokenCreateBody, json EnrollmentToken, 200;
+    HostEnrollmentTokenCreate: POST "/hosts/enrollment-tokens", Rule("its home is the caller's domain or an org inside it and the members of that home may add hosts there; else settings.manage on that org; a system admin when it has no home"), none, json HostEnrollmentTokenCreateBody, json EnrollmentToken, 200,
+        operation Op::receipt(&Op::single(Manage, &[Object(K::Host)], Target::Resolved("home")));
     /// Reads a host.
-    HostGet: GET "/hosts/{id}", Rule("any permission on the host"), none, none, json Host, 200;
+    HostGet: GET "/hosts/{id}", Rule("any permission on the host"), none, none, json Host, 200,
+        operation Op::facets(&crate::resource_reads::HOST.facets::<7>(Target::Path("id")));
     /// Changes a host.
-    HostUpdate: PATCH "/hosts/{id}", Permission("host.manage"), none, json HostUpdateBody, json Host, 200;
+    HostUpdate: PATCH "/hosts/{id}", Permission("host.manage"), none, json HostUpdateBody, json Host, 200,
+        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Lists everything that runs on a host, whoever's it is.
     HostRuntimeList: GET "/hosts/{id}/runtimes", Permission("host.manage"), query HostRuntimeListQuery, none, json Vec<Runtime>, 200;
     /// Reads a host's load over time: CPU, memory used, disk used and free.
     HostMetricsList: GET "/hosts/{id}/metrics", Permission("host.manage"), query HostMetricsListQuery, none, json Vec<MetricSeries>, 200;
     /// Stops a runtime of a host.
-    HostRuntimeStop: POST "/hosts/{id}/runtimes/{runtime_id}/stop", Permission("host.manage"), none, json HostRuntimeStopBody, json Runtime, 200;
+    HostRuntimeStop: POST "/hosts/{id}/runtimes/{runtime_id}/stop", Permission("host.manage"), none, json HostRuntimeStopBody, json Runtime, 200,
+        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Schedules removal of the exact environment or provider unit, with its owned volumes if asked.
     /// A provider survives; its next turn creates a new unit. Running work prevents acceptance.
     HostRuntimeDelete: DELETE "/hosts/{id}/runtimes/{runtime_id}", Permission("host.manage"), query HostRuntimeDeleteQuery, none, none, 204;
     /// Stops the idle environments on a host, or only lists them.
-    HostRecycle: POST "/hosts/{id}/recycle", Permission("host.manage"), none, json RecycleBody, json RecycleReply, 200;
+    HostRecycle: POST "/hosts/{id}/recycle", Permission("host.manage"), none, json RecycleBody, json RecycleReply, 200,
+        operation Op::returning(Manage, &[Object(K::Host)], Target::PermissionObject);
     /// Removes a host that nothing runs on and no mount has a volume on; its machine is revoked.
     HostDelete: DELETE "/hosts/{id}", Permission("host.manage"), query HostDeleteQuery, none, none, 204;
 }
@@ -3022,6 +4153,7 @@ mod tests {
     fn provider() -> Value {
         merged(&[
             json!({
+                "origin_machine": null, "availability": [],
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a12", "name": "Team Pro", "kind": "subscription",
                 "harness_kind": "codex", "harness": { "kind": "codex", "name": "Codex" }, "address": "acme.research.alice.team-pro",
                 "placement": "managed", "status": "ready",
@@ -3473,6 +4605,7 @@ mod tests {
     #[test]
     fn what_a_transfer_answers_with_is_the_resource_itself() {
         let template = json!({
+            "origin_machine": null, "availability": [],
             "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a17", "name": "Ubuntu", "description": "",
             "org_id": null, "owner": null, "home": null, "address": "system.ubuntu",
             "kind": "environment", "driver": "docker", "spec": {}, "units": 3, "enabled": true,

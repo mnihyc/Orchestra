@@ -339,6 +339,9 @@ impl AdapterError {
 pub struct AgentStart {
     /// The provider whose harness process this is.
     pub provider_id: Id,
+    /// The account's reported kind, without any credential material. Absent on older callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_kind: Option<crate::descriptor::ProviderKind>,
     /// The agent profile.
     pub agent_id: Id,
     /// The harness kind.
@@ -591,6 +594,12 @@ pub trait AgentAdapter: Send + 'static {
     /// The harness kind it drives, such as `codex`.
     fn kind(&self) -> &'static str;
 
+    /// The retained output cache, whose files are named by their content hash. The host snapshots
+    /// this after start and uploads referenced files before publishing their item events.
+    fn output_directory(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
     /// The manifest of the program this adapter drives, for an adapter that is not part of Orch: the program says
     /// what it is in the `hello` of its plugin, and the system lists it and checks its builds like any other's. An
     /// adapter that is part of Orch has its manifest in the registry of the programs it ships and answers none.
@@ -619,6 +628,16 @@ pub trait AgentAdapter: Send + 'static {
     ) -> Result<(), String> {
         let _ = evidence;
         Ok(())
+    }
+
+    /// Adapter-owned structural validation of staged native classifier evidence. This does not
+    /// alter decisions or provide model/provider authorization.
+    fn verify_native_classifier(
+        &self,
+        evidence: &crate::conformance::NativeClassifierEvidence<'_>,
+    ) -> Result<(), String> {
+        let _ = evidence;
+        Err("this adapter has no staged-classifier evidence validator".to_owned())
     }
 
     /// Starts the harness or attaches to a running one. Idempotent.
@@ -967,6 +986,40 @@ mod tests {
     use futures::executor::block_on;
     use serde_json::json;
 
+    #[test]
+    fn startup_account_kind_is_optional_and_has_no_credential_payload()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let old = json!({
+            "provider_id":id(1), "agent_id":id(2), "harness_kind":"fixture",
+            "profile":serde_json::to_value(AgentProfile::default())?, "home":null,
+            "provider_config":{}, "binary":null,
+            "loopback":serde_json::to_value(crate::loopback::Loopback::new(41701,
+                orch_plugin_contract::Secret::new("fixture-existing-loopback-token".to_owned())))?
+        });
+        let mut decoded: AgentStart = serde_json::from_value(old.clone())?;
+        assert!(decoded.provider_kind.is_none());
+        assert_eq!(
+            serde_json::to_value(&decoded)?,
+            old,
+            "old caller wire shape stays unchanged"
+        );
+        decoded.provider_kind = Some(crate::descriptor::ProviderKind::Api);
+        let new = serde_json::to_value(&decoded)?;
+        assert_eq!(new["provider_kind"], "api");
+        let read: AgentStart = serde_json::from_value(new.clone())?;
+        assert_eq!(read.provider_kind, decoded.provider_kind);
+        #[derive(serde::Deserialize)]
+        struct EarlierAdapter {
+            provider_id: Id,
+        }
+        let earlier: EarlierAdapter = serde_json::from_value(new)?;
+        assert_eq!(
+            earlier.provider_id, decoded.provider_id,
+            "an unaware adapter ignores the optional fact"
+        );
+        Ok(())
+    }
+
     /// The least an adapter does: it implements the six methods that every adapter has.
     struct Minimal;
 
@@ -1059,6 +1112,8 @@ mod tests {
         );
         assert_eq!(adapter.kind(), "minimal");
         let turn = TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: id(1),
             turn_id: id(2),

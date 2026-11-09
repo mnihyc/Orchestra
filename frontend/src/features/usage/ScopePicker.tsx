@@ -18,7 +18,7 @@ export interface ScopePickerProps {
 export function ScopePicker({ scope, name, onChange, kinds = ['org', 'project'], mineLabel, placeholder, nothing }: ScopePickerProps) {
   const { t } = useTranslation();
   return <div className="w-[min(100%,16rem)] min-w-0 max-w-full">
-    <NamePicker label={t('usage.scope.label')} kinds={kinds}
+    <NamePicker pickerKey="usage.ScopePicker.usage.scope.label" label={t('usage.scope.label')} kinds={kinds}
       chosen={scope.kind === 'me' ? null : name ?? t('common.loading')}
       anything={mineLabel ?? t('usage.scope.me.name')} placeholder={placeholder ?? t('usage.scope.search')} nothing={nothing ?? t('usage.scope.empty')}
       onChoose={(hit) => onChange(hit === null ? 'me' : `${hit.kind === 'host' ? 'host' : 'node'}:${hit.id}`)} />

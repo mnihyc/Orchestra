@@ -46,7 +46,8 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 
 /// How long an ordinary call waits, leaving ten seconds before the harness's deadline.
-pub const RESULT_WAIT: Duration = Duration::from_secs(50);
+pub const RESULT_WAIT: Duration =
+    Duration::from_secs(orch_agent_contract::loopback::ORCH_TOOL_RESULT_WAIT_SECONDS);
 
 /// How much longer than an ordinary call `open_port` waits: 70 s where the ordinary wait is 50, so that the
 /// system's sixty seconds for a person's decision answer within it, ten seconds before the harness's deadline of
@@ -144,8 +145,16 @@ const PARSE_ERROR: i64 = -32700;
 /// The definitions of the tools, as the system declares them.
 fn listing() -> &'static [Json] {
     static LISTING: OnceLock<Vec<Json>> = OnceLock::new();
-    LISTING
-        .get_or_init(|| serde_json::from_str(include_str!("orch_tools.json")).unwrap_or_default())
+    LISTING.get_or_init(|| {
+        let mut definitions: Vec<Json> =
+            serde_json::from_str(include_str!("orch_tools.json")).unwrap_or_default();
+        definitions.extend(
+            orch_agent_contract::read_tools::definitions()
+                .into_iter()
+                .map(|definition| definition.to_mcp()),
+        );
+        definitions
+    })
 }
 
 /// The definitions of these tools, with the descriptions a place set in place of the shipped ones, in the order
@@ -164,6 +173,17 @@ pub fn definitions_with(
                 .and_then(|name| descriptions.get(name))
             {
                 definition["description"] = Json::String(supplied(own));
+                if definition["name"]
+                    .as_str()
+                    .and_then(orch_agent_contract::events::OrchTool::parse)
+                    .is_some_and(orch_agent_contract::events::OrchTool::is_owner_read)
+                    && let Some(description) = definition["description"].as_str()
+                {
+                    definition["description"] = Json::String(format!(
+                        "{description} {}",
+                        orch_agent_contract::read_tools::OWNER_CONDITION
+                    ));
+                }
             }
             definition
         })
@@ -1031,6 +1051,24 @@ fn bounded_error(code: &str, message: &str, budget: usize) -> String {
 fn result_of_at(tool: &str, arguments: &Json, outcome: Result<Json, ToolError>, now: Time) -> Json {
     match outcome {
         Ok(value) => {
+            if orch_agent_contract::events::OrchTool::parse(tool).is_some_and(|tool| {
+                tool.is_owner_read() || tool == orch_agent_contract::events::OrchTool::OrchDocs
+            }) {
+                return match orch_agent_contract::tool_answers::bounded(tool, arguments, &value) {
+                    Ok(shown) => {
+                        json!({"content":[{"type":"text","text":shown.to_string()}],"isError":false})
+                    }
+                    Err(message) => result_of_at(
+                        tool,
+                        arguments,
+                        Err(ToolError {
+                            code: "too_large".into(),
+                            message: message.into(),
+                        }),
+                        now,
+                    ),
+                };
+            }
             if matches!(tool, "read_shared" | "list_shared" | "search_shared") {
                 let budget = arguments["max_bytes"]
                     .as_u64()
@@ -1242,6 +1280,10 @@ impl OrchEndpoint {
                     segment_id: session.segment_id,
                 },
                 Event::OrchToolCall(OrchToolCall {
+                    deadline: Some(Time::new(
+                        self.hosting.services().clock.now()
+                            + chrono::Duration::from_std(wait).unwrap_or_default(),
+                    )),
                     turn_id: source.turn_id,
                     call_ref: call_ref.clone(),
                     attempt: Some(orch_types::new_id()),
@@ -1268,7 +1310,17 @@ impl OrchEndpoint {
 fn unreachable_error(tool: &str) -> ToolError {
     ToolError {
         code: "unavailable".to_owned(),
-        message: if matches!(tool, "list_shared" | "read_shared" | "search_shared") {
+        message: if matches!(
+            tool,
+            "list_shared"
+                | "read_shared"
+                | "search_shared"
+                | "orch_docs"
+                | "open"
+                | "search"
+                | "find_operation"
+                | "read"
+        ) {
             UNREACHABLE
         } else {
             TIMEOUT_CHANGE
@@ -1727,8 +1779,8 @@ mod tests {
             );
             assert_eq!(
                 tool["annotations"]["openWorldHint"],
-                name == orch_agent_contract::events::OrchTool::UseBrowser.name(),
-                "only the browser tool reaches the open web: {name}"
+                matches!(name, "use_browser" | "web_search" | "web_fetch"),
+                "browser and managed web tools reach the open web: {name}"
             );
             assert!(tool["annotations"]["readOnlyHint"].is_boolean(), "{name}");
         }

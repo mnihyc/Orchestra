@@ -18,6 +18,10 @@ import type { AdminMode, Chat, Me } from '@/generated/api-types';
 import type { ChatListFilter } from '@/api/chats';
 import { i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
+import { CloseViews, useViewSaveGuard } from '@/features/workbench/CloseViews';
+import { useWorkbench } from '@/features/workbench/store';
+import { useCapturedAction } from '@/features/workbench/lossActions';
+import { makeGroup } from '@/features/workbench/layout';
 
 const calls = vi.hoisted(() => ({
   read: vi.fn<() => Promise<AdminMode>>(),
@@ -49,6 +53,12 @@ let cache: QueryClient;
 let state: AdminMode;
 const ADMIN_MODE_NAME = /^As admin: (Off|On)$/;
 const before = client.session.getState();
+const beforeWorkbench = useWorkbench.getState();
+const dirtyTab = 'dirty-admin-page';
+function DirtyView({ save, discard }: { save: () => Promise<boolean>; discard: () => void }) {
+  useViewSaveGuard(dirtyTab, { save, discard });
+  return <p>Unsaved private text</p>;
+}
 function draw(children: ReactNode) {
   const clientForView = cache;
   const Surround = ({ children: content }: { children: ReactNode }) => <QueryClientProvider client={clientForView}><TooltipProvider>{content}</TooltipProvider></QueryClientProvider>;
@@ -74,8 +84,69 @@ beforeEach(async () => {
 });
 afterEach(() => {
   cache.clear();
+  useCapturedAction.setState({ action: null });
+  useWorkbench.setState(beforeWorkbench);
   act(() => { client.session.setState(before); });
 });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it('explains the pending admin switch in '+locale, async () => {
+    await setLocale(locale);
+    let finish: () => void = () => { throw new Error('The mode write has not started'); };
+    const waiting = new Promise<void>((resolve) => { finish = resolve; });
+    calls.write.mockImplementationOnce(async (enabled) => {
+      await waiting; state = { ...state, as_admin: enabled };
+      await applyChanges([{ session: true, mode: { ...state } }], cache); return { ...state };
+    });
+    const user = userEvent.setup(); draw(<AdminModeControl />);
+    const control = await screen.findByRole('switch');
+    await user.click(control);
+    try {
+      expect(control).toHaveAttribute('aria-disabled', 'true');
+      await user.unhover(control);
+      act(() => { control.blur(); control.focus(); });
+      expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('ui.unavailable.modeChanging'));
+      expect(calls.write).toHaveBeenCalledExactlyOnceWith(true);
+    } finally { await act(async () => { finish(); await waiting; }); }
+  });
+
+  it('asks about unsaved work before leaving admin mode and keeps it on Cancel in '+locale, async () => {
+    await setLocale(locale); state = { available: true, as_admin: true };
+    useWorkbench.setState({ layout: { ...beforeWorkbench.layout, main: makeGroup([{ id: dirtyTab, view: 'page', of: { href: '/admin/overview' } }]) }, unsaved: new Set([dirtyTab]) });
+    const save = vi.fn<() => Promise<boolean>>(), discard = vi.fn(), user = userEvent.setup();
+    draw(<><AdminModeControl /><DirtyView save={save} discard={discard} /><CloseViews /></>);
+    await user.click(await screen.findByRole('switch', { name: i18n.t('adminReach.mode.label', { state: i18n.t('adminReach.mode.stateOn') }) }));
+    const dialog = screen.getByRole('dialog', { name: i18n.t('workbench.workspace.saveContinue') });
+    expect(calls.write).not.toHaveBeenCalled();
+    expect(screen.getByRole('switch', { hidden: true })).toBeChecked();
+    await user.click(within(dialog).getByRole('button', { name: i18n.t('common.cancel') }));
+    expect(calls.write).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled(); expect(discard).not.toHaveBeenCalled();
+    expect(screen.getByText('Unsaved private text')).toBeVisible(); expect(screen.getByRole('switch')).toBeChecked();
+  });
+
+  it.each(['save', 'discard', 'failed save'] as const)('resolves the %s before the mode write in '+locale, async (decision) => {
+    await setLocale(locale); state = { available: true, as_admin: true };
+    useWorkbench.setState({ layout: { ...beforeWorkbench.layout, main: makeGroup([{ id: dirtyTab, view: 'page', of: { href: '/admin/overview' } }]) }, unsaved: new Set([dirtyTab]) });
+    const save = vi.fn(async () => {
+      expect(calls.write).not.toHaveBeenCalled();
+      if (decision === 'failed save') return false;
+      useWorkbench.getState().setUnsaved(dirtyTab, false); return true;
+    });
+    const discard = vi.fn(() => { expect(calls.write).not.toHaveBeenCalled(); useWorkbench.getState().setUnsaved(dirtyTab, false); });
+    const user = userEvent.setup();
+    draw(<><AdminModeControl /><DirtyView save={save} discard={discard} /><CloseViews /></>);
+    await user.click(await screen.findByRole('switch'));
+    const dialog = screen.getByRole('dialog', { name: i18n.t('workbench.workspace.saveContinue') });
+    await user.click(within(dialog).getByRole('button', { name: i18n.t(decision === 'discard' ? 'workbench.workspace.discard' : 'workbench.workspace.saveAll') }));
+    if (decision === 'failed save') {
+      await waitFor(() => expect(save).toHaveBeenCalledOnce());
+      expect(calls.write).not.toHaveBeenCalled(); expect(screen.getByRole('switch', { hidden: true })).toBeChecked(); expect(dialog).toBeVisible();
+    } else {
+      await waitFor(() => expect(calls.write).toHaveBeenCalledExactlyOnceWith(false));
+      expect(decision === 'discard' ? discard : save).toHaveBeenCalledOnce();
+    }
+  });
+}
 
 describe('the one human-session admin mode', () => {
   it('is absent when the server says this person administers nothing', async () => {

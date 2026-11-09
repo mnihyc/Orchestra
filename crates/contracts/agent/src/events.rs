@@ -40,11 +40,21 @@ pub const FILE_SEARCH_MAX_MATCHES: u32 = 200;
 pub mod turn_error {
     /// The provider's usage limit is reached; the provider also becomes `exhausted`.
     pub const PROVIDER_EXHAUSTED: &str = "provider_exhausted";
+    /// A native image operation reached its allowance without ending the text turn.
+    pub const IMAGE_GENERATION_LIMIT: &str = "image_generation_limit";
+    /// A native image operation failed without ending the text turn.
+    pub const IMAGE_GENERATION_FAILED: &str = "image_generation_failed";
     /// The upstream refused the credential; the provider becomes `error`.
     pub const PROVIDER_UNAUTHORIZED: &str = "provider_unauthorized";
     /// What passes: throttling that is not the plan's, an overloaded vendor, a vendor that failed. The
     /// provider keeps its state and the thread is not blocked.
     pub const PROVIDER_BUSY: &str = "provider_busy";
+    /// The upstream refused a request because its rate limit was reached.
+    pub const RATE_LIMITED: &str = "rate_limited";
+    /// The upstream has no serving capacity.
+    pub const OVERLOADED: &str = "overloaded";
+    /// A response failed after output had started.
+    pub const STREAM_INTERRUPTED: &str = "stream_interrupted";
     /// What passes: a request that timed out, a connection that dropped or was refused, a certificate the
     /// runtime does not trust. The provider keeps its state and the thread is not blocked.
     pub const PROVIDER_UNREACHABLE: &str = "provider_unreachable";
@@ -68,6 +78,8 @@ pub mod turn_error {
     pub const CAP_REACHED: &str = "cap_reached";
     /// Not a failure: the harness ran the turn on another model than the one chosen, and the turn says so.
     pub const MODEL_REROUTED: &str = "model_rerouted";
+    /// An observed native setting differs from the value Orch requested; this does not end the turn.
+    pub const HARNESS_DIVERGED: &str = "harness_diverged";
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -109,9 +121,17 @@ pub enum FileChangeKind {
     Rename,
 }
 
+/// Complete file-tool images use the same neutral type as restore planning.
+pub use orch_api_contract::source::FileChangeImage;
+
 /// The change of one file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FileChange {
+    /// Complete harness-provided material, kept in the private recorded change, not the displayed diff.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<FileChangeImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<FileChangeImage>,
     /// The file's path.
     pub path: String,
     /// What was done to it.
@@ -207,6 +227,29 @@ pub struct WebSearchResult {
     pub url: String,
 }
 
+/// The reported action of a web tool; old search rows may omit it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WebAction {
+    /// Search for pages.
+    Search,
+    /// Open a page, with its address only where reported.
+    OpenPage {
+        /// The page's address.
+        url: Option<String>,
+    },
+    /// Look for text within a page.
+    FindInPage {
+        /// The page's address.
+        url: Option<String>,
+        /// The text sought.
+        pattern: Option<String>,
+    },
+    /// A future or otherwise unspecified web action; its raw source remains available.
+    #[serde(other)]
+    Other,
+}
+
 /// Where a sub-agent stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -226,6 +269,16 @@ pub enum SubagentState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OrchTool {
+    /// Searches the bundled user help in both languages.
+    OrchDocs,
+    /// Opens a permitted Orch reference using the sole viewer owner's read access.
+    Open,
+    /// Searches the current root using the sole viewer owner's read access.
+    Search,
+    /// Finds derived read-only operation selections.
+    FindOperation,
+    /// Runs a derived read-only operation using the sole viewer owner's access.
+    Read,
     /// Lists what was shared with the agent.
     ListShared,
     /// Reads something that was shared.
@@ -236,7 +289,8 @@ pub enum OrchTool {
     DownloadShared,
     /// Makes or changes a document.
     EditDocument,
-    /// Organizes documents and folders; only deletion requires a preview and confirmation.
+    /// Organizes documents and folders: create, copy, move and restore execute directly;
+    /// document deletion and thread/chat management require a preview and confirmation.
     ManageShared,
     /// Posts to people in a chat or queues a note to another thread's agent, according to its typed target.
     SendMessage,
@@ -262,6 +316,14 @@ pub enum OrchTool {
     ListPortConnections,
     /// Reads the thread's goal, and reports where the agent stands on it; given only to a thread that has one.
     Goal,
+    /// Creates, lists or cancels managed future inputs on this thread, only when enabled.
+    Schedule,
+    /// Searches the public web through an explicitly selected paid service.
+    WebSearch,
+    /// Reads a public page through an explicitly selected paid service.
+    WebFetch,
+    /// Produces images through the explicitly selected image service and delivers their files.
+    ImageGeneration,
 }
 
 impl OrchTool {
@@ -283,12 +345,26 @@ impl OrchTool {
         Self::ClosePort,
         Self::ListPortConnections,
         Self::Goal,
+        Self::Schedule,
+        Self::WebSearch,
+        Self::WebFetch,
+        Self::ImageGeneration,
+        Self::OrchDocs,
+        Self::Open,
+        Self::Search,
+        Self::FindOperation,
+        Self::Read,
     ];
 
     /// The tool's name as the server lists it.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::OrchDocs => "orch_docs",
+            Self::Open => "open",
+            Self::Search => "search",
+            Self::FindOperation => "find_operation",
+            Self::Read => "read",
             Self::ListShared => "list_shared",
             Self::ReadShared => "read_shared",
             Self::SearchShared => "search_shared",
@@ -307,6 +383,10 @@ impl OrchTool {
             Self::ClosePort => "close_port",
             Self::ListPortConnections => "list_port_connections",
             Self::Goal => "goal",
+            Self::Schedule => "schedule",
+            Self::WebSearch => "web_search",
+            Self::WebFetch => "web_fetch",
+            Self::ImageGeneration => "image_generation",
         }
     }
 
@@ -319,6 +399,15 @@ impl OrchTool {
             "send_thread_message" => Some(Self::SendThreadMessage),
             _ => Self::ALL.iter().copied().find(|tool| tool.name() == name),
         }
+    }
+
+    /// Personal reads are a separate, explicitly enabled owner delegation.
+    #[must_use]
+    pub const fn is_owner_read(self) -> bool {
+        matches!(
+            self,
+            Self::Open | Self::Search | Self::FindOperation | Self::Read
+        )
     }
 }
 
@@ -393,6 +482,9 @@ pub enum ToolPayload {
     },
     /// A search of the web.
     WebSearch {
+        /// The reported operation, absent on legacy search rows.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<WebAction>,
         /// What was searched for.
         query: String,
         /// What was found.
@@ -576,9 +668,52 @@ pub struct ToolCallPayload {
     pub raw: RawCall,
 }
 
+impl ToolCallPayload {
+    /// Only declared retained byte references, never hashes inside opaque tool input or results.
+    pub fn output_blobs(&self) -> impl Iterator<Item = Hash> {
+        let content = match &self.tool {
+            ToolPayload::Image { blob, .. } => Some(*blob),
+            ToolPayload::Command { output, .. } => output.blob,
+            ToolPayload::FileRead { content, .. } | ToolPayload::WebFetch { content, .. } => {
+                content.blob
+            }
+            _ => None,
+        };
+        let changes = match &self.tool {
+            ToolPayload::FileChange { changes } => changes.as_slice(),
+            _ => &[],
+        };
+        [
+            self.raw.input.blob,
+            self.raw.output.as_ref().and_then(|output| output.blob),
+            content,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            changes
+                .iter()
+                .flat_map(|change| [&change.before, &change.after])
+                .filter_map(|image| match image {
+                    Some(FileChangeImage::Blob { blob, .. }) => Some(*blob),
+                    _ => None,
+                }),
+        )
+    }
+}
+
 /// An error that happened in the harness's work.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ErrorPayload {
+    /// Safe structured native facts supplied with a diagnostic, separate from its sentence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Json>,
+    /// The allowance identifier reported for this operation, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    /// When that allowance resets; absent when the program supplies no time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<Time>,
     /// A code; the ones of [`turn_error`] where they apply.
     pub code: String,
     /// What happened, in a sentence.
@@ -587,10 +722,15 @@ pub struct ErrorPayload {
     pub retryable: bool,
 }
 
+/// Shared safe native observations exposed through the neutral adapter contract.
+pub use orch_api_contract::threads::MarkerHarnessChanged;
+
 /// A factual line emitted by the harness adapter, without changing the model's input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "marker", content = "data", rename_all = "snake_case")]
 pub enum MarkerPayload {
+    /// A safe observed program setting/state, using the same history marker contract.
+    HarnessChanged(Box<orch_api_contract::threads::MarkerHarnessChanged>),
     /// The resumed session keeps its original instructions until a new session is made.
     InstructionsDeferred {
         /// The program that keeps the original instructions.
@@ -1068,6 +1208,8 @@ pub enum TurnPhaseKind {
     Working,
     /// Shortening its own conversation to make room.
     Compacting,
+    /// The harness is retrying its model call.
+    Retrying,
 }
 
 /// A running turn starts to shorten its own conversation, or goes on.
@@ -1077,6 +1219,9 @@ pub struct TurnPhase {
     pub turn_id: Id,
     /// What it does now.
     pub kind: TurnPhaseKind,
+    /// The native one-based retry number, when reported; absent outside a retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<i64>,
     /// Since when.
     pub at: Time,
 }
@@ -1225,6 +1370,9 @@ impl TurnError {
     #[must_use]
     pub fn cut_short(mut self, incomplete: bool) -> Self {
         self.incomplete = incomplete;
+        if incomplete && self.code == turn_error::PROVIDER_UNREACHABLE {
+            self.code = turn_error::STREAM_INTERRUPTED.to_owned();
+        }
         self
     }
 }
@@ -1260,6 +1408,9 @@ pub struct OrchToolCall {
     /// One transport attempt at the same logical call; replaying the event preserves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<Id>,
+    /// The actual proxy reply deadline; it narrows this transport attempt and grants no authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<Time>,
     /// The tool's name as the server lists it ([`OrchTool::name`]).
     pub tool: String,
     /// What it was called with.
@@ -1299,6 +1450,9 @@ pub enum SessionEvent {
     /// The session is gone.
     #[serde(rename = "session.lost")]
     SessionLost(SessionLost),
+    /// Owned task state and an optional native continuation awaiting admission.
+    #[serde(rename = "session.background_tasks")]
+    BackgroundTasks(crate::background::BackgroundTasks),
     /// A turn began.
     #[serde(rename = "turn.started")]
     TurnStarted(TurnStarted),
@@ -1344,11 +1498,12 @@ pub enum SessionEvent {
 }
 
 /// The kinds of a session event, as they are written.
-pub const SESSION_EVENT_KINDS: [&str; 18] = [
+pub const SESSION_EVENT_KINDS: [&str; 19] = [
     "session.opened",
     "session.instructions",
     "session.title",
     "session.lost",
+    "session.background_tasks",
     "turn.started",
     "item.started",
     "item.delta",
@@ -1374,6 +1529,7 @@ impl SessionEvent {
             Self::InstructionSources(_) => "session.instructions",
             Self::SessionTitle(_) => "session.title",
             Self::SessionLost(_) => "session.lost",
+            Self::BackgroundTasks(_) => "session.background_tasks",
             Self::TurnStarted(_) => "turn.started",
             Self::ItemStarted(_) => "item.started",
             Self::ItemDelta(_) => "item.delta",
@@ -1418,6 +1574,7 @@ mod tests {
             json!({ "kind": "session.instructions", "body": { "sources": [] } }),
             json!({ "kind": "session.title", "body": { "title": "Fix the login redirect" } }),
             json!({ "kind": "session.lost", "body": { "reason": "the harness process exited" } }),
+            json!({ "kind": "session.background_tasks", "body": { "self_waking": true, "tasks": [], "native_wake": null } }),
             json!({ "kind": "turn.started", "body": { "turn_id": id(1), "native_turn_ref": "turn_9" } }),
             json!({ "kind": "item.started", "body": {
                 "turn_id": id(1), "native_ref": "item_3", "stream": "main", "kind": "agent_message",

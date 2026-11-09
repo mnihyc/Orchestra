@@ -93,7 +93,9 @@ describe('the complete shipped help', () => {
     expect(checkHelpContent({ ...content, routes: content.routes.filter((route) => route.replace(/\/$/, '') !== '/resources/machines') })).toContain('screen.missing: connect-a-computer:/resources/machines');
   });
   it('fails when a current registry key lacks its Chinese title or description', () => {
-    expect(checkHelpContent({ ...content, catalogues: [content.catalogues[0], {}] })).toContain('text.missing: 1:settingRegistry.agent.params.description');
+    const failures = checkHelpContent({ ...content, catalogues: [content.catalogues[0], {}] });
+    expect(failures).toContain('text.missing: 1:settingRegistry.agent.params.description');
+    expect(failures).toContain('text.missing: 1:settingRegistry.ask.max_tools.description');
   });
   it('requires the authored file headings in both languages and their screen hints', () => {
     const file = content.guide.articles.find((article) => article.id === FILE_GUIDE.id);

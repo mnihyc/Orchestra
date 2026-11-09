@@ -246,6 +246,7 @@ pub async fn send(
         .say(
             thread,
             Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: turn,
                 call_ref: call_ref.into(),
                 attempt: None,

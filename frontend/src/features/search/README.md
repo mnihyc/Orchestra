@@ -10,7 +10,8 @@ tabs beside the current conversation through the same authorized readers. Covere
 and private/deleted content, and authored component and browser cases of stepping, paging, highlights and draft/focus preservation.
 
 Active filters show their current values and can be removed above the results. The device remembers
-the filter groups, category, sort and filters without the query text; an explicit address wins.
+the filter groups, category, sort and filters without the query text or org choice; an explicit address wins.
+A fresh page and rail search use the selected root org. `org=<uuid>` and `org=all` are address state; `scope` remains a narrower place. Place names stay within that root, contradictory root/node links are refused without widening, and native scope still decides every readable result. All-org cards use actual root facts and shared chips, grouping only multiple answering roots. An empty-state count is a bounded stream receipt, qualified with + when a cursor or unavailable source leaves more unknown.
 The full-width result's primary body remains a
 real link. Attribution lives outside that link so agent controls are not nested in a link, and a
 small named icon in its header retains Open to the side without a label under every card. Normal,
@@ -48,3 +49,6 @@ Search streams both sources over one request and presents only the server's reci
 once the first screen is read; active cards and focus hold pending reorderings. First Show more reveals received
 rows and later presses resume the server cursor. Component tests cover independent arrivals, source failures,
 filters, typing, cancellation, settling and continuation. Result names use the shared reference card.
+
+- `OrgScope.tsx`: One compact root/all radio menu shared by the page and rail.
+- `orgHits.ts`: Authorized root facts and grouping, with ordinary node lookup only when hit paths and live trees do not name the root.

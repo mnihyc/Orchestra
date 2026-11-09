@@ -72,10 +72,10 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-export function useSearchStream(filters: SearchFilters, enabled: boolean, immediate: boolean, submitted: number, typedAt: number, onUnavailable?: (error: unknown) => boolean) {
+export function useSearchStream(filters: SearchFilters, enabled: boolean, immediate: boolean, submitted: number, typedAt: number, onUnavailable?: (error: unknown) => boolean, projection: 'results' | 'org-count' = 'results') {
   const cache = useQueryClient();
   const reader = useStore(client.session, (session) => `${session.userId ?? ''}:${session.readerVersion ?? 0}`);
-  const queryKey = [...searchKey(filters), 'stream', reader] as const;
+  const queryKey = [...searchKey(filters), projection === 'org-count' ? 'org-count' : 'stream', reader] as const;
   const key = JSON.stringify(queryKey);
   const [stored, dispatch] = useReducer(reducer, undefined, initial);
   // A new reader or selection never paints the preceding reader's parts, even for one frame.
@@ -155,6 +155,6 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
   }));
   const available = state.shown.filter((id) => hits[id] !== undefined);
   const ids = state.expanded ? available : available.slice(0, state.pageSize);
-  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: !state.ended || Object.values(state.running).some(Boolean),
+  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: enabled && (!state.ended || Object.values(state.running).some(Boolean)),
     more, block, hasMore: !state.expanded && Object.keys(hits).length > state.pageSize || state.cursor !== null};
 }

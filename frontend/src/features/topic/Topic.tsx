@@ -8,6 +8,7 @@
  * Which tab is open is in the address, so that a link reproduces it. A tab whose part is not built
  * yet says so in words and says what it will show.
  */
+import { ResourceSummary } from '@/features/summaries/ResourceSummary';
 import { useContentFocused } from '@/features/workbench/instance';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Archive, Diamond, Settings } from 'lucide-react';
@@ -24,7 +25,9 @@ import { placeOfNode } from '@/features/navigation/places';
 import { TopicActivity } from '@/features/topic/Activity';
 import { TopicEnvironments } from '@/features/topic/Environments';
 import { TopicOverview } from '@/features/topic/Overview';
+import { useUsageBoardParams } from '@/features/usage/Board';
 import type { TopicSection } from '@/features/settings/ScopeSettings';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { TopicSettings } from '@/features/topic/Settings';
 import { TagPicker } from '@/features/topic/TagPicker';
 import { PlaceAnnouncements } from '@/features/announcements/Composer';
@@ -44,16 +47,16 @@ import { Button } from '@/ui/Button';
 import { NodeFailure } from '@/features/access/NoAccess';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { NodeIcon } from '@/ui/NodeIcon';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { Tabs } from '@/ui/Tabs';
 import { toast } from '@/ui/Toast';
 
 export type TopicTab = 'overview' | 'threads' | 'environments' | 'documents' | 'agents' | 'activity' | 'settings';
 
-function TopicSkeleton() {
+function TopicSkeleton(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -81,7 +84,9 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
   const { t } = useTranslation();
   const focusedContent = useContentFocused();
   const userId = useStore(client.session, (state) => state.userId);
-  const query = useQuery(topicQuery(topicId));
+  const opening = useDefaultsOpening(topicId);
+  const usage = useUsageBoardParams(topicId);
+  const query = useQuery({ ...topicQuery(topicId, tab === 'overview' ? usage : undefined), enabled: !opening.waiting });
   const topic = query.data;
   const tree = useOrgTree(topic?.org_id ?? null);
 
@@ -98,7 +103,7 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
     },
   });
 
-  if (query.isPending) return <TopicSkeleton />;
+  if (query.isPending) return <TopicSkeleton read={query} />;
   if (query.isError) {
     // A screen the server refused shows what is missing and whom to ask, and the way on, in place of its content.
     return <NodeFailure className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
@@ -144,6 +149,8 @@ export function Topic({ topicId, tab, onTab, section, onSection }: TopicProps) {
           </>
         }
       />
+
+      <ResourceSummary target={{ kind: 'topic', id: data.id }} reference={`/topic/${data.id}`} />
 
       {data.archived && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-base text-text">

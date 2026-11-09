@@ -73,6 +73,8 @@ CREATE TABLE usage_caps (
     subject_role text,
     split text DEFAULT 'shared'::text NOT NULL,
     models text[] DEFAULT '{}'::text[] NOT NULL,
+    services text[] DEFAULT '{}'::text[] NOT NULL,
+    purposes text[] DEFAULT '{}'::text[] NOT NULL,
     tiers text[] DEFAULT '{}'::text[] NOT NULL,
     harness_kinds text[] DEFAULT '{}'::text[] NOT NULL,
     meter text NOT NULL,
@@ -134,6 +136,49 @@ CREATE UNLOGGED TABLE usage_commit_rows (
     CONSTRAINT usage_commit_rows_pkey PRIMARY KEY (xact, ordinal)
 );
 
+-- A service's recorded offering identity is derived once from its normal measurement envelope.
+CREATE FUNCTION usage_service(states jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE STRICT
+    AS $$ SELECT CASE WHEN jsonb_typeof(states#>'{service_usage,offering}')='string'
+         THEN jsonb_build_object('name',states#>'{service_usage,offering}',
+              'groups',COALESCE(states->'_service_groups','[]'::jsonb)) END $$;
+
+-- Fixed-width native keys retain full identities without a B-tree key-size limit on group metadata.
+-- Escape every backslash before bytea decoding: the bytes are the exact database-encoded canonical JSON.
+CREATE FUNCTION usage_service_key(service jsonb) RETURNS bytea
+    LANGUAGE sql IMMUTABLE STRICT AS $$
+      SELECT sha256(decode(replace(service::text,chr(92),chr(92)||chr(92)),'escape'))
+$$;
+
+-- Unit quantities reuse the existing scalar count merge inside one unit-keyed outer map.
+CREATE FUNCTION usage_unit_counts_adjust(state jsonb, counts jsonb, direction bigint) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$
+    SELECT COALESCE(jsonb_object_agg(unit,totals),'{}'::jsonb) FROM (
+      SELECT unit,usage_counts_merge(state->unit,
+        (SELECT COALESCE(jsonb_object_agg(key,value::bigint*direction),'{}'::jsonb)
+         FROM jsonb_each_text(COALESCE(counts->unit,'{}'::jsonb)))) AS totals
+      FROM (SELECT jsonb_object_keys(COALESCE(state,'{}'::jsonb)) AS unit
+            UNION SELECT jsonb_object_keys(COALESCE(counts,'{}'::jsonb))) units
+    ) per_unit WHERE COALESCE((totals->>'known_requests')::bigint,0)>0
+                    OR COALESCE((totals->>'unknown_requests')::bigint,0)>0
+$$;
+CREATE FUNCTION usage_unit_counts_merge(state jsonb, counts jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE AS $$ SELECT usage_unit_counts_adjust(state,counts,1) $$;
+CREATE AGGREGATE usage_merge_unit_counts(jsonb) (
+    SFUNC=usage_unit_counts_merge,STYPE=jsonb,INITCOND='{}'
+);
+CREATE FUNCTION usage_service_units(states jsonb) RETURNS jsonb
+    LANGUAGE sql IMMUTABLE STRICT AS $$
+    SELECT CASE WHEN states#>>'{service_usage,unit}' IS NULL THEN '{}'::jsonb ELSE
+      jsonb_build_object(states#>>'{service_usage,unit}',
+        CASE WHEN states#>>'{service_usage,quantity,state}'='told'
+          AND jsonb_typeof(states#>'{service_usage,quantity,value}')='number'
+          AND (states#>>'{service_usage,quantity,value}')::bigint>=0
+        THEN jsonb_build_object('quantity',(states#>>'{service_usage,quantity,value}')::bigint,
+             'known_requests',1,'unknown_requests',0)
+        ELSE jsonb_build_object('quantity',0,'known_requests',0,'unknown_requests',1) END) END
+$$;
+
 CREATE TABLE usage_daily (
     day date NOT NULL,
     org_id uuid NOT NULL,
@@ -145,6 +190,8 @@ CREATE TABLE usage_daily (
     entry_id uuid,
     user_id uuid,
     model text NOT NULL,
+    service jsonb,
+    service_key bytea GENERATED ALWAYS AS (usage_service_key(service)) STORED,
     tier text,
     harness_kind text,
     environment_kind text,
@@ -167,9 +214,11 @@ CREATE TABLE usage_daily (
     credits numeric DEFAULT 0 NOT NULL,
     estimated_credits numeric DEFAULT 0 NOT NULL,
     unrated_tokens bigint DEFAULT 0 NOT NULL,
+    unrated_services bigint DEFAULT 0 NOT NULL,
+    service_units jsonb DEFAULT '{}'::jsonb NOT NULL,
     cache_write_tokens bigint DEFAULT 0 NOT NULL,
     rated_rows bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT usage_daily_day_topic_id_thread_id_purpose_provider_id_entr_key UNIQUE NULLS NOT DISTINCT (day, topic_id, thread_id, purpose, provider_id, entry_id, model, tier, user_id, harness_kind, environment_kind, effort, access_program)
+    CONSTRAINT usage_daily_day_topic_id_thread_id_purpose_provider_id_entr_key UNIQUE NULLS NOT DISTINCT (day, topic_id, thread_id, purpose, provider_id, entry_id, model, service_key, tier, user_id, harness_kind, environment_kind, effort, access_program)
 );
 
 CREATE INDEX usage_daily_org_idx ON usage_daily USING btree (org_id, day);
@@ -224,6 +273,14 @@ CREATE TABLE usage_events (
     outcome text,
     access_program text,
     measurement_states jsonb DEFAULT '{}'::jsonb NOT NULL,
+    service jsonb GENERATED ALWAYS AS (usage_service(measurement_states)) STORED,
+    error_reason text,
+    upstream_status bigint CHECK (upstream_status BETWEEN 100 AND 599),
+    attempt bigint DEFAULT 1 NOT NULL CHECK (attempt >= 1),
+    provider_request_id text,
+    thread_owner_id uuid,
+    tool_calls bigint CHECK (tool_calls >= 0),
+    tool_ms bigint CHECK (tool_ms >= 0),
     request_ref text,
     rate jsonb,
     rate_source text,
@@ -232,8 +289,8 @@ CREATE TABLE usage_events (
     CONSTRAINT usage_events_first_token_ms_check CHECK ((first_token_ms >= 0)),
     CONSTRAINT usage_events_generation_ms_check CHECK ((generation_ms >= 0)),
     CONSTRAINT usage_events_origin_check CHECK ((origin = ANY (ARRAY['harness'::text, 'forwarder'::text, 'orch'::text]))),
-    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text]))),
-    CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text]))),
+    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text]))),
+    CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text, 'reported'::text]))),
     CONSTRAINT usage_events_request_ms_check CHECK ((request_ms >= 0)),
     CONSTRAINT usage_events_scope_check CHECK ((scope = ANY (ARRAY['turn'::text, 'request'::text]))),
     CONSTRAINT usage_events_speed_milli_check CHECK ((speed_milli >= 0)),
@@ -297,6 +354,8 @@ CREATE TABLE usage_monthly (
     purpose text DEFAULT 'turn'::text NOT NULL,
     provider_id uuid NOT NULL,
     model text NOT NULL,
+    service jsonb,
+    service_key bytea GENERATED ALWAYS AS (usage_service_key(service)) STORED,
     tier text,
     harness_kind text,
     environment_kind text,
@@ -309,8 +368,10 @@ CREATE TABLE usage_monthly (
     credits numeric DEFAULT 0 NOT NULL,
     estimated_credits numeric DEFAULT 0 NOT NULL,
     unrated_tokens bigint DEFAULT 0 NOT NULL,
+    unrated_services bigint DEFAULT 0 NOT NULL,
+    service_units jsonb DEFAULT '{}'::jsonb NOT NULL,
     cache_write_tokens bigint DEFAULT 0 NOT NULL,
-    CONSTRAINT usage_monthly_month_topic_id_user_id_purpose_provider_id_mo_key UNIQUE NULLS NOT DISTINCT (month, topic_id, user_id, purpose, provider_id, model, tier, harness_kind, environment_kind)
+    CONSTRAINT usage_monthly_month_topic_id_user_id_purpose_provider_id_mo_key UNIQUE NULLS NOT DISTINCT (month, topic_id, user_id, purpose, provider_id, model, service_key, tier, harness_kind, environment_kind)
 );
 
 CREATE INDEX usage_monthly_org_idx ON usage_monthly USING btree (org_id, month);
@@ -359,6 +420,14 @@ CREATE TABLE usage_running (
     outcome text,
     access_program text,
     measurement_states jsonb DEFAULT '{}'::jsonb NOT NULL,
+    service jsonb GENERATED ALWAYS AS (usage_service(measurement_states)) STORED,
+    error_reason text,
+    upstream_status bigint CHECK (upstream_status BETWEEN 100 AND 599),
+    attempt bigint DEFAULT 1 NOT NULL CHECK (attempt >= 1),
+    provider_request_id text,
+    thread_owner_id uuid,
+    tool_calls bigint CHECK (tool_calls >= 0),
+    tool_ms bigint CHECK (tool_ms >= 0),
     request_ref text,
     rate jsonb,
     rate_source text,
@@ -367,14 +436,18 @@ CREATE TABLE usage_running (
     CONSTRAINT usage_events_first_token_ms_check CHECK ((first_token_ms >= 0)),
     CONSTRAINT usage_events_generation_ms_check CHECK ((generation_ms >= 0)),
     CONSTRAINT usage_events_origin_check CHECK ((origin = ANY (ARRAY['harness'::text, 'forwarder'::text, 'orch'::text]))),
-    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text]))),
-    CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text]))),
+    CONSTRAINT usage_events_purpose_check CHECK ((purpose = ANY (ARRAY['turn'::text, 'summary'::text, 'review'::text, 'embeddings'::text, 'web_search'::text, 'page_fetch'::text, 'image_generation'::text, 'ask'::text]))),
+    CONSTRAINT usage_events_rate_source_check CHECK ((rate_source = ANY (ARRAY['provider'::text, 'rate_card'::text, 'catalogue'::text, 'reported'::text]))),
     CONSTRAINT usage_events_request_ms_check CHECK ((request_ms >= 0)),
     CONSTRAINT usage_events_scope_check CHECK ((scope = ANY (ARRAY['turn'::text, 'request'::text]))),
     CONSTRAINT usage_events_speed_milli_check CHECK ((speed_milli >= 0)),
     CONSTRAINT usage_events_streamed_output_tokens_check CHECK ((streamed_output_tokens >= 0)),
     CONSTRAINT usage_running_pkey PRIMARY KEY (id)
 );
+
+CREATE INDEX usage_events_upstream_request_idx ON usage_events (turn_id, provider_id, provider_request_id) WHERE (provider_request_id IS NOT NULL);
+
+CREATE INDEX usage_running_upstream_request_idx ON usage_running (turn_id, provider_id, provider_request_id) WHERE (provider_request_id IS NOT NULL);
 
 CREATE INDEX usage_running_at_idx ON usage_running USING btree (at, id);
 
@@ -392,3 +465,84 @@ CREATE TABLE usage_cap_notices (
     CONSTRAINT usage_cap_notices_cap_id_user_id_period_start_level_key UNIQUE NULLS NOT DISTINCT (cap_id, user_id, period_start, level),
     CONSTRAINT usage_cap_notices_cap_id_fkey FOREIGN KEY (cap_id) REFERENCES usage_caps(id) ON DELETE CASCADE
 );
+
+
+-- Exact per-turn UTC membership, compressed across repeated calls of the same attribution hour.
+CREATE FUNCTION usage_tier_unknown(tier text, states jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT COALESCE(tier IS NULL AND jsonb_typeof(states->'requested_service_tier')='string' AND states->>'requested_service_tier' NOT IN ('default','standard') AND states->'reported_service_tier'->>'state'='empty',false) $$;
+CREATE FUNCTION usage_tier_unavailable(tier text, states jsonb) RETURNS boolean
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$ SELECT COALESCE(states->'reported_service_tier'->>'state'='unread' OR (jsonb_typeof(states->'wire_protocol')='string' AND COALESCE(states->'reported_service_tier'->>'state','unsupported')='unsupported') OR (tier IS NULL AND jsonb_typeof(states->'requested_service_tier')='string' AND states->>'requested_service_tier' NOT IN ('default','standard') AND COALESCE(states->'reported_service_tier'->>'state','unsupported') NOT IN ('told','empty')),false) $$;
+CREATE TABLE usage_turn_daily (
+    day date NOT NULL,
+    at timestamptz NOT NULL,
+    turn_id uuid NOT NULL,
+    org_id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    topic_id uuid NOT NULL,
+    thread_id uuid,
+    purpose text NOT NULL,
+    provider_id uuid NOT NULL,
+    user_id uuid,
+    model text NOT NULL,
+    service jsonb,
+    effort text,
+    tier text,
+    access_program text,
+    outcome text,
+    harness_kind text,
+    environment_kind text,
+    tier_unknown boolean NOT NULL,
+    tier_unavailable boolean NOT NULL,
+    members bigint NOT NULL CHECK (members >= 0),
+    service_key bytea GENERATED ALWAYS AS (usage_service_key(service)) STORED,
+    CONSTRAINT usage_turn_daily_key UNIQUE NULLS NOT DISTINCT (day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service_key,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable),
+    CHECK (day=(at AT TIME ZONE 'UTC')::date AND (at AT TIME ZONE 'UTC')=date_trunc('hour',at AT TIME ZONE 'UTC'))
+);
+CREATE INDEX usage_turn_daily_org_id_idx ON usage_turn_daily (org_id,day);
+CREATE INDEX usage_turn_daily_project_id_idx ON usage_turn_daily (project_id,day);
+CREATE INDEX usage_turn_daily_topic_id_idx ON usage_turn_daily (topic_id,day);
+CREATE INDEX usage_turn_daily_thread_id_idx ON usage_turn_daily (thread_id,day);
+CREATE INDEX usage_turn_daily_provider_id_idx ON usage_turn_daily (provider_id,day);
+CREATE INDEX usage_turn_daily_user_id_idx ON usage_turn_daily (user_id,day);
+CREATE FUNCTION usage_turn_projection(event usage_events) RETURNS usage_turn_daily
+LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $$
+    SELECT ((event).at AT TIME ZONE 'UTC')::date,date_trunc('hour',(event).at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC',(event).turn_id,(event).org_id,(event).project_id,(event).topic_id,(event).thread_id,(event).purpose,(event).provider_id,(event).user_id,(event).model,(event).service,(event).effort,(event).tier,(event).access_program,(event).outcome,(event).harness_kind,(event).environment_kind,usage_tier_unknown((event).tier,(event).measurement_states),usage_tier_unavailable((event).tier,(event).measurement_states),1::bigint,usage_service_key((event).service) WHERE (event).turn_id IS NOT NULL
+$$;
+CREATE FUNCTION usage_turn_membership_change() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE old_member usage_turn_daily; new_member usage_turn_daily; remaining bigint;
+BEGIN
+    IF TG_OP<>'INSERT' THEN old_member:=usage_turn_projection(OLD); END IF;
+    IF TG_OP<>'DELETE' THEN new_member:=usage_turn_projection(NEW); END IF;
+    IF TG_OP='UPDATE' AND old_member IS NOT DISTINCT FROM new_member THEN RETURN NULL; END IF;
+    IF old_member.turn_id IS NOT NULL THEN
+        UPDATE usage_turn_daily d SET members=d.members-1 WHERE d.day=old_member.day AND d.at=old_member.at AND d.turn_id=old_member.turn_id AND d.day IS NOT DISTINCT FROM old_member.day AND d.at IS NOT DISTINCT FROM old_member.at AND d.turn_id IS NOT DISTINCT FROM old_member.turn_id AND d.org_id IS NOT DISTINCT FROM old_member.org_id AND d.project_id IS NOT DISTINCT FROM old_member.project_id AND d.topic_id IS NOT DISTINCT FROM old_member.topic_id AND d.thread_id IS NOT DISTINCT FROM old_member.thread_id AND d.purpose IS NOT DISTINCT FROM old_member.purpose AND d.provider_id IS NOT DISTINCT FROM old_member.provider_id AND d.user_id IS NOT DISTINCT FROM old_member.user_id AND d.model IS NOT DISTINCT FROM old_member.model AND d.service IS NOT DISTINCT FROM old_member.service AND d.effort IS NOT DISTINCT FROM old_member.effort AND d.tier IS NOT DISTINCT FROM old_member.tier AND d.access_program IS NOT DISTINCT FROM old_member.access_program AND d.outcome IS NOT DISTINCT FROM old_member.outcome AND d.harness_kind IS NOT DISTINCT FROM old_member.harness_kind AND d.environment_kind IS NOT DISTINCT FROM old_member.environment_kind AND d.tier_unknown IS NOT DISTINCT FROM old_member.tier_unknown AND d.tier_unavailable IS NOT DISTINCT FROM old_member.tier_unavailable RETURNING members INTO remaining;
+        IF NOT FOUND THEN RAISE EXCEPTION 'usage turn membership missing' USING ERRCODE='23514'; END IF;
+        IF remaining=0 THEN DELETE FROM usage_turn_daily d WHERE d.day=old_member.day AND d.at=old_member.at AND d.turn_id=old_member.turn_id AND d.day IS NOT DISTINCT FROM old_member.day AND d.at IS NOT DISTINCT FROM old_member.at AND d.turn_id IS NOT DISTINCT FROM old_member.turn_id AND d.org_id IS NOT DISTINCT FROM old_member.org_id AND d.project_id IS NOT DISTINCT FROM old_member.project_id AND d.topic_id IS NOT DISTINCT FROM old_member.topic_id AND d.thread_id IS NOT DISTINCT FROM old_member.thread_id AND d.purpose IS NOT DISTINCT FROM old_member.purpose AND d.provider_id IS NOT DISTINCT FROM old_member.provider_id AND d.user_id IS NOT DISTINCT FROM old_member.user_id AND d.model IS NOT DISTINCT FROM old_member.model AND d.service IS NOT DISTINCT FROM old_member.service AND d.effort IS NOT DISTINCT FROM old_member.effort AND d.tier IS NOT DISTINCT FROM old_member.tier AND d.access_program IS NOT DISTINCT FROM old_member.access_program AND d.outcome IS NOT DISTINCT FROM old_member.outcome AND d.harness_kind IS NOT DISTINCT FROM old_member.harness_kind AND d.environment_kind IS NOT DISTINCT FROM old_member.environment_kind AND d.tier_unknown IS NOT DISTINCT FROM old_member.tier_unknown AND d.tier_unavailable IS NOT DISTINCT FROM old_member.tier_unavailable; END IF;
+    END IF;
+    IF new_member.turn_id IS NOT NULL THEN
+        INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members) VALUES(new_member.day,new_member.at,new_member.turn_id,new_member.org_id,new_member.project_id,new_member.topic_id,new_member.thread_id,new_member.purpose,new_member.provider_id,new_member.user_id,new_member.model,new_member.service,new_member.effort,new_member.tier,new_member.access_program,new_member.outcome,new_member.harness_kind,new_member.environment_kind,new_member.tier_unknown,new_member.tier_unavailable,1)
+        ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+1;
+    END IF;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER usage_turn_membership_change AFTER UPDATE OR DELETE ON usage_events
+FOR EACH ROW EXECUTE FUNCTION usage_turn_membership_change();
+-- Bulk imports fold a transition set once instead of repeatedly updating the same membership.
+CREATE FUNCTION usage_turn_membership_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
+    SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM inserted_usage e
+    CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p WHERE e.turn_id IS NOT NULL
+    GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable
+    ON CONFLICT ON CONSTRAINT usage_turn_daily_key DO UPDATE SET members=usage_turn_daily.members+EXCLUDED.members;
+    RETURN NULL;
+END
+$$;
+CREATE TRIGGER usage_turn_membership_insert AFTER INSERT ON usage_events
+REFERENCING NEW TABLE AS inserted_usage FOR EACH STATEMENT EXECUTE FUNCTION usage_turn_membership_insert();
+-- The projection is filled in one ledger pass; stored consumption is never rewritten.
+INSERT INTO usage_turn_daily(day,at,turn_id,org_id,project_id,topic_id,thread_id,purpose,provider_id,user_id,model,service,effort,tier,access_program,outcome,harness_kind,environment_kind,tier_unknown,tier_unavailable,members)
+SELECT p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable,count(*) FROM usage_events e
+CROSS JOIN LATERAL usage_turn_projection(e::usage_events) p WHERE e.turn_id IS NOT NULL
+GROUP BY p.day,p.at,p.turn_id,p.org_id,p.project_id,p.topic_id,p.thread_id,p.purpose,p.provider_id,p.user_id,p.model,p.service,p.effort,p.tier,p.access_program,p.outcome,p.harness_kind,p.environment_kind,p.tier_unknown,p.tier_unavailable;

@@ -14,6 +14,8 @@ import { applyChanges, type Change, followWith, people, resourceChanges, treeCha
 import { feedSequences, record } from '@/api/cache';
 import { client } from '@/api/client';
 import { capturePeopleHint } from '@/api/peopleChanges';
+import { scheduledReads } from '@/api/readScheduler';
+import { admittedOrOffline, dispatchPersonalEvent, followPersonalSource, retakePersonalBaseline, retirePersonalEvents } from '@/realtime/personalSource';
 import { fetchTree, splitListed, type TreeRows } from '@/api/nodes';
 import { fetchDocumentSync } from '@/api/documents';
 import { fetchNotifications, fetchSummary } from '@/api/notifications';
@@ -50,6 +52,8 @@ client.onSession((event) => {
   if (event.type === 'signed_in') {
     // adopt() can replace a person without an intervening signed_out event. A subscription
     // captured for the new reader must never travel on the former person's authenticated socket.
+    personalSource?.stop(); personalSource = null; retirePersonalEvents();
+    scheduledReads.advance();
     socket.stop();
     stopQueryFeeds();
     feedSequences.clear();
@@ -60,6 +64,8 @@ client.onSession((event) => {
   }
   else if (event.type === 'renewed') socket.reauth();
   else {
+    personalSource?.stop(); personalSource = null; retirePersonalEvents();
+    scheduledReads.advance();
     socket.stop();
     stopQueryFeeds();
     feedSequences.clear();
@@ -335,6 +341,21 @@ export function sendWriting(id: string, block: string): void {
 // ---------------------------------------------------------------- the person's own feed
 
 const USER_FEED = 'user';
+let personalSource: ReturnType<typeof followPersonalSource<UserRows>> | null = null;
+let baselineExpected = false;
+export async function ensurePersonalSource(willReadBaseline = false): Promise<void> {
+  baselineExpected ||= willReadBaseline;
+  if (personalSource === null) feeds.use(USER_FEED, () => {
+    const source = followPersonalSource(socket, userFeed(), () => scheduledReads.advance());
+    personalSource = source;
+    return { ...source, stop: () => { source.stop(); if (personalSource === source) personalSource = null; baselineExpected = false; } };
+  }, () => userWriter.clear());
+  const source = personalSource;
+  if (source === null) throw new Error('The personal source has no owner');
+  const accepted = await admittedOrOffline(source.ready, socket.status);
+  if (!accepted) baselineExpected = false;
+}
+
 const INBOX_FIRST_PAGE = ['inbox', 'first-page'] as const;
 
 /** The confirmed user cut owns this page independently of whether an Inbox pane is open. */
@@ -376,7 +397,7 @@ function userFeed(): DurableFeed<UserRows> {
   let subscribed = false;
   return {
     feed: USER_FEED,
-    invalidated: () => { retireInboxPage(); userWriter.clear(); settle([...people(true),{approvalViews:true}]); },
+    invalidated: () => { retireInboxPage(); userWriter.clear(); capturePeopleHint(queryClient); },
     initial: () => {
       const summary = queryClient.getQueryData(outsideQuery().queryKey);
       if (summary === undefined) return null;
@@ -426,17 +447,24 @@ function userFeed(): DurableFeed<UserRows> {
       // source closes the authority gap before initial admission or reconnect:
       // personal events are not replayed and an Inbox sequence is not that cut.
       if (frame.mode === 'reload') return;
-      settle(people(true));
-      tellUserEvent('connected', { resumed: subscribed }); subscribed = true;
+      // The first shell aggregate starts after this accepted source. Reconnects
+      // retake it once before repairing dependent views; no pre-admission snapshot
+      // is used as evidence for this cut.
+      if (subscribed || !baselineExpected) void retakePersonalBaseline().then((retaken) => { if (!retaken) settle(people(true)); }, (error: unknown) => userWriter.failed(error));
+      subscribed = true;
     },
     other: (frame) => {
       if (frame.op === 'event') {
-        const what = typeof frame.data.what === 'string' ? frame.data.what : '';
-        const counters = countersOf(frame.data.summary);
-        if (counters !== null) userWriter.counters(counters);
-        // A consumer of personal preferences reads this exact value, already cached, before its callback.
-        if (what === 'state') void applyChanges(userEventChanges(what, frame.data));
-        tellUserEvent(what, frame.data);
+        const reader = client.session.getState().readerVersion;
+        dispatchPersonalEvent(() => {
+          if (reader !== client.session.getState().readerVersion) return;
+          const what = typeof frame.data.what === 'string' ? frame.data.what : '';
+          const counters = countersOf(frame.data.summary);
+          if (counters !== null) userWriter.counters(counters);
+          // Publish a supplied preference once before all its consumers hear it.
+          if (what === 'state' || what === 'favorites') void applyChanges(userEventChanges(what, frame.data));
+          tellUserEvent(what, frame.data);
+        });
       }
     },
   };
@@ -561,7 +589,7 @@ client.onSession((event) => {
 /** Follows the person's own feed for as long as the calling view is shown: their Inbox and its counters. */
 export function useUserFeed(rows = true, enabled = true): void {
   useEffect(()=>{if(!rows || !enabled)return;inboxReaders+=1;return()=>{inboxReaders-=1;};},[rows, enabled]);
-  useEffect(() => enabled ? feeds.use(USER_FEED, () => followFeed(socket, userFeed()), () => userWriter.clear()) : undefined, [enabled]);
+  useEffect(() => { if (enabled) void ensurePersonalSource().catch((error: unknown) => userWriter.failed(error)); }, [enabled]);
   useEffect(() => {
     if (!enabled || !rows || useUserStore.getState().loaded) return;
     const abort = new AbortController();
@@ -577,5 +605,5 @@ export function useUserFeed(rows = true, enabled = true): void {
 
 /** Loads the Inbox again from nothing, when its reader asks after a failure. */
 export function reloadUserFeed(): void {
-  feeds.reload(USER_FEED);
+  personalSource?.reload();
 }

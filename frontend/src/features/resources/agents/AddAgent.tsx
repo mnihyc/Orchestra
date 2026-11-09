@@ -9,6 +9,7 @@ import { HomePicker } from '@/features/resources/HomePicker';
 import { readMachineFacts, registrableHarnesses } from '@/features/resources/machines/facts';
 import { RegisterMachineProgram, machineProgramName } from '@/features/resources/machines/Programs';
 import { AgentProgramHelp } from './AgentProgramHelp';
+import { AgentDetection } from './AgentDetection';
 import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { ChoiceLocator } from '@/ui/ChoiceLocator';
@@ -20,6 +21,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
 
 type Mode = 'available' | 'machine';
+type ProgramChoice = { value: string; label: string; source: 'machine' | 'catalogue' | 'person' };
 export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClose: () => void; onCreated?: (agent: Agent) => void; initialHome?:string }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -27,21 +29,26 @@ export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClo
   const [mode,setMode]=useState<Mode>('available');
   const [machineId,setMachineId]=useState('');
   const [registering,setRegistering]=useState(false);
-  const [registered,setRegistered]=useState<{machine:string;kind:string;title:string}[]>([]);
+  const [registered,setRegistered]=useState<{machine:string;kind:string;title:string;program:MachineProgram;revision:number|null}[]>([]);
   const machines=useQuery({...machinesQuery,enabled:mode==='machine'});
   const machine=useQuery({...machineQuery(machineId),enabled:mode==='machine' && machineId!==''});
   const key = useActKey();
-  const [kind, setKind] = useState('');
+  const [choice, setChoice] = useState<ProgramChoice | null>(null);
   const [home, setHome] = useState(initialHome);
   const [placed, setPlaced] = useState(false);
   const form = useForm({ name: '' }, { name: (value) => (value.trim() === '' ? t('agents.add.nameEmpty') : null) });
   const installed=registrableHarnesses(readMachineFacts(machine.data?.facts));
+  const freshRegistered=registered.filter((row)=>row.machine===machineId && row.revision===(machine.data?.revision ?? null));
   const choices=mode==='available'?(kinds.data ?? []).map((row)=>({value:row.kind,label:row.title}))
     : [...new Map([
       ...installed.map((row)=>[row.kind,{value:row.kind,label:row.title ?? kinds.data?.find((entry)=>entry.kind===row.kind)?.title ?? row.kind}] as const),
-      ...registered.filter((row)=>row.machine===machineId).map((row)=>[row.kind,{value:row.kind,label:row.title}] as const),
+      ...freshRegistered.map((row)=>[row.kind,{value:row.kind,label:row.title}] as const),
     ]).values()];
-  const selected=choices.some((choice)=>choice.value===kind);
+  const proposed=(mode==='machine' && machine.data?.online===true || choices.length===1 && mode==='available') ? choices[0] : undefined;
+  if(choice===null && proposed!==undefined && !kinds.isPending && !kinds.isError) setChoice({...proposed,source:mode==='machine'?'machine':'catalogue'});
+  const kind=choice?.value ?? '';
+  const selected=choices.some((entry)=>entry.value===kind);
+  const shownChoices=choice!==null && !selected ? [...choices,{value:choice.value,label:choice.label,disabled:true,description:t('agentDetection.unavailable')}] : choices;
   const machineOptions=machines.data?.filter((row)=>row.roles.includes('agent')).map((row)=>({value:row.id,label:row.name,disabled:!row.online,description:row.online?undefined:t('agentCreation.offline')})) ?? [];
   const made = useMutation({
     mutationFn: (name: string) => {
@@ -63,8 +70,8 @@ export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClo
       || !('kind' in descriptor) || typeof descriptor.kind!=='string' || descriptor.kind==='')return;
     const reportedKind=descriptor.kind;
     setRegistered((before)=>[...before.filter((row)=>row.machine!==machineId || row.kind!==reportedKind),
-      {machine:machineId,kind:reportedKind,title:machineProgramName(program)}]);
-    setKind(reportedKind);setRegistering(false);
+      {machine:machineId,kind:reportedKind,title:machineProgramName(program),program,revision:machine.data?.revision ?? null}]);
+    setChoice({value:reportedKind,label:machineProgramName(program),source:'person'});setRegistering(false);
   };
   const blocked=!selected || home==='' || mode==='machine' && (machineId==='' || machine.data?.online!==true);
   return <Dialog open onOpenChange={(next)=>!next && !made.isPending && onClose()} title={t('agents.add.title')}
@@ -74,20 +81,25 @@ export function AddAgentDialog({ onClose, onCreated, initialHome = '' }: { onClo
     </>}>
     <form id="add-agent" className="flex min-w-0 flex-col gap-3 py-2" noValidate onSubmit={form.submit((values)=>!blocked && made.mutate(values.name))}>
       <div className="flex items-center gap-1 text-sm font-medium"><span>{t('agentCreation.mode')}</span><AgentProgramHelp/></div>
-      <Select<Mode> hideLabel label={t('agentCreation.mode')} value={mode} onValueChange={(next)=>{setMode(next);setKind('');}}
+      <Select<Mode> hideLabel label={t('agentCreation.mode')} value={mode} disabled={made.isPending} onValueChange={(next)=>{setMode(next);setChoice(null);}}
         options={[{value:'available',label:t('agentCreation.available')},{value:'machine',label:t('agentCreation.onMachine')}]}/>
       {mode==='machine' && <>
-        {machines.isPending?<SkeletonRows rows={1}/>:machines.isError?<ErrorState compact error={machines.error} onRetry={()=>void machines.refetch()}/>:
-          <ChoiceLocator label={t('agentCreation.machine')} value={machineId} onValueChange={(id)=>{setMachineId(id);setKind('');}}
+        {machines.isPending?<SkeletonRows read={machines} rows={1}/>:machines.isError?<ErrorState compact error={machines.error} onRetry={()=>void machines.refetch()}/>:
+          <ChoiceLocator label={t('agentCreation.machine')} value={machineId} disabled={made.isPending} onValueChange={(id)=>{setMachineId(id);setChoice(null);}}
             options={machineOptions}/>}
-        {machineId!=='' && <Button size="sm" className="self-start" onClick={()=>setRegistering(true)}>{t('agentCreation.register')}</Button>}
+        {machineId!=='' && <Button size="sm" disabled={made.isPending} className="self-start" onClick={()=>setRegistering(true)}>{t('agentCreation.register')}</Button>}
         {machineId!=='' && machine.isError && <ErrorState compact error={machine.error} onRetry={()=>void machine.refetch()}/>}
       </>}
-      {kinds.isPending || mode==='machine' && machineId!=='' && machine.isPending ? <SkeletonRows rows={1}/>
+      {kinds.isPending || mode==='machine' && machineId!=='' && machine.isPending ? <SkeletonRows reads={[kinds, machine]} rows={1}/>
         : kinds.isError?<ErrorState compact error={kinds.error} onRetry={()=>void kinds.refetch()}/>
-          : <ChoiceLocator label={t('agents.add.harness')} value={selected?kind:''} placeholder={t('agents.add.harnessChoose')} onValueChange={setKind} options={choices}/>}
-      <Input label={t('agents.add.name')} {...form.field('name')} autoComplete="off"/>
-      <HomePicker value={home} onChange={setHome}/>
+          : <ChoiceLocator label={t('agents.add.harness')} value={kind} valueLabel={choice?.label} placeholder={t('agents.add.harnessChoose')} disabled={made.isPending}
+            hint={choice===null?undefined:choice.source==='person'?t('agentDetection.yourChoice'):choice.source==='machine'?t('agentDetection.fromMachine'):t('agentDetection.fromCatalogue')}
+            error={choice!==null && !selected?t('agentDetection.unavailable'):undefined}
+            onValueChange={(value)=>{const entry=choices.find((row)=>row.value===value);if(entry!==undefined)setChoice({...entry,source:'person'});}} options={shownChoices}/>}
+      {selected && <AgentDetection kind={kind} machine={mode==='machine'?machine.data:undefined} catalogue={kinds.data?.find((entry)=>entry.kind===kind)}
+        registered={mode==='machine'?freshRegistered.find((entry)=>entry.kind===kind)?.program:undefined}/>}
+      <Input label={t('agents.add.name')} {...form.field('name')} disabled={made.isPending} autoComplete="off"/>
+      <HomePicker value={home} onChange={setHome} disabled={made.isPending}/>
       {made.error!==null && !placed && <ErrorAlert error={made.error}/>}
     </form>
     {registering && machineId!=='' && <RegisterMachineProgram machineId={machineId} kind="agent" onRegistered={useProgram} onClose={()=>setRegistering(false)}/>}

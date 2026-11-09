@@ -5,7 +5,6 @@ export const commentDocument: Document = {
   "id": "00000000-0000-4000-8007-000000000001",
   "title": "Rollout plan",
   "description": "",
-  "description_source": "auto",
   "description_line": "Ship the redirect fix behind the flag, then:",
   "node": {
     "id": "00000000-0000-4000-8003-000000000003",

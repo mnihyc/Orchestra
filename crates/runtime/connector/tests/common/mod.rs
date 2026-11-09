@@ -136,6 +136,13 @@ impl Rig {
         let controller =
             ScriptedController::attach(&hub, Arc::clone(&clock), machine_id, roles.clone());
         let blobs = BlobServer::new();
+        // The scripted endpoint uses command admission; producing roles also have the standing upload account.
+        if roles
+            .iter()
+            .any(|role| matches!(role, Role::Agent | Role::Environment))
+        {
+            blobs.open_command(Id::nil());
+        }
         Self {
             manual,
             clock,

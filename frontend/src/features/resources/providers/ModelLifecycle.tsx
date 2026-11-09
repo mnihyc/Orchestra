@@ -33,7 +33,7 @@ export function ModelLifecycle({ provider, model, kind, onClose }: {provider:Pro
     confirmLabel={t(kind==='delete'?'providers.danger.deleteConfirm':'providers.danger.disableConfirm',{name})}
     danger pending={change.isPending} error={change.error??undefined} disabled={impact.isPending||impact.isError||kind==='delete'&&typed!==name} onConfirm={()=>change.mutate()}>
     <div className="flex min-w-0 flex-col gap-3">
-      {impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={kind} />}
+      {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={kind} />}
       {kind==='disable'?<Input optional label={t('resourceImpact.note')} value={note} onChange={(event)=>setNote(event.target.value)} disabled={change.isPending} />:<>
         <span className="text-sm text-text-muted">{t('resourceImpact.deleteKeeps')}</span>
         <Button size="sm" variant="ghost" onClick={()=>{onClose();openChange({kind:'model',providerId:provider.id,id:model.id,name},{kind:'switch'});}}>{t('resourceImpact.switchFirst')}</Button>

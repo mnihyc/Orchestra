@@ -65,3 +65,34 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     }
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`keeps machine Access in its six-tab Policy group (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    expect((await page.request.post(`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/__double/request-feeds/fixtures`)).ok()).toBe(true);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/resources/machines/${RUNS_ON.laptop}?tab=access`);
+    const navigation = page.getByRole('tablist');
+    await expect(navigation.getByRole('tab')).toHaveCount(6);
+    await expect(navigation.getByRole('tab', { name: words.machines.tabs.policy, exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('[data-resource-section="access"]')).toBeVisible();
+    const sections = page.locator('[data-section-nav]').filter({ has: page.locator('a[data-section-id="access"]') });
+    if (width === 400) {
+      const choice = sections.getByRole('combobox', { name: words.machines.tabs.policy, exact: true });
+      await expect(choice).toHaveValue(words.machines.tabs.access);
+      await choice.click();
+      await page.getByRole('option', { name: words.machines.tabs.policy, exact: true }).click();
+    } else await sections.getByRole('link', { name: words.machines.tabs.policy, exact: true }).click();
+    await expect(page.locator('[data-resource-section="policy"]')).toBeVisible();
+    await expect(page).toHaveURL(/tab=policy/);
+  });
+}

@@ -16,7 +16,7 @@
 //!   question allows it), and an MCP server's request for input is accepted with what was asked for,
 //!   declined or cancelled.
 //!
-//! A request the adapter does not know is refused at once, so that the harness is not left waiting for it.
+//! Unknown approval kinds use the generic card with cancellation only. Other unknown requests are rejected.
 
 use std::collections::BTreeMap;
 
@@ -69,6 +69,10 @@ pub struct Pending {
 pub enum PendingKind {
     /// To run a command.
     Command,
+    /// A managed checkpoint requires one fresh person decision, even in Auto or Bypass.
+    HumanCommand,
+    /// A native managed-network prompt is answered by a person through its own decision callback.
+    Network,
     /// To change files.
     FileChange,
     /// To be given more permissions; holds what was asked for.
@@ -77,6 +81,10 @@ pub enum PendingKind {
     UserInput(Vec<String>),
     /// An MCP server's request for input.
     Elicitation,
+    /// A future command-approval kind with the known command cancellation response.
+    UnrecognizedCommand,
+    /// A future approval method; cancellation is a JSON-RPC method-not-found response.
+    UnrecognizedRequest,
 }
 
 /// A request of the harness, as the neutral model has it.
@@ -132,8 +140,19 @@ fn decision_options(
     let mut options = Vec::new();
     let mut decisions = BTreeMap::new();
     let mut add = |id: &str, label: &str, style, scope, decision: Json| {
-        options.push(option(id, label, style, scope));
-        decisions.insert(id.to_owned(), decision);
+        if decisions.values().any(|old| old == &decision) {
+            return;
+        }
+        let id = if decisions.contains_key(id) {
+            format!(
+                "{id}:{}",
+                orch_types::Hash::of(decision.to_string().as_bytes())
+            )
+        } else {
+            id.to_owned()
+        };
+        options.push(option(&id, label, style, scope));
+        decisions.insert(id, decision);
     };
     for decision in listed {
         match decision {
@@ -208,6 +227,32 @@ fn decision_options(
     (options, decisions)
 }
 
+/// Older builds supplied the complete list; newer builds supply optional proposed amendments.
+fn command_decisions(params: &Json, human: bool) -> Vec<Json> {
+    if human {
+        return vec![json!("accept")];
+    }
+    if let Some(listed) = params.get("availableDecisions").and_then(Json::as_array) {
+        return listed.clone();
+    }
+    let mut listed = vec![json!("accept"), json!("acceptForSession")];
+    if let Some(amendment) = params
+        .get("proposedExecpolicyAmendment")
+        .filter(|value| !value.is_null())
+    {
+        listed.push(json!({"acceptWithExecpolicyAmendment":{"execpolicy_amendment":amendment}}));
+    }
+    for amendment in params
+        .get("proposedNetworkPolicyAmendments")
+        .and_then(Json::as_array)
+        .into_iter()
+        .flatten()
+    {
+        listed.push(json!({"applyNetworkPolicyAmendment":{"network_policy_amendment":amendment}}));
+    }
+    listed
+}
+
 fn mcp_schema(params: &Json) -> (String, Json) {
     let message = match text(params, "mode") {
         "openai/userVerification" => {
@@ -234,21 +279,71 @@ pub fn translate(method: &str, params: &Json, changes: Vec<FileChange>) -> Optio
         "item/commandExecution/requestApproval" => {
             let command = text(params, "command");
             let shown = display_command(command);
-            let listed = params.get("availableDecisions").and_then(Json::as_array);
-            let (options, decisions) = decision_options(listed, true);
-            Some(Translated {
-                title: format!("Run {}", first_line(&shown)),
-                request: HarnessRequest {
-                    request_kind: HarnessRequestKind::Command,
-                    options,
-                    detail: HarnessRequestDetail::Command {
+            let kind = params.get("kind");
+            if kind.is_some_and(|kind| {
+                !matches!(
+                    kind.as_str(),
+                    Some("command" | "writeStdin" | "humanCommand")
+                )
+            }) {
+                return Some(unrecognized(
+                    method,
+                    params,
+                    PendingKind::UnrecognizedCommand,
+                ));
+            }
+            let human = kind.and_then(Json::as_str) == Some("humanCommand");
+            let network = params
+                .get("networkApprovalContext")
+                .filter(|value| !value.is_null());
+            let listed = command_decisions(params, human);
+            let (options, decisions) = decision_options(Some(&listed), !human);
+            let (title, request_kind, detail) = if let Some(network) = network {
+                let host = text(network, "host");
+                let protocol = text(network, "protocol");
+                (
+                    if host.is_empty() {
+                        "Connect to the network".to_owned()
+                    } else {
+                        format!("Connect to {host} ({protocol})")
+                    },
+                    HarnessRequestKind::Permissions,
+                    HarnessRequestDetail::Permissions {
+                        permissions: json!({"network":{"enabled":true,"host":host,"protocol":protocol}}),
+                        reason: opt_text(params, "reason"),
+                    },
+                )
+            } else {
+                let title = if kind.and_then(Json::as_str) == Some("writeStdin") {
+                    "Send input to a running command".to_owned()
+                } else {
+                    format!("Run {}", first_line(&shown))
+                };
+                (
+                    title,
+                    HarnessRequestKind::Command,
+                    HarnessRequestDetail::Command {
                         command: shown,
                         cwd: text(params, "cwd").to_owned(),
                         reason: opt_text(params, "reason"),
                     },
+                )
+            };
+            Some(Translated {
+                title,
+                request: HarnessRequest {
+                    request_kind,
+                    options,
+                    detail,
                 },
                 pending: Pending {
-                    kind: PendingKind::Command,
+                    kind: if human {
+                        PendingKind::HumanCommand
+                    } else if network.is_some() {
+                        PendingKind::Network
+                    } else {
+                        PendingKind::Command
+                    },
                     native_thread,
                     item,
                     decisions,
@@ -404,7 +499,32 @@ pub fn translate(method: &str, params: &Json, changes: Vec<FileChange>) -> Optio
                 },
             })
         }
+        _ if method.ends_with("/requestApproval") => Some(unrecognized(
+            method,
+            params,
+            PendingKind::UnrecognizedRequest,
+        )),
         _ => None,
+    }
+}
+
+fn unrecognized(method: &str, params: &Json, kind: PendingKind) -> Translated {
+    let title = format!("Unrecognized Codex approval {method}");
+    Translated {
+        request: orch_agent_contract::observations::generic_approval(
+            title.clone(),
+            json!({"method":method,"kind":params.get("kind").filter(|kind| kind.is_string())}),
+            vec![],
+        ),
+        title,
+        pending: Pending {
+            kind,
+            native_thread: text(params, "threadId").into(),
+            item: opt_text(params, "itemId"),
+            decisions: BTreeMap::new(),
+            answered: false,
+            closed: false,
+        },
     }
 }
 
@@ -420,7 +540,16 @@ fn unusable(what: &str) -> AdapterError {
 pub fn answer(pending: &Pending, decision: &ApprovalDecision) -> Result<Json, AdapterError> {
     match (&pending.kind, decision) {
         (
-            PendingKind::Command | PendingKind::FileChange,
+            PendingKind::UnrecognizedCommand | PendingKind::UnrecognizedRequest,
+            ApprovalDecision::Option { option_id, .. },
+        ) if option_id == orch_agent_contract::observations::CANCEL_UNRECOGNIZED_APPROVAL => {
+            Ok(refusal(&pending.kind))
+        }
+        (
+            PendingKind::Command
+            | PendingKind::HumanCommand
+            | PendingKind::Network
+            | PendingKind::FileChange,
             ApprovalDecision::Option { option_id, .. },
         ) => {
             let chosen = pending
@@ -471,7 +600,12 @@ pub fn bypass_answer(kind: &PendingKind) -> Option<Json> {
         PendingKind::Permissions(requested) => {
             Some(json!({ "permissions": requested, "scope": "turn" }))
         }
-        PendingKind::UserInput(_) | PendingKind::Elicitation => None,
+        PendingKind::HumanCommand
+        | PendingKind::Network
+        | PendingKind::UserInput(_)
+        | PendingKind::Elicitation
+        | PendingKind::UnrecognizedCommand
+        | PendingKind::UnrecognizedRequest => None,
     }
 }
 
@@ -479,7 +613,13 @@ pub fn bypass_answer(kind: &PendingKind) -> Option<Json> {
 #[must_use]
 pub fn refusal(kind: &PendingKind) -> Json {
     match kind {
-        PendingKind::Command | PendingKind::FileChange => json!({ "decision": "cancel" }),
+        PendingKind::Command
+        | PendingKind::HumanCommand
+        | PendingKind::Network
+        | PendingKind::FileChange
+        | PendingKind::UnrecognizedCommand => json!({ "decision": "cancel" }),
+        // The actor sends a protocol error for this kind, never a successful null grant.
+        PendingKind::UnrecognizedRequest => Json::Null,
         PendingKind::Permissions(_) => json!({ "permissions": {}, "scope": "turn" }),
         PendingKind::UserInput(ids) => {
             let empty: serde_json::Map<String, Json> = ids
@@ -509,6 +649,91 @@ mod tests {
 
     fn translated(method: &str, params: &Json) -> Translated {
         translate(method, params, Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn managed_command_checkpoints_offer_only_fresh_person_decisions_and_never_bypass() {
+        let mut params = command_request();
+        params["kind"] = json!("humanCommand");
+        params["availableDecisions"] = json!(["acceptForSession",{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["deploy"]}}]);
+        let asked = translated("item/commandExecution/requestApproval", &params);
+        assert_eq!(asked.pending.kind, PendingKind::HumanCommand);
+        assert_eq!(
+            asked
+                .request
+                .options
+                .iter()
+                .map(|option| option.id.as_str())
+                .collect::<Vec<_>>(),
+            [ONCE, DENY, ABORT]
+        );
+        assert!(
+            asked
+                .request
+                .options
+                .iter()
+                .all(|option| option.rule.is_none())
+        );
+        assert!(bypass_answer(&asked.pending.kind).is_none());
+        assert!(
+            answer(
+                &asked.pending,
+                &ApprovalDecision::Option {
+                    option_id: SESSION.into(),
+                    note: None
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(
+            answer(
+                &asked.pending,
+                &ApprovalDecision::Option {
+                    option_id: ONCE.into(),
+                    note: None
+                }
+            )
+            .unwrap(),
+            json!({"decision":"accept"})
+        );
+    }
+
+    #[test]
+    fn network_prompts_use_the_reported_host_and_protocol_and_a_persons_exact_amendment() {
+        let params = json!({"kind":"command","threadId":"thr_1","turnId":"turn_1","itemId":"network-parent","networkApprovalContext":{"host":"api.example.invalid","protocol":"https"},"proposedNetworkPolicyAmendments":[{"host":"api.example.invalid","action":"allow"},{"host":"other.example.invalid","action":"allow"},{"host":"api.example.invalid","action":"deny"}]});
+        let asked = translated("item/commandExecution/requestApproval", &params);
+        assert_eq!(asked.pending.kind, PendingKind::Network);
+        assert_eq!(asked.request.request_kind, HarnessRequestKind::Permissions);
+        assert!(
+            matches!(&asked.request.detail,HarnessRequestDetail::Permissions {permissions,..} if permissions.pointer("/network/host")==Some(&json!("api.example.invalid")) && permissions.pointer("/network/protocol")==Some(&json!("https")))
+        );
+        assert!(bypass_answer(&asked.pending.kind).is_none());
+        let grants: Vec<_> = asked
+            .request
+            .options
+            .iter()
+            .filter(|option| option.id.starts_with(HOST_ALLOW))
+            .collect();
+        assert_eq!(grants.len(), 2);
+        assert_ne!(grants[0].id, grants[1].id);
+        for (option, host) in grants
+            .iter()
+            .zip(["api.example.invalid", "other.example.invalid"])
+        {
+            let result = answer(
+                &asked.pending,
+                &ApprovalDecision::Option {
+                    option_id: option.id.clone(),
+                    note: None,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                result
+                    .pointer("/decision/applyNetworkPolicyAmendment/network_policy_amendment/host"),
+                Some(&json!(host))
+            );
+        }
     }
 
     #[test]
@@ -594,6 +819,8 @@ mod tests {
     #[test]
     fn a_change_of_files_is_shown_with_the_changes_of_the_item_it_is_about() {
         let change = FileChange {
+            before: None,
+            after: None,
             path: "src/main.rs".into(),
             change: orch_agent_contract::events::FileChangeKind::Modify,
             old_path: None,

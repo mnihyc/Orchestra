@@ -114,9 +114,9 @@ export function PlaceReadme({ readme, foldable = false }: { readme: DocumentRef;
       {open && (
         <div className="px-4 pb-3">
           {sync.data === undefined || cut === null ? (
-            <SkeletonRows rows={3} />
+            <SkeletonRows read={sync} rows={3} />
           ) : (
-            <Suspense fallback={<SkeletonRows rows={3} />}><BlockEditor document={sync.data.document} editable={false} inspection fixed={cut.shown} /></Suspense>
+            <Suspense fallback={<SkeletonRows read={sync} rows={3} />}><BlockEditor document={sync.data.document} editable={false} inspection fixed={cut.shown} /></Suspense>
           )}
           {cut?.more === true && (
             <Link to="/doc/$documentId" params={{ documentId: readme.id }} className="text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-focus">

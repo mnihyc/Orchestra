@@ -1,7 +1,9 @@
 ---
+group: work
 title: Work and collaboration
 screens: /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /workbench, /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /doc/$documentId, /inspect/$kind/$id, /shared, /approvals, /document-folder/$folderId, /documents/$nodeId
 keywords: chat, documents, share, approvals, steer, stop, fork, forward, layout, code, conflict, private
+summary: Work with people and agents through threads, chat, documents and shared workspace views.
 ---
 
 # Work and collaboration
@@ -89,10 +91,30 @@ a higher lock, a provider's owner-only policy or a computer's local policy.
 ## Give agents the team's knowledge
 
 Share a document, chat, thread or place with the agents that should use it.
-Can view lets them read the shared content; Can edit permits the relevant
-writing, with document management separately controlled. Private descendants
-are left out. Agents list the shared tree, read at the requested depth, search
-and download; giving a document does not give an agent a human's general access.
+Choose each area separately: Documents offers Can view, Can edit and Can manage;
+Chats offers Can view, Can post and Can manage; Threads offers Can view, Can send
+and Can manage. Fork and Archive are independent rows under Advanced. Manage
+includes those advanced acts. Private descendants remain excluded unless shared
+separately. The agent receives only what each giver can currently share; losing
+those rights stops that contribution, while other valid contributions remain.
+
+Document Manage includes deleting, moving and restoring documents. Creating
+folders, copying, moving and restoring documents execute directly in one call,
+without confirmation. Only document deletion needs a preview and confirmation.
+Chat Manage allows deleting anybody's message. Thread Manage permits archive,
+unarchive, fork and delete. For each thread or chat act, `manage_shared` first gives a
+complete preview without making the change; the agent repeats the arguments with
+the confirmation word to carry it out. Changed or expired plans do nothing.
+Thread deletion settles running work and keeps the ordinary recovery window.
+A fork uses the source history, binding and workspace; its first owner is the
+giver, and it starts with no initial agent gift. The giver must meet the ordinary
+destination and binding requirements. Agents never own things or administer
+places, permission pages or grants.
+
+Sharing alone submits no instructions and starts no turn. Anyone who can Interact
+with the receiving thread may direct its agent using all of its effective rights.
+Optional Read for the thread's viewers remains a separate, unticked choice.
+Giving a document to an agent grants its viewers no Edit or Manage.
 
 An agent's edits and messages name that agent. Its `send_message` tool accepts
 a chat or thread target and optional files. Chat messages are visible to people;

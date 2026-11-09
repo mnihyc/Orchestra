@@ -1,4 +1,4 @@
-/** Copy, link, pin, quote, discuss, forward, select, what the agent received, and fork or ask on the side from any message.
+/** Copy, link, pin, quote, discuss, forward, select, what the agent received, and fork or start a side thread from any message.
  *
  * What can be done with an item, in the same list whether it is reached by the button at its end or
  * by the right mouse button: copy what it shows, copy its link, bring it to the thread's chat as a
@@ -9,6 +9,7 @@
  * quote carries their number. What a person said opens, beside it, what the agent received with it: the
  * view of what was given, narrowed to its turn.
  */
+import { linkTo, referenceTo } from '@/lib/links';
 import { useMutation } from '@tanstack/react-query';
 import { Copy, Ellipsis, GitFork, Link as LinkIcon, ListChecks, MessageSquareDashed, MessageSquareQuote, Pin, PinOff, RotateCcw, ScrollText } from 'lucide-react';
 import { type ReactNode, useContext, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -23,6 +24,7 @@ import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/avail
 import type { Item, Turn } from '@/generated/api-types';
 import { RestoreDialog } from '@/features/source/Restore';
 import { ChatRefs } from '@/features/timeline/ChatRefs';
+import { HoverActions } from '@/features/timeline/HoverActions';
 import { useTimelineContext } from '@/features/timeline/context';
 import { ViewRouteContext } from '@/features/workbench/viewOpening';
 import { isForwarded } from '@/lib/content';
@@ -66,23 +68,15 @@ export function itemText(item: Item): string {
 /** The address of an item: the thread's, with the item named. */
 export function itemLink(target: ThreadReadTarget, itemId: string): string {
   const read = typeof target === 'string' ? defaultThreadRead(target) : target;
-  const url = new URL(`/thread/${read.threadId}`, location.origin);
-  url.searchParams.set('item', itemId);
   const continuation = threadViewOf(read).read?.projection?.viewed_continuation_id;
-  if (continuation !== undefined) url.searchParams.set('continuation', continuation);
-  return url.toString();
+  return linkTo({ kind: 'thread', id: read.threadId }, { item: itemId, ...(continuation === undefined ? {} : { continuation }) });
 }
 
 /** The address of several items: the thread's, with the first brought into view and all of them lit. */
 export function itemsLink(target: ThreadReadTarget, itemIds: readonly string[]): string {
   const read = typeof target === 'string' ? defaultThreadRead(target) : target;
-  const url = new URL(`/thread/${read.threadId}`, location.origin);
-  const [first] = itemIds;
-  if (first !== undefined) url.searchParams.set('item', first);
-  if (itemIds.length > 1) url.searchParams.set('items', itemIds.join(','));
   const continuation = threadViewOf(read).read?.projection?.viewed_continuation_id;
-  if (continuation !== undefined) url.searchParams.set('continuation', continuation);
-  return url.toString();
+  return linkTo({ kind: 'thread', id: read.threadId }, { items: itemIds, ...(continuation === undefined ? {} : { continuation }) });
 }
 
 /** How long a finger rests on an item before the conversation is put in selection mode with it picked: less than the
@@ -116,6 +110,7 @@ export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onR
   const entries: MenuEntry[] = [...extra];
   if (entries.length > 0) entries.push({ type: 'separator', id: 'extra-end' });
   if (text !== '') entries.push({ id: 'copy', label: t('timeline.actions.copy'), icon: <Copy aria-hidden />, onSelect: () => copy(text) });
+  if (turn !== undefined) entries.push({ id: 'reference', label: t('people.reference.copy'), icon: <LinkIcon aria-hidden />, onSelect: () => copy(referenceTo({ kind: 'thread', id: context.threadId, name: t('people.reference.turn', { number: turn.ordinal }) }, { turn: turn.ordinal })) });
   entries.push({ id: 'link', label: t('timeline.actions.copyLink'), icon: <LinkIcon aria-hidden />, onSelect: () => copy(itemLink(read, item.id)) });
   entries.push({
     id: 'discuss',
@@ -132,10 +127,10 @@ export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onR
       const view = threadViewOf(read);
       context.selection.pick(view.order.filter((id) => view.items.get(id)?.turn_id === turn.id));
     } });
-    if (onRestore !== undefined && turn.completed_at !== null && turn.before_snapshot_id !== null && thread?.environment !== null
-      && thread?.environment_permissions.includes('files.view') === true && thread.environment_permissions.includes('files.manage')) {
-      entries.push({ id: 'restore-turn', label: t('source.restore.open'), icon: <RotateCcw aria-hidden />, onSelect: () => onRestore(turn) });
-    }
+  }
+  if (turn !== undefined && item.kind === 'user_message' && onRestore !== undefined && turn.completed_at !== null && turn.before_snapshot_id !== null && thread?.environment !== null
+    && thread?.environment_permissions.includes('files.view') === true && thread.environment_permissions.includes('files.manage')) {
+    entries.push({ id: 'restore-turn', label: t('thread.turnActions.restoreBefore'), icon: <RotateCcw aria-hidden />, onSelect: () => onRestore(turn) });
   }
   if (typeof item.model_input_id === 'string') {
     const record = item.model_input_id;
@@ -176,7 +171,7 @@ export function useItemEntries(item: Item, extra: readonly MenuEntry[] = [], onR
     });
   }
   return context.readOnly === true ? entries.map((entry) => 'onSelect' in entry
-    && ['discuss', 'select', 'select-turn', 'fork-here', 'side-here'].includes(entry.id)
+    && ['discuss', 'select', 'select-turn', 'fork-here', 'side-here', 'restore-turn'].includes(entry.id)
     ? { ...entry, disabled: t('messageVersions.activeActions') } : entry) : entries;
 }
 
@@ -188,10 +183,12 @@ export interface ItemFrameProps {
   label: string;
   children: ReactNode;
   className?: string;
+  /** Common controls under a human message; its remaining acts keep the same menu and context menu. */
+  messageActions?: ReactNode;
 }
 
 /** Wraps an item so that its menu opens under the right mouse button and from a button at its end. */
-export function ItemFrame({ item, extra, label, children, className }: ItemFrameProps) {
+export function ItemFrame({ item, extra, label, children, className, messageActions }: ItemFrameProps) {
   const { t } = useTranslation();
   const [restoring, setRestoring] = useState<Turn | null>(null);
   const entries = useItemEntries(item, extra, setRestoring);
@@ -298,9 +295,11 @@ export function ItemFrame({ item, extra, label, children, className }: ItemFrame
       >
         <div ref={body} data-item-body>{children}</div>
         {item.chat_refs > 0 && <ChatRefs count={item.chat_refs} />}
-        <div ref={acts} data-item-acts className="absolute top-0 right-0 opacity-0 transition-opacity group-focus-within/item:opacity-100 group-hover/item:opacity-100">
+        {messageActions !== undefined ? <HoverActions owner="person">{messageActions}
+          <Menu label={label} align="end" entries={entries.filter((entry) => !['copy', 'edit-message', 'restore-turn'].includes(entry.id))} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
+        </HoverActions> : <div ref={acts} data-item-acts className="absolute top-0 right-0 opacity-0 transition-opacity group-focus-within/item:opacity-100 group-hover/item:opacity-100">
           <Menu label={label} align="end" entries={entries} trigger={<IconButton size="sm" label={t('timeline.actions.more')} icon={<Ellipsis aria-hidden />} />} />
-        </div>
+        </div>}
       </div>
     </ContextMenu>
     {restoring?.before_snapshot_id !== null && restoring !== null && thread !== null && <RestoreDialog thread={thread} snapshotId={restoring.before_snapshot_id} onClose={() => setRestoring(null)} />}</>

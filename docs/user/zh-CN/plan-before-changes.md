@@ -13,6 +13,7 @@ heading_id.达成与证据: met-and-the-evidence
 heading_id.限额与停止: limits-and-stopping
 heading_id.谁能设定目标: who-can-set-a-goal
 heading_id.计划与目标: plan-and-goal
+summary: 在代理修改前查看计划，并用目标引导后续工作。
 ---
 
 # 计划与目标

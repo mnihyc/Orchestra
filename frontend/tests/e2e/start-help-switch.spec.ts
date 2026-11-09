@@ -156,3 +156,81 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     });
   });
 }
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`marks the environment reported as this topic's default (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    let defaultName: string | null = null;
+    await page.route('**/api/v1/nodes/*/binding/options**', async (route) => {
+      const response = await route.fetch();
+      const options: unknown = await response.json();
+      if (typeof options !== 'object' || options === null || !('environments' in options) || !Array.isArray(options.environments)) throw new Error('The native binding preview supplies environment choices.');
+      const first: unknown = options.environments[0];
+      if (typeof first !== 'object' || first === null || !('environment' in first) || typeof first.environment !== 'object' || first.environment === null
+        || !('name' in first.environment) || typeof first.environment.name !== 'string') throw new Error('This default-mark fixture needs one native environment.');
+      defaultName = first.environment.name;
+      await route.fulfill({ response, json: { ...options, environments: options.environments.map((entry: unknown, index: number) => {
+        if (typeof entry !== 'object' || entry === null) throw new Error('A binding environment is an object.');
+        return { ...entry, is_default: index === 0 };
+      }) } });
+    });
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/topic/${ACME.fixLogin}`);
+    await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
+    const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
+    await form.getByRole('button', { name: words.start.options.title, exact: true }).click();
+    const where = form.locator('[data-start-where]');
+    await where.getByRole('radio', { name: words.start.where.useExisting, exact: true }).click();
+    await where.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
+    if (defaultName === null) throw new Error('The default environment must come from the native preview.');
+    const option = page.getByRole('option', { name: defaultName, exact: true });
+    await expect(option.getByText(words.start.topicDefault, { exact: true })).toBeVisible();
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`opens complete reference documentation from the Arrangement heading (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario(); await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/topic/${ACME.fixLogin}`);
+    const starter = page.locator('[data-quick-start]');
+    await starter.getByRole('textbox').fill('Keep the setup while reading');
+    await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
+    const form = page.getByRole('dialog').filter({ has: page.locator('[data-start-actions]') });
+    await form.getByRole('button', { name: words.start.options.title, exact: true }).click();
+    const question = form.getByRole('button', { name: words.help.hint.label.replace('{{term}}', words.start.arrangement.label), exact: true });
+    await expect(question).toHaveCount(1);
+    await question.click();
+    await page.getByRole('button', { name: words.help.hint.more, exact: true }).click();
+    const help = page.locator('[data-help-reading]');
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Choose an arrangement' : '选择运行方式', exact: true })).toBeVisible();
+    await help.getByRole('link', { name: locale === 'en' ? 'option field reference' : '选项字段参考', exact: true }).click();
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Option field reference' : '选项字段参考', exact: true })).toBeVisible();
+    await expect(help.getByText('option:ChangeOptions.active_turn', { exact: true })).toBeVisible();
+    await expect(help).toContainText(locale === 'en' ? 'How to treat a turn that is under way.' : '如何处理正在运行的轮次。');
+    const summaryOption = help.getByText('option:SummaryTargetOptions.automatic', { exact: true });
+    await summaryOption.scrollIntoViewIfNeeded();
+    await expect(summaryOption).toBeVisible();
+    await expect(help).toContainText(locale === 'en' ? 'Allow automatic refresh for this target. Off as shipped; explicit Refresh is separate.' : '允许此目标自动刷新。默认关闭；手动刷新是独立操作。');
+    const groupOption = help.getByText('option:ModelGroupOptions.request_options', { exact: true });
+    await groupOption.scrollIntoViewIfNeeded();
+    await expect(groupOption).toBeVisible();
+    await help.getByRole('link', { name: locale === 'en' ? 'settings reference' : '设置参考', exact: true }).click();
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Settings reference' : '设置参考', exact: true })).toBeVisible();
+    const askSetting = help.getByRole('row').filter({ has: page.getByText('setting:ask.max_steps', { exact: true }) });
+    await askSetting.scrollIntoViewIfNeeded();
+    await expect(askSetting).toContainText(words.settingRegistry.ask.max_steps.description);
+    await help.getByRole('link', { name: locale === 'en' ? 'state reference' : '状态参考', exact: true }).click();
+    const closed = help.getByRole('row').filter({ has: page.getByText('state:AskState.closed', { exact: true }) });
+    await closed.scrollIntoViewIfNeeded();
+    await expect(closed).toContainText(locale === 'en' ? 'The owner can no longer enter the conversation’s root organization.' : '所有者已无法进入此会话的根组织。');
+    const unfinished = help.getByRole('row').filter({ has: page.getByText('state:UploadInventoryState.partial', { exact: true }) });
+    await unfinished.scrollIntoViewIfNeeded();
+    await expect(unfinished).toContainText(locale === 'en' ? 'The upload is unfinished; this does not claim that a sender is active now.' : '上传尚未完成；不能据此认定发送方此刻仍在活动。');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+  });
+}

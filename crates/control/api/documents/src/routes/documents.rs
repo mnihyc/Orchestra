@@ -1,0 +1,947 @@
+//! Documents: listing beside a node, blocks and their operations, comments, versions and what changed between two of them, files, export as Markdown, HTML and Typst with what it is asked to hold, import, moving and deleting.
+//!
+//! A document is a page of blocks written beside a node. This module makes
+//! one (from blocks, or from Markdown, which is the way in for a script and
+//! for an import), lists those beside a node that the caller may read, reads
+//! one whole or what changed in it since a sequence, renames it and changes
+//! its description, says how far the caller has had it on screen, moves it to
+//! another node of its tree, and
+//! deletes it and brings it back. The submodules hold the rest: `ops`
+//! applies batches of changes, `history` lists versions, says what changed
+//! between two and puts one back, `comments` holds the discussions beside
+//! the text, `export` writes a document out, `files` puts files into it and
+//! gives them back, and [`page`] is its permission page. Who may do what is
+//! the access engine's, asked through [`crate::middleware::authorization`];
+//! what a document may hold where it stands is `limits`; the names a reader
+//! is shown are put in by `build`.
+//!
+//! Every change is one transaction that stamps the document from its own
+//! sequence under the lock on its row and announces it when it commits, which
+//! is how every open copy of a document stays the same document.
+
+use std::collections::HashMap;
+
+use crate::middleware::authorization;
+
+use crate::middleware::authorization::exact;
+
+use crate::middleware::authorization::refusals;
+
+use crate::middleware::requests::ApiError;
+
+use crate::middleware::requests::ApiResult;
+
+use crate::middleware::transaction_guard;
+
+use crate::registry::Ctx;
+
+use crate::registry::Registry;
+
+use crate::routes::nodes::actor_name;
+
+use crate::routes::nodes::invalid;
+
+use crate::routes::nodes::placed;
+
+use crate::sign_in::origin;
+
+use chrono::DateTime;
+
+use chrono::Utc;
+
+use orch_access_contract::audit::AuditAction;
+
+use orch_access_contract::permissions::Permission;
+
+use orch_api_contract::common::ErrorCode;
+
+use orch_api_contract::common::Page;
+
+use orch_api_contract::common::PageQuery;
+
+use orch_api_contract::documents::DOCUMENT_SYNC_MAX_CHANGES;
+
+use orch_api_contract::documents::DOCUMENT_TITLE_MAX_CHARS;
+
+use orch_api_contract::documents::Document;
+
+use orch_api_contract::documents::DocumentDelete;
+
+use orch_api_contract::documents::DocumentFileChange;
+
+use orch_api_contract::documents::DocumentFileChangeKind;
+
+use orch_api_contract::documents::DocumentFileDelete;
+
+use orch_api_contract::documents::DocumentGet;
+
+use orch_api_contract::documents::DocumentMove;
+
+use orch_api_contract::documents::DocumentMoveBody;
+
+use orch_api_contract::documents::DocumentMovePreview;
+
+use orch_api_contract::documents::DocumentOp;
+
+use orch_api_contract::documents::DocumentRestore;
+
+use orch_api_contract::documents::DocumentSeen;
+
+use orch_api_contract::documents::DocumentSeenBody;
+
+use orch_api_contract::documents::DocumentSync;
+
+use orch_api_contract::documents::DocumentSyncGet;
+
+use orch_api_contract::documents::DocumentSyncGetQuery;
+
+use orch_api_contract::documents::DocumentUpdate;
+
+use orch_api_contract::documents::DocumentUpdateBody;
+
+use orch_api_contract::documents::NewBlock;
+
+use orch_api_contract::documents::NewDocumentAccess;
+
+use orch_api_contract::documents::NodeDocumentCreate;
+
+use orch_api_contract::documents::NodeDocumentCreateBody;
+
+use orch_api_contract::documents::NodeDocumentList;
+
+use orch_api_contract::documents::NodeDocumentPagesGet;
+
+use orch_authz::documents;
+
+use orch_authz::pages;
+
+use orch_authz::usable::ResourcePolicy;
+
+use orch_authz::Act;
+
+use orch_authz::Policy;
+
+use orch_authz::Principal;
+
+use orch_db::audit;
+
+use orch_db::audit::Actor;
+
+use orch_db::audit::Entry;
+
+use orch_db::queries::documents::batch;
+
+use orch_db::queries::documents::batch::Outcome;
+
+use orch_db::queries::documents::discussions;
+
+use orch_db::queries::documents as rows;
+
+use orch_db::queries::documents::DocumentRow;
+
+use orch_db::Conn;
+
+use orch_db::DbError;
+
+use orch_documents::markdown;
+
+use orch_documents::markdown::Directory;
+
+use orch_documents::placement;
+
+use orch_documents::placement::Destination;
+
+use orch_documents::placement::MoveRefusal;
+
+use orch_documents::versions::Writer;
+
+use orch_engine::document_tree as document_tree_domain;
+
+use orch_types::Id;
+
+use orch_types::Json;
+
+use orch_types::Time;
+
+use serde_json::json;
+
+use limits::DocSettings;
+/// How many rounds of reading a list take at most to find a page of documents
+/// the caller may read: a person who may read few of many is shown the page
+/// they have so far, with the cursor to go on from, instead of waiting for the
+/// whole list to be read.
+const LIST_ROUNDS_MAX: usize = 20;
+
+/// Carries only the fact that an authorized private row was encountered on an earlier readable page.
+const WITH_PRIVATE_CURSOR: &str = "with-private:";
+
+/// A sparse list advances by a scan count relative to its last readable cursor, not a hidden timestamp.
+const SCAN_CURSOR: &str = "scan:";
+
+/// Binds this module's requests.
+pub fn mount(registry: &mut Registry) {
+    mentions::mount(registry);
+    creation::mount(registry);
+    convert::mount(registry);
+    imports::mount(registry);
+    registry
+        .creation(
+            NodeDocumentCreate,
+            text_creation::replay_binding::<text_creation::Node, NodeDocumentCreateBody>(),
+        )
+        .creation(
+            orch_api_contract::document_tree::DocumentContainerDocumentCreate,
+            text_creation::replay_binding::<text_creation::Container, NodeDocumentCreateBody>(),
+        )
+        .on_snapshot_read_with_optional_operation(
+            NodeDocumentList,
+            list_read::prepare,
+            list_read::read,
+        )
+        .on_snapshot_read_with_optional_operation(
+            NodeDocumentPagesGet,
+            pages_read::prepare,
+            pages_read::get,
+        )
+        .on_with_operation(
+            NodeDocumentCreate,
+            crate::key_operations::native::effects::prepare::<text_creation::AtNode>,
+            text_creation::create::<text_creation::AtNode>,
+        )
+        .on_with_operation(
+            orch_api_contract::document_tree::DocumentContainerDocumentCreate,
+            crate::key_operations::native::effects::prepare::<text_creation::AtContainer>,
+            text_creation::create::<text_creation::AtContainer>,
+        )
+        .on_snapshot_read_with_operation(DocumentGet, read_operation::get, get)
+        .on_snapshot_read_with_operation(DocumentSyncGet, read_operation::sync, sync)
+        .on(DocumentUpdate, update)
+        .on(DocumentSeen, seen)
+        .on(DocumentDelete, delete)
+        .on_with_operation(
+            DocumentRestore,
+            crate::key_operations::native::effects::prepare::<restoring::Restores>,
+            restoring::restore,
+        )
+        .on_with_operation(
+            DocumentMovePreview,
+            crate::key_operations::native::effects::prepare::<move_review::Reviews>,
+            move_review::preview,
+        )
+        .on_with_operation(
+            DocumentMove,
+            crate::key_operations::native::effects::prepare::<moving::Moves>,
+            moving::move_to,
+        )
+        .on(DocumentFileDelete, file_delete);
+    ops::mount(registry);
+    history::mount(registry);
+    comments::mount(registry);
+    export::mount(registry);
+    files::mount(registry);
+    subscription::mount(registry);
+    references::mount(registry);
+    summary_options::mount(registry);
+}
+orch_api_base::__api_bind_00fe765ca7!();
+
+// ---------------------------------------------------------------- shared by the submodules
+
+/// Writes the audit row of an act of the caller on a document, in the caller's
+/// transaction. A document's rows stand beside no node: they are lines of its
+/// own history, and of the audit trail of the root org it lies in.
+async fn record(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    action: AuditAction,
+    document: &DocumentRow,
+    summary: &str,
+    details: Json,
+) -> ApiResult<()> {
+    let mut entry = Entry::new(
+        Actor::User(ctx.user()?.id()),
+        action.as_str(),
+        action.object_kind().unwrap_or("document"),
+        Some(document.id),
+        summary,
+    );
+    entry.history = action.is_history_line();
+    entry.node_id = Some(document.node_id);
+    entry.org_id = Some(document.org_id);
+    entry.details = details;
+    if action == AuditAction::DocumentDeleted {
+        let days =
+            i64::try_from(ctx.app.config.retention.soft_delete_days).map_err(ApiError::internal)?;
+        entry.details["purge_at"] = json!(ctx.now + chrono::Duration::days(days));
+    }
+    audit::append(conn, &entry, &origin(ctx), ctx.now).await?;
+    Ok(())
+}
+
+/// The document `id` that is there: not deleted.
+async fn live(conn: &mut Conn, id: Id) -> ApiResult<DocumentRow> {
+    rows::get(conn, id)
+        .await?
+        .filter(|row| row.deleted_at.is_none() || orch_db::queries::trace::retained_read(row.id))
+        .ok_or_else(ApiError::not_found)
+}
+
+/// The document `id` that is there, with its row locked until the transaction
+/// ends.
+async fn live_locked(conn: &mut Conn, id: Id) -> ApiResult<DocumentRow> {
+    rows::lock(conn, id)
+        .await?
+        .filter(|row| row.deleted_at.is_none())
+        .ok_or_else(ApiError::not_found)
+}
+
+/// The stored directory belongs to the native tree entry, separately from the text content row.
+async fn stored_directory(
+    conn: &mut Conn,
+    document: &DocumentRow,
+) -> ApiResult<document_tree_domain::Directory> {
+    let entry = rows::containers::entry(conn, "document", document.id)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if entry.node_id != document.node_id || entry.org_id != document.org_id {
+        return Err(ApiError::not_found());
+    }
+    Ok(entry.parent_container_id.map_or(
+        document_tree_domain::Directory::NodeDocs(entry.node_id),
+        document_tree_domain::Directory::Container,
+    ))
+}
+
+/// A title as it is kept: without the space around it, one to the most characters.
+fn clean_title(path: &str, title: &str) -> ApiResult<String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(invalid(path, "must not be empty"));
+    }
+    let most = usize::try_from(DOCUMENT_TITLE_MAX_CHARS).unwrap_or(usize::MAX);
+    if title.chars().count() > most {
+        return Err(invalid(
+            path,
+            &format!("must be at most {DOCUMENT_TITLE_MAX_CHARS} characters"),
+        ));
+    }
+    Ok(title.to_owned())
+}
+
+/// The moment and the identifier a list resumes after: the moment is written in
+/// microseconds, which is what the database keeps.
+fn read_cursor(path: &str, cursor: Option<&str>) -> ApiResult<Option<(DateTime<Utc>, Id)>> {
+    let Some(text) = cursor else {
+        return Ok(None);
+    };
+    let bad = || invalid(path, "is not a cursor of this list");
+    let (micros, id) = text.split_once('|').ok_or_else(bad)?;
+    let at = micros
+        .parse::<i64>()
+        .ok()
+        .and_then(DateTime::<Utc>::from_timestamp_micros)
+        .ok_or_else(bad)?;
+    Ok(Some((at, id.parse().map_err(|_| bad())?)))
+}
+
+/// A cursor, as [`read_cursor`] reads it.
+fn write_cursor(at: DateTime<Utc>, id: Id) -> String {
+    format!("{}|{id}", at.timestamp_micros())
+}
+
+// ---------------------------------------------------------------- listing and reading
+
+/// Batch only the transport: every place retains its native permission and document-page supplier.
+/// The people named in Markdown, looked up by the names the text uses.
+struct Names {
+    users: HashMap<String, Id>,
+}
+
+impl Directory for Names {
+    fn user_id(&self, username: &str) -> Option<Id> {
+        self.users.get(&username.to_ascii_lowercase()).copied()
+    }
+}
+
+async fn names_in(conn: &mut Conn, text: &str) -> ApiResult<Names> {
+    let candidates = markdown::mentioned_names(text);
+    let found = rows::users_by_username(conn, &candidates).await?;
+    Ok(Names {
+        users: found.into_iter().collect(),
+    })
+}
+
+/// Operations that put blocks at the top of an empty document, one after the other.
+fn creation_ops(blocks: Vec<NewBlock>) -> Vec<DocumentOp> {
+    let mut previous: Option<Id> = None;
+    blocks
+        .into_iter()
+        .map(|block| {
+            let id = block.id;
+            let op = DocumentOp::Insert {
+                block,
+                parent_id: None,
+                after_id: previous,
+            };
+            previous = Some(id);
+            op
+        })
+        .collect()
+}
+
+async fn initial_blocks(
+    conn: &mut Conn,
+    blocks: Option<Vec<NewBlock>>,
+    markdown: Option<String>,
+) -> ApiResult<Vec<NewBlock>> {
+    Ok(match (blocks, markdown) {
+        (Some(_), Some(_)) => {
+            return Err(invalid("markdown", "give blocks or markdown, not both"));
+        }
+        (Some(blocks), None) => blocks,
+        (None, Some(text)) => {
+            let names = names_in(conn, &text).await?;
+            markdown::read(&text, &names)
+        }
+        (None, None) => Vec::new(),
+    })
+}
+
+struct CreationMaterial<'a> {
+    id: Id,
+    node: Id,
+    title: &'a str,
+    access: Option<NewDocumentAccess>,
+    blocks: Vec<NewBlock>,
+    copied_files: &'a [rows::HeldFile],
+    receipt_warnings: &'a [String],
+    settings: DocSettings,
+}
+
+/// The one native content/files/privacy/audit installer for new current material.
+async fn install_created(
+    ctx: &Ctx,
+    tx: &mut orch_db::Tx,
+    principal: &Principal,
+    material: CreationMaterial<'_>,
+) -> ApiResult<()> {
+    let CreationMaterial {
+        id,
+        node,
+        title,
+        access,
+        blocks,
+        copied_files,
+        receipt_warnings,
+        settings,
+    } = material;
+    let maker = principal.user();
+    let mut total = 0_i64;
+    for file in copied_files {
+        if file.file.size > settings.file_max_bytes.value {
+            return Err(limits::too_large(
+                &mut *tx,
+                principal,
+                &settings,
+                limits::Limit::FileBytes,
+                Policy::default(),
+            )
+            .await);
+        }
+        total = total.saturating_add(file.file.size);
+    }
+    if total > settings.files_max_bytes.value {
+        return Err(limits::too_large(
+            &mut *tx,
+            principal,
+            &settings,
+            limits::Limit::FilesBytes,
+            Policy::default(),
+        )
+        .await);
+    }
+    convert::register(ctx, &mut *tx, copied_files, ctx.now).await?;
+    rows::copy::install_files(&mut *tx, id, copied_files, Some(maker), None, ctx.now)
+        .await
+        .map_err(ApiError::internal)?;
+    let policy = Policy::default();
+    if access == Some(NewDocumentAccess::Private) {
+        let change = orch_access_contract::pages::PageChange {
+            whole: Some(orch_access_contract::pages::Whole::Private),
+            ..Default::default()
+        };
+        let home = ResourcePolicy {
+            owners_name_outsiders: crate::routes::nodes::policy_at(&mut *tx, node)
+                .await?
+                .owners_name_outsiders,
+            shared_subscriptions: None,
+        };
+        let object = orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Document,
+            id,
+        };
+        if let Err(error) =
+            pages::change_resource(&mut *tx, principal, object, &change, &home, &origin(ctx)).await
+        {
+            return Err(refusals::change_failed(&mut *tx, error).await);
+        }
+    }
+    let ops = creation_ops(blocks);
+    let rules = settings.version_rules(ctx.app.config.documents.version_window_secs);
+    // Creation may contain the place's full block allowance. Each ordinary operation batch keeps
+    // its own request bound; all chunks remain in this one transaction, so no partial page is visible.
+    let chunk_max = usize::try_from(orch_api_contract::documents::DOCUMENT_OPS_MAX)
+        .map_err(ApiError::internal)?;
+    for chunk in ops.chunks(chunk_max) {
+        let outcome = batch::apply(
+            &mut *tx,
+            id,
+            &Writer::User(maker),
+            None,
+            chunk,
+            settings.batch_limits(),
+            rules,
+            ctx.now,
+        )
+        .await?;
+        match outcome {
+            Outcome::Applied(_) => {}
+            other => return Err(ops::refuse(&mut *tx, principal, &settings, other, policy).await),
+        }
+    }
+    let row = live(&mut *tx, id).await?;
+    let who = actor_name(ctx)?;
+    let mut details = json!({ "node": node, "title": title, "access": access });
+    if !receipt_warnings.is_empty() {
+        details["import_warnings"] = json!(receipt_warnings);
+    }
+    record(
+        ctx,
+        &mut *tx,
+        orch_db::audit::action!(AuditAction::DocumentCreated),
+        &row,
+        &format!("{who} made the document \"{title}\""),
+        details,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Reads a document without its blocks.
+pub(crate) async fn get(
+    ctx: Ctx,
+    _query: orch_api_contract::nodes::DeletedInspectionQuery,
+    (): (),
+) -> ApiResult<Document> {
+    let (shown, prepared, actual) =
+        crate::key_operations::native::read(ctx, |ctx, conn, principal| {
+            Box::pin(async move {
+                let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+                read_operation::same_inspection(ctx, &prepared)?;
+                let shown = read_operation::project_document(conn, principal, &prepared).await?;
+                Ok((shown, prepared, ctx.clone()))
+            })
+        })
+        .await?;
+    read_operation::finish(&actual, &prepared).await?;
+    Ok(shown)
+}
+
+/// A document and every live block, or what changed since a sequence, as a
+/// reader holding the document open is brought up to date.
+async fn read_sync(
+    conn: &mut Conn,
+    principal: &Principal,
+    id: Id,
+    since: Option<i64>,
+    now: DateTime<Utc>,
+) -> ApiResult<DocumentSync> {
+    let policy = Policy::default();
+    let row = live(conn, id).await?;
+    let listed = build::standing(conn, principal, id, policy).await?;
+    let document = build::document(conn, principal, &row, &listed, now, policy).await?;
+    let selected = sync_rows(conn, &row, since).await?;
+    let seq = row.doc_seq;
+    let SyncRows {
+        blocks,
+        discussions: found,
+        complete,
+    } = selected;
+    Ok(DocumentSync {
+        document,
+        blocks: build::blocks_for(conn, principal, &blocks, policy).await?,
+        discussions: build::discussions_for(conn, principal, id, &found, policy).await?,
+        seq,
+        since,
+        complete,
+    })
+}
+
+pub(super) struct SyncRows {
+    pub blocks: Vec<rows::BlockRow>,
+    pub discussions: Vec<discussions::Full>,
+    pub complete: bool,
+}
+
+pub(super) async fn sync_rows(
+    conn: &mut Conn,
+    row: &DocumentRow,
+    since: Option<i64>,
+) -> ApiResult<SyncRows> {
+    let id = row.id;
+    let seq = row.doc_seq;
+    let (blocks, found, complete) = match since {
+        None => (
+            rows::live_blocks(conn, id).await?,
+            discussions::list(conn, id, discussions::Which::All, None, 50)
+                .await?
+                .into_iter()
+                .map(|(full, _)| full)
+                .collect(),
+            true,
+        ),
+        Some(since) => {
+            let changed_discussions =
+                discussions::changed_previews(conn, id, since, seq, 51).await?;
+            let too_far = since < row.purged_seq
+                || changed_discussions.len() > 50
+                || rows::count_blocks_changed(conn, id, since).await? > DOCUMENT_SYNC_MAX_CHANGES;
+            if too_far {
+                (Vec::new(), Vec::new(), false)
+            } else {
+                (
+                    rows::blocks_changed(conn, id, since, seq, DOCUMENT_SYNC_MAX_CHANGES).await?,
+                    changed_discussions,
+                    true,
+                )
+            }
+        }
+    };
+    Ok(SyncRows {
+        blocks,
+        discussions: found,
+        complete,
+    })
+}
+
+/// Reads a document and every live block, or what changed since a sequence.
+async fn sync(ctx: Ctx, query: DocumentSyncGetQuery, (): ()) -> ApiResult<DocumentSync> {
+    if query.since.is_some_and(|since| since < 0) {
+        return Err(invalid("since", "must not be negative"));
+    }
+    let (shown, prepared, actual) =
+        crate::key_operations::native::read(ctx, |ctx, conn, principal| {
+            Box::pin(async move {
+                let prepared = ctx.operation_data::<read_operation::PreparedRead>()?;
+                read_operation::same_inspection(ctx, &prepared)?;
+                let shown = read_operation::project_sync(conn, principal, &prepared).await?;
+                Ok((shown, prepared, ctx.clone()))
+            })
+        })
+        .await?;
+    read_operation::finish(&actual, &prepared).await?;
+    Ok(shown)
+}
+
+// ---------------------------------------------------------------- the document as a thing
+
+/// Renames a document, changes its description, or both. A description that a person writes is theirs from then
+/// on: automation leaves it alone.
+async fn update(mut ctx: Ctx, (): (), body: DocumentUpdateBody) -> ApiResult<Document> {
+    let id = ctx.id("id")?;
+    if body.title.is_none() && body.description.is_none() {
+        return Err(invalid("title", "give a title, a description, or both"));
+    }
+    let title = body
+        .title
+        .as_deref()
+        .map(|title| clean_title("title", title))
+        .transpose()?;
+    let description = body
+        .description
+        .as_deref()
+        .map(|text| crate::routes::nodes::clean_description("description", text))
+        .transpose()?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    ctx.now = guard.now().get();
+    let principal = guard.principal().clone();
+    let policy = Policy::default();
+    let before = live(&mut tx, id).await?;
+    if let Some(description) = description
+        && description != before.description
+    {
+        Box::pin(rows::describe(
+            &mut tx,
+            id,
+            &description,
+            &Writer::User(principal.user()),
+            ctx.now,
+        ))
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    }
+    if let Some(title) = title
+        && before.title != title
+    {
+        let request = document_tree_domain::Request {
+            command: document_tree_domain::Command::Rename,
+            items: vec![document_tree_domain::Item::Document(id)],
+            to: None,
+            name: Some(title),
+            request_ref: orch_types::new_id().to_string(),
+            version: None,
+        };
+        let renamed = document_tree_domain::execute_in(
+            &mut tx,
+            document_tree_domain::Actor::Person(&principal),
+            &request,
+            None,
+            Time::new(ctx.now),
+            crate::routes::document_tree::options(&ctx),
+        )
+        .await;
+        crate::routes::document_tree::result(&mut tx, renamed).await?;
+    }
+    let row = live(&mut tx, id).await?;
+    let listed = build::standing(&mut tx, &principal, id, policy).await?;
+    let changed = build::document(&mut tx, &principal, &row, &listed, ctx.now, policy).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(changed)
+}
+
+/// Says how far the caller has had a document on screen.
+async fn seen(mut ctx: Ctx, (): (), body: DocumentSeenBody) -> ApiResult<()> {
+    let id = ctx.id("id")?;
+    if body.seq < 0 {
+        return Err(invalid("seq", "must not be negative"));
+    }
+    let (mut conn, guard) = transaction_guard::begin(&ctx).await?;
+    ctx.now = guard.now().get();
+    let principal = guard.principal().clone();
+    let row = live(&mut conn, id).await?;
+    // Nobody has had on screen what does not exist yet.
+    let seq = body.seq.min(row.doc_seq);
+    rows::mark_seen(&mut conn, principal.user(), id, seq, ctx.now).await?;
+    conn.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+/// Deletes a document, which can be restored until it is purged.
+async fn delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let id = ctx.id("id")?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    ctx.now = guard.now().get();
+    let principal = guard.principal().clone();
+    rows::containers::lock_document_scope(&mut tx, id).await?;
+    live(&mut tx, id).await?;
+    // The existing single-document DELETE keeps its request shape; its confirmation is
+    // the ordinary document action. It uses the same complete producer, never a folder target.
+    let request = document_tree_domain::Request {
+        command: document_tree_domain::Command::Delete,
+        items: vec![document_tree_domain::Item::Document(id)],
+        to: None,
+        name: None,
+        request_ref: orch_types::new_id().to_string(),
+        version: None,
+    };
+    let options = crate::routes::document_tree::options(&ctx);
+    let plan = document_tree_domain::plan_delete_in(
+        &mut tx,
+        document_tree_domain::Actor::Person(&principal),
+        &request,
+        Time::new(ctx.now),
+        options,
+    )
+    .await;
+    let plan = crate::routes::document_tree::result(&mut tx, plan).await?;
+    let deleted = document_tree_domain::execute_in(
+        &mut tx,
+        document_tree_domain::Actor::Person(&principal),
+        &request,
+        Some(&plan.stamp),
+        Time::new(ctx.now),
+        options,
+    )
+    .await;
+    crate::routes::document_tree::result(&mut tx, deleted).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------- moving
+
+/// What a move needs held, and what it needs of the place: Manage of the
+/// document, what makes a document where it goes, documents being on there, and
+/// the node being within the tree the document was made in.
+async fn may_move(
+    conn: &mut Conn,
+    principal: &Principal,
+    ctx_policy: Policy,
+    document: &DocumentRow,
+    to: Id,
+) -> ApiResult<Option<Id>> {
+    authorization::require_document(
+        conn,
+        principal,
+        document.id,
+        Permission::DocManage,
+        ctx_policy,
+    )
+    .await?;
+    let (target, _) = placed(conn, to).await?;
+    authorization::require(
+        conn,
+        principal,
+        to,
+        exact(Permission::DocCreate),
+        Act::Use,
+        ctx_policy,
+    )
+    .await?;
+    let settings = DocSettings::at(conn, to).await?;
+    let destination = Destination {
+        root: target.org,
+        deleted: false,
+        docs_enabled: settings.enabled,
+    };
+    match placement::check_move(document.node_id, document.org_id, to, &destination) {
+        Ok(()) => Ok(Some(target.org)),
+        Err(MoveRefusal::Already) => {
+            let entry = rows::containers::entry(conn, "document", document.id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            Ok(entry.parent_container_id.map(|_| target.org))
+        }
+        Err(MoveRefusal::Gone) => Err(ApiError::not_found()),
+        Err(MoveRefusal::OtherTree) => Err(ApiError::new(
+            ErrorCode::NodeWrongParent,
+            "Use Move to another org to copy there and delete here.",
+        )),
+        Err(MoveRefusal::Disabled) => {
+            Err(limits::disabled(conn, principal, &settings, ctx_policy).await)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- files
+
+/// Takes a file out of a document, unless a live block names it.
+async fn file_delete(mut ctx: Ctx, (): (), (): ()) -> ApiResult<()> {
+    let id = ctx.id("id")?;
+    let file = ctx.id("file_id")?;
+    let (mut tx, guard) = transaction_guard::begin(&ctx).await?;
+    ctx.now = guard.now().get();
+    let row = live_locked(&mut tx, id).await?;
+    let held = rows::file(&mut tx, id, file)
+        .await?
+        .ok_or_else(ApiError::not_found)?;
+    if !rows::files_in_use(&mut tx, id, &[file]).await?.is_empty() {
+        return Err(ApiError::new(
+            ErrorCode::ResourceInUse,
+            "a block of the document still names this file",
+        ));
+    }
+    rows::remove_file(&mut tx, id, file).await?;
+    // The document no longer holds the bytes: the pin it took when the file was put in is let go.
+    ctx.app.blobs.unpin(&mut tx, &[held.blob], ctx.now).await?;
+    let settings = DocSettings::at(&mut tx, row.node_id).await?;
+    rows::history::record_file(
+        &mut tx,
+        id,
+        &Writer::User(guard.principal().user()),
+        DocumentFileChange {
+            name: held.file.name.clone(),
+            kind: DocumentFileChangeKind::Removed,
+        },
+        settings.version_rules(ctx.app.config.documents.version_window_secs),
+        ctx.now,
+    )
+    .await?;
+    rows::touch(&mut tx, id).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(())
+}
+
+#[path = "documents/build.rs"]
+pub mod build;
+
+#[path = "documents/comments.rs"]
+pub mod comments;
+
+#[path = "documents/convert.rs"]
+pub mod convert;
+
+#[path = "documents/copying.rs"]
+pub mod copying;
+
+#[path = "documents/creation.rs"]
+pub mod creation;
+
+#[path = "documents/export.rs"]
+pub mod export;
+
+#[path = "documents/files.rs"]
+pub mod files;
+
+#[path = "documents/history.rs"]
+pub mod history;
+
+#[path = "documents/imports.rs"]
+pub mod imports;
+
+#[path = "documents/limits.rs"]
+pub mod limits;
+
+#[path = "documents/list_read.rs"]
+pub mod list_read;
+
+#[path = "documents/listing.rs"]
+pub mod listing;
+
+#[path = "documents/mentions.rs"]
+pub mod mentions;
+
+#[path = "documents/metadata_projection.rs"]
+pub mod metadata_projection;
+
+#[path = "documents/move_operands.rs"]
+pub mod move_operands;
+
+#[path = "documents/move_review.rs"]
+pub mod move_review;
+
+#[path = "documents/moving.rs"]
+pub mod moving;
+
+#[path = "documents/notices.rs"]
+pub mod notices;
+
+#[path = "documents/operation.rs"]
+pub mod operation;
+
+#[path = "documents/ops.rs"]
+pub mod ops;
+
+#[path = "documents/page.rs"]
+pub mod page;
+
+#[path = "documents/pages_read.rs"]
+pub mod pages_read;
+
+#[path = "documents/read_operation.rs"]
+pub mod read_operation;
+
+#[path = "documents/references.rs"]
+pub mod references;
+
+#[path = "documents/restoring.rs"]
+pub mod restoring;
+
+#[path = "documents/subscription.rs"]
+pub mod subscription;
+
+#[path = "documents/summary_options.rs"]
+pub mod summary_options;
+
+#[path = "documents/text_creation.rs"]
+pub mod text_creation;

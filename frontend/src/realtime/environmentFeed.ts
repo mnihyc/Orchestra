@@ -12,6 +12,7 @@ import { useEffect } from 'react';
 
 import { environmentQuery } from '@/api/environments';
 import { applyRow, feedSequences, record } from '@/api/cache';
+import { seedEnvironmentLibrary } from '@/api/resourceLibrary';
 import { socket } from '@/realtime/live';
 import type { FeedFrame } from '@/realtime/socket';
 
@@ -21,6 +22,7 @@ export const environmentFeed = (environmentId: string): string => `env:${environ
 /** What one frame of the feed changes in what the page holds. */
 export function applyEnvironmentFrame(client: QueryClient, environmentId: string, frame: FeedFrame): void {
   if (frame.op === 'sync') {
+    seedEnvironmentLibrary(client, environmentId, frame.data.library);
     const environment = frame.data.environment;
     if (record(environment)) {
       applyRow(client, { kind: 'environment', id: environmentId, value: environment });

@@ -7,6 +7,8 @@
  * elements, so a message cannot bring an element of its own, and a link is followed only to http and https.
  */
 
+import { readOrchLink } from '@/lib/orchLinks';
+
 export type Inline =
   | { type: 'text'; text: string }
   | { type: 'code'; text: string }
@@ -27,7 +29,7 @@ export type Block =
 /** How deep emphasis may be nested: more than this is a message written to break a parser, and is shown as typed. */
 const MAX_DEPTH = 4;
 
-const LINK = /^\[([^\]\n]+)\]\(((?:https?:\/\/|\/|\.\.?\/|id:)[^\s)]+)\)/;
+const LINK = /^\[((?:\\.|[^\]\\\n])+)\]\((?:<((?:https?:\/\/|\/|\.\.?\/|id:)(?:\\.|[^>\\\n])*)>|((?:https?:\/\/|\/|\.\.?\/|id:)[^\s)]+))\)/;
 const ADDRESS = /^https?:\/\/[^\s<>]+/;
 const MENTION = /^@([A-Za-z0-9][A-Za-z0-9_-]{0,31})/;
 const BULLET = /^\s{0,3}[-*]\s+(.*)$/;
@@ -56,6 +58,12 @@ export function parseInline(text: string, depth = 0): Inline[] {
     const rest = text.slice(at);
     const before = at === 0 ? undefined : text.charAt(at - 1);
 
+    if (char === '\\' && at + 1 < text.length && '\\[]`*_<>$~&|()'.includes(text.charAt(at + 1))) {
+      push(out, text.charAt(at + 1));
+      at += 2;
+      continue;
+    }
+
     if (char === '\n') {
       out.push({ type: 'break' });
       at += 1;
@@ -72,7 +80,8 @@ export function parseInline(text: string, depth = 0): Inline[] {
     if (char === '[') {
       const link = LINK.exec(rest);
       if (link !== null) {
-        out.push({ type: 'link', href: link[2] ?? '', children: parseInline(link[1] ?? '', depth + 1) });
+        const href = (link[2] ?? link[3] ?? '').replace(/\\([<>\\])/g, '$1');
+        out.push({ type: 'link', href, children: parseInline(link[1] ?? '', depth + 1) });
         at += link[0].length;
         continue;
       }
@@ -183,14 +192,13 @@ export function parseBlocks(text: string): Block[] {
 
 /** Where an address that points into this application leads, as a path with its search; `null` for any other address. */
 export function placeOfAddress(href: string, origin: string): { path: string; id: string; kind: 'org' | 'project' | 'topic' | 'thread' | 'doc' } | null {
-  let url: URL;
-  try {
-    url = new URL(href, origin);
-  } catch {
-    return null;
-  }
-  if (url.origin !== origin) return null;
+  const url = readOrchLink(href, { currentUrl: origin });
+  if (url === null) return null;
   const found = /^\/(org|project|topic|thread|doc)\/([^/]+)\/?$/.exec(url.pathname);
   if (found === null) return null;
-  return { path: `${url.pathname}${url.search}`, id: decodeURIComponent(found[2] ?? ''), kind: found[1] as 'org' | 'project' | 'topic' | 'thread' | 'doc' };
+  try {
+    const id = decodeURIComponent(found[2] ?? '');
+    if (id === '' || /[/\\\u0000-\u001f\u007f]/.test(id)) return null;
+    return { path: `${url.pathname}${url.search}${url.hash}`, id, kind: found[1] as 'org' | 'project' | 'topic' | 'thread' | 'doc' };
+  } catch { return null; }
 }

@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Import and export
 screens: /workbench, /topic/$topicId, /project/$projectId, /org/$slug, /thread/$threadId, /documents/$nodeId, /document-folder/$folderId, /settings/exports, /settings/imports
 keywords: import, export, package, archive, folder, Markdown, HTML, Word, people, conflicts, report, undo
+summary: Preview imports, resolve conflicts and follow or undo jobs before exporting work.
 ---
 
 # Import and export
@@ -44,6 +46,14 @@ Start the import and follow its progress. Close the dialog while the job runs;
 the status bar keeps its progress. Select **Notify me when done** to see a
 notice while Orch is open. A cancelled or failed import keeps what was made so far and its report
 says what happened.
+
+For text-file API imports, retry with the same destination, `client_id` and
+`Idempotency-Key`. Accepted documents remain and only unfinished entries are
+imported. The total byte allowance still includes sources already accepted. A
+different body with the same key is refused. A receipt can acknowledge accepted
+document IDs without source paths; `complete: false` means unfinished entries
+remain and still need their current Write and source Read. Full entries need
+current Read and show current document details. A removed accepted document is never recreated by replay.
 
 Lists show one page at a time. **Next page** replaces that page; **Back to first
 page** returns to the beginning.

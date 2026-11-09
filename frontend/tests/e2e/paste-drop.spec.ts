@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { createInstance } from 'i18next';
 import { expect, type APIRequestContext, type Page, test } from '@playwright/test';
-import type { Draft, Job } from '../../src/generated/api-types';
+import type { Draft, Job, ThreadParameters } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { begin, filesPanel, MAIN, MAIN_ENVIRONMENT, openThread, showView } from './inspector-support';
@@ -140,6 +140,41 @@ async function uploads(page: Page, holdNative = false) {
 }
 
 for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
+  test(`an image for a text-only model stays attached through Send at ${width}px in ${theme}/${locale}`, async ({ page, request }, info) => {
+    await begin();
+    const t = await language(request, locale, theme);
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await page.route(`**/api/v1/threads/${MAIN}/parameters`, async route => {
+      const response = await route.fetch();
+      expect(response.ok()).toBe(true);
+      const parameters = await response.json() as ThreadParameters;
+      expect(parameters.model.options.length).toBeGreaterThan(0);
+      parameters.model.options = parameters.model.options.map(option => ({ ...option, parameters: { ...option.parameters, input_images: false } }));
+      await route.fulfill({ response, json: parameters });
+    });
+    const held = await uploads(page);
+    await openThread(page);
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9ZkAAAAASUVORK5CYII=', 'base64');
+    const blob = createHash('sha256').update(bytes).digest('hex');
+    const composer = page.locator('[data-composer]');
+    await composer.locator('input[type=file]').setInputFiles({ name: 'screenshot.png', mimeType: 'image/png', buffer: bytes });
+    await expect(composer.getByText(t('fileMedia.imageByPath'), { exact: true })).toBeVisible();
+    await expect(composer.getByText(`→ .orch/attachments/screenshot.png · ${t('uploads.whenSent')}`)).toBeVisible();
+    await expect(composer.getByRole('button', { name: t('composer.send'), exact: true })).toBeEnabled();
+    expect(held.blobs.get(blob)?.bytes.equals(bytes)).toBe(true);
+    expect(held.counts().agentInputs).toBe(0);
+    expect(held.counts().workspaceWrites).toBe(0);
+    await page.screenshot({ path: info.outputPath(`image-file-${width}-${theme}-${locale}.png`), animations: 'disabled' });
+    const sent = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === `/api/v1/threads/${MAIN}/inputs`);
+    await composer.getByRole('button', { name: t('composer.send'), exact: true }).click();
+    const body = (await sent).postDataJSON() as { content: unknown[] };
+    expect(body.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image', blob, name: 'screenshot.png', media_type: 'image/png' })]));
+    await expect.poll(() => held.counts().agentInputs).toBe(1);
+    expect(held.blobs.get(blob)?.bytes.equals(bytes)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+
   test(`pasted drafts stay editable and private at ${width}px in ${theme}/${locale}`, async ({ page, request }, info) => {
     await begin(); const t = await language(request, locale, theme); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const held = await uploads(page); await openThread(page);
