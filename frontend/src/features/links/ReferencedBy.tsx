@@ -27,7 +27,7 @@ export function ReferencedBy({ documentId, list }: { documentId: string; list: L
   const { t } = useTranslation();
   const rows = list.rows;
   const labels = usePlaceLabels(rows.map((row) => ({ id: row.id, name: row.name ?? '', above: row.context })));
-  if (list.pending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (list.pending) return <SkeletonRows read={list.read} rows={LOADING_ROWS} />;
   if (list.failed) return <ErrorAlert error={list.error} action={<Button size="sm" onClick={list.retry}>{t('common.tryAgain')}</Button>} />;
   // A page can hold nothing the reader may read and still be followed by more: the list then goes on by itself.
   if (rows.length === 0 && !list.hasMore) return <StateLine title={t('links.referencedBy.empty')} compact />;

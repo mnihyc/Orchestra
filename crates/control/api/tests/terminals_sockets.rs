@@ -10,6 +10,7 @@ mod rig;
 mod support;
 mod terminals_support;
 
+use crate::support::FullTicketReply as _;
 use chrono::Duration;
 use orch_api_contract::terminals::TerminalState;
 use orch_link_contract::events::{Event, PtyExited};
@@ -716,6 +717,7 @@ async fn agent_ticket(floor: &Floor, who: &places::Who, control: bool) -> String
         )
         .send()
         .await
+        .full_ticket()
         .ok()
         .ticket
 }

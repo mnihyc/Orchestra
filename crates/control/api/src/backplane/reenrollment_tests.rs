@@ -87,6 +87,8 @@ impl Office {
             .app
             .link
             .authorize(&AuthQuery {
+                purpose: Default::default(),
+                capabilities: Vec::new(),
                 endpoints: None,
                 hosted_endpoints: None,
                 n: 1,
@@ -234,6 +236,8 @@ async fn rejected_certificates_release_their_version_fence_before_authorization_
     // transaction by reusing its pooled connection. No transaction waits on another connection.
     let mut observer = office.app.app.db.acquire().await.unwrap();
     let mut query = AuthQuery {
+        purpose: Default::default(),
+        capabilities: Vec::new(),
         endpoints: None,
         hosted_endpoints: None,
         n: 1,
@@ -582,6 +586,8 @@ async fn retained_connector_and_node_directories_replace_only_their_bound_identi
                 assert_eq!(std::fs::read(data.config_path()).unwrap(), config);
                 assert_eq!(std::fs::read(&registration).unwrap(), b"kept");
                 let auth = |certificate: &Certificate| AuthQuery {
+                    purpose: Default::default(),
+                    capabilities: Vec::new(),
                     n: 1,
                     machine_id: first.record.machine_id,
                     fingerprint: certificate.fingerprint(),

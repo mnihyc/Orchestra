@@ -5,9 +5,17 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "notifications_channels/list_scopes.rs"]
+mod list_scopes;
 mod outside;
 mod places;
+#[path = "notifications_channels/scopes.rs"]
+mod scopes;
 mod support;
+#[path = "notifications_channels/test_scopes.rs"]
+mod test_scopes;
+#[path = "notifications_channels/update_scopes.rs"]
+mod update_scopes;
 
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::notifications::{
@@ -34,13 +42,22 @@ async fn make_system(
     by: &Who,
     body: &NotificationChannelCreateBody,
 ) -> Reply<NotificationChannel> {
-    o.world
+    let reply = o
+        .world
         .app
         .call(AdminNotificationChannelCreate, &[])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary created channel content")),
+    }
 }
 
 async fn make_org(
@@ -49,13 +66,22 @@ async fn make_org(
     org: Id,
     body: &NotificationChannelCreateBody,
 ) -> Reply<NotificationChannel> {
-    o.world
+    let reply = o
+        .world
         .app
         .call(OrgNotificationChannelCreate, &[&org])
         .token(&by.token)
         .body(body)
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary created channel content")),
+    }
 }
 
 async fn make_own(
@@ -65,7 +91,8 @@ async fn make_own(
     url: &str,
     secret: Option<&str>,
 ) -> Reply<NotificationChannel> {
-    o.world
+    let reply = o
+        .world
         .app
         .call(MeNotificationChannelCreate, &[])
         .token(&by.token)
@@ -80,7 +107,15 @@ async fn make_own(
             templates: None,
         })
         .send()
-        .await
+        .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply
+            .body
+            .map(|value| value.into_full().expect("ordinary created channel content")),
+    }
 }
 
 async fn change(
@@ -89,13 +124,18 @@ async fn change(
     id: Id,
     body: &NotificationChannelUpdateBody,
 ) -> Reply<NotificationChannel> {
-    o.world
-        .app
-        .call(NotificationChannelUpdate, &[&id])
-        .token(&by.token)
-        .body(body)
-        .send()
-        .await
+    let call = o.world.app.call(NotificationChannelUpdate, &[&id]);
+    let reply = call.token(&by.token).body(body).send().await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|response| {
+            response
+                .into_full()
+                .expect("the ordinary channel fixture requires its native full response")
+        }),
+    }
 }
 
 async fn remove(o: &Outside, by: &Who, id: Id) -> Reply<()> {
@@ -1004,7 +1044,9 @@ async fn slow_channel_and_destination_tests_leave_the_only_connection_available(
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("ordinary destination creation returns full content");
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect_with((*o.world.db.pool.connect_options()).clone())
@@ -1249,7 +1291,10 @@ async fn the_channels_of_a_root_org_are_listed_to_look_after_for_whoever_may_and
                 .app
                 .call(NotificationChannelList, &[])
                 .token(&token)
-                .query(&NotificationChannelListQuery { org_id: Some(org) })
+                .query(&NotificationChannelListQuery {
+                    org_id: Some(org),
+                    ..Default::default()
+                })
                 .send()
                 .await
         }

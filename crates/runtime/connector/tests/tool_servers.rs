@@ -1,4 +1,5 @@
 //! Tool servers of an environment: started by a command, reached through the tunnel of a session's ticket, filtered as their definition says, killed and started again within their budget, and reported failed past it.
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -46,6 +47,7 @@ async fn start(rig: &EnvRig, name: &str, spec: Json) -> Json {
     let command = new_id();
     let sealed = rig.sealed(command, "s3cret-value");
     let body = McpStart::Given(Box::new(McpStartGiven {
+        preset: false,
         server_id: None,
         environment_id: rig.environment,
         name: name.to_owned(),
@@ -83,6 +85,64 @@ async fn call(
         .into_iter()
         .next()
         .unwrap_or(Json::Null))
+}
+
+#[tokio::test]
+async fn a_registered_preset_runs_with_add_disabled_while_an_environment_owned_definition_is_refused()
+ {
+    let mut rig = EnvRig::new();
+    rig.config.mcp.add = false;
+    let workspace = rig.directory("preset-workspace");
+    rig.start().await;
+    rig.attach(&workspace).await;
+    let own = McpStart::Given(Box::new(McpStartGiven {
+        preset: false,
+        server_id: Some(new_id()),
+        environment_id: rig.environment,
+        name: "own-tool".into(),
+        spec: serde_json::from_value(definition(json!({"secret_env":[]}))).unwrap(),
+        secrets: BTreeMap::new(),
+    }));
+    assert_eq!(rig.fail(&own).await, "policy.mcp_add_disabled");
+    let command = new_id();
+    let given = McpStart::Given(Box::new(McpStartGiven {
+        preset: true,
+        server_id: Some(new_id()),
+        environment_id: rig.environment,
+        name: "preset-tool".into(),
+        spec: serde_json::from_value(definition(json!({}))).unwrap(),
+        secrets: BTreeMap::from([(
+            "STAND_IN_SECRET".into(),
+            Secret::Sealed(rig.sealed(command, "preset-secret-value")),
+        )]),
+    }));
+    assert!(matches!(
+        rig.send_as(command, &given).await,
+        orch_link::commands::Progress::Succeeded(_)
+    ));
+    let opener = rig.opener().await;
+    let hello = call(
+        &rig,
+        &opener,
+        "preset-tool",
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(hello["result"]["serverInfo"]["name"], "stand-in");
+    let secret = call(&rig, &opener, "preset-tool", json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"secret","arguments":{}}})).await.unwrap();
+    assert_eq!(
+        secret["result"]["content"][0]["text"],
+        "preset-secret-value"
+    );
+    assert!(matches!(
+        rig.send(&McpStop {
+            environment_id: rig.environment,
+            name: "preset-tool".into()
+        })
+        .await,
+        orch_link::commands::Progress::Succeeded(_)
+    ));
 }
 
 #[tokio::test]

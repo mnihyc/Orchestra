@@ -29,7 +29,7 @@ function ThreadSource({ id, setting }: { id: string; setting: string }) {
     router.history.replace(`${location.pathname}${search.size === 0 ? '' : `?${search.toString()}`}${location.hash === '' ? '' : `#${location.hash}`}`);
   };
   return <Dialog open onOpenChange={(open) => { if (!open) close(); }} title={t('helpRelease.settings')} size="lg">
-    {node.isPending || node.isFetching ? <SkeletonRows rows={3} /> : node.isError ? <ErrorState compact error={node.error} onRetry={() => void node.refetch()} /> :
+    {node.isPending || node.isFetching ? <SkeletonRows read={node} rows={3} /> : node.isError ? <ErrorState compact error={node.error} onRetry={() => void node.refetch()} /> :
       node.data.kind !== 'thread' ? <EmptyState compact icon={<SlidersHorizontal aria-hidden />} title={t('helpRelease.sourceMissing')} /> : <SettingsEditor target={{ kind: 'node', id }} scope="thread" only={[setting]} place={{ name: node.data.name, owner: node.data.owner, access: node.data.access, kind: 'thread' }} />}
   </Dialog>;
 }

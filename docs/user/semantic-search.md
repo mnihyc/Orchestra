@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Semantic search
 screens: /search, /admin/$section, /org/$slug/settings/$section, /resources/providers, /resources/providers/$id, /resources/templates, /resources/templates/$id
 keywords: semantic search, embeddings, Local embeddings, index, disk limit, model, rebuild, managed, 语义搜索, 嵌入, 索引
+summary: Choose embeddings, follow index readiness and keep word search available during changes.
 ---
 
 # Semantic search

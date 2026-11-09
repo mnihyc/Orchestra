@@ -22,17 +22,10 @@ use crate::source::{SourceDescriptor, SourceErrorCode};
 pub mod builtin {
     /// The harness that keeps a sign-in, through its adapter: facts and models.
     pub const ADAPTER: &str = "adapter";
-    /// OpenRouter's key and account-credit reads: facts.
-    pub const OPENROUTER: &str = "openrouter";
-    /// DeepSeek's balance read: facts.
-    pub const DEEPSEEK: &str = "deepseek";
     /// Each endpoint's own list of models: models.
     pub const ENDPOINTS: &str = "endpoints";
-    /// Every built-in name.
-    pub const ALL: [&str; 4] = [ADAPTER, OPENROUTER, DEEPSEEK, ENDPOINTS];
-    /// The built-ins that read a key's facts from its vendor, which a program registers with their readers
-    /// ([`crate::builtins`]).
-    pub const KEY_FACTS: [&str; 2] = [OPENROUTER, DEEPSEEK];
+    /// Intrinsic source roles, reserved independently of registered provider extensions.
+    pub const ALL: [&str; 2] = [ADAPTER, ENDPOINTS];
 }
 
 /// What keeps a provider's credential, as far as the default of its sources goes.
@@ -153,7 +146,7 @@ pub struct SourceSpec {
     /// The server's current providers.allow_http_upstreams permission for this address call; absent, false.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_http: bool,
-    /// The provider's current name for the source's call context; absent on older commands.
+    /// The provider's current name for the source's call context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<crate::source::SourceAskProvider>,
     /// What implements the element.
@@ -170,6 +163,9 @@ pub struct SourceSpec {
     /// The values of the source's secret fields, by field.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, SourceSecret>,
+    /// Registered recipient of these secrets, fixed by the server when a default source is configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_source: Option<String>,
     /// The address's authorization: the bearer token, or the value of the named header.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<SourceSecret>,
@@ -180,6 +176,12 @@ impl SourceSpec {
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.by == SourceBy::Default
+            && self.name.is_none()
+            && self.address.is_none()
+            && self.config.is_empty()
+            && self.secrets.is_empty()
+            && self.authorization.is_none()
+            && self.secret_source.is_none()
     }
 }
 
@@ -220,6 +222,9 @@ pub struct SourceChoice {
     /// `source:<element>:field:<name>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Source identity to which the encrypted fields belong; never inferred from a later endpoint edit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_source: Option<String>,
     /// What the source said it is, the last time it was asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub descriptor: Option<SourceDescriptor>,
@@ -238,9 +243,9 @@ pub enum ChoiceFault {
     /// A built-in source or a program is chosen without its name.
     #[error("a built-in source or a program is chosen by name")]
     NoName,
-    /// No built-in source has the name.
-    #[error("{0:?} is no built-in source")]
-    UnknownBuiltin(String),
+    /// A source name is too long or contains control characters.
+    #[error("a source name is bounded text without control characters")]
+    InvalidName,
     /// An address is chosen without one.
     #[error("an address is chosen with its url")]
     NoAddress,
@@ -267,9 +272,13 @@ impl SourceChoice {
                     .as_deref()
                     .filter(|name| !name.is_empty())
                     .ok_or(ChoiceFault::NoName)?;
-                if self.by == SourceBy::Builtin && !builtin::ALL.contains(&name) {
-                    return Err(ChoiceFault::UnknownBuiltin(name.to_owned()));
+                if name.chars().count() > crate::limits::TEXT_MAX_CHARS
+                    || name.trim() != name
+                    || name.chars().any(char::is_control)
+                {
+                    return Err(ChoiceFault::InvalidName);
                 }
+                // Registration, not a closed core list, determines availability at the native consumer.
                 if self.address.is_some() {
                     return Err(ChoiceFault::Stray);
                 }
@@ -322,6 +331,7 @@ impl SourceChoice {
             address: self.address.clone(),
             config: self.config.clone(),
             secrets,
+            secret_source: self.secret_source.clone(),
             authorization,
         }
     }
@@ -485,10 +495,7 @@ mod tests {
             choose(json!({ "by": "builtin", "name": "openrouter" })),
             Ok(())
         );
-        assert_eq!(
-            choose(json!({ "by": "builtin", "name": "acme" })),
-            Err(ChoiceFault::UnknownBuiltin("acme".into()))
-        );
+        assert_eq!(choose(json!({ "by": "builtin", "name": "acme" })), Ok(()));
         assert_eq!(choose(json!({ "by": "program" })), Err(ChoiceFault::NoName));
         assert_eq!(
             choose(json!({ "by": "address" })),
@@ -527,11 +534,11 @@ mod tests {
         // A key: the vendor's read at its host, else nothing; models from the endpoints.
         assert_eq!(
             default(SourceElement::Facts, Keeper::Key, &openrouter),
-            Some(builtin::OPENROUTER)
+            Some("openrouter")
         );
         assert_eq!(
             default(SourceElement::Facts, Keeper::Key, &deepseek),
-            Some(builtin::DEEPSEEK)
+            Some("deepseek")
         );
         assert_eq!(default(SourceElement::Facts, Keeper::Key, &elsewhere), None);
         assert_eq!(
@@ -557,5 +564,29 @@ mod tests {
             default_source(SourceElement::Facts, Keeper::Key, &openrouter, &none),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod source_credential_binding_tests {
+    #![allow(clippy::unwrap_used, reason = "fixture assertions")]
+    use super::*;
+    #[test]
+    fn a_configured_default_retains_its_secret_recipient_and_is_never_omitted_as_an_empty_default()
+    {
+        let choice = SourceChoice {
+            secrets: vec!["admin_key".into()],
+            secret_source: Some("registered-source".into()),
+            ..SourceChoice::default()
+        };
+        let secret = orch_types::new_id();
+        let spec = choice.spec(SourceElement::Facts, &|_| Some(secret));
+        assert!(!spec.is_default());
+        assert_eq!(spec.secret_source.as_deref(), Some("registered-source"));
+        assert_eq!(spec.secrets["admin_key"], SourceSecret::Ref(secret));
+        let wire = serde_json::to_value(&spec).unwrap();
+        assert_eq!(wire["secret_source"], "registered-source");
+        assert_eq!(serde_json::from_value::<SourceSpec>(wire).unwrap(), spec);
+        assert!(SourceSpec::default().is_default());
     }
 }

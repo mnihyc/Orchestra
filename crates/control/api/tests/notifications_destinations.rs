@@ -12,8 +12,8 @@ mod support;
 use orch_api_contract::common::{ErrorCode, Problem};
 use orch_api_contract::notifications::{
     Destination, DestinationDelete, DestinationLevel, DestinationTest, DestinationUpdate,
-    DestinationUpdateBody, NodeDestinationCreate, NodeDestinationCreateBody, NodeDestinationList,
-    NotificationTestReply,
+    DestinationUpdateBody, DestinationUpdateResponse, NodeDestinationCreate,
+    NodeDestinationCreateBody, NodeDestinationList, NotificationTestReply,
 };
 use orch_api_core::testing::Reply;
 use orch_types::Id;
@@ -61,13 +61,24 @@ async fn add(
     node: Id,
     body: &NodeDestinationCreateBody,
 ) -> Reply<Destination> {
-    p.o.world
-        .app
-        .call(NodeDestinationCreate, &[&node])
-        .token(&by.token)
-        .body(body)
-        .send()
-        .await
+    let reply =
+        p.o.world
+            .app
+            .call(NodeDestinationCreate, &[&node])
+            .token(&by.token)
+            .body(body)
+            .send()
+            .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|value| {
+            value
+                .into_full()
+                .expect("ordinary created destination content")
+        }),
+    }
 }
 
 async fn list(p: &Place, by: &Who, node: Id) -> Reply<Vec<Destination>> {
@@ -80,13 +91,26 @@ async fn list(p: &Place, by: &Who, node: Id) -> Reply<Vec<Destination>> {
 }
 
 async fn patch(p: &Place, by: &Who, id: Id, body: &DestinationUpdateBody) -> Reply<Destination> {
-    p.o.world
-        .app
-        .call(DestinationUpdate, &[&id])
-        .token(&by.token)
-        .body(body)
-        .send()
-        .await
+    let reply =
+        p.o.world
+            .app
+            .call(DestinationUpdate, &[&id])
+            .token(&by.token)
+            .body(body)
+            .send()
+            .await;
+    Reply {
+        status: reply.status,
+        headers: reply.headers,
+        raw: reply.raw,
+        body: reply.body.map(|response| {
+            match response {
+                DestinationUpdateResponse::Full(destination) => Some(*destination),
+                DestinationUpdateResponse::Receipt(_) => None,
+            }
+            .expect("this ordinary control expects the permitted full destination projection")
+        }),
+    }
 }
 
 async fn remove(p: &Place, by: &Who, id: Id) -> Reply<()> {
@@ -492,4 +516,107 @@ async fn nobody_who_is_not_signed_in_sets_up_or_changes_a_destination() {
     for problem in problems {
         assert_eq!(problem.code, ErrorCode::AuthRequired);
     }
+}
+
+#[tokio::test]
+async fn a_destination_creation_key_replays_current_native_content_without_another_save() {
+    use orch_access_contract::key_scope::KeyScope;
+    use orch_api_core::middleware::authentication::{API_TOKEN_PREFIX, new_token, token_hash};
+    use orch_db::queries::identity;
+    let p = place().await;
+    let far = FarSide::taking().await;
+    let input = room(&far.url);
+    let header = orch_types::new_id().to_string();
+    let send = |secret: String| {
+        let app = p.o.world.app.clone();
+        let input = input.clone();
+        let header = header.clone();
+        let node = p.project;
+        async move {
+            let call = app
+                .call(NodeDestinationCreate, &[&node])
+                .token(&secret)
+                .header("Idempotency-Key", &header)
+                .body(&input);
+            call.send_bytes().await
+        }
+    };
+    let first = send(p.o.bea.token.clone()).await;
+    assert_eq!(first.status, 200, "{}", String::from_utf8_lossy(&first.raw));
+    let first: serde_json::Value = serde_json::from_slice(&first.raw).unwrap();
+    let id: Id = serde_json::from_value(first["id"].clone()).unwrap();
+    sqlx::query("UPDATE destinations SET name='Current destination' WHERE id=$1")
+        .bind(id)
+        .execute(&p.o.world.db.pool)
+        .await
+        .unwrap();
+    let before: String = sqlx::query_scalar("SELECT xmin::text FROM destinations WHERE id=$1")
+        .bind(id)
+        .fetch_one(&p.o.world.db.pool)
+        .await
+        .unwrap();
+    for operation in ["NodeDestinationCreate", "DestinationUpdate"] {
+        let scope: KeyScope = serde_json::from_value(
+            json!({"rules":[{"target":{"kind":"project","id":p.project,"reach":"self"},
+            "resources":["project"],"allow":[{"operation":operation,"actions":["read"]}]}]}),
+        )
+        .unwrap();
+        assert!(scope.validate().is_empty());
+        let secret = new_token(API_TOKEN_PREFIX);
+        let mut conn = p.o.world.conn().await;
+        identity::create_api_token_scoped(
+            &mut conn,
+            &identity::NewApiToken {
+                id: orch_types::new_id(),
+                user_id: p.o.bea.id(),
+                name: "Creation current Read",
+                token_hash: &token_hash(&secret),
+                scopes: &[],
+                node_id: None,
+                at: p.o.world.now(),
+                expires_at: Some(p.o.world.now() + chrono::Duration::hours(1)),
+            },
+            Some(&serde_json::to_value(scope).unwrap()),
+        )
+        .await
+        .unwrap();
+        drop(conn);
+        let reply = send(secret).await;
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.raw));
+        let reply: serde_json::Value = serde_json::from_slice(&reply.raw).unwrap();
+        if operation == "NodeDestinationCreate" {
+            assert_eq!(reply["id"], json!(id));
+            assert_eq!(reply["name"], "Current destination");
+        } else {
+            assert_eq!(
+                reply,
+                json!({"projection":"receipt","destination_id":id,"node_id":p.project})
+            );
+        }
+    }
+    let after: String = sqlx::query_scalar("SELECT xmin::text FROM destinations WHERE id=$1")
+        .bind(id)
+        .fetch_one(&p.o.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(before, after);
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM destinations WHERE node_id=$1")
+        .bind(p.project)
+        .fetch_one(&p.o.world.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let record: serde_json::Value =
+        sqlx::query_scalar("SELECT response FROM idempotency_keys WHERE user_id=$1 AND key=$2")
+            .bind(p.o.bea.id())
+            .bind(header)
+            .fetch_one(&p.o.world.db.pool)
+            .await
+            .unwrap();
+    assert_eq!(record["outcome"]["id"], json!(id));
+    assert!(
+        !serde_json::to_string(&record)
+            .unwrap()
+            .contains("room-signing-secret")
+    );
 }

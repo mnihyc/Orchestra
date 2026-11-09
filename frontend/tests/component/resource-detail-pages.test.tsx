@@ -1,4 +1,4 @@
-/** Seven real detail compositions keep visible navigation, compact facts and unloaded secondary panels. */
+/** Seven real detail compositions keep native navigation, compact facts and unloaded secondary panels. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -99,10 +99,12 @@ function draw(content: ReactNode, host?: typeof detailHost) {
 const previousAppearance = useAppearance.getState(), previousTheme = document.documentElement.dataset.theme, wasDark = document.documentElement.classList.contains('dark');
 beforeEach(() => { vi.clearAllMocks(); calls.uses.mockResolvedValue({ scopes: [], environments: [], hidden: 2 }); });
 afterEach(async () => { cleanup(); useAppearance.setState(previousAppearance); document.documentElement.classList.toggle('dark', wasDark);
+  records.agent = detailAgent;
+  records.machine = detailMachine;
   if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme; await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  it.each(kinds)(`keeps %s to six visible tabs, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
+  it.each(kinds)(`keeps %s native tabs visible, one compact fact list and no diagnostic dump (${locale}/${theme})`, async (kind) => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     const view = draw(<Scene kind={kind} />);
     expect(await screen.findByRole('heading', { level: 1, name: records[kind].name })).toBeVisible();
@@ -110,7 +112,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     if (header === null) throw new Error('The resource needs its own page header');
     expect(within(header).queryByRole('button', { name: i18n.t(`resourceCreation.${creationKinds[kind]}`) })).not.toBeInTheDocument();
     const navigation = screen.getByRole('tablist');
-    const tabs = within(navigation).getAllByRole('tab'); expect(tabs.length).toBeLessThanOrEqual(6); expect(tabs.length).toBeGreaterThanOrEqual(3);
+    const tabs = within(navigation).getAllByRole('tab');
+    if (kind === 'machine') {
+      const names = [i18n.t('machines.tabs.overview'), i18n.t('resourceDetails.layout.tools'), i18n.t('machines.tabs.registered'),
+        i18n.t('resourceDetails.layout.storage'), i18n.t('machines.tabs.policy'), i18n.t('resourceDetails.layout.software')];
+      expect(tabs).toHaveLength(names.length);
+      for (const [index, name] of names.entries()) expect(tabs[index]).toHaveTextContent(name);
+    } else { expect(tabs.length).toBeLessThanOrEqual(6); expect(tabs.length).toBeGreaterThanOrEqual(3); }
     for (const tab of tabs) expect(tab).toBeVisible();
     expect(screen.queryByRole('button', { name: /^More$/i })).not.toBeInTheDocument();
     expect(view.container.querySelectorAll('[data-resource-facts]')).toHaveLength(1);
@@ -126,6 +134,30 @@ it('opens mount Uses only when chosen and keeps the server visibility cut', asyn
   expect(await screen.findByText(i18n.t('resourceDetails.mount.hidden', { count: 2 }))).toBeVisible(); expect(calls.uses).toHaveBeenCalledTimes(1);
   await user.click(screen.getByRole('tab', { name: i18n.t('resourceDetails.overview') }));
   await user.click(screen.getByRole('tab', { name: i18n.t('resourceDetails.mount.uses') })); expect(calls.uses).toHaveBeenCalledTimes(1);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it.each(['missing', 'partial', 'zero', 'live'] as const)(`shows actual machine link sample presence for %s in ${locale}`, async (state) => {
+  await setLocale(locale); useAppearance.setState({ locale });
+  const rates = state === 'missing' ? {} : state === 'partial' ? { round_trip_ms: 16, up_bps: 0 }
+    : state === 'zero' ? { round_trip_ms: 0, up_bps: 0, down_bps: 0 } : { round_trip_ms: 200, up_bps: 8000, down_bps: 16000 };
+  records.machine = { ...detailMachine, facts: { rates } };
+  draw(<Machine machineId={detailMachine.id} tab="overview" onTab={vi.fn()} />);
+  await screen.findByRole('heading', { name: detailMachine.name });
+  const label = i18n.t(state === 'missing' ? 'machines.overview.linkPending' : 'machines.overview.link');
+  const term = screen.getAllByRole('term').find((row) => row.textContent === `${label}:`);
+  const value = term?.parentElement?.querySelector('dd');
+  if (!(value instanceof HTMLElement)) throw new Error('The machine link has no fact value');
+  const expected = state === 'missing' ? '–' : state === 'partial'
+    ? i18n.t('machines.overview.linkPartial', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '0 bit/s', down: '–' })
+    : i18n.t('machines.overview.linkValue', { trip: state === 'zero' ? '0' : '200', up: state === 'zero' ? '0 bit/s' : '8 kbit/s', down: state === 'zero' ? '0 bit/s' : '16 kbit/s' });
+  expect(value).toHaveTextContent(expected);
+  if (state === 'missing') {
+    expect(value.textContent).toBe('–');
+    act(() => { value.querySelector<HTMLElement>('[tabindex="0"]')?.focus(); });
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('machines.overview.notMeasured'));
+  }
+  if (state === 'live') expect(within(value).getByText(i18n.t('machines.overview.slow'))).toBeVisible();
+  else expect(within(value).queryByText(i18n.t('machines.overview.slow'))).not.toBeInTheDocument();
 });
 
 it.each(['en', 'zh-CN'] as const)('keeps an MCP shell script out of ordinary facts until Details is opened (%s)', async (locale) => {
@@ -216,6 +248,26 @@ it('shows readable parameter defaults with the native Defaults destination and b
   await waitFor(() => expect(screen.getByText('Worker option 13')).toBeVisible());
 });
 
+it.each(['en', 'zh-CN'] as const)('uses the declared program name and translated parameter words in %s', async (locale) => {
+  await setLocale(locale);
+  const english = 'How much of a conversation Example agent keeps, in tokens';
+  const chinese = '示例代理保留的对话长度，以词元计';
+  records.agent = { ...detailAgent, descriptor: {
+    harness: { name: 'Example agent', status: 'supported', version: '1.0.0' },
+    parameters: [{ key: 'context', type: 'integer', title: 'Context', description: english, default: { from_model: 'default_context' } }],
+    text: { 'zh-CN': { 'harness.name': '示例代理', 'parameters.context.title': '上下文', 'parameters.context.description': chinese } },
+  } };
+  draw(<AgentScreen agentId={detailAgent.id} tab="parameters" onTab={vi.fn()} />);
+  const description = await screen.findByText(locale === 'en' ? english : chinese);
+  expect(description).toBeVisible();
+  const row = description.closest<HTMLElement>('[data-setting-row]');
+  if (row === null) throw new Error('The context parameter has no setting row');
+  expect(within(row).getByText(locale === 'en' ? 'Context' : '上下文', { exact: true })).toBeVisible();
+  expect(within(row).getByText(i18n.t('resourceDetails.layout.modelDefault'))).toBeVisible();
+  expect(row).not.toHaveTextContent('the fake');
+  expect(calls.read.mock.calls.filter(([kind]) => kind === 'agent')).toHaveLength(1);
+});
+
 it('keeps technical profile JSON closed initially and blocks an invalid edit with its reason once', async () => {
   const user = userEvent.setup(); draw(<AgentScreen agentId={detailAgent.id} tab="profile" onTab={vi.fn()} />);
   await screen.findByRole('heading', { name: detailAgent.name });
@@ -268,4 +320,15 @@ it.each(['en', 'zh-CN'] as const)('shows a host reader values under one authorit
   expect(view.container.querySelectorAll('[data-read-only-settings]')).toHaveLength(1);
   expect(screen.queryByRole('textbox')).not.toBeInTheDocument(); expect(screen.queryByRole('switch')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: i18n.t('hosts.settings.save') })).not.toBeInTheDocument(); expect(updateHost).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('keeps the machine Access address reachable inside Policy without reading policy (%s)', async (locale) => {
+  await setLocale(locale);
+  const view = draw(<Machine machineId={detailMachine.id} tab="access" onTab={vi.fn()} />);
+  await screen.findByRole('heading', { name: detailMachine.name, level: 1 });
+  expect(screen.getByRole('tab', { name: i18n.t('machines.tabs.policy') })).toHaveAttribute('aria-selected', 'true');
+  expect(view.container.querySelector('[data-resource-section="access"]')).toBeVisible();
+  expect(calls.read).toHaveBeenCalledExactlyOnceWith('machine');
+  expect(calls.hidden).not.toHaveBeenCalled();
 });

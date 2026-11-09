@@ -10,6 +10,10 @@ mod desk;
 mod places;
 mod support;
 
+#[path = "people_notify/scopes.rs"]
+mod scopes;
+
+use crate::support::FullPermissionPageReply;
 use desk::Desk;
 use orch_api_contract::access::{
     AccessChoice, HolderInput, PageChange, PageChangeName, PermissionPageUpdate,
@@ -48,6 +52,7 @@ fn grant(person: Id, notify: bool) -> PageChange {
 #[tokio::test]
 async fn an_explicit_notice_is_one_per_reader_and_a_replay_creates_nothing_more() {
     let desk = Desk::new().await;
+    let replay_key = orch_types::new_id().to_string();
     let reader = desk.member("bea", "viewer").await;
     let outsider = desk.stranger("sid").await;
     let doc = desk.make(&desk.ada, "Guide").await;
@@ -65,7 +70,7 @@ async fn an_explicit_notice_is_one_per_reader_and_a_replay_creates_nothing_more(
             .app
             .call(PersonNotifyCreate, &[&"documents", &doc.base.id])
             .token(&desk.ada.token)
-            .header(IDEMPOTENCY_HEADER, "notice-1")
+            .header(IDEMPOTENCY_HEADER, &replay_key)
             .body(&body)
             .send()
             .await
@@ -100,7 +105,7 @@ async fn an_explicit_notice_is_one_per_reader_and_a_replay_creates_nothing_more(
             .app
             .call(PersonNotifyCreate, &[&"documents", &doc.base.id])
             .token(&desk.ada.token)
-            .header(IDEMPOTENCY_HEADER, "notice-1")
+            .header(IDEMPOTENCY_HEADER, &replay_key)
             .body(&denied)
             .send()
             .await
@@ -131,7 +136,8 @@ async fn access_and_the_requested_notice_commit_together() {
         .token(&desk.ada.token)
         .body(&invalid)
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(!denied.status.is_success());
     assert_eq!(count(&desk, reader.id()).await, 0);
     assert!(
@@ -158,6 +164,7 @@ async fn access_and_the_requested_notice_commit_together() {
             .body(&accepted)
             .send()
             .await
+            .full_permission_page()
             .ok();
     }
     assert_eq!(count(&desk, reader.id()).await, 1);
@@ -295,6 +302,7 @@ async fn a_group_member_grant_and_notice_are_one_replayable_act() {
     assert_eq!(context.can_view, Some(false));
     assert_eq!(context.gives, [AccessChoice::FullInteract]);
     let body = |anchor| ChatPersonGrantBody {
+        link_origin: None,
         choice: AccessChoice::FullInteract,
         notify: true,
         anchor: Some(PersonNoticeAnchor::Message(anchor)),
@@ -327,12 +335,13 @@ async fn a_group_member_grant_and_notice_are_one_replayable_act() {
     .await
     .unwrap();
     assert_eq!(before, 0);
+    let request_key = new_id().to_string();
     for _ in 0..2 {
         room.world
             .app
             .call(ChatPersonGrant, &[&chat, &room.gus.id()])
             .token(&room.ada.token)
-            .header(IDEMPOTENCY_HEADER, "chat-grant")
+            .header(IDEMPOTENCY_HEADER, &request_key)
             .body(&body(message.id))
             .send()
             .await
@@ -376,6 +385,7 @@ async fn a_node_chat_grant_does_not_open_the_place_or_its_documents() {
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     assert!(
         !room
@@ -393,6 +403,7 @@ async fn a_node_chat_grant_does_not_open_the_place_or_its_documents() {
         .call(ChatPersonGrant, &[&room.chat, &room.gus.id()])
         .token(&room.ada.token)
         .body(&ChatPersonGrantBody {
+            link_origin: None,
             choice: AccessChoice::FullView,
             notify: false,
             anchor: None,
@@ -530,7 +541,8 @@ async fn an_opted_out_notice_rolls_back_the_associated_grant() {
         .token(&desk.ada.token)
         .body(&grant(reader.id(), true))
         .send()
-        .await;
+        .await
+        .full_permission_page();
     assert!(!denied.status.is_success());
     assert!(
         !desk
@@ -576,6 +588,7 @@ async fn a_mention_in_the_initial_document_blocks_does_not_send_a_notice() {
 #[tokio::test]
 async fn concurrent_retries_of_one_notice_create_one_inbox_item() {
     let desk = Desk::new().await;
+    let replay_key = orch_types::new_id().to_string();
     let reader = desk.member("bea", "viewer").await;
     let doc = desk.make(&desk.ada, "Guide").await;
     let body = PersonNotifyBody {
@@ -588,7 +601,7 @@ async fn concurrent_retries_of_one_notice_create_one_inbox_item() {
             .app
             .call(PersonNotifyCreate, &[&"documents", &doc.base.id])
             .token(&desk.ada.token)
-            .header(IDEMPOTENCY_HEADER, "same-concurrent-act")
+            .header(IDEMPOTENCY_HEADER, &replay_key)
             .body(&body)
             .send()
     };
@@ -603,6 +616,7 @@ async fn a_deleted_document_no_longer_exposes_its_notice_in_the_inbox() {
     use orch_api_contract::documents::DocumentDelete;
     use orch_api_contract::notifications::{NotificationList, NotificationListQuery};
     let desk = Desk::new().await;
+    let replay_key = orch_types::new_id().to_string();
     let reader = desk.member("bea", "viewer").await;
     let doc = desk.make(&desk.ada, "Private title").await;
     let notice = PersonNotifyBody {
@@ -614,7 +628,7 @@ async fn a_deleted_document_no_longer_exposes_its_notice_in_the_inbox() {
         .app
         .call(PersonNotifyCreate, &[&"documents", &doc.base.id])
         .token(&desk.ada.token)
-        .header(IDEMPOTENCY_HEADER, "deleted-notice")
+        .header(IDEMPOTENCY_HEADER, &replay_key)
         .body(&notice)
         .send()
         .await
@@ -656,11 +670,15 @@ async fn a_deleted_document_no_longer_exposes_its_notice_in_the_inbox() {
         .app
         .call(PersonNotifyCreate, &[&"documents", &doc.base.id])
         .token(&desk.ada.token)
-        .header(IDEMPOTENCY_HEADER, "deleted-notice")
+        .header(IDEMPOTENCY_HEADER, &replay_key)
         .body(&notice)
         .send()
         .await;
-    assert!(!replay.status.is_success());
+    assert_eq!(replay.status, 204);
+    assert!(
+        replay.raw.is_empty(),
+        "the completed acknowledgement exposes no deleted content"
+    );
     assert_eq!(count(&desk, reader.id()).await, 1);
 }
 
@@ -708,7 +726,9 @@ async fn a_service_identity_is_not_offered_as_a_person_to_notify() {
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("this ordinary control requires the full native creation response");
     let mut conn = desk.world.conn().await;
     let directory =
         orch_db::queries::identity::search_users(&mut conn, desk.ada.id(), "ci-robot", None, 50)
@@ -745,6 +765,7 @@ async fn a_service_identity_is_not_offered_as_a_person_to_notify() {
         .body(&grant(service.user.id, false))
         .send()
         .await
+        .full_permission_page()
         .ok();
     let after = desk
         .world

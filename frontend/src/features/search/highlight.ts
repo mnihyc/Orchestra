@@ -17,14 +17,18 @@ const litViews = new Map<string, Range[]>();
 const MAIN_FIND = 'conversation';
 
 interface Registry {
-  set: (name: string, highlight: unknown) => void;
+  set: (name: string, highlight: Highlight) => void;
   delete: (name: string) => void;
 }
 
 /** The registry, where the browser has one. */
 function registry(): Registry | null {
-  const found = (globalThis as { CSS?: { highlights?: Registry } }).CSS?.highlights;
-  return found === undefined || typeof (globalThis as { Highlight?: unknown }).Highlight !== 'function' ? null : found;
+  const css: unknown = Reflect.get(globalThis, 'CSS');
+  if (typeof css !== 'object' || css === null || !('highlights' in css)) return null;
+  const found: unknown = css.highlights;
+  if (typeof found !== 'object' || found === null || !('set' in found) || typeof found.set !== 'function'
+    || !('delete' in found) || typeof found.delete !== 'function' || typeof Reflect.get(globalThis, 'Highlight') !== 'function') return null;
+  return found as Registry;
 }
 
 /** The ranges of `words` inside the text of an element, found without regard to case. */
@@ -57,7 +61,7 @@ export function lightWords(root: Element | null, words: string, owner = MAIN_FIN
     highlights.delete(FIND_HIGHLIGHT);
     return;
   }
-  const Highlight = (globalThis as unknown as { Highlight: new (...ranges: Range[]) => unknown }).Highlight;
+  const Highlight = globalThis.Highlight;
   highlights.set(FIND_HIGHLIGHT, new Highlight(...ranges));
 }
 
@@ -68,7 +72,7 @@ export function clearLight(owner = MAIN_FIND): void {
   const ranges = [...litViews.values()].flat().slice(0, MOST_RANGES);
   if (ranges.length === 0) highlights.delete(FIND_HIGHLIGHT);
   else {
-    const Highlight = (globalThis as unknown as { Highlight: new (...ranges: Range[]) => unknown }).Highlight;
+    const Highlight = globalThis.Highlight;
     highlights.set(FIND_HIGHLIGHT, new Highlight(...ranges));
   }
 }

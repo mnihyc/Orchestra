@@ -9,7 +9,6 @@
 use super::csv::{self, json_response};
 use super::names::{Names, rate_of};
 use super::scope::{self, Wanted};
-use crate::middleware::authorization;
 use crate::middleware::requests::{ApiError, ApiResult};
 use crate::registry::Ctx;
 use crate::routes::resources::view as resource_view;
@@ -56,11 +55,16 @@ fn word<T: serde::de::DeserializeOwned>(text: &str) -> Option<T> {
 }
 
 /// Lists the rows of the ledger behind a figure.
-pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResult<Response> {
-    let mut conn = ctx.app.db.begin().await?;
-    let principal = authorization::principal(&ctx, &mut conn).await?;
+pub async fn list(ctx: Ctx, query: UsageEventListQuery, body: Body) -> ApiResult<Response> {
+    crate::key_operations::native::selected_raw::<Records>(ctx, query, body).await
+}
+async fn select_rows(
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    query: &UsageEventListQuery,
+) -> ApiResult<(Vec<EventRow>, Option<String>, scope::Opened)> {
     let asked = scope::parse(&query.scope)?;
-    let opened = scope::open(&mut conn, &principal, asked).await?;
+    let opened = scope::open(conn, principal, asked).await?;
     let from = scope::parse_day("from", &query.from)?;
     let to = scope::parse_day("to", &query.to)?;
     if to < from {
@@ -76,9 +80,12 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
         topic_id: query.topic_id,
         thread_id: query.thread_id,
     };
-    let mut filter = scope::filter(&mut conn, &principal, &opened, &wanted, true).await?;
+    let mut filter = scope::filter(conn, principal, &opened, &wanted, true).await?;
+    filter.service = query.service.clone();
+    filter.purpose = query.purpose.clone();
     filter.effort = query.effort.clone();
     filter.tier = query.tier.clone();
+    filter.tier_unknown = query.tier_unknown;
     filter.program = query.program.clone();
     filter.outcome = query.outcome;
     filter.org = query.org_id;
@@ -86,10 +93,10 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
     let limit = i64::from(query.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
     let newest_first = query.order.unwrap_or_default() == UsageEventOrder::Desc;
     let after = query.cursor.as_deref().map(parse_cursor).transpose()?;
-    let all_places = scope::all_record_places(&mut conn, &principal, &opened).await?;
+    let all_places = scope::all_record_places(conn, principal, &opened).await?;
     let mut rows = record_page(
-        &mut conn,
-        &principal,
+        conn,
+        principal,
         all_places,
         &Listing {
             from: Some(midnight(from)?),
@@ -109,18 +116,90 @@ pub async fn list(ctx: Ctx, query: UsageEventListQuery, _body: Body) -> ApiResul
     rows.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
     let next_cursor = more.then(|| rows.last().map(cursor_of)).flatten();
 
-    let items = events(&ctx.app, &mut conn, &principal, &rows).await?;
-    conn.commit().await.map_err(orch_db::DbError::from)?;
-    if scope::wants_csv(&ctx.headers) {
-        let mut answer = csv::response(events_csv(&items));
-        if let Some(next) = &next_cursor
-            && let Ok(value) = HeaderValue::from_str(next)
-        {
-            answer.headers_mut().insert(NEXT_CURSOR_HEADER, value);
-        }
-        return Ok(answer);
+    Ok((rows, next_cursor, opened))
+}
+
+pub(super) struct Records;
+impl crate::key_operations::native::Selected for Records {
+    type Source = orch_api_contract::usage_sources::Source;
+    type Query = UsageEventListQuery;
+    type Value = super::native::Report<Page<UsageEvent>>;
+    type Reply = Response;
+    const DECLARATION: &'static orch_api_contract::operation_sources::Declaration<Self::Source> =
+        &orch_api_contract::usage_sources::EVENTS;
+    fn select<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        caller: &'a orch_authz::Caller,
+        query: &'a Self::Query,
+    ) -> futures::future::BoxFuture<
+        'a,
+        ApiResult<(
+            Self::Value,
+            Vec<crate::key_operations::native::Facts<Self::Source>>,
+        )>,
+    > {
+        Box::pin(async move {
+            let (principal, facts) =
+                super::native::report_reader(ctx, conn, caller, Self::DECLARATION, &query.scope)
+                    .await?;
+            let (rows, next_cursor, opened) = select_rows(conn, &principal, query).await?;
+            let (items, names) = events_with_cut(&ctx.app, conn, &principal, &rows).await?;
+            Ok((
+                super::native::Report {
+                    answer: Page { items, next_cursor },
+                    disclosure: super::native::Disclosure {
+                        scope: scope::parse(&query.scope)?,
+                        depth: opened.depth,
+                        names,
+                        records: rows,
+                    },
+                },
+                facts,
+            ))
+        })
     }
-    json_response(&Page { items, next_cursor }, StatusCode::OK)
+    fn require<'a>(
+        _ctx: &'a Ctx,
+        _conn: &'a mut orch_db::Conn,
+        _principal: &'a orch_authz::Principal,
+    ) -> futures::future::BoxFuture<'a, ApiResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn render<'a>(
+        ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        value: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<Response>> {
+        Box::pin(async move {
+            value.disclosure.require(conn, principal).await?;
+            if scope::wants_csv(&ctx.headers) {
+                let mut answer = csv::response(events_csv(&value.answer.items));
+                if let Some(next) = &value.answer.next_cursor
+                    && let Ok(header) = HeaderValue::from_str(next)
+                {
+                    answer.headers_mut().insert(NEXT_CURSOR_HEADER, header);
+                }
+                Ok(answer)
+            } else {
+                json_response(&value.answer, StatusCode::OK)
+            }
+        })
+    }
+    fn check_opened<'a>(
+        _ctx: &'a Ctx,
+        conn: &'a mut orch_db::Conn,
+        principal: &'a orch_authz::Principal,
+        _query: &'a Self::Query,
+        opened: &'a Self::Value,
+        _fresh: &'a Self::Value,
+    ) -> futures::future::BoxFuture<'a, ApiResult<bool>> {
+        Box::pin(async move {
+            opened.disclosure.require(conn, principal).await?;
+            Ok(true)
+        })
+    }
 }
 
 /// Page in bounded candidate batches until the visible page is full. A hidden row never becomes
@@ -160,7 +239,19 @@ pub(crate) async fn events(
     principal: &orch_authz::Principal,
     rows: &[EventRow],
 ) -> ApiResult<Vec<UsageEvent>> {
-    let mut users: Vec<Id> = rows.iter().filter_map(|row| row.user_id).collect();
+    Ok(events_with_cut(app, conn, principal, rows).await?.0)
+}
+async fn events_with_cut(
+    app: &crate::state::AppState,
+    conn: &mut orch_db::Conn,
+    principal: &orch_authz::Principal,
+    rows: &[EventRow],
+) -> ApiResult<(Vec<UsageEvent>, super::names::Cut)> {
+    let mut users: Vec<Id> = rows
+        .iter()
+        .flat_map(|row| [row.user_id, row.thread_owner_id])
+        .flatten()
+        .collect();
     users.sort_unstable();
     users.dedup();
     let mut providers: Vec<Id> = rows.iter().map(|row| row.provider_id).collect();
@@ -207,10 +298,14 @@ pub(crate) async fn events(
         .filter_map(|row| row.turn_id)
         .collect();
     let ordinals = ledger::turn_ordinals(conn, &turns).await?;
-    Ok(rows
+    let cut = names.cut();
+    let items = rows
         .iter()
         .filter_map(|row| {
             Some(UsageEvent {
+                thread_owner: row.thread_owner_id.map(|id| names.user(id)),
+                tool_calls: row.tool_calls,
+                tool_ms: row.tool_ms,
                 timing: row.timing(),
                 access_program: row.access_program.clone(),
                 running: row.running,
@@ -257,6 +352,10 @@ pub(crate) async fn events(
                     .unwrap_or_default(),
                 effort: row.effort.clone(),
                 tier: row.tier.clone(),
+                tier_unknown: orch_db::usage::rollup::tier_unknown(
+                    row.tier.as_deref(),
+                    &row.measurement_states,
+                ),
                 tokens: TokenUsage {
                     input_tokens: row.input_tokens,
                     cached_input_tokens: row.cached_input_tokens,
@@ -265,19 +364,28 @@ pub(crate) async fn events(
                     reasoning_tokens: row.reasoning_tokens,
                     total_tokens: row.total_tokens,
                 },
-                request_ref: row.request_ref.clone(),
+                request_ref: row
+                    .measurement_states
+                    .get("_adapter_request_ref")
+                    .and_then(orch_types::Json::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| row.request_ref.clone()),
                 context_tokens: row.context_tokens,
                 rate: row.rate.as_ref().and_then(rate_of),
                 rate_source: row.rate_source.as_deref().and_then(word::<RateSource>),
                 credits: row.credits.clone(),
             })
         })
-        .collect())
+        .collect();
+    Ok((items, cut))
 }
 
 /// The rows as CSV: a line for each, with what a spreadsheet wants to filter by.
 fn events_csv(events: &[UsageEvent]) -> String {
-    let mut text = csv::line(&[
+    let services = events
+        .iter()
+        .any(|event| event.timing.service_usage.is_some());
+    let mut headers = vec![
         "id",
         "at",
         "origin",
@@ -299,8 +407,11 @@ fn events_csv(events: &[UsageEvent]) -> String {
         "model_display",
         "effort",
         "tier",
+        "tier_unknown",
         "input_tokens",
         "cached_input_tokens",
+        "uncached_input_tokens",
+        "cache_write_tokens",
         "output_tokens",
         "reasoning_tokens",
         "total_tokens",
@@ -318,11 +429,29 @@ fn events_csv(events: &[UsageEvent]) -> String {
         "vendor_words",
         "reasoning_hidden",
         "running",
-    ]);
+        "error_reason",
+        "upstream_status",
+        "attempt",
+        "provider_request_id",
+        "thread_owner_id",
+        "thread_owner",
+        "web_searches",
+        "requested_service_tier",
+        "reported_service_tier",
+        "tool_calls",
+        "tool_ms",
+    ];
+    if services {
+        headers.push("service_usage");
+    }
+    let mut text = csv::line(&headers);
     for each in events {
         let name = |node: &orch_api_contract::nodes::NodeRef| node.name.clone().unwrap_or_default();
         let reported = each.timing.reported_tokens.as_ref();
         let count = |value: Option<i64>, legacy: i64| {
+            if each.timing.service_usage.is_some() {
+                return String::new();
+            }
             if each.scope == orch_api_contract::usage::UsageEventScope::Request
                 && !each.timing.is_unsupported()
             {
@@ -331,7 +460,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
                 legacy.to_string()
             }
         };
-        text.push_str(&csv::line(&[
+        let mut values = vec![
             each.id.to_string(),
             each.at.get().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
             serde_word(&each.origin),
@@ -367,6 +496,7 @@ fn events_csv(events: &[UsageEvent]) -> String {
             each.model_display.clone(),
             each.effort.clone().unwrap_or_default(),
             each.tier.clone().unwrap_or_default(),
+            each.tier_unknown.to_string(),
             count(
                 reported.and_then(|tokens| tokens.input_tokens),
                 each.tokens.input_tokens,
@@ -374,6 +504,31 @@ fn events_csv(events: &[UsageEvent]) -> String {
             count(
                 reported.and_then(|tokens| tokens.cached_input_tokens),
                 each.tokens.cached_input_tokens,
+            ),
+            if each.timing.service_usage.is_some() {
+                String::new()
+            } else if each.scope == orch_api_contract::usage::UsageEventScope::Request
+                && !each.timing.is_unsupported()
+            {
+                reported
+                    .and_then(|tokens| {
+                        tokens
+                            .input_tokens
+                            .zip(tokens.cached_input_tokens)
+                            .zip(tokens.cache_write_tokens)
+                    })
+                    .map(|((input, cached), written)| (input - cached - written).max(0).to_string())
+                    .unwrap_or_default()
+            } else {
+                (each.tokens.input_tokens
+                    - each.tokens.cached_input_tokens
+                    - each.tokens.cache_write_tokens)
+                    .max(0)
+                    .to_string()
+            },
+            count(
+                reported.and_then(|tokens| tokens.cache_write_tokens),
+                each.tokens.cache_write_tokens,
             ),
             count(
                 reported.and_then(|tokens| tokens.output_tokens),
@@ -423,7 +578,53 @@ fn events_csv(events: &[UsageEvent]) -> String {
             each.timing.vendor_words.clone().unwrap_or_default(),
             each.timing.reasoning_hidden.to_string(),
             each.running.to_string(),
-        ]));
+            each.timing.error_reason.clone().unwrap_or_default(),
+            each.timing
+                .upstream_status
+                .map(|status| status.to_string())
+                .unwrap_or_default(),
+            each.timing
+                .attempt
+                .map(|attempt| attempt.to_string())
+                .unwrap_or_default(),
+            each.timing.provider_request_id.clone().unwrap_or_default(),
+            each.thread_owner
+                .as_ref()
+                .map(|owner| owner.id.to_string())
+                .unwrap_or_default(),
+            each.thread_owner
+                .as_ref()
+                .map(|owner| owner.username.clone())
+                .unwrap_or_default(),
+            each.timing
+                .web_searches
+                .value()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            each.timing
+                .requested_service_tier
+                .clone()
+                .unwrap_or_default(),
+            each.timing
+                .reported_service_tier
+                .value()
+                .cloned()
+                .unwrap_or_default(),
+            each.tool_calls
+                .map(|count| count.to_string())
+                .unwrap_or_default(),
+            each.tool_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+        ];
+        if services {
+            values.push(
+                each.timing
+                    .service_usage
+                    .as_ref()
+                    .and_then(|service| serde_json::to_string(service).ok())
+                    .unwrap_or_default(),
+            );
+        }
+        text.push_str(&csv::line(&values));
     }
     text
 }

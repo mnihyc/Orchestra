@@ -116,6 +116,8 @@ it.each(entries.flatMap((entry) => ['keyboard', 'tap'].map((mode) => ({ entry, m
   expect(calls.preview).toHaveBeenCalledTimes(1);
   expect(calls.go).not.toHaveBeenCalled();
   expect(screen.getByRole('button', { name: i18n.t('people.reference.open') })).toBeVisible();
+  expect(document.querySelector('[data-reference-card][role="dialog"]')).toHaveFocus();
+  expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   await user.keyboard('{Escape}');
   await waitFor(() => expect(document.querySelector('[data-reference-card]')).toBeNull());
 });

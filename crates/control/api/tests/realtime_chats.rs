@@ -211,7 +211,9 @@ async fn a_rename_and_a_new_member_arrive_as_the_chat_itself_for_each_subscriber
         .call(ChatUpdate, &[&group])
         .token(&room.bea.token)
         .body(&ChatUpdateBody {
-            name: Some("Launch".to_owned()),
+            visibility: None,
+            home_id: None,
+            name: Some(Some("Launch".to_owned())),
         })
         .send()
         .await

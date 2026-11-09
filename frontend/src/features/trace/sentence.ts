@@ -20,6 +20,9 @@ export function auditSentence(entry: TraceEntry, t: TFunction): string {
     const locale=i18n.resolvedLanguage ?? i18n.language;
     return t('trace.windowStartedOver',{window:details.window_label,before:formatNumber(details.before_percent,locale),after:formatNumber(details.after_percent,locale),cause:t('cause' in details && details.cause==='outside' ? 'planUsage.resetCause.outside' : 'planUsage.resetCause.vendor')});
   }
+  if(entry.action==='harness.changed' && typeof details==='object' && details!==null && 'program' in details && typeof details.program==='string' && 'change' in details && typeof details.change==='string') {
+    return t('trace.sentenceHarnessChanged',{program:details.program,setting:t(`harnessChanges.settings.${details.change}` as 'harnessChanges.settings.model',{defaultValue:t('harnessChanges.setting')})});
+  }
   const setting = auditSetting(entry, t);
   if (setting !== null) return setting.reset
     ? t('trace.sentenceSettingReset', { setting: setting.title })

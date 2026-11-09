@@ -8,24 +8,54 @@
 mod places;
 mod resources;
 mod support;
+use support::FullTokenReply as _;
 mod usage_world;
 
 use chrono::{Duration, Timelike};
 use orch_api_contract::auth::{ApiTokenCreateBody, MeTokenCreate, SensitiveProof};
 use orch_api_contract::common::ErrorCode;
-use orch_api_contract::resources::{ProviderGet, ProviderPlanGet, ProviderPlanGetQuery};
+use orch_api_contract::resources::{
+    ProviderGet, ProviderHistorySeries, ProviderPlanGet, ProviderPlanGetQuery, ProviderPlanSeries,
+};
 use orch_api_contract::usage::UsageBucket;
 use orch_db::queries::resources::keeper::set_facts;
 use serde_json::json;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 use support::World;
 use tracing::instrument::WithSubscriber;
 
-#[derive(Clone, Default)]
+fn subscription(
+    page: orch_api_contract::common::Page<ProviderHistorySeries>,
+) -> orch_api_contract::common::Page<ProviderPlanSeries> {
+    orch_api_contract::common::Page {
+        items: page
+            .items
+            .into_iter()
+            .map(|series| match series {
+                ProviderHistorySeries::Subscription(series) => series,
+                ProviderHistorySeries::Credits(_) => {
+                    panic!("the default metric remains subscription history")
+                }
+            })
+            .collect(),
+        next_cursor: page.next_cursor,
+    }
+}
+
+#[derive(Clone)]
 struct ReadStatements(Arc<AtomicUsize>);
+
+impl Default for ReadStatements {
+    fn default() -> Self {
+        // Other tasks can register SQLx callsites before this scoped counter is polled.
+        support::Statements::now();
+        Self(Arc::default())
+    }
+}
+
 impl tracing::Subscriber for ReadStatements {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
         metadata.target() == "sqlx::query"
@@ -37,11 +67,96 @@ impl tracing::Subscriber for ReadStatements {
     fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
         if event.metadata().target() == "sqlx::query" {
-            self.0.fetch_add(1, Ordering::Relaxed);
+            let ordinal = self.0.fetch_add(1, Ordering::Relaxed);
+            static TIMINGS: OnceLock<bool> = OnceLock::new();
+            if *TIMINGS.get_or_init(|| std::env::var_os("ORCH_TEST_SQL_TIMINGS").is_some()) {
+                #[derive(Default)]
+                struct Sql(Vec<(String, String)>);
+                impl tracing::field::Visit for Sql {
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if matches!(field.name(), "summary" | "db.statement") {
+                            self.0.push((field.name().to_owned(), value.to_owned()));
+                        }
+                    }
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        if matches!(field.name(), "summary" | "db.statement") {
+                            self.record_str(field, &format!("{value:?}"));
+                        }
+                    }
+                }
+                let mut sql = Sql::default();
+                event.record(&mut sql);
+                eprintln!(
+                    "SCOPED SQL {} {}",
+                    ordinal + 1,
+                    serde_json::to_string(&sql.0).unwrap()
+                );
+            }
         }
     }
     fn enter(&self, _: &tracing::span::Id) {}
     fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[tokio::test]
+async fn statement_observation_keeps_known_queries_visible_without_counting_other_tasks() {
+    let db = orch_testkit::database::TestDb::fresh().await;
+    let mut connection = db.pool.acquire().await.unwrap();
+    let statements = ReadStatements::default();
+    let dispatcher = tracing::Dispatch::new(statements.clone());
+    // Another task can use SQL before an observed request is first polled.
+    let unobserved_pool = db.pool.clone();
+    tokio::spawn(async move {
+        sqlx::query("SELECT 1")
+            .execute(&unobserved_pool)
+            .await
+            .unwrap();
+    })
+    .await
+    .unwrap();
+    let outside = statements.0.load(Ordering::Relaxed);
+
+    let (release, released) = tokio::sync::oneshot::channel::<()>();
+    let (finished, wait_finished) = tokio::sync::oneshot::channel::<()>();
+    let background_pool = db.pool.clone();
+    let background = tokio::spawn(async move {
+        released.await.unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&background_pool)
+            .await
+            .unwrap();
+        finished.send(()).unwrap();
+    });
+    async {
+        sqlx::query("SELECT 1")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        wait_finished.await.unwrap();
+        sqlx::query("SELECT 1")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+    }
+    .with_subscriber(dispatcher)
+    .await;
+    background.await.unwrap();
+    let observed = statements.0.load(Ordering::Relaxed);
+    drop(connection);
+    db.close().await.unwrap();
+    assert_eq!(
+        outside, 0,
+        "queries outside the observed future do not count"
+    );
+    assert_eq!(
+        observed, 2,
+        "both observed queries count, and other tasks' queries do not"
+    );
 }
 
 #[tokio::test]
@@ -80,6 +195,7 @@ async fn provider_window_reads_have_fixed_statement_counts_and_pages_reject_a_ch
         "provider read SQL must not grow with window rows"
     );
     let mut query = ProviderPlanGetQuery {
+        metric: None,
         from: (now - Duration::days(7)).format("%Y-%m-%d").to_string(),
         to: now.format("%Y-%m-%d").to_string(),
         bucket: Some(UsageBucket::Day),
@@ -99,6 +215,7 @@ async fn provider_window_reads_have_fixed_statement_counts_and_pages_reject_a_ch
             .with_subscriber(statements.clone())
             .await
             .ok();
+        let page = subscription(page);
         assert_eq!(page.items.len(), 20);
         assert!(page.items.iter().all(|row| row.points.len() <= 600
             && row.history.len() <= 800
@@ -206,6 +323,7 @@ async fn the_provider_read_projects_both_short_and_weekly_windows_and_one_read_s
         .call(ProviderPlanGet, &[&team.provider])
         .token(&team.boss.token)
         .query(&ProviderPlanGetQuery {
+            metric: None,
             from: (now - Duration::days(2)).format("%Y-%m-%d").to_string(),
             to: now.format("%Y-%m-%d").to_string(),
             bucket: Some(UsageBucket::Hour),
@@ -215,7 +333,7 @@ async fn the_provider_read_projects_both_short_and_weekly_windows_and_one_read_s
         .send()
         .await
         .ok();
-    let series = series.items;
+    let series = subscription(series).items;
     assert_eq!(series.len(), 2);
     assert!(series.iter().all(|window| window.points.len() <= 600));
     assert!(
@@ -246,6 +364,7 @@ async fn the_provider_read_projects_both_short_and_weekly_windows_and_one_read_s
         .call(ProviderPlanGet, &[&team.provider])
         .token(&team.boss.token)
         .query(&ProviderPlanGetQuery {
+            metric: None,
             from: (now - Duration::days(14)).format("%Y-%m-%d").to_string(),
             to: (now - Duration::days(7)).format("%Y-%m-%d").to_string(),
             bucket: Some(UsageBucket::Day),
@@ -255,7 +374,7 @@ async fn the_provider_read_projects_both_short_and_weekly_windows_and_one_read_s
         .send()
         .await
         .ok();
-    let past = past.items;
+    let past = subscription(past).items;
     assert!(past.iter().all(|series| series.history.is_empty()));
     assert!(
         !past
@@ -293,22 +412,44 @@ async fn the_provider_read_projects_both_short_and_weekly_windows_and_one_read_s
 async fn a_reader_without_provider_view_gets_neither_forecasts_nor_plan_points() {
     let world = World::new().await;
     let team = usage_world::team(&world).await;
+    let now = world.now();
+    let facts = json!({"identity":"plan-reader@example.test","plan":"Private plan","windows":[{
+        "id":"private-window","label":"Weekly","duration_minutes":10080,"used_percent":20,"resets_at":now+Duration::days(6)
+    }]});
+    {
+        let mut conn = world.conn().await;
+        set_facts(&mut conn, team.provider, &facts, now)
+            .await
+            .unwrap();
+    }
+    let readable = world
+        .app
+        .call(ProviderGet, &[&team.provider])
+        .token(&team.boss.token)
+        .send()
+        .await
+        .ok();
+    assert_eq!(readable.facts.windows.len(), 1);
+    assert!(readable.facts.identity.is_some());
+    assert!(readable.plan_forecasts.is_some());
     let credential = world
         .app
         .call(MeTokenCreate, &[])
         .token(&team.boss.token)
         .body(&ApiTokenCreateBody {
+            rules: None,
             name: "Plan reader".to_owned(),
             scopes: Some(vec!["provider.manage".to_owned()]),
             node_id: None,
             expires_at: None,
-            proof: SensitiveProof {
+            proof: Some(SensitiveProof {
                 password: Some(support::PASSWORD.to_owned()),
                 ..Default::default()
-            },
+            }),
         })
         .send()
         .await
+        .full_token()
         .ok()
         .token
         .unwrap();
@@ -317,13 +458,27 @@ async fn a_reader_without_provider_view_gets_neither_forecasts_nor_plan_points()
         .call(ProviderGet, &[&team.provider])
         .token(&credential)
         .send()
-        .await;
-    assert_eq!(single.problem().code, ErrorCode::AuthzDenied);
+        .await
+        .ok();
+    assert_eq!(single.base.id, team.provider);
+    assert!(
+        !single
+            .access
+            .permissions
+            .iter()
+            .any(|permission| permission == "provider.view")
+    );
+    assert!(single.plan_forecasts.is_none());
+    assert!(single.facts.windows.is_empty());
+    assert!(single.facts.identity.is_none());
+    assert!(single.facts.plan.is_none());
+    assert!(single.facts_at.is_none());
     let points = world
         .app
         .call(ProviderPlanGet, &[&team.provider])
         .token(&credential)
         .query(&ProviderPlanGetQuery {
+            metric: None,
             from: world.now().format("%Y-%m-%d").to_string(),
             to: world.now().format("%Y-%m-%d").to_string(),
             bucket: None,

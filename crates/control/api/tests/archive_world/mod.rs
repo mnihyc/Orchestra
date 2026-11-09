@@ -38,7 +38,14 @@ pub struct Office {
 
 impl Office {
     pub async fn new() -> Self {
-        let s = Scene::new().await;
+        Self::with_scene(Scene::new().await).await
+    }
+
+    pub async fn with_blob_layer(layer: crate::rig::BlobLayer) -> Self {
+        Self::with_scene(Scene::with_blob_layer(layer).await).await
+    }
+
+    async fn with_scene(s: Scene) -> Self {
         Self::ready(&s).await;
         let thread = s.thread().await;
         s.exchange(thread.base.id, 0, "First question", "First answer")
@@ -83,6 +90,8 @@ impl Office {
             .send()
             .await
             .ok()
+            .into_full()
+            .unwrap()
     }
 
     pub fn topic(&self) -> Id {
@@ -108,7 +117,8 @@ impl Office {
     }
 
     pub async fn ask(&self, by: &Who, place: Id, request: &ExportRequest) -> Reply<Job> {
-        self.s
+        let reply = self
+            .s
             .rig
             .world
             .app
@@ -116,17 +126,44 @@ impl Office {
             .token(&by.token)
             .body(request)
             .send()
-            .await
+            .await;
+        Reply {
+            status: reply.status,
+            headers: reply.headers,
+            raw: reply.raw,
+            body: reply.body.map(|answer| {
+                answer
+                    .into_full()
+                    .expect("an ordinary export returns its job")
+            }),
+        }
     }
 
     /// Waits until the job has ended and says how.
     pub async fn ended(&self, by: &Who, job: Id) -> Job {
         let app = &self.s.rig.world.app;
         let token = by.token.clone();
+        let diagnostic = std::env::var_os("ORCH_TEST_NATIVE_OPERATIONS").is_some();
+        let last = std::sync::Mutex::new(None::<String>);
         eventually("the job that writes the archive ends", || {
             let call = app.call(JobGet, &[&job]).token(&token);
+            let last = &last;
             async move {
                 let read = call.send().await.ok();
+                if diagnostic {
+                    let observed = format!(
+                        "{:?} {:?} {:?} {:?}",
+                        read.state, read.progress.phase, read.progress.phases, read.error
+                    );
+                    let mut last = last.lock().unwrap();
+                    if last.as_ref() != Some(&observed) {
+                        eprintln!(
+                            "Archive job {job}: state={:?}, progress={:?}, error={:?}",
+                            read.state, read.progress, read.error
+                        );
+                        *last = Some(observed);
+                    }
+                }
                 matches!(
                     read.state,
                     JobState::Succeeded | JobState::Failed | JobState::Cancelled

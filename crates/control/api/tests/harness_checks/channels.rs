@@ -111,14 +111,121 @@ async fn mirror_for(world: &World) -> Mirror {
     mirror
 }
 
+async fn trust_mirror(world: &World) {
+    setting(
+        world,
+        None,
+        "agents.harness_trust_mirror",
+        json!(true),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scoped_exact_supplier_runs_once_and_rechecks_after_the_native_settings_wait() {
+    use orch_api_contract::admin::{HarnessVersionFetch, HarnessVersionFetchBody};
+    for expire in [false, true] {
+        let world = Arc::new(World::new().await);
+        let c = cast(&world).await;
+        let mirror = mirror_for(&world).await;
+        trust_mirror(&world).await;
+        let secret = super::scopes::key(
+            &world,
+            c.root.id(),
+            vec![super::scopes::system(
+                "HarnessVersionFetch.system",
+                "manage",
+            )],
+        )
+        .await;
+        let mut blocker = world.app.app.db.begin().await.unwrap();
+        sqlx::query("LOCK TABLE settings IN SHARE MODE")
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let serving = Arc::clone(&world);
+        let pending = tokio::spawn(async move {
+            let request = serving
+                .app
+                .call(HarnessVersionFetch, &[&"codex", &super::VERSION])
+                .token(&secret)
+                .body(&HarnessVersionFetchBody::default());
+            request.send_bytes().await
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                assert!(!pending.is_finished(), "the actual native settings footprint must wait");
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+                    AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query LIKE 'LOCK TABLE settings IN SHARE ROW EXCLUSIVE MODE%')")
+                    .bind(pid).fetch_one(&world.db.pool).await.unwrap();
+                if blocked { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(
+            mirror
+                .paths()
+                .iter()
+                .filter(|path| path.ends_with(&format!("/tags/rust-v{}", super::VERSION)))
+                .count(),
+            1
+        );
+        if expire {
+            world.advance(chrono::Duration::seconds(11));
+        }
+        blocker.commit().await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(30), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        if expire {
+            assert!(matches!(
+                reply.problem().code,
+                orch_api_contract::common::ErrorCode::AuthInvalidToken
+                    | orch_api_contract::common::ErrorCode::AuthzDenied
+            ));
+            let saved = rows::row(
+                &mut *world.conn().await,
+                None,
+                &orch_api_core::harness_channels::channel_key(&channel_build()),
+            )
+            .await
+            .unwrap();
+            assert!(
+                saved.is_none(),
+                "the expired original supplier cannot write a fetched build or claim"
+            );
+        } else {
+            assert_eq!(reply.status, 202, "{}", String::from_utf8_lossy(&reply.raw));
+            let body: Value = serde_json::from_slice(&reply.raw).unwrap();
+            assert_eq!(body["projection"], "receipt");
+        }
+        assert_eq!(
+            mirror
+                .paths()
+                .iter()
+                .filter(|path| path.ends_with(&format!("/tags/rust-v{}", super::VERSION)))
+                .count(),
+            1,
+            "guarded preparation never repeats the native vendor supplier"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_typed_exact_release_uses_its_own_manifest_checksum_and_background_native_check() {
     use orch_api_contract::admin::{
-        HarnessBuildStatus, HarnessVersionFetch, HarnessVersionFetchBody,
+        HarnessBuildSource, HarnessBuildStatus, HarnessVersionFetch, HarnessVersionFetchBody,
     };
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     let machine = system_host(&world).await;
     let answering = super::node_answering(&world, machine, &[]);
     world
@@ -128,7 +235,9 @@ async fn a_typed_exact_release_uses_its_own_manifest_checksum_and_background_nat
         .body(&HarnessVersionFetchBody::default())
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the ordinary build catalogue");
     assert_eq!(
         answering.await.unwrap(),
         [
@@ -140,6 +249,7 @@ async fn a_typed_exact_release_uses_its_own_manifest_checksum_and_background_nat
     let build = super::checked(&world, &people.root).await;
     assert_eq!(build.version, super::VERSION);
     assert_eq!(build.status, HarnessBuildStatus::Checked);
+    assert_eq!(build.source, HarnessBuildSource::Mirror);
     let ensure: Value =
         sqlx::query_scalar("SELECT body FROM commands WHERE kind='node.tool.ensure'")
             .fetch_one(&world.db.pool)
@@ -217,6 +327,7 @@ async fn an_org_requests_only_its_vendor_and_an_ancestor_lock_can_take_that_requ
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     setting(
         &world,
         Some(people.acme),
@@ -266,6 +377,7 @@ async fn zero_disables_the_schedule_but_an_admin_refresh_still_reads_and_keeps_i
     let world = World::new().await;
     let people = cast(&world).await;
     let mirror = mirror_for(&world).await;
+    trust_mirror(&world).await;
     setting(
         &world,
         None,

@@ -1,4 +1,4 @@
-/** Asking on the side: the entry every screen calls, and the one request behind it.
+/** Starting side thread: the entry every screen calls, and the one request behind it.
  *
  * A side thread is a quick aside that a person takes from a thread: a short conversation with the same agent set-up,
  * which starts from the thread's history and adds nothing to it. It is started from the send menu of the box (with

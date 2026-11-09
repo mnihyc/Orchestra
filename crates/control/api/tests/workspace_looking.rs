@@ -62,6 +62,7 @@ async fn changes(
         .query(&EnvironmentChangeListQuery {
             thread,
             turn_id: None,
+            item_id: None,
             all,
         })
         .send()
@@ -177,6 +178,81 @@ async fn the_changes_are_for_whoever_may_read_the_files() {
 }
 
 // ---------------------------------------------------------------- searching
+
+#[tokio::test]
+async fn an_exact_recorded_change_survives_a_later_edit_under_the_same_file_view_gate() {
+    let site = live_site().await;
+    let first = site
+        .file_change_item(site.thread, &[change("web/a.txt", "modify")])
+        .await;
+    site.world.advance(chrono::Duration::minutes(1));
+    site.file_change_item(site.thread, &[change("web/a.txt", "delete")])
+        .await;
+    let query = EnvironmentChangeListQuery {
+        item_id: Some(first),
+        ..Default::default()
+    };
+    let old = site
+        .app()
+        .call(EnvironmentChangeList, &[&site.environment])
+        .token(&site.vic.token)
+        .query(&query)
+        .send()
+        .await
+        .ok();
+    assert_eq!(old.changes.len(), 1);
+    assert_eq!(old.changes[0].item_id, first);
+    assert_eq!(
+        old.changes[0].change.change,
+        orch_api_contract::threads::FileChangeKind::Modify
+    );
+    for item in [first, site.thread] {
+        let refused = site
+            .app()
+            .call(EnvironmentChangeList, &[&site.environment])
+            .token(&site.eve.token)
+            .query(&EnvironmentChangeListQuery {
+                item_id: Some(item),
+                ..Default::default()
+            })
+            .send()
+            .await
+            .problem();
+        assert_eq!(refused.code, ErrorCode::AuthzDenied);
+    }
+    let other = site.another_thread(&site.ada, "docs").await;
+    let other_item = site
+        .file_change_item(other, &[change("docs/other.txt", "modify")])
+        .await;
+    let own_only = site
+        .app()
+        .call(EnvironmentChangeList, &[&site.environment])
+        .token(&site.vic.token)
+        .query(&EnvironmentChangeListQuery {
+            thread: Some(site.thread),
+            item_id: Some(other_item),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert!(own_only.changes.is_empty());
+    let all = site
+        .app()
+        .call(EnvironmentChangeList, &[&site.environment])
+        .token(&site.vic.token)
+        .query(&EnvironmentChangeListQuery {
+            thread: Some(site.thread),
+            item_id: Some(other_item),
+            all: Some(true),
+            ..Default::default()
+        })
+        .send()
+        .await
+        .ok();
+    assert_eq!(all.changes.len(), 1);
+    assert_eq!(all.changes[0].item_id, other_item);
+}
 
 async fn search(
     site: &Site,

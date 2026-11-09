@@ -95,3 +95,9 @@ export function sum(per: { turns: number; tokens: number; credits: number; estim
     estimated: Math.round(per.estimated * days * 1e6) / 1e6,
   };
 }
+
+
+/** One normalized service observation for a UI click path; native admission/billing is covered in Rust. */
+export async function useService(given:{offering:string;purpose?:string;unit?:string;unknown?:boolean;unpriced?:boolean}):Promise<void> {
+  await control('/use',{pattern:'A',service:true,...given});
+}

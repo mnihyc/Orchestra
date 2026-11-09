@@ -344,7 +344,7 @@ pub async fn list_by_place(
     places.sort_unstable();
     places.dedup();
     let nodes = view::ways(&mut conn, &principal, &places, Policy::default()).await?;
-    let actors = crate::realtime::user::notification_people(
+    let actors = crate::realtime::user::notification_context(
         &mut conn,
         &mut page.iter_mut().map(|(row, _, _)| row).collect::<Vec<_>>(),
     )

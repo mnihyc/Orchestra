@@ -1,7 +1,7 @@
 /** An image the agent looked at or made.
  *
  * An image the agent looked at or made: its name, what it shows in the words the harness gave, and
- * its type. The picture is kept in the thread's files and is opened from there.
+ * its type. The picture is retained as an authorized blob and uses the shared file viewer.
  */
 import { useTranslation } from 'react-i18next';
 

@@ -9,6 +9,8 @@ mod desk;
 mod places;
 mod support;
 
+use crate::support::FullDiscussionCreationReply as _;
+use crate::support::FullPermissionPageReply;
 use axum::{Router, extract::State, http::StatusCode, routing::post};
 use desk::{Desk, text};
 use orch_api_contract::access::{PageChange, PageChangeWhole, PermissionPageUpdate};
@@ -136,7 +138,7 @@ async fn pw_01_a_real_route_delivers_each_accepted_discussion_once_and_drops_a_r
             .call(DocumentDiscussionCreate, &[&doc.base.id])
             .token(&reader.token)
             .body(&body);
-        async move { request.send().await.ok() }
+        async move { request.send().await.full_discussion().ok() }
     };
     let first = open(body.clone()).await;
     let repeat = open(body.clone()).await;
@@ -164,6 +166,7 @@ async fn pw_01_a_real_route_delivers_each_accepted_discussion_once_and_drops_a_r
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let dropped = outbox.run().await.unwrap();
     // What the reader may no longer read is cancelled, which is no failed delivery.
@@ -192,6 +195,7 @@ async fn pw_01_a_real_route_delivers_each_accepted_discussion_once_and_drops_a_r
         })
         .send()
         .await
+        .full_permission_page()
         .ok();
     let mut third = body;
     third.client_id = new_id().to_string();

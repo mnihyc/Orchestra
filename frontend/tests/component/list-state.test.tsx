@@ -1,6 +1,8 @@
 /** Each addressed list resumes its own device state; links and explicit resets replace it. */
 import { act, cleanup, renderHook } from '@testing-library/react';
-import { afterEach, beforeEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { ReactNode } from 'react';
+import { PageContext, type PageContextValue } from '@/features/workbench/pageContext';
 import { client } from '@/api/client';
 import { useListChoice, usePageListSearch } from '@/lib/listState';
 
@@ -66,4 +68,23 @@ it('keeps nullable object selections live and clears anonymous state when the re
   act(()=>choice.result.current[1]({id:'selected-person'}));expect(choice.result.current[0]).toEqual({id:'selected-person'});
   act(()=>client.session.setState({userId:'another-reader',readerVersion:2}));expect(choice.result.current[0]).toBeNull();
   act(()=>client.session.setState({userId:null,readerVersion:3}));expect(choice.result.current[0]).toBeNull();
+});
+
+it('keeps settings and transient picker folds on this device without publishing a list address', () => {
+  const navigate = vi.fn< PageContextValue['navigate'] >().mockResolvedValue(undefined);
+  const target: PageContextValue['target'] = { route: '/org/$slug/settings/$section/', pathname: '/org/acme/settings/defaults', params: { slug: 'acme', section: 'defaults' }, search: {}, hash: '' };
+  const wrapper = ({ children }: { children: ReactNode }) => <PageContext value={{ id: 'settings-page', target, navigate }}>{children}</PageContext>;
+  const first = renderHook(() => useListChoice<string[]>('settings-picker', 'collapsedHomes', []), { wrapper });
+  act(() => first.result.current[1](['home-one'])); expect(first.result.current[0]).toEqual(['home-one']);
+  expect(navigate).not.toHaveBeenCalled(); first.unmount();
+  const restored = renderHook(() => useListChoice<string[]>('settings-picker', 'collapsedHomes', []), { wrapper });
+  expect(restored.result.current[0]).toEqual(['home-one']); restored.unmount();
+  target.route = '/usage/'; target.pathname = '/usage'; target.search = { _list: true, list: { 'usage-picker.collapsedHomes': ['from-link'] } };
+  const transient = renderHook(() => useListChoice<string[]>('usage-picker', 'collapsedHomes', [], 'device'), { wrapper });
+  expect(transient.result.current[0]).toEqual([]); act(() => transient.result.current[1](['home-two']));
+  expect(transient.result.current[0]).toEqual(['home-two']); expect(navigate).not.toHaveBeenCalled();
+});
+it('keeps the settings locator but omits internal list metadata from a plain org settings address', () => {
+  const addressed = renderHook(() => usePageListSearch('/org/$slug/settings/$section/', '/org/acme/settings/defaults', { setting: 'agent.model' }, (value) => ({ setting: value.setting })));
+  expect(addressed.result.current).toEqual({ setting: 'agent.model' });
 });

@@ -6,9 +6,12 @@
 )]
 
 mod binding_support;
+#[path = "binding_options/native_scopes.rs"]
+mod native_scopes;
 mod places;
 mod rig;
 mod support;
+mod thread_history_scope;
 
 use binding_support::{
     a_directory_on_a_machine, another_environment, another_provider, names, offering_plain,
@@ -620,7 +623,9 @@ async fn an_environment_that_has_served_only_other_topics_gives_a_new_directory_
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .unwrap();
     let options = options_for(&s, &s.ada, thread).await;
     let listed = options
         .environments
@@ -856,4 +861,67 @@ async fn a_subscription_is_offered_to_its_first_owner_alone_unless_the_org_share
         )
         .await;
     assert!(provider_of(&options_for(&s, &s.eve, eves).await, s.on.provider).usable);
+}
+
+#[tokio::test]
+async fn grouping_uses_the_same_native_arrangements_and_preserves_unavailable_choices() {
+    let s = Scene::new().await;
+    let thread = s.thread().await.base.id;
+    let before = options_for(&s, &s.ada, thread).await;
+    let original = provider_of(&before, s.on.provider);
+    assert_eq!(
+        original.owner.as_ref().map(|owner| owner.id),
+        Some(s.ada.id())
+    );
+    assert_eq!(
+        original.agents[0].owner.as_ref().map(|owner| owner.id),
+        Some(s.ada.id())
+    );
+
+    assert_eq!(
+        original.grouping.home.as_ref().map(|home| home.id),
+        Some(s.tree.org.base.id)
+    );
+    assert_eq!(
+        original.agents[0]
+            .grouping
+            .home
+            .as_ref()
+            .map(|home| home.id),
+        Some(s.tree.org.base.id)
+    );
+    let available = original.agents[0]
+        .arrangements
+        .iter()
+        .any(|choice| choice.available);
+    assert_eq!(
+        original.agents[0].grouping.availability[0].available,
+        available
+    );
+    assert_eq!(
+        original.agents[0].grouping.availability[0].machine_id,
+        s.rig.machine_id
+    );
+    sqlx::query("UPDATE environments SET status='lost' WHERE id=$1")
+        .bind(s.on.environment)
+        .execute(s.rig.db.pool())
+        .await
+        .unwrap();
+    let after = options_for(&s, &s.ada, thread).await;
+    let environment = after
+        .environments
+        .iter()
+        .find(|row| row.environment.id == s.on.environment)
+        .unwrap();
+    assert_eq!(
+        environment.grouping.home.as_ref().map(|home| home.id),
+        Some(s.tree.topic.base.id)
+    );
+    assert!(!environment.usable);
+    assert_eq!(environment.reason.as_deref(), Some("environment_lost"));
+    assert!(!environment.grouping.availability[0].available);
+    assert_eq!(
+        environment.grouping.availability[0].reason.as_deref(),
+        Some("environment_lost")
+    );
 }

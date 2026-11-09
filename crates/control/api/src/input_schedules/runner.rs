@@ -3,7 +3,9 @@
 use super::*;
 use crate::state::AppState;
 use chrono::Utc;
-use orch_engine::inputs::Submitted;
+use orch_engine::inputs::{
+    InputSourceOperands, ScheduledInputDestination, ScheduledInputOrigin, Submitted,
+};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
@@ -13,15 +15,16 @@ const PAGE: i64 = 200;
 /// Inputs sent later have the specification's one-minute default cadence.
 const EVERY: Duration = Duration::from_secs(60);
 
-pub(super) async fn accept(
+/// Materialize only the existing destination branch. A rollback validator has no
+/// durable occurrence and must never manufacture a ScheduledInputOrigin for it.
+async fn destination(
     app: &AppState,
     conn: &mut Conn,
     caller: &Caller,
     row: &rows::ScheduleRow,
     occurrence: &str,
     date: Option<chrono::NaiveDate>,
-) -> ApiResult<Submitted> {
-    let native: Option<NativeInvocation> = row.native_action.clone().map(decode).transpose()?;
+) -> ApiResult<(Id, ScheduledInputDestination)> {
     let now = app.clock.now();
     let thread = match target(row)? {
         InputScheduleTarget::Thread { thread_id } => {
@@ -29,7 +32,7 @@ pub(super) async fn accept(
                 .await?
                 .filter(|thread| thread.topic_id == row.topic_id)
                 .ok_or_else(ApiError::not_found)?;
-            thread.node_id
+            (thread.node_id, ScheduledInputDestination::ExistingThread)
         }
         InputScheduleTarget::NewThread { config } => {
             let suffix = date.map_or_else(String::new, |date| format!(" · {date}"));
@@ -58,24 +61,180 @@ pub(super) async fn accept(
                 .create_thread_in_transaction(conn, caller, &new, &birth, id, now)
                 .await
             {
-                Ok(created) => created.thread,
+                Ok(created) => (created.thread, ScheduledInputDestination::NewThread),
                 Err(error) => return Err(crate::routes::threads::create_failed(conn, error).await),
             }
         }
     };
-    let request = InputRequest {
+    Ok(thread)
+}
+
+pub(super) fn request(row: &rows::ScheduleRow, occurrence: &str) -> ApiResult<InputRequest> {
+    let prefix = if agent::metadata(row)?.is_some() {
+        "agent-schedule"
+    } else {
+        "schedule"
+    };
+    Ok(InputRequest {
         plan: false,
         content: content(row)?,
         delivery: Delivery::Queue,
-        client_id: format!("schedule:{}:{occurrence}", row.id),
+        client_id: format!("{prefix}:{}:{occurrence}", row.id),
         bypass: None,
-    };
+    })
+}
+
+/// Preserve creation/resume's current caller inside its existing rollback trial.
+/// The validator does not queue work, capture origins, or impersonate the author.
+pub(super) async fn validate(
+    app: &AppState,
+    conn: &mut Conn,
+    caller: &Caller,
+    row: &rows::ScheduleRow,
+    operands: Option<&InputSourceOperands>,
+) -> ApiResult<()> {
+    if agent::input_authority(row)?.is_some() {
+        return agent::validate(app, conn, row).await;
+    }
+    let native: Option<NativeInvocation> = row.native_action.clone().map(decode).transpose()?;
+    let (thread, _) = destination(app, conn, caller, row, "validation", None).await?;
+    let request = request(row, "validation")?;
     match app
         .engine
-        .submit_selected_scheduled_input(conn, caller, thread, &request, now, native.as_ref())
+        .validate_selected_scheduled_input(
+            conn,
+            caller,
+            thread,
+            &request,
+            app.clock.now(),
+            native.as_ref(),
+            operands,
+        )
         .await
     {
-        Ok(submitted) => Ok(submitted),
+        Ok(()) => Ok(()),
+        Err(error) => Err(crate::routes::threads::input_failed(conn, thread, error).await),
+    }
+}
+
+/// A real due occurrence retains the actual inserted run and every accepted
+/// definition origin. State-controller actions never become execution origins.
+pub(super) async fn accept(
+    app: &AppState,
+    conn: &mut Conn,
+    row: &rows::ScheduleRow,
+    run: &rows::RunRow,
+    date: chrono::NaiveDate,
+) -> ApiResult<Submitted> {
+    if run.schedule_id != row.id {
+        return Err(ApiError::not_found());
+    }
+    if let Some(authority) = agent::current(app, conn, row).await? {
+        let info = agent::metadata(row)?.ok_or_else(ApiError::not_found)?;
+        let request = request(row, &run.occurrence)?;
+        return match app
+            .engine
+            .submit_agent_scheduled_input(
+                conn,
+                row.author_id,
+                &authority,
+                info.thread_id,
+                &request,
+                app.clock.now(),
+            )
+            .await
+        {
+            Ok(submitted) => Ok(submitted),
+            Err(error) => {
+                Err(crate::routes::threads::input_failed(conn, info.thread_id, error).await)
+            }
+        };
+    }
+    let restored = authority::restore(app, conn, row).await?;
+    if matches!(target(row)?, InputScheduleTarget::NewThread { .. }) {
+        authority::require_creation(app, conn, &restored, row.topic_id).await?;
+    }
+    // Only the ordinary new-thread writer needs one caller for attribution. In
+    // that branch every origin passed its own scope and TopicStartThreads; the
+    // input producer below restores and checks each origin independently again.
+    let creator = restored.callers().first().ok_or_else(|| {
+        ApiError::internal("the schedule has no restored author-definition boundary")
+    })?;
+    let (thread, destination) =
+        destination(app, conn, creator, row, &run.occurrence, Some(date)).await?;
+    let reference = ScheduledInputOrigin {
+        schedule_id: row.id,
+        run_id: run.id,
+        destination,
+    };
+    if destination == ScheduledInputDestination::NewThread
+        && let authority::Restored::Captured { origins, .. } = &restored
+        && !orch_engine::inputs::scheduled_source_before_acceptance(
+            conn,
+            row.author_id,
+            origins,
+            reference,
+            thread,
+            app.clock.as_ref(),
+        )
+        .await
+        .map_err(ApiError::engine)?
+    {
+        return Err(ApiError::new(
+            ErrorCode::AuthzDenied,
+            "the accepted definition does not permit this source preparation",
+        ));
+    }
+    let native: Option<NativeInvocation> = row.native_action.clone().map(decode).transpose()?;
+    let request = request(row, &run.occurrence)?;
+    let now = app.clock.now();
+    let accepted = match &restored {
+        authority::Restored::Historical(caller) => {
+            // Historical definitions were session-only and retained no original
+            // key or operation. Preserve that explicitly limited compatibility path.
+            app.engine
+                .submit_selected_scheduled_input(
+                    conn,
+                    caller,
+                    thread,
+                    &request,
+                    now,
+                    native.as_ref(),
+                )
+                .await
+        }
+        authority::Restored::Captured { origins, .. } => {
+            app.engine
+                .submit_selected_scheduled_input_from_origins(
+                    conn,
+                    row.author_id,
+                    origins,
+                    reference,
+                    thread,
+                    &request,
+                    now,
+                    native.as_ref(),
+                )
+                .await
+        }
+    };
+    match accepted {
+        Ok(submitted) => {
+            if destination == ScheduledInputDestination::NewThread
+                && matches!(restored, authority::Restored::Captured { .. })
+            {
+                orch_engine::inputs::retain_scheduled_source_origin(
+                    conn,
+                    row.author_id,
+                    thread,
+                    submitted.input.id,
+                    reference,
+                )
+                .await
+                .map_err(ApiError::engine)?;
+            }
+            Ok(submitted)
+        }
         Err(error) => Err(crate::routes::threads::input_failed(conn, thread, error).await),
     }
 }
@@ -95,13 +254,17 @@ async fn cannot_start(
     record(
         conn,
         row,
-        Actor::User(row.author_id),
+        agent::actor(row)?,
         orch_db::audit::action!(AuditAction::InputScheduleCannotStart),
         &Origin::default(),
         json!({"run":run.id,"occurrence":run.occurrence,"reason":reason}),
         now,
     )
     .await?;
+    if agent::metadata(row)?.is_some() {
+        // Agent wakeups have visible run outcomes and audit, without notifying a person by default.
+        return Ok(());
+    }
     let event = orch_engine::notifications::Event {
         kind: orch_engine::notifications::Kind::ScheduleCannotStart,
         node: Some(row.topic_id),
@@ -126,14 +289,27 @@ async fn cannot_start(
 }
 
 async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
-    let before = {
+    let refresh = {
         let mut conn = app.db.acquire().await?;
-        rows::schedule(&mut conn, id, false).await?
+        let before = rows::schedule(&mut conn, id, false).await?;
+        if let Some(row) = before
+            && row.state == "active"
+            && row.next_run_at.is_some_and(|at| at <= app.clock.now())
+            && row.native_action.is_some()
+            && let InputScheduleTarget::Thread { thread_id } = target(&row)?
+        {
+            match authority::before_refresh(app, &mut conn, &row).await {
+                Ok(()) => Some(thread_id),
+                // A refused author must still receive the ordinary durable failed
+                // occurrence below. Recheck in the locked trial without doing the RPC.
+                Err(error) if error.problem.code != ErrorCode::Internal => None,
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        }
     };
-    if let Some(row) = before
-        && row.native_action.is_some()
-        && let InputScheduleTarget::Thread { thread_id } = target(&row)?
-    {
+    if let Some(thread_id) = refresh {
         app.engine
             .native_actions(thread_id, true)
             .await
@@ -152,7 +328,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
         return Ok(false);
     };
     let timing = timing_of(&row)?;
-    let occurrence = timing::latest_due(&timing, first, now)?;
+    let occurrence = timing::latest_due(&timing, first, agent::due_cutoff(&row, now)?)?;
     let missed = timing::missed(&timing, first, &occurrence)?;
     let pending = rows::pending(&mut tx, row.id).await?;
     let mut run = rows::RunRow {
@@ -172,7 +348,10 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
     if !rows::insert_run(&mut tx, &run).await? {
         return Ok(false);
     }
-    if occurrence.scheduled_for.is_none() {
+    if !agent::allows_due(&row, now)? {
+        run.state = "skipped".to_owned();
+        run.reason = Some("schedule_ended".to_owned());
+    } else if occurrence.scheduled_for.is_none() {
         run.state = "skipped".to_owned();
         run.reason = Some("nonexistent_local_time".to_owned());
     } else if pending {
@@ -180,15 +359,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
         run.reason = Some("previous_input_pending".to_owned());
     } else {
         let mut trial = tx.begin().await.map_err(DbError::from)?;
-        let accepted = accept(
-            app,
-            &mut trial,
-            &Caller::session(row.author_id),
-            &row,
-            &occurrence.key,
-            Some(occurrence.date),
-        )
-        .await;
+        let accepted = accept(app, &mut trial, &row, &run, occurrence.date).await;
         match accepted {
             Ok(submitted) => {
                 run.thread_id = Some(submitted.input.thread_id);
@@ -218,6 +389,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
     } else {
         row.next_run_at = Some(timing::next(&timing, now)?.due);
     }
+    agent::after_claim(&mut row, now)?;
     row.updated_at = now;
     row.revision += 1;
     row.topic_seq = stamp(&mut tx, row.topic_id).await?;
@@ -228,7 +400,7 @@ async fn claim(app: &AppState, id: Id) -> ApiResult<bool> {
         record(
             &mut tx,
             &row,
-            Actor::User(row.author_id),
+            agent::actor(&row)?,
             orch_db::audit::action!(AuditAction::InputScheduleRan),
             &Origin::default(),
             json!({"run":run.id,"occurrence":run.occurrence,"state":run.state,"coalesced":missed}),

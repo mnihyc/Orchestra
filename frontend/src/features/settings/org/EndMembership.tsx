@@ -104,7 +104,7 @@ export function EndMembership({ org, member, self, onClose }: EndMembershipProps
     >
       <div className="flex flex-col gap-4 py-2 text-base text-text">
         {holdings.isPending && (
-          <SkeletonGroup className="flex flex-col gap-2">
+          <SkeletonGroup read={holdings} className="flex flex-col gap-2">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-4 w-2/3" />
           </SkeletonGroup>

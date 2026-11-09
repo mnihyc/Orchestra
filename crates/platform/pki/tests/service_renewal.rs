@@ -20,6 +20,38 @@ use std::sync::Arc;
 const HOST: &str = "gateway.test";
 const GRACE_DAYS: u64 = 90;
 
+#[test]
+fn application_proofs_keep_the_certificate_and_key_together_during_replacement() {
+    use orch_pki::certificates::verify_signature;
+    let clock = clock();
+    let ca = authority(&clock);
+    let first = service(&ca, &clock, ServiceName::Gateway, &[HOST]);
+    let replacement = service(&ca, &clock, ServiceName::Gateway, &[HOST]);
+    let identity = LiveIdentity::new(&first).unwrap();
+    let input = orch_link_contract::gateways::probe_signing_input("fixture-nonce", "near", HOST);
+    let (certificate, signature) = identity.proof(input.as_bytes()).unwrap();
+    assert_eq!(certificate, first.chain[0]);
+    assert!(verify_signature(
+        certificate.public_point(),
+        input.as_bytes(),
+        &signature
+    ));
+    identity.replace(&replacement).unwrap();
+    let (current, renewed_signature) = identity.proof(input.as_bytes()).unwrap();
+    assert_eq!(current, replacement.chain[0]);
+    assert_ne!(current.fingerprint(), certificate.fingerprint());
+    assert!(verify_signature(
+        current.public_point(),
+        input.as_bytes(),
+        &renewed_signature
+    ));
+    assert!(!verify_signature(
+        current.public_point(),
+        input.as_bytes(),
+        &signature
+    ));
+}
+
 fn arc_clock(clock: &ManualClock) -> Arc<dyn Clock> {
     Arc::new(clock.clone())
 }

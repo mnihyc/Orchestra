@@ -1,0 +1,6 @@
+# Central runs on diag-25 + held-page-request 9c920addd + summaries 25a45073b. Leading NAME=value words are settings.
+# held-page-request (RUST-B24-api4: the four archive waits with its new worker diagnostics; the native-origin case)
+test ORCH_TEST_NATIVE_OPERATIONS=1 -p orch-api-core --test imports_history -- --nocapture --test-threads=1
+test -p orch-api-core --test ask_tools_native_origin -- --nocapture
+# summaries (RUST-B24-api-summaries: the five resource summary cases and the malformed-text case)
+test -p orch-api-core --test resource_summaries --test summaries -- --nocapture

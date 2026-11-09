@@ -19,28 +19,34 @@ import { useStore } from 'zustand';
 
 import { openDependency } from '@/api/changes';
 import { ApiError, client } from '@/api/client';
-import { blockersOf, cancelJob, forkKeys, heldBy, isOver, jobQuery, planFork, planGone, startFork } from '@/api/forks';
+import { blockersOf, cancelJob, forkKeys, heldBy, isOver, jobQuery, placesQuery, planFork, planGone, startFork } from '@/api/forks';
 import { saveDraft } from '@/api/threads';
 import { nodeQuery } from '@/api/nodes';
+import { type PickedPlace } from '@/features/settings/PlacePicker';
 import { agentsQuery, providersQuery } from '@/api/resources';
 import { Blockers } from '@/features/change/Blockers';
-import { type Choices, changedOptions, changesSomething, initialChoices, requestOf, withFate, withPick } from '@/features/change/choices';
+import { type Choices, changedOptions, changesSomething, initialThreadChoices, requestOf, withFate, withPick } from '@/features/change/choices';
 import { MountFates } from '@/features/change/MountFates';
 import { Depends } from '@/features/change/Depends';
 import { Frame, type View } from '@/features/change/Frame';
 import { HistoryChoices } from '@/features/change/History';
 import { HistoryReportTable, PlanLists } from '@/features/change/Lists';
 import { Options } from '@/features/change/Options';
-import { changesOf, endsOf, planProviderName, plannedApprovalWords, targetModelName, targetModelWords, type PlanContext, staysOf } from '@/features/change/plan';
+import { addedResourcesOf, changesOf, endsOf, keptResourcesOf, plannedApprovalWords, targetModelName, type PlanContext, staysOf } from '@/features/change/plan';
+import { changeJobWords } from '@/features/change/jobWords';
 import { providerLabels } from '@/features/resources/providers/labels';
 import { JobProgress, committed } from '@/features/change/Progress';
 import { MeasurementReason, Measurements, waitsForCount } from '@/features/change/Measurements';
 import { useRefreshWhenOver } from '@/features/change/refresh';
 import { Result } from '@/features/change/Result';
-import { agentFor, hasReported, movesRuns, profilesFor, RunsOn, useModelFor } from '@/features/change/RunsOn';
+import { agentFor, automaticProfileFor, hasReported, movesRuns, profilesFor, RunsOn, useModelFor } from '@/features/change/RunsOn';
 import { Time } from '@/features/change/Time';
 import { Where } from '@/features/change/Where';
-import type { ForkPlan, ForkRequest, Job, Provider, Thread } from '@/generated/api-types';
+import type { CopyDestinationJudgement } from '@/api/copyDestinations';
+import { CopyPlacePicker } from '@/features/duplicate/CopyPlacePicker';
+import { CreationAgentAccess } from '@/features/start/AgentAccess';
+import { offeredAgentAccess, useAgentAccessSelection } from '@/features/start/agentAccessOffer';
+import type { ForkCreateResponse, ForkRequest, Job, Provider, Thread } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
 import { newActKey } from '@/lib/requests';
@@ -82,7 +88,7 @@ function ThreadChangeContent(props: ThreadChangeProps) {
   if (node.isPending || node.isError || node.data.kind !== 'thread') {
     return (
       <Frame steps={props.kind === 'fork' || props.focus === 'environment'} title={t(props.kind === 'fork' ? 'change.title.fork' : 'change.title.switch', { name: '' })} at="plan" open={props.open} onClose={props.onClose} footer={<Button onClick={props.onClose}>{t('common.close')}</Button>}>
-        {node.isError ? <ErrorState compact error={node.error} retrying={node.isRefetching} onRetry={() => void node.refetch()} /> : <SkeletonRows rows={4} />}
+        {node.isError ? <ErrorState compact error={node.error} retrying={node.isRefetching} onRetry={() => void node.refetch()} /> : <SkeletonRows read={node} rows={4} />}
       </Frame>
     );
   }
@@ -98,17 +104,20 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const meId = useStore(client.session, (state) => state.userId);
   const now = useNow();
   const fork = kind === 'fork';
-  const simple = !fork && focus !== 'environment';
+  const builtin = thread.program?.id === 'orch';
+  const simple = !builtin && !fork && focus !== 'environment';
   const reasonId = useId();
   // A side thread that is forked is kept as a thread of the topic.
   const keeping = fork && thread.side_of !== null;
 
-  const [choices, setChoices] = useState<Choices>(() => initialChoices(fork ? 'new' : 'replace', toTurn));
+  const [choices, setChoices] = useState<Choices>(() => initialThreadChoices(thread, fork ? 'new' : 'replace', toTurn));
   const patch = (next: Partial<Choices>) => setChoices((current) => ({ ...current, ...next }));
   // A provider-blocked thread starts with the next usable provider, with every picker directly available.
   const blockedReason = thread.state === 'blocked' && thread.blocked !== null ? thread.blocked.reason : null;
   const startsOnDefault = !fork && job === null && focus !== 'environment' && blockedReason !== null && PROVIDER_WAYS_OUT.has(blockedReason);
   const [options, setOptions] = useState(false);
+  const [destination, setDestination] = useState<PickedPlace | null>(null);
+  const [destinationStanding, setDestinationStanding] = useState<CopyDestinationJudgement | null>(null);
   const [jobId, setJobId] = useState<string | null>(job);
   const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set());
   const [cancelling, setCancelling] = useState(false);
@@ -116,23 +125,26 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const [ran, setRan] = useState<{ heading: string; done: string; interrupted: boolean; waited: number; fork: boolean } | null>(null);
 
   const picking = open && jobId === null;
+  const agentSelection = useAgentAccessSelection(thread.id);
   const usable = useQuery({ ...providersQuery('usable'), enabled: picking });
   const agents = useQuery({ ...agentsQuery(), enabled: picking });
   const [defaulted, setDefaulted] = useState(false);
   if (!defaulted && startsOnDefault && jobId === null && usable.data !== undefined && agents.data !== undefined) {
     // Once, as soon as the lists are here: the choice is the person's from then on.
     setDefaulted(true);
-    const next = usable.data.find((candidate: Provider) => candidate.id !== thread.binding?.provider.id && candidate.status === 'ready' && profilesFor(candidate, agents.data).some(hasReported));
-    if (next !== undefined) setChoices((current) => ({ ...current, providerId: next.id, agentId: agentFor(next, agents.data, thread) }));
+    const next = usable.data.find((candidate: Provider) => candidate.id !== thread.binding?.provider.id && (candidate.status === 'ready' || candidate.status === 'exhausted') && profilesFor(candidate, agents.data).some(hasReported));
+    if (next !== undefined) setChoices((current) => ({ ...current, providerId: next.id, agentId: agentFor(next, agents.data, thread), automaticRuns: automaticProfileFor(next, agents.data, thread) }));
   }
 
   const models = useModelFor(thread, choices, patch, picking);
 
   // The plan, asked for once the choices have rested, and kept: a plan is a statement of what would happen now.
-  const request: ForkRequest = useMemo(() => requestOf(choices), [choices]);
+  const request: ForkRequest = useMemo(() => ({ ...requestOf(choices, fork ? destination?.id ?? null : null), ...(fork && agentSelection.chosen !== null ? { agent_access: agentSelection.chosen } : {}) }), [choices, fork, destination?.id, agentSelection.chosen]);
   const asked = JSON.stringify(request);
   const rested = useDebounced(asked, PLAN_PAUSE_MS);
-  const settled = !movesRuns(choices) || choices.model !== null;
+  const runtimeReady = builtin ? choices.providerId !== null && choices.agentId !== null && choices.model !== null : !movesRuns(choices) || choices.model !== null;
+  const environmentReady = !builtin || choices.where.kind === 'new' || choices.where.kind === 'use' && choices.where.id !== '';
+  const settled = runtimeReady && environmentReady;
   const wanted = picking && settled && (fork || changesSomething(choices));
   const plan = useQuery({
     queryKey: ['change-plan', thread.id, rested],
@@ -144,6 +156,11 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
     placeholderData: keepPreviousData,
   });
   const current = plan.data;
+  const agentAccess = offeredAgentAccess(agentSelection, { offer: current?.agent_access, enabled: picking && fork,
+    pending: plan.isPending || plan.isFetching || rested !== asked, error: plan.error, retry: () => void plan.refetch() });
+  // The first admitted preview supplies the offer. The existing query then freezes the shown
+  // explicit choice; confirmation cannot use the earlier omitted-choice plan.
+  if (picking && fork && agentSelection.chosen === null && plan.isSuccess && !plan.isFetching && rested === asked && current?.agent_access !== undefined && current.agent_access !== null) agentSelection.onChange(agentAccess.value);
   const fingerprints = useMutation({
     mutationFn: ({ body, requestId }: { body: ForkRequest; requestId: string }) => planFork(thread.id, { ...body, check_fingerprints: true, fingerprint_request_id: requestId }),
     onSuccess: (checked, { body }) => { queryClient.setQueriesData({ queryKey: ['change-plan', thread.id, JSON.stringify(body)], exact: true }, checked); },
@@ -163,15 +180,18 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   const view: View = running === undefined ? 'plan' : running.state === 'queued' || running.state === 'running' ? 'progress' : 'done';
 
   const confirm = useMutation({
-    mutationFn: async (): Promise<Job> => {
+    mutationFn: async (): Promise<ForkCreateResponse> => {
       if (current === undefined) throw new Error('there is no plan');
-      setRan({ heading: headingOf(current, fork, t, context), done: doneOf(current, fork, t, context), interrupted: current.turn_running && current.options.active_turn === 'interrupt', waited: current.options.wait_minutes, fork });
+      const environmentOnly = !fork && current.from.kind === 'agent' && current.from.provider.id === current.to.provider.id && thread.binding !== null && thread.binding.agent.id === current.to.agent.id
+        && current.to.arrangement === thread.binding.arrangement && (choices.where.kind !== 'same' || choices.directory !== null);
+      const words = changeJobWords(current, fork, environmentOnly, t, context, queryClient.getQueryData(placesQuery(thread.topic_id).queryKey) ?? []);
+      setRan({ ...words, interrupted: current.turn_running && current.options.active_turn === 'interrupt', waited: current.options.wait_minutes, fork });
       for (const dependency of current.depends.filter((entry) => ticked.has(entry.object.id))) await openDependency(dependency);
       return startFork(thread.id, { preflight_id: current.preflight_id }, actKey({ plan: current.preflight_id, options: choices.options }));
     },
     onSuccess: (started) => {
-      queryClient.setQueryData(forkKeys.job(started.id), started);
-      setJobId(started.id);
+      if ('projection' in started) setJobId(started.job_id);
+      else { queryClient.setQueryData(forkKeys.job(started.id), started); setJobId(started.id); }
     },
     onError: (error) => {
       // A plan that went out of date, or that the world moved from under, is made again: what the person chose stays.
@@ -198,13 +218,15 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
 
   const blockers = confirm.error instanceof ApiError && confirm.error.is('plan.blocked') ? blockersOf(confirm.error) : (current?.blockers ?? []);
   const held = heldBy(confirm.error);
-  const planFresh = wanted && current !== undefined && rested === asked && !plan.isError && !plan.isFetching && !plan.isPlaceholderData && !expired && !checkingContent;
-  const canConfirm = planFresh && blockers.length === 0 && !confirm.isPending;
+  const destinationReady = !fork || destination === null || destinationStanding !== null && destinationStanding.outcome.state !== 'blocked';
+  const planFresh = destinationReady && wanted && current !== undefined && rested === asked && !plan.isError && !plan.isFetching && !plan.isPlaceholderData && !expired && !checkingContent;
+  const canConfirm = planFresh && blockers.length === 0 && !confirm.isPending && (!fork || agentAccess.ready && agentSelection.chosen !== null);
   const firstBlocker = blockers[0];
   const refusalKey = firstBlocker?.code === 'access' ? 'access' : firstBlocker?.code === 'already_running' ? 'running' : firstBlocker?.code === 'provider_not_ready' ? 'provider' : firstBlocker?.code === 'model_not_allowed' ? 'model' : firstBlocker?.code === 'no_host' || firstBlocker?.code === 'no_capacity' ? 'capacity' : 'blocked';
   const reason = confirm.isPending ? t('changeReady.applying')
     : !fork && !changesSomething(choices) ? t('changeReady.unchanged')
-    : !settled ? t(simple ? 'switchChoice.modelUnavailable' : 'changeReady.chooseModel')
+    : !runtimeReady ? t(builtin ? 'changeReady.chooseNativeBinding' : simple ? 'switchChoice.modelUnavailable' : 'changeReady.chooseModel')
+    : !environmentReady ? t('changeCompact.chooseEnvironment')
     : planning || plan.isPending ? t('changeReady.checking')
     : plan.isError ? t('changeReady.failed')
     : expired ? t('changeReady.expired')
@@ -319,7 +341,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
   if (jobId !== null) {
     return (
       <Frame steps={!simple} title={title} about={simple ? undefined : about} at="progress" open={open} onClose={onClose} footer={<Button onClick={onClose}>{t('change.progress.hide')}</Button>}>
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={jobAnswer} rows={3} />
       </Frame>
     );
   }
@@ -360,16 +382,18 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
     >
       <div className="flex min-w-0 flex-col gap-3" data-thread-change-pickers>
         {fork && <HistoryChoices threadId={thread.id} choices={choices} onChange={patch} planned={planFresh ? current.history : undefined} focus={open && focus === null} />}
+        {fork && <CopyPlacePicker label={t('duplicate.destination')} subject={{ kind: 'thread', id: thread.id }} sourceName={thread.name} intent="duplicate" onStanding={setDestinationStanding} only="topic" value={destination} onChange={setDestination} disabled={confirm.isPending} />}
         <RunsOn compact={simple} thread={thread} choices={choices} onChange={patch} focus={open && (focus === 'provider' || (!fork && focus === null))} />
         {/* A switch is first what it runs on, then what of the conversation it carries there. */}
         {!fork && <HistoryChoices threadId={thread.id} choices={choices} onChange={patch} planned={planFresh ? current.history : undefined} />}
         {!simple && <Where thread={thread} choices={choices} onChange={patch} fork={fork} focus={open && focus === 'environment'} />}
         {!simple && current !== undefined && <MountFates mounts={current.mounts} picks={choices.mounts} onPickAll={(fate) => patch({ mounts: withFate(choices.mounts, current.mounts, fate) })} onPick={(mount, pick) => patch({ mounts: withPick(choices.mounts, mount, pick) })} onCheck={() => fingerprints.mutate({ body: request, requestId: newActKey() })} checking={checkingContent} checkDisabled={!planFresh && !checkingContent} checkError={checkError} />}
       </div>
-      {!simple && options && <Options choices={choices} onChange={patch} applied={current?.options ?? null} plan={current ?? null} topic={topic} />}
+      {fork && <CreationAgentAccess access={agentAccess} disabled={confirm.isPending} />}
+      {!simple && options && <Options choices={choices} onChange={patch} applied={current?.options ?? null} plan={current ?? null} topic={topic} defaultPage={builtin ? 'private' : 'original'} />}
 
       {wanted && plan.isError && <PlanFailure error={plan.error} onRetry={() => void plan.refetch()} />}
-      {wanted && plan.isPending && <><p role="status" className="text-sm text-text-muted">{t('liveWork.planning')}</p><SkeletonRows rows={4} /></>}
+      {wanted && plan.isPending && <><p role="status" className="text-sm text-text-muted">{t('liveWork.planning')}</p><SkeletonRows read={plan} rows={4} /></>}
 
       {wanted && current !== undefined && (
         <div className={planning ? 'flex flex-col gap-4 opacity-60 transition-opacity' : 'flex flex-col gap-4'} aria-busy={planning} data-plan data-planning={planning ? 'true' : undefined}>
@@ -389,7 +413,7 @@ function Body({ thread, kind, toTurn, focus, job, say, open, onClose }: ThreadCh
           {planGone(confirm.error) && <InlineAlert tone="warning" title={t('change.expired.title')}>{t('change.expired.made')}</InlineAlert>}
           <Blockers blockers={blockers.filter((blocker) => blocker.code !== 'measurement_pending')} plan={current} onShow={held === null ? undefined : () => setJobId(held)} />
           {plannedApprovalWords(current.to, t) !== null && <p className="text-sm text-text-muted" data-planned-approval>{plannedApprovalWords(current.to, t)}</p>}
-          <PlanLists compact={simple} changes={simple ? [] : changesOf(current, context, t)} stays={simple ? [] : staysOf(current, context, t)} ends={endsOf(current, context, t)} />
+          <PlanLists compact={simple} changes={simple ? addedResourcesOf(current, t) : [...changesOf(current, context, t), ...(choices.directory === null ? [] : [{ id: 'directory', tone: 'plain' as const, text: t('change.directory.planned', { path: current.to.directory || t('change.directory.root') }) }])]} stays={simple ? keptResourcesOf(current, t) : staysOf(current, context, t)} ends={endsOf(current, context, t)} />
           {(!simple || current.history.report.fidelity !== 'lossless' || current.history.report.warnings.length > 0 || current.history.report.dropped.length > 0) && <HistoryReportTable report={current.history.report} />}
           {!fork && <Depends depends={simple ? current.depends.filter((dependency) => dependency.open !== 'all') : current.depends} model={targetModelName(current, context, t)} ticked={ticked} onTick={(id, on) => setTicked((set) => { const next = new Set(set); if (on) next.add(id); else next.delete(id); return next; })} />}
           {(!simple || current.turn_running) && <Time estimate={current.estimate} options={current.options} turnRunning={current.turn_running && !fork} stands={fork ? null : t('change.time.thisThread')} />}
@@ -426,17 +450,4 @@ function kindHeading(job: Job, name: string, t: TFunction): string {
     default:
       return t('change.progress.switching', { name });
   }
-}
-
-/** "Switching to Team Pro": what the bar says is under way. */
-function headingOf(plan: ForkPlan, fork: boolean, t: TFunction, context: PlanContext): string {
-  if (fork) return t('change.progress.forking', { name: plan.source.name ?? '' });
-  const target = planProviderName(plan, 'to', context, t);
-  return t('change.progress.switchingTo', { target });
-}
-
-/** What the end says was done, in the past. */
-function doneOf(plan: ForkPlan, fork: boolean, t: TFunction, context: PlanContext): string {
-  if (fork) return t('change.result.forked');
-  return t('change.result.switched', { provider: planProviderName(plan, 'to', context, t), model: targetModelWords(plan, context, t) });
 }

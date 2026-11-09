@@ -31,6 +31,7 @@ import { EnvironmentDot } from '@/ui/EnvironmentDot';
 
 import { useAppearance, useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
+import { formatSpan, useRunningClock } from '@/lib/time';
 import { useSocketStatus } from '@/realtime/live';
 import { StatusPart } from '@/ui/StatusBar';
 import { StatusPlace } from '@/features/status-items/StatusPlace';
@@ -41,17 +42,28 @@ export const SLOW_ABOVE_MS = 150;
 /** How long the socket may be gone before anything says so: a line that comes and goes does not make the screen flicker. */
 export const LOST_SAID_AFTER_MS = 2_000;
 
+/** A sustained reconnect names its elapsed duration after the short status has been visible. */
+export const RECONNECT_ELAPSED_AFTER_MS = 10_000;
+
 /** The connection: nothing while it is there and quick. */
 export function ConnectionPart() {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const status = useSocketStatus();
+  // build is populated only by an actual ready frame and reset with this session's socket.
+  const reconnecting = status.build !== null;
+  const waiting = status.phase !== 'idle' && status.phase !== 'ready';
+  const now = useRunningClock(waiting && reconnecting && status.lostAt !== null);
+  const elapsed = status.lostAt === null ? 0 : Math.max(0, now - status.lostAt);
+  const label = !reconnecting ? t('workbench.status.connecting')
+    : elapsed >= RECONNECT_ELAPSED_AFTER_MS ? t('workbench.status.reconnectingSince', { time: formatSpan(elapsed, { locale }, 'short') })
+      : t('workbench.status.reconnecting');
 
   if (status.phase === 'idle') return null;
   if (status.phase !== 'ready') {
     return (
-      <StatusPart icon={<LoaderCircle size={16} className="animate-spin" aria-hidden />} hint={t('workbench.status.reconnectingHint')}>
-        {t('workbench.status.reconnecting')}
+      <StatusPart icon={<LoaderCircle size={16} className="animate-spin" aria-hidden />} hint={t(reconnecting ? 'workbench.status.reconnectingHint' : 'workbench.status.connectingHint')}>
+        {label}
       </StatusPart>
     );
   }
@@ -99,10 +111,16 @@ function LimitPart({ thread }: { thread: Thread }) {
   const programs = useHarnessNames(false);
   const blocked = thread.blocked?.reason;
   if (limit === null && blocked !== 'provider_exhausted' && blocked !== 'quota_exceeded') return null;
-  const reached = limit?.state === 'reached' || limit === null;
-  const name = limit === null ? t('providerPlan.limits') : capTitle(limit.cap, t, programs.title);
+  if (limit === null) {
+    const name = t(blocked === 'provider_exhausted' ? 'workbench.status.providerLimit' : 'workbench.status.usageLimit');
+    const detail = thread.blocked?.detail;
+    const label = detail === null || detail === undefined || detail === '' ? name : `${name} · ${detail}`;
+    return <StatusPart icon={<Gauge size={16} aria-hidden />} tone="warning" hint={label} onOpen={() => revealView('usage')}>{label}</StatusPart>;
+  }
+  const reached = limit.state === 'reached';
+  const name = capTitle(limit.cap, t, programs.title);
   const label = t(reached ? 'workbench.status.limitReached' : 'workbench.status.limitNear', { name });
-  const hint = limit === null ? label : `${usedWords(limit, t, locale)}. ${capSentence(limit.cap, t, locale, programs.title)}`;
+  const hint = `${usedWords(limit, t, locale)}. ${capSentence(limit.cap, t, locale, programs.title)}`;
   return <StatusPart icon={<Gauge size={16} aria-hidden />} tone={reached ? 'danger' : 'warning'} hint={hint} onOpen={() => revealView('usage')}>{label}</StatusPart>;
 }
 

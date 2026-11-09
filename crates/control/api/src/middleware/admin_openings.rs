@@ -40,8 +40,12 @@ pub(crate) async fn finish_json(ctx: &Ctx, value: &Json) -> ApiResult<()> {
     if ctx.route.method != Method::GET || ctx.inspect_deleted {
         return Ok(());
     }
+    if finish_custody(ctx).await? {
+        return Ok(());
+    }
     let place = value
         .pointer("/access/admin_access/place")
+        .or_else(|| value.pointer("/admin_access/place"))
         .or_else(|| value.pointer("/can/admin_access/place"))
         .or_else(|| value.get("inspected").filter(|place| !place.is_null()));
     let Some(place) = place else {
@@ -83,6 +87,76 @@ pub(crate) async fn finish_json(ctx: &Ctx, value: &Json) -> ApiResult<()> {
     note(ctx, &mut tx, kind, id, place.clone(), nonce(ctx)?).await?;
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(())
+}
+
+/// Artifact lists are metadata, while opening one private artifact (including its report or
+/// bytes) uses the same browser-opening audit as every other private object.
+async fn finish_custody(ctx: &Ctx) -> ApiResult<bool> {
+    let parts: Vec<_> = ctx.route.path.trim_matches('/').split('/').collect();
+    let Some(family) = parts
+        .first()
+        .copied()
+        .filter(|family| matches!(*family, "exports" | "imports" | "snapshots"))
+    else {
+        return Ok(false);
+    };
+    if parts.len() < 2
+        || !ctx
+            .user()
+            .is_ok_and(|user| user.as_admin && user.is_session())
+    {
+        return Ok(false);
+    }
+    let id = ctx.id("id")?;
+    let (mut tx, guard) = crate::middleware::transaction_guard::begin(ctx).await?;
+    let (maker, private) = match family {
+        "exports" => (
+            orch_db::queries::exports::get(&mut tx, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?
+                .user_id,
+            true,
+        ),
+        "imports" => (
+            orch_db::queries::imports::get(&mut tx, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?
+                .user_id,
+            true,
+        ),
+        _ => {
+            let row = orch_db::queries::storage::snapshot(&mut tx, id)
+                .await?
+                .ok_or_else(ApiError::not_found)?;
+            (row.created_by, row.thread_id.is_none())
+        }
+    };
+    if !private || maker == Some(guard.principal().user()) {
+        return Ok(true);
+    }
+    if !orch_engine::archive::may_read_custody(guard.principal(), maker) {
+        return Err(ApiError::new(
+            orch_api_contract::common::ErrorCode::AuthzDenied,
+            "the private artifact is no longer readable",
+        ));
+    }
+    guard.check_deadline(ctx)?;
+    let kind = match family {
+        "exports" => "export",
+        "imports" => "import",
+        _ => "snapshot",
+    };
+    note(
+        ctx,
+        &mut tx,
+        kind,
+        id,
+        Json::String("system".into()),
+        nonce(ctx)?,
+    )
+    .await?;
+    tx.commit().await.map_err(orch_db::DbError::from)?;
+    Ok(true)
 }
 
 /// Appends only after a real reader has established native private access.
@@ -229,6 +303,9 @@ pub(crate) async fn finish_raw(ctx: &Ctx) -> ApiResult<()> {
             .user()
             .is_ok_and(|user| user.as_admin && user.is_session())
     {
+        return Ok(());
+    }
+    if finish_custody(ctx).await? {
         return Ok(());
     }
     let first = ctx
