@@ -1,7 +1,7 @@
 //! OpenRouter's ordinary-key spending, credits and lapse, using bounded read-only vendor requests.
 //!
 //! One read asks `GET /api/v1/key` with the provider's key, and then `GET /api/v1/credits`, which OpenRouter
-//! answers only for a management key. The key's answer gives its spending (`usage`, by day, week and month),
+//! may answer for an ordinary key too. A separately configured management key is used only for the account read. The key's answer gives its spending (`usage`, by day, week and month),
 //! its limit with how often it starts over (`limit`, `limit_remaining`, `limit_reset`), the budgets enforced on
 //! it (`budgets`, the one that blocks first being `effective_budget`), the free models' requests of the day
 //! (`free_model_daily_requests`) and its lapse. Each limit that starts over is reported as a subscription's
@@ -20,6 +20,8 @@ use orch_types::{Clock, Json, Time};
 use std::time::Duration;
 use url::Url;
 
+pub mod capabilities;
+pub mod native_search;
 pub mod source;
 pub use source::{OpenRouter, builtin};
 
@@ -36,7 +38,7 @@ const KNOWN_HOSTS: &[(&str, KnownVendor, &str)] = &[(
     KnownVendor::OpenRouter,
     "https://openrouter.ai/docs/api/reference/api-keys/get-current-api-key",
 )];
-/// OpenRouter documents its account-credit read separately, and refuses it to an ordinary key.
+/// OpenRouter documents its account-credit read separately; availability is observed per key.
 pub const OPENROUTER_CREDITS_DOCUMENTATION: &str =
     "https://openrouter.ai/docs/api/reference/credits/get-credits";
 /// OpenRouter's page of limits and budgets, read for when each starts over.
@@ -457,6 +459,17 @@ pub(crate) async fn read_details(
     vendor: KnownVendor,
     clock: &dyn Clock,
 ) -> Option<(ProviderFacts, Json)> {
+    read_details_with_credits(client, base, key, key, vendor, clock).await
+}
+
+pub(crate) async fn read_details_with_credits(
+    client: &dyn VendorClient,
+    base: &Url,
+    key: &Secret,
+    credits_key: &Secret,
+    vendor: KnownVendor,
+    clock: &dyn Clock,
+) -> Option<(ProviderFacts, Json)> {
     let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
     match vendor {
         KnownVendor::OpenRouter => {
@@ -484,14 +497,23 @@ pub(crate) async fn read_details(
                     .insert("balances".to_owned(), clock.time());
             }
             // A slow or refused account read does not discard the key's successful observation: OpenRouter
-            // answers it only for a management key.
-            let credits = tokio::time::timeout_at(
+            // may answer either ordinary or management credentials.
+            let mut credits = tokio::time::timeout_at(
                 deadline,
-                client.get(base, "/api/v1/credits", key, REPLY_BYTES),
+                client.get(base, "/api/v1/credits", credits_key, REPLY_BYTES),
             )
             .await
             .ok()
             .flatten();
+            if credits.is_none() && credits_key.expose() != key.expose() {
+                credits = tokio::time::timeout_at(
+                    deadline,
+                    client.get(base, "/api/v1/credits", key, REPLY_BYTES),
+                )
+                .await
+                .ok()
+                .flatten();
+            }
             facts.key_credits = credits.as_ref().and_then(openrouter_credits);
             if facts.key_credits.is_some() {
                 facts

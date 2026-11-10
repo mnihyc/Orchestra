@@ -66,7 +66,7 @@ it('does not let a late permission read reopen a cancelled chooser', async () =>
 
 for (const locale of ['en', 'zh-CN'] as const) it(`chooses a real place with the keyboard, no hidden lookup and an honest partial answer (${locale})`, async () => {
   await setLocale(locale); const t = i18n.getFixedT(locale);
-  const hit: NameHit = { id: 'topic', kind: 'topic', name: 'Login', address: null, archived: false, avatar: null, color: null, custom_color: null,
+  const hit: NameHit = { home_path: [], id: 'topic', kind: 'topic', name: 'Login', address: null, archived: false, avatar: null, color: null, custom_color: null,
     owner: null, recent: false, path: [], tag: null, thread_attention: null, username: null };
   calls.node.mockResolvedValue(node(['topic.interact'])); calls.names.mockResolvedValue({ items: [hit], partial: true });
   show(<CreationHost />); expect(calls.names).not.toHaveBeenCalled();

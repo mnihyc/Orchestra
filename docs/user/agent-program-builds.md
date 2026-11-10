@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Agent program builds
 screens: /admin
 keywords: harness, agent, program, build, checksum, mirror, offline, vendor, trust, 构建, 校验和, 镜像, 离线
+summary: Read build checksums and compatibility results before choosing an agent program build.
 ---
 
 # Agent program builds

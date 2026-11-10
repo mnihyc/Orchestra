@@ -1,9 +1,11 @@
-/** Every screen of usage, asked in both themes whether anything on it is a serious barrier: one's own usage with its tables open, a place's for somebody who reads reports and for somebody who reads figures, an empty span, a place with each kind of cap, the form that makes a cap, a provider's two tabs, the page of one's own allowances, the board on an overview, the rates of an org with the form of a rate and the catalogue, and a thread with a cap: its chip, the prompt at a limit and what limits a blocked thread. */
+/** Every screen of usage, asked in both themes whether anything on it is a serious barrier: one's own usage with its tables open, a place's for somebody who reads reports and for somebody who reads figures, an empty span, a place with each kind of cap, the form that makes a cap, a provider's usage with its inline limits, the page of one's own allowances, the board on an overview, the rates of an org with the form of a rate and the catalogue, and a thread's Usage view and prompt at a limit. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
+import { deny, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
 import { ACME, makeCap, PLACES, setRunning, setWaiting, useNow } from '../e2e/usage-support.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
+import { showWorkbenchView } from '../e2e/workbench-support.ts';
+import { auditLanguage } from './language';
 
 test.beforeEach(async () => {
   await scenario();
@@ -19,18 +21,18 @@ test('one\'s own usage: the figures, the chart, and each table', async ({ page }
   await expect(page.getByRole('list', { name: 'Figures of the span' })).toBeVisible();
   await expect(page.locator('canvas')).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  for (const name of ['By project', 'By model', 'By provider', 'By agent', 'By environment', 'By speed', 'By thread']) {
-    await page.getByRole('tab', { name }).click();
-    await expect(page.getByRole('tab', { name, selected: true })).toBeVisible();
+  for (const name of ['By project', 'By model', 'By model or service', 'By purpose', 'By provider', 'By agent', 'By environment', 'By speed', 'By effort', 'By access programme', 'By thread']) {
+    await page.getByRole('tab', { name, exact: true }).click();
+    await expect(page.getByRole('tab', { name, exact: true, selected: true })).toBeVisible();
     await expectAccessibleInBothThemes(page);
   }
 });
 
 test('one\'s own usage with a table narrowing it, the chart as a table, and the card that picks a span', async ({ page }) => {
   await open(page, '/usage');
-  await page.getByRole('tab', { name: 'By model' }).click();
-  await page.getByRole('table', { name: 'By model' }).getByRole('button', { name: /^GPT-5\.4/ }).click();
-  await expect(page.getByRole('list', { name: 'What the screen is narrowed to' })).toBeVisible();
+  await page.getByRole('tab', { name: 'By model', exact: true }).click();
+  await page.getByRole('table', { name: 'By model', exact: true }).getByRole('button', { name: /^GPT-5\.4/ }).click();
+  await expect(page.getByRole('group', { name: 'What the screen is narrowed to' })).toContainText('Model: GPT-5.4');
   await expectAccessibleInBothThemes(page);
   await page.getByText('Show the figures as a table').click();
   await expect(page.getByRole('table', { name: /Use over time/ })).toBeVisible();
@@ -69,9 +71,24 @@ test('a place for somebody who reads its reports, with a cap of each kind, and t
   await expectAccessibleInBothThemes(page);
 });
 
-test('a place for somebody who reads its figures only, and for one who reads nothing but their own', async ({ page }) => {
+test('a place for somebody who reads its figures only', async ({ page }) => {
   await open(page, `/usage?scope=node:${PLACES.web}`, PEOPLE.vera);
-  await expect(page.getByText('as its page lets you see them')).toBeVisible();
+  await expect(page.getByText('Summary figures', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Access to Web', exact: true })).toBeVisible();
+  await expect(page.getByText('Only your own records are listed here.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'By thread', exact: true })).toHaveCount(0);
+  await expectAccessibleInBothThemes(page);
+});
+
+test('a place for somebody who reads only their own use', async ({ page }) => {
+  await deny('dora', ['usage.summary']);
+  await open(page, `/usage?scope=node:${PLACES.web}`, PEOPLE.dora);
+  await expect(page.getByText('Your own usage only', { exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'By thread', exact: true })).toBeVisible();
+  const people = page.getByRole('table', { name: 'By person', exact: true });
+  await expect(people.getByRole('row')).toHaveCount(2);
+  await expect(people).toContainText('Dora Developer');
+  await expect(people).not.toContainText('Ada Lovelace');
   await expectAccessibleInBothThemes(page);
 });
 
@@ -101,8 +118,9 @@ test('a provider\'s usage and its limits', async ({ page }) => {
   await open(page, `/resources/providers/${RUNS_ON.openAiKey}?tab=usage`);
   await expect(page.getByRole('list', { name: 'Figures of the span' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  await page.getByRole('tab', { name: 'Limits' }).click();
-  await expect(page.getByRole('region', { name: 'Limits' }).getByRole('listitem')).toHaveCount(1);
+  const limits = page.getByRole('region', { name: 'Limits', exact: true });
+  await limits.scrollIntoViewIfNeeded();
+  await expect(limits.getByRole('listitem')).toHaveCount(1);
   await expectAccessibleInBothThemes(page);
 });
 
@@ -143,23 +161,38 @@ test('the rates of an org, the form of a rate with its faults, and the catalogue
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
 });
 
-test('a thread with a cap: its chip, its popover, the prompt before a message goes past a limit, and what limits a blocked thread', async ({ page }) => {
+test('a thread with a cap: its Usage view, the prompt before a message goes past a limit, and what limits a blocked thread', async ({ page }) => {
   await makeCap(PEOPLE.ada, { node_id: PLACES.web, meter: 'tokens', amount: '1000000' });
   await open(page, `/thread/${PLACES.mainThread}`);
-  await page.getByRole('button', { name: /^Usage/ }).click();
+  await showWorkbenchView(page, 'Usage');
+  await expect(page.locator('[data-thread-usage]')).toBeVisible();
   await expect(page.getByText('Stops within one request')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   const box = page.getByRole('textbox', { name: 'Message to the agent' });
   await box.fill('Go on past it');
   await box.press('Enter');
-  const prompt = page.getByRole('dialog', { name: 'This would go past a limit' });
+  const prompt = page.getByRole('dialog', { name: 'A limit is reached' });
   await expect(prompt).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
   await prompt.getByRole('button', { name: 'Cancel' }).click();
 
   await page.goto(`/thread/${ACME.idleThread}`);
-  await page.getByRole('button', { name: /^Usage/ }).click();
+  await showWorkbenchView(page, 'Usage');
   await expect(page.locator('[data-thread-usage]')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
+
+for (const width of [400, 1440]) for (const language of ['en', 'zh-CN'] as const) {
+  test(`a reached cap's forecast is readable at ${width}px in ${language}`, async ({ page }) => {
+    await makeCap(PEOPLE.ada, { node_id: PLACES.web, meter: 'tokens', amount: '1000000' });
+    await useNow('A');
+    await page.setViewportSize({ width, height: 900 });
+    await signIn(page);
+    await auditLanguage(page, language);
+    await page.goto(`/usage?scope=node:${PLACES.web}`);
+    await expect(page.locator('p[data-forecast-state="reached"]')).toHaveCount(1);
+    await expect(page.locator('p[data-forecast-state="reached"]')).toBeVisible();
+    await expectAccessibleInBothThemes(page);
+  });
+}

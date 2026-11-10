@@ -39,6 +39,7 @@ pub mod failure;
 pub mod history;
 pub mod instruction_sources;
 mod native_history;
+mod native_review;
 pub mod parameters;
 pub mod performance;
 pub mod process;
@@ -49,3 +50,9 @@ pub mod stream;
 pub mod tools;
 
 pub use adapter::ClaudeCodeAdapter;
+
+#[cfg(test)]
+mod published_protocol_tests;
+
+#[cfg(test)]
+mod capability_facts_tests;

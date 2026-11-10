@@ -44,11 +44,19 @@ pub async fn credential_home(
         .unwrap_or(EnvironmentDataSource::MadeByOrch))
 }
 
-/// The keeper retains its adapter default when neither it nor its profile chose a home.
+/// An explicit fresh keeper home takes precedence; absence retains the existing runtime/profile selection.
 pub async fn credential_home_choice(
     conn: &mut Conn,
     provider: Id,
 ) -> Result<Option<EnvironmentDataSource>, Error> {
+    if let Some(home) = provider_runtime::credential_home(conn, provider).await? {
+        let home: EnvironmentDataSource =
+            serde_json::from_value(home).map_err(|error| Error::NotOfThatType {
+                key: "provider.credential_home".into(),
+                reason: error.to_string(),
+            })?;
+        return Ok(Some(home));
+    }
     let row = provider_runtime::state(conn, provider)
         .await?
         .ok_or(Error::NotFound)?;

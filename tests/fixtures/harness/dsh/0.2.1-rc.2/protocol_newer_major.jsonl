@@ -1,0 +1,2 @@
+{"direction":"to_harness","frame":{"jsonrpc":"2.0","id":{"$replay_capture":"init"},"method":"initialize","params":{"protocolVersion":1}},"subset":true}
+{"direction":"from_harness","frame":{"jsonrpc":"2.0","id":{"$replay_ref":"init"},"result":{"protocolVersion":2,"agentInfo":{"name":"deepseek-harness-acp","version":"0.0.1"},"agentCapabilities":{"mcpCapabilities":{"http":true},"promptCapabilities":{"image":true,"audio":false,"embeddedContext":false},"sessionCapabilities":{"close":{},"list":{},"resume":{}}},"authMethods":[]}}}

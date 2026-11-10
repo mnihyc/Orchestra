@@ -34,6 +34,12 @@ SELECT w.turn,w.thread,w.segment,w.ordinal,
        w.input,c.person,'scale-model',jsonb_build_object('total_tokens',c.tokens_per_turn),c.at,c.at,c.at,0,true,
        CASE WHEN w.ordinal=c.turns_per_thread THEN 'resource_disabled' END
 FROM custody_scale_work w CROSS JOIN custody_scale_seed c;
+-- These historical rows supply index pressure and the actual stopped marker. Pin,
+-- reference and history-count projections are not read by the custody queries.
+-- Keep ownership, payload metadata, foreign keys and every index enabled.
+ALTER TABLE items DISABLE TRIGGER items_current_pins;
+ALTER TABLE items DISABLE TRIGGER related_thread_references;
+ALTER TABLE items DISABLE TRIGGER items_insert_history_counts;
 INSERT INTO items(id,thread_id,segment_id,turn_id,kind,status,payload,seq_created,seq_updated,created_at,updated_at)
 SELECT w.item,w.thread,w.segment,w.turn,'agent_message','completed',
        '{"text":"retained scale history","text_len":22}',w.ordinal,w.ordinal,c.at,c.at
@@ -46,6 +52,9 @@ SELECT md5('custody-scale-stopped-'||s.number)::uuid,s.id,s.segment,w.turn,'mark
          'note',NULL,'model',NULL,'deleted',false)),
        c.turns_per_thread+1,c.turns_per_thread+1,c.at,c.at
 FROM custody_scale_threads s CROSS JOIN custody_scale_seed c JOIN custody_scale_work w ON w.thread=s.id AND w.ordinal=c.turns_per_thread;
+ALTER TABLE items ENABLE TRIGGER items_current_pins;
+ALTER TABLE items ENABLE TRIGGER related_thread_references;
+ALTER TABLE items ENABLE TRIGGER items_insert_history_counts;
 INSERT INTO usage_events(id,change_seq,at,origin,purpose,scope,counted,org_id,project_id,topic_id,thread_id,segment_id,turn_id,provider_id,user_id,agent_id,environment_id,model,input_tokens,total_tokens)
 SELECT w.usage,0,c.at,'harness','turn','turn',true,n.org_id,n.parent_id,c.topic,
        w.thread,w.segment,w.turn,c.provider,c.person,c.agent,c.environment,'scale-model',c.tokens_per_turn,c.tokens_per_turn

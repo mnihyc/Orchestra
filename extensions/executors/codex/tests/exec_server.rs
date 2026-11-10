@@ -20,6 +20,7 @@ use orch_executor_codex::server::{CodexConfig, CodexExecServer};
 use orch_executor_contract::context::EnvironmentContext;
 use orch_executor_contract::executor::{Executor, ExecutorEndpoint};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt as _;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
@@ -30,8 +31,8 @@ const IMAGE: &str = "orch-dev-harness";
 /// Container names start with this; nothing else is ever touched.
 const CONTAINER_PREFIX: &str = "orch-test-exec-codex";
 
-/// Options that let the vendor's sandbox start in a container: no filter on system calls and no profile of
-/// the security module, which a stock container has and which refuse the namespaces the sandbox needs.
+/// Removes the container's syscall filter and security profile. The host may still refuse the
+/// user namespaces needed by the vendor's sandbox; these options do not establish that premise.
 const SANDBOX_FRIENDLY: &str =
     "--security-opt seccomp=unconfined --security-opt apparmor=unconfined";
 
@@ -543,6 +544,87 @@ async fn the_vendors_server_is_started_in_docker_with_a_token_and_says_which_bui
     rig.exec.stop().await.unwrap();
 }
 
+/// A machine program is self-contained: its version probe receives no environment fixture variables.
+#[cfg(target_os = "linux")]
+fn machine_program_rig() -> (Rig, String) {
+    let mut rig = docker_rig("");
+    let quote = |text: &str| format!("'{}'", text.replace('\'', "'\\''"));
+    let mount = rig.outer.path().canonicalize().unwrap();
+    let program = mount.join("machine-program");
+    let source = format!(
+        r#"#!/bin/sh
+set -e
+if [ "$1" = "--version" ]; then
+  exec docker run --rm --name {prefix}-version-$$ --network none {image} codex "$@"
+fi
+exec docker run --rm -i --init --name {prefix}-$$ --network host \
+  -v {mount} -e CODEX_HOME {image} codex "$@"
+"#,
+        prefix = quote(&rig.prefix),
+        image = quote(IMAGE),
+        mount = quote(&format!("{}:{}", mount.display(), mount.display())),
+    );
+    std::fs::write(&program, source).unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut context = serde_json::to_value(&rig.env).unwrap();
+    context["tools_dir"] = Value::Null;
+    context["tools"] = json!([]);
+    context["local_programs"] = json!({"codex":program});
+    rig.env = serde_json::from_value(context).unwrap();
+    let builds: Vec<Value> =
+        serde_json::from_str(include_str!("../../../../deploy/harness-builds.json")).unwrap();
+    let expected = builds
+        .iter()
+        .find(|build| {
+            build["kind"] == "codex"
+                && build["os"] == "linux"
+                && build["arch"] == std::env::consts::ARCH
+                && build["is_default"] == true
+        })
+        .unwrap()["version"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (rig, expected)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_confirmed_machine_program_without_a_tool_cache_runs_a_native_command_and_ends() {
+    if !docker_ready() {
+        return;
+    }
+    let (mut rig, expected) = machine_program_rig();
+    let env = rig.env.clone();
+    assert!(env.tools_dir.is_none() && env.tools.is_empty());
+    let report = rig.exec.available(&env).await;
+    assert!(report.available, "{report:?}");
+    assert_eq!(report.version.as_deref(), Some(expected.as_str()));
+    let endpoint = rig.exec.start(&env).await.unwrap();
+    assert_eq!(endpoint.version, expected);
+    assert!((41000..=41999).contains(&endpoint.port().unwrap()));
+    let token = token_of(&endpoint);
+    assert!(connect(&endpoint, None).await.is_err());
+    let mut socket = connect(&endpoint, Some(&token)).await.unwrap();
+    let initialized = initialize(&mut socket).await;
+    assert!(initialized.get("error").is_none(), "{initialized}");
+    let output = run_through(
+        &mut socket,
+        2,
+        "printf 'machine-program-ok\\n'",
+        &rig.outer.path().canonicalize().unwrap().join("work"),
+        json!({}),
+        None,
+    )
+    .await;
+    assert_eq!(output, "machine-program-ok\n");
+    drop(socket);
+    rig.exec.stop().await.unwrap();
+    assert!(rig.exec.endpoint().is_none());
+    assert!(connect(&endpoint, Some(&token)).await.is_err());
+    assert_eq!(containers_of(&rig.prefix), 0);
+}
+
 #[tokio::test]
 async fn a_command_through_the_server_carries_the_environments_variables_and_the_clients_thread_id()
 {
@@ -591,15 +673,13 @@ async fn a_command_through_the_server_carries_the_environments_variables_and_the
         "the server's home is the executor's own"
     );
 
-    // What the build checked here does with the ids a client names in `metadata`: nothing. If a newer build
-    // starts to give `CODEX_TOOL_CALL_ID`, this is where to find out, and the attribution can use it.
+    // The pinned server carries both native identities supplied with this invocation.
     let metadata = json!({ "threadId": thread, "toolCallId": "call-1" });
     let out = run_through(&mut socket, 3, "env", &work, json!({}), Some(metadata)).await;
     let vars = env_of(&out);
-    assert!(
-        !vars.contains_key("CODEX_TOOL_CALL_ID") && !vars.contains_key("CODEX_THREAD_ID"),
-        "this build gives no ids of its own from the metadata: {out}"
-    );
+    let attributed = descriptor::attribution().read(&vars);
+    assert_eq!(attributed.thread_id.as_deref(), Some(thread), "{out}");
+    assert_eq!(attributed.tool_call_id.as_deref(), Some("call-1"), "{out}");
     drop(socket);
     rig.exec.stop().await.unwrap();
 }
@@ -690,6 +770,89 @@ async fn two_servers_run_at_once_on_one_host_and_share_nothing() {
     second.exec.stop().await.unwrap();
 }
 
+/// An independent namespace premise, without changing the flags used by the failing fixture.
+async fn namespace_premise(rig: &Rig) -> Value {
+    let mut command = tokio::process::Command::new("docker");
+    command.args(["run", "--rm", "--network", "none", "--name"]);
+    command.arg(format!(
+        "{}-namespace-{}",
+        rig.prefix,
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
+    if let Some(options) = rig.env.variables.get("ORCH_TEST_DOCKER_OPTS") {
+        command.args(options.split_whitespace());
+    }
+    command.args([IMAGE, "sh", "-c", "command -v unshare >/dev/null 2>&1 || { echo 'unshare is unavailable' >&2; exit 127; }; exec unshare --user --map-root-user --mount /bin/sh -c 'exit 0'"])
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    let Ok(mut child) = command.spawn() else {
+        return json!({"started":false});
+    };
+    // Match the version probe's existing short-output bound; retain only the sandbox reason's 200 characters.
+    let mut stderr = child.stderr.take().unwrap().take(4096);
+    let mut bytes = Vec::new();
+    let result = tokio::time::timeout(config().probe_timeout, async {
+        stderr.read_to_end(&mut bytes).await?;
+        drop(stderr);
+        child.wait().await
+    })
+    .await;
+    if !matches!(child.try_wait(), Ok(Some(_))) {
+        let _ = child.kill().await;
+    }
+    let detail: String = String::from_utf8_lossy(&bytes).chars().take(200).collect();
+    match result {
+        Ok(Ok(status)) => {
+            json!({"started":true,"exit_code":status.code(),"timed_out":false,"stderr":detail})
+        }
+        Ok(Err(_)) => json!({"started":true,"wait_error":true,"stderr":detail}),
+        Err(_) => json!({"started":true,"timed_out":true,"stderr":detail}),
+    }
+}
+
+/// Reuse the production refusal path so a CLI or kernel denial is visible before the unchanged assertion.
+async fn sandbox_failure_diagnostic(
+    rig: &Rig,
+) -> (orch_executor_codex::sandbox::Enforceable, Value) {
+    let build = descriptor::locate(&rig.env).unwrap();
+    let scratch = orch_executor_codex::sandbox::scratch_dir(Path::new(&rig.env.data_dir));
+    let mut variables: std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString> = rig
+        .env
+        .variables
+        .iter()
+        .map(|(name, value)| {
+            (
+                std::ffi::OsString::from(name.as_str()),
+                std::ffi::OsString::from(value.as_str()),
+            )
+        })
+        .collect();
+    if let Some(path) = std::env::var_os("PATH") {
+        variables.insert("PATH".into(), path);
+    }
+    variables.insert(
+        "CODEX_HOME".into(),
+        PathBuf::from(&rig.env.data_dir)
+            .join("codex-home")
+            .into_os_string(),
+    );
+    let variables: Vec<_> = variables.into_iter().collect();
+    let observed = orch_executor_codex::sandbox::probe(&orch_executor_codex::sandbox::Probe {
+        program: &build.program,
+        shell: &rig.env.shell.path,
+        scratch: &scratch,
+        environment: &variables,
+        timeout: config().probe_timeout,
+    })
+    .await;
+    let premise = namespace_premise(rig).await;
+    eprintln!(
+        "sandbox failure-only diagnostic: replay_modes={:?} refused={:?} user_mount_namespace={premise}",
+        observed.modes, observed.refused
+    );
+    (observed, premise)
+}
+
 #[tokio::test]
 async fn the_sandbox_modes_are_probed_in_a_container_with_and_without_user_namespaces() {
     if !docker_ready() {
@@ -709,19 +872,48 @@ async fn the_sandbox_modes_are_probed_in_a_container_with_and_without_user_names
     assert_eq!(endpoint.sandbox_modes, [SandboxMode::Open]);
     stock.exec.stop().await.unwrap();
 
-    // Without the filter on system calls and the profile, the sandbox starts, and keeps what it promises.
+    // These options remove two restrictions; they cannot grant what the host kernel still refuses.
     let mut free = docker_rig(SANDBOX_FRIENDLY);
     let env = free.env.clone();
     let report = free.exec.available(&env).await;
-    assert_eq!(
-        report.sandbox_modes,
-        [
-            SandboxMode::ReadOnly,
-            SandboxMode::Workspace,
-            SandboxMode::Open
-        ],
-        "{report:?}"
-    );
+    assert!(report.available, "{report:?}");
+    let mut expected = vec![
+        SandboxMode::ReadOnly,
+        SandboxMode::Workspace,
+        SandboxMode::Open,
+    ];
+    if report.sandbox_modes != expected {
+        let (observed, premise) = sandbox_failure_diagnostic(&free).await;
+        assert_eq!(
+            premise["exit_code"], 1,
+            "the namespace premise failed for another reason: {premise}"
+        );
+        assert_eq!(premise["timed_out"], false, "{premise}");
+        assert!(
+            premise["stderr"].as_str().is_some_and(
+                |reason| reason.contains("/proc/self/uid_map: Operation not permitted")
+            ),
+            "{premise}"
+        );
+        assert_eq!(observed.modes, [SandboxMode::Open], "{observed:?}");
+        assert_eq!(
+            observed
+                .refused
+                .iter()
+                .map(|(mode, _)| *mode)
+                .collect::<Vec<_>>(),
+            [SandboxMode::ReadOnly, SandboxMode::Workspace],
+            "{observed:?}"
+        );
+        assert!(
+            observed.refused.iter().all(|(_, reason)| reason
+                .contains("bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted")),
+            "the native profiles failed for an unexplained cause: {observed:?}"
+        );
+        // This branch proves the refusal, not positive three-mode enforcement on this host.
+        expected = vec![SandboxMode::Open];
+    }
+    assert_eq!(report.sandbox_modes, expected, "{report:?}");
     let endpoint = free.exec.start(&env).await.unwrap();
     assert_eq!(endpoint.sandbox_modes, report.sandbox_modes);
     free.exec.stop().await.unwrap();

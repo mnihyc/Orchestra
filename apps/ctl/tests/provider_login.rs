@@ -5,11 +5,11 @@
     reason = "a test fails by panicking"
 )]
 
-#[path = "../../../crates/control/api/tests/places/mod.rs"]
+#[path = "../../../crates/control/api/base/tests/places/mod.rs"]
 mod places;
-#[path = "../../../crates/control/api/tests/rig/mod.rs"]
+#[path = "../../../crates/control/api/base/tests/rig/mod.rs"]
 mod rig;
-#[path = "../../../crates/control/api/tests/support/mod.rs"]
+#[path = "../../../crates/control/api/base/tests/support/mod.rs"]
 mod support;
 
 use base64::Engine as _;

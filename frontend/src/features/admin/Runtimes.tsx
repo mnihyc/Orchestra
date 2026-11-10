@@ -23,7 +23,8 @@ import { ErrorState } from '@/ui/ErrorState';
 import { FilterBar } from '@/ui/FilterBar';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Select } from '@/ui/Select';
+import { ResourcePicker } from '@/ui/ResourcePicker';
+import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { type DotTone, StatusDot } from '@/ui/StatusDot';
 import { type Column, Table } from '@/ui/Table';
@@ -133,17 +134,17 @@ export function Runtimes({ search, onSearch }: SectionProps) {
             { value: 'provider', name: t('choiceCatalog.runtimePool.provider.name') },
           ]}
         />
-        <Select
+        <ResourcePicker pickerKey="admin-runtime-host"
           label={t('admin.runtimes.host')}
           value={host}
           onValueChange={(next) => onSearch({ host: next === ALL_HOSTS ? undefined : next })}
-          options={[{ value: ALL_HOSTS, name: t('admin.runtimes.allHostsName'), description: t('admin.runtimes.allHosts') }, ...(hosts.data ?? []).map((one) => ({ value: one.id, ...choiceOption(t, 'dynamic.resource', { name: one.name }) }))]}
+          options={[{ value: ALL_HOSTS, name: t('admin.runtimes.allHostsName'), description: t('admin.runtimes.allHosts') }, ...(hosts.data ?? []).map((one) => ({ value: one.id, ...choiceOption(t, 'dynamic.resource', { name: one.name }), ...resourceChoice({kind:'host',host:one}) }))]}
           fieldClassName="min-w-[12rem]"
         />
       </FilterBar>
 
       {runtimes.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={runtimes} rows={4} />
       ) : runtimes.isError ? (
         <ErrorState error={runtimes.error} retrying={runtimes.isRefetching} onRetry={() => void runtimes.refetch()} />
       ) : runtimes.data.length === 0 ? (

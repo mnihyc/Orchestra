@@ -23,6 +23,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { Tabs } from '@/ui/Tabs';
 
 import { Agents } from './Agents';
+import { ChatAccessPanel } from './GroupAccess';
 import { ByArea } from './ByArea';
 import { type Asked, ChangePreview } from './ChangePreview';
 import { type PageSource, useChanges } from './changes';
@@ -130,7 +131,7 @@ function PagePanel({ target, share, active, initialPermission }: { target: Acces
 
   if (page.isError) return <ErrorState compact error={page.error} title={t('access.page.notLoaded')} retrying={page.isRefetching} onRetry={() => void page.refetch()} />;
   if (catalogue.isError) return <ErrorState compact error={catalogue.error} retrying={catalogue.isRefetching} onRetry={() => void catalogue.refetch()} />;
-  if (page.isPending || catalogue.isPending) return <SkeletonRows rows={7} />;
+  if (page.isPending || catalogue.isPending) return <SkeletonRows reads={[page, catalogue]} rows={7} />;
 
   const index = indexCatalogue(catalogue.data);
   return (
@@ -191,7 +192,7 @@ export function AccessDialog({ target, open, onClose, initialTab = 'page', share
         onValueChange={setTab}
         panelClassName="pt-4"
         tabs={[
-          { value: 'page', label: place ? t('access.tabs.this', { kind }) : t('access.tabs.access'), panel: <PagePanel target={target} share={share} active={open && tab === 'page'} initialPermission={initialPermission} /> },
+          { value: 'page', label: place ? t('access.tabs.this', { kind }) : t('access.tabs.access'), panel: target.kind === 'chat' ? <ChatAccessPanel id={target.id} fallback={<PagePanel target={target} share={share} active={open && tab === 'page'} initialPermission={initialPermission} />} /> : <PagePanel target={target} share={share} active={open && tab === 'page'} initialPermission={initialPermission} /> },
           ...(place
             ? [
                 { value: 'people' as const, label: t('access.tabs.people'), panel: <Roles place={target} /> },

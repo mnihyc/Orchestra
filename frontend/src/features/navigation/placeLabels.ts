@@ -8,6 +8,7 @@
  */
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { useCallback, useMemo } from 'react';
+import { useStoreWithEqualityFn } from 'zustand/traditional';
 
 import { fetchTree, orgsQuery } from '@/api/nodes';
 import type { NodeKind, TreeNode } from '@/generated/api-types';
@@ -26,6 +27,33 @@ const TREES_READ_FOR_LABELS = 20;
 
 /** How long a tree read for labels is kept before it is read again: names seldom change, and an act that changes one asks again at once. */
 const LABEL_TREES_FRESH_MS = 5 * 60_000;
+
+const NO_NAME_TREES: ReadonlyMap<string, OrgTree> = new Map();
+
+/** Labels depend on visible membership, names and ancestry, never a thread's activity. */
+function sameNameTrees(before: ReadonlyMap<string, OrgTree>, after: ReadonlyMap<string, OrgTree>): boolean {
+  if (before === after) return true;
+  if (before.size !== after.size) return false;
+  for (const [id, tree] of after) {
+    const held = before.get(id);
+    if (held === undefined) return false;
+    if (held.nodes === tree.nodes) continue;
+    if (held.nodes.size !== tree.nodes.size) return false;
+    for (const [id, node] of tree.nodes) {
+      const old = held.nodes.get(id);
+      if (old === node) continue;
+      if (old === undefined) return false;
+      if (old.id !== node.id || old.kind !== node.kind || old.name !== node.name
+        || old.parent_id !== node.parent_id || old.address !== node.address || old.deleted !== node.deleted) return false;
+    }
+  }
+  return true;
+}
+
+/** Caption readers alone use this snapshot; activity and permission readers use the native store. */
+export function useNameTrees(trees = true): ReadonlyMap<string, OrgTree> {
+  return useStoreWithEqualityFn(useTreeStore, (state) => trees ? state.byOrg : NO_NAME_TREES, sameNameTrees);
+}
 
 /** The places of one tree, each with the way to it; worked out once for each state of the tree. */
 const placesOfTree = new WeakMap<OrgTree, Placed[]>();
@@ -58,7 +86,7 @@ const asTree = (rows: readonly TreeNode[]): OrgTree => ({ nodes: new Map(rows.ma
  * rail, the org switcher), whose names the list of orgs tells apart by their addresses.
  */
 export function useKnownPlaces({ trees = true, loadTrees = false }: { trees?: boolean; loadTrees?: boolean } = {}): KnownPlaces {
-  const byOrg = useTreeStore((state) => state.byOrg);
+  const byOrg = useNameTrees(trees);
   // The orgs as whatever asked for them read them: this asks nothing itself.
   const orgs = useQuery({ ...orgsQuery, enabled: false }).data;
   const others = useQueries({
@@ -105,7 +133,7 @@ export function usePlaceLabel(): (reference: {id:string;name:string|null;redacte
 
 /** The label of one place, by its id: from the trees the page knows; `fallback` where none holds it, or where it is no place's own name. */
 export function useNodeLabel(nodeId: string | null | undefined, fallback: string | undefined): string | undefined {
-  const byOrg = useTreeStore((state) => state.byOrg);
+  const byOrg = useNameTrees(nodeId !== null && nodeId !== undefined);
   const known = useKnownPlaces({ trees: nodeId !== null && nodeId !== undefined });
   return useMemo(() => {
     if (nodeId === null || nodeId === undefined || fallback === undefined) return fallback;

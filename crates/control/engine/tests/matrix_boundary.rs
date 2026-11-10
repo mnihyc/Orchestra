@@ -301,6 +301,7 @@ async fn ask(world: &World, thread: Id, capability: &str) -> OrchToolResult {
         .say(
             thread,
             Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: turn,
                 call_ref: call_ref.clone(),
                 attempt: None,

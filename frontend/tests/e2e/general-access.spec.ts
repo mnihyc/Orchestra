@@ -16,8 +16,11 @@ async function selectGeneral(page: Page, text: string): Promise<void> {
 }
 
 test('a topic member can view the new thread but cannot send, and a person added keeps their own level', async ({ page, browser }) => {
+  // EN: Topic → Threads → New thread → View → create → Share thread → retain an explicit person's level.
+  // 中文：主题 → 会话 → 新建线程 → 查看 → 创建 → 共享线程 → 保留单独授予人员的权限级别。
   await signIn(page, PEOPLE.ada);
   await page.goto(`/topic/${ACME.fixLogin}`);
+  await page.getByRole('tab', { name: 'Threads', exact: true }).click();
   await page.getByRole('button', { name: 'New thread', exact: true }).first().click();
   const creation = page.getByRole('dialog', { name: 'New thread in Fix login' });
   await creation.getByRole('combobox', { name: 'General access' }).click();
@@ -35,7 +38,7 @@ test('a topic member can view the new thread but cannot send, and a person added
     await member.goto(address);
     await expect(member.getByRole('heading', { name: 'Readers watch' })).toBeVisible();
     await expect(member.getByRole('textbox', { name: 'Message to the agent' })).toHaveCount(0);
-    await page.locator('[data-thread-header]').getByRole('button', { name: 'Share', exact: true }).click();
+    await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
     await sharing(page).getByRole('combobox', { name: 'Add people, groups or roles' }).fill('@vera');
     await page.getByRole('option', { name: /Vera Rubin/ }).click();
     await sharing(page).getByRole('combobox', { name: 'What they can do' }).click();
@@ -60,7 +63,7 @@ const KINDS = [
 for (const kind of KINDS) test(`${kind.kind}: a followed holder is removed here in one confirmed PATCH, and untouched rows still follow`, async ({ page }) => {
   await signIn(page, PEOPLE.ada);
   await page.goto(kind.url);
-  if (kind.kind === 'thread') await page.locator('[data-thread-header]').getByRole('button', { name: 'Share', exact: true }).click();
+  if (kind.kind === 'thread') await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
   else if (kind.kind === 'document') await page.getByRole('button', { name: 'Share', exact: true }).click();
   else {
     await page.getByRole('button', { name: `Actions for ${kind.name}` }).first().click();

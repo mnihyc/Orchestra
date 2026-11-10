@@ -24,8 +24,8 @@ export { EMPTY_WORKBENCH, parsePageAddress, pageResource } from './contentAddres
 import { useWorkbench } from './store';
 import type { ViewProps } from './views';
 import { TargetContext } from '@/shell/RouteContext';
-import { isListRoute, storedListState, usePageListSearch } from '@/lib/listState';
-import { readViewChoice } from '@/lib/viewChoices';
+import { isListRoute, isResourceListRoute, resourceListSearch, listSearch, storedListState, usePageListSearch } from '@/lib/listState';
+import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
 import { client } from '@/api/client';
 
 /** Compatibility name used by existing full-page callers; all full content now has an address. */
@@ -121,7 +121,11 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
         const kept=storedListState(readViewChoice(client.session.getState().userId,`page.${scope}`,'state','{}'));
         nextSearch={...kept,...nextSearch};
       }
-      if (isListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
+      if (isResourceListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
+        nextSearch = resourceListSearch(nextSearch);
+        // Store an explicit reset before navigation, so an empty address cannot resurrect the old filters.
+        writeViewChoice(client.session.getState().userId, `page.${target.pathname}`, 'state', JSON.stringify(listSearch(nextSearch, target.route)));
+      } else if (isListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
         nextSearch = { ...nextSearch, _list: true, ...(nextSearch.list === undefined && latestSearch.current.list !== undefined ? { list: latestSearch.current.list } : {}) };
       }
       latestSearch.current = nextSearch;
@@ -140,6 +144,10 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
     }
   }, [router, tab, target]);
   useEffect(() => {
+    if (isResourceListRoute(target.route)) {
+      if (JSON.stringify(target.search) !== JSON.stringify(search)) void navigate({ search, replace: true });
+      return;
+    }
     if (!isListRoute(target.route) || target.search._list !== undefined) return;
     const addressed = { ...definition.validate(target.search), ...(target.search.list === undefined ? {} : { list: target.search.list }), _list: undefined };
     const restored = { ...search, _list: undefined };

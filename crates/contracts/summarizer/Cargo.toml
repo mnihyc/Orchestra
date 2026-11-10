@@ -1,6 +1,6 @@
 [package]
 name = "orch-summarizer-contract"
-description = "Summarizer contract for title, description and tag generation."
+description = "Summarizer contract for titles, tags, summary text and handoffs."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

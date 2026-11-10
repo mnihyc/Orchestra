@@ -7,6 +7,8 @@ import { ACME, PEOPLE, scenario, signIn } from './support.ts';
 test.beforeEach(async () => { await scenario(); });
 
 test('two selected topics share together and Tell them sends one message containing both links', async ({page,browser,baseURL}) => {
+  // EN: Select both topics → Share → named recipient → review → apply → open the actual notified chat as that recipient.
+  // 中文：选择两个主题 → 共享 → 指定接收者 → 预览 → 应用 → 以接收者身份打开实际收到通知的聊天。
   await signIn(page);
   await page.goto(`/project/${ACME.web}?view=list`);
   await page.getByRole('checkbox',{name:'Select Fix login',exact:true}).check();
@@ -18,10 +20,16 @@ test('two selected topics share together and Tell them sends one message contain
   await dialog(page).getByRole('button',{name:'Review shares',exact:true}).click();
   await expect(dialog(page).getByRole('region',{name:'Sharing consequences'})).toHaveCount(2);
   expect(await sent()).toEqual([]);
+  const telling = page.waitForResponse((response) => response.request().method() === 'POST'
+    && /\/chats\/[^/]+\/messages$/u.test(new URL(response.url()).pathname)
+    && response.request().postData()?.includes('Please read both selected topics') === true);
   await dialog(page).getByRole('button',{name:'Apply to 2 ready rows',exact:true}).click();
   await expect(dialog(page).getByText('Succeeded',{exact:true})).toHaveCount(2);
-  const vera = await second(browser,baseURL,'/org/acme/messages',PEOPLE.vera);
-  await vera.page.getByText('Ada Lovelace').first().click();
+  const notification = await telling;
+  expect(notification.ok()).toBe(true);
+  const chatId = new URL(notification.url()).pathname.split('/').at(-2);
+  expect(chatId).toBeTruthy();
+  const vera = await second(browser,baseURL,`/chat/${chatId}`,PEOPLE.vera);
   const message = vera.page.locator('li[data-message]',{hasText:'Please read both selected topics'});
   await expect(message).toHaveCount(1);
   await expect(message.getByRole('link',{name:'Fix login',exact:true})).toHaveAttribute('href',`/topic/${ACME.fixLogin}`);
@@ -40,7 +48,7 @@ test('a page which can no longer be read is reported individually while the othe
   });
   await page.getByRole('region',{name:'Selected topics'}).getByRole('button',{name:'Share…',exact:true}).click();
   await stage(page,'Vera Rubin');
-  await dialog(page).getByRole('checkbox',{name:/Send Vera Rubin a message with the link/}).uncheck();
+  await dialog(page).getByRole('checkbox',{name:/^Send Vera Rubin\b.* a message with the link/}).uncheck();
   await dialog(page).getByRole('button',{name:'Review shares',exact:true}).click();
   await dialog(page).getByRole('button',{name:'Apply to 1 ready row',exact:true}).click();
   await expect(dialog(page).getByText('Succeeded',{exact:true})).toHaveCount(1);
@@ -65,7 +73,7 @@ test('a lost share answer is read explicitly and the one Undo never treats that 
   });
   await page.getByRole('region',{name:'Selected topics'}).getByRole('button',{name:'Share…',exact:true}).click();
   await stage(page,'Vera Rubin');
-  await dialog(page).getByRole('checkbox',{name:/Send Vera Rubin a message with the link/}).uncheck();
+  await dialog(page).getByRole('checkbox',{name:/^Send Vera Rubin\b.* a message with the link/}).uncheck();
   await dialog(page).getByRole('button',{name:'Review shares',exact:true}).click();
   expect(written).toEqual([]);
   await dialog(page).getByRole('button',{name:'Apply to 2 ready rows',exact:true}).click();

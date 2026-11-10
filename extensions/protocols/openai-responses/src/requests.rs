@@ -1,8 +1,10 @@
 //! Allowed paths and explicit model extraction.
 //!
-//! The Responses format has three requests worth relaying: creating a response (`POST /responses`, answered
-//! as one JSON document or as a server-sent event stream), compacting a conversation (`POST
-//! /responses/compact`) and listing models (`GET /models`). Every other request, such as fetching, deleting or
+//! The Responses relay carries response creation (`POST /responses`, answered as one JSON document or a
+//! server-sent event stream), model listing (`GET /models`) and a native side search (`POST /alpha/search`).
+//! The side path still requires the actual endpoint's binding and the turn's captured native mode;
+//! the method/path table grants neither. Remote compaction uses a
+//! `compaction_trigger` item on that same Responses endpoint. Every other request, such as fetching, deleting or
 //! cancelling a stored response, or a file or batch call, is refused: a harness that talks through Orch has no
 //! use for them, and each would reach state of the provider's account that the lease does not cover.
 //!
@@ -45,11 +47,18 @@ pub fn lists_models(method: &Method, path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch_model_contract::protocol::WireProtocol;
 
     #[test]
-    fn only_responses_compaction_and_the_model_list_pass() {
+    fn responses_the_model_list_and_the_gated_native_search_path_pass_the_wire_table() {
         assert!(allowed(&Method::POST, "/responses"));
-        assert!(allowed(&Method::POST, "/responses/compact"));
+        assert!(allowed(&Method::POST, "/alpha/search"));
+        assert_eq!(
+            crate::OpenAiResponses.native_capability("/alpha/search"),
+            Some("web_search")
+        );
+        assert!(!allowed(&Method::POST, "/responses/compact"));
+        assert!(!allowed(&Method::POST, "/responses/compact?api-version=1"));
         assert!(allowed(&Method::GET, "/models"));
         assert!(
             allowed(&Method::POST, "/responses?api-version=1"),
@@ -80,6 +89,9 @@ mod tests {
             "/respons%65s",
             "/Responses",
             "/responses%2Fcompact",
+            "/alpha/search/",
+            "/alpha/%73earch",
+            "/alpha/../search",
             "responses",
             "",
         ] {

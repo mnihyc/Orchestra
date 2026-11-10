@@ -44,11 +44,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const catalogue=locale==='en'?en:zh;
     const words=catalogue.calls;
     const common=catalogue.common;
+    const turnRetry = (id: string) => page.locator(`[data-footer="${id}"]`).getByRole('button', { name: catalogue.timeline.footer.retry, exact: true });
     const counts={settingsWrites:0,recoveryReads:0,recoveryActions:[] as string[]};
     page.on('request',(request)=>{
       if(new URL(request.url()).pathname.endsWith('/settings/calls.rules') && request.method()==='PUT') counts.settingsWrites++;
     });
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=calls.rules`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=calls.rules`);
     const setting=page.locator('[data-setting="calls.rules"]');
     await expect(setting).toBeVisible();
     await setting.locator('[data-setting-editor-trigger]').click();
@@ -96,7 +97,10 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await failedTurn(recovery,1);
     await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.getByRole('button',{name:words.retryNow,exact:true})).toBeVisible();
-    await expect(page.getByRole('button',{name:catalogue.timeline.footer.retry,exact:true})).toHaveCount(0);
+    await expect(turnRetry('recovery-turn-1')).toHaveAttribute('aria-disabled', 'true');
+    await turnRetry('recovery-turn-1').focus();
+    await expect(page.getByRole('tooltip')).toContainText(catalogue.thread.turnActions.retryHandled);
+    await page.keyboard.press('Escape');
     await expect(page.locator('[data-item="recovery-error-1"]')).toHaveCount(0);
     await expect(page.locator('[data-turn-failure]')).toHaveCount(1);
     await expect(page.locator('[data-item="recovery-error-1-repeat"]')).toHaveCount(0);
@@ -113,7 +117,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect(page.getByRole('status',{name:words.status,exact:true})).toHaveCount(0);
     await expect(page.locator('[data-call-recovery="stopped"]')).toHaveCount(1);
     await expect(page.locator('[data-call-recovery="stopped"]')).toContainText(locale==='en'?'5 min':'5分钟');
-    await expect(page.getByRole('button',{name:catalogue.timeline.footer.retry,exact:true})).toHaveCount(0);
+    await expect(turnRetry('recovery-turn-1')).toHaveAttribute('aria-disabled', 'true');
     await contained(page);
     await info.attach('stopped',{body:await page.screenshot({path:info.outputPath('stopped.png')}),contentType:'image/png'});
     expect(counts.recoveryActions).toEqual(['stop']);
@@ -122,7 +126,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(counts.recoveryReads).toBeLessThanOrEqual(2);
     expect(counts.settingsWrites).toBe(1);
     const beforeReopen=counts.recoveryReads;
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=calls.rules`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=calls.rules`);
     recovery={...recovery,state:'scheduled',rule_id:'refused',attempt:1,continuing:true,failure:{...recovery.failure,code:'model_refused',reason:'cyber',message:'Synthetic vendor filter refusal',incomplete:true},step:{type:'continue',times:3},due_at:new Date(Date.now()+30_000).toISOString(),detail:null,count:null,window_secs:null};
     await failedTurn(recovery,2);
     await page.goto(`/thread/${ACME.mainThread}`);
@@ -131,7 +135,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(counts.recoveryReads).toBeGreaterThan(beforeReopen);
     expect(counts.recoveryReads-beforeReopen).toBeLessThanOrEqual(2);
     await expect(page.getByText(catalogue.timeline.failure.incomplete,{exact:true})).toHaveCount(0);
-    await expect(page.getByRole('button',{name:catalogue.timeline.footer.retry,exact:true})).toHaveCount(0);
+    await expect(turnRetry('recovery-turn-2')).toHaveAttribute('aria-disabled', 'true');
     await info.attach('continuing',{body:await page.screenshot({path:info.outputPath('continuing.png')}),contentType:'image/png'});
 
     const input='recovery-automatic-input',id='recovery-automatic-turn',at=new Date().toISOString();
@@ -149,7 +153,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const annotation=page.getByText(automatic,{exact:false});
     await expect(annotation).toBeVisible();
     await expect(page.getByText(catalogue.timeline.failure.incomplete,{exact:true})).toHaveCount(0);
-    await expect(page.getByRole('button',{name:catalogue.timeline.footer.retry,exact:true})).toHaveCount(0);
+    await expect(turnRetry('recovery-turn-2')).not.toHaveAttribute('aria-disabled');
     const event=page.locator('[data-recovery-event]');
     await expect(event).toHaveCount(1);
     await expect(event).toContainText(words.causes.model_refused);

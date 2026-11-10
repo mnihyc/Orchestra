@@ -9,6 +9,8 @@
 //! deadline has passed, writes the result down before it says how the command
 //! ended, and answers a command it has seen before from what it wrote down
 //! instead of running it again.
+//! A transport-only session rebind retains the same serial queue and in-flight ownership,
+//! but never enters the journal: a lost live call is requested again by its caller.
 //!
 //! [`CommandIssuer`] is the system's end. It sends a command when a session is
 //! ready, sends the ones that have not ended again whenever a session becomes
@@ -23,7 +25,7 @@ use async_trait::async_trait;
 use orch_link_contract::backplane::DownFrame;
 use orch_link_contract::commands::{
     ACK_RESENDS, ACK_TIMEOUT_SECS, Cmd, CmdAck, CmdCancel, CmdRes, Command, CommandBody,
-    CommandError, CommandKind, CommandResult, ErrorCode, SerialKey,
+    CommandError, CommandKind, CommandResult, ErrorCode, SerialKey, is_transport_rebind,
 };
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::Role;
@@ -229,6 +231,8 @@ struct InHand {
     /// Whether it is written down, and so acknowledged: a copy that arrives
     /// before is not acknowledged, since the machine does not have it yet.
     written: bool,
+    /// A live transport replacement is acknowledged and executed entirely in memory.
+    transport_only: bool,
     accepted: Instant,
     finishing: bool,
     finalizer: Option<tokio::task::JoinHandle<()>>,
@@ -430,15 +434,14 @@ impl CommandServer {
         self.take_in_hand(cmd);
     }
 
-    /// Takes a command in hand: in the line of its key, or to run beside the others, once it is written
-    /// down. One that is written down already runs in its turn; one that is not is written down first, by a
-    /// task of its own ([`CommandServer::write_down`]).
+    /// Takes a command in hand in its key's line. Ordinary work is written before admission;
+    /// a live transport rebind is admitted in memory and uses the same serial worker.
     fn take_in_hand(&self, cmd: Cmd) {
         let id = cmd.id;
         let (admit, admitted) = oneshot::channel();
         let mut state = lock(&self.inner.state);
         if let Some(hand) = state.in_hand.get(&id) {
-            let written = hand.written;
+            let written = hand.written || hand.transport_only;
             drop(state);
             if written {
                 self.send(CmdAck { id });
@@ -470,6 +473,7 @@ impl CommandServer {
             }) => (cmd, true, false),
             None => (cmd, false, false),
         };
+        let transport_only = is_transport_rebind(&cmd.kind, &cmd.body);
         let cancel = CancellationToken::new();
         if state.cancelled_before_arrival.contains(&id) {
             cancel.cancel();
@@ -480,6 +484,7 @@ impl CommandServer {
                 cancel,
                 queued_under: if interrupted { None } else { cmd.key.clone() },
                 written,
+                transport_only,
                 accepted: Instant::now(),
                 finishing: false,
                 finalizer: None,
@@ -534,7 +539,7 @@ impl CommandServer {
         drop(state);
         let keyed = cmd.key.is_some();
         let server = self.clone();
-        if written {
+        if written || transport_only {
             self.send(CmdAck { id });
             if keyed {
                 let _ = admit.send(true);
@@ -754,7 +759,7 @@ impl CommandServer {
             return Err(too_late());
         }
         let id = cmd.id;
-        if self.write_started(id).await.is_err() {
+        if !is_transport_rebind(&cmd.kind, &cmd.body) && self.write_started(id).await.is_err() {
             return Err(CommandError::new(
                 ErrorCode::Internal,
                 "the journal cannot be written",
@@ -786,24 +791,40 @@ impl CommandServer {
         outcome: Result<Json, CommandError>,
         hold: Option<CompletionHold>,
     ) {
-        let owned = {
+        let (owned, transport_only) = {
             let mut state = lock(&self.inner.state);
+            // A live call already retired has no journal result to finalize again.
+            if !state.in_hand.contains_key(&id) && self.entry(id).is_none() {
+                return;
+            }
             let hand = state.in_hand.entry(id).or_insert_with(|| InHand {
                 cancel: CancellationToken::new(),
                 queued_under: None,
                 written: true,
+                transport_only: false,
                 accepted: Instant::now(),
                 finishing: false,
                 finalizer: None,
             });
             if hand.finishing {
-                false
+                (false, hand.transport_only)
             } else {
                 hand.finishing = true;
-                true
+                (true, hand.transport_only)
             }
         };
         if !owned {
+            return;
+        }
+        if transport_only {
+            self.send(CmdRes { id, outcome });
+            drop(hold);
+            {
+                let mut state = lock(&self.inner.state);
+                state.in_hand.remove(&id);
+                state.cancelled_before_arrival.remove(&id);
+            }
+            self.inner.changed.notify_waiters();
             return;
         }
         let started = Instant::now();
@@ -895,7 +916,7 @@ impl CommandServer {
                 return;
             };
             hand.cancel.cancel();
-            let written = hand.written;
+            let written = hand.written || hand.transport_only;
             let queued_under = hand.queued_under.clone();
             if let Some(key) = queued_under {
                 if let Some(queue) = state.queues.get_mut(&key) {
@@ -982,7 +1003,7 @@ pub enum Progress {
     Queued,
     /// Handed to the gateway.
     Sent,
-    /// The machine wrote it down.
+    /// The machine accepted it; a live transport rebind is held only in memory.
     Accepted,
     /// It ended well.
     Succeeded(Json),
@@ -1024,6 +1045,8 @@ pub struct CommandIssuer {
     state: Arc<Mutex<IssuerState>>,
     down: mpsc::UnboundedSender<DownFrame>,
     clock: Arc<dyn Clock>,
+    #[cfg(feature = "test-observers")]
+    observed: Option<Arc<crate::test_observers::QueueGauge>>,
 }
 
 impl std::fmt::Debug for CommandIssuer {
@@ -1111,11 +1134,33 @@ impl CommandIssuer {
             })),
             down,
             clock,
+            #[cfg(feature = "test-observers")]
+            observed: None,
         }
     }
 
+    #[cfg(feature = "test-observers")]
+    pub(crate) fn with_observer(
+        mut self,
+        observed: Arc<crate::test_observers::QueueGauge>,
+    ) -> Self {
+        self.observed = Some(observed);
+        self
+    }
+
+    fn send_down(&self, frame: DownFrame) -> Result<(), mpsc::error::SendError<DownFrame>> {
+        #[cfg(feature = "test-observers")]
+        if let Some(observed) = &self.observed {
+            let bytes = orch_link_contract::frames::encode(&frame, usize::MAX)
+                .ok()
+                .map(|text| text.len());
+            return observed.send(&self.down, frame, bytes);
+        }
+        self.down.send(frame)
+    }
+
     fn transmit(&self, issued: &mut Issued, now: Instant) {
-        if self.down.send(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
+        if self.send_down(DownFrame::Cmd(issued.cmd.clone())).is_ok() {
             issued.sent_at = Some(now);
             issued.tx.send_if_modified(|progress| {
                 if *progress == Progress::Queued {
@@ -1241,6 +1286,32 @@ impl CommandIssuer {
         }
     }
 
+    /// Refuses a local transmission only while the machine has not acknowledged it.
+    /// The same state lock serializes this decision with CmdAck and native results; an
+    /// earlier acknowledgement cannot be overwritten by a delayed sealing/admission error.
+    /// This is not a native answer and never establishes handler completion.
+    pub fn refuse_unaccepted(&self, id: Id, error: &CommandError) -> bool {
+        let mut state = lock(&self.state);
+        let Some(issued) = state.commands.get_mut(&id) else {
+            return false;
+        };
+        let refused = issued.tx.send_if_modified(|progress| {
+            if matches!(*progress, Progress::Queued | Progress::Sent) {
+                *progress = Progress::Failed(error.clone());
+                true
+            } else {
+                false
+            }
+        });
+        // A suppressed duplicate cannot receive a new ACK. Retire that resend's
+        // ACK timer just as the acknowledgement already observed by this issuer did.
+        let accepted = matches!(*issued.tx.borrow(), Progress::Accepted);
+        if refused || accepted {
+            issued.sent_at = None;
+        }
+        refused
+    }
+
     /// Whether the machine has returned from this command's handler, even after a cancellation request.
     #[must_use]
     pub fn answered(&self, id: Id) -> bool {
@@ -1288,7 +1359,7 @@ impl CommandIssuer {
             let _ = was_open;
         }
         // Cancellation is replayable after reconnect, including when only its terminal row remains.
-        let _ = self.down.send(DownFrame::CmdCancel(CmdCancel { id }));
+        let _ = self.send_down(DownFrame::CmdCancel(CmdCancel { id }));
     }
 
     /// Looks at the clocks: a command the machine did not acknowledge in time

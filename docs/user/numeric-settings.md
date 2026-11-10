@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Zero in settings
 screens: /settings, /resources, /project/$projectId/settings, /org/$slug, /topic/$topicId, /thread/$threadId, /admin
 keywords: zero, 0, Off, numbers, days, grace, wait, tags, preview, inherited settings
+summary: Understand when zero means Off, an immediate action or an ordinary numeric value.
 ---
 
 # Zero in settings

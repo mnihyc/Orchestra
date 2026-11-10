@@ -56,7 +56,7 @@ test('Share opens the page with the field that adds people in focus, and shows t
   // As shipped a Developer manages the topic and everybody who can see it reads it.
   await expect(line(page, 'Can manage')).toContainText('Developers');
   await expect(line(page, 'Can view')).toContainText('Everyone in Fix login');
-  await expect(line(page, 'Can view')).toContainText('as the system decides');
+  await expect(line(page, 'Can view')).toContainText('Inherited from the system');
   await expect(dialog(page).getByText('Admins of Web, Research, Acme, and the system')).toBeVisible();
 });
 
@@ -352,7 +352,7 @@ test('a current refusal never offers an administrator a self-grant, including wh
 
 /** Opens Share from the thread's own header. */
 async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share', exact: true }).click();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
 }
 
 /** Opens the permission page of a resource from the Access tab of its own page. */

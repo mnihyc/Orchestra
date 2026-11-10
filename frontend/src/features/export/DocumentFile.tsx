@@ -97,7 +97,7 @@ export function DocumentFile({ target, open, onClose }: FileDialogProps) {
   if (read.isError) {
     body = <ErrorState compact error={read.error} retrying={read.isRefetching} onRetry={() => void read.refetch()} />;
   } else if (document === undefined) {
-    body = <SkeletonRows rows={4} />;
+    body = <SkeletonRows read={read} rows={4} />;
   } else {
     body = (
       <div className="flex flex-col gap-4">
