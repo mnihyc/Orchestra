@@ -185,3 +185,29 @@ pub async fn list_for_documents(
         .bind(node).bind(filter.id).bind(filter.turn).bind(filter.before).bind(filter.after).bind(filter.limit).bind(documents)
         .fetch_all(conn).await?)
 }
+
+/// Private native governors. A missing resource keeps its marker and remains unreadable.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct Governors {
+    /// The exact protected model-input record.
+    pub model_input_id: Id,
+    /// Original private reader, absent for shared automatic work.
+    pub viewer_id: Option<Id>,
+    /// Actual source identities; never prompt content or cached permission.
+    pub source_refs: Json,
+}
+/// Native prompt markers plus the existing document marker, with no prompt body hydration.
+pub async fn governors(conn: &mut Conn, node: Id) -> Result<Vec<Governors>, DbError> {
+    Ok(sqlx::query_as("SELECT g.model_input_id,g.viewer_id,g.source_refs FROM resource_summary_model_inputs g JOIN model_inputs m ON m.id=g.model_input_id WHERE m.node_id=$1 UNION ALL SELECT d.model_input_id,NULL::uuid,jsonb_build_array(jsonb_build_object('kind','document','id',d.document_id)) FROM document_model_inputs d JOIN model_inputs m ON m.id=d.model_input_id WHERE m.node_id=$1 AND NOT EXISTS(SELECT 1 FROM resource_summary_model_inputs s WHERE s.model_input_id=m.id)")
+        .bind(node).fetch_all(conn).await?)
+}
+/// Select only currently admitted protected records before the native pagination boundary.
+pub async fn list_for_sources(
+    conn: &mut Conn,
+    node: Id,
+    filter: &ModelInputFilter,
+    readable: &[Id],
+) -> Result<Vec<ModelInputRow>, DbError> {
+    Ok(sqlx::query_as("SELECT m.id,m.node_id,m.segment_id,m.turn_id,m.input_id,m.item_id,m.purpose,m.reference,m.blocks,m.state,m.created_at,m.sent_at,m.seq_created,m.seq_updated FROM model_inputs m WHERE m.node_id=$1 AND ($2::uuid IS NULL OR m.id=$2) AND ($3::uuid IS NULL OR m.turn_id=$3) AND ($4::bigint IS NULL OR m.seq_created<$4) AND ($5::bigint IS NULL OR m.seq_created>$5) AND ((NOT EXISTS(SELECT 1 FROM document_model_inputs d WHERE d.model_input_id=m.id) AND NOT EXISTS(SELECT 1 FROM resource_summary_model_inputs g WHERE g.model_input_id=m.id)) OR m.id=ANY($7)) ORDER BY m.seq_created DESC,m.id DESC LIMIT $6")
+        .bind(node).bind(filter.id).bind(filter.turn).bind(filter.before).bind(filter.after).bind(filter.limit).bind(readable).fetch_all(conn).await?)
+}

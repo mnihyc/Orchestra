@@ -20,10 +20,18 @@ pub const SUBSCRIPTION_TITLE: &str = "Claude subscription";
 
 /// The exact candidate harness pin. A wider range needs real contract/startup evidence for every
 /// advertised version, including the native instruction and quiet-start configuration.
-pub const SUPPORTED_RANGE: &str = "=2.1.312";
+pub const SUPPORTED_RANGE: &str = "=2.1.319";
+
+/// Exact native UUID-prefix protocol set, checked independently of the general startup range.
+/// A new build needs the prefix exclusion, empty-prefix and retained-source controls before addition.
+pub(crate) const INPUT_PREFIX_VERSIONS: &[&str] = &["2.1.319"];
+
+pub(crate) fn input_prefix_supported(version: &str) -> bool {
+    INPUT_PREFIX_VERSIONS.contains(&version)
+}
 
 /// The candidate whose same-version native transcript is being checked before support is advertised.
-pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = "2.1.312";
+pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = "2.1.319";
 
 /// The program looked up on the search path when no binary is given.
 pub const PROGRAM: &str = "claude";
@@ -96,7 +104,7 @@ pub const STDERR_KEPT_LINES: usize = 40;
 pub const FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many failed attempts in a row the harness announces before a turn says so to the people watching:
-/// the first retries are routine, the fifth is not.
+/// the first retries are routine, the fifth is not. Profiles can change this default.
 pub const RETRY_NOTICE_ATTEMPT: u64 = 5;
 
 /// What the harness's `fast_mode_state` says when the vendor's limit for the fast mode was reached and the harness went on at
@@ -114,8 +122,8 @@ pub const RAW_FRAME_MAX_BYTES: usize = 256 * 1024;
 pub struct ProfileConfig {
     /// Seconds an idle process stays alive when the harness works through Orch's executor; `0` keeps it.
     pub idle_exit_secs: u64,
-    /// Whether a personal harness may run agents and commands in the background. Managed sessions always
-    /// disable this: a native wake-up has no Orch input or model lease.
+    /// Legacy profile preference; the resolved thread background-wake setting governs conversations.
+    /// Version and provider probes always keep autonomous background work disabled.
     pub background_tasks: bool,
     /// Whether the harness's own to-do tools are offered, which is what a plan is made of.
     pub todo_tools: bool,
@@ -129,6 +137,9 @@ pub struct ProfileConfig {
     /// Seconds the harness may go on trying again, with nothing else between, before the turn is ended and the
     /// process stopped; `0` never.
     pub retry_patience_secs: u64,
+    /// Native retry number at which an error notice appears; zero means the first reported retry.
+    /// Live retry status is always reported, independently of this threshold.
+    pub retry_notice_attempt: u64,
 }
 
 impl Default for ProfileConfig {
@@ -140,6 +151,7 @@ impl Default for ProfileConfig {
             setting_sources: "project".to_owned(),
             silence_secs: DEFAULT_SILENCE_SECS,
             retry_patience_secs: DEFAULT_RETRY_PATIENCE_SECS,
+            retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
         }
     }
 }
@@ -166,6 +178,9 @@ impl ProfileConfig {
         }
         if let Some(secs) = map.get("retry_patience_secs").and_then(Json::as_u64) {
             options.retry_patience_secs = secs;
+        }
+        if let Some(attempt) = map.get("retry_notice_attempt").and_then(Json::as_u64) {
+            options.retry_notice_attempt = attempt;
         }
         if let Some(sources) = map.get("setting_sources").and_then(Json::as_str) {
             let known = ["user", "project", "local"];
@@ -212,6 +227,22 @@ mod tests {
         assert!(!options.background_tasks);
         assert_eq!(options.silence(), Some(Duration::from_secs(900)));
         assert_eq!(options.retry_patience(), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn retry_notices_have_a_configurable_default_without_delaying_live_status() {
+        assert_eq!(ProfileConfig::default().retry_notice_attempt, 5);
+        for value in [0, 2, 100] {
+            assert_eq!(
+                ProfileConfig::from_json(&json!({"retry_notice_attempt":value}))
+                    .retry_notice_attempt,
+                value
+            );
+        }
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"retry_notice_attempt":"later"})).retry_notice_attempt,
+            5
+        );
     }
 
     #[test]

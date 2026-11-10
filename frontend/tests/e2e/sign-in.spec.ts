@@ -60,7 +60,7 @@ test('a wrong password is said at its field, and the right one gets in', async (
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.ada.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 
@@ -81,7 +81,7 @@ test('somebody with an authenticator is asked for its code after a right passwor
 
   await code.fill(PEOPLE.grace.totp);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('somebody whose second step is a mailed code is sent one at once, and gets in with it', async ({ page }) => {
@@ -96,7 +96,7 @@ test('somebody whose second step is a mailed code is sent one at once, and gets 
 
   await page.getByLabel('Code').fill(await mailed('linus', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('a code by mail gets somebody in without their password, and the page says the same whatever the name', async ({ page }) => {
@@ -125,7 +125,7 @@ test('a code by mail gets somebody in without their password, and the page says 
 
   await page.getByLabel('Code').fill(await mailed('margaret', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('a name that is locked says which proof is closed, until when, and what else works', async ({ page }) => {
@@ -194,7 +194,7 @@ test('a session outlives a reload, though its token was never kept anywhere', as
 
   await page.reload();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 

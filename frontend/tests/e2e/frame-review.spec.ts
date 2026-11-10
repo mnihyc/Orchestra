@@ -57,7 +57,7 @@ for (const width of [400, 1440]) for (const locale of ['en', 'zh-CN'] as const) 
       await page.goto('/settings/profile');
       await page.getByRole('button', { name: words.navigation, exact: true }).click();
       await page.getByRole('dialog', { name: words.navigation, exact: true }).getByRole('link', { name: words.home, exact: true }).click();
-      await expect(page).toHaveURL(/\/org\/acme\/?$/);
+      await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     }
 
     await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);

@@ -36,7 +36,7 @@ export function BrowserView() {
   const query = useQuery({ ...environmentQuery(id ?? ''), enabled: id !== null && allowed });
   if (state.kind === 'loading') return <SkeletonRows rows={4} />;
   if (!allowed) return <EmptyState compact className="h-full" icon={<AppWindow aria-hidden />} title={t('browser.view.notAllowed')} />;
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   return <BrowsersPanel environment={query.data} threadId={threadId} />;
 }

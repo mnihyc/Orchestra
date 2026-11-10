@@ -3,7 +3,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import type { NotificationPrefs, ResolvedSetting, SettingDef, SettingReach } from '../../src/generated/api-types.ts';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chineseWords from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { ACME, scenario, signIn } from './support.ts';
+import { ACME, scenario, signIn, supplyDefaults } from './support.ts';
 
 const definition = (index: number): SettingDef => ({ key: `review.feature${index}`, title: `Feature ${index}`, description: `Keep feature ${index} available.`,
   class: 'parameter', scopes: ['org'], group: index % 2 === 0 ? 'agent' : 'confinement', merge: 'replace', schema: { type: 'boolean' },
@@ -152,6 +152,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const writes: { method: string; body: unknown; guard: string | null }[] = [];
     await page.route('**/api/v1/settings/registry', (route) => route.fulfill({ json: definitions }));
     await page.route(`**/api/v1/nodes/${ACME.research}/settings`, (route) => { listReads += 1; return route.fulfill({ json: [...readOnly, current] }); });
+    await supplyDefaults(page, ACME.research, { registry: () => definitions, settings: () => { listReads += 1; return [...readOnly, current]; } });
     const settingPath = `/api/v1/nodes/${ACME.research}/settings/${delay.key}`;
     // Match the native child endpoint as a path; a single glob star does not cross its slash.
     await page.route((url) => url.pathname === settingPath || url.pathname === `${settingPath}/reach`, async (route) => {
@@ -171,7 +172,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       } else throw new Error('The setting write has no numeric value');
       await route.fulfill({ json: current });
     });
-    await page.goto('/org/acme.research/settings/policies');
+    await page.goto('/org/acme.research/settings/defaults');
     const rows = page.locator('[data-setting-row]');
     await expect(rows).toHaveCount(146);
     await expect(page.locator('[data-read-only-settings]')).toHaveCount(1);
@@ -265,7 +266,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await row.getByRole('button', { name: chinese ? '适用位置' : 'Where it applies', exact: true }).click();
     const details = page.getByRole('region', { name: chinese ? '此值适用的位置' : 'Where this value applies' });
     await expect(details).toContainText(chinese ? '7 个线程' : '7 threads');
-    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=policies&setting=${delay.key}`);
+    await expect(details.getByRole('link', { name: 'login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=settings&section=defaults&setting=${delay.key}`);
     expect(reachReads).toBe(1);
     expect(listReads).toBe(1);
   });

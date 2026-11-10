@@ -39,7 +39,8 @@ Replace service names when the collector's network differs. Prometheus supplies 
 has a recorded beat no older than **45 seconds**, the named `orch_db::heartbeat::WORKER_HEARTBEAT_MAX_AGE`
 (three fifteen-second beats). Missing/stale worker or database failure returns 503. A beat exactly at
 the limit remains current. This is readiness, not proof that every host, model or external channel works.
-Use `/api/v1/admin/system` as an authorized administrator for component/queue details.
+Use `/api/v1/admin/system` in an authorized browser session, or `/openapi/v1/admin/system` with
+an account key whose ordinary rights and key rules admit that operation, for component/queue details.
 
 On first startup, the worker waits for the schema the API applies. Compose starts it after PostgreSQL
 is healthy and the API has started; it deliberately does not wait for API readiness, which needs that

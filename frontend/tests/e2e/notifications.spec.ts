@@ -9,10 +9,10 @@ test.beforeEach(async () => {
 });
 
 const card = (page: Page, heading: string) => page.getByRole('region', { name: heading });
-const mailCard = (page: Page) => card(page, 'Mail · this system');
-const botCard = (page: Page) => card(page, "Telegram · Acme's bot");
-const pushCard = (page: Page) => card(page, 'Push · this system');
-const roomCard = (page: Page) => card(page, 'Ops room · a webhook of Acme');
+const mailCard = (page: Page) => card(page, 'Mail (this system)');
+const botCard = (page: Page) => card(page, "Telegram (Acme's bot)");
+const pushCard = (page: Page) => card(page, 'Push (this system)');
+const roomCard = (page: Page) => card(page, 'Ops room (a webhook of Acme)');
 
 async function open(page: Page): Promise<void> {
   await signIn(page);
@@ -34,10 +34,10 @@ test('the three levels are explained, and every way out begins off', async ({ pa
   await page.keyboard.press('Escape');
   await expect(page.getByText('Nothing is sent to you outside Orch until you switch a way on.')).toBeVisible();
   for (const [heading, switchName] of [
-    ['Mail · this system', 'Mail · this system'],
-    ["Telegram · Acme's bot", "Telegram · Acme's bot"],
-    ['Push · this system', 'Push · this system'],
-    ['Ops room · a webhook of Acme', 'Ops room · a webhook of Acme'],
+    ['Mail (this system)', 'Mail (this system)'],
+    ["Telegram (Acme's bot)", "Telegram (Acme's bot)"],
+    ['Push (this system)', 'Push (this system)'],
+    ['Ops room (a webhook of Acme)', 'Ops room (a webhook of Acme)'],
   ] as const) {
     await expect(card(page, heading).getByRole('switch', { name: switchName })).not.toBeChecked();
   }
@@ -45,7 +45,7 @@ test('the three levels are explained, and every way out begins off', async ({ pa
 
 test('what the person chose about approvals, chats and quiet hours is kept', async ({ page }) => {
   await open(page);
-  const always = page.getByRole('switch', { name: /^Answerable approvals:/ });
+  const always = page.getByRole('switch', { name: 'Always tell me about approvals I can answer', exact: true });
   await expect(always).toBeChecked();
   await always.click();
   await expect(always).not.toBeChecked();
@@ -54,7 +54,7 @@ test('what the person chose about approvals, chats and quiet hours is kept', asy
   await page.getByRole('option', { name: 'Mentions' }).click();
   await expect(page.getByRole('combobox', { name: 'Direct and group chats' })).toContainText('Mentions');
 
-  const quiet = page.getByRole('switch', { name: /^Quiet schedule:/ });
+  const quiet = page.getByRole('switch', { name: 'Hold what is sent outside Orch during quiet hours', exact: true });
   await expect(quiet).not.toBeChecked();
   await quiet.click();
   // Switched on, it begins with a night: from ten to seven.
@@ -70,9 +70,9 @@ test('what the person chose about approvals, chats and quiet hours is kept', asy
   await saved;
 
   await page.reload();
-  await expect(page.getByRole('switch', { name: 'Answerable approvals: Followed places', exact: true })).not.toBeChecked();
+  await expect(page.getByRole('switch', { name: 'Always tell me about approvals I can answer', exact: true })).not.toBeChecked();
   await expect(page.getByRole('combobox', { name: 'Direct and group chats' })).toContainText('Mentions');
-  await expect(page.getByRole('switch', { name: 'Quiet schedule: On', exact: true })).toBeChecked();
+  await expect(page.getByRole('switch', { name: 'Hold what is sent outside Orch during quiet hours', exact: true })).toBeChecked();
   await expect(page.getByLabel('From', { exact: true })).toHaveValue('23:30');
   await expect(page.getByLabel('Until', { exact: true })).toHaveValue('07:00');
 });
@@ -80,15 +80,17 @@ test('what the person chose about approvals, chats and quiet hours is kept', asy
 test('a route is switched on and keeps what it carries, how long a notification waits and how often a message goes', async ({ page }) => {
   await open(page);
   const mail = mailCard(page);
-  await mail.getByRole('switch', { name: 'Mail · this system' }).click();
-  await expect(mail.getByRole('switch', { name: 'Mail · this system' })).toBeChecked();
+  await mail.getByRole('switch', { name: 'Mail (this system)' }).click();
+  await expect(mail.getByRole('switch', { name: 'Mail (this system)' })).toBeChecked();
 
   // Only some kinds: the choice stands once at least one is made.
-  await mail.getByRole('radio', { name: 'Only these kinds' }).click();
+  await mail.getByRole('radiogroup', { name: 'Send' }).getByRole('radio', { name: 'Selected', exact: true }).click();
   await expect(mail.getByText('Choose at least one kind.')).toBeVisible();
   await mail.getByRole('button', { name: 'Choose kinds' }).click();
-  await page.getByRole('checkbox', { name: 'Approval needed' }).click();
-  await page.getByRole('checkbox', { name: 'Mention', exact: true }).click();
+  // The kinds the route carries are chosen in their own list, apart from the kinds of the page.
+  const kinds = page.getByRole('dialog', { name: 'Choose kinds' });
+  await kinds.getByRole('checkbox', { name: 'Approval needed' }).click();
+  await kinds.getByRole('checkbox', { name: 'Mention', exact: true }).click();
   await page.keyboard.press('Escape');
   await expect(mail.getByText('Approval needed')).toBeVisible();
   await expect(mail.getByText('Choose at least one kind.')).toHaveCount(0);
@@ -113,7 +115,7 @@ test('a route is switched on and keeps what it carries, how long a notification 
 
   await page.reload();
   const again = mailCard(page);
-  await expect(again.getByRole('switch', { name: 'Mail · this system' })).toBeChecked();
+  await expect(again.getByRole('switch', { name: 'Mail (this system)' })).toBeChecked();
   await expect(again.getByText('Approval needed')).toBeVisible();
   await expect(again.getByText('Mention', { exact: true })).toBeVisible();
   await expect(again.getByRole('spinbutton', { name: 'Only what I have not read after' })).toHaveValue('20');
@@ -122,7 +124,7 @@ test('a route is switched on and keeps what it carries, how long a notification 
   // Untick: at once again; and everything again.
   await again.getByRole('checkbox', { name: 'Only what I have not read after' }).click();
   await expect(again.getByRole('spinbutton', { name: 'Only what I have not read after' })).toBeDisabled();
-  await again.getByRole('radio', { name: 'Everything I am notified of' }).click();
+  await again.getByRole('radio', { name: 'All', exact: true }).click();
   await expect(again.getByText('Approval needed')).toHaveCount(0);
 });
 
@@ -133,8 +135,8 @@ test('a way that cannot reach the person yet says what is missing and offers it,
   await expect(mail.getByText('Confirm ada@example.org first')).toBeVisible();
   await expect(mail.getByText('not confirmed')).toBeVisible();
   // Pressing the switch changes nothing: what is missing is already said, just below.
-  await mail.getByRole('switch', { name: 'Mail · this system' }).click();
-  await expect(mail.getByRole('switch', { name: 'Mail · this system' })).not.toBeChecked();
+  await mail.getByRole('switch', { name: 'Mail (this system)' }).click();
+  await expect(mail.getByRole('switch', { name: 'Mail (this system)' })).not.toBeChecked();
   await expect(mail.getByText('Confirm ada@example.org first')).toBeVisible();
 
   await mail.getByRole('button', { name: 'Send the confirmation again' }).click();
@@ -152,22 +154,27 @@ test('push says that the system has no key for browsers, and offers nothing that
   // A browser that has not been asked.
   await page.addInitScript(() => Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true }));
   await open(page);
-  await expect(pushCard(page).getByText('Push is not set up on this system yet: it has no key for browsers.')).toBeVisible();
-  await expect(pushCard(page).getByRole('button', { name: 'Allow notifications in this browser' })).toHaveCount(0);
+  const device = pushCard(page).getByRole('region', { name: 'This device' });
+  await expect(device.getByText('This system has no push key. Ask its administrator.')).toBeVisible();
+  await expect(device.getByRole('button', { name: 'Enable this device' })).toHaveCount(0);
 });
 
 test('push offers the browser’s own question where the system has a key and the browser has not been asked', async ({ page }) => {
   await scenario({ meta: { push_public_key: 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDzkrxZJjSgSnfckjBJuBkr3qBUYIHBQFLXYp5Nksh8U' } });
   await page.addInitScript(() => Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true }));
   await open(page);
-  await expect(pushCard(page).getByText('The browser will ask you.', { exact: false })).toBeVisible();
-  await expect(pushCard(page).getByRole('button', { name: 'Allow notifications in this browser' })).toBeVisible();
+  const device = pushCard(page).getByRole('region', { name: 'This device' });
+  await expect(device.getByRole('status')).toHaveText('Not enabled on this device');
+  await expect(device.getByRole('button', { name: 'Enable this device' })).toBeVisible();
 });
 
 test('push in a browser that refused is told so, with where to change it', async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(Notification, 'permission', { get: () => 'denied', configurable: true }));
   await open(page);
-  await expect(pushCard(page).getByText("Notifications are blocked for this site. Allow them in the browser's settings, then come back.")).toBeVisible();
+  const device = pushCard(page).getByRole('region', { name: 'This device' });
+  await expect(device.getByRole('status')).toHaveText('Notifications are blocked for this website');
+  await expect(device.getByRole('link', { name: 'Open settings instructions' })).toBeVisible();
+  await expect(device.getByRole('button', { name: 'Enable this device' })).toHaveCount(0);
 });
 
 test('a bot is connected through its link: a QR code, the link, the wait for Start, and the card that reads who connected', async ({ page }) => {
@@ -205,11 +212,11 @@ test('a webhook of one’s own is added, said wrong at its fields, changed, test
 
   await dialog.getByLabel('Name').fill('My room');
   await dialog.getByLabel('Address').fill('https://hooks.example.org/mine');
-  await dialog.getByLabel('Secret').fill('s3cret');
+  await dialog.getByRole('textbox', { name: 'Secret (optional)', exact: true }).fill('s3cret');
   await dialog.getByRole('button', { name: 'Add the webhook' }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  const mine = card(page, 'My room · a webhook of yours');
-  await expect(mine.getByRole('switch', { name: 'My room · a webhook of yours' })).not.toBeChecked();
+  const mine = card(page, 'My room (a webhook of yours)');
+  await expect(mine.getByRole('switch', { name: 'My room (a webhook of yours)' })).not.toBeChecked();
 
   // The server's own refusal is shown at the field it names.
   await page.getByRole('button', { name: 'Add a webhook…' }).click();
@@ -227,7 +234,7 @@ test('a webhook of one’s own is added, said wrong at its fields, changed, test
   await edit.getByLabel('Name').fill('Our room');
   await edit.getByLabel('Address').fill('https://hooks.example.org/fail');
   await edit.getByRole('button', { name: 'Save' }).click();
-  const ours = card(page, 'Our room · a webhook of yours');
+  const ours = card(page, 'Our room (a webhook of yours)');
   await expect(ours).toBeVisible();
 
   // A test says what the far side answered.
@@ -238,7 +245,7 @@ test('a webhook of one’s own is added, said wrong at its fields, changed, test
   const confirm = page.getByRole('alertdialog', { name: 'Remove Our room?' });
   await expect(confirm.getByText('Nothing is sent through it any more, and every route through it ends.')).toBeVisible();
   await confirm.getByRole('button', { name: 'Remove Our room' }).click();
-  await expect(card(page, 'Our room · a webhook of yours')).toHaveCount(0);
+  await expect(card(page, 'Our room (a webhook of yours)')).toHaveCount(0);
 });
 
 test('a test through a way of the org says that the far side took it, and a route of one’s own through it is switched on', async ({ page }) => {
@@ -246,8 +253,8 @@ test('a test through a way of the org says that the far side took it, and a rout
   const room = roomCard(page);
   await room.getByRole('button', { name: 'Send a test' }).click();
   await expect(room.getByText('The far side took it.')).toBeVisible();
-  await room.getByRole('switch', { name: 'Ops room · a webhook of Acme' }).click();
-  await expect(room.getByRole('switch', { name: 'Ops room · a webhook of Acme' })).toBeChecked();
+  await room.getByRole('switch', { name: 'Ops room (a webhook of Acme)' }).click();
+  await expect(room.getByRole('switch', { name: 'Ops room (a webhook of Acme)' })).toBeChecked();
 });
 
 test('where there is no way out there is no card, and a webhook of one’s own can still be added', async ({ page }) => {

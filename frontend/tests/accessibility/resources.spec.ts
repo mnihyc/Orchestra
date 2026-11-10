@@ -34,7 +34,11 @@ test('machines: the list, the dialog that adds one, a machine with its tabs, and
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('button', { name: 'Add machine' }).click();
-  await expect(page.getByRole('dialog', { name: 'Add machine' }).getByText(/oenr_/)).toBeVisible();
+  const adding = page.getByRole('dialog', { name: 'Add machine' });
+  // The command is made once its choices are read: Show command makes it.
+  await expectAccessibleInBothThemes(page);
+  await adding.getByRole('button', { name: 'Show command' }).click();
+  await expect(adding.getByText(/oenr_/).first()).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
@@ -200,8 +204,10 @@ test('hosts: the list, the dialog that enrolls one, and a host with each of its 
 
 test('somebody who may only read sees the lists and the pages with what they may not do kept from them', async ({ page }) => {
   await open(page, '/resources/providers', PEOPLE.vera);
-  // A person who owns nothing is told so, and may still begin: what they may not do is refused when they try.
-  await expect(page.getByText('You own no provider')).toBeVisible();
+  // The list opens on what they may use; with nothing there it says so and offers what they may view. They may still begin:
+  // what they may not do is refused when they try.
+  await expect(page.getByText('Nothing you can use here')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Show what you can view' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add provider' }).first()).toBeVisible();
   await expectAccessibleInBothThemes(page);
 

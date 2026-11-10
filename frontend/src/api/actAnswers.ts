@@ -6,6 +6,8 @@ import { isDocumentDirectory, isDocumentTreeOperation, isDocumentTreeReceipt } f
 import { AGENT_REACH, type AgentReachChange } from '@/api/agentReach';
 import { META_SETTINGS } from '@/api/adminState';
 import { isPeopleProjection } from '@/api/peopleChanges';
+import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
+import { outsideKey, routesKey } from '@/api/away';
 
 const KINDS: Readonly<Record<string, string>> = {
   nodes: 'node', orgs: 'node', projects: 'node', topics: 'node', threads: 'thread',
@@ -39,9 +41,12 @@ function row(kind: string, value: unknown, insert = false, parent?: string): Row
 
 /** Public so the registry's exhaustive test checks the policy actually used by the client. */
 export function answerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
+  // Their accepted 204 carries no replacement inventory; retain the declared credential owner.
+  if (dependencies.some((change) => 'adminCredentials' in change)) return [...dependencies];
   const related = dependencies.filter((change) => 'relatedViews' in change);
-  const native = dependencies.filter((change) => !('relatedViews' in change));
-  return [...nativeAnswerChanges(act, p, native), ...related];
+  const missing = dependencies.filter((change) => 'missing' in change);
+  const native = dependencies.filter((change) => !('relatedViews' in change) && !('missing' in change));
+  return [...nativeAnswerChanges(act, p, native), ...related, ...missing];
 }
 
 function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Change[]): Change[] {
@@ -78,6 +83,29 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     // select the exact list already holding it, not a query keyed by the invitation ID.
     return [{ missing: [{ key: ['invitations'] }], containingRow: parts[1], cancelPending: true }];
   }
+  // Summary writers return receipts. Each independent protected projection owns
+  // one exact read; never treat a receipt as options/content or select another range.
+  if (act.method === 'PUT' && parts[0] === 'documents' && parts[2] === 'summary-options' && parts.length === 3 && parts[1] !== undefined) {
+    const id = parts[1];
+    return [documentSummaryOptionsKey(id), resourceSummaryKey({ kind: 'document', id })]
+      .map((key): Change => ({ missing: [{ key, exact: true }], cancelPending: true }));
+  }
+  if (act.method === 'POST' && parts[0] === 'summaries' && parts[3] === 'refresh' && parts.length === 4 && parts[1] !== undefined && parts[2] !== undefined) {
+    const input = record(act.input) ? act.input.range : undefined;
+    if (input !== undefined && input !== null && (!record(input) || typeof input.after !== 'number' || typeof input.through !== 'number')) return [];
+    const range = record(input) && typeof input.after === 'number' && typeof input.through === 'number'
+      ? { after: input.after, through: input.through } : undefined;
+    return [{ missing: [{ key: resourceSummaryKey({ kind: parts[1], id: parts[2] }, range), exact: true }], cancelPending: true }];
+  }
+  // A route is the caller's own switch for one channel, and its list holds one row for each channel, before the route has an
+  // id of its own: the answer replaces that row by its channel, and the line that says whether anything goes out is read again.
+  if (parts[0] === 'me' && parts[1] === 'notification-routes' && parts.length === 3 && parts[2] !== undefined) {
+    const summary: Change = { missing: [{ key: outsideKey }] };
+    if (act.method === 'PUT' && record(act.answer) && act.answer.channel_id === parts[2]) {
+      return [{ collection: { key: routesKey, identity: 'channel_id', id: parts[2], data: act.answer } }, summary];
+    }
+    return [{ missing: [{ key: routesKey, exact: true }], cancelPending: true }, summary];
+  }
   if (dependencies.length === 0) return [];
   const answer = act.answer;
   const input = act.input;
@@ -100,6 +128,27 @@ function nativeAnswerChanges(act: Act, p: PathParam, dependencies: readonly Chan
     }
   };
   const value = (key: readonly unknown[], data: unknown): void => { changes.push({ value: { key, data } }); };
+  // Transfer routes name their source, not the collection or accepted destination.
+  // Explicit source-view hints remain scoped; missing inventory projections keep their own readers.
+  const copiedKind = parts[0] === 'chats' ? 'chat' : KINDS[parts[0] ?? ''];
+  const operation = parts.length === 3 ? parts[2] : parts.length === 4 && parts[0] === 'skills' && parts[2] === 'draft' ? parts[3] : undefined;
+  const moved = operation === 'move-out';
+  const transferred = act.method === 'POST' && (operation === 'duplicate' || moved);
+  if (transferred && copiedKind !== undefined && record(answer) && answer.projection === 'receipt'
+    && answer.kind === copiedKind && (typeof answer.id === 'string' && answer.id !== '' || moved && typeof answer.object_id === 'string' && answer.object_id === parts[1])) {
+    const inventories = dependencies.filter((change): change is Stale => 'key' in change);
+    // The source and each inventory have independent suppliers; one repair selects one shown query.
+    const repairs = inventories.map((hint): Change => ({ missing: [hint], cancelPending: true }));
+    return [...(moved ? dependencies.filter((change) => !('key' in change)) : []), ...repairs];
+  }
+  if (act.method === 'POST' && parts[0] === 'environments' && parts[1] !== undefined
+    && parts[2] === 'mcp' && parts.length === 4 && (parts[3] === 'imports' || parts[3] === 'servers')) {
+    // The nested writer returns a server, never its parent Environment. Restricted receipts
+    // contain no stored server view; only an already loaded parent MCP page may be retaken.
+    if (record(answer) && record(answer.access) && record(answer.spec)) put('mcp_server', answer, true);
+    changes.push({ missing: [{ key: ['environment-mcp', parts[1]], exact: true }], cancelPending: true });
+    return changes;
+  }
   if (act.method==='POST' && parts[0]==='threads' && parts[2]==='calls' && parts[3]==='recovery' && record(answer) && 'recovery' in answer) {
     return [{value:{key:['call-recovery',p('id')],data:answer}},...dependencies.filter((change)=>'feed' in change)];
   }

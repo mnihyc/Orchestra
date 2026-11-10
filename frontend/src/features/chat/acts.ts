@@ -10,7 +10,7 @@
  */
 import { create } from 'zustand';
 
-import { ApiError } from '@/api/client';
+import { ApiError, ReceiptAcknowledged } from '@/api/client';
 import { deleteMessage, editMessage, markRead, pin as pinMessage, react as reactTo, sendMessage } from '@/api/chats';
 import type { ChatMentionName, ChatMessage, ChatPart, UserRef } from '@/generated/api-types';
 import { NetworkError, newActKey, retryPause, READ_RETRY_PAUSES_MS } from '@/lib/requests';
@@ -52,6 +52,13 @@ async function waiting<Result>(messageId: string, act: () => Promise<Result>): P
 export function failed(title: string, error: unknown): void {
   const { locale, timeZone } = useAppearance.getState();
   toast({ tone: 'danger', title, description: errorText(error, i18n.t.bind(i18n), { locale, timeZone }).message });
+}
+
+/** Accepted work has no replacement row here; its ordinary feed supplies that content. */
+export function acknowledgeReceipt(error: unknown): boolean {
+  if (!(error instanceof ReceiptAcknowledged)) return false;
+  toast({ tone: 'info', title: i18n.t('ui.receipt.title'), description: i18n.t('ui.receipt.accepted') });
+  return true;
 }
 
 // ---------------------------------------------------------------- sending
@@ -114,6 +121,7 @@ export async function edit(chatId: string, messageId: string, parts: ChatPart[])
     chatWriter.own(chatId, changed);
     return true;
   } catch (error) {
+    if (acknowledgeReceipt(error)) return true;
     failed(i18n.t('chat.failed.edit'), error);
     return false;
   }
@@ -125,6 +133,7 @@ export async function remove(chatId: string, messageId: string): Promise<boolean
     chatWriter.own(chatId, changed);
     return true;
   } catch (error) {
+    if (acknowledgeReceipt(error)) return true;
     failed(i18n.t('chat.failed.delete'), error);
     return false;
   }
@@ -135,6 +144,7 @@ export async function pin(chatId: string, messageId: string, on: boolean): Promi
     const changed = await waiting(messageId, () => pinMessage(chatId, messageId, on));
     chatWriter.own(chatId, changed);
   } catch (error) {
+    if (acknowledgeReceipt(error)) return;
     failed(i18n.t(on ? 'chat.failed.pin' : 'chat.failed.unpin'), error);
   }
 }
@@ -170,6 +180,9 @@ export async function toggleReaction(chatId: string, message: ChatMessage, emoji
   try {
     chatWriter.own(chatId, await reactTo(chatId, message.id, emoji, on));
   } catch (error) {
+    // This person's optimistic reaction was accepted. A bounded receipt cannot
+    // replace the message, and must not undo the act or offer to send it again.
+    if (acknowledgeReceipt(error)) return;
     chatWriter.unshown(chatId, shown, message);
     failed(i18n.t('chat.failed.react'), error);
   }

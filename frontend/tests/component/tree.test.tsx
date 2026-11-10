@@ -1,6 +1,6 @@
 /** A tree of hundreds of rows: a row whose thing did not change is not drawn again, and opening a row draws the rows it adds and not the rows after them. */
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import { Tree, type TreeRow } from '@/ui/Tree';
 
@@ -14,6 +14,19 @@ const GROUPS = 10;
 const IN_GROUP = 30;
 /** The group the tests close and open in the middle, and the one after it. */
 const MIDDLE = GROUPS / 2;
+
+it('selects a single picker row by press, Enter and Space while links and locked rows keep their own acts', () => {
+  const picked = vi.fn<(row: TreeRow<Thing>) => void>(), opened = vi.fn();
+  const rows: TreeRow<Thing>[] = ['open', 'locked'].map((id) => ({ id, item: { name: id, mark: 0 }, parentId: null, depth: 0, expandable: false, expanded: false, tick: false, tickLocked: id === 'locked' }));
+  render(<Tree flat label="Pick one" rows={rows} onExpandedChange={() => undefined} onPick={picked} nameOf={(item) => item.name}
+    renderRow={(row) => <a href="#preview" onClick={(event) => { event.preventDefault(); opened(); }}>{row.item.name}</a>} />);
+  const open = screen.getByRole('treeitem', { name: 'open' }), locked = screen.getByRole('treeitem', { name: 'locked' });
+  fireEvent.click(screen.getByRole('link', { name: 'open' })); expect(opened).toHaveBeenCalledOnce(); expect(picked).not.toHaveBeenCalled();
+  fireEvent.click(open); fireEvent.keyDown(open, { key: 'Enter' }); fireEvent.keyDown(open, { key: ' ' });
+  expect(picked.mock.calls.map(([row]) => row.id)).toEqual(['open', 'open', 'open']);
+  fireEvent.click(locked); fireEvent.keyDown(locked, { key: 'Enter' }); fireEvent.keyDown(locked, { key: ' ' });
+  expect(picked).toHaveBeenCalledTimes(3);
+});
 
 /** The things a tree is of, the same object for a row until its mark changes, as the tree of the left bar keeps them. */
 class Things {

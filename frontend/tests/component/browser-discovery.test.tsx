@@ -60,7 +60,7 @@ function reply(data: unknown): Reply { return { data, response: new Response(nul
 function tools() { return screen.getByRole('navigation', { name: i18n.t('resourceDetails.layout.tools') }); }
 function expectNavigation() {
   const navigation = tools();
-  for (const label of ['mcpServers.title', 'views.terminal.title', 'ports.title', 'browser.tab', 'vnc.tab'] as const)
+  for (const label of ['resourceDetails.layout.tools', 'views.terminal.title', 'ports.title', 'browser.tab', 'vnc.tab'] as const)
     expect(within(navigation).getByRole('link', { name: i18n.t(label) })).toBeVisible();
   expect(screen.getByRole('heading', { level: 1, name: environment.name })).toBeVisible();
 }

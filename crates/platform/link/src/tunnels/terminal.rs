@@ -55,20 +55,59 @@ pub enum ApiOut {
     },
 }
 
+#[cfg(feature = "test-observers")]
+impl ApiOut {
+    pub fn observed_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Text(frame) => orch_link_contract::frames::encode(frame.as_ref(), usize::MAX)
+                .ok()
+                .map(|text| text.len()),
+            Self::Data(data) => data.encode().ok().map(|bytes| bytes.len()),
+            Self::Datagram { machine, packet } => BackplanePortDatagram {
+                machine_id: *machine,
+                datagram: packet.frame.clone(),
+            }
+            .encode()
+            .ok()
+            .map(|bytes| bytes.len()),
+        }
+    }
+}
+
+#[inline]
+fn send(
+    out: &mpsc::UnboundedSender<ApiOut>,
+    item: ApiOut,
+    #[cfg(feature = "test-observers")] observed: Option<&Arc<crate::test_observers::QueueGauge>>,
+) -> Result<(), mpsc::error::SendError<ApiOut>> {
+    #[cfg(feature = "test-observers")]
+    if let Some(observed) = observed {
+        let bytes = item.observed_bytes();
+        return observed.send(out, item, bytes);
+    }
+    out.send(item)
+}
+
 struct BackplaneWire {
     machine: Id,
     out: mpsc::UnboundedSender<ApiOut>,
     frame_bytes: usize,
+    #[cfg(feature = "test-observers")]
+    observed: Option<Arc<crate::test_observers::QueueGauge>>,
 }
 
 impl Wire for BackplaneWire {
     fn datagram(&self, packet: Datagram) -> bool {
-        self.out
-            .send(ApiOut::Datagram {
+        send(
+            &self.out,
+            ApiOut::Datagram {
                 machine: self.machine,
                 packet,
-            })
-            .is_ok()
+            },
+            #[cfg(feature = "test-observers")]
+            self.observed.as_ref(),
+        )
+        .is_ok()
     }
     fn control(&self, channel: u32, frame: ChannelFrame) -> bool {
         let machine_id = self.machine;
@@ -105,18 +144,28 @@ impl Wire for BackplaneWire {
             // A terminal is never resumed, so nothing is acknowledged.
             ChannelFrame::Ack(_) => return true,
         };
-        self.out.send(ApiOut::Text(Box::new(text))).is_ok()
+        send(
+            &self.out,
+            ApiOut::Text(Box::new(text)),
+            #[cfg(feature = "test-observers")]
+            self.observed.as_ref(),
+        )
+        .is_ok()
     }
 
     fn data(&self, channel: u32, offset: u64, payload: Bytes) -> bool {
-        self.out
-            .send(ApiOut::Data(BackplaneData {
+        send(
+            &self.out,
+            ApiOut::Data(BackplaneData {
                 machine_id: self.machine,
                 channel,
                 offset,
                 payload,
-            }))
-            .is_ok()
+            }),
+            #[cfg(feature = "test-observers")]
+            self.observed.as_ref(),
+        )
+        .is_ok()
     }
 
     fn data_frame_bytes(&self) -> usize {
@@ -144,6 +193,8 @@ pub struct TerminalHub {
     frame_bytes: usize,
     ports: orch_link_contract::version::PortLimits,
     gauge: Option<Arc<Gauge>>,
+    #[cfg(feature = "test-observers")]
+    observed: Option<Arc<crate::test_observers::QueueGauge>>,
 }
 
 impl std::fmt::Debug for TerminalHub {
@@ -203,6 +254,8 @@ impl TerminalHub {
             frame_bytes: orch_link_contract::version::MAX_FRAME_BYTES as usize,
             ports: orch_link_contract::version::PortLimits::SHIPPED,
             gauge: None,
+            #[cfg(feature = "test-observers")]
+            observed: None,
         }
     }
 
@@ -217,6 +270,12 @@ impl TerminalHub {
     #[must_use]
     pub fn with_gauge(mut self, gauge: Arc<Gauge>) -> Self {
         self.gauge = Some(gauge);
+        self
+    }
+
+    #[cfg(feature = "test-observers")]
+    pub fn with_observer(mut self, observed: Arc<crate::test_observers::QueueGauge>) -> Self {
+        self.observed = Some(observed);
         self
     }
 
@@ -273,13 +332,16 @@ impl TerminalHub {
                 .insert((machine, number), (Arc::clone(&channel), answer_tx));
             number
         };
-        let sent = self
-            .out
-            .send(ApiOut::Text(Box::new(BackplaneFrame::TunOpen(TunOpen {
+        let sent = send(
+            &self.out,
+            ApiOut::Text(Box::new(BackplaneFrame::TunOpen(TunOpen {
                 machine_id: machine,
                 channel: number,
                 ticket: ticket.to_owned(),
-            }))));
+            }))),
+            #[cfg(feature = "test-observers")]
+            self.observed.as_ref(),
+        );
         if sent.is_err() {
             self.forget(machine, number);
             return Err(OpenError::NoSession);
@@ -291,6 +353,8 @@ impl TerminalHub {
                     machine,
                     out: self.out.clone(),
                     frame_bytes: self.frame_bytes,
+                    #[cfg(feature = "test-observers")]
+                    observed: self.observed.clone(),
                 });
                 lock(&channel).attach(wire, number, cid);
                 Ok(Tunnel::new(channel, events))
@@ -399,5 +463,42 @@ impl TerminalHub {
                 lock(&channel).on_datagram(packet);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-observers"))]
+#[allow(clippy::unwrap_used, reason = "observer controls fail by panicking")]
+mod observer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn actual_terminal_wire_tracks_queued_bytes_handoff_and_closed_receiver_failure() {
+        let (out, mut received) = mpsc::unbounded_channel();
+        let queue = crate::test_observers::QueueGauge::new("api.terminal_out");
+        let lifetime = queue.receiver();
+        let wire = BackplaneWire {
+            machine: orch_types::new_id(),
+            out,
+            frame_bytes: orch_link_contract::version::MAX_FRAME_BYTES as usize,
+            observed: Some(Arc::clone(&queue)),
+        };
+        assert!(wire.data(7, 0, Bytes::from_static(b"actual queued bytes")));
+        assert!(wire.control(7, ChannelFrame::Eof));
+        let queued = queue.snapshot();
+        assert_eq!(queued.queued_messages, 2);
+        assert!(queued.queued_payload_bytes > 18);
+        for _ in 0..2 {
+            let item = received.recv().await.unwrap();
+            lifetime.selected(item.observed_bytes()).complete();
+        }
+        assert_eq!(
+            (queue.snapshot().sent, queue.snapshot().queued_messages),
+            (2, 0)
+        );
+        drop(received);
+        assert!(!wire.data(7, 18, Bytes::from_static(b"refused")));
+        assert_eq!(queue.snapshot().failed_enqueues, 1);
+        drop(lifetime);
+        assert!(queue.snapshot().receiver_closed);
     }
 }

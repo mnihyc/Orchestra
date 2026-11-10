@@ -73,7 +73,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     }
     if (width === 400) await page.locator('[data-navigation-rail]').getByRole('link', { name: /^(Home|主页)$/ }).click();
     else await page.getByRole('navigation', { name: /^(Orgs and your own places|组织和个人入口)$/ }).locator('a[href="/org/acme"]').click();
-    await expect(page).toHaveURL(/\/org\/acme\/?$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
   });
 

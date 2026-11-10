@@ -359,7 +359,7 @@ test.describe('Organizations', () => {
     await expect(row(page, /Old Labs/)).toContainText('Archived');
 
     await row(page, /Acme/).getByRole('link', { name: 'Open' }).click();
-    await expect(page).toHaveURL(/\/org\/acme$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   });
 
   test("lists team orgs before people's own, and keeps one kind in the address", async ({ page }) => {

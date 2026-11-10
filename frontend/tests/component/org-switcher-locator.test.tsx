@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import type * as Router from '@tanstack/react-router';
 import { afterEach, expect, it, vi } from 'vitest';
 import { LeaveDrawer, OrgSwitcher } from '@/features/navigation/OrgSwitcher';
+import { i18n, setLocale } from '@/i18n';
 import { org, userRef, me } from '../doubles/fixtures';
 import { show } from './support';
 
@@ -13,7 +14,24 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   useNavigate: () => calls.navigate,
   Link: ({ to, params, children, ...props }: { to: string; params: { slug: string }; children: ReactNode }) => <a {...props} href={to.replace('$slug', params.slug)}>{children}</a>,
 }));
-afterEach(() => { cleanup(); vi.clearAllMocks(); });
+afterEach(async () => { cleanup(); vi.clearAllMocks(); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`distinguishes loading organizations from an empty list and keeps a loaded selection in ${locale}`, async () => {
+    await setLocale(locale);
+    const owner = userRef(me(1, 'ada', 'Ada'));
+    const current = org('acme', 'acme', 'Acme', owner);
+    const view = show(<OrgSwitcher orgs={[]} current={null} loading />);
+    expect(screen.getByRole('combobox')).toHaveValue(i18n.t('common.loading'));
+    expect(screen.getByRole('combobox')).toHaveAttribute('placeholder', i18n.t('common.loading'));
+    view.rerender(<OrgSwitcher orgs={[current]} current={current} loading />);
+    expect(screen.getByRole('combobox')).toHaveValue('Acme');
+    expect(screen.getByRole('link', { name: /Acme/ })).toHaveAttribute('href', '/org/acme');
+    view.rerender(<OrgSwitcher orgs={[]} current={null} />);
+    expect(screen.getByRole('combobox')).toHaveValue('');
+    expect(screen.getByRole('combobox')).toHaveAttribute('placeholder', i18n.t('navigation.chooseOrg'));
+  });
+}
 
 it('finds one of twenty organizations in one field and keeps a direct home link', async () => {
   const owner = userRef(me(1, 'ada', 'Ada'));
@@ -32,3 +50,19 @@ it('finds one of twenty organizations in one field and keeps a direct home link'
   expect(calls.leave).toHaveBeenCalledTimes(1);
   expect(screen.getAllByRole('combobox')).toHaveLength(1);
 });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`beside a rail the head is the org in view and its home, with no second way to another org, in ${locale}`, async () => {
+    await setLocale(locale);
+    const owner = userRef(me(1, 'ada', 'Ada'));
+    const current = org('acme', 'acme', 'Acme', owner);
+    const other = org('zeta', 'zeta', 'Zeta Labs', owner);
+    show(<OrgSwitcher orgs={[current, other]} current={current} choose={false} />);
+    const home = screen.getByRole('link', { name: 'Acme' });
+    expect(home).toHaveAttribute('href', '/org/acme');
+    expect(home).toHaveAttribute('title', i18n.t('workbench.orgActions.homeName', { name: 'Acme' }));
+    expect(screen.getAllByRole('link')).toHaveLength(1);
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('navigation.otherPlaces') })).toBeNull();
+  });
+}

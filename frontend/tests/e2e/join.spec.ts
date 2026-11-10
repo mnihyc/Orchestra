@@ -33,7 +33,7 @@ test('an invitation says what it is before anything is asked, and a stranger reg
   await expect(page.getByText('You are in Acme.')).toBeVisible();
   await expect(page.getByText('You also have an org of your own, for work that is only yours.')).toBeVisible();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('a personal link asks for the address it was sent to, and refuses another', async ({ page }) => {
@@ -157,7 +157,7 @@ test('somebody who is signed in accepts an invitation where it is shown', async 
   await expect(page.getByText('Signed in as Margaret Hamilton.')).toBeVisible();
   await page.getByRole('button', { name: 'Accept invitation' }).click();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('asking for a reset always answers the same, and the link sets a new password that then gets in', async ({ page }) => {

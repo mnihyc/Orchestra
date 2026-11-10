@@ -1,3 +1,4 @@
+import { adoptSummaryOpening } from '@/api/summarySnapshots';
 /** API client for Chats, messages, forwarding, and sharing with agents and taking it back.
  *
  * What the chat screens ask of the API: the chats of a root org and of one node, a chat with its latest
@@ -10,11 +11,13 @@
 import { infiniteQueryOptions, queryOptions, type QueryClient } from '@tanstack/react-query';
 
 import { api, client, done, ok, repeatable } from '@/api/client';
+import type { Chat, GroupCreateFields, GroupUpdateBody } from '@/api/chat-contract';
 import { queryClient } from '@/api/query';
 import { beginPeopleRead } from '@/api/peopleChanges';
+import { nodeKey } from '@/api/nodes';
+import { beginDefaultsOpening, hasUnattemptedPeopleHint, seedNodeDefaults, type DefaultsDemand } from '@/api/defaultsOpening';
 import { chatWriter, useChatStore } from '@/realtime/stores/chat';
 import type {
-  Chat,
   ChatDraft,
   ChatDraftSetBody,
   ChatLevel,
@@ -99,28 +102,44 @@ function seedChatDraft(cache: QueryClient, opening: ChatOpening): void {
 }
 
 /** One independently admitted panel opening supplies scopes and the selected conversation. */
-export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: string | null) => queryOptions({
+export const nodeChatOpeningQuery = (nodeId: string, scope: string, chatId: string | null, defaults?: DefaultsDemand, ownsDefaults?: () => boolean) => queryOptions({
   queryKey: ['node-chat-opening', nodeId] as const,
   queryFn: async ({ signal, client: cache, queryKey }): Promise<NodeChatOpening> => {
+    const state = cache.getQueryState(queryKey);
+    // Later repair/retry owns only Chat. Existing editor queries retain their actual live demand.
+    const first = (state?.dataUpdateCount ?? 0) === 0 && (state?.errorUpdateCount ?? 0) === 0;
+    const requestedDefaults = first && defaults?.defaults === true ? defaults : ownsDefaults?.() === true && hasUnattemptedPeopleHint(cache, queryKey)
+      ? { defaults: true, ...(defaults?.settings_only === true ? { settings_only: true } : {}), secret_names: false, default_provider_name: false, embeddings_provider_name: false } : undefined;
+    const read = beginDefaultsOpening(cache, queryKey, nodeId, signal, ownsDefaults ?? (() => requestedDefaults?.defaults === true), requestedDefaults?.defaults === true);
     const checked = beginPeopleRead(cache, queryKey);
+    if (requestedDefaults?.defaults === true) cache.getQueryCache().build(cache, cache.defaultQueryOptions({ queryKey: nodeKey(nodeId) }));
+    const checkedNode = requestedDefaults?.defaults === true ? beginPeopleRead(cache, nodeKey(nodeId)) : null;
     try {
-    const reader = client.session.getState().readerVersion;
+    const { userId, readerVersion: reader } = client.session.getState();
     const preferred: NodeKind | undefined = ['org', 'project', 'topic', 'thread'].includes(scope) ? scope as NodeKind : undefined;
     const data = await ok(api.GET('/nodes/{id}/chat-opening', {
-      params: { path: { id: nodeId }, query: { scope: preferred, ...(chatId === null ? {} : { chat_id: chatId }), limit: MESSAGES_PAGE } }, signal,
+      params: { path: { id: nodeId }, query: { scope: preferred, ...(chatId === null ? {} : { chat_id: chatId }), limit: MESSAGES_PAGE,
+        ...(requestedDefaults?.defaults === true ? requestedDefaults : {}) } }, signal,
     }));
     signal.throwIfAborted();
-    if (client.session.getState().readerVersion !== reader) throw new DOMException('The chat reader changed', 'AbortError');
+    if (client.session.getState().readerVersion !== reader || client.session.getState().userId !== userId) throw new DOMException('The chat reader changed', 'AbortError');
+    if (requestedDefaults !== undefined && (ownsDefaults === undefined || ownsDefaults()) && seedNodeDefaults(cache, nodeId, data.defaults, requestedDefaults, `${userId ?? ''}:${reader ?? 0}`)) {
+      checkedNode?.accept(); if (read !== undefined) read.projection = data.defaults ?? undefined;
+    }
+    else checkedNode?.cancel();
     if (data.opening !== null) {
       seedChatDraft(cache, data.opening);
       const sync = data.opening.sync;
       const held = useChatStore.getState().byChat.get(sync.chat.id);
       // A simultaneous live frame may already have advanced the admitted conversation.
-      if (held === undefined || held.lastSeq <= sync.seq) chatWriter.reset(sync.chat.id, sync.chat, sync.messages, sync.has_older, sync.seq);
+      if (held === undefined || held.lastSeq <= sync.seq) {
+        adoptSummaryOpening(cache, data);
+        chatWriter.reset(sync.chat.id, sync.chat, sync.messages, sync.has_older, sync.seq);
+      }
     }
     checked.accept();
     return data;
-    } catch (error) { checked.cancel(); throw error; }
+    } catch (error) { checked.cancel(); checkedNode?.cancel(); throw error; }
   },
   retry: false,
 });
@@ -307,7 +326,7 @@ export function discardDraft(chatId: string): Promise<void> {
  * Opens the direct chat with one person (the answer is the chat that exists already when it does), or
  * makes a group of several, with a name if one is given. `key` is made once, when the person acts.
  */
-export function createChat(orgId: string, body: OrgChatCreateBody, key: string): Promise<Chat> {
+export function createChat(orgId: string, body: OrgChatCreateBody & GroupCreateFields, key: string): Promise<Chat> {
   return ok(api.POST('/orgs/{id}/chats', { params: { path: { id: orgId } }, body, ...repeatable(key) }));
 }
 
@@ -318,6 +337,21 @@ export function renameChat(chatId: string, name: string | null): Promise<Chat> {
 
 export function addMember(chatId: string, userId: string): Promise<Chat> {
   return ok(api.PUT('/chats/{id}/members/{user_id}', { params: { path: { id: chatId, user_id: userId } } }));
+}
+
+/** Current group controls share the native group patch. */
+export function updateGroup(chatId: string, body: GroupUpdateBody): Promise<Chat> {
+  return ok(api.PATCH('/chats/{id}', { params: { path: { id: chatId } }, body }));
+}
+
+/** Hand over the stored manager role; historic authorship supplies no authority. */
+export function setGroupManager(chatId: string, userId: string, manager: boolean): Promise<Chat> {
+  return ok(api.PUT('/chats/{id}/members/{user_id}/manager', { params: { path: { id: chatId, user_id: userId } }, body: { manager } }));
+}
+
+/** Join the actual readable public group, with no membership or role inferred locally. */
+export function joinGroup(chatId: string): Promise<void> {
+  return done(api.POST('/chats/{id}/join', { params: { path: { id: chatId } } }));
 }
 
 /** Takes a person out of a group, or lets the caller leave it. */

@@ -736,7 +736,18 @@ export const threadWriter = {
    * put over the row held, whatever its sequence, and the next row from the server replaces it.
    */
   patch(threadId: ThreadReadTarget, change: (thread: Thread) => Thread): void {
-    update(threadId, (view) => (view.thread === null ? view : { ...view, thread: change(view.thread) }));
+    // The row is the thread's own, whichever read of it a screen holds (a tab's scoped read is kept apart from the plain
+    // one): every held read of the thread takes the person's change.
+    const id = threadReadTarget(threadId).threadId;
+    useThreadStore.setState((state) => {
+      let byThread: Map<string, ThreadView> | null = null;
+      for (const [key, view] of state.byThread) {
+        if (view.ref?.threadId !== id || view.thread === null) continue;
+        byThread ??= new Map(state.byThread);
+        byThread.set(key, { ...view, thread: change(view.thread) });
+      }
+      return byThread === null ? state : { byThread };
+    });
   },
 
   /** A piece of growing text; it is added with the next frame. */

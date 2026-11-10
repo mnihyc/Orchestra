@@ -111,7 +111,7 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
 
       const providerBefore = calls.length;
       const setting = 'agent.default_provider_id';
-      await page.goto(`/project/${ACME.web}/settings?section=policies&setting=${setting}`);
+      await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=${setting}`);
       const field = page.locator(`[data-setting="${setting}"]`).getByRole('combobox', { name: english.settingRegistry.agent.default_provider_id.title, exact: true });
       await expect(field).toBeVisible();
       const current = await field.inputValue();

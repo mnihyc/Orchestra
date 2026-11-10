@@ -17,10 +17,11 @@ test('the short form of a place: what it is shared with, what that covers, and a
   await expect(dialog(page)).toContainText('Covers 3 topics and folders');
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
 
+  // What is shared is chosen first; a person staged then is offered the message that goes with naming them.
+  await reach(page, 'Place only');
+  await expect(dialog(page)).toContainText('Nothing inside Web is opened');
   await stage(page, 'Zoe Outsider', 'zoe');
   await expect(dialog(page).getByRole('checkbox', { name: /Send Zoe Outsider a message/ })).toBeVisible();
-  await reach(page, 'Only Web itself');
-  await expect(dialog(page)).toContainText('Nothing inside Web is opened');
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
 
   // The one hint of the application, opened beside what is shared.
@@ -73,7 +74,7 @@ test('a copy past the limit, with its size against the limit and the ways on', a
   const form = page.getByRole('dialog', { name: 'Share “Fix login” with agents' });
   await form.getByRole('combobox', { name: 'Whose agents' }).fill('Main');
   await page.getByRole('option', { name: /^Main thread/ }).first().click();
-  await form.getByRole('radio', { name: /Give a copy/ }).click();
+  await form.getByRole('radiogroup', { name: 'How it is shared' }).getByRole('radio', { name: 'Copy', exact: true }).click();
   await form.getByRole('button', { name: /Give a copy to/ }).click();
   await expect(form).toContainText('This copy is over the limit');
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
@@ -136,7 +137,7 @@ test('an environment’s page, its five rows by area and the list of who reaches
 
 test('a person from outside is staged with the ticks that go with naming them', async ({ page }) => {
   await shareAs(page, PEOPLE.ada, fixLogin, 'Fix login');
-  await reach(page, 'Only Fix login itself');
+  await reach(page, 'Place only');
   await stage(page, ZOE.name, 'zoe');
   await expect(dialog(page).getByRole('checkbox', { name: 'They may take it away as a file' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');

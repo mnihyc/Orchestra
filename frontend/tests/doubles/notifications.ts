@@ -214,12 +214,12 @@ export class NotificationWorld implements Part {
   }
 
   /** News that is no row: sent to every connection that follows a person's feed (or those of some people). */
-  announce(what: string, users?: readonly string[]): void {
+  announce(what: string, users?: readonly string[], facts: Record<string, unknown> = {}): void {
     if (what === 'approvals') {
       for (const username of users ?? this.world.people.keys()) this.world.users.tellAll({ what, summary: this.summary(username) }, [username]);
       return;
     }
-    this.world.users.tellAll({ what }, users);
+    this.world.users.tellAll({ what, ...facts }, users);
   }
 
   private list(person: Person, query: URLSearchParams): Answer {
@@ -752,7 +752,8 @@ export class NotificationWorld implements Part {
           link: null,
           label: typeof body.label === 'string' ? body.label : '@alice_c',
         });
-        this.announce('route', [user]);
+        // The server names the channel whose route changed, as a dialog waiting for this route listens for it.
+        this.announce('route', [user], { channel_id: def.id });
         return { status: 204 };
       }
       case '/channels': {

@@ -2,6 +2,7 @@
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { RUNS_ON } from '../doubles/fixtures.ts';
+import { signInForManagement } from '../e2e/admin-mode-support.ts';
 import { expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
 
 test.beforeEach(async () => {
@@ -43,7 +44,8 @@ test('every list has its row of kinds above it, the act of a row at its end and 
 });
 
 test('rows that are ticked show the acts they share, and the question that names them', async ({ page }) => {
-  await signIn(page);
+  // The system's own profiles are managed only as an admin.
+  await signInForManagement(page);
   await page.goto('/resources/agents');
   await page.getByRole('checkbox', { name: 'Select Codex', exact: true }).check();
   await page.getByRole('checkbox', { name: 'Select Scripted agent' }).check();
@@ -77,7 +79,7 @@ test('the Edit dialog of each kind, with what cannot be changed read only beside
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog', { name: title })).toBeHidden();
   };
-  await edit(`/resources/providers/${RUNS_ON.openAiKey}`, 'Edit OpenAI key');
+  // A provider has no Edit of its own: its parts are changed on its tabs, and it is renamed from its menu.
   await edit(`/resources/agents/${RUNS_ON.codexOnLaptop}`, 'Edit Codex on ada-laptop');
   await edit(`/resources/machines/${RUNS_ON.laptop}`, 'Edit ada-laptop');
   await edit(`/resources/environments/${RUNS_ON.workspace}`, 'Edit Workspace');
@@ -89,16 +91,18 @@ test('the Edit dialog of each kind, with what cannot be changed read only beside
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
+  // A host is edited on its Settings tab, which its Edit opens.
   await page.goto('/resources/hosts');
   await page.getByRole('link', { name: 'host-1', exact: true }).click();
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Edit host-1' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'Settings', exact: true })).toHaveAttribute('aria-selected', 'true');
   await expectAccessibleInBothThemes(page);
 });
 
 test('a hint opens the same card beside an option on a desktop and a phone', async ({ page }) => {
   await signIn(page);
-  await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
+  // The switches are in the environment's settings.
+  await page.goto(`/resources/environments/${RUNS_ON.workspace}?tab=controls`);
   await page.getByRole('button', { name: 'Help: Allow writing from outside' }).click();
   await expect(page.getByRole('dialog', { name: 'Allow writing from outside' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -107,15 +111,16 @@ test('a hint opens the same card beside an option on a desktop and a phone', asy
   // Inside a dialog, where the hint stands over the dialog's own layer.
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'Edit Workspace' });
-  await dialog.getByRole('button', { name: 'Help: Allow a terminal' }).click();
-  await expect(page.getByRole('dialog', { name: 'Allow a terminal' })).toBeVisible();
+  // One hint is drawn once on a screen: the terminal's shares the writing hint's entry, so the dialog's own is the home's.
+  await dialog.getByRole('button', { name: 'Help: Workspace and home' }).click();
+  await expect(page.getByRole('dialog', { name: 'Workspace and home' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
   await page.keyboard.press('Escape');
 
   await page.setViewportSize({ width: 390, height: 800 });
-  await page.getByRole('button', { name: 'Help: Allow a terminal' }).click();
-  await expect(page.getByRole('dialog', { name: 'Allow a terminal' })).toBeVisible();
+  await page.getByRole('button', { name: 'Help: Allow writing from outside' }).click();
+  await expect(page.getByRole('dialog', { name: 'Allow writing from outside' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -157,13 +162,19 @@ test('on a phone the lists and the pages keep the way back, the acts and the men
   }
 });
 
-test('somebody who may only read is offered the acts they may take, and no box to tick a row', async ({ page }) => {
+test('somebody who may only read is offered the acts they may take, and no act on ticked rows that they may not take', async ({ page }) => {
   await signIn(page, PEOPLE.dora);
   await page.goto('/resources/providers?view=usable');
   const row = rowOf(page, 'Providers', 'Team Anthropic');
   await expect(row).toBeVisible();
-  await expect(page.getByRole('checkbox', { name: /^Select / })).toHaveCount(0);
+  // Every list lets its rows be ticked and counted; only the acts every ticked row permits are offered.
+  const box = row.getByRole('checkbox', { name: 'Select Team Anthropic' });
+  await box.check();
+  const bar = page.getByRole('toolbar', { name: 'Acts on the ticked rows' });
+  await expect(bar).toBeVisible();
+  for (const act of ['Disable…', 'Delete…']) await expect(bar.getByRole('button', { name: act })).toHaveCount(0);
   await expectAccessibleInBothThemes(page);
+  await box.uncheck();
   await row.click({ button: 'right' });
   await expect(page.getByRole('menu', { name: /^Actions for Team Anthropic(?: · .+)?$/ })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="menu"]');

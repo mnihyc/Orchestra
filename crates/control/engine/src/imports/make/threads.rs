@@ -894,6 +894,7 @@ impl History<'_, '_> {
             .collect();
         let mut known = rows::present_items(tx, thread, &wanted).await?;
         let count = i64::try_from(ready.len()).unwrap_or(i64::MAX);
+        self.batch.live()?;
         let Some(block) = rows::take_seqs(tx, thread, count).await? else {
             return refuse("the thread is gone");
         };
@@ -1081,7 +1082,12 @@ fn origin_of(batch: &Batch<'_>, thread: Id, item: &Ready) -> OriginRow {
 
 /// Makes the node of a thread under its topic: its page and owner, its chat, its description and its times, its place in the feeds
 /// of the tree, the line of the audit, and where it came from.
-async fn make_node(tx: &mut Tx, batch: &Batch<'_>, object: &Object) -> Result<(), MakeError> {
+async fn make_node(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    operation_cut: &mut Option<crate::imports::operation::Cut>,
+) -> Result<(), MakeError> {
     let importer = batch.principal.user();
     let thread = object.target;
     let mut name = cut(&object.object.name, NAME_MAX);
@@ -1104,6 +1110,7 @@ async fn make_node(tx: &mut Tx, batch: &Batch<'_>, object: &Object) -> Result<()
         .object
         .created_at
         .map_or(batch.now, |created| created.get());
+    batch.cut(operation_cut)?;
     if !threads::insert_thread(tx, thread, object.lies_in, &name, owner, at).await? {
         return refuse("the topic it lies in is not there any more");
     }
@@ -1168,13 +1175,28 @@ pub(super) async fn make_thread(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
+    make_thread_ready(tx, batch, object, None).await
+}
+pub(super) async fn make_thread_ready(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    prepared: Option<Option<std::sync::Arc<Record>>>,
+) -> Result<Made, MakeError> {
     let thread = object.target;
     let merging = object.action == ImportAction::Replace;
     // What it brings is copied and checked against its hash before anything is written: a record that is damaged makes nothing.
-    let record = if object.bare {
-        None
-    } else {
-        Some(Record::open(batch, object, "thread").await?)
+    let record = match prepared {
+        Some(record) => record,
+        None => {
+            if object.bare {
+                None
+            } else {
+                Some(std::sync::Arc::new(
+                    Record::open(batch, object, "thread").await?,
+                ))
+            }
+        }
     };
     let held = rows::held(tx, thread).await?;
     match held {
@@ -1183,14 +1205,22 @@ pub(super) async fn make_thread(
         None if merging => return refuse("the thread that was there is gone"),
         _ => {}
     }
+    let mut operation_cut = batch.before(tx, object).await?;
+    let current_principal = operation_cut.as_ref().map(|cut| cut.principal.clone());
+    let current_batch = current_principal
+        .as_ref()
+        .map(|principal| batch.with_principal(principal));
+    let batch = current_batch.as_ref().unwrap_or(batch);
     let created = held.is_none();
     if created {
-        make_node(tx, batch, object).await?;
+        make_node(tx, batch, object, &mut operation_cut).await?;
     } else {
         // A thread that is there: the one an earlier import made, which a retry finds, or one that takes this history in.
+        batch.cut(&mut operation_cut)?;
         note_origin(tx, batch, object, thread, Some(object.lies_in), !merging).await?;
     }
     // Two numbers of the thread's sequence, for its state and its segment; each page of items takes the numbers it needs.
+    batch.live()?;
     let Some(first) = rows::take_seqs(tx, thread, SEQS_BESIDES_ITEMS).await? else {
         return refuse("the thread is gone");
     };
@@ -1234,6 +1264,7 @@ pub(super) async fn take_back(
     thread: Id,
     principal: &orch_authz::Principal,
     limit: i64,
+    before: impl FnOnce() -> Result<(), MakeError>,
 ) -> Result<Taken, MakeError> {
     // What lies in a place that was deleted goes and comes back with it.
     if !place_is_live(tx, thread).await? {
@@ -1254,6 +1285,7 @@ pub(super) async fn take_back(
     if !allowed {
         return Ok(Taken::Refused);
     }
+    before()?;
     let looked = rows::take_back_items(tx, import, thread, limit).await?;
     Ok(if looked == 0 {
         Taken::Nothing

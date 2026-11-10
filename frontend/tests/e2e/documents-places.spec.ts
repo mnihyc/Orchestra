@@ -34,10 +34,19 @@ test('a document named as its place README is shown there and can be cleared fro
 test('a discussion is begun on some words, answered and resolved, and is then listed under Resolved', async ({ page }) => {
   await signIn(page);
   await openDocument(page, DOCS.plan);
-  // The first word is selected; the bar over it offers Comment, and Comment opens the panel with the words quoted.
+  // EN: Select Ship → Comment → answer → Resolve → Resolved → inspect the resolver's UserChip.
+  // 中文：选择 Ship → 评论 → 回复 → 解决 → 已解决 → 核对解决者的用户标签。
   await lineOf(page, 'Ship the redirect fix').click();
-  await page.keyboard.press('Home');
-  await page.keyboard.press('Control+Shift+ArrowRight');
+  await lineOf(page, 'Ship the redirect fix').evaluate((element) => {
+    const text = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node = text.nextNode();
+    while (node !== null && !node.textContent?.includes('Ship')) node = text.nextNode();
+    if (node === null) throw new Error('The visible first word is required');
+    const offset = node.textContent?.indexOf('Ship') ?? -1;
+    const range = document.createRange(); range.setStart(node, offset); range.setEnd(node, offset + 4);
+    const selected = document.getSelection(); selected?.removeAllRanges(); selected?.addRange(range);
+  });
+  await expect.poll(() => page.evaluate(() => document.getSelection()?.toString())).toBe('Ship');
   await page.getByRole('toolbar', { name: 'Text formatting' }).getByRole('button', { name: 'Comment' }).click();
   const panel = page.getByRole('region', { name: 'Comments on this document' });
   const compose = panel.getByRole('region', { name: 'New discussion' });
@@ -61,7 +70,9 @@ test('a discussion is begun on some words, answered and resolved, and is then li
   await expect(editorOf(page).locator('.oc-commented')).toHaveCount(0);
   await page.getByRole('combobox', { name: 'Which discussions' }).click();
   await page.getByRole('option', { name: 'Resolved' }).click();
-  await expect(panel.getByRole('region', { name: 'Discussion' })).toContainText('Resolved by Ada Lovelace');
+  const resolvedBy = panel.getByRole('region', { name: 'Discussion' }).locator('p').filter({ hasText: /^Resolved by / });
+  await expect(resolvedBy).toBeVisible();
+  await expect(resolvedBy.getByText('Ada Lovelace', { exact: true })).toBeVisible();
   await panel.getByRole('button', { name: 'Open again' }).click();
   await expect(panel.getByText('No resolved discussions')).toBeVisible();
 
@@ -92,6 +103,8 @@ test('a block comment keeps its target when the narrow workbench opens Comments'
 });
 
 test('a person choice card remains inside the viewport and outside its list after resize', async ({ page }) => {
+  // EN: Mention people → resize → keep the list → Right Arrow → bounded person card outside the list.
+  // 中文：提及人员 → 缩小窗口 → 保留候选列表 → 右方向键 → 在列表外打开有边界的人员卡片。
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
   await openDocument(page, DOCS.plan);
@@ -103,6 +116,11 @@ test('a person choice card remains inside the viewport and outside its list afte
   const card = page.locator('[data-inspection-card]:visible').first();
   await expect(card).toBeVisible();
   await page.setViewportSize({ width: 400, height: 900 });
+  // Narrow choices keep the list usable; Right Arrow explicitly keeps its detail card.
+  await expect(card).toHaveCount(0);
+  await expect(list).toBeVisible();
+  await page.keyboard.press('ArrowRight');
+  await expect(card).toBeVisible();
   await expect.poll(async () => {
     const box = await card.boundingBox(), choices = await list.boundingBox();
     if (box === null || choices === null) return false;
@@ -209,13 +227,15 @@ test('what others changed since the reader last looked is told under the title, 
 });
 
 test('a document is moved beside another place, and each list shows it where it now is', async ({ page }) => {
+  // EN: Document → Move to → exact Acme / Research / Web / Upgrade deps → verify both containing lists.
+  // 中文：文档 → 移动到 → 精确选择 Acme / Research / Web / Upgrade deps → 核对原位置与目标位置的列表。
   await signIn(page);
   await openDocument(page, DOCS.plan);
   await page.locator('[data-screen="document"]').getByRole('button', { name: /^Actions for / }).click();
   await page.getByRole('menuitem', { name: 'Move to…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Move to…', exact: true });
   await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Upgrade');
-  await page.getByRole('option', { name: /Upgrade deps/ }).click();
+  await page.getByRole('option', { name: 'Acme / Research / Web / Upgrade deps', exact: true }).click();
   await expect(dialog.getByText('Move keeps documents in their original organization.')).toBeVisible();
   await dialog.getByRole('button', { name: 'Move', exact: true }).click();
   await expect(page.getByText('Documents updated', { exact: true })).toBeVisible();

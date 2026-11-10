@@ -56,10 +56,11 @@ test('the list of keys asked from the tree is longer than a short window, scroll
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 
-  // In a tall window the same list fits, and its body is no stop.
-  await page.setViewportSize({ width: 1280, height: 1400 });
+  // In a tall window the same list fits, and its body is no stop; the table of keys keeps its own named scroller.
+  await page.setViewportSize({ width: 1280, height: 2400 });
   await tree(page).getByRole('treeitem', { name: /^Web/ }).focus();
   await page.keyboard.press('?');
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByRole('region')).toHaveCount(0);
+  await expect(dialog.getByRole('region', { name: 'Keyboard shortcuts' })).toHaveCount(0);
+  await expect(dialog.getByRole('region', { name: 'Keyboard bindings' })).toBeVisible();
 });

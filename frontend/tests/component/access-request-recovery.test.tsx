@@ -162,7 +162,7 @@ it('remembers an in-flight named request for its original reader after the reade
   await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
   act(() => client.session.setState({ status: 'signed_in', userId: 'reader-b', readerVersion: 112 }));
   expect(screen.getByRole('button', { name: i18n.t('access.request.send') })).toBeEnabled();
-  await act(async () => reply.resolve({ batch_id: 'batch', approvals: [approval] }));
+  await act(async () => { reply.resolve({ batch_id: 'batch', approvals: [approval] }); await reply.promise; });
   const key = (reader: string) => `orch.access.request.v2.${JSON.stringify([reader, 'release.use', 'thread-a', false])}`;
   await waitFor(() => expect(sessionStorage.getItem(key('reader-a'))).toBe('batch'));
   expect(sessionStorage.getItem(key('reader-b'))).toBeNull();
