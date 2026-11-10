@@ -22,6 +22,7 @@ export interface MessageActions {
   select: (message: ChatMessage) => void;
   copyText: (message: ChatMessage) => void;
   copyLink: (message: ChatMessage) => void;
+  copyReference?: (message: ChatMessage) => void;
   /** Scrolls to a message, loading the part of the chat it is in if it is not held. */
   jump: (messageId: string) => void;
 }

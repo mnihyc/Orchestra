@@ -5,6 +5,7 @@ keywords: 资源卡片, 检查, 选项, 提供方, 模型, 主机, 环境, 负�
 heading_id.检查选项: inspect-a-choice
 heading_id.结合来源阅读信息: read-facts-with-their-source
 heading_id.理解缺失信息和阻塞原因: understand-missing-or-blocked-facts
+summary: 查看资源和选项的报告数据、来源及不可用原因。
 ---
 
 # 查看资源卡片和选项
@@ -37,3 +38,5 @@ heading_id.理解缺失信息和阻塞原因: understand-missing-or-blocked-fact
 
 卡片只显示你有权读取的信息。看见名称不等于获得使用或管理权。不可用的选项保留
 原因。卡片里的启动、停止或回收沿用资源页面的权限检查和确认流程。
+
+共享行会说明正在检查或详情不可用；重试只重新读取失败的数据。受限或只读不表示共享范围是“仅自己”。只有当前权限页允许时，共享入口才可用；权限目录读取失败也不会改变已有权限。

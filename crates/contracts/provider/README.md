@@ -8,6 +8,7 @@ The interfaces through which a provider's facts (with the resets they list), its
 |--------|------------------------|
 | [address](src/address.rs) | The address binding: a program's methods and JSON over HTTP; its envelope, its authorization, and how its reply is read. |
 | [builtins](src/builtins.rs) | The built-in sources of a key's facts a program carries: each one's name, its declaration, the addresses it is the default for, and how it is made with the keeping machine's transport. |
+| [credit_fields](src/credit_fields.rs) | Optional source-declared credit fields resolved through the existing member states, with their original observation clocks. |
 | [facts](src/facts.rs) | What a provider's sources report of it: the plan, how full its windows are, what is left to spend and what was spent, the resets it offers, and who its credential belongs to. |
 | [forecast](src/forecast.rs) | A shared projection of measured plan usage or a cap's counted period use to its reset. |
 | [failure](src/failure.rs) | Shared classification of model failures from structured evidence, status and vendor words. |
@@ -18,3 +19,7 @@ The interfaces through which a provider's facts (with the resets they list), its
 | [members](src/members.rs) | The members of a provider's facts, the four states each is in, and which members a provider's sources declare. |
 | [source](src/source.rs) | The interfaces a provider's facts, models and key presentation are read through, what a source declares, what it is given and what it answers. |
 | [wire](src/wire.rs) | The methods of a provider source, the version of the contract they are written in, their parameters, and how long each may take. |
+
+Credit amounts use bounded decimal text, including `ExtraUsage.used` and `limit`; old numeric extra-use reports remain readable through the canonical decoder. `field_reports` is an optional source declaration for known normalized member/item fields. A missing declaration preserves unknown capability, a reported value proves support, and explicitly unsupported fields stay hidden. Native adapters carry these declarations through the existing facts-source descriptor; other sources use the same contract.
+
+Credit item timestamps retain `balances.<id>` and `spend.<id>`. New finer clock keys use `/balances/<escaped-id>/<field>` or `/spend/<escaped-id>/<field>`, escaping `~` as `~0` and `/` as `~1`; dots remain ordinary id characters. `extra_usage.<field>` remains unchanged. Descriptor and field-state display paths are separate from these clock keys. Explicit finer clocks retain their own dates; accepted whole replacements advance only previously known finer clocks omitted from that replacement.

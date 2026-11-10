@@ -9,10 +9,11 @@
  * A cap that is made carries the key of the act, so that a second attempt after a lost answer makes nothing
  * twice; a change names the revision the person saw.
  */
+import { scheduledReads, suppliedRead } from '@/api/readScheduler';
 import { ADMIN_QUERY } from '@/api/queryAuthority';
-import { infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
+import { CancelledError, infiniteQueryOptions, type QueryClient, queryOptions } from '@tanstack/react-query';
 
-import { api, done, ok, repeatable } from '@/api/client';
+import { api, client, done, ok, repeatable } from '@/api/client';
 import type {
   AdminUsageCatalogueSetBody,
   CapInput,
@@ -40,12 +41,15 @@ import type {
 export interface UsageFilters {
   effort?: string;
   tier?: string;
+  tier_unknown?: boolean;
   program?: string;
   outcome?: UsageOutcomeFilter;
   org_id?: string;
   turn_id?: string;
   user_id?: string;
   model?: string;
+  service?:string;
+  purpose?:string;
   provider_id?: string;
   harness_kind?: string;
   environment_kind?: UsageEnvironmentKind;
@@ -58,7 +62,7 @@ export interface UsageFilters {
 export interface UsageParams {
   health?: boolean;
   measure?: 'credits' | 'tokens' | 'turns' | 'requests' | 'speed' | 'first_token' | 'errors' | undefined;
-  /** `me`, `node:` and an identifier, or `provider:` and an identifier. */
+  /** `me`, current-admin `system`, `node:` and an identifier, or `provider:` and an identifier. */
   scope: string;
   /** The first and the last day, UTC, as `YYYY-MM-DD`. */
   from: string;
@@ -131,30 +135,50 @@ export const healthQuery = (providerId: string) => queryOptions({
 export const usageQuery = (params: UsageParams) =>
   queryOptions({
     queryKey: usageKeys.analytics(params),
-    queryFn: ({ signal }): Promise<UsageAnalytics> =>
-      ok(
-        api.GET('/usage', {
-          params: {
-            query: {
-              scope: params.scope,
-              from: params.from,
-              to: params.to,
-              breakdowns: params.breakdowns.join(','),
-              ...(params.measure === undefined ? {} : { measure: params.measure }),
-              ...(params.health ? { health: true } : {}),
-              ...(params.bucket === undefined ? {} : { bucket: params.bucket }),
-              ...(params.seriesBy === undefined ? {} : { series_by: params.seriesBy }),
-              ...(params.limit === undefined ? {} : { limit: params.limit }),
-              ...filterQuery(params.filters),
-            },
+    ...(params.scope === 'system' ? ADMIN_QUERY : {}),
+    ...suppliedRead(usageKeys.analytics(params)),
+    // This bounded read belongs to its cache flight, including the first view remount.
+    // A newer native opening or reader still prevents a late response from landing.
+    queryFn: async (context): Promise<UsageAnalytics> => {
+      const cache = context.client;
+      const reader = client.session.getState().readerVersion;
+      const cut = scheduledReads.version();
+      const key = usageKeys.analytics(params);
+      const before = cache.getQueryState(key);
+      const result = await ok(api.GET('/usage', {
+        ...(params.scope === 'system' ? { signal: context.signal } : {}),
+        params: {
+          query: {
+            scope: params.scope,
+            from: params.from,
+            to: params.to,
+            breakdowns: params.breakdowns.join(','),
+            ...(params.measure === undefined ? {} : { measure: params.measure }),
+            ...(params.health ? { health: true } : {}),
+            ...(params.bucket === undefined ? {} : { bucket: params.bucket }),
+            ...(params.seriesBy === undefined ? {} : { series_by: params.seriesBy }),
+            ...(params.limit === undefined ? {} : { limit: params.limit }),
+            ...filterQuery(params.filters),
           },
-          signal,
-        }),
-      ),
+        },
+      })).then((data) => ({ ok: true as const, data }), (error: unknown) => ({ ok: false as const, error }));
+      const current = cache.getQueryState<UsageAnalytics>(key);
+      if (!scheduledReads.current(cut) || reader !== client.session.getState().readerVersion) throw new CancelledError({ silent: true });
+      if (current !== undefined && scheduledReads.owns(key)
+        && (current.dataUpdateCount !== before?.dataUpdateCount || current.error !== before.error)) {
+        // Settle the cache flight with the newer native outcome, including its idle
+        // fetch status. A silent cancellation without a replacement would leave it busy.
+        if (current.status === 'success' && current.data !== undefined) return current.data;
+        if (current.status === 'error' && current.error !== null) throw current.error;
+        throw new CancelledError({ silent: true });
+      }
+      if (!result.ok) throw result.error;
+      return result.data;
+    },
     // A span that ended before today does not change, and today's changes with every turn: a minute is a fair wait.
     staleTime: 60_000,
     // The screen keeps what it showed while the next span is on its way, dimmed.
-    placeholderData: (before) => before,
+    placeholderData: (before, previous) => previous?.queryKey[2].scope === params.scope ? before : undefined,
   });
 
 /** The ledger rows behind the figures, newest first, a page at a time. */
@@ -170,6 +194,7 @@ export function fetchEventsPage(params: EventParams, cursor: string | null, limi
 export const eventsQuery = (params: EventParams, pageSize: number = EVENTS_PAGE) =>
   infiniteQueryOptions({
     queryKey: [...usageKeys.events(params), pageSize] as const,
+    ...(params.scope === 'system' ? ADMIN_QUERY : {}),
     queryFn: ({ pageParam, signal }): Promise<UsageEventPage> =>
       ok(
         api.GET('/usage/events', {
@@ -336,6 +361,7 @@ export const placeLimitsQuery = (nodeId: string, userId: string | null = null) =
 export const capsQuery = (where: CapPlace) =>
   queryOptions({
     queryKey: usageKeys.caps(where),
+    ...(where.kind === 'system' ? ADMIN_QUERY : {}),
     queryFn: ({ signal }): Promise<CapStatus[]> =>
       ok(
         api.GET('/usage/caps', {

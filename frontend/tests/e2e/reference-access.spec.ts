@@ -26,7 +26,10 @@ for(const width of [400,1440])for(const theme of ['light','dark'] as const)for(c
   expect(chipBounds.x).toBeGreaterThanOrEqual(0);expect(chipBounds.x+chipBounds.width).toBeLessThanOrEqual(width);
  await lock.focus();await lock.press('Enter');
  const card=page.locator('[data-reference-card]').filter({hasText:words.people.reference.noAccess});
- await expect(card).toBeVisible();await expect(card).toContainText(words.people.reference.ownersAsked);
+ await expect(card).toBeVisible();await expect(page.locator('[data-reference-card]')).toHaveCount(1);await expect(card).toContainText(words.people.reference.ownersAsked);
+ // EN: Pin the card → focus its reading surface → Tab deliberately reaches actions; Escape returns to the chip.
+ // 中文：固定卡片 → 焦点停留在阅读区域 → 按 Tab 主动进入操作；Escape 返回引用。
+ await expect(card).toBeFocused();await expect(page.getByRole('tooltip')).toHaveCount(0);
  await expect(card).toContainText(locale==='en'?'Asks for View document':'申请查看文档');
  await expect(card).not.toContainText(privateTarget.title);await expect(card).not.toContainText('Ada Lovelace');
  await expect(card.getByRole('button',{name:words.access.request.send,exact:true})).toBeEnabled();
@@ -40,6 +43,9 @@ for(const width of [400,1440])for(const theme of ['light','dark'] as const)for(c
  expect(reads).toBe(1);
  const path=test.info().outputPath(`reference-${width}-${locale}-${theme}.png`);await page.screenshot({path,animations:'disabled'});await test.info().attach('Private reference',{path,contentType:'image/png'});
  await page.keyboard.press('Escape');await expect(card).toHaveCount(0);await expect(lock).toBeFocused();
+ await lock.click();await expect(card).toHaveCount(1);await expect(card).toBeVisible();
+ await page.keyboard.press('Escape');await expect(card).toHaveCount(0);await expect(lock).toBeFocused();
+ expect(reads).toBe(1);
 });
 
 const DAY_MS=24*60*60*1000;

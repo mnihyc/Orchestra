@@ -32,7 +32,7 @@ const SYNC_MAX_CHANGES = 2_000;
 const FORWARD_MAX_MESSAGES = 20;
 const FORWARD_MAX_ITEMS = 200;
 const FORWARD_MAX_DESTINATIONS = 10;
-const GROUP_MAX_MEMBERS = 12;
+const GROUP_MAX_MEMBERS = 200;
 const REPLY_EXCERPT_CHARS = 120;
 const REACTION_KINDS_MAX = 20;
 const PAGE = 50;
@@ -46,6 +46,9 @@ interface Rec {
   /** The root org it belongs to. */
   orgId: string;
   nodeId: string | null;
+  homeId: string | null;
+  visibility: 'private' | 'public';
+  managers: Set<string>;
   name: string | null;
   /** The people in a direct or group chat, by username, including guests. */
   members: string[];
@@ -182,6 +185,7 @@ export class Chats implements Part {
       const made: Rec = {
         id: chatId,
         kind: 'node',
+        homeId: null, visibility: 'public', managers: new Set(),
         orgId: root,
         nodeId: row.id,
         name: null,
@@ -221,7 +225,7 @@ export class Chats implements Part {
     const inside = rec.members.includes(username);
     if (inside) {
       const closed = rec.kind === 'direct' && rec.members.some((other) => other !== username && this.person(other)?.suspended === true);
-      return { reads: true, sends: !closed, moderates: false, inspects: false, reason: closed ? 'closed' : null };
+      return { reads: true, sends: !closed, moderates: rec.kind === 'group' && rec.managers.has(username), inspects: false, reason: closed ? 'closed' : null };
     }
     const inspects = this.isAdmin(person, rec.orgId);
     return { reads: inspects, sends: false, moderates: false, inspects, reason: inspects ? 'inspecting' : 'no_permission' };
@@ -257,7 +261,10 @@ export class Chats implements Part {
   }
 
   private stateOf(username: string, chatId: string): ChatState | null {
-    return this.states.get(`${username}:${chatId}`) ?? null;
+    const held = this.states.get(`${username}:${chatId}`);
+    if (held === undefined) return null;
+    const rec = this.rec(chatId);
+    return { ...held, org_id: rec.orgId, last_message_seq: rec.lastMessageSeq };
   }
 
   private ensureState(username: string, rec: Rec, engaged = false): ChatState {
@@ -265,6 +272,8 @@ export class Chats implements Part {
     const held = this.states.get(key);
     const base: ChatState = held ?? {
       chat_id: rec.id,
+      org_id: rec.orgId,
+      last_message_seq: rec.lastMessageSeq,
       effective_level: 'off',
       engaged: false,
       hidden: false,
@@ -273,7 +282,7 @@ export class Chats implements Part {
       level: null,
       mentions_unread: 0,
     };
-    const next: ChatState = { ...base, engaged: base.engaged || engaged };
+    const next: ChatState = { ...base, org_id: rec.orgId, last_message_seq: rec.lastMessageSeq, engaged: base.engaged || engaged };
     next.effective_level = next.level ?? (next.engaged || (rec.kind !== 'node' && rec.members.includes(username)) ? 'all' : 'off');
     this.states.set(key, next);
     return next;
@@ -289,6 +298,9 @@ export class Chats implements Part {
     return {
       id: rec.id,
       kind: rec.kind,
+      visibility: rec.visibility,
+      home: rec.kind === 'group' ? (() => {const row=this.world.trees.get(rec.orgId)?.nodes.get(rec.homeId ?? rec.orgId);return row === undefined ? null : {id:row.id,kind:row.kind,name:row.name,redacted:false};})() : undefined,
+      managers: rec.kind === 'group' ? [...rec.managers].filter((name) => rec.members.includes(name)).map((name) => this.ref(name).id) : [],
       org_id: rec.orgId,
       node: this.nodeRef(rec),
       name: rec.name,
@@ -304,7 +316,11 @@ export class Chats implements Part {
         text: last.deleted ? '' : Array.from(words === undefined || words === '' ? carried ?? '' : words).slice(0, 120).join(''),
       },
       // A chat of a node is taken away by the right its node's page gives; a direct or a group chat by being in it, and not by an admin who only reads it.
-      can: { admin_only: [], participating: standing.reads && !standing.inspects && ((own?.effective_level ?? 'off') !== 'off' || rec.nodeId !== null && this.world.places.participates(person, rec.nodeId)), send: standing.sends, moderate: standing.moderates, export: rec.kind === 'node' ? rec.nodeId !== null && this.world.places.access(person, rec.nodeId).permissions.includes('chat.export') : !standing.inspects, reason: standing.sends ? null : standing.reason },
+      // Read that only an admin's reach gives names its administered place, as the server's capabilities do.
+      can: { ...(standing.inspects ? (() => { const root = this.world.trees.get(rec.orgId)?.nodes.get(rec.orgId);
+          const place = root === undefined ? 'system' as const : { id: root.id, kind: root.kind, name: root.name, redacted: false };
+          return { admin_place: place, admin_access: { place, private: false } }; })() : {}),
+        manage: rec.kind === 'group' && rec.members.includes(person.me.username) && rec.managers.has(person.me.username), join: false, admin_only: [], participating: standing.reads && !standing.inspects && ((own?.effective_level ?? 'off') !== 'off' || rec.nodeId !== null && this.world.places.participates(person, rec.nodeId)), send: standing.sends, moderate: standing.moderates || rec.kind === 'group' && rec.members.includes(person.me.username) && rec.managers.has(person.me.username), export: rec.kind === 'node' ? rec.nodeId !== null && this.world.places.access(person, rec.nodeId).permissions.includes('chat.export') : !standing.inspects, reason: standing.sends ? null : standing.reason },
       my: standing.inspects ? null : own,
     };
   }
@@ -316,7 +332,7 @@ export class Chats implements Part {
     let found: RegExpExecArray | null;
 
     if (route === 'GET /me/chat-states') {
-      const list = [...this.states.entries()].filter(([key]) => key.startsWith(`${person.me.username}:`)).map(([, state]) => state);
+      const list = [...this.states.entries()].filter(([key]) => key.startsWith(`${person.me.username}:`)).map(([, state]) => this.stateOf(person.me.username, state.chat_id));
       return { status: 200, body: list };
     }
     if (route === 'POST /forward') return this.forward(person, body);
@@ -328,6 +344,16 @@ export class Chats implements Part {
     if ((found = /^GET \/chats\/([^/]+)$/.exec(route))) {
       const { rec } = this.readable(person, found[1] ?? '');
       return { status: 200, body: this.view(person, rec) };
+    }
+    if ((found = /^PUT \/chats\/([^/]+)\/members\/([^/]+)\/manager$/.exec(route))) {
+      const {rec}=this.readable(person,found[1] ?? '');
+      this.requireManager(person,rec);
+      const userId=found[2] ?? '';
+      const other=[...this.world.people.values()].find((one)=>one.me.id===userId);
+      if (other===undefined || !rec.members.includes(other.me.username)) return notFound();
+      if (body.manager !== true && rec.managers.has(other.me.username) && rec.managers.size===1) throw new Refusal(409,'chat.last_manager','A chat must keep a manager');
+      if(body.manager===true)rec.managers.add(other.me.username);else rec.managers.delete(other.me.username);
+      rec.seq+=1;this.afterChange(rec);return {status:200,body:this.view(person,rec)};
     }
     if ((found = /^PATCH \/chats\/([^/]+)$/.exec(route))) return this.rename(person, found[1] ?? '', body);
     if ((found = /^(PUT|DELETE) \/chats\/([^/]+)\/members\/([^/]+)$/.exec(route))) {
@@ -378,11 +404,11 @@ export class Chats implements Part {
       const rec = this.rec(row.chat.id);
       if (!this.standing(person, rec).reads) continue;
       const path = this.world.places.pathTo(row.id).map((above): NodeRef => ({ id: above.id, kind: above.kind, name: above.name, redacted: false }));
-      found.push({ chat: { id: rec.id, kind: 'node', name: null, node: this.nodeRef(rec), org_id: rec.orgId }, label: row.name, path, messages: said(rec), in: false });
+      found.push({ chat: { visibility: 'public', id: rec.id, kind: 'node', name: null, node: this.nodeRef(rec), org_id: rec.orgId }, label: row.name, path, messages: said(rec), in: false });
     }
     for (const rec of this.records.values()) {
       if (rec.kind === 'node' || !rec.members.includes(person.me.username)) continue;
-      found.push({ chat: { id: rec.id, kind: rec.kind, name: rec.name, node: null, org_id: rec.orgId }, label: rec.name ?? [...rec.members].sort().map((username) => this.ref(username).display_name).join(', '), path: [], messages: said(rec), in: true });
+      found.push({ chat: { visibility: rec.visibility, id: rec.id, kind: rec.kind, name: rec.name, node: null, org_id: rec.orgId }, label: rec.name ?? [...rec.members].sort().map((username) => this.ref(username).display_name).join(', '), path: [], messages: said(rec), in: true });
     }
     return found;
   }
@@ -482,6 +508,7 @@ export class Chats implements Part {
       kind,
       orgId,
       nodeId: null,
+      homeId: null, visibility: 'private', managers: new Set(kind === 'group' ? [by] : []),
       name,
       members,
       guests: new Set(),
@@ -495,27 +522,38 @@ export class Chats implements Part {
     };
     this.records.set(rec.id, rec);
     for (const member of members) {
+      this.tellUser(member, { what: 'chat_state', state: this.ensureState(member, rec) });
       this.tellUser(member, { what: 'chat', chat_id: rec.id, seq: 0, at: rec.createdAt });
     }
     return rec;
   }
 
+  private requireManager(person:Person,rec:Rec):void {
+    if(rec.kind!=='group' || !rec.members.includes(person.me.username) || !rec.managers.has(person.me.username)) throw new Refusal(403,'chat.manager_required','A current chat manager is needed');
+  }
   private rename(person: Person, chatId: string, body: Record<string, unknown>): Answer {
-    const { rec } = this.writable(person, chatId);
-    if (rec.kind !== 'group') throw new Refusal(403, 'chat.not_allowed', 'only a group has a name', { reason: 'not_a_group' });
-    const name = body.name === null ? null : asText(body.name).trim();
-    if (name !== null && (name === '' || Array.from(name).length > 80)) invalid('name', 'must be 1 to 80 characters');
-    rec.name = name;
-    this.system(rec, 'renamed', person.me.username, null, name);
+    const { rec } = this.readable(person, chatId);
+    this.requireManager(person,rec);
+    if(Object.hasOwn(body,'name')) {
+      const name=body.name===null?null:asText(body.name).trim();
+      if(name!==null && (name==='' || Array.from(name).length>80))invalid('name','must be 1 to 80 characters');
+      if(name!==rec.name) {rec.name=name;this.system(rec,'renamed',person.me.username,null,name);}
+    }
+    if(Object.hasOwn(body,'visibility')) {
+      if(body.visibility!=='private' && body.visibility!=='public')invalid('visibility','must be private or public');
+      rec.visibility=body.visibility;rec.seq+=1;
+    }
     this.afterChange(rec);
-    return { status: 200, body: this.view(person, rec) };
+    return {status:200,body:this.view(person,rec)};
   }
 
   private addMember(person: Person, chatId: string, userId: string): Answer {
-    const { rec } = this.writable(person, chatId);
+    const { rec } = this.readable(person, chatId);
+    this.requireManager(person,rec);
     if (rec.kind !== 'group') throw new Refusal(403, 'chat.not_allowed', 'people are added to a group', { reason: 'not_a_group' });
     const other = [...this.world.people.values()].find((one) => one.me.id === userId);
     if (other === undefined) return notFound();
+    if (rec.members.includes(other.me.username)) return {status:200,body:this.view(person,rec)};
     if (rec.members.length >= GROUP_MAX_MEMBERS) throw new Refusal(403, 'chat.not_allowed', 'this chat does not allow it (full)', { reason: 'full' });
     if (!this.isMember(other, rec.orgId)) rec.guests.add(other.me.username);
     if (!rec.members.includes(other.me.username)) rec.members.push(other.me.username);
@@ -531,9 +569,9 @@ export class Chats implements Part {
     const other = [...this.world.people.values()].find((one) => one.me.id === userId);
     if (rec.kind !== 'group' || other === undefined || !rec.members.includes(other.me.username)) return notFound();
     const self = other.me.username === person.me.username;
-    if (!self && rec.createdBy !== person.me.username) {
-      throw new Refusal(403, 'authz.denied', 'only the person who made the group removes others', { required: 'chat.interact', requestable: false, override: false, missing: [] });
-    }
+    if(!self)this.requireManager(person,rec);
+    if(rec.managers.has(other.me.username) && rec.managers.size===1)throw new Refusal(409,'chat.last_manager','A chat must keep a manager');
+    rec.managers.delete(other.me.username);
     rec.members = rec.members.filter((username) => username !== other.me.username);
     rec.guests.delete(other.me.username);
     this.system(rec, self ? 'member_left' : 'member_removed', person.me.username, other.me.username, null);
@@ -679,6 +717,7 @@ export class Chats implements Part {
       for (const member of rec.members) {
         const state = this.ensureState(member, rec);
         if (state.hidden) this.states.set(`${member}:${rec.id}`, { ...state, hidden: false });
+        this.tellUser(member, { what: 'chat_state', state: this.stateOf(member, rec.id) });
         this.tellUser(member, { what: 'chat', chat_id: rec.id, seq: rec.seq, at });
       }
     }
@@ -867,7 +906,7 @@ export class Chats implements Part {
       if (messageIds.length === 0 || messageIds.length > FORWARD_MAX_MESSAGES) invalid('from.message_ids', 'takes one to twenty messages');
       const picked = messageIds.map((id) => origin.messages.find((message) => message.id === id && message.kind === 'message' && !message.deleted));
       if (picked.some((message) => message === undefined)) invalid('from.message_ids', 'names a message that is not there');
-      copiesOf = () => copiesOfMessages({id:origin.id,kind:origin.kind,name:origin.name,node:this.nodeRef(origin),org_id:origin.orgId},picked as ChatMessage[]);
+      copiesOf = () => copiesOfMessages({id:origin.id,kind:origin.kind,visibility:origin.kind==='node'?'public':origin.visibility,name:origin.name,node:this.nodeRef(origin),org_id:origin.orgId},picked as ChatMessage[]);
     } else if (typeof from.thread_id === 'string') {
       const threadId = from.thread_id;
       this.world.places.need(person, threadId, 'thread.view');

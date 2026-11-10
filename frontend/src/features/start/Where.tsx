@@ -1,3 +1,6 @@
+import { ResourcePickerLookup } from '@/ui/ResourcePicker';
+import { BindingPickerScope } from '@/features/resources/PickerContext';
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Where a thread runs: an existing environment its creator may use (the topic's first, every other under More), or a new one with template, place, storage, mounts, starting files and who else manages it.
  *
  * Where a thread works: an environment the person may use (the topic's own first, with its default
@@ -12,30 +15,34 @@ import type { TFunction } from 'i18next';
 import { FolderPlus, Laptop, Plus } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
 import { EmptyState } from '@/ui/EmptyState';
-import { choiceOption } from '@/i18n/choices';
 
 import { registerEnvironment } from '@/api/environments';
-import { ApiError } from '@/api/client';
+import { ApiError, client } from '@/api/client';
 import { startOptionsQuery } from '@/api/start';
 import { AccessRequest } from '@/features/access/AccessRequest';
 import type { PlaceRef } from '@/features/navigation/places';
 import { ResourceHint, ResourceName, resourcePreview } from '@/features/resource-facts/ResourceFacts';
 import { hostNotes } from '@/features/resources/hosts/words';
 import { MakeEnvironmentDialog } from '@/features/resources/environments/MakeEnvironment';
-import type { BindingEnvironment, Environment, Machine, PlaceHost } from '@/generated/api-types';
+import { NewAccess } from '@/features/resources/NewAccess';
+import type { BindingEnvironment, Machine, NewEnvironment, PlaceHost } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
+import { EnvironmentDot } from '@/ui/EnvironmentDot';
 import { ErrorAlert, MissingAccessList } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { Select } from '@/ui/Select';
+import { SegmentedControl } from '@/ui/SegmentedControl';
+import { type ComboboxGroup } from '@/ui/Combobox';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 
-import { canUseEnvironment, NEW_ENVIRONMENT } from './choices';
+import { canCreateEnvironment, canUseEnvironment, CHOOSE_EXISTING_ENVIRONMENT, NEW_ENVIRONMENT } from './choices';
 import type { StartOptions } from '@/api/start';
 import { reasonWords } from './words';
+import { StartingFiles } from './StartingFiles';
 
 export interface WhereProps {
   compact?: boolean;
@@ -54,9 +61,11 @@ export interface WhereProps {
   onRequestingChange: (environment: BindingEnvironment | null) => void;
   /** Read current choices after a request changes. */
   onRefresh?: () => void;
+  newEnvironment?: Pick<NewEnvironment, 'access' | 'files'>;
+  onNewEnvironmentChange?: (value: Pick<NewEnvironment, 'access' | 'files'>) => void;
 }
 
-function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environment: Environment) => void }) {
+function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: { machines: readonly Machine[]; loading?: boolean; homeId: string; onRegistered: (environmentId: string) => void }) {
   const { t } = useTranslation();
   const actKey = useActKey();
   const online = machines.filter((machine) => machine.online);
@@ -67,7 +76,7 @@ function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: 
   const register = useMutation({
     mutationFn: () => registerEnvironment(chosen, { name: name.trim() === '' ? root.trim() : name.trim(), root: root.trim(), home_id: homeId }, actKey({ chosen, root, name, homeId })),
     onSuccess: (environment) => {
-      onRegistered(environment);
+      onRegistered('environment_id' in environment ? String(environment.environment_id) : environment.id);
       setRoot('');
       setName('');
     },
@@ -93,11 +102,11 @@ function RegisterDirectory({ machines, loading = false, homeId, onRegistered }: 
           <InlineAlert tone="warning">{t('start.where.allOffline')}</InlineAlert>
         ) : (
           <>
-            <Select
+            <ResourcePicker pickerKey="thread-directory-machine"
               label={t('start.where.machine')}
               value={chosen}
               onValueChange={setMachineId}
-              options={online.map((machine) => ({ value: machine.id, label: machine.name, description: machine.owner === null ? undefined : <UserChip user={machine.owner} /> }))}
+              options={online.map((machine) => ({ value: machine.id, label: machine.name, resource:{kind:'machine',id:machine.id,data:machine}, description: machine.owner === null ? undefined : <UserChip user={machine.owner} /> }))}
             />
             <Input label={t('start.where.root')} hint={t('start.where.rootHint')} value={root} onChange={(event) => setRoot(event.target.value)} autoComplete="off" />
             <Input label={t('start.where.envName')} optional value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
@@ -148,87 +157,123 @@ function usedBy(row: BindingEnvironment, t: TFunction): string | null {
 /** An environment the person sees and may not start a thread in: picking it asks for its Use. */
 const USE_REQUIRED = 'environment_use_required';
 
-export function Where({ compact = false, place, options, value, onChange, machines, machinesLoading = false, homeId, requesting, onRequestingChange, onRefresh }: WhereProps) {
+export function Where({ compact = false, place, options, value, onChange, machines, machinesLoading = false, homeId, requesting, onRequestingChange, onRefresh, newEnvironment, onNewEnvironmentChange }: WhereProps) {
   const { t } = useTranslation();
+  const reader = useStore(client.session, (state) => JSON.stringify([state.userId, state.readerVersion ?? 0]));
+  const context = JSON.stringify([reader, place.id]);
+  const [requestedAt, setRequestedAt] = useState<{ context: string; id: string } | null>(() => requesting === null ? null : { context, id: requesting.environment.id });
+  const [granted, setGranted] = useState<{ context: string; id: string } | null>(null);
   const mayMake = options.can_create.allowed;
+  const canMakeNew = canCreateEnvironment(options);
+  const [moreQuery, setMoreQuery] = useState('');
   const currentRequest = requesting === null ? null : options.environments.find((row) => row.environment.id === requesting.environment.id) ?? requesting;
   // A refusal identifies who can actually give Use; a visible resource does not imply it is requestable.
   const access = useQuery({ ...startOptionsQuery(place.id, requesting?.environment.id ?? null), enabled: requesting !== null, retry: false, staleTime: 0 });
   const missing = access.error instanceof ApiError ? access.error.extra('authz.denied')?.missing.filter((entry) => entry.object.id === requesting?.environment.id && entry.permissions.includes('environment.use')) ?? [] : [];
   const canAsk = missing.some((entry) => entry.closed === null && (entry.ask.length > 0 || entry.ask_more > 0));
+  const available = access.data?.environments.find((row) => row.environment.id === requesting?.environment.id);
+  const acquired = requesting !== null && requestedAt?.context === context && requestedAt.id === requesting.environment.id
+    && !access.isFetching && !access.isError && available !== undefined && canUseEnvironment(available) ? available : undefined;
+  if (acquired !== undefined && (granted?.context !== context || granted.id !== acquired.environment.id)) setGranted({ context, id: acquired.environment.id });
+  if (acquired === undefined && granted !== null && (granted.context !== context || granted.id !== value)) setGranted(null);
   useEffect(() => {
-    const granted = access.data?.environments.find((row) => row.environment.id === requesting?.environment.id);
-    if (requesting !== null && !access.isFetching && !access.isError && granted !== undefined && canUseEnvironment(granted)) {
+    if (acquired !== undefined) {
       onRequestingChange(null);
-      onChange(granted.environment.id);
+      onChange(acquired.environment.id);
     }
-  }, [requesting, access.data, access.isFetching, access.isError, onRequestingChange, onChange]);
-  // What may be used comes first; what may be asked for follows, set apart; what cannot be had now, last.
+  }, [acquired, onRequestingChange, onChange]);
+  // The server's topic/default rows stay first; More preserves its explicit use categories.
   const order = (row: BindingEnvironment) => (canUseEnvironment(row) ? 0 : row.reason === USE_REQUIRED ? 1 : 2);
-  const listed = [...options.environments].sort((a, b) => order(a) - order(b));
-  const grouped = listed.some((row) => order(row) === 0) && listed.some((row) => order(row) === 1);
-  const rows = [
-    ...listed.map((row) => {
-      const used = usedBy(row, t);
-      const usable = canUseEnvironment(row);
-      const askable = row.reason === USE_REQUIRED;
-      const refusal = usable || askable ? null : row.environment.status === 'failed' || row.environment.status === 'removed' ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason);
-      return {
-        value: row.environment.id,
-        preview: resourcePreview({ kind: 'environment', environment: row.environment, host: row.host }),
-        accessory: <UserChip user={row.environment.owner} />,
-        name: row.environment.name,
-        group: grouped ? usable ? t('start.where.canUse') : askable ? t('start.where.askAccess') : undefined : undefined,
-        description: (
-          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            {row.is_default && usable && <span>{t('start.where.topicDefault')}</span>}
-            <ResourceHint subject={{ kind: 'environment', environment: row.environment, host: row.host }} />
-            {used !== null && !usable && <span>{used}</span>}
-            {askable && !grouped && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
-            {refusal !== null && <span className="text-warning-text">{refusal}</span>}
-          </span>
-        ),
-        disabled: !usable && !askable,
-      };
-    }),
-    ...(mayMake
-      ? [
-          {
-            value: NEW_ENVIRONMENT,
-            ...choiceOption(t, 'environmentDestination.new'),
-            icon: <Plus aria-hidden />,
-            description: (
-              <span className="flex flex-col gap-1">
-                <span>{t('start.where.newAbout', { place: place.name })}</span>
-                <Hosts hosts={options.hosts} />
-              </span>
-            ),
-          },
-        ]
-      : []),
-  ];
-  return (
-    <div className="flex flex-col gap-3">
-      {rows.length === 0 ? (
-        <EmptyState compact title={t('start.where.none')} />
-      ) : (
-        <Select
-          label={t('start.where.title')}
-          hideLabel
-          value={currentRequest?.environment.id ?? value ?? ''}
-          onValueChange={(id) => {
-            const row = options.environments.find((each) => each.environment.id === id);
-            if (row !== undefined && row.reason === USE_REQUIRED) {
-              onRequestingChange(row);
-              return;
-            }
-            onRequestingChange(null);
-            onChange(id);
-          }}
-          options={rows}
-        />
-      )}
-      {currentRequest !== null && access.isPending && <SkeletonRows rows={1} />}
+  const listed = [...options.environments].sort((a, b) => Number(b.is_default) - Number(a.is_default) || order(a) - order(b));
+  const topic = listed.filter((row) => row.is_default || row.used === 'topic');
+  const others = listed.filter((row) => !row.is_default && row.used !== 'topic');
+  const selectedId = currentRequest?.environment.id ?? value;
+  const selected = listed.find((row) => row.environment.id === selectedId);
+  const primary = selected !== undefined && !topic.includes(selected) ? [...topic, selected] : topic;
+  const mixed = (rows: readonly BindingEnvironment[]) => rows.some((row) => order(row) === 0) && rows.some((row) => order(row) === 1);
+  const rowChoice = (row: BindingEnvironment, group?: string) => {
+    const used = usedBy(row, t);
+    const usable = canUseEnvironment(row);
+    const askable = row.reason === USE_REQUIRED;
+    const refusal = usable || askable ? null : row.environment.status === 'failed' || row.environment.status === 'removed' ? t('startRecovery.failedChoice') : row.reason === null ? t('start.where.closed') : reasonWords(row.reason);
+    return {
+      value: row.environment.id,
+      preview: resourcePreview({ kind: 'environment', environment: row.environment, host: row.host }),
+      accessory: <UserChip user={row.environment.owner} />,
+      name: row.environment.name,
+      ...(group === undefined ? {} : { group }),
+      description: <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <ResourceHint subject={{ kind: 'environment', environment: row.environment, host: row.host }} />
+        {row.machine !== null && <span>{row.machine.name}</span>}
+        {used !== null && <span>{used}</span>}
+        {askable && group === undefined && <span className="text-accent-text">{t('start.where.askAccess')}</span>}
+        {refusal !== null && <span className="text-warning-text">{refusal}</span>}
+      </span>,
+      disabled: !usable && !askable,
+    };
+  };
+  const pickExisting = (id: string) => {
+    const row = options.environments.find((each) => each.environment.id === id);
+    if (row === undefined) return;
+    setGranted(null);
+    if (row.reason === USE_REQUIRED) { setRequestedAt({ context, id }); onRequestingChange(row); return; }
+    if (!canUseEnvironment(row)) return;
+    setRequestedAt(null);
+    onRequestingChange(null); onChange(id);
+  };
+  const needle = moreQuery.trim().normalize('NFKC').toLocaleLowerCase();
+  const moreRows = others.filter((row) => [row.environment.name, row.environment.address, row.environment.owner.display_name, row.machine?.name, row.host?.name, ...row.topics.map((topic) => topic.name)]
+    .some((name) => name?.normalize('NFKC').toLocaleLowerCase().includes(needle)));
+  const moreGroups: ComboboxGroup<string>[] = [];
+  for (const use of ['project', 'elsewhere', 'unused'] as const) {
+    const rows = moreRows.filter((row) => row.used === use);
+    for (const permission of [0, 1, 2]) {
+      const choices = rows.filter((row) => order(row) === permission);
+      if (choices.length === 0) continue;
+      const accessLabel = mixed(rows) && permission !== 2 ? t(permission === 0 ? 'start.where.canUse' : 'start.where.askAccess') : null;
+      moreGroups.push({ id: `${use}-${permission}`, label: [t(`start.where.used.${use}`), accessLabel].filter((word) => word !== null).join(' · '),
+        options: choices.map((row) => {
+          const option = rowChoice(row, accessLabel ?? undefined);
+          return { value: option.value, text: option.name, label: option.name, preview: option.preview, disabled: option.disabled,
+            description: <span className="flex flex-wrap items-center gap-x-3 gap-y-1"><UserChip user={row.environment.owner} />{option.description}</span>,
+            icon: <EnvironmentDot status={row.environment.status} /> };
+        }) });
+    }
+  }
+  const kind = currentRequest !== null || value !== NEW_ENVIRONMENT ? 'existing' : 'new';
+  return <BindingPickerScope options={options} screen="thread-environment" currentHomes={[place.id,...(place.parentId===null?[]:[place.parentId])]}>{(
+    <div className="flex flex-col gap-3" data-start-where>
+      <SegmentedControl<'existing' | 'new'> label={t('start.where.choice')} value={kind}
+        onValueChange={(next) => {
+          if (next === 'new') { if (canMakeNew) { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(NEW_ENVIRONMENT); } }
+          else { const row = listed.find(canUseEnvironment) ?? listed.find((row) => row.reason === USE_REQUIRED); if (row !== undefined) pickExisting(row.environment.id); else { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(CHOOSE_EXISTING_ENVIRONMENT); } }
+        }}
+        segments={[
+          { value: 'existing', name: t('start.where.useExisting'), disabled: listed.length === 0, description: listed.length === 0 ? t('start.where.noExisting') : undefined },
+          { value: 'new', name: t('start.where.createNew'), disabled: !canMakeNew, description: !canMakeNew ? t(mayMake ? 'start.where.noHost' : 'start.where.mayNotMake') : undefined },
+        ]} />
+      {listed.length === 0 && <p className="text-sm text-text-muted">{t('start.where.noExisting')}</p>}
+      {mayMake && !canMakeNew && <p role="status" className="text-sm text-text-muted">{t('start.where.noHost')}</p>}
+      {!mayMake && <p className="text-sm text-text-muted">{t('start.where.mayNotMake')}</p>}
+      {kind === 'existing' && listed.length > 0 && <div className="flex min-w-0 flex-wrap items-end gap-2">
+        <ResourcePicker pickerKey="start.Where.start.where.title" label={t('start.where.title')} hideLabel value={selected === undefined ? '' : selected.environment.id}
+          placeholder={t('start.where.chooseExisting')} onValueChange={pickExisting} fieldClassName="min-w-0 flex-1"
+          options={primary.map((row) => rowChoice(row, mixed(primary) ? order(row) === 0 ? t('start.where.canUse') : order(row) === 1 ? t('start.where.askAccess') : undefined : undefined))} />
+        {others.length > 0 && <ResourcePickerLookup pickerKey="thread-environment-more" label={t('start.where.moreTitle')} hideLabel query={moreQuery} onQueryChange={setMoreQuery} displayValue={t('start.where.more')}
+          onOpenChange={(open) => { if (!open) setMoreQuery(''); }} groups={moreGroups} placeholder={t('start.where.search')}
+          empty={t('start.where.noMatches')} fieldClassName="min-w-0 w-(--field-narrow) max-w-full"
+          onSelect={(option) => { pickExisting(option.value); setMoreQuery(''); }} />}
+        {granted?.context === context && granted.id === value && <span role="status" className="text-sm text-text-muted">{t('startImplicit.grantedSelected')}</span>}
+      </div>}
+      {kind === 'new' && canMakeNew && <>
+        <Hosts hosts={options.hosts} />
+        {onNewEnvironmentChange !== undefined && <>
+          <StartingFiles value={newEnvironment?.files} onChange={(files) => onNewEnvironmentChange({ ...newEnvironment, files })} />
+          <NewAccess label={t('start.where.managers')} value={newEnvironment?.access ?? 'defaults'} home={place.name} allowHome={false}
+            onChange={(access) => { if (access !== 'home') onNewEnvironmentChange({ ...newEnvironment, access }); }} />
+        </>}
+      </>}
+      {currentRequest !== null && access.isPending && <SkeletonRows read={access} rows={1} />}
       {currentRequest !== null && missing.length > 0 && !canAsk && <MissingAccessList missing={missing} />}
       {currentRequest !== null && canAsk && (
         <AccessRequest
@@ -242,9 +287,9 @@ export function Where({ compact = false, place, options, value, onChange, machin
         />
       )}
       {currentRequest !== null && access.isError && missing.length === 0 && <ErrorAlert error={access.error} action={<Button size="sm" onClick={() => void access.refetch()}>{t('common.tryAgain')}</Button>} />}
-      {!compact && <WhereOptions place={place} options={options} value={value} onChange={(id) => { onRequestingChange(null); onChange(id); }} machines={machines} machinesLoading={machinesLoading} homeId={homeId} />}
+      {!compact && <WhereOptions place={place} options={options} value={value} onChange={(id) => { setGranted(null); setRequestedAt(null); onRequestingChange(null); onChange(id); }} machines={machines} machinesLoading={machinesLoading} homeId={homeId} />}
     </div>
-  );
+  )}</BindingPickerScope>;
 }
 
 /** Extra creation and registration acts live with the dialog's optional setup. */
@@ -264,7 +309,7 @@ export function WhereOptions({ place, options, onChange, machines, machinesLoadi
           </div>
         </details>
       )}
-      <RegisterDirectory machines={machines} loading={machinesLoading} homeId={homeId} onRegistered={(environment) => onChange(environment.id)} />
+      <RegisterDirectory machines={machines} loading={machinesLoading} homeId={homeId} onRegistered={(environmentId) => onChange(environmentId)} />
       {making && <MakeEnvironmentDialog forThread home={{ id: place.id, name: place.name }} onClose={() => setMaking(false)} onMade={(environment) => onChange(environment.id)} />}
   </>;
 }

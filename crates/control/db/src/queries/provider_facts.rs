@@ -1,5 +1,6 @@
 //! Durable provider observation timing, discovered model contexts and confirmed reset receipts.
 
+use super::resources::provider_runtime::INTENTIONAL_STOP_DETAILS;
 use crate::{Conn, DbError};
 use chrono::{DateTime, Duration, Utc};
 use orch_types::{Id, Json};
@@ -27,6 +28,31 @@ const SOURCE_INTERVAL_DUE: &str = "(p.facts_requested_at IS NULL OR
       THEN GREATEST(60,(p.sources #>> '{facts,descriptor,facts,min_interval_secs}')::numeric)
       ELSE 0 END)";
 
+/// Online credential keepers, including stopped or unexpectedly failed units their host can start.
+const READ_AVAILABLE: &str = "p.deleted_at IS NULL AND p.status <> 'disabled'
+    AND ((m.deleted_at IS NULL AND m.status = 'active' AND m.online)
+      OR (p.machine_id IS NULL AND EXISTS (
+          SELECT 1 FROM runtimes r JOIN hosts h ON h.id = r.host_id JOIN machines hm ON hm.id = h.machine_id
+          WHERE r.provider_id = p.id AND r.state IN ('stopped','failed') AND r.successor_of IS NULL
+            AND hm.online AND hm.status = 'active' AND hm.deleted_at IS NULL)))";
+
+/// Parameter two is always the shared array of deliberate stop reasons.
+const SCHEDULED_READ_ALLOWED: &str = "NOT EXISTS (SELECT 1 FROM runtimes paused
+    WHERE paused.provider_id=p.id AND paused.successor_of IS NULL
+      AND paused.state IN ('stopping','stopped','failed') AND paused.state_detail=ANY($2::text[]))";
+
+/// Rechecks a queued reader without changing its facts or attempt clock.
+pub async fn scheduled_read_allowed(conn: &mut Conn, provider: Id) -> Result<bool, DbError> {
+    let sql = format!(
+        "SELECT EXISTS (SELECT 1 FROM providers p WHERE p.id=$1 AND p.deleted_at IS NULL AND {SCHEDULED_READ_ALLOWED})"
+    );
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(provider)
+        .bind(INTENTIONAL_STOP_DETAILS.as_slice())
+        .fetch_one(conn)
+        .await?)
+}
+
 /// Changes choices in the management transaction and makes the new source's first read immediate.
 /// Learned metadata is kept separately below; only a manager's selection changes this revision.
 pub async fn set_sources(
@@ -34,11 +60,14 @@ pub async fn set_sources(
     provider: Id,
     expected_revision: i64,
     sources: &Json,
-    facts_changed: bool,
+    read_due: bool,
+    facts_source_changed: bool,
     now: DateTime<Utc>,
 ) -> Result<bool, DbError> {
-    Ok(sqlx::query("UPDATE providers SET sources=$3,facts_requested_at=CASE WHEN $4 THEN NULL ELSE facts_requested_at END,revision=revision+1,updated_at=$5 WHERE id=$1 AND revision=$2 AND deleted_at IS NULL")
-        .bind(provider).bind(expected_revision).bind(sources).bind(facts_changed).bind(now).execute(conn).await?.rows_affected()>0)
+    Ok(sqlx::query("UPDATE providers SET sources=$3,facts_requested_at=CASE WHEN $4 THEN NULL ELSE facts_requested_at END,
+        credit_source_revision=CASE WHEN $6 THEN revision+1 ELSE credit_source_revision END,
+        revision=revision+1,updated_at=$5 WHERE id=$1 AND revision=$2 AND deleted_at IS NULL")
+        .bind(provider).bind(expected_revision).bind(sources).bind(read_due).bind(now).bind(facts_source_changed).execute(conn).await?.rows_affected()>0)
 }
 
 /// Keeps a learned descriptor and a scrubbed error only for the unchanged source choice.
@@ -64,17 +93,37 @@ pub async fn source_observed(
         .bind(provider).bind(element).bind(expected).bind(patch).bind(now).execute(conn).await?.rows_affected()>0)
 }
 
-/// Deployment-selected source-read intervals, independent of the vendor's own clock.
+/// One provider's resolved source-read intervals in whole minutes.
 #[derive(Debug, Clone, Copy)]
 pub struct ReadSchedule {
+    /// The provider whose settings were resolved.
+    pub provider_id: Id,
     /// How far back bound-thread work keeps a provider active.
-    pub recent: Duration,
+    pub recent: i64,
     /// The interval while work was recent.
-    pub active: Duration,
+    pub active: i64,
     /// The interval without recent work.
-    pub idle: Duration,
+    pub idle: i64,
     /// The recovery interval while a credential is refused.
-    pub refused: Duration,
+    pub refused: i64,
+}
+
+/// Potential readers with the own values needed for a shared settings pass. No result limit is
+/// applied before individual cadences: earlier non-due providers must not hide a later due one.
+pub async fn read_candidates(
+    conn: &mut Conn,
+    now: DateTime<Utc>,
+) -> Result<Vec<super::settings::ProviderRuntimeRow>, DbError> {
+    let sql = format!("SELECT p.id,p.home_id,p.runtime_config,p.revision FROM providers p
+        LEFT JOIN machines m ON m.id = p.key_machine_id WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
+        AND (p.facts_requested_at IS NULL OR p.facts_requested_at <= $1 - interval '1 minute' OR {RESET_READ_DUE})
+        AND {SOURCE_INTERVAL_DUE}");
+    // A valid cadence is at least one minute; reset reads keep their independent due time.
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(now)
+        .bind(INTENTIONAL_STOP_DETAILS.as_slice())
+        .fetch_all(conn)
+        .await?)
 }
 
 /// Admits one ordinary reader per interval across processes, including attempts that tell nothing.
@@ -86,18 +135,44 @@ pub async fn claim_read(
     now: DateTime<Utc>,
     interval: Duration,
 ) -> Result<bool, DbError> {
+    claim_read_inner(conn, provider, force, now, interval, false).await
+}
+
+/// A scheduled claim serializes with stop/start admission and rechecks its durable stop reason.
+pub async fn claim_scheduled_read(
+    conn: &mut Conn,
+    provider: Id,
+    now: DateTime<Utc>,
+    interval: Duration,
+) -> Result<bool, DbError> {
+    if !lock_provider(conn, provider).await? {
+        return Ok(false);
+    }
+    claim_read_inner(conn, provider, false, now, interval, true).await
+}
+
+async fn claim_read_inner(
+    conn: &mut Conn,
+    provider: Id,
+    force: bool,
+    now: DateTime<Utc>,
+    interval: Duration,
+    scheduled: bool,
+) -> Result<bool, DbError> {
     // This query's first argument is the observation clock, shared with the due-reader condition.
     let sql = format!(
-        "UPDATE providers p SET facts_requested_at = $1 WHERE id = $2 AND deleted_at IS NULL
-        AND ($3 OR facts_requested_at IS NULL OR facts_requested_at <= $4 OR {RESET_READ_DUE})
-        AND {SOURCE_INTERVAL_DUE}"
+        "UPDATE providers p SET facts_requested_at = $1 WHERE id = $3 AND deleted_at IS NULL
+        AND ($4 OR facts_requested_at IS NULL OR facts_requested_at <= $5 OR {RESET_READ_DUE})
+        AND (NOT $6 OR {SCHEDULED_READ_ALLOWED}) AND {SOURCE_INTERVAL_DUE}"
     );
     // Only this module's constants are put into the statement.
     Ok(sqlx::query(sqlx::AssertSqlSafe(sql))
         .bind(now)
+        .bind(INTENTIONAL_STOP_DETAILS.as_slice())
         .bind(provider)
         .bind(force)
         .bind(now - interval)
+        .bind(scheduled)
         .execute(conn)
         .await?
         .rows_affected()
@@ -135,41 +210,44 @@ pub async fn credential_end(
 pub async fn due_reads(
     conn: &mut Conn,
     now: DateTime<Utc>,
-    schedule: ReadSchedule,
+    schedules: &[ReadSchedule],
     limit: i64,
 ) -> Result<Vec<Id>, DbError> {
-    let interval = |duration: Duration| sqlx::postgres::types::PgInterval {
-        months: 0,
-        days: 0,
-        microseconds: duration.num_microseconds().unwrap_or_default(),
-    };
+    let providers: Vec<Id> = schedules
+        .iter()
+        .map(|schedule| schedule.provider_id)
+        .collect();
+    let recent: Vec<i64> = schedules.iter().map(|schedule| schedule.recent).collect();
+    let active: Vec<i64> = schedules.iter().map(|schedule| schedule.active).collect();
+    let idle: Vec<i64> = schedules.iter().map(|schedule| schedule.idle).collect();
+    let refused: Vec<i64> = schedules.iter().map(|schedule| schedule.refused).collect();
     let sql = format!("SELECT p.id FROM providers p
          LEFT JOIN machines m ON m.id = p.key_machine_id
-         WHERE p.deleted_at IS NULL AND p.status <> 'disabled'
-           AND ((m.deleted_at IS NULL AND m.status = 'active' AND m.online)
-             OR (p.machine_id IS NULL AND EXISTS (
-                 SELECT 1 FROM runtimes r JOIN hosts h ON h.id = r.host_id JOIN machines hm ON hm.id = h.machine_id
-                 WHERE r.provider_id = p.id AND r.state = 'stopped' AND r.successor_of IS NULL
-                   AND hm.online AND hm.status = 'active' AND hm.deleted_at IS NULL)))
-           AND (p.facts_requested_at IS NULL OR COALESCE(p.facts_requested_at,p.facts_at,p.created_at) <= $1 - CASE
-             WHEN p.status = 'error' THEN $5::interval
+         JOIN UNNEST($3::uuid[],$4::bigint[],$5::bigint[],$6::bigint[],$7::bigint[])
+           AS cadence(provider_id,recent,active,idle,refused) ON cadence.provider_id = p.id
+         WHERE {READ_AVAILABLE} AND {SCHEDULED_READ_ALLOWED}
+           AND (p.facts_requested_at IS NULL OR EXTRACT(EPOCH FROM ($1 - COALESCE(p.facts_requested_at,p.facts_at,p.created_at))) / 60 >= CASE
+             WHEN p.status = 'error' THEN cadence.refused
              WHEN EXISTS (SELECT 1 FROM threads th JOIN turns t ON t.thread_id = th.node_id
-               WHERE th.provider_id = p.id AND (t.state = 'running' OR GREATEST(t.started_at,t.completed_at) >= $2))
+               WHERE th.provider_id = p.id AND (t.state = 'running'
+                 OR EXTRACT(EPOCH FROM ($1 - GREATEST(t.started_at,t.completed_at))) / 60 <= cadence.recent))
              OR (p.status='exhausted' AND EXISTS (
                SELECT 1 FROM threads th JOIN nodes n ON n.id=th.node_id
                JOIN thread_inputs i ON i.thread_id=th.node_id
                WHERE th.provider_id=p.id AND n.deleted_at IS NULL AND n.archived_at IS NULL
                  AND i.state IN ('pending','delivering')))
-             THEN $3::interval ELSE $4::interval END OR {RESET_READ_DUE})
+             THEN cadence.active ELSE cadence.idle END OR {RESET_READ_DUE})
            AND {SOURCE_INTERVAL_DUE}
-         ORDER BY COALESCE(p.facts_requested_at,p.facts_at,p.created_at),p.id LIMIT $6");
+         ORDER BY COALESCE(p.facts_requested_at,p.facts_at,p.created_at),p.id LIMIT $8");
     // Only this module's constants are put into the statement.
     Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(now)
-        .bind(now - schedule.recent)
-        .bind(interval(schedule.active))
-        .bind(interval(schedule.idle))
-        .bind(interval(schedule.refused))
+        .bind(INTENTIONAL_STOP_DETAILS.as_slice())
+        .bind(providers)
+        .bind(recent)
+        .bind(active)
+        .bind(idle)
+        .bind(refused)
         .bind(limit)
         .fetch_all(conn)
         .await?)

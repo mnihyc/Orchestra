@@ -1,6 +1,6 @@
 /** A tree of hundreds of rows: a row whose thing did not change is not drawn again, and opening a row draws the rows it adds and not the rows after them. */
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 
 import { Tree, type TreeRow } from '@/ui/Tree';
 
@@ -14,6 +14,19 @@ const GROUPS = 10;
 const IN_GROUP = 30;
 /** The group the tests close and open in the middle, and the one after it. */
 const MIDDLE = GROUPS / 2;
+
+it('selects a single picker row by press, Enter and Space while links and locked rows keep their own acts', () => {
+  const picked = vi.fn<(row: TreeRow<Thing>) => void>(), opened = vi.fn();
+  const rows: TreeRow<Thing>[] = ['open', 'locked'].map((id) => ({ id, item: { name: id, mark: 0 }, parentId: null, depth: 0, expandable: false, expanded: false, tick: false, tickLocked: id === 'locked' }));
+  render(<Tree flat label="Pick one" rows={rows} onExpandedChange={() => undefined} onPick={picked} nameOf={(item) => item.name}
+    renderRow={(row) => <a href="#preview" onClick={(event) => { event.preventDefault(); opened(); }}>{row.item.name}</a>} />);
+  const open = screen.getByRole('treeitem', { name: 'open' }), locked = screen.getByRole('treeitem', { name: 'locked' });
+  fireEvent.click(screen.getByRole('link', { name: 'open' })); expect(opened).toHaveBeenCalledOnce(); expect(picked).not.toHaveBeenCalled();
+  fireEvent.click(open); fireEvent.keyDown(open, { key: 'Enter' }); fireEvent.keyDown(open, { key: ' ' });
+  expect(picked.mock.calls.map(([row]) => row.id)).toEqual(['open', 'open', 'open']);
+  fireEvent.click(locked); fireEvent.keyDown(locked, { key: 'Enter' }); fireEvent.keyDown(locked, { key: ' ' });
+  expect(picked).toHaveBeenCalledTimes(3);
+});
 
 /** The things a tree is of, the same object for a row until its mark changes, as the tree of the left bar keeps them. */
 class Things {
@@ -54,6 +67,39 @@ describe('a tree of hundreds of rows', () => {
   const nameOf = (thing: Thing) => thing.name;
   const onExpandedChange = () => undefined;
   const tree = (rows: TreeRow<Thing>[]) => <Tree label="Things" rows={rows} onExpandedChange={onExpandedChange} nameOf={nameOf} renderRow={renderRow} />;
+
+  it('does not rebuild positions for unchanged rows when one item changes', () => {
+    const things = new Things();
+    const { rerender } = render(tree(rowsOf(things)));
+    const writes = vi.spyOn(Map.prototype, 'set');
+    try {
+      rerender(tree(rowsOf(things, new Set(), new Map([['group-0-0', 1]]))));
+      expect(writes.mock.calls.filter(([id]) => id === 'group-1-0')).toHaveLength(0);
+    } finally { writes.mockRestore(); }
+  });
+
+  it('keeps sibling positions current through reorder, reparenting, insertion and removal', () => {
+    const things = new Things();
+    const row = (id: string, parentId: string | null): TreeRow<Thing> => ({ id, parentId, item: things.of(id, 0), depth: parentId === null ? 0 : 1, expandable: parentId === null, expanded: parentId === null });
+    const a = row('a', null), b = row('b', null), one = row('one', 'a'), two = row('two', 'a');
+    const { rerender } = render(tree([a, one, two, b]));
+    const position = (name: string, at: number, total: number) => {
+      const element = screen.getByRole('treeitem', { name });
+      expect(element).toHaveAttribute('aria-posinset', String(at));
+      expect(element).toHaveAttribute('aria-setsize', String(total));
+    };
+    position('one', 1, 2); position('two', 2, 2);
+    rerender(tree([a, two, one, b]));
+    position('two', 1, 2); position('one', 2, 2);
+    const moved = { ...two, parentId: 'b' };
+    rerender(tree([a, one, b, moved]));
+    position('one', 1, 1); position('two', 1, 1); position('b', 2, 2);
+    const three = row('three', 'a');
+    rerender(tree([a, one, three, b, moved]));
+    position('one', 1, 2); position('three', 2, 2);
+    rerender(tree([a, three, b, moved]));
+    position('three', 1, 1); position('two', 1, 1);
+  });
 
   it('shows every row to a reader as an item of the tree, with its place among its brothers', () => {
     drawn.clear();

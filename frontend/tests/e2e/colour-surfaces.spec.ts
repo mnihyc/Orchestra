@@ -12,7 +12,7 @@ test('a custom colour reaches cards, the finder and the export tree', async ({ p
   await colour.getByLabel('A colour of its own').fill('#3a7bd5');
   await colour.getByRole('button', { name: 'Use this colour', exact: true }).click();
   await page.keyboard.press('Escape');
-  await page.goto('/org/acme');
+  await page.goto('/org/acme.research');
   const card = page.getByRole('article').filter({ has: page.getByRole('link', { name: 'Web', exact: true }) });
   await expect(card.locator('[data-node-icon]').first()).toHaveAttribute('data-node-color', 'own');
   await page.getByRole('button', { name: 'Find anything', exact: true }).click();
@@ -21,7 +21,7 @@ test('a custom colour reaches cards, the finder and the export tree', async ({ p
   const hit = finder.getByRole('option', { name: /^Web\b/ }).first();
   await expect(hit.locator('[data-node-icon]')).toHaveAttribute('style', /--node-own: ?#3a7bd5/);
   await page.keyboard.press('Escape');
-  await page.getByRole('button', { name: 'Actions for Web', exact: true }).first().click();
+  await card.getByRole('button', { name: /^Actions for Web\b/ }).click();
   await page.getByRole('menuitem', { name: 'Export…', exact: true }).click();
   const exportDialog = page.getByRole('dialog', { name: 'Export Web', exact: true });
   await expect(exportDialog.getByRole('treeitem', { name: /^Web\b/ }).locator('[data-node-icon]').first()).toHaveAttribute('data-node-color', 'own');

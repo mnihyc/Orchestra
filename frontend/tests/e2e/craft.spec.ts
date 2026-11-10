@@ -17,25 +17,25 @@ test.beforeEach(async () => { await scenario(); });
 
 test('the page tab names the thing once and the title bar holds only its ancestors', async ({ page }) => {
   await signIn(page);
-  const cases: [string, string][] = [
+  const cases: [string, string, string?][] = [
     ['/org/acme.research.ml', 'ML'],
     [`/project/${ACME.payments}`, 'Payments'],
-    [`/thread/${ACME.mainThread}`, 'Main thread'],
+    [`/thread/${ACME.mainThread}`, 'Main thread', 'Running Main thread'],
     [doc, 'Rollout plan'],
     [`/doc/${id(0x30, 7)}`, 'Fee rules'],
     [`/doc/${id(0x30, 8)}`, 'Fee table findings'],
     ['/org/acme/settings/general', 'General'],
     ['/org/acme.research.ml/settings/general', 'General'],
-    [`/project/${ACME.payments}/settings?section=policies`, 'Policies'],
+    [`/project/${ACME.payments}/settings?section=defaults`, 'Defaults'],
     [`/topic/${ACME.fixLogin}?tab=settings&section=destinations`, 'Send elsewhere'],
     ['/org/acme/messages', 'Messages'],
     ['/settings/profile', 'Profile'],
     ['/help/finding-things', 'Finding things'],
     ['/not-a-route', 'Page not found'],
   ];
-  for (const [route, leaf] of cases) {
+  for (const [route, leaf, tabName = leaf] of cases) {
     await page.goto(route);
-    await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: leaf, exact: true })).toBeVisible();
+    await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: tabName, exact: true })).toBeVisible();
     await expect(path(page).getByRole('link', { name: leaf, exact: true })).toHaveCount(0);
     await expect(path(page).locator('[aria-current="page"]')).toHaveCount(0);
     await expect(path(page).getByRole('button', { name: 'Ancestor places', exact: true })).toHaveCount(0);
@@ -48,7 +48,7 @@ test('the phone title bar gives the document its full parent back link', async (
   await signIn(page);
   await page.goto(doc);
   await expect(path(page).getByRole('link', { name: 'Rollout plan', exact: true })).toHaveCount(0);
-  await expect(path(page).getByRole('link', { name: 'Fix login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}`);
+  await expect(path(page).getByRole('link', { name: 'Fix login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}?tab=overview`);
   await expect(path(page).getByRole('link', { name: 'Fix login', exact: true })).toBeVisible();
   await expect(path(page).getByRole('button', { name: 'Ancestor places' })).toHaveCount(0);
 });
@@ -592,7 +592,7 @@ test('secret write and replacement carry the shared Save sign in both languages'
   await signIn(page);
   for (const locale of ['en', 'zh-CN'] as const) {
     const english = locale === 'en';
-    await page.goto(`/project/${ACME.web}/settings?section=policies`); await language(page, locale);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults`); await language(page, locale);
     await page.getByRole('button', { name: english ? 'New secret…' : '新建密钥…', exact: true }).click();
     const write = page.getByRole('button', { name: english ? 'Write secret' : '写入密钥', exact: true });
     await expect(write.locator('[data-action-icon="save"].lucide-save')).toBeVisible();

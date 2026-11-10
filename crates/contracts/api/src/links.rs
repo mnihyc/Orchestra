@@ -3,6 +3,11 @@
 //! Every list here is filtered for the reader before it is paged: a source or a target that the reader may not
 //! read is left out whole, and nothing counts it, names it, draws it or leaves its identity in a cursor.
 
+use crate::operations::{OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::common::Page;
 use crate::documents::Author;
 use crate::nodes::NodeKind;
@@ -264,7 +269,8 @@ crate::endpoints! {
     /// Says which tabs of the Links section a document shows, and whether the caller may change them.
     DocumentLinksGet: GET "/documents/{id}/links", Permission("doc.view"), none, none, json DocumentLinks, 200;
     /// Chooses the tabs of the Links section for one document, or goes back to the place's setting.
-    DocumentLinksSet: PUT "/documents/{id}/links", Permission("doc.manage"), none, json DocumentLinksSetBody, json DocumentLinks, 200;
+    DocumentLinksSet: PUT "/documents/{id}/links", Permission("doc.manage"), none, json DocumentLinksSetBody, json DocumentLinks, 200,
+        operation Op::returning(Manage, &[Object(K::Document)], Target::PermissionObject);
     /// Lists what refers to a document, with the line around each mention, or what it refers to; the reader's own view, paged.
     DocumentReferencesList: GET "/documents/{id}/references", Permission("doc.view"), query DocumentReferencesListQuery, none, json Page<LinkedThing>, 200;
     /// Draws the readable documents, chats and threads that refer to each other around a document.

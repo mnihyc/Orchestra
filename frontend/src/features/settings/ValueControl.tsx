@@ -5,11 +5,12 @@
  * a column of switches under names. What it draws is the value it is given and what it hands back is the
  * whole new value, never a part, so that the row that holds it writes one thing.
  */
+import type { TFunction } from 'i18next';
 import { Plus, Trash2 } from 'lucide-react';
 import { type ReactNode, useContext, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
-import { SIZE_UNITS, type Shape, bytesOf, emptyOf, isUnit, sizeParts, words } from '@/features/settings/settingsModel';
+import { SIZE_UNITS, type Shape, type UnavailableChoice, bytesOf, emptyOf, isUnit, sizeParts, words } from '@/features/settings/settingsModel';
 import { SettingChoiceContext } from '@/features/settings/choiceCopy';
 import { choiceOption, settingChoice } from '@/i18n/choices';
 import { Button } from '@/ui/Button';
@@ -122,25 +123,44 @@ function IntControl({ shape, value, onChange, onEdited, label, disabled, error, 
 
 // ---------------------------------------------------------------- lists
 
+interface VisibleChoice { value: string; name: string; description?: string; disabled?: boolean }
+function schemaChoices(values: readonly string[], unavailable: readonly UnavailableChoice[] | undefined, key: string | null, word: (value: string) => string, t: TFunction): VisibleChoice[] {
+  const choices: VisibleChoice[] = values.map((value) => {
+    const copy = settingChoice(t, key, value);
+    return { value, name: copy?.name ?? word(value), ...(copy === null ? {} : { description: copy.description }) };
+  });
+  const known = new Set(values);
+  for (const choice of unavailable ?? []) {
+    if (known.has(choice.value)) continue;
+    known.add(choice.value);
+    const copy = settingChoice(t, key, choice.value);
+    choices.push({ value: choice.value, name: copy?.name ?? word(choice.value), disabled: true,
+      description: choice.reason === 'program_auto_unavailable' ? t('settings.editor.autoUnavailable') : t('settings.editor.choiceUnavailable') });
+  }
+  return choices;
+}
+
 /** A list of words out of a closed list, as ticks; the order of the registry, which the value keeps. */
-function ChoiceSet({ values, value, onChange, label, hideLabel, disabled, say }: ValueControlProps & { values: readonly string[] }) {
+function ChoiceSet({ values, unavailable, value, onChange, label, hideLabel, disabled, say }: ValueControlProps & { values: readonly string[]; unavailable?: readonly UnavailableChoice[] }) {
   const { t } = useTranslation();
   const key = useContext(SettingChoiceContext);
   const chosen = Array.isArray(value) ? (value as unknown[]).filter((entry): entry is string => typeof entry === 'string') : [];
   const word = say ?? words;
   return (
     <CheckboxList label={label} hideLabel={hideLabel === true} value={chosen} onValueChange={onChange} disabled={disabled === true}
-      options={values.map((entry) => ({ value: entry, ...(settingChoice(t, key, entry) ?? { name: word(entry) }) }))} />
+      options={schemaChoices(values, unavailable, key, word, t).map((option) => ({ ...option,
+        disabled: option.disabled === true && !chosen.includes(option.value) }))} />
   );
 }
 
 /** The same list where the order of what is ticked matters: the chosen ones in their order, with the rest to add. */
-function OrderedChoice({ values, value, onChange, label, disabled, say }: ValueControlProps & { values: readonly string[] }) {
+function OrderedChoice({ values, unavailable, value, onChange, label, disabled, say }: ValueControlProps & { values: readonly string[]; unavailable?: readonly UnavailableChoice[] }) {
   const { t } = useTranslation();
   const key = useContext(SettingChoiceContext);
   const chosen = Array.isArray(value) ? (value as unknown[]).filter((entry): entry is string => typeof entry === 'string') : [];
-  const rest = values.filter((entry) => !chosen.includes(entry));
   const word = say ?? words;
+  const options = schemaChoices(values, unavailable, key, word, t);
+  const rest = options.filter((option) => !chosen.includes(option.value));
   const move = (at: number, by: -1 | 1) => {
     const next = [...chosen];
     const [taken] = next.splice(at, 1);
@@ -156,7 +176,8 @@ function OrderedChoice({ values, value, onChange, label, disabled, say }: ValueC
           {chosen.map((entry, at) => (
             <li key={entry} className="flex items-center gap-2 rounded-md border border-border bg-bg-subtle px-3 py-2">
               <span className="w-5 text-sm text-text-subtle tabular-nums">{at + 1}</span>
-              <Choice {...(settingChoice(t, key, entry) ?? { name: word(entry) })} className="min-w-0 flex-1 text-base text-text" />
+              <Choice name={options.find((option) => option.value === entry)?.name ?? word(entry)}
+                description={options.find((option) => option.value === entry)?.description} className="min-w-0 flex-1 text-base text-text" />
               <Button size="sm" variant="ghost" disabled={disabled === true || at === 0} aria-label={t('settings.editor.earlier', { name: word(entry) })} onClick={() => move(at, -1)}>
                 {t('settings.editor.up')}
               </Button>
@@ -170,9 +191,9 @@ function OrderedChoice({ values, value, onChange, label, disabled, say }: ValueC
       )}
       {rest.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {rest.map((entry) => (
-            <Choice key={entry} {...(settingChoice(t, key, entry) ?? { name: word(entry) })}>
-              {(content, control) => <Button {...control} size="sm" icon={<Plus aria-hidden />} disabled={disabled === true} onClick={() => onChange([...chosen, entry])}>{content}</Button>}
+          {rest.map((option) => (
+            <Choice key={option.value} name={option.name} description={option.description}>
+              {(content, control) => <Button {...control} size="sm" icon={<Plus aria-hidden />} disabled={disabled === true || option.disabled === true} onClick={() => onChange([...chosen, option.value])}>{content}</Button>}
             </Choice>
           ))}
         </div>
@@ -275,7 +296,7 @@ function Members({ shape, value, onChange, onEdited, label, disabled, say, membe
         const present = member.name in held;
         const name = memberLabel?.(member.name) ?? words(member.name);
         return (
-          <div key={member.name} className={`flex min-w-0 flex-col gap-1${memberLabel !== undefined && member.shape.type === 'object' ? ' sm:col-span-2' : ''}`}>
+          <div key={member.name} role={member.shape.type === 'object' && present ? 'group' : undefined} aria-label={member.shape.type === 'object' && present ? name : undefined} className={`flex min-w-0 flex-col gap-1${memberLabel !== undefined && member.shape.type === 'object' ? ' sm:col-span-2' : ''}`}>
             {memberLabel !== undefined && member.required && member.shape.type === 'object' && <span className="text-sm text-text">{name}</span>}
             {!member.required && (
               <Checkbox
@@ -380,22 +401,23 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
       return <IntControl {...props} shape={shape} />;
     case 'choice': {
       const word = say ?? words;
+      const options = schemaChoices(shape.values, shape.unavailable, key, word, t);
       return (
         <ChoiceLocator
           label={label}
           hideLabel
           value={typeof value === 'string' ? value : ''}
           placeholder={placeholder}
-          valueLabel={typeof value === 'string' && !shape.values.includes(value) ? word(value) : undefined}
+          valueLabel={typeof value === 'string' && !options.some((option) => option.value === value) ? word(value) : undefined}
           disabled={disabled === true}
           error={error}
           onValueChange={onChange}
-          options={shape.values.map((entry) => ({ value: entry, ...(settingChoice(t, key, entry) ?? { name: word(entry) }) }))}
+          options={options}
         />
       );
     }
     case 'text':
-      return (shape.maxLength ?? 0) > LONG_TEXT_CHARS ? (
+      return key === 'org.terms' || (shape.maxLength ?? 0) > LONG_TEXT_CHARS ? (
         <Textarea
           label={label}
           hideLabel={props.showLabel !== true}
@@ -428,7 +450,7 @@ export function ValueControl(props: ValueControlProps & { ordered?: boolean }): 
       return <DateField label={label} hideLabel placeholder={placeholder} type="datetime-local" value={typeof value === 'string' ? value.slice(0, 16) : ''} disabled={disabled} error={error} onValueChange={(value) => onChange(value === '' ? '' : new Date(value).toISOString())} />;
     case 'list':
       if (shape.item.type === 'choice' && shape.unique) {
-        return props.ordered === true ? <OrderedChoice {...props} values={shape.item.values} /> : <ChoiceSet {...props} values={shape.item.values} />;
+        return props.ordered === true ? <OrderedChoice {...props} values={shape.item.values} unavailable={shape.item.unavailable} /> : <ChoiceSet {...props} values={shape.item.values} unavailable={shape.item.unavailable} />;
       }
       if (shape.item.type === 'text' || shape.item.type === 'id') return <Lines {...props} />;
       return <Json {...props} />;

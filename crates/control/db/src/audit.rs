@@ -207,6 +207,32 @@ pub struct Origin {
 tokio::task_local! { static REQUEST_ORIGIN: Origin; }
 tokio::task_local! { static AGENT_TURN: (Id,Id); }
 tokio::task_local! { static ADMIN_MODE: Cell<Option<Id>>; }
+tokio::task_local! { static LINK_ORIGIN: LinkAttribution; }
+
+/// Trusted actor attribution for a validated explicit link grant, never a message-send receipt.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkAttribution {
+    #[serde(flatten)]
+    source: orch_access_contract::audit::LinkOrigin,
+    by: Id,
+}
+
+/// Native grant owners call this after validating the real source context and their actual actor.
+/// An inner ordinary writer with no additional source keeps its outer grant's attribution.
+pub async fn scope_link_origin<T>(
+    source: Option<orch_access_contract::audit::LinkOrigin>,
+    by: Id,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    match source {
+        Some(source) => {
+            LINK_ORIGIN
+                .scope(LinkAttribution { source, by }, work)
+                .await
+        }
+        None => work.await,
+    }
+}
 
 /// Retains the original tool-call turn while its asynchronous action is answered.
 pub async fn scope_agent_turn<T>(
@@ -252,7 +278,48 @@ pub async fn append(
     origin: &Origin,
     at: DateTime<Utc>,
 ) -> Result<Id, DbError> {
+    append_placed(conn, entry, Placement::Object, origin, at).await
+}
+
+/// Records an event at its actual native material boundary while the object's own
+/// name and lifecycle location still come from the object. A system event has no node.
+pub async fn append_in(
+    conn: &mut Conn,
+    entry: &Entry<'_>,
+    node: Option<Id>,
+    origin: &Origin,
+    at: DateTime<Utc>,
+) -> Result<Id, DbError> {
+    append_placed(conn, entry, Placement::At(node), origin, at).await
+}
+
+enum Placement {
+    Object,
+    At(Option<Id>),
+}
+
+async fn append_placed(
+    conn: &mut Conn,
+    entry: &Entry<'_>,
+    placement: Placement,
+    origin: &Origin,
+    at: DateTime<Utc>,
+) -> Result<Id, DbError> {
     let mut entry = entry.clone();
+    if let Ok(link) = LINK_ORIGIN.try_with(Clone::clone)
+        && matches!(entry.actor, Actor::User(by) if by == link.by)
+        && let Json::Object(details) = &mut entry.details
+    {
+        let value = match link.source {
+            orch_access_contract::audit::LinkOrigin::Chat { chat_id } => {
+                serde_json::json!({"kind":"chat","chat_id":chat_id,"by":link.by})
+            }
+            orch_access_contract::audit::LinkOrigin::ThreadInput { thread_id } => {
+                serde_json::json!({"kind":"thread_input","thread_id":thread_id,"by":link.by})
+            }
+        };
+        details.insert("link_origin".into(), value);
+    }
     crate::queries::trace::snapshot_names(conn, &mut entry).await?;
     crate::queries::trace::deletion_details(conn, &mut entry).await?;
     let inherited = current_origin();
@@ -278,6 +345,30 @@ pub async fn append(
         &entry.details,
     )
     .await?;
+    let event = match placement {
+        Placement::Object => crate::queries::trace::Facts {
+            node: facts.node.or(entry.node_id),
+            org: facts.org.or(entry.org_id),
+            ..facts.clone()
+        },
+        Placement::At(Some(id)) => {
+            let node = crate::queries::hierarchy::node(conn, id)
+                .await?
+                .ok_or_else(|| DbError::Rule {
+                    constraint: "audit_event_place_present".into(),
+                })?;
+            let mut scope = node.path;
+            scope.sort_unstable();
+            scope.dedup();
+            crate::queries::trace::Facts {
+                node: Some(node.id),
+                org: Some(node.org_id),
+                scope,
+                ..Default::default()
+            }
+        }
+        Placement::At(None) => crate::queries::trace::Facts::default(),
+    };
     let for_user = if let Actor::Agent(thread) = entry.actor {
         if entry.for_user_id.is_some() {
             entry.for_user_id
@@ -328,8 +419,8 @@ pub async fn append(
     .bind(entry.r#override)
     .bind(entry.object_kind)
     .bind(entry.object_id)
-    .bind(facts.node.or(entry.node_id))
-    .bind(facts.org.or(entry.org_id))
+    .bind(event.node)
+    .bind(event.org)
     .bind(entry.environment_id)
     .bind(entry.summary)
     .bind(&entry.details)
@@ -337,12 +428,21 @@ pub async fn append(
     .bind(origin.user_agent.as_deref())
     .bind(origin.request_id.as_deref())
     .bind(facts.name.as_deref())
-    .bind(&facts.scope)
+    .bind(&event.scope)
     .bind(for_user)
     .bind(matches!(entry.actor, Actor::User(user) if origin.as_admin == Some(user)) && AGENT_TURN.try_with(|_| ()).is_err())
     .execute(&mut *conn)
     .await?;
     crate::queries::trace::changed(conn, &entry, &facts, at).await?;
+    if let (Actor::User(account), Some(object)) = (entry.actor, entry.object_id)
+        && entry
+            .action
+            .parse::<orch_access_contract::audit::AuditAction>()
+            .is_ok_and(|action| action.kind() == orch_access_contract::audit::AuditKind::Made)
+    {
+        crate::idempotency::creation::observe(conn, Some(account), entry.object_kind, object)
+            .await?;
+    }
     Ok(id)
 }
 

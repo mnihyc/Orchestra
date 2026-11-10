@@ -52,6 +52,8 @@ export async function sendMessage(page: Page, text: string): Promise<void> {
 /** The menu of a message: opened from its toolbar, which shows while the pointer rests on the message. */
 export async function openMessageMenu(page: Page, text: string | RegExp): Promise<void> {
   const message = messageSaying(page, text).first();
+  await page.mouse.move(0, 0);
+  if (await page.getByRole('tooltip').count() > 0) await page.keyboard.press('Escape');
   await message.hover();
   await message.getByRole('button', { name: /^Actions/ }).click();
 }

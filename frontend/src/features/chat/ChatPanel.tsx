@@ -10,14 +10,13 @@
 import { useViewInstance } from '@/features/workbench/instance';
 import { useWorkbench } from '@/features/workbench/store';
 import { findTab } from '@/features/workbench/layout';
-import { useQuery } from '@tanstack/react-query';
 import { useRouter, useRouterState } from '@tanstack/react-router';
 import { MessageSquareOff, Maximize2 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useViewChoice } from '@/lib/viewChoices';
-import { nodeChatOpeningQuery } from '@/api/chats';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { ApiError } from '@/api/client';
 import { ChatView, type ChatViewProps } from '@/features/chat/ChatView';
 import { useTakeQuotes } from '@/features/chat/discuss';
@@ -87,7 +86,7 @@ export function ChatScope({ segments, value, onValueChange, restoreFocusRef }: {
  * The panel admits its scopes and selected conversation together; cached path names never grant a chat.
  */
 function useSegments(nodeId: string, shown: boolean, scope: string, chatId: string | null): { segments: Segment[]; failed: unknown; empty: boolean; retry: () => void } {
-  const opening = useQuery({ ...nodeChatOpeningQuery(nodeId, scope, chatId), enabled: shown });
+  const { opening } = useDefaultsOpening(nodeId, { shown, scope, chatId });
   const refused = opening.isError && opening.error instanceof ApiError && [403, 404].includes(opening.error.status);
   const data = refused ? undefined : opening.data;
   const segments = useMemo(() => (data?.scopes ?? []).flatMap(({ node, chat }) => node.name === null || node.redacted ? [] : [{

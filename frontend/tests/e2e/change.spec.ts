@@ -5,6 +5,14 @@ import { RUNS_ON } from '../doubles/fixtures.ts';
 import { BUILD_HOST, change, conversation, HOST_ONE, MAIN, openBlocked, openHistory, shot, tabTo, wizard } from './change-support.ts';
 import { ACME, bodySent, scenario, signIn } from './support.ts';
 
+async function chooseSwitchDestination(page: Page, dialog: ReturnType<typeof wizard>) {
+  const pair = dialog.getByRole('combobox', { name: 'Agent and provider', exact: true });
+  await pair.click();
+  await pair.fill('OpenAI key');
+  await page.getByRole('option', { name: /Codex.*OpenAI key/, disabled: false }).first().click();
+  await expect(pair).toHaveValue(/Codex.*OpenAI key/);
+}
+
 test.beforeEach(async () => {
   await scenario();
   await change.mode('manual');
@@ -18,8 +26,9 @@ test('a switch of a blocked thread: planned, a blocker resolved in the dialog, c
   await expect(dialog).toBeVisible();
 
   // The plan is made for the provider that can take it: what changes, what stays, what ends.
-  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toContainText('OpenAI key');
-  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toContainText('Codex');
+  await chooseSwitchDestination(page, dialog);
+  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toHaveValue(/OpenAI key/);
+  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toHaveValue(/Codex/);
   await expect(dialog.getByRole('list', { name: 'Steps' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
   await shot(page, 'switch-2-plan');
@@ -71,6 +80,7 @@ test('a switch that fails in its checks says where, why, and what was undone, an
   await openBlocked(page);
   await page.getByRole('button', { name: 'Switch provider…' }).click();
   const dialog = wizard(page, 'Switch “Main thread”');
+  await chooseSwitchDestination(page, dialog);
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
   // The new side does not pass its checks: what it had made is taken away.
@@ -177,12 +187,12 @@ test('a side thread is asked from a message, answered inline and in its panel, a
   await openHistory(page);
   await conversation(page).getByText('Please fix it, and run the tests.').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Side thread from here…' }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByText('Side mode: Enforced read-only files', { exact: true })).toBeVisible();
   await expect(ask.getByText('It starts from the conversation up to turn 1.')).toBeVisible();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Which tests cover the redirect?');
   await shot(page, 'side-1-ask');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
 
   // Where the thread screen places it: under the line that says it began, with its own box.
   const lane = conversation(page).getByRole('region', { name: /^Side thread/ });
@@ -243,16 +253,16 @@ test('a side thread is asked from a message, answered inline and in its panel, a
 test('a thread with as many side threads open as it may have says so, and one is closed to ask again', async ({ page }) => {
   await openHistory(page);
   await change.sides(MAIN, 4);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Main thread has 4 side threads open')).toBeVisible();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
   await shot(page, 'side-5-limit');
   await ask.getByRole('list', { name: 'The open side threads' }).getByRole('button', { name: 'Close' }).first().click();
   await expect(ask.getByText('Main thread has 4 side threads open')).toHaveCount(0);
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask).toHaveCount(0);
   await expect(conversation(page).getByText('One more question').first()).toBeVisible();
 });
@@ -421,14 +431,17 @@ test('what is idle on a host is listed exactly as it will be stopped, and stoppe
   await shot(page, 'recycle-2-stopped');
 });
 
-test('a fork is made from the keyboard alone: the menu, the choices, the confirmation, the way to the new thread', async ({ page }) => {
+test('a duplicate is made from the keyboard alone: the menu, the choices, the confirmation, the way to the new thread', async ({ page }) => {
   await openHistory(page);
   await page.locator('[data-thread-header]').getByRole('button', { name: 'Actions for Main thread', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('menu')).toBeVisible();
-  // The header's Fork to action opens the choices this keyboard flow exercises.
-  await page.keyboard.press('Escape');
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Fork to…', exact: true }).focus();
+  // Duplicate to hands the thread to the native Fork wizard, including its Fork confirmation.
+  const duplicate = page.locator('[data-thread-header]').getByRole('button', { name: 'Duplicate to…', exact: true });
+  if (await duplicate.isVisible()) {
+    await page.keyboard.press('Escape');
+    await duplicate.focus();
+  } else await page.getByRole('menuitem', { name: 'Duplicate to…', exact: true }).focus();
   await page.keyboard.press('Enter');
   const dialog = wizard(page, 'Fork “Main thread”');
   await expect(dialog).toBeVisible();
@@ -488,9 +501,9 @@ test('a switch is planned, confirmed and hidden from the keyboard alone, and Esc
 
 test('a side thread is asked, kept in view and closed from the keyboard alone', async ({ page }) => {
   await openHistory(page);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).focus();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).focus();
   await page.keyboard.press('Enter');
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByRole('textbox', { name: 'What to ask' })).toBeFocused();
   await page.keyboard.type('Is the redirect covered?');
   await page.keyboard.press('Enter');
@@ -523,8 +536,8 @@ test('a composer aside with a lost reply retries its original act after navigati
   try {
     await box.fill(original);
     await page.getByRole('button', { name: 'More ways to send', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Ask on the side', exact: true }).click();
-    const retry = page.getByRole('button', { name: 'Retry aside', exact: true });
+    await page.getByRole('menuitem', { name: 'Side thread', exact: true }).click();
+    const retry = page.getByRole('button', { name: 'Retry side thread', exact: true });
     await expect(retry).toBeVisible();
     await expect(box).toHaveValue(original);
     await box.fill(newer);

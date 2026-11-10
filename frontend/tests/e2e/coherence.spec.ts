@@ -70,7 +70,8 @@ test('the same names are allowed in two orgs and two parents, and refused beside
   // The screen says the same, and takes the free short name when asked.
   await signIn(page);
   await page.goto('/org/acme');
-  await page.getByRole('button', { name: 'New department', exact: true }).click();
+  await page.getByRole('button', { name: 'New in Acme', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'New department…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'New department in Acme' });
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('dep2');
   await expect(dialog.getByRole('textbox', { name: 'Short name' })).toHaveValue('dep2');

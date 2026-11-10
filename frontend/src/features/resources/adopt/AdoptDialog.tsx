@@ -7,17 +7,19 @@
  * the session before Orch and never sent to the agent again, or why none do. Nothing happens until Adopt is
  * pressed, and a session that is a thread already says so and links to it.
  */
-import { useMutation, useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { adoptionPlanQuery, adoptSession } from '@/api/adoption';
 import { placePath } from '@/features/navigation/places';
+import { CreationAgentAccess } from '@/features/start/AgentAccess';
+import { offeredAgentAccess, useAgentAccessSelection } from '@/features/start/agentAccessOffer';
 import { Facts } from '@/features/resources/Facts';
 import { PlacePicker, type PickedPlace } from '@/features/settings/PlacePicker';
 import type { AdoptPlan, NativeSession } from '@/generated/api-types';
-import { newActKey } from '@/lib/requests';
+import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
@@ -78,11 +80,19 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [topic, setTopic] = useState<PickedPlace | null>(null);
-  const key = useRef(newActKey());
-  const body = { provider_id: providerId, agent_id: agentId, native_session_ref: session.native_session_ref };
-  const plan = useQuery({ ...adoptionPlanQuery(topic?.id ?? '', body), enabled: topic !== null });
+  const key = useActKey();
+  const selection = useAgentAccessSelection(topic?.id ?? '');
+  const body = { provider_id: providerId, agent_id: agentId, native_session_ref: session.native_session_ref,
+    ...(selection.chosen === null ? {} : { agent_access: selection.chosen }) };
+  const plan = useQuery({ ...adoptionPlanQuery(topic?.id ?? '', body), enabled: topic !== null, placeholderData: keepPreviousData });
+  const planned = plan.data;
+  const already = planned?.adopted_thread_id ?? session.adopted_thread_id;
+  const eligible = topic !== null && planned?.environment !== undefined && planned.environment !== null && already === null;
+  const access = offeredAgentAccess(selection, { offer: planned?.agent_access, enabled: eligible,
+    pending: plan.isPending || plan.isFetching || plan.isPlaceholderData, error: plan.error, retry: () => void plan.refetch() });
+  if (eligible && selection.chosen === null && plan.isSuccess && !plan.isFetching && !plan.isPlaceholderData && planned.agent_access !== undefined && planned.agent_access !== null) selection.onChange(access.value);
   const adopt = useMutation({
-    mutationFn: (topicId: string) => adoptSession(topicId, body, key.current),
+    mutationFn: (topicId: string) => adoptSession(topicId, body, key({ topic: topicId, ...body })),
     onSuccess: (thread) => {
       toast({
         tone: 'success',
@@ -92,9 +102,7 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
       onClose();
     },
   });
-  const planned = plan.data;
-  const already = planned?.adopted_thread_id ?? session.adopted_thread_id;
-  const ready = topic !== null && planned !== undefined && planned.environment !== null && already === null && !plan.isFetching;
+  const ready = eligible && access.ready && selection.chosen !== null && !plan.isFetching && !plan.isPlaceholderData;
   const name = sessionName(session, t('adopt.untitled'));
 
   const footer = (
@@ -146,12 +154,12 @@ export function AdoptDialog({ session, providerId, agentId, onClose }: AdoptDial
             only="topic"
             disabled={adopt.isPending}
             onChange={(chosen) => {
-              key.current = newActKey();
               adopt.reset();
               setTopic(chosen);
             }}
           />
         )}
+        {eligible && <CreationAgentAccess access={access} disabled={adopt.isPending} />}
         {plan.isFetching && (
           <p role="status" className="text-sm text-text-muted">
             {t('adopt.dialog.planning')}

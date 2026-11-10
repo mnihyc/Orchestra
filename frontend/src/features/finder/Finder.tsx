@@ -14,6 +14,11 @@ import { type KeyboardEvent, type ReactNode, useCallback, useMemo, useRef, useSt
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 
+import { KnownNodeChip } from '@/features/people/NamedChip';
+import { useHitOrgs } from '@/features/search/orgHits';
+import { keyOfHit } from '@/features/search/hits';
+import { OrgScope } from '@/features/search/OrgScope';
+import { useSelectedOrg } from '@/shell/org';
 import { orgsQuery } from '@/api/nodes';
 import { recordItemVisit, starItem, unstarItem } from '@/api/personal';
 import { SEARCH_MIN_CHARS, searchPreviewQuery } from '@/api/search';
@@ -74,6 +79,9 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
   const queryClient = useQueryClient();
   const openHelp = useHelpOpener();
   const orgs = useQuery({ ...orgsQuery, enabled: ready }).data;
+  const selectedOrg = useSelectedOrg((state) => state.orgId);
+  const [orgChoice, setOrgChoice] = useState<string>();
+  const searchOrg = orgChoice ?? selectedOrg ?? orgs?.[0]?.id;
 
   const [text, setText] = useState(seed);
   const [card, setCard] = useState<NameHit | null>(null);
@@ -100,13 +108,14 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
 
   // What the words typed lead to besides names: the search of what was said.
   const letters = Array.from(query).length;
-  const wantsHits = open && mode === 'conversations' && letters >= SEARCH_MIN_CHARS;
-  const preview = useQuery({ ...searchPreviewQuery({ q: query, participating }), enabled: wantsHits }).data;
+  const wantsHits = open && mode === 'conversations' && letters >= SEARCH_MIN_CHARS && searchOrg !== undefined;
+  const preview = useQuery({ ...searchPreviewQuery({ q: query, participating, scope: searchOrg === 'all' ? undefined : searchOrg }), enabled: wantsHits }).data;
+  const hitOrgs = useHitOrgs(wantsHits ? preview?.items ?? [] : [], orgs, searchOrg === 'all');
   const slugOfOrg = useCallback((id: string) => orgs?.find((org) => org.id === id)?.slug ?? null, [orgs]);
 
   const searchRow = useMemo<Scored | null>(() => {
     if (commandPrefix !== null || (mode !== 'all' && mode !== 'conversations')) return null;
-    const destination = { to: '/search', search: query === '' ? {} : { q: query } };
+    const destination = { to: '/search', search: { ...(query === '' ? {} : { q: query }), ...(searchOrg === undefined ? {} : { org: searchOrg }) } };
     return {
       score: 0,
       row: {
@@ -120,10 +129,11 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
         run: (open) => env.go(destination, open),
       },
     };
-  }, [query, commandPrefix, mode, t, env]);
+  }, [query, searchOrg, commandPrefix, mode, t, env]);
 
   const answered = useAnswers({
     commandPrefix,
+    orgId: searchOrg === 'all' ? undefined : searchOrg,
     active: open,
     metadataReady: ready,
     mode,
@@ -155,6 +165,7 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
         const fileSource = source.fileId !== undefined && hit.kind === 'document'
           ? { ...source, href: `/doc/${hit.document.id}?file=${source.fileId}` } : source;
         return { score: 1 - index / 100, row: { id: `conversations:file:${index}:${fileIndex}`, group: 'conversations',
+          ...(searchOrg === 'all' ? { org: hitOrgs.get(keyOfHit(hit)) ?? null } : {}),
           file: fileSource, title: source.name, marks: markedRanges(source.name, query),
           detail: hit.kind === 'document' ? [way, hit.document.title].filter(Boolean).join(' › ') : way,
           icon: MessagesSquare, adminAccess: adminAccessOf(hit), ...(addressed === null ? {} : { destination: addressed }),
@@ -171,6 +182,7 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
       const row: FinderRow = {
         id: `conversations:${hit.kind}:${index}`,
         group: 'conversations',
+        ...(searchOrg === 'all' ? { org: hitOrgs.get(keyOfHit(hit)) ?? null } : {}),
         adminAccess: adminAccessOf(hit),
         title: hit.snippet,
         marks,
@@ -185,14 +197,14 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
       };
       return [{ row, score: 1 - index / 100 }];
     });
-  }, [wantsHits, preview, slugOfOrg, env, query]);
+  }, [wantsHits, preview, slugOfOrg, env, query, hitOrgs, searchOrg]);
 
   const answers = { ...answered.answers };
   // Content hits stay in their ordinary group; advanced search follows every group.
   if (hitRows.length > 0) answers.conversations = hitRows;
   const continuations: Partial<Record<GroupId, FinderRow>> = {};
   for (const group of answered.full) {
-    const destination = { to: '/everything', search: { q: query, participating: participating ? 'true' : undefined } };
+    const destination = { to: '/everything', search: { q: query, participating: participating ? 'true' : undefined, parent: searchOrg === 'all' ? undefined : searchOrg } };
     continuations[group] = {
       id: `everything:${group}`, group, title: t('finder.moreInEverything'), marks: [],
       detail: t('finder.moreInEverythingAbout'), icon: ArrowRight, destination,
@@ -279,7 +291,7 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
       {commandPrefix === null && <ModeButtons mode={mode} onChoose={(next) => change(withMode(text, next))} />}
       {commandPrefix === null && (mode === 'all' || mode === 'people' || mode === 'conversations') && <div className="px-4 py-2" onKeyDown={(event) => {
         if (['Enter', ' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) event.stopPropagation();
-      }}><FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={(on) => useFinder.setState({ participating: on })} />} /></div>}
+      }}><FilterBar leading={mode === 'all' || mode === 'conversations' ? <OrgScope value={searchOrg} selected={selectedOrg} orgs={orgs} onChange={setOrgChoice} /> : undefined} participation={<ParticipationFilter checked={participating} onCheckedChange={(on) => useFinder.setState({ participating: on })} />} /></div>}
 
       {card !== null && (
         <Card
@@ -296,7 +308,7 @@ function Session({ open, seed, commandPrefix, ready }: { open: boolean; seed: st
         />
       )}
       {/* The list stays while a card is shown, out of sight: the field points at it. */}
-      <PaletteList label={t('finder.list')} hidden={card !== null} onPointerMove={() => (walked.current = true)}>
+      <PaletteList label={t('finder.list')} hidden={card !== null} onPointerMoveCapture={() => (walked.current = true)}>
           {nothing && (
             <EmptyState compact className="px-4" title={t('finder.nothing', { query })}
               description={letters < SEARCH_MIN_CHARS && (mode === 'all' || mode === 'people') ? t('finder.namesMinimum') : participating ? t('finder.nothingFocused', { focus: t('adminReach.focus.only') }) : t('finder.nothingAbout')} />
@@ -386,7 +398,7 @@ function RowView({ row, onSelect, howRef }: { row: FinderRow; onSelect: () => vo
               <FileChip source={row.file} bare label={<Marked text={row.title} ranges={row.marks} />} ariaLabel={row.title} presentation={{ place: 'compact' }} onOpen={(event) => { howRef.current = howOf(event); onSelect(); }} />}
             <AsAdminMark of={row.adminAccess?.place} responsive />
           </span>{' '}
-          {(row.detail !== '' || row.state !== undefined || row.lastActivity !== undefined) && <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted"><span className="min-w-0 wrap-anywhere">{row.detail}</span>{row.state !== undefined && <span>{row.state}</span>}{row.lastActivity !== undefined && <RelativeTime at={row.lastActivity} />}</span>}
+          {(row.org !== undefined || row.detail !== '' || row.state !== undefined || row.lastActivity !== undefined) && <span className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">{row.org !== undefined && <span onClick={(event) => event.stopPropagation()}>{row.org === null ? <UnknownOrg /> : <KnownNodeChip node={row.org} />}</span>}<span className="min-w-0 wrap-anywhere">{row.detail}</span>{row.state !== undefined && <span>{row.state}</span>}{row.lastActivity !== undefined && <RelativeTime at={row.lastActivity} />}</span>}
         </span>
         {row.starred === true && <Star aria-hidden className="text-warning" />}
         {row.note !== undefined && <span className="shrink-0 text-xs text-text-muted">{row.note}</span>}
@@ -432,3 +444,4 @@ function SavedStar({ target, name, starred }: { target: NonNullable<FinderRow['t
   </span>;
 }
 
+function UnknownOrg() { const { t } = useTranslation(); return t('search.org.unavailable'); }

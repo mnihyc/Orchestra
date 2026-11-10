@@ -49,7 +49,8 @@ test('a page shows a block of every one of the twenty kinds as it is stored', as
   await expect(page_.locator('video')).toHaveCount(0);
   // The title and the line under it.
   await expect(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Rollout plan');
-  await expect(page.getByText('Ada Lovelace changed this')).toBeVisible();
+  const changed = page.locator('[data-screen="document"] p').filter({ hasText: 'Changed by' });
+  await expect(changed.getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
   await expect(page.locator('[data-access-state]').filter({ hasText: 'Uses Fix login permissions' })).toBeVisible();
   // Opening a page writes nothing.
   expect((await held(DOCS.plan)).seq).toBe(1);

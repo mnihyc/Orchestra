@@ -6,6 +6,7 @@ import type { Document, DocumentRef, NewBlock, DocumentImportResult as ImportRes
 import { comparePositions } from '../../src/features/documents/blocks.ts';
 import { formatOf, IMPORT_ENTRIES_MAX } from '../../src/features/people/imports.ts';
 import { readHtml } from '../../src/features/people/html.ts';
+import { readMarkdown } from './markdown-reader.ts';
 import type { Piece } from '../../src/features/documents/pieces.ts';
 import { plainText } from '../../src/features/documents/blocks.ts';
 import { type Answer, type Person, Refusal, type World } from './world.ts';
@@ -24,43 +25,10 @@ const ZIP_END_BYTES = 22;
 const ZIP_COMMENT_BYTES = 65535;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-/** What this double's reader makes of Markdown: headings, bullet items by their indent, and paragraphs. The real reader is the server's; a browser test only needs blocks. */
-function readMarkdownLines(source: string): Piece[] {
-  const out: Piece[] = [];
-  const stack: { indent: number; piece: Piece }[] = [];
-  let paragraph: string[] = [];
-  const flush = () => {
-    if (paragraph.length > 0) out.push({ type: 'paragraph', props: {}, content: [{ type: 'text', text: paragraph.join(' ') }], children: [] });
-    paragraph = [];
-  };
-  for (const line of source.replace(/\r\n?/g, '\n').split('\n')) {
-    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
-    const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
-    if (heading !== null) {
-      flush();
-      out.push({ type: 'heading', props: { level: (heading[1] ?? '#').length }, content: [{ type: 'text', text: heading[2] ?? '' }], children: [] });
-      stack.length = 0;
-    } else if (item !== null) {
-      flush();
-      const indent = (item[1] ?? '').length;
-      const made: Piece = { type: 'bullet', props: {}, content: [{ type: 'text', text: item[2] ?? '' }], children: [] };
-      while (stack.length > 0 && (stack[stack.length - 1]?.indent ?? 0) >= indent) stack.pop();
-      (stack[stack.length - 1]?.piece.children ?? out).push(made);
-      stack.push({ indent, piece: made });
-    } else if (line.trim() === '') {
-      flush();
-    } else {
-      paragraph.push(line.trim());
-    }
-  }
-  flush();
-  return out;
-}
-
 /** A title supplied by the first heading is stored once, outside the copied block tree, and every block has a fresh id: what the server's import makes, in the small. */
 function importedWriting(name: string, source: string, format: 'markdown' | 'html', freshId: () => string): { title: string; blocks: NewBlock[]; warnings: string[] } {
   const html = format === 'html' ? readHtml(source) : null;
-  const pieces = [...(html?.pieces ?? readMarkdownLines(source))];
+  const pieces = [...(html?.pieces ?? readMarkdown(source))];
   const first = pieces[0];
   const heading = first?.type === 'heading' ? plainText(first.content).trim() : '';
   const title = (heading || name.replace(/^.*\//, '').replace(/\.[^.]+$/, '')).slice(0, 200) || 'Untitled';

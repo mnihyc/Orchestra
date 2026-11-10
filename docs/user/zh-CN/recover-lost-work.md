@@ -10,6 +10,7 @@ heading_id.服务器与挂载: servers-and-mounts
 heading_id.提供方运行时: provider-runtimes
 heading_id.移除主机: remove-a-host
 heading_id.默认环境丢失时: when-a-default-is-lost
+summary: 声明机器永久丢失、查看恢复目标，并通知受影响人员。
 ---
 
 # 机器丢失后恢复工作

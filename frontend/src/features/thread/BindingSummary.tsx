@@ -27,7 +27,7 @@ export function EnvironmentChip({ thread }: { thread: Thread }) {
   const meId = useStore(client.session, (state) => state.userId);
   const environment = thread.environment;
   if (environment === null) {
-    return <span className="text-text-subtle">{t('thread.environment.none')}</span>;
+    return <span className="text-text-subtle">{t(thread.program?.requires_environment === false ? 'ask.noEnvironment' : 'thread.environment.none')}</span>;
   }
   const others = thread.directory_threads;
   return (
@@ -84,6 +84,11 @@ export function IsolationBadge({ thread }: { thread: Thread }) {
 /** What the thread runs on, in a few lines: for an empty conversation. */
 export function BindingSummary({ thread }: { thread: Thread }) {
   const { t } = useTranslation();
+  if (thread.program?.id === 'orch') return <ul className="flex flex-col items-center gap-1 text-sm text-text-muted">
+    <li>{t('ask.threadProgram')}</li>
+    <li>{t('ask.threadProgramDescription')}</li>
+    <li><EnvironmentChip thread={thread} /></li>
+  </ul>;
   const binding = thread.binding;
   if (binding === null) return null;
   return (

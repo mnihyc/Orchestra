@@ -19,7 +19,7 @@ async function editor(page: Page) { await page.goto('/settings/notifications'); 
 async function placeInbox(page: Page) {
   await page.goto('/inbox');
   await page.getByRole('combobox', { name: 'Group notifications' }).click();
-  await page.getByRole('option', { name: 'By place', exact: true }).click();
+  await page.getByRole('option', { name: 'Place', exact: true }).click();
 }
 async function bell(page: Page) { await page.getByRole('button', { name: 'Notifications for this thread' }).click(); }
 async function chooseTime(page: Page, time = '12:30') {
@@ -51,7 +51,8 @@ test('the scoped bell is checked, retains stale facts, and subscription changes 
   await bell(page);
   await expect(page.getByText('Outside Orch: off', { exact: true })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'Edit outside notifications' })).toHaveCount(1);
-  await expect(page.getByText('Configured ways do not guarantee receipt.', { exact: false })).toBeVisible();
+  // The bell now shows its observed value and check time; its duplicate delivery disclaimer was removed.
+  await expect(page.getByRole('status').filter({ hasText: 'Outside Orch: off' })).toContainText('Checked');
   await page.getByRole('menuitemradio', { name: 'Off', exact: true }).click();
   expect((await held()).routes.every((route) => !route.enabled)).toBe(true);
   await bell(page);
@@ -97,7 +98,8 @@ test('terminal unconfirmed delivery leaves one Inbox notice, last accepted, curr
   await page.goto('/inbox');
   await expect(page.locator('[data-kind="notification.route_attention"]')).toHaveCount(1);
   await expect(page.getByText('Nothing went out')).toHaveCount(0);
-  await page.getByRole('link', { name: /Delivery could not be confirmed through System mail/ }).click();
+  // The card's explicit repair link stays clickable beside its interactive delivery details.
+  await page.locator('[data-kind="notification.route_attention"]').getByRole('link', { name: 'Open notification settings', exact: true }).click();
   const mail = card(page, 'email');
   await expect(mail.getByText('Last accepted:', { exact: false })).toBeVisible();
   await mail.getByRole('button', { name: 'Retry waiting' }).click();
@@ -196,12 +198,14 @@ test('place groups use supplied actionability, filtered counts and no answer exc
   await signIn(page);
   await placeInbox(page);
   await expect(groups(page).first().getByRole('heading', { name: 'Web' })).toBeVisible();
-  await expect(groups(page).first().getByText('Waiting for you', { exact: true })).toHaveCount(2);
+  // The actionable group leads; its row says this once, without a duplicate heading badge.
+  await expect(groups(page).first().getByText('Waiting for you', { exact: true })).toHaveCount(1);
   await expect(page.getByText('Do not use this as an answer excerpt')).toHaveCount(0);
   await settleAs(approval.id, 'ada');
   await expect(groups(page).getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await expect(groups(page).first().getByRole('heading', { name: 'Infra' })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('combobox', { name: 'Group notifications' })).toContainText('By place');
+  await expect(page.getByRole('combobox', { name: 'Group notifications' })).toContainText('Place');
   await away('/hide', { ids: [ACME.mainThread] });
   await expect(groups(page).getByRole('heading', { name: 'Web' })).toHaveCount(0);
   await expect(page.getByText('Decision in Web', { exact: true })).toHaveCount(0);
@@ -224,7 +228,9 @@ test('group read captures one cut/key and Undo preserves new arrivals and a late
     const other = await context.newPage();
     await signIn(other);
     await other.goto('/inbox');
-    await other.getByRole('link', { name: /Read again elsewhere/ }).click();
+    // Thread notices use their current thread name, so select the exact notice
+    // whose later read must survive Undo without restoring its old authored title.
+    await other.locator(`[data-notification-id="${first.id}"]`).getByRole('link').first().click();
     await expect.poll(async () => (await held()).requests.filter((request) => Array.isArray(request.body.ids) && request.body.ids.includes(first.id)).length).toBeGreaterThan(0);
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await expect(page.getByText('Read marks undone')).toBeVisible();
@@ -253,10 +259,10 @@ test('a manager sees only enabled-route counts and removal reaches each memberâ€
     const row = page.locator(`li[data-channel="${route?.channel_id ?? ''}"]`);
     await expect(row.getByText('2 members switched this on')).toBeVisible();
     await expect(row.getByText('dora@example.org')).toHaveCount(0);
-    await row.getByRole('button', { name: /^Remove / }).click();
+    await row.getByRole('button', { name: 'Delete Ops room', exact: true }).click();
     const confirmation = page.getByRole('alertdialog');
     await expect(confirmation.getByText('Removing this channel disables 2 enabled routes.', { exact: false })).toBeVisible();
-    await confirmation.getByRole('button', { name: /^Remove / }).click();
+    await confirmation.getByRole('button', { name: 'Delete Ops room', exact: true }).click();
     await expect(other.locator('[data-retained-route]').getByText('Removed: Ops room')).toBeVisible();
   } finally { await context.close(); }
 });
@@ -338,7 +344,8 @@ test('the editor empty, loading, refused and failed states offer a current retry
   await expect(page.getByText('No way out is set up for you here', { exact: false })).toBeVisible();
   await away('/fault', { path: '/notification-channels', status: 403 });
   await page.reload();
-  await expect(page.getByText('Your notification choices cannot be read', { exact: false })).toBeVisible();
+  // Permission refusals use the shared safe message rather than raw server copy.
+  await expect(page.getByRole('alert')).toHaveText('You do not have access to this. Ask somebody who manages it.');
   await away('/fault', { path: '/notification-channels', status: 503 });
   await page.reload();
   await expect(page.getByRole('button', { name: 'Try again', exact: true }).first()).toBeVisible();

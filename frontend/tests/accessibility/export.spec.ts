@@ -108,8 +108,8 @@ test('the list of one’s exports with an archive of every state', async ({ page
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('row', { name: /Web/ }).getByRole('button', { name: /Actions for the archive of Web/ }).click();
-  await page.getByRole('menuitem', { name: 'Remove' }).click();
-  await expect(page.getByRole('alertdialog', { name: 'Remove the archive of Web?' })).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Delete' }).click();
+  await expect(page.getByRole('alertdialog', { name: 'Delete the archive of Web?' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="alertdialog"]');
 });
 

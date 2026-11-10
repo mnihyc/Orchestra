@@ -124,6 +124,7 @@ export async function tabTo(page: Page, name: string | RegExp, limit = 60): Prom
       return (element.getAttribute('aria-label') ?? label ?? element.textContent).replace(/\s+/g, ' ').trim();
     });
     if (typeof name === 'string' ? label === name : name.test(label)) return;
+    if (await page.getByRole('listbox').isVisible()) await page.keyboard.press('Escape');
   }
   throw new Error(`the focus did not reach ${String(name)} in ${limit} presses of Tab`);
 }

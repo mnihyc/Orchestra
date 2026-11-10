@@ -21,6 +21,7 @@ import { ScrollRegion } from '@/ui/ScrollRegion';
 export const TWO_COLUMNS_NEED_PX = 900;
 
 export type DiffLayout = 'one' | 'two';
+export interface DiffLineAddress { side: 'old' | 'new'; line: number }
 
 export interface DiffViewProps {
   /** The difference as unified text; `null` for a file that is no text and while a change is still being written. */
@@ -42,6 +43,8 @@ export interface DiffViewProps {
   showCounts?: boolean;
   /** A compact single-file tool keeps its acts on its opening row; other displays retain this toolbar. */
   showToolbar?: boolean;
+  /** The caller owns the private review form and its exact recorded patch. */
+  onCommentLine?: (address: DiffLineAddress) => void;
 }
 
 /** A line of text with the ranges that changed marked. */
@@ -65,12 +68,18 @@ function Text({ line }: { line: DiffLine }) {
 
 const TINT = { add: 'bg-success-subtle', del: 'bg-danger-subtle', context: '' } as const;
 
-function Gutter({ n }: { n: number | undefined }) {
-  return <td className="w-px min-w-10 px-2 text-right text-xs text-text-muted tabular-nums select-none">{n}</td>;
+function Gutter({ n, side, onCommentLine, commentLabel, className }: { n: number | undefined; side?: 'old' | 'new'; onCommentLine?: ((address: DiffLineAddress) => void) | undefined; commentLabel?: string | undefined; className?: string }) {
+  return <td className={cx('relative w-px min-w-10 px-2 align-top text-right text-xs text-text-muted tabular-nums select-none', className)}>{n}
+    {n !== undefined && side !== undefined && onCommentLine !== undefined && commentLabel !== undefined && <IconButton action="create" size="sm"
+      label={commentLabel}
+      className="absolute inset-x-0 top-0 bg-bg-muted opacity-0 group-hover/diff-line:opacity-100 focus:opacity-100"
+      style={{ width: '100%', height: '1lh' }} onClick={() => onCommentLine({ side, line: n })} />}
+  </td>;
 }
 
-function OneColumn({ hunks, label }: { hunks: readonly Hunk[]; label: string }) {
+function OneColumn({ hunks, label, onCommentLine }: { hunks: readonly Hunk[]; label: string; onCommentLine?: ((address: DiffLineAddress) => void) | undefined }) {
   const { t } = useTranslation();
+  const commentLabel = (side: 'old' | 'new', line: number | undefined) => onCommentLine === undefined || line === undefined ? undefined : t('source.review.commentLine', { line, side: t(`source.review.side.${side}`) });
   return (
     <table aria-label={label} className="w-full border-collapse font-mono text-sm">
       <tbody>
@@ -86,9 +95,9 @@ function OneColumn({ hunks, label }: { hunks: readonly Hunk[]; label: string }) 
               </tr>
             ),
             ...hunk.lines.map((line, index) => (
-              <tr key={`${hunkIndex}.${index}`} className={TINT[line.kind]}>
-                <Gutter n={line.oldNo} />
-                <Gutter n={line.newNo} />
+              <tr key={`${hunkIndex}.${index}`} className={cx('group/diff-line', TINT[line.kind])}>
+                <Gutter n={line.oldNo} side="old" onCommentLine={line.newNo === undefined ? onCommentLine : undefined} commentLabel={line.newNo === undefined ? commentLabel('old', line.oldNo) : undefined} />
+                <Gutter n={line.newNo} side="new" onCommentLine={onCommentLine} commentLabel={commentLabel('new', line.newNo)} />
                 <td aria-hidden className="w-4 text-center text-text-muted select-none">
                   {line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}
                 </td>
@@ -105,8 +114,9 @@ function OneColumn({ hunks, label }: { hunks: readonly Hunk[]; label: string }) 
   );
 }
 
-function TwoColumns({ hunks, label }: { hunks: readonly Hunk[]; label: string }) {
+function TwoColumns({ hunks, label, onCommentLine }: { hunks: readonly Hunk[]; label: string; onCommentLine?: ((address: DiffLineAddress) => void) | undefined }) {
   const { t } = useTranslation();
+  const commentLabel = (side: 'old' | 'new', line: number | undefined) => onCommentLine === undefined || line === undefined ? undefined : t('source.review.commentLine', { line, side: t(`source.review.side.${side}`) });
   return (
     <table aria-label={label} className="w-full table-fixed border-collapse font-mono text-sm">
       <colgroup>
@@ -128,8 +138,8 @@ function TwoColumns({ hunks, label }: { hunks: readonly Hunk[]; label: string })
               </tr>
             ),
             ...sideBySide(hunk).map((row, index) => (
-              <tr key={`${hunkIndex}.${index}`}>
-                <td className={cx('px-2 text-right text-xs text-text-muted tabular-nums select-none', row.left ? TINT[row.left.kind] : 'bg-bg-subtle')}>{row.left?.oldNo}</td>
+              <tr key={`${hunkIndex}.${index}`} className="group/diff-line">
+                <Gutter n={row.left?.oldNo} side="old" onCommentLine={onCommentLine} commentLabel={commentLabel('old', row.left?.oldNo)} className={row.left ? TINT[row.left.kind] : 'bg-bg-subtle'} />
                 <td className={cx('pr-3 pl-1 whitespace-pre-wrap break-words', row.left ? TINT[row.left.kind] : 'bg-bg-subtle')}>
                   {row.left !== null && (
                     <>
@@ -138,7 +148,7 @@ function TwoColumns({ hunks, label }: { hunks: readonly Hunk[]; label: string })
                     </>
                   )}
                 </td>
-                <td className={cx('border-l border-border px-2 text-right text-xs text-text-muted tabular-nums select-none', row.right ? TINT[row.right.kind] : 'bg-bg-subtle')}>{row.right?.newNo}</td>
+                <Gutter n={row.right?.newNo} side="new" onCommentLine={onCommentLine} commentLabel={commentLabel('new', row.right?.newNo)} className={cx('border-l border-border', row.right ? TINT[row.right.kind] : 'bg-bg-subtle')} />
                 <td className={cx('pr-3 pl-1 whitespace-pre-wrap break-words', row.right ? TINT[row.right.kind] : 'bg-bg-subtle')}>
                   {row.right !== null && (
                     <>
@@ -156,7 +166,7 @@ function TwoColumns({ hunks, label }: { hunks: readonly Hunk[]; label: string })
   );
 }
 
-function DiffViewBody({ diff, binary = false, truncated = false, writing = false, layout = 'one', onLayout, label, className, showCounts = true, showToolbar = true }: DiffViewProps) {
+function DiffViewBody({ diff, binary = false, truncated = false, writing = false, layout = 'one', onLayout, label, className, showCounts = true, showToolbar = true, onCommentLine }: DiffViewProps) {
   const { t } = useTranslation();
   const hunks = useMemo(() => (diff === null ? [] : parseDiff(diff)), [diff]);
   const counts = useMemo(() => countChanges(hunks), [hunks]);
@@ -200,7 +210,7 @@ function DiffViewBody({ diff, binary = false, truncated = false, writing = false
       ) : hunks.length === 0 ? (
         <EmptyState compact className="px-3" title={t('timeline.diff.empty')} />
       ) : (
-        <ScrollRegion kind="code" label={label} className="max-h-(--diff-max-height) overflow-auto">{two ? <TwoColumns hunks={hunks} label={label} /> : <OneColumn hunks={hunks} label={label} />}</ScrollRegion>
+        <ScrollRegion kind="code" label={label} className="max-h-(--diff-max-height) overflow-auto">{two ? <TwoColumns hunks={hunks} label={label} onCommentLine={onCommentLine} /> : <OneColumn hunks={hunks} label={label} onCommentLine={onCommentLine} />}</ScrollRegion>
       )}
       {truncated && <p className="border-t border-border bg-warning-subtle px-3 py-1 text-xs text-text">{t('timeline.diff.cut')}</p>}
     </div>

@@ -1,7 +1,9 @@
 ---
+group: work
 title: Thread states
 screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /everything, /search, /inbox, /resources/providers/$id
 keywords: thread, icon, state, queued, held, finished, blocked, approval, unread
+summary: Read consistent thread states, unread results and supported background-work controls.
 ---
 
 # Thread states
@@ -44,3 +46,17 @@ A check there means new results inside. A private reference shows no state to so
 cannot read the thread.
 
 For queue controls, see [The message queue](message-queue.md).
+
+## Background work
+
+An idle agent can still have a command or subagent running. Beside Idle, the header names each known task and its state. Subagent chips open their existing conversation lanes.
+
+**Will wake when these finish** means a successful or failed task will request a continuation under the person who started it. The adjacent **Background wake: On** shows the value accepted by the session. Managers can click it to open that one setting; inherited values, locks and reset keep their normal behavior. A changed value is shown as **Next session: On/Off** until it applies. Session changes wait while work runs.
+
+With background wake off, **Results arrive with the next input**. Codex background work can still run; its results arrive with the next turn. Claude Code does not offer background tasks in this mode, and commands run in the foreground. Changes apply to the next session, and each completion also checks the current setting and the original person's access.
+
+A continuation starts with **Woken by: Build web finished**. Several causes are separated by commas; a failure says **Review auth failed**. These labels come from the recorded tasks. A continuation waiting for access or model use shows the ordinary held-input reason with its cause. **N finished tasks waiting** means Stop is holding those wakes until the next accepted human input. It does not resume the ordinary Stop-held queue.
+
+**Stop** ends the foreground turn and holds its pending work. **End** stops one exact background task without Orch prompting the model. The harness may tell the model the task ended. End requires Interact and native support for that task kind. Where unsupported, the task says **Cannot be ended from here**. End opens a fresh native review before confirmation, so later work cannot be ended by an older task's button. Orch starts no continuation for an ended task; an unconfirmed End remains unknown until current facts confirm it.
+
+**Lost with the session** records work lost when its owning session disappeared. A temporary disconnection is not a known empty list or proof of loss. Lost work is not restored from a transcript.

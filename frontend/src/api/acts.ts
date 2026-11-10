@@ -23,22 +23,26 @@ import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import { type Act, client } from '@/api/client';
 import { ENROLLMENT_PROGRESS, enrollmentChanges, enrollmentProgressKey, type EnrollmentChange } from '@/api/enrollment';
 import { answerChanges } from '@/api/actAnswers';
+import { pathOf, type AccessKind } from '@/api/access';
 import { applyAdminUser, repairAdminOrgs, repairMeta, type AdminOrgRestoreChange, type AdminUserChange, type MetaChange } from '@/api/adminState';
 import { AGENT_REACH, agentReachProjections, type AgentReachChange } from '@/api/agentReach';
 import { applyCollection, applyRow, applyThread, missingInventoryProjection, record, type CollectionChange, type RowChange, type ThreadChange, type ValueChange } from '@/api/cache';
 import { applyDocumentTreeChange, repairDocumentDirectories, type DocumentTreeChange, type DocumentDirectoryChange } from '@/api/documentTreeChanges';
 import { repairResource, type ResourceRepair } from '@/api/resourceRepair';
 import { queryClient } from '@/api/query';
+import { devicesKey, outsideStatusKey, routesKey } from '@/api/away';
 import { capturePeopleHint, readAuthority, repairPeople } from '@/api/peopleChanges';
 import type { BindingOptions, TreeNode } from '@/generated/api-types';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
+import { reachKeys, refreshReach } from '@/api/adminReach';
 
 // ---------------------------------------------------------------- what a change is
 
 /** Data the query cache keeps: the queries whose key begins with `key`, narrowed to those that name `id` anywhere in it. */
 export interface Stale {
-  key: readonly string[];
+  /** A named head with its typed query arguments, or a legacy string-only prefix. */
+  key: readonly [string, ...unknown[]] | readonly string[];
   /** Only the queries that name this identifier. */
   id?: string;
   /** A query argument at a fixed position, for views such as the finder's empty-query recents. */
@@ -57,16 +61,22 @@ export interface Followed {
 
 export interface SessionAuthorityChanged { session: true; mode?: unknown; asAdmin?: boolean; person?: unknown }
 export interface StateChange { state: { key: string; data: unknown; child?: string } }
-/** An answer genuinely omitted its view: choose one exact currently shown projection, never stale a kind. */
+/** An omitted view is repaired at its exact observed key; dependencies may identify several owners. */
 export interface MissingProjection {
   missing: readonly Stale[];
+  /** Each displayed filtered projection needs its own authorized answer. */
+  allObserved?: true;
   /** A bodyless act names a row, while its complete list is keyed by the owning place. */
   containingRow?: string;
   /** Service accounts are identified by their nested user reference. */
   containingAccount?: string;
+  /** A permission page may describe rights granted on another typed object. */
+  dependentOn?: { object: string; id: string };
   cancelPending?: true;
 }
-export type Change = AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number } | { approvalViews: true } | { relatedViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
+/** Bodyless administrative revocations repair their existing credential inventory suppliers. */
+export interface AdminCredentialsChanged { adminCredentials: { kind: 'tokens' } | { kind: 'sessions'; person: string } }
+export type Change = AdminCredentialsChanged | AdminOrgRestoreChange | AdminUserChange | MetaChange | Stale | Followed | SessionAuthorityChanged | RowChange | ThreadChange | ValueChange | CollectionChange | StateChange | ResourceRepair | MissingProjection | AgentReachChange | EnrollmentChange | DocumentTreeChange | DocumentDirectoryChange | { people: true; authority?: true; cut?: number } | { approvalViews: true } | { relatedViews: true } | { outsideViews: true } | { capViews: { id: string; value?: Record<string, unknown> } } | { rateViews: { nodeId: string | null } };
 
 /** The value of a parameter of the request's path, by its name in the template: `p('id')`. */
 export type PathParam = (name: string) => string;
@@ -79,6 +89,10 @@ const every = (...key: string[]): Stale => ({ key });
 const only = (...key: string[]): Stale => ({ key, exact: true });
 const gone = (id: string, ...key: string[]): Stale => ({ key, id, gone: true });
 const kinds = (...heads: string[]): Stale[] => heads.map((head) => every(head));
+/** Bodyless favorite writes omit both the ordered list and each filtered name page's star state. */
+const favoriteViews = (): Change[] => [
+  { missing: [only('favorites'), every('names')], allObserved: true, cancelPending: true },
+];
 const ones = (id: string, ...heads: string[]): Stale[] => heads.map((head) => one(id, head));
 const TREES: Followed = { feed: 'trees' };
 const COUNTERS: Followed = { feed: 'counters' };
@@ -86,6 +100,11 @@ const conversation = (id: string): Followed => ({ feed: 'thread', id });
 const blocks = (id: string): Followed => ({ feed: 'document', id });
 /** A request that changes nothing a screen reads. */
 const NOTHING: readonly Change[] = [];
+/** Ask receipts omit their views; repair each currently shown projection independently. */
+const askConversation = (id: string): Change[] => [
+  { missing: [one(id, 'ask')], cancelPending: true },
+  { missing: [every('ask-history')], cancelPending: true },
+];
 /** The views of one thing that was removed: what was read of it alone is gone; the lists it was a row of are asked again. */
 const ended = (changes: readonly Change[], id: string): Change[] => changes.map((change) => ('key' in change && change.id === id ? { ...change, gone: true } : change));
 
@@ -106,7 +125,7 @@ const placeAccess = (): Change[] => [
   { relatedViews: true },
   ...kinds('page', 'page-people', 'page-effective', 'page-history', 'defaults', 'roles', 'preview', 'agent-shares'),
   ...kinds('thread-shared', 'thread-shared-tree', 'environment-reach', AGENT_REACH, 'access-requests', 'holder-search', 'node', 'members'),
-  ...kinds('holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
+  ...kinds('copy-destinations', 'holdings', 'first-steps', 'usage', 'start-options', 'shared-with-me', 'outside-port-openings'),
   ...kinds('thread-instructions', 'model-inputs', 'model-input-block', 'user-shares'),
   TREES,
 ];
@@ -122,6 +141,7 @@ const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
   agents: ['agent', 'agents', 'start-options'],
   environments: ['environment', 'environments', 'environment-reach', AGENT_REACH, 'environment-ports', 'start-options', 'mounts', 'machine-environment-data'],
   hosts: ['host', 'host-settings', 'hosts', 'host-runtimes', 'mounts', 'machine-environment-data'],
+  machines: ['machine', 'machines'],
   templates: ['template', 'templates'],
   'mcp-servers': ['mcp-server', 'mcp-servers'],
   mounts: ['mount', 'mounts', 'mount-uses'],
@@ -130,23 +150,29 @@ const THING_VIEWS: Readonly<Record<string, readonly string[]>> = {
 
 /** Who may do what with one thing changed (`object` is how the API addresses its kind); a place's change reaches what is in it. */
 const access = (object: string, id: string): Change[] => {
-  if (object === 'nodes') return [...placeAccess(), one(id, 'node')];
+  const dependents: MissingProjection = { missing: [{ key: ['page'] }], dependentOn: { object, id }, cancelPending: true };
+  if (object === 'nodes') return [...placeAccess(), one(id, 'node'), dependents];
   const views = THING_VIEWS[object] ?? [];
   return [
     { relatedViews: true },
+    dependents,
     ...ones(id, 'page-people', 'page-effective', 'page-history', 'agent-shares'),
     ...(object === 'documents' ? [blocks(id)] : []),
     // Another page may say what this one gives: a thread's page says whether the people on it reach its environment.
-    ...kinds('page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
+    ...kinds('copy-destinations', 'page', 'preview', 'holder-search', 'access-requests', 'shared-with-me', 'user-shares'),
     ...views.map((head, index) => (index === 0 ? one(id, head) : every(head))),
   ];
 };
 
 /** Settings resolve down the tree: what a place sets is what every place, thread and resource inside it reads. */
 const settings = (): Change[] =>
-  kinds('settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
+  kinds('copy-destinations', 'settings', 'secrets', 'thread-parameters', 'thread-limits', 'start-options', 'usage', 'usage-caps', 'first-steps', 'page', 'defaults', 'preview', 'provider-settings', 'environment-settings', 'host-settings', AGENT_REACH, 'environment-ports', 'notifiers', 'channels');
 
 const relatedSettings = (key: string): Change[] => key.startsWith('related.') || key.startsWith('search.semantic.') ? [{ relatedViews: true }] : [];
+/** A saved identity list omits each viewer/root's resolved model eligibility and default. Repair shown Ask reads only. */
+const askModelSetting = (key: string): Change[] => key === 'ask.models' ? [{ missing: [every('ask-models')], cancelPending: true }] : [];
+/** A personal-skill policy edit omits each open thread's derived knowledge policy. */
+const personalSkillsSetting = (key: string): Change[] => key === 'agents.personal_skills' ? [{ missing: [every('thread-shared')], cancelPending: true }] : [];
 
 /** Who is in an org changed: its members, what they hold, and every list that names people of it. */
 export const people = (authority = false): Change[] => [{ people: true, ...(authority ? { authority: true } : {}) }];
@@ -212,7 +238,13 @@ const inbox = (): Change[] => [...kinds('inbox', 'away', 'notification-prefs'), 
 const approvals = (): Change[] => [...kinds('approvals', 'approval', 'access-requests', 'access-request', 'port-requests'), COUNTERS];
 
 /** How the person is told outside Orch. */
-const routes = (): Change[] => kinds('notification-channels', 'notification-prefs', 'away', 'notifiers', 'channels', 'first-steps');
+const routes = (): Change[] => [...kinds('notification-channels', 'notification-prefs', 'away', 'notifiers', 'channels', 'first-steps'), { outsideViews: true }];
+const pushDevices = (): Change[] => [
+  { missing: [{ key: devicesKey, exact: true }], cancelPending: true },
+  { missing: [{ key: routesKey, exact: true }], cancelPending: true },
+  { missing: [{ key: ['notification-channels'], exact: true }] },
+  { outsideViews: true },
+];
 
 /** Usage: figures, caps, limits and rates, which each screen of usage reads under one head. */
 const usage = (): Change[] => kinds('usage', 'usage-caps', 'provider-caps', 'thread-limits');
@@ -240,6 +272,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /setup': () => [...me(), every('orgs')],
   'POST /auth/login': () => NOTHING,
   'POST /auth/email-code': () => NOTHING,
+  'POST /summaries/batch': () => NOTHING,
   'POST /auth/register': () => NOTHING,
   'POST /auth/recovery': () => NOTHING,
   'POST /auth/recovery/confirm': () => kinds('recovery-token'),
@@ -265,10 +298,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /me/sessions': () => kinds('sessions'),
   'POST /me/tokens': () => kinds('tokens', 'org-tokens'),
   'DELETE /me/tokens/{id}': () => kinds('tokens', 'org-tokens'),
-  'PUT /me/favorites/{node_id}': () => kinds('favorites', 'names'),
-  'DELETE /me/favorites/{node_id}': () => kinds('favorites', 'names'),
-  'PUT /me/favorites/{kind}/{id}': () => kinds('favorites', 'names'),
-  'DELETE /me/favorites/{kind}/{id}': () => kinds('favorites', 'names'),
+  'PUT /me/favorites/{node_id}': favoriteViews,
+  'DELETE /me/favorites/{node_id}': favoriteViews,
+  'PUT /me/favorites/{kind}/{id}': favoriteViews,
+  'DELETE /me/favorites/{kind}/{id}': favoriteViews,
   'POST /me/visits': () => NOTHING,
   'POST /me/recents': () => NOTHING,
   // What the interface keeps is shown as it is set; reading it back while more is being sent could bring back an older
@@ -277,6 +310,49 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /me/state/help': () => kinds('first-steps'),
   'PUT /me/first-steps': () => kinds('first-steps', 'me-state'),
   'PUT /me/state/project_views/{project_id}': () => NOTHING,
+
+  // -- private Ask conversations; kept threads enter their ordinary live tree separately
+  'POST /ask/conversations': () => [{ missing: [every('ask-history')], cancelPending: true }],
+  'POST /ask/conversations/{id}/messages': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/stop': (p) => askConversation(p('id')),
+  'POST /ask/conversations/{id}/keep': (p) => askConversation(p('id')),
+
+  'PUT /{object}/{id}/home': (p) => [...access(p('object'), p('id')), ...kinds('everything', 'names', 'start-options'), TREES],
+
+  'POST /hosts/{id}/move-out/preview': () => NOTHING,
+  'POST /hosts/{id}/move-out': (p) => [...access('hosts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /machines/{id}/move-out/preview': () => NOTHING,
+  'POST /machines/{id}/move-out': (p) => [...access('machines', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /agents/{id}/move-out/preview': () => NOTHING,
+  'POST /agents/{id}/move-out': (p) => [...access('agents', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mounts/{id}/move-out/preview': () => NOTHING,
+  'POST /mounts/{id}/move-out': (p) => [...access('mounts', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /templates/{id}/move-out/preview': () => NOTHING,
+  'POST /templates/{id}/move-out': (p) => [...access('templates', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /providers/{id}/move-out/preview': () => NOTHING,
+  'POST /providers/{id}/move-out': (p) => [...access('providers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /mcp-servers/{id}/move-out/preview': () => NOTHING,
+  'POST /mcp-servers/{id}/move-out': (p) => [...access('mcp-servers', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/move-out/preview': () => NOTHING,
+  'POST /chats/{id}/move-out': (p) => [...access('chats', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+  'POST /skills/{id}/draft/move-out/preview': () => NOTHING,
+  'POST /skills/{id}/draft/move-out': (p) => [...access('skills', p('id')), ...kinds('everything', 'names', 'trace'), TREES],
+
+  'POST /copy-destinations/judge': () => NOTHING,
+
+  // -- native duplicates create fresh identities; their sources are not updated
+  'POST /providers/{id}/duplicate': () => kinds('providers', 'provider-setup', 'start-options', 'everything', 'names', 'trace'),
+  'POST /agents/{id}/duplicate': () => kinds('agents', 'start-options', 'everything', 'names', 'trace'),
+  'POST /templates/{id}/duplicate': () => kinds('templates', 'everything', 'names', 'trace'),
+  'POST /mounts/{id}/duplicate': () => kinds('mounts', 'everything', 'names', 'trace'),
+  'POST /mcp-servers/{id}/duplicate': () => kinds('mcp-servers', 'environment-mcp', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /skills/{id}/draft/duplicate': () => kinds('skills', 'everything', 'names', 'trace'),
+  'POST /environments/{id}/duplicate': () => [...kinds('environments', 'start-options', 'job', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate': () => [...kinds('chats', 'everything', 'names', 'trace'), TREES],
+  'POST /chats/{id}/duplicate/preview': () => NOTHING,
 
   // -- notifications and the ways a person is told
   'POST /notifications/read': () => inbox(),
@@ -288,9 +364,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'DELETE /me/notification-routes/by-id/{route_id}': () => routes(),
   'POST /me/notification-routes/{channel_id}/link': () => routes(),
   'POST /me/notification-channels': () => routes(),
-  'POST /me/push-subscriptions': () => routes(),
-  'DELETE /me/push-subscriptions': () => routes(),
-  'DELETE /me/push-subscriptions/{id}': () => routes(),
+  'POST /me/push-subscriptions': () => pushDevices(),
+  'DELETE /me/push-subscriptions': () => pushDevices(),
+  'DELETE /me/push-subscriptions/{id}': () => pushDevices(),
   'POST /notification-channels/{id}/test': () => routes(),
   'PATCH /notification-channels/{id}': () => routes(),
   'DELETE /notification-channels/{id}': () => routes(),
@@ -336,6 +412,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/tags': (p) => [one(p('id'), 'tags'), ...tags()],
   'PUT /nodes/{id}/tags': (p) => [...place(p('id')), ...tags(), ...kinds('everything')],
   'POST /nodes/{id}/announcements': (p) => [...place(p('id')), ...kinds('announcements')],
+  'POST /orgs/{id}/messages': (p) => [{ missing: [only('admin-messages', p('id'))] }],
+  // The sent list and the banner's settings are two projections the receipt omits; each is repaired where it is shown.
+  'POST /admin/messages': () => [{ missing: [only('admin-messages', 'system')] }, { missing: [only('admin', 'settings')] }, { meta: true }],
   'PATCH /tags/{id}': () => tags(),
   'DELETE /tags/{id}': () => tags(),
   'PUT /topics/{id}/default-environment': (p) => [...place(p('id')), ...kinds('start-options', 'environments')],
@@ -385,14 +464,15 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /orgs/{id}/tokens/{token_id}/refuse': (p) => [one(p('id'), 'org-tokens'), ...kinds('tokens', 'service-tokens')],
 
   // -- settings and secrets, at a place, of a resource, of the system
-  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
-  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'PUT /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
+  'DELETE /nodes/{id}/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...thread(p('id')), one(p('id'), 'node')],
   'PUT /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'DELETE /nodes/{id}/secrets/{name}': () => kinds('secrets', 'settings'),
   'PUT /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
   'DELETE /environments/{id}/secrets/{name}': (p) => [one(p('id'), 'secrets'), ...kinds('settings')],
-  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
-  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'PUT /gateways': () => [{ key: ['gateway-catalogue'], exact: true }],
+  'PUT /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
+  'DELETE /admin/settings/{key}': (p) => [...settings(), ...relatedSettings(p('key')), ...askModelSetting(p('key')), ...personalSkillsSetting(p('key')), ...kinds('meta', 'admin'), ...(p('key').startsWith('hosts.') ? kinds('host', 'hosts') : [])],
 
   // -- threads
   'POST /topics/{id}/threads': (p) => [...place(p('id')), ...threads()],
@@ -405,6 +485,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /threads/{id}/inputs': (p) => [conversation(p('id')), ...ones(p('id'), 'thread-limits', 'thread-catchup'), ...usage()],
   'PATCH /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id'))],
   'DELETE /threads/{id}/inputs/{input_id}': (p) => [conversation(p('id')), one(p('id'), 'thread-limits')],
+  'POST /topics/{id}/input-schedules': (p) => [one(p('id'), 'topic-schedules')],
+  'PATCH /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule'), one(p('id'), 'input-schedule-runs'), every('topic-schedules')],
+  // Cancellation retains schedule history; the topic list follows its native feed.
+  'DELETE /input-schedules/{id}': (p) => [one(p('id'), 'input-schedule')],
   // A 202 admits work. Its caller selects its own read window; native scoped feeds publish the outcome.
   // Refreshing the default window here would read an unrelated active pane or race that selection.
   'POST /threads/{id}/inputs/{input_id}/versions': () => NOTHING,
@@ -463,7 +547,9 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'PUT /chats/{id}/draft': () => NOTHING,
   'DELETE /chats/{id}/draft': () => NOTHING,
   'POST /orgs/{id}/chats': () => kinds('chats', 'chat-states'),
-  'PATCH /chats/{id}': (p) => chat(p('id')),
+  'PATCH /chats/{id}': (p) => [...chat(p('id')), ...kinds('everything'), { feed: 'trees' }],
+  'POST /chats/{id}/join': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...kinds('everything'), { feed: 'trees' }],
+  'PUT /chats/{id}/members/{user_id}/manager': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions'), ...approvals(), ...kinds('everything'), { feed: 'trees' }],
   'PUT /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'DELETE /chats/{id}/members/{user_id}': (p) => [...chat(p('id')), one(p('id'), 'chat-mentions')],
   'PUT /chats/{id}/agents/{thread_id}/posting': (p) => [...chat(p('id')), ...thread(p('thread_id'))],
@@ -472,7 +558,7 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /forward': () => [...kinds('chats', 'chat-states', 'thread-item')],
 
   // -- documents
-  'POST /document-tree/operations': () => kinds('document-directory', 'document-tree-entry'),
+  'POST /document-tree/operations': () => [...kinds('document-directory', 'document-tree-entry', 'document', 'documents', 'readme', 'names', 'trace'), TREES],
   'POST /document-tree/delete/preview': () => NOTHING,
   'POST /document-containers/{id}/documents': () => kinds('document-directory', 'document'),
   'POST /nodes/{id}/documents': (p) => [...ones(p('id'), 'documents', 'node'), ...kinds('readme', 'exports'), TREES],
@@ -480,6 +566,13 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /nodes/{id}/documents/import': (p) => [...ones(p('id'), 'documents', 'node'), TREES],
   'PATCH /documents/{id}': (p) => [...doc(p('id')), ...kinds('names', 'recents', 'node', 'user-shares'), TREES],
   'PUT /documents/{id}/links': (p) => [one(p('id'), 'document-links')],
+  'PUT /documents/{id}/summary-options': (p) => [
+    one(p('id'), 'document-summary-options'),
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: 'document' } },
+  ],
+  'POST /summaries/{kind}/{id}/refresh': (p) => [
+    { ...one(p('id'), 'resource-summary'), at: { index: 2, value: p('kind') } },
+  ],
   'DELETE /documents/{id}': (p) => [gone(p('id'), 'document'), gone(p('id'), 'document-versions'), ...kinds('documents', 'readme', 'node', 'names', 'trace-deleted', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/restore': (p) => [...doc(p('id')), ...kinds('node', 'trace-deleted', 'deleted-inspection', 'trace', 'user-shares'), TREES],
   'POST /documents/{id}/move/preview': () => NOTHING,
@@ -536,6 +629,8 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /environments/{id}/keep-awake': (p) => environment(p('id')),
   'POST /environments/{id}/keep': (p) => environment(p('id')),
   'POST /environments/{id}/files/export': () => kinds('job'),
+  'POST /environments/{id}/mcp/imports': (p) => [one(p('id'), 'environment-mcp')],
+  'POST /environments/{id}/mcp/servers': (p) => [one(p('id'), 'environment-mcp')],
   'POST /environments/{id}/mcp/servers/{name}/restart': (p) => [one(p('id'), 'environment-mcp'), ...kinds('job', 'trace')],
   'PUT /environments/{id}/config-trust/{harness}': (p) => [...environment(p('id')), every('thread-parameters')],
   'POST /environments/updates/preflight': () => NOTHING,
@@ -690,6 +785,10 @@ export const ACTS: Readonly<Record<string, Entry>> = {
   'POST /admin/releases/check': () => [only('admin', 'installation-records')],
   'POST /admin/users': () => kinds('admin', 'trace-users'),
   'PATCH /admin/users/{id}': () => [...kinds('admin', 'trace-users', 'trace-person'), ...people()],
+  'DELETE /admin/tokens/{id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/tokens/{token_id}': () => [{ adminCredentials: { kind: 'tokens' } }],
+  'DELETE /admin/users/{id}/sessions': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
+  'DELETE /admin/users/{id}/sessions/{session_id}': (p) => [{ adminCredentials: { kind: 'sessions', person: p('id') } }],
   'POST /admin/users/{id}/reset-link': () => NOTHING,
   'POST /admin/users/{id}/org-invitation': () => kinds('admin'),
   'DELETE /admin/users/{id}/org-invitation': () => kinds('admin'),
@@ -833,7 +932,25 @@ function follow(change: Followed): void {
 
 const startRepairs = new WeakMap<Query, Promise<void>>();
 const approvalRepairs = new WeakMap<Query, Promise<void>>();
+const outsideRepairs = new WeakMap<Query, Promise<void>>();
 const relatedRepairs = new WeakMap<Query, Promise<void>>();
+
+/** A route or preference answer cannot supply independently admitted status for each visible place. */
+async function repairOutsideViews(cache: QueryClient, current: () => boolean): Promise<void> {
+  await Promise.all(cache.getQueryCache().findAll({ queryKey: outsideStatusKey }).map(async (query) => {
+    if (!query.isActive()) { cache.removeQueries({ queryKey: query.queryKey, exact: true }); return; }
+    const pending = outsideRepairs.get(query);
+    if (pending !== undefined) return pending;
+    const repair = (async () => {
+      await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+      if (!current() || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query
+        || !query.isActive() || !queryAuthorityAllows(cache, query.meta)) return;
+      await cache.refetchQueries({ queryKey: query.queryKey, exact: true });
+    })();
+    outsideRepairs.set(query, repair);
+    return repair.finally(() => { if (outsideRepairs.get(query) === repair) outsideRepairs.delete(query); });
+  }));
+}
 
 /** Ranking and authority can change without the source document's body changing. Refresh only displayed lists. */
 async function repairRelatedViews(cache: QueryClient, current: () => boolean): Promise<void> {
@@ -1045,6 +1162,10 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       if (client.session.getState().readerVersion !== readerVersion) return;
       await repairAgentChoices(cache, change.row, () => client.session.getState().readerVersion === readerVersion);
     }
+    else if ('adminCredentials' in change) {
+      await refreshReach(cache, change.adminCredentials.kind === 'tokens' ? reachKeys.tokens : reachKeys.sessions(change.adminCredentials.person));
+      if (client.session.getState().readerVersion !== readerVersion) return;
+    }
     else if ('rateViews' in change) await repairRateViews(cache, change.rateViews.nodeId, () => client.session.getState().readerVersion === readerVersion);
     else if ('capViews' in change) await repairCapViews(cache, change.capViews, () => client.session.getState().readerVersion === readerVersion);
     else if ('approvalViews' in change) await repairApprovalViews(cache, () => client.session.getState().readerVersion === readerVersion);
@@ -1062,6 +1183,7 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
       await repairPeople(cache, supplied, directoryCut);
     }
     else if ('relatedViews' in change) await repairRelatedViews(cache, () => client.session.getState().readerVersion === readerVersion);
+    else if ('outsideViews' in change) await repairOutsideViews(cache, () => client.session.getState().readerVersion === readerVersion);
     else if ('documentTree' in change) await applyDocumentTreeChange(cache, change.documentTree);
     else if ('documentDirectories' in change) await repairDocumentDirectories(cache, change.documentDirectories);
     else if ('missing' in change) {
@@ -1071,15 +1193,23 @@ export async function applyChanges(changes: readonly Change[], cache: QueryClien
         && (change.containingRow===undefined || Array.isArray(query.state.data)
           && (query.state.data as unknown[]).some((row)=>record(row) && row.id===change.containingRow))
         && (change.containingAccount===undefined || Array.isArray(query.state.data)
-          && (query.state.data as unknown[]).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount)));
-      const query=candidates.find((query)=>query.isActive()) ?? candidates[0];
-      if (query?.isActive() && change.cancelPending === true) {
-        await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
-        if (client.session.getState().readerVersion !== readerVersion
-          || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+          && (query.state.data as unknown[]).some((row)=>record(row) && record(row.user) && row.user.id===change.containingAccount))
+        && (change.dependentOn === undefined || record(query.state.data) && Array.isArray(query.state.data.depends)
+          && !(query.queryKey[1] === change.dependentOn.object && query.queryKey[2] === change.dependentOn.id)
+          && query.state.data.depends.some((entry: unknown) => record(entry) && record(entry.object)
+            && entry.object.id === change.dependentOn?.id && typeof entry.object.kind === 'string'
+            && pathOf(entry.object.kind as AccessKind) === change.dependentOn?.object)));
+      const selected = change.allObserved === true || change.dependentOn !== undefined ? candidates : [candidates.find((query)=>query.isActive()) ?? candidates[0]];
+      for (const query of selected) {
+        if (query === undefined) continue;
+        if (query.isActive() && change.cancelPending === true) {
+          await cache.cancelQueries({ queryKey: query.queryKey, exact: true });
+          if (client.session.getState().readerVersion !== readerVersion
+            || cache.getQueryCache().find({ queryKey: query.queryKey, exact: true }) !== query) return;
+        }
+        if(query.isActive()) await cache.refetchQueries({queryKey:query.queryKey,exact:true});
+        else cache.removeQueries({queryKey:query.queryKey,exact:true});
       }
-      if(query?.isActive()) await cache.refetchQueries({queryKey:query.queryKey,exact:true});
-      else if(query!==undefined) cache.removeQueries({queryKey:query.queryKey,exact:true});
     }
     else if ('repair' in change) await repairResource(cache, change.repair);
     else if ('enrollment' in change) {
@@ -1185,12 +1315,16 @@ export function userEventChanges(what: string, data: Readonly<Record<string, unk
     if (member === 'summary' && what !== 'route') continue;
     if (member in data) snapshots.push({ value: { key, data: data[member] } });
   }
-  if (snapshots.length > 0) return snapshots;
+  if (snapshots.length > 0) return what === 'route' || what === 'notification_prefs' ? [...snapshots, { outsideViews: true }] : snapshots;
   switch (what) {
     case 'admin_mode':
       return [{ session: true, ...(typeof data.as_admin==='boolean'?{asAdmin:data.as_admin}:{}) }];
     case 'approvals':
       return record(data.approval) && typeof data.approval.id === 'string' ? [{ row: { kind: 'approval', id: data.approval.id, value: data.approval, insert: true } }] : [{ approvalViews: true }];
+    case 'route':
+      return [{ missing: [{ key: routesKey, exact: true }], cancelPending: true }, { missing: [{ key: ['notification-channels'], exact: true }] }, { outsideViews: true }];
+    case 'notification_prefs':
+      return [{ missing: [{ key: ['notification-prefs'], exact: true }] }, { outsideViews: true }];
     case 'favorites':
       return [];
     case 'recents':

@@ -17,6 +17,7 @@ use super::{Answer, CallContext};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use orch_agent_contract::events::OrchTool;
+use orch_api_contract::ports::PortToolInactiveReason;
 use orch_db::Conn;
 
 /// Which of the four a thread's current environment lets it be offered now.
@@ -45,26 +46,54 @@ pub async fn offered(
     thread: &ThreadRow,
     now: orch_types::Time,
 ) -> Result<Offer, EngineError> {
+    Ok(availability(conn, thread, now).await?.offer)
+}
+
+/// The same offer with native causes for its two independent gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Availability {
+    pub offer: Offer,
+    pub read_reason: Option<PortToolInactiveReason>,
+    pub open_reason: Option<PortToolInactiveReason>,
+}
+impl Availability {
+    fn closed(reason: PortToolInactiveReason) -> Self {
+        Self {
+            offer: Offer::NONE,
+            read_reason: Some(reason),
+            open_reason: Some(reason),
+        }
+    }
+}
+
+/// Select current native facts once; an inspection and the ordinary offer use this same decision.
+pub async fn availability(
+    conn: &mut Conn,
+    thread: &ThreadRow,
+    now: orch_types::Time,
+) -> Result<Availability, EngineError> {
     let unreadable = |error: crate::ports::Error| EngineError::unreadable(error.to_string());
     let Some(id) = thread.environment_id else {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(PortToolInactiveReason::NoEnvironment));
     };
     let Some(env) = orch_db::queries::environments::routes::environments(conn, &[id])
         .await?
         .into_iter()
         .next()
     else {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(
+            PortToolInactiveReason::EnvironmentUnavailable,
+        ));
     };
     let Some(machine) = env.machine_id else {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(PortToolInactiveReason::NoMachine));
     };
     let Some(machine) = orch_db::queries::resources::machine(conn, machine).await? else {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(PortToolInactiveReason::NoMachine));
     };
     // The native reader currently proves ownership on Linux; other platforms report unsupported.
     if machine.platform_os != "linux" {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(PortToolInactiveReason::Unsupported));
     }
     let principal = orch_authz::Principal::load(
         conn,
@@ -81,15 +110,19 @@ pub async fn offered(
     .await
     .map_err(unreadable)?
     {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(
+            PortToolInactiveReason::OwnerViewRequired,
+        ));
     }
     let policy = crate::ports::policies(conn, id).await.map_err(unreadable)?;
-    if !policy.enabled
-        || !crate::ports::local_enabled(conn, &env)
-            .await
-            .map_err(unreadable)?
+    if !policy.enabled {
+        return Ok(Availability::closed(PortToolInactiveReason::PolicyOff));
+    }
+    if !crate::ports::local_enabled(conn, &env)
+        .await
+        .map_err(unreadable)?
     {
-        return Ok(Offer::NONE);
+        return Ok(Availability::closed(PortToolInactiveReason::LocalOff));
     }
     let mut open = false;
     for gate in crate::port_capabilities::gates(conn, id)
@@ -98,7 +131,11 @@ pub async fn offered(
     {
         open |= gate.permits();
     }
-    Ok(Offer { reads: true, open })
+    Ok(Availability {
+        offer: Offer { reads: true, open },
+        read_reason: None,
+        open_reason: (!open).then_some(PortToolInactiveReason::NoAudience),
+    })
 }
 
 /// Narrows the offered tools to what the environment permits: without the door only `close_port` stays (closing
@@ -180,6 +217,7 @@ impl Engine {
                 text,
                 &[],
                 crate::inputs::Arrival::Steer { turn: turn.id },
+                None,
             )
             .await?;
         } else {

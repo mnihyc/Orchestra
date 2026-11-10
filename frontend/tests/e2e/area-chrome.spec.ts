@@ -1,6 +1,9 @@
-/** Global areas own their navigation, and narrow chrome exposes every container above its sheet. */
+/** Each page owns its sections beside global navigation, and narrow chrome names every container above its sheet. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
+import { signInForManagement } from './admin-mode-support.ts';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 
 async function language(page: Page, locale: 'en' | 'zh-CN') {
   if (locale === 'en') return;
@@ -8,6 +11,13 @@ async function language(page: Page, locale: 'en' | 'zh-CN') {
   await page.getByRole('combobox', { name: /^(Language|语言)$/ }).click();
   await page.getByRole('option', { name: '简体中文', exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('lang', locale);
+}
+
+/** A persistent workspace keeps its previous layout until the person chooses a thread arrangement. */
+async function conversationArrangement(page: Page, locale: 'en' | 'zh-CN') {
+  const words = locale === 'en' ? english : chinese;
+  await page.getByRole('button', { name: words.workbench.arrangements.label, exact: true }).click();
+  await page.getByRole('menuitem', { name: words.workbench.arrangements.conversation.title, exact: true }).click();
 }
 
 async function insideStrip(strip: Locator) {
@@ -26,54 +36,65 @@ async function insideStrip(strip: Locator) {
 test.beforeEach(async () => { await scenario(); });
 
 for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
-  test(`each area's sections replace a remembered org at ${width}/${locale}/${theme}`, async ({ page }) => {
+  test(`each area's sections keep a remembered org in Navigation at ${width}/${locale}/${theme}`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
-    await signIn(page); await language(page, locale);
+    await signInForManagement(page); await language(page, locale);
     await page.goto('/org/acme'); await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
-    const requests: string[] = [];
-    const orgFeeds: string[] = [];
-    page.on('request', (request) => { if (request.url().includes('/api/v1/')) requests.push(new URL(request.url()).pathname); });
-    page.on('websocket', (socket) => socket.on('framesent', (event) => {
-      try {
-        const frame: unknown = JSON.parse(typeof event.payload === 'string' ? event.payload : event.payload.toString());
-        if (typeof frame === 'object' && frame !== null && 'op' in frame && frame.op === 'sub' && 'feed' in frame && typeof frame.feed === 'string' && frame.feed.startsWith('org:')) orgFeeds.push(frame.feed);
-      } catch { /* Non-JSON native transport payloads are not navigation subscriptions. */ }
-    }));
-    for (const [path, section, area] of [
-      ['/settings/profile', 'security', locale === 'en' ? 'Settings' : '设置'],
-      ['/admin/overview', 'settings', locale === 'en' ? 'Management' : '管理'],
-      ['/help', 'keys', locale === 'en' ? 'Help' : '帮助'],
-      [`/usage?scope=node:${ACME.org}&range=last_week`, 'performance', locale === 'en' ? 'Usage' : '用量'],
+    const words = locale === 'en' ? english : chinese;
+    for (const [path, section] of [
+      ['/settings/profile', 'security'],
+      ['/admin/overview', 'settings'],
+      ['/help', 'keys'],
+      [`/usage?scope=node:${ACME.org}&range=last_week`, 'performance'],
     ] as const) {
-      requests.length = 0; orgFeeds.length = 0;
       await page.goto(path);
       if (width === 400) {
         const areaControl = page.locator('[data-container-choice="left:navigation"]');
-        await expect(areaControl).toHaveAccessibleName(area); await areaControl.press('Enter');
+        await expect(areaControl).toHaveAccessibleName(words.views.navigation.title);
+        await areaControl.press('Enter');
       }
       const left = page.locator('[data-workbench-bar="left"]:visible');
-      await expect(left.locator('[data-section-nav]')).toBeVisible();
-      await expect(left.getByRole('tree')).toHaveCount(0);
-      await expect(left.locator('[data-bar-scroll]')).toHaveCount(0);
-      const nav = left.locator('[data-section-nav]');
-      await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
-      const link = nav.locator(`[data-section-id="${section}"]`);
-      await expect(link).toBeVisible();
-      const destination = await link.getAttribute('href');
-      if (destination === null) throw new Error('The section must have a real destination');
-      const url = new URL(destination, page.url());
-      await link.press('Enter');
-      await expect(page).toHaveURL(url.href);
-      if (path.startsWith('/usage')) {
-        expect(url.searchParams.get('scope')).toBe(`node:${ACME.org}`); expect(url.searchParams.get('range')).toBe('last_week');
+      // Sections now belong to the page. Global Navigation keeps the org tree and its readers.
+      await expect(left.getByRole('tree')).toBeVisible();
+      await expect(left.locator('[data-section-nav]')).toHaveCount(0);
+      if (width === 400) await expect(left.getByRole('combobox', { name: words.navigation.orgs, exact: true })).toHaveValue('Acme');
+      else await expect(left.getByRole('navigation', { name: words.views.navigation.title, exact: true }).getByRole('link', { name: 'Acme', exact: true })).toBeVisible();
+      if (width === 400) await left.getByRole('button', { name: words.common.close, exact: true }).press('Enter');
+      const main = page.locator('[data-main-area]');
+      if (path.startsWith('/settings') || path.startsWith('/admin')) {
+        const nav = main.locator('[data-settings-frame] [data-section-nav]');
+        await expect(nav).toBeVisible();
+        await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
+        const link = nav.locator(`[data-section-id="${section}"]`);
+        const destination = await link.getAttribute('href');
+        if (destination === null) throw new Error('The section must have a real destination');
+        const picker = nav.getByRole('combobox');
+        if (await picker.isVisible()) {
+          const label = (await link.textContent())?.trim();
+          if (label === undefined || label === '') throw new Error('The section must have a name');
+          await picker.click();
+          await picker.fill(label);
+          await expect(page.getByRole('option', { name: label, exact: true })).toBeVisible();
+          await picker.press('Enter');
+        } else await link.press('Enter');
+        await expect(page).toHaveURL(new URL(destination, page.url()).href);
+        await expect(nav.locator(`[data-section-id="${section}"]`)).toHaveAttribute('aria-current', 'page');
+      } else {
+        const tab = main.getByRole('tab', { name: section === 'keys' ? words.help.parts.keys : words.usagePerf.viewNames.performance, exact: true });
+        await tab.press('Enter');
+        await expect(tab).toHaveAttribute('aria-selected', 'true');
+        const url = new URL(page.url());
+        expect(url.searchParams.get(section === 'keys' ? 'part' : 'view')).toBe(section);
+        if (path.startsWith('/usage')) {
+          expect(url.searchParams.get('scope')).toBe(`node:${ACME.org}`);
+          expect(url.searchParams.get('range')).toBe('last_week');
+        }
       }
-      expect(requests.filter((request) => /\/orgs\/[^/]+\/(tree|chats)(?:\/|$)/.test(request))).toEqual([]);
-      expect(orgFeeds).toEqual([]);
       await expect(page.locator('[data-workbench-chrome]').getByRole('button', { name: /^(More|Details|更多|详情)$/ })).toHaveCount(0);
     }
     if (width === 400) await page.locator('[data-navigation-rail]').getByRole('link', { name: /^(Home|主页)$/ }).click();
     else await page.getByRole('navigation', { name: /^(Orgs and your own places|组织和个人入口)$/ }).locator('a[href="/org/acme"]').click();
-    await expect(page).toHaveURL(/\/org\/acme\/?$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     await expect(page.getByRole('heading', { name: 'Acme', exact: true, level: 1 })).toBeVisible();
   });
 
@@ -81,6 +102,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
     await signIn(page); await language(page, locale); await page.goto(`/thread/${ACME.mainThread}`);
     await expect(page.getByRole('heading', { name: 'Main thread', exact: true })).toBeVisible();
+    await conversationArrangement(page, locale);
     const strip = page.locator('[data-narrow-containers]');
     const chrome = page.locator('[data-workbench-chrome]');
     if (width === 400) {
@@ -139,6 +161,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
 test('eight view icons also fit one row at 360 px without scrolling or a More menu', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 800 }); await page.emulateMedia({ colorScheme: 'dark' });
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
+  await conversationArrangement(page, 'en');
   const strip = page.locator('[data-narrow-containers]');
   await expect(strip.getByRole('button')).toHaveCount(8);
   await insideStrip(strip);

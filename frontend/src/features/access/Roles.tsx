@@ -35,6 +35,7 @@ import { Menu, type MenuEntry } from '@/ui/Menu';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { StateLine } from '@/ui/StateLine';
 import { Table, type Column } from '@/ui/Table';
 import { toast } from '@/ui/Toast';
 import { TracePerson, useTraceEntry } from '@/features/trace/Person';
@@ -72,11 +73,14 @@ export function SubjectView({ subject, scope, allowed = false }: { subject: Subj
 }
 
 /** What each role does here as things stand, read from what the place gives to what is made inside it. */
-function WhatRolesDo({ place, onDefaults }: { place: AccessTarget; onDefaults?: (() => void) | undefined }) {
+export function WhatRolesDo({ place, onDefaults }: { place: AccessTarget; onDefaults?: (() => void) | undefined }) {
   const { t } = useTranslation();
   const catalogue = useQuery(permissionsQuery);
   const defaults = useQuery(defaultsQuery(place.id));
-  if (catalogue.data === undefined || defaults.data === undefined) return null;
+  const failure = catalogue.error ?? defaults.error;
+  if (failure instanceof ApiError && [401, 403, 404, 410].includes(failure.status)) return <StateLine compact message={t('implicitAvailability.detailsUnavailable')} />;
+  if (catalogue.isError || defaults.isError) return <ErrorState compact error={failure} onRetry={() => { if (catalogue.isError) void catalogue.refetch(); if (defaults.isError) void defaults.refetch(); }} />;
+  if (catalogue.data === undefined || defaults.data === undefined) return <SkeletonRows rows={1} />;
   const index = indexCatalogue(catalogue.data);
   const kinds = place.kind === 'org' ? (['project', 'topic', 'thread'] as const) : place.kind === 'project' ? (['topic', 'thread'] as const) : (['thread'] as const);
   const sentences = kinds.flatMap((kind) => {
@@ -191,10 +195,10 @@ function AddPeople({ place, open, onClose, givable }: { place: AccessTarget; ope
       dismissible={!give.isPending}
       footer={
         <>
-          <Button disabled={give.isPending} onClick={onClose}>
+          <Button disabled={give.isPending} reason={give.isPending ? t('ui.unavailable.saving') : undefined} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" pending={give.isPending} blocked={chosen === null} onClick={() => give.mutate()}>
+          <Button variant="primary" pending={give.isPending} blocked={chosen === null} reason={give.isPending ? t('ui.unavailable.saving') : chosen === null ? t('ui.unavailable.recipient') : undefined} onClick={() => give.mutate()}>
             {t('access.roles.give')}
           </Button>
         </>
@@ -275,7 +279,7 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
     },
   });
 
-  if (roles.isPending) return <SkeletonRows rows={4} />;
+  if (roles.isPending) return <SkeletonRows read={roles} rows={4} />;
   if (roles.isError) return <ErrorState compact error={roles.error} retrying={roles.isRefetching} onRetry={() => void roles.refetch()} />;
   const own = roles.data.own;
 
@@ -400,12 +404,13 @@ export function Roles({ place, onDefaults }: { place: AccessTarget; onDefaults?:
         title={t('access.roles.endTitle', { name: ending === null ? '' : subjectName(ending.subject, t,label) })}
         footer={
           <>
-            <Button disabled={finish.isPending} onClick={() => setEnding(null)}>
+            <Button disabled={finish.isPending} reason={finish.isPending ? t('ui.unavailable.saving') : undefined} onClick={() => setEnding(null)}>
               {t('common.cancel')}
             </Button>
             <Button
               variant="primary"
               pending={finish.isPending}
+              reason={finish.isPending ? t('ui.unavailable.saving') : undefined}
               onClick={() => ending !== null && finish.mutate({ row: ending, expires: end === '' ? null : new Date(`${end}T23:59:59`).toISOString() })}
             >
               {t('access.roles.endSave')}

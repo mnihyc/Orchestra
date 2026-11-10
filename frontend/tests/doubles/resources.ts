@@ -1,3 +1,4 @@
+import { unjudgedProvenance, unplacedGrouping } from './resource-grouping.ts';
 /** What the fake API says of resources: machines with their enrollment and policy, providers with their models and key, agent profiles, environments, hosts and templates, and the acts that register, change and remove them.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: the same shapes,
@@ -9,6 +10,7 @@
 import { randomUUID } from 'node:crypto';
 import { seedPlan,planReply,type PlanSeed } from './plan-usage.ts';
 import { readFileSync } from 'node:fs';
+import type { StartOptions } from '../../src/api/start';
 
 import type {
   EverythingResource,
@@ -23,13 +25,14 @@ import type {
   ArrangementType,
   BindingAgent,
   BindingEnvironment,
-  BindingOptions,
   BindingProvider,
   EnrollmentToken,
   EnrollmentProgress,
   ComponentUpdate,
+  ConnectorGatewayStatus,
   FactMember,
   Environment,
+  EnvironmentSandboxReadiness,
   EnvironmentMcp,
   Job,
   EnvironmentRef,
@@ -37,6 +40,7 @@ import type {
   Isolation,
   JobRef,
   Machine,
+  MachineDataInventory,
   MachinePolicy,
   MachinePolicySection,
   MachineProgram,
@@ -59,6 +63,7 @@ import type {
   ResolvedSetting,
   ResourceAccess,
   Runtime,
+  RunningHarnessBuild,
   Template,
   UserRef,
 } from '../../src/generated/api-types.ts';
@@ -172,10 +177,15 @@ function policySections(key: string): MachinePolicySection[] {
   if (key === 'environment.roots') return ['environment', 'node'];
   if (['drivers', 'storages', 'hooks', 'resources.max'].includes(key)) return ['node'];
   if (key === 'ports') return ['environment'];
-  if (key === 'agent.harnesses' || key === 'agent.programs' || key === 'tools.fetch') return ['agent'];
+  if (key === 'agent.harnesses') return ['environment', 'agent'];
+  if (key === 'agent.programs' || key === 'tools.fetch') return ['agent'];
   if (key.startsWith('provider.')) return ['provider'];
   if (key.startsWith('environment.') || key.startsWith('mcp.') || key === 'exec.offers' || key === 'agent.max_sandbox') return ['environment'];
   return ['machine'];
+}
+
+function policyDelegationSections(key: string): MachinePolicySection[] {
+  return key === 'agent.harnesses' ? ['agent'] : policySections(key);
 }
 
 function policyDefinition(key: string): MachinePolicy['keys'][number]['definition'] {
@@ -186,6 +196,8 @@ function policyDefinition(key: string): MachinePolicy['keys'][number]['definitio
 }
 
 interface MachineRecord {
+  dataDirectory?: MachineDataInventory;
+  revision?: number;
   programs?:MachineProgram[];
   dedicated?: boolean;
   id: string;
@@ -199,6 +211,8 @@ interface MachineRecord {
   lastSeen: string | null;
   roundTripMs: number;
   harnesses: { kind: string; path: string; version: string; daemon: boolean }[];
+  discoveredHarnesses?: MachineRecord['harnesses'];
+  searchedHarnessKinds?: string[];
   policy: Record<string, unknown>;
   roles?: Machine['roles'];
   /** When its certificate ends, as a distance from when the world began (negative: it has ended). Absent: a good certificate, or the one a revoked machine had. */
@@ -210,6 +224,8 @@ type ModelRecord = ProviderModel;
 interface EnrollmentSelection { kind: 'connector' | 'node'; roles: string[]; delegate: string[]; dedicated: boolean; home?: string | null }
 
 interface ProviderRecord {
+  modelGroupOptions?: NonNullable<Provider['model_group_options']>;
+  modelGroupsMaximum?: number;
   /** Native reports are shared by HTTP reads and the resource feed. */
   harnessReports?: Provider['harnesses'];
   planUsage?:PlanSeed;
@@ -232,6 +248,8 @@ interface ProviderRecord {
   secrets: string[];
   facts: Provider['facts'];
   sources?: Provider['sources'];
+  /** Explicit source-view fixtures are shared by direct and admitted native reads. */
+  sourceFactStates?: Provider['facts_state'];
   runtimeConfig?: Record<string,unknown>;
   running: number;
   /** Who may use it besides its owner, and who may manage it. */
@@ -264,6 +282,7 @@ interface AgentRecord {
 interface EnvironmentRecord {
   /** The verified unit generation after a retained-volume restoration. */
   generation?: number;
+  sandboxReadiness?: EnvironmentSandboxReadiness;
   id: string;
   name: string;
   owner: string;
@@ -441,6 +460,7 @@ const USUAL_BINDING: ThreadBinding = {
 };
 
 export class Resources {
+  gatewayStatuses = new Map<string, ConnectorGatewayStatus>();
   readonly world: World;
   machines: MachineRecord[] = [];
   providers: ProviderRecord[] = [];
@@ -454,7 +474,7 @@ export class Resources {
   readonly mcpServers = new Map<string, EnvironmentMcp>();
   /** Explicitly controlled update/reconnect phases, without a timer that can race a browser assertion. */
   private componentUpdates = new Map<string, ComponentUpdate>();
-  private driverFacts = new Map<string, Pick<Host, 'drivers' | 'storages'> & Partial<Pick<Host, 'capacity'>>>();
+  private driverFacts = new Map<string, Pick<Host, 'drivers' | 'storages'> & Partial<Pick<Host, 'capacity' | 'kept_layers'>>>();
   private templateDriversReported = true;
   /** The jobs that end later: an environment that is starting is running a moment after. */
   private timers = new Set<NodeJS.Timeout>();
@@ -491,6 +511,7 @@ export class Resources {
   }
 
   reset(): void {
+    this.gatewayStatuses.clear();
     for (const timer of this.timers) clearTimeout(timer);
     this.timers.clear();
     this.jobs.clear();
@@ -1030,6 +1051,7 @@ export class Resources {
 
   private machineFacts(record: MachineRecord): unknown {
     return {
+      revision: record.revision ?? 1,
       role_management:{supported:!record.roles?.includes('node'),delegated:this.machineKeyHanded(record,'machine.roles'),enabled:record.policy['machine.roles']===true},
       programs:this.machinePrograms(null,record),
       dedicated: record.dedicated === true,
@@ -1040,6 +1062,8 @@ export class Resources {
       memory_bytes: 17_179_869_184,
       storages: [{name:'default',default:true,capacity_gb:500,free_gb:320,private_views:false}],
       harnesses: record.harnesses,
+      ...(record.discoveredHarnesses === undefined ? {} : { discovered_harnesses: record.discoveredHarnesses }),
+      ...(record.searchedHarnessKinds === undefined ? {} : { searched_harness_kinds: record.searchedHarnessKinds }),
       adapters: [
         { kind: 'claude-code', adapter_version: 1, builtin: true },
         { kind: 'codex', adapter_version: 1, builtin: true },
@@ -1100,7 +1124,7 @@ export class Resources {
   private machineKeyHanded(record:MachineRecord,key:string):boolean {
     const delegated=record.policy['policy.delegated'];const local=record.policy['policy.local'];
     return key!=='policy.delegated' && !(isRecord(local) && Object.hasOwn(local,key)) && Array.isArray(delegated)
-      && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section)=>section!=='machine' && delegated.includes(`${section}.*`)));
+      && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section)=>section!=='machine' && delegated.includes(`${section}.*`)));
   }
 
   private machinePrograms(person:Person|null,record:MachineRecord):MachinePrograms {
@@ -1128,6 +1152,30 @@ export class Resources {
     const name=asText(body.name);
     const entry=entries.find((entry)=>entry.kind===kind && entry.name===name);
     if(body.action==='reload') return this.machinePrograms(person,record);
+    if(body.action==='confirm_harness' || body.action==='remove_harness') {
+      const roles=record.roles ?? ['environment','agent','provider'];
+      if(!roles.some((role)=>role==='environment' || role==='agent')) this.invalid('kind','The machine needs an Environment or Agent role.');
+      if(!this.machineKeyHanded(record,'agent.harnesses')) throw new Refusal(409,'policy.not_delegated','Agent programs are kept on the machine.',{keys:['agent.harnesses']});
+      const harnessKind=asText(body.kind),path=asText(body.path);
+      const candidates=body.action==='remove_harness'?record.harnesses:[...record.harnesses,...(record.discoveredHarnesses ?? [])];
+      const program=candidates.find((row)=>row.kind===harnessKind && row.path===path);
+      if(program===undefined) this.invalid('path','The machine has not reported this program.');
+      const previous=record.policy['agent.harnesses'];
+      const values:readonly unknown[]=Array.isArray(previous)?previous:[];
+      const kept=values.filter((row)=>!isRecord(row) || row.kind!==harnessKind);
+      record.harnesses=record.harnesses.filter((row)=>row.kind!==harnessKind);
+      record.discoveredHarnesses=(record.discoveredHarnesses ?? []).filter((row)=>row.kind!==harnessKind);
+      if(body.action==='confirm_harness') {
+        record.policy['agent.harnesses']=[...kept,{kind:harnessKind,path}];
+        record.harnesses.push(program);
+      } else {
+        record.policy['agent.harnesses']=kept;
+        record.discoveredHarnesses.push(program);
+      }
+      this.world.users.tellAll({what:'resources',kind:'machine',id:record.id});
+      for(const environment of this.environments.filter((row)=>row.machine===record.id)) this.world.users.tellAll({what:'resources',kind:'environment',id:environment.id});
+      return this.machinePrograms(person,record);
+    }
     if(body.action==='test') {
       if(entry===undefined) throw new Refusal(404,'not_found','This program is not registered.');
       entry.ready=true;
@@ -1152,7 +1200,9 @@ export class Resources {
   }
 
   private machine(record: MachineRecord): Machine {
-    return {
+    return { ...unplacedGrouping(),
+      ...(record.dataDirectory === undefined ? {} : { data_directory: record.dataDirectory }),
+      revision: record.revision ?? 1,
       role_management:{supported:!record.roles?.includes('node'),delegated:this.machineKeyHanded(record,'machine.roles'),enabled:record.policy['machine.roles']===true},
       access:{permissions:['machine.view','machine.use','machine.manage','access.own','access.manage'],admin_only:[],administers:false,admin_access:null,participating:true,through:[{kind:'owner'}]},
       installation:this.installation(record),
@@ -1238,7 +1288,7 @@ export class Resources {
     }
     const listsModels=(sources.models.descriptor?.models ?? null) !== null;
     factsState.models=record.facts.models !== null ? record.facts.models.length > 0 ? 'told' : 'empty' : listsModels && record.facts.field_times.models !== undefined ? 'empty' : listsModels ? 'not_read_yet' : 'unsupported';
-    return {
+    return { ...unjudgedProvenance(),
       runtime_support:{resource_limits:{cpu:'reported',memory:'reported',pids:'reported',disk:'reported'},data_storage:machine===undefined?undefined:{made_by_orch:'directory',existing_directory:machine.os==='linux',reason:machine.os==='linux'?null:'This platform has not verified existing harness homes.'},home:homeSource,machine_id:machine?.id,driver:null,lifecycle:machine===undefined?'unit':'attach',commands_after_start:{supported:machine?.os!=='windows',reason:machine?.os==='windows'?'This machine cannot supervise a complete command process group.':null},
         after_up:machine===undefined?null:machine.policy['environment.after_up']===true,
         sign_in:record.kind==='subscription'?{home_owned:homeOwned,policy_allowed:typeof signInPolicy==='boolean'?signInPolicy:null,allowed:homeOwned || signInPolicy===true}:null},
@@ -1258,6 +1308,8 @@ export class Resources {
       held_by: null,
       runtime_config: record.runtimeConfig ?? {},
       upstreams: record.upstreams,
+      model_group_options: record.modelGroupOptions ?? {},
+      model_groups_max: record.modelGroupsMaximum ?? 8,
       secrets_set: record.secrets,
       config: {},
       subscription: record.kind === 'subscription' ? { accepted: true, shareable: true } : null,
@@ -1270,12 +1322,12 @@ export class Resources {
       status_at: LATER_AT,
       ...(withPlan && record.planUsage!==undefined ? {plan_forecasts:record.planUsage.forecasts} : {}),
       facts: record.facts,
-      facts_state: factsState,
+      facts_state: record.sourceFactStates ?? factsState,
       sources,
       facts_overridden: [],
       last_reset: null,
-      facts_at: record.planUsage?.at ?? (record.facts.plan === null ? null : inMs(-5 * 60_000)),
-      facts_requested_at: record.facts.plan === null ? null : inMs(-5 * 60_000),
+      facts_at: record.planUsage?.at ?? (record.facts.plan === null ? null : new Date(this.born - 5 * 60_000).toISOString()),
+      facts_requested_at: record.facts.plan === null ? null : record.planUsage?.at ?? new Date(this.born - 5 * 60_000).toISOString(),
       models: record.models,
       running_threads: record.running,
       runtime: null,
@@ -1309,6 +1361,65 @@ export class Resources {
     } as unknown as Agent;
   }
 
+  /** The HTTP row and its native feed share the same confirmed tuple and server attribution. */
+  private environmentMachinePrograms(record:EnvironmentRecord,machine:MachineRecord|undefined):NonNullable<Environment['exec']['machine_programs']> {
+    if(machine===undefined || record.template!==null) return [];
+    const declared=machine.policy['agent.harnesses'];
+    const program=machine.harnesses.find((row)=>row.kind==='codex' && Array.isArray(declared) && declared.some((entry)=>isRecord(entry) && entry.kind===row.kind && entry.path===row.path));
+    if(program===undefined) return [];
+    const decisions=record.config?.['exec.version_overrides'];
+    const decision=isRecord(decisions)?decisions[program.kind]:undefined;
+    const row={harness_kind:program.kind,path:program.path,version:program.version};
+    if(!isRecord(decision) || decision.path!==program.path || decision.version!==program.version || typeof decision.by!=='string' || typeof decision.at!=='string') return [{...row,approval:null}];
+    const by=decision.by,at=decision.at;
+    const writer=[...this.world.people.values()].find((person)=>person.me.id===by);
+    return [{...row,approval:{by:writer===undefined?{id:by,kind:'human',username:'',display_name:'',address:null,avatar:{text:'',color:0}}:userRef(writer.me),at}}];
+  }
+
+  private prepareProgramConsent(person:Person,record:EnvironmentRecord,config:Record<string,unknown>):Record<string,unknown> {
+    const key='exec.version_overrides';
+    const previous=record.config?.[key];
+    const requested=config[key];
+    if(requested===undefined && previous===undefined) return config;
+    if(requested!==undefined && !isRecord(requested)) this.invalid('config','Version decisions must be an object.');
+    const current=this.environmentMachinePrograms(record,this.machines.find((row)=>row.id===record.machine));
+    const decisions:Record<string,unknown>={};
+    let changed=false;
+    for(const [kind,input] of Object.entries(requested ?? {})) {
+      if(!isRecord(input)) this.invalid('config','Name the confirmed path and version.');
+      if(Object.keys(input).some((key)=>!['path','version','by','at'].includes(key))) this.invalid('config','A version decision has an unknown member.');
+      if(typeof input.path!=='string' || typeof input.version!=='string') this.invalid('config','Name the confirmed path and version.');
+      const prior=isRecord(previous)?previous[kind]:undefined;
+      if(isRecord(prior) && prior.path===input.path && prior.version===input.version) {decisions[kind]=prior;continue;}
+      if(!current.some((row)=>row.harness_kind===kind && row.path===input.path && row.version===input.version)) this.invalid('config','The confirmed program changed. Refresh and try again.');
+      changed=true;
+      decisions[kind]={path:input.path,version:input.version,by:person.me.id,at:new Date().toISOString()};
+    }
+    changed ||= isRecord(previous) && Object.keys(previous).some((kind)=>!Object.hasOwn(decisions,kind));
+    if(changed && person.me.kind!=='human') throw new Refusal(403,'authz.denied','A human environment manager records version decisions.');
+    return {...config,[key]:decisions};
+  }
+
+  /** No held artifact bytes are observed by this fixture world; a catalogue/version match proves no build identity. */
+  private environmentHarnesses(person:Person,record:EnvironmentRecord):RunningHarnessBuild[] {
+    if(!this.world.access.permissionsOnEnvironment(person,record.id).includes('environment.view')) throw new Refusal(404,'not_found','There is no readable environment.');
+    const programs=new Map<string,RunningHarnessBuild>();
+    const add=(kind:string,version:string)=>{const key=JSON.stringify([kind,version]);if(!programs.has(key))programs.set(key,{kind,harness:harnessName(kind),version,build:null});};
+    const machine=this.machines.find((row)=>row.id===record.machine);
+    if(machine!==undefined && record.template===null) {
+      const raw=machine.policy['agent.harnesses'],selected=new Map<string,string>();
+      if(Array.isArray(raw)) for(const entry of raw) if(isRecord(entry) && typeof entry.kind==='string' && typeof entry.path==='string' && !selected.has(entry.kind)) selected.set(entry.kind,entry.path);
+      for(const program of machine.harnesses) {const path=selected.get(program.kind);if(path!==undefined && (!path.startsWith('/') || path===program.path)) add(program.kind,program.version);}
+    }
+    for(const binding of this.bindings.values()) {
+      if(binding.environment!==record.id) continue;
+      const agent=this.agents.find((row)=>row.id===binding.agent),provider=this.providers.find((row)=>row.id===binding.provider);
+      if(agent===undefined || provider===undefined) continue;
+      for(const observed of provider.harnessReports ?? []) if(observed.agent.id===agent.id && observed.machine.id===record.machine && observed.harness_version!==null) add(agent.harness,observed.harness_version);
+    }
+    return [...programs.values()].sort((a,b)=>a.kind<b.kind?-1:a.kind>b.kind?1:a.version<b.version?-1:a.version>b.version?1:0);
+  }
+
   private environment(person: Person, record: EnvironmentRecord): Environment {
     const machine = this.machines.find((candidate) => candidate.id === record.machine);
     const host = this.hosts.find((candidate) => candidate.id === record.host);
@@ -1339,11 +1450,12 @@ export class Resources {
       removal: null,
       host: host === undefined ? null : { id: host.id, name: host.name, address: host.home === null ? `system.${host.name}` : `acme.${host.owner ?? 'ada'}.${host.name}` },
       mounts: [],
-      exec: { offers: [{ name: 'codex-exec-server', available: true, reason: null }, { name: 'plain', available: true, reason: null }], orch_tools: true, machine_offers: record.machine === null ? null : ['codex-exec-server', 'claude-code', 'plain', 'custom'] },
+      exec: { offers: [{ name: 'codex-exec-server', available: true, reason: null }, { name: 'plain', available: true, reason: null }], orch_tools: true, machine_offers: record.machine === null ? null : ['codex-exec-server', 'claude-code', 'plain', 'custom'], ...(this.environmentMachinePrograms(record,machine).length===0?{}:{machine_programs:this.environmentMachinePrograms(record,machine)}) },
       mcp_found: [],
       index: record.index ?? 'full',
       index_reason: record.index === 'live' ? 'entries' : null,
       template: template === undefined ? null : { id: template.id, name: template.name, driver: template.driver },
+      sandbox_readiness: record.sandboxReadiness ?? null,
       generation: record.generation ?? 0,
       ports_exposed: this.world.ports.exposed(record.id),
       updates: Array.from({ length: record.updates }, (_, n) => ({ name: n === 0 ? 'Image' : 'Exec node', what: n === 0 ? 'image' : 'executor', from: '0.1.0', to: '0.1.1' })),
@@ -1620,7 +1732,7 @@ export class Resources {
     if (!record.online) throw new Refusal(503, 'source.offline', 'the machine is offline');
     const delegated = Array.isArray(record.policy['policy.delegated']) ? (record.policy['policy.delegated'] as string[]) : [];
     const local = record.policy['policy.local'];
-    const handed = (key: string): boolean => !(typeof local === 'object' && local !== null && Object.hasOwn(local,key)) && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section) => delegated.includes(`${section}.*`)));
+    const handed = (key: string): boolean => !(typeof local === 'object' && local !== null && Object.hasOwn(local,key)) && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section) => delegated.includes(`${section}.*`)));
     const refused = Object.keys(body).filter((key) => key === 'policy.delegated' || !handed(key));
     if (refused.length > 0) throw new Refusal(409, 'policy.not_delegated', 'the machine keeps those to itself', { keys: refused });
     Object.assign(record.policy, body);
@@ -1631,7 +1743,7 @@ export class Resources {
     const delegated = Array.isArray(record.policy['policy.delegated']) ? (record.policy['policy.delegated'] as string[]) : [];
     const local = record.policy['policy.local'];
     const kept = (key: string): boolean => typeof local === 'object' && local !== null && Object.hasOwn(local,key);
-    const handed = (key: string): boolean => key !== 'policy.delegated' && !kept(key) && (delegated.includes('*') || delegated.includes(key) || policySections(key).some((section) => delegated.includes(`${section}.*`)));
+    const handed = (key: string): boolean => key !== 'policy.delegated' && !kept(key) && (delegated.includes('*') || delegated.includes(key) || policyDelegationSections(key).some((section) => delegated.includes(`${section}.*`)));
     return {
       command:this.installation(record).commands.policy,
       machine: this.machineRef(record),
@@ -1728,7 +1840,7 @@ export class Resources {
   }
 
   private providerSetup(): ProviderSetup {
-    const field = (name: string, label: string, type: 'text' | 'choice' | 'map' | 'secret_map', help: string | null, choices: { value: string; label: string }[] | null = null) => ({
+    const field = (name: string, label: string, type: 'text' | 'choice' | 'map' | 'secret_map' | 'json', help: string | null, choices: { value: string; label: string }[] | null = null) => ({
       name,
       label,
       type,
@@ -1747,13 +1859,21 @@ export class Resources {
       field('headers', 'Headers', 'map', 'Headers sent with every request to this endpoint.'),
       field('secret_headers', 'Secret headers', 'secret_map', 'Headers whose values are secrets. They are stored like the key and never shown again.'),
       field('query', 'Query parameters', 'map', 'Parameters added to the address of every request.'),
+      field('request_options', 'Request options', 'json', 'Option declarations by interface.'),
       // An option that its descriptor gives no help for: it has no "?".
       field('organization', 'Organization', 'text', null),
     ];
     const codex = this.agentRef(this.findAgent(fixtureId(KIND.agent, 1)));
     const claude = this.agentRef(this.findAgent(fixtureId(KIND.agent, 2)));
-    return {
-      machines:this.machines.filter((machine)=>machine.status==='active').map((machine)=>({machine:this.machineRef(machine),directory_runtime:true,roles:['agent','provider'],harnesses:machine.harnesses.map((harness)=>harness.kind)})),
+    return { grouping: [],
+      machines:this.machines.filter((machine)=>machine.status==='active').map((machine)=>{
+        const arrangements = machine.policy['provider.arrangements'];
+        const upstreams = machine.policy['provider.upstreams'];
+        const types: ArrangementType[] = ['separated', 'key_separated', 'credential_shared', 'handed_over'];
+        return { machine:this.machineRef(machine),directory_runtime:true,roles:['agent','provider'],harnesses:machine.harnesses.map((harness)=>harness.kind),
+          arrangements: Array.isArray(arrangements) ? types.filter((type) => arrangements.includes(type)) : null,
+          upstreams: Array.isArray(upstreams) ? upstreams.filter((url: unknown): url is string => typeof url === 'string') : null };
+      }),
       api_arrangements: this.arrangementConsents(['separated', 'key_separated']),
       http_allowed: false,
       key_machines: this.machines.filter((machine) => machine.status === 'active' && machine.online).map((machine) => this.machineRef(machine)),
@@ -1767,7 +1887,7 @@ export class Resources {
             network:{mode:'bridge',egress:'open',dns:[]},security:{read_only_rootfs:true,no_new_privileges:true,cap_add:[],cap_drop:['ALL']},
             env:{LLAMA_ARG_MODEL:'/opt/models/embeddinggemma-2-Q8_0.gguf',LLAMA_ARG_ALIAS:'embeddinggemma-2',LLAMA_ARG_EMBEDDINGS:'true',LLAMA_ARG_POOLING:'mean',LLAMA_ARG_HOST:'127.0.0.1',LLAMA_ARG_PORT:'8090',LLAMA_ARG_CTX_SIZE:'2048',LLAMA_ARG_BATCH:'2048',LLAMA_ARG_UBATCH:'2048',LLAMA_ARG_THREADS:'4',EMBEDDINGS_START_SECS:'120'},
             mounts:[{type:'tmpfs',target:'/tmp'}],after_up:[{name:'embeddings',command:['/bin/bash','/opt/llama/serve'],timeout_secs:300}],plugins:[],host_labels:[]}}},
-        { name: 'OpenAI', note: null, docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.openai.com/v1', options: {} }] },
+        { name: 'OpenAI', note: null, docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.openai.com/v1', options: {} }], credential_hints: [{ prefix: 'fixture-model-', role: 'model' }, { prefix: 'fixture-admin-', role: 'admin', field: 'admin_key' }] },
         { name: 'Anthropic', note: null, docs_url: null, upstreams: [{ protocol: 'anthropic-messages', base_url: 'https://api.anthropic.com', options: {} }] },
         { name: 'OpenRouter', note: null, docs_url: null, upstreams: [{ protocol: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', options: {} }] },
         { name: 'DeepSeek', note: 'Serves both formats on the same key.', docs_url: null, upstreams: [{ protocol: 'openai-responses', base_url: 'https://api.deepseek.com', options: {} }, { protocol: 'anthropic-messages', base_url: 'https://api.deepseek.com/anthropic', options: {} }] },
@@ -1909,6 +2029,10 @@ export class Resources {
       record.arrangements = chosen;
     }
     if (Array.isArray(body.upstreams)) record.upstreams = body.upstreams as Provider['upstreams'];
+    if (body.model_group_options !== undefined) {
+      if (!isRecord(body.model_group_options)) this.invalid('model_group_options', 'group options are an object');
+      record.modelGroupOptions = structuredClone(body.model_group_options) as NonNullable<Provider['model_group_options']>;
+    }
     if (isRecord(body.runtime_config)) record.runtimeConfig=body.runtime_config;
     record.revision += 1;
     return this.provider(person, record);
@@ -2016,6 +2140,12 @@ export class Resources {
   }
 
   // ---------------------------------------------------------------- what a thread could be bound to, before it exists
+
+  /** Binding and placement replies share the reader's protected home path; no birth-machine report is fabricated. */
+  placementMetadata(person: Person, homeId: string | null): Pick<BindingEnvironment, 'availability' | 'home' | 'home_path' | 'origin_machine'> {
+    const path = homeId === null ? [] : this.world.places.pathFor(person, homeId);
+    return { availability: [], home: path.find((node) => node.id === homeId) ?? null, home_path: path, origin_machine: null };
+  }
 
   /**
    * The executors an environment offers a harness that runs apart from its tools, in the order it tries them: what its
@@ -2151,16 +2281,24 @@ export class Resources {
   }
 
   /** The agent profiles a provider could run, as the server lists them for the dialog: those that can be placed with what each can be placed in, and those whose harness never reported, not offered. */
-  private agentsFor(provider: ProviderRecord, environmentId: string | null, prefer: readonly ArrangementType[], allowed: readonly ArrangementType[] | null): BindingAgent[] {
+  private agentsFor(person: Person, provider: ProviderRecord, environmentId: string | null, prefer: readonly ArrangementType[], allowed: readonly ArrangementType[] | null): BindingAgent[] {
+    const mayInspect = this.held(person, 'provider', provider.owner, provider.uses, provider.manages).permissions.includes('provider.manage');
+    const reports = mayInspect ? provider.harnessReports ?? [] : [];
+    const priority = { online: 0, starting: 1, error: 2, offline: 3 } as const;
     return this.agents
       .filter((agent) => (provider.kind === 'subscription' ? agent.harness === provider.harness : agent.machine === null || agent.machine === provider.machine))
       .map((agent): BindingAgent => {
         const ref = this.agentRef(agent);
-        if (agent.disabled) return { agent: ref, usable: false, reason: 'disabled', arrangements: [] };
-        if (Object.keys(agent.descriptor).length === 0) return { agent: ref, usable: false, reason: 'harness_unreported', arrangements: [] };
+        const metadata = { ...this.placementMetadata(person, agent.home),
+          owner: agent.owner !== null && this.held(person, 'agent', agent.owner, [], []).permissions.includes('agent.view') ? this.userOf(agent.owner) : null };
+        const report = reports.filter((report) => report.agent.id === agent.id && (provider.machine === null || report.machine.id === provider.machine))
+          .sort((one, other) => priority[one.status] - priority[other.status] || (other.last_active_at ?? '').localeCompare(one.last_active_at ?? '') || one.machine.id.localeCompare(other.machine.id))[0];
+        const program = report === undefined ? {} : { program_report: { status: report.status, detail: report.status_detail } };
+        if (agent.disabled) return { ...metadata, agent: ref, ...program, usable: false, reason: 'disabled', arrangements: [] };
+        if (Object.keys(agent.descriptor).length === 0) return { ...metadata, agent: ref, ...program, usable: false, reason: report?.status === 'error' ? 'harness_error' : 'harness_unreported', arrangements: [] };
         const arrangements = this.arrangementsOf(agent.id, provider.id, environmentId, prefer, allowed);
         const usable = arrangements.some((choice) => choice.available && choice.permitted);
-        return { agent: ref, usable, reason: usable ? null : arrangements[0]?.reason ?? 'binding_incompatible', arrangements };
+        return { ...metadata, agent: ref, ...program, usable, reason: usable ? null : arrangements[0]?.reason ?? 'binding_incompatible', arrangements };
       });
   }
 
@@ -2169,7 +2307,7 @@ export class Resources {
    * and whether they may make one. `ground` is what the settings of the place say; `environmentId` the environment the arrangements are
    * judged against (the topic's default, or the one a new thread would make, where none is named).
    */
-  bindingOptions(person: Person, ground: BindingGround, environmentId: string | null, environmentNew = false): BindingOptions {
+  bindingOptions(person: Person, ground: BindingGround, environmentId: string | null, environmentNew = false): StartOptions {
     const record = environmentId === null ? null : this.findEnvironment(environmentId);
     if (record !== null) this.mustManageEnvironment(person, record);
     const topicDefault = ground.topicDefault === null ? null : (this.environments.find((candidate) => candidate.id === ground.topicDefault) ?? null);
@@ -2180,18 +2318,22 @@ export class Resources {
         return candidate.owner === person.me.username || access.includes('provider.use') || access.includes('provider.manage');
       })
       .map((candidate): BindingProvider => {
-        const may = this.held(person, 'provider', candidate.owner, candidate.uses, candidate.manages).permissions.includes('provider.use');
+        const access = this.held(person, 'provider', candidate.owner, candidate.uses, candidate.manages).permissions;
+        const may = access.includes('provider.use');
         const reason = !may ? 'no_use' : candidate.status === 'disabled' ? 'disabled' : null;
         return {
+          ...this.placementMetadata(person, candidate.home),
+          owner: access.includes('provider.view') ? this.userOf(candidate.owner) : null,
           provider: this.providerRef(candidate),
           usable: reason === null,
           reason,
           models: candidate.models.map((model): ModelOption => ({ ...MODEL_ESTIMATE, allowed: model.enabled, display_name: model.display_name, model_name: model.model_name, parameters: model.parameters, reason: model.enabled ? null : 'disabled' })),
-          agents: this.agentsFor(candidate, judged?.id ?? null, ground.prefer, ground.allowed),
+          agents: this.agentsFor(person, candidate, judged?.id ?? null, ground.prefer, ground.allowed),
         };
       });
     const mayMake = this.mayMake(person);
     return {
+      viewer_default:this.world.settings.viewerDefault(person,ground.node.id),
       defaults: { provider_id: ground.defaults.provider, agent_id: ground.defaults.agent, model_name: ground.defaults.model, effort: ground.defaults.effort, locked: ground.defaults.locked },
       providers,
       environments: this.environmentsFor(person, ground),
@@ -2227,6 +2369,8 @@ export class Resources {
         const host = this.hosts.find((candidate) => candidate.id === record.host);
         const isDefault = ground.topicDefault === record.id;
         const row: BindingEnvironment = {
+          ...this.placementMetadata(person, record.home),
+          owner: this.held(person, 'environment', record.owner, record.uses, record.manages).permissions.includes('environment.view') ? this.userOf(record.owner) : null,
           environment: this.environmentRef(record),
           host: host === undefined ? null : { id: host.id, name: host.name, address: host.home === null ? `system.${host.name}` : `acme.${host.owner ?? 'ada'}.${host.name}` },
           machine: machine === undefined ? null : this.machineRef(machine),
@@ -2317,6 +2461,7 @@ export class Resources {
       return {status:200,body:targets.map((target)=>{
         const object=isRecord(target.object)?target.object:{};
         const kind=String(object.kind);
+        if(kind==='environment' && !this.world.access.permissionsOnEnvironment(person,String(object.id)).includes('environment.view')) throw new Refusal(404,'not_found','There is no readable environment.');
         const unit=kind==='provider'||kind==='agent'||kind==='environment'?'turn':kind==='mcp_server'?'mcp_call':kind==='skill'?'skill_invocation':kind==='host'||kind==='template'?'environment_made':null;
         return {target,facts:{subject:{kind:'resource',object},as_of:new Date().toISOString(),dependents:[],dependents_complete:false,uses:unit===null?null:{kind:unit,coverage:{state:'unrecorded'},all_time:null,last_30_days:null,people:null,people_30_days:null,last_used_at:null}},threads:null};
       })};
@@ -2341,6 +2486,14 @@ export class Resources {
     let found: RegExpExecArray | null;
 
     // machines
+    if ((found = /^GET \/machines\/([^/]+)\/gateway$/.exec(route))) {
+      const id = found[1] ?? '';
+      const host = this.hosts.map((record) => this.host(person, record)).find((row) => row.machine.id === id);
+      if (host !== undefined && !host.access.permissions.includes('host.view')) throw new Refusal(404, 'not_found', 'The machine is not readable.');
+      const machine = host?.machine ?? this.machine(this.findMachine(person, id));
+      return { status: 200, body: this.gatewayStatuses.get(id) ?? { machine_id: id, selection: null, selected_gateway_id: null,
+        primary_gateway_id: null, connected: machine.online, measured_at: null, measurements: [] } };
+    }
     if(route==='GET /machines/enrollment-options') return {status:200,body:{secure:true,public_url:'https://orch.example'}};
     if ((found = /^GET \/machines\/enrollment-status\/([^/]+)$/.exec(route))) return { status: 200, body: this.enrollmentProgress(person, found[1] ?? '') };
     if (route === 'GET /machines') return { status: 200, body: this.machines.filter((record) => record.owner === person.me.username).map((record) => this.machine(record)) };
@@ -2392,7 +2545,8 @@ export class Resources {
       for(const [role,used] of [['environment',this.environments.some((entry)=>entry.machine===record.id)],['agent',this.agents.some((entry)=>entry.machine===record.id)],['provider',this.providers.some((entry)=>entry.machine===record.id)]] as const) {
         if(used && !roles.includes(role))this.invalid('roles',`Remove its registered ${role} resources before turning off this role.`);
       }
-      record.roles=roles;
+      if(body.expected_revision!==undefined && body.expected_revision!==(record.revision ?? 1))throw new Refusal(409,'conflict.stale_revision','The machine changed.',{current:{id:record.id,revision:record.revision ?? 1}});
+      record.roles=roles;record.revision=(record.revision ?? 1)+1;
       this.world.users.tellAll({what:'resources',kind:'machine',id:record.id});
       return {status:200,body:{machine_view:this.machine(record),requested_roles:roles,reconnecting:false}};
     }
@@ -2565,11 +2719,15 @@ export class Resources {
       return {
         status: 200,
         body: this.settingsOf([
-          ['runtime.idle_stop_minutes', 1440],
+          ['runtime.idle_stop_minutes', 0],
           ['runtime.template_id', fixtureId(KIND.template, 2)],
           ['runtime.host_id', null],
           ['runtime.update', 'manual'],
           ['runtime.renew_days', 7],
+          ['providers.facts_idle_minutes', 60],
+          ['providers.facts_active_minutes', 5],
+          ['providers.facts_recent_minutes', 15],
+          ['providers.facts_refused_minutes', 5],
         ]),
       };
     }
@@ -2608,6 +2766,11 @@ export class Resources {
       if (isRecord(body.profile)) record.profile = body.profile;
       record.revision += 1;
       return { status: 200, body: this.agent(person, record) };
+    }
+
+    if((found=/^GET \/environments\/([^/]+)\/harnesses$/.exec(route))) {
+      const record=this.findEnvironment(found[1] ?? '');
+      return {status:200,body:this.environmentHarnesses(person,record)};
     }
 
     // environments
@@ -2688,7 +2851,7 @@ export class Resources {
       if (typeof body.name === 'string' && body.name.trim() !== '') record.name = body.name.trim();
       if (typeof body.remote_write === 'boolean') record.remoteWrite = body.remote_write;
       if (typeof body.terminal === 'boolean') record.terminal = body.terminal;
-      if (typeof body.config === 'object' && body.config !== null) record.config = { ...(record.config ?? {}), ...(body.config as Record<string, unknown>) };
+      if (isRecord(body.config)) record.config = { ...(record.config ?? {}), ...this.prepareProgramConsent(person,record,body.config) };
       const selected = dataSources(body.data_sources);
       if (selected !== null) record.config = { ...record.config, 'env.data_sources': selected };
       record.revision += 1;
@@ -2900,6 +3063,65 @@ export class Resources {
   /** The requests only the double has for resources. */
   control(path: string, body: Record<string, unknown>): Answer | null {
     switch (path) {
+      case '/environment-readiness': {
+        const environment = this.environments.find((row) => row.id === body.environment_id);
+        if (environment === undefined) return { status: 404 };
+        if (!isRecord(body.readiness) || !isRecord(body.readiness.environment) || body.readiness.environment.id !== environment.id) return { status: 400 };
+        environment.sandboxReadiness = body.readiness as unknown as EnvironmentSandboxReadiness;
+        this.world.users.tellAll({ what: 'resources', kind: 'environment', id: environment.id });
+        return { status: 204 };
+      }
+      case '/provider-source-view': {
+        const record = this.providers.find((row) => row.id === body.id);
+        const owner = record === undefined ? undefined : this.world.people.get(record.owner);
+        if (record === undefined || owner === undefined) return { status: 404 };
+        const view = body.view;
+        if (view !== undefined) {
+          if (!isRecord(view) || !isRecord(view.sources) || !isRecord(view.facts) || !isRecord(view.facts_state)
+            || !Array.isArray(view.secrets_set) || view.secrets_set.some((value) => typeof value !== 'string')) return { status: 422 };
+          // Presentation facts only; ownership, reach and write authority keep the native record.
+          record.sources = structuredClone(view.sources) as Provider['sources'];
+          record.facts = structuredClone(view.facts) as Provider['facts'];
+          record.sourceFactStates = structuredClone(view.facts_state) as Provider['facts_state'];
+          record.secrets = (view.secrets_set as unknown[]).filter((value): value is string => typeof value === 'string');
+          record.revision += 1;
+          this.world.users.tellAll({ what: 'resources', kind: 'provider', id: record.id });
+        }
+        return { status: 200, body: this.provider(owner, record) };
+      }
+      case '/model-observation': {
+        const provider = this.providers.find((row) => row.id === body.provider_id);
+        if (provider === undefined || !Array.isArray(body.models)) return { status: 400 };
+        provider.facts.models = body.models as ModelSuggestion[];
+        if (typeof body.at === 'string') provider.facts.field_times.models = body.at;
+        provider.revision += 1;
+        this.world.users.tellAll({ what: 'resources', kind: 'provider', id: provider.id });
+        return { status: 204 };
+      }
+      case '/machine-data-inventory': {
+        const machine = this.machines.find((row) => row.id === asText(body.id));
+        if (machine === undefined) return { status: 404 };
+        if (!isRecord(body.inventory) || !Array.isArray(body.inventory.parts)) return { status: 400 };
+        machine.dataDirectory = body.inventory as unknown as MachineDataInventory;
+        return { status: 204 };
+      }
+      case '/machine-programs': {
+        const machine=this.machines.find((row)=>row.id===asText(body.machine_id));
+        if(machine===undefined) return {status:404};
+        const rows=(value:unknown):MachineRecord['harnesses']=>Array.isArray(value)?value.flatMap((entry)=>isRecord(entry) && typeof entry.kind==='string' && typeof entry.path==='string' && typeof entry.version==='string'?[{kind:entry.kind,path:entry.path,version:entry.version,daemon:entry.daemon===true}]:[]):[];
+        machine.harnesses=rows(body.harnesses);
+        machine.discoveredHarnesses=rows(body.discovered_harnesses);
+        machine.searchedHarnessKinds=Array.isArray(body.searched_harness_kinds)?body.searched_harness_kinds.filter((value):value is string=>typeof value==='string'):[];
+        machine.policy['agent.harnesses']=machine.harnesses.map(({kind,path})=>({kind,path}));
+        if(body.delegated===true && !this.machineKeyHanded(machine,'agent.harnesses')) {
+          const previous=machine.policy['policy.delegated'];
+          const delegated:readonly unknown[]=Array.isArray(previous)?previous:[];
+          machine.policy['policy.delegated']=[...delegated,'agent.harnesses'];
+        }
+        this.world.users.tellAll({what:'resources',kind:'machine',id:machine.id});
+        for(const environment of this.environments.filter((row)=>row.machine===machine.id)) this.world.users.tellAll({what:'resources',kind:'environment',id:environment.id});
+        return {status:204};
+      }
       case '/plan-usage': {
         const record=this.providers.find((record)=>record.id===body.id);
         if(record===undefined) return {status:404};
@@ -2920,6 +3142,7 @@ export class Resources {
       case '/host-driver-facts': {
         const host = this.findHost(asText(body.id));
         this.driverFacts.set(host.id, { drivers: body.drivers as Host['drivers'], storages: body.storages as Host['storages'],
+          ...(body.kept_layers === undefined ? {} : { kept_layers: body.kept_layers as Host['kept_layers'] }),
           ...(body.capacity === undefined ? {} : { capacity: body.capacity as Host['capacity'] }) });
         return { status: 200, body: { id: host.id } };
       }

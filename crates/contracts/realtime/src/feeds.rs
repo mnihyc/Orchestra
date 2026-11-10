@@ -133,7 +133,7 @@ pub enum Feed {
     Job(Id),
     /// A fork/switch batch's current authorized members and aggregate progress.
     Fork(Id),
-    /// Live model requests visible under `me`, `node:<id>` or `provider:<id>` usage scope.
+    /// Live model requests visible under `me`, `system`, `node:<id>` or `provider:<id>` usage scope.
     Usage(String),
     /// A thread: its rows, the growing text of its items, and who is
     /// looking.
@@ -352,6 +352,7 @@ impl std::str::FromStr for Feed {
             "usage" => {
                 let mut scope = match parts.next() {
                     Some("me") => "me".to_owned(),
+                    Some("system") => "system".to_owned(),
                     Some(kind @ ("node" | "provider")) => format!("{kind}:{}", id(parts.next())?),
                     _ => return Err(bad()),
                 };
@@ -526,6 +527,14 @@ pub struct EnvData {
     /// The environment itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<Environment>,
+    /// The same Library facts as the HTTP snapshot. Omission leaves them unchanged; explicit null
+    /// retires an older projection when the reader still reaches the environment through another door.
+    #[serde(
+        default,
+        deserialize_with = "orch_api_contract::common::absent_or_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub library: Option<Option<orch_api_contract::resource_facts::ResourceFacts>>,
     /// The jobs about it: each whole where its reader may read it, or the current job's safe
     /// progress alone for a reader who sees the environment only through a thread, as its HTTP
     /// state gives them.
@@ -712,8 +721,7 @@ pub enum UserEvent {
         /// The draft; `null` when it was sent or cleared.
         draft: Option<Draft>,
     },
-    /// They read a chat, changed their level in it, hid it, or were
-    /// mentioned in it.
+    /// Their current state, including a newly joined chat and its newest message position.
     ChatState {
         /// Their state in that chat.
         state: ChatState,
@@ -736,7 +744,7 @@ pub enum UserEvent {
     Chat {
         /// The chat.
         chat_id: Id,
-        /// The chat's sequence with that message.
+        /// The newest message sequence; metadata and system changes never advance it.
         seq: Seq,
         /// When it was written.
         at: Time,
@@ -997,7 +1005,7 @@ pub enum EventData {
     Fork(ForkData),
     /// A bounded newest-first page of model requests, rechecked for this subscriber.
     Usage(orch_api_contract::common::Page<orch_api_contract::usage::UsageEvent>),
-    /// Of usage:provider:<id>:health, which carries no request log.
+    /// Of `usage:provider:<id>:health`, which carries no request log.
     UsageHealth(HealthData),
     /// Of the caller's own feed.
     User(UserEvent),
@@ -1125,7 +1133,7 @@ pub(crate) mod fixtures {
             "id": A, "kind": "thread", "parent_id": B, "org_id": B,
             "path": [{ "id": B, "kind": "org", "name": "Acme", "redacted": false }],
             "name": "Fix the login", "description": "", "color": null, "readme": null, "owner": user(), "owners": 1,
-            "title_source": "user", "description_source": "auto", "auto_updated_at": null,
+            "title_source": "user", "auto_updated_at": null,
             "tags": [], "tags_source": "auto",
             "page": "follows", "chat_id": B, "archived": false, "archived_at": null, "archived_by": null,
             "revision": 3, "created_at": AT, "updated_at": AT
@@ -1145,6 +1153,7 @@ pub(crate) mod fixtures {
             "starting_step": null, "blocked": null,
             "queue": { "held": false, "by": null, "at": null, "held_inputs": 0, "revision": 1 },
             "binding": null, "environment": null, "environment_permissions": [],
+            "program_model": null,
             "directory": "", "source": null, "links": [], "suggested_links": [], "work": null,
             "attention": { "uncommitted": null, "unpushed": null, "failed": false, "as_of": null, "stale": false, "reason": null },
             "model": null, "model_display": null, "effort": null, "cwd": "/work", "directory_threads": 1,
@@ -1240,6 +1249,11 @@ mod tests {
     fn every_feed() -> Vec<(Feed, String)> {
         vec![
             (Feed::Usage("me".to_owned()), "usage:me".to_owned()),
+            (Feed::Usage("system".to_owned()), "usage:system".to_owned()),
+            (
+                Feed::Usage(format!("system:org:{A}")),
+                format!("usage:system:org:{A}"),
+            ),
             (
                 Feed::Usage(format!("me:org:{A}")),
                 format!("usage:me:org:{A}"),
@@ -1566,10 +1580,34 @@ mod tests {
     }
 
     #[test]
+    fn an_environment_feed_keeps_explicit_library_retirement() {
+        let data = json!({"jobs":[job()], "library":null});
+        let SyncData::Env(read) = SyncData::decode(&Feed::Env(id()), data.clone()).unwrap() else {
+            panic!("not an environment")
+        };
+        assert_eq!(serde_json::to_value(&read).unwrap(), data);
+    }
+
+    #[test]
+    fn an_environment_feed_keeps_its_projected_library_facts() {
+        let data = json!({"jobs":[job()], "library":{
+            "subject":{"kind":"resource","object":{"kind":"environment","id":A}},
+            "as_of":AT,
+            "dependents":[{"relation":"binding","count":1,"visible":[],"hidden":1,"until":null}],
+            "dependents_complete":true,
+            "uses":null
+        }});
+        let SyncData::Env(read) = SyncData::decode(&Feed::Env(id()), data.clone()).unwrap() else {
+            panic!("not an environment")
+        };
+        assert_eq!(serde_json::to_value(&read).unwrap(), data);
+    }
+
+    #[test]
     fn the_other_durable_feeds_carry_their_own_rows() {
         let node = json!({
             "id": A, "kind": "thread", "parent_id": B, "name": "Fix the login", "archived": false,
-            "address": null, "color": null, "docs": 0,
+            "address": null, "color": null, "docs": 0, "docs_seq": 0,
             "restricted": false, "deleted": true, "tree_seq": 77, "topic": null,
             "thread": { "state": "idle",
                 "display": { "seq": 412, "read_seq": 0, "state": "idle", "queued_inputs": 0,
@@ -1621,7 +1659,7 @@ mod tests {
 
         let chat = json!({
             "chat": {
-                "id": A, "kind": "direct", "org_id": B, "node": null, "name": null, "members": [], "guests": [],
+                "id": A, "kind": "direct", "org_id": B, "node": null, "name": null, "visibility": "private", "members": [], "guests": [],
                 "created_by": null, "created_at": AT, "seq": 12, "last_message_seq": 12, "last_message_at": AT,
                 "can": { "send": true, "moderate": false, "export": true, "reason": null }, "my": null, "preview": null
             },

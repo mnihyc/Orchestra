@@ -70,6 +70,6 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await expect(page.getByLabel(w.recovery, { exact: true })).toHaveAttribute('aria-invalid', 'true');
     await page.getByLabel(w.recovery, { exact: true }).fill(fresh[0] ?? '');
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(/\/org\/acme$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   });
 }

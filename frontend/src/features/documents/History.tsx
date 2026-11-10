@@ -200,7 +200,7 @@ function Detail({ doc, entry, onShow }: { doc: Document; entry: DocumentVersion;
       </div>
       {reviewCurrent && <p role="status" className="text-sm text-text-muted">{t('people.reviewCurrent')}</p>}
       <FileChanges files={files} />
-      {changes.isPending ? <SkeletonRows rows={3} /> : changes.isError ? <ErrorState compact error={changes.error} onRetry={() => void changes.refetch()} /> : (files.length === 0 || changes.data.blocks.length > 0 || changes.data.title !== null) && <ChangesView key={`${reviewCurrent}:${changes.data.to}`} changes={changes.data} doc={doc} columns={columns === '2' ? 2 : 1} onStale={() => { refreshDocument(doc.id); setReviewCurrent(true); void changes.refetch(); }} />}
+      {changes.isPending ? <SkeletonRows read={changes} rows={3} /> : changes.isError ? <ErrorState compact error={changes.error} onRetry={() => void changes.refetch()} /> : (files.length === 0 || changes.data.blocks.length > 0 || changes.data.title !== null) && <ChangesView key={`${reviewCurrent}:${changes.data.to}`} changes={changes.data} doc={doc} columns={columns === '2' ? 2 : 1} onStale={() => { refreshDocument(doc.id); setReviewCurrent(true); void changes.refetch(); }} />}
       <ConfirmDialog
         open={putting}
         onOpenChange={setPutting}
@@ -272,7 +272,7 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
           options={[{ value: 'all', ...choiceOption(t, 'statusFilter.any'), description: t('documents.history.everybody') }, ...authors.map(([key, one]) => ({ value: key, ...choiceOption(t, 'dynamic.value', { name: authorName(one), context: t('documents.history.everybody') }) }))]}
         />
         {list.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows read={list} rows={4} />
         ) : list.isError ? (
           <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />
         ) : entries.length === 0 ? (

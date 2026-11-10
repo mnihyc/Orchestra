@@ -18,7 +18,7 @@ use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use orch_model_contract::credentials::Credential;
-use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, authorize};
+use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, authorize_joined};
 use orch_model_contract::protocol::SecretHeaders;
 use serde_json::json;
 
@@ -38,7 +38,14 @@ pub fn present(
     options: &EndpointOptions,
     secrets: &SecretHeaders,
 ) -> Result<Vec<(String, String)>, AuthorizeError> {
-    let query = authorize(headers, credential, options, secrets, DEFAULT_AUTH)?;
+    let query = authorize_joined(
+        headers,
+        credential,
+        options,
+        secrets,
+        DEFAULT_AUTH,
+        crate::JOINED_HEADERS,
+    )?;
     tracing::trace!(
         protocol = orch_model_contract::protocol::OPENAI_RESPONSES,
         auth = options.auth.unwrap_or(DEFAULT_AUTH).as_str(),
@@ -128,6 +135,20 @@ mod tests {
         )
         .unwrap();
         assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn native_feature_lists_keep_program_and_endpoint_flags() {
+        let mut headers = HeaderMap::new();
+        headers.insert("openai-beta", HeaderValue::from_static("program, shared"));
+        present(
+            &mut headers,
+            None,
+            &options(&json!({"auth":"none","headers":{"openai-beta":"shared, endpoint"}})),
+            &SecretHeaders::new(),
+        )
+        .unwrap();
+        assert_eq!(headers["openai-beta"], "program, shared, endpoint");
     }
 
     #[test]

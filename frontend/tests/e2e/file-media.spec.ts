@@ -1,6 +1,7 @@
+import { chats } from './chat-support';
 /** People and agents use the same bounded file preview, viewer and saved presentation in both widths and languages. */
 import { expect, test, type Page } from '@playwright/test';
-import type { ContentPart, DocumentFile } from '../../src/generated/api-types';
+import type { ChatPart, ContentPart, DocumentFile } from '../../src/generated/api-types';
 import { userMessage, toolCall, turn, agentMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/thread-scenes';
 import { id as fixtureId } from '../doubles/fixtures';
@@ -8,7 +9,7 @@ import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { FILE_GUIDE } from '../../src/help/files';
 import { begin, MAIN } from './inspector-support';
-import { emit, PEOPLE, signIn } from './support';
+import { emit, PEOPLE, signIn, ACME } from './support';
 import { block, DOCS, held, waitUntilSaved } from './documents-support';
 
 const PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
@@ -85,6 +86,34 @@ for (const locale of ['en', 'zh-CN'] as const) test(`file hints open their autho
 });
 
 for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
+  test(`a returned MCP image opens through the common image item at ${width}px in ${theme}/${locale}`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await begin();
+    await appearance(theme, locale);
+    const reads: string[] = [];
+    await fileRoutes(page, reads);
+    await emit(MAIN, { items: [
+      toolCall('native-mcp-image-call', { kind: 'mcp', server: 'camera', tool: 'snapshot', arguments: {}, result: 'The camera returned an image', error: null }, { title: 'camera: snapshot', turn: 'camera-turn' }),
+      { ...toolCall('native-mcp-image-result', { kind: 'image', blob: GENERATED, name: 'camera.png', media_type: 'image/png', caption: null }, { title: 'Image result', turn: 'camera-turn' }), parent_item_id: 'native-mcp-image-call' },
+    ], turns: [turn('camera-turn', { ordinal: 1, state: 'completed', inputId: 'camera-input' })] });
+    await signIn(page);
+    await page.goto(`/thread/${MAIN}`);
+    const row = page.locator('[data-step="native-mcp-image-result"] [data-tool-row] button[aria-expanded]');
+    await row.scrollIntoViewIfNeeded();
+    if (await row.getAttribute('aria-expanded') !== 'true') await row.click();
+    const open = page.getByRole('button', { name: locale === 'en' ? 'Open camera.png' : '打开 camera.png', exact: true });
+    await expect(open.getByRole('img', { name: 'camera.png' })).toBeVisible();
+    expect(reads.every(url => url.includes('preview=true'))).toBe(true);
+    await open.click();
+    await expect(page.locator('[data-file-overlay] [data-viewer="image"] img')).toHaveAttribute('alt', 'camera.png');
+    expect(reads.filter(url => !url.includes('preview=true'))).toHaveLength(1);
+    await page.screenshot({ path: info.outputPath(`mcp-image-${width}-${theme}-${locale}.png`), animations: 'disabled' });
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(open).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+
   test(`file previews at ${width}px in ${theme} and ${locale}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: 1000 });
     await begin();
@@ -183,5 +212,32 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
     }
     expect(external).toBe(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`opens a chat file through its native link and keeps all file actions (${locale}/${theme}/${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    await begin();
+    await appearance(theme, locale);
+    const made = await chats('/chat', { org: ACME.org, members: ['ada', 'dora'], name: 'File review' });
+    if (typeof made.chat !== 'string') throw new Error('The file-review fixture needs its created chat.');
+    const parts: ChatPart[] = [{ type: 'attachment', blob: FILE, name: 'notes.txt', size: 23, media_type: 'text/plain' }];
+    await chats('/say', { chat: made.chat, as: 'ada', parts });
+    const reads: string[] = [];
+    await fileRoutes(page, reads);
+    await signIn(page);
+    await page.goto(`/chat/${made.chat}`);
+    const words = locale === 'en' ? english : chinese;
+    const file = page.getByRole('link', { name: 'notes.txt', exact: true });
+    await expect(file).toHaveAttribute('href', new RegExp(`/chat/${made.chat}`));
+    await file.click();
+    const card = page.locator('[data-file-card]');
+    await expect(card).toBeVisible();
+    await expect(card).toHaveCount(1);
+    await expect(card.getByRole('button', { name: words.fileMedia.open, exact: true })).toBeEnabled();
+    await expect(card.getByRole('button', { name: words.fileMedia.download, exact: true })).toBeEnabled();
+    await expect(card.getByRole('button', { name: words.people.reference.copy, exact: true })).toBeVisible();
+    expect(reads.every((path) => path.includes('preview=true'))).toBe(true);
   });
 }
