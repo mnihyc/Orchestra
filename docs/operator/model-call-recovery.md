@@ -8,7 +8,7 @@ The [user article](../user/model-call-recovery.md) explains the controls and vis
 
 | Key | Shipped value | Effect |
 | --- | --- | --- |
-| `calls.rules` | Busy and unreachable: retry three times, first delay 60 seconds, multiplier 2; request refusal: continue three times; quota: wait for reset; otherwise wait for a person | The first matching rule owns an ordered chain of retry, continue, failover and wait steps |
+| `calls.rules` | Busy and unreachable: retry three times, first delay 60 seconds, multiplier 2; request refusal: continue three times; session lost: continue once; quota: wait for reset; otherwise wait for a person | The first matching rule owns an ordered chain of retry, continue, failover and wait steps |
 | `calls.repeat_limit` | `3` | Bounds automatic recoveries of one failure kind within the window; `0`, shown as Off, stops automatic recovery |
 | `calls.repeat_window` | `300` seconds | The rolling window of the guard; shared by call purposes on the same subject |
 | `calls.notify_on_stop` | `false` | A guard stop can send the thread owner one grouped Inbox notice |
@@ -32,6 +32,14 @@ other unavailable model, quota, rejected credential, busy provider, unreachable 
 A filter's refusal of this request is `model_refused`, with reason `cyber`, `safety` or `other`.
 Access not granted to a model or programme is `model_unavailable` with reason `access`.
 Retrying alone does not create missing access. Configure an eligible candidate or fix the provider's model entry.
+
+The loss of a confirmed running native session is `session_lost` with purpose `agent`.
+Its shipped rule continues once, then waits for a person. If its machine is unavailable, the existing recovery
+row waits for the machine's return. This does not reserve another attempt. Stop retrying still holds it,
+and current policy, limits and the original input's authority are checked before it continues.
+The lost process may have completed work it did not report, so its retained conversation receives a visible
+`Continue`, even if no answer or tool has arrived yet. The original prompt is not replayed.
+An unconfirmed start still needs a person's decision, and a person's Stop does not become a recoverable loss.
 
 A bare 429 is busy. Quota, credit, billing or usage-limit evidence identifies a plan limit.
 An HTTP 401 or explicit credential rejection can reject a shared credential. A bare 403 cannot.

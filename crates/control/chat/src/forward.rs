@@ -22,6 +22,7 @@
 //! copies in the conversation's written form.
 
 use crate::chats::{self, Loaded, Mode};
+use crate::following::BlobOrigin;
 use crate::messages::{self, Post, Written};
 use crate::redaction::{self, KeyProvider};
 use crate::views::{self, Lookups};
@@ -35,7 +36,7 @@ use orch_api_contract::threads::{
 };
 use orch_db::Conn;
 use orch_db::queries::chats::{self as rows, MessageRow};
-use orch_types::{Id, Time};
+use orch_types::{Hash, Id, Time};
 use serde_json::json;
 
 /// Where a forward goes.
@@ -60,6 +61,115 @@ impl Destination {
             Self::Thread(thread) => json!({ "thread_id": thread }),
         }
     }
+}
+
+/// The actual scope-bearing destination selected by the existing chat identity producer.
+/// A person is only a selector for their direct chat, never the authority target for its message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestinationState {
+    /// An existing chat, either named directly or selected by the actor/recipient pair.
+    ExistingChat(Id),
+    /// A direct chat does not yet exist; creation is at this actual source root org.
+    NewDirect {
+        /// The existing root org at which this chat will be created.
+        root: Id,
+        /// The recipient selecting the direct pair, not an Account permission target.
+        user: Id,
+    },
+}
+
+/// A request destination and its effect-free current resolution. Never deserialized from clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlannedDestination {
+    /// The original selector, retained for ordering, deduplication and safe refusal attribution.
+    pub requested: Destination,
+    /// The existing chat or direct-chat creation place.
+    pub state: DestinationState,
+}
+
+/// Resolves current direct-chat identities without opening, unhiding, joining or writing anything.
+/// Ordinary root/member/policy validation stays in chats::open and the existing message writer.
+/// Repeated identical selectors reuse one fact while preserving the request's order.
+pub async fn destination_plan(
+    conn: &mut Conn,
+    actor: Id,
+    root: Id,
+    to: &[Destination],
+) -> Result<Vec<PlannedDestination>, Error> {
+    check_destinations(to)?;
+    let mut planned: Vec<PlannedDestination> = Vec::with_capacity(to.len());
+    for requested in to {
+        if let Some(previous) = planned
+            .iter()
+            .find(|plan| plan.requested == *requested)
+            .copied()
+        {
+            planned.push(previous);
+            continue;
+        }
+        let state = match requested {
+            Destination::Chat(chat) => DestinationState::ExistingChat(*chat),
+            Destination::User(user) => {
+                let key = chats::direct_key(actor, *user);
+                match rows::direct_chat(conn, root, &key).await? {
+                    Some(chat) => DestinationState::ExistingChat(chat.id),
+                    None => DestinationState::NewDirect { root, user: *user },
+                }
+            }
+            Destination::Thread(_) => return Err(at(requested, unsupported_thread())),
+        };
+        planned.push(PlannedDestination {
+            requested: *requested,
+            state,
+        });
+    }
+    Ok(planned)
+}
+
+fn check_destinations(to: &[Destination]) -> Result<(), Error> {
+    if to.is_empty() || to.len() > usize::try_from(FORWARD_MAX_DESTINATIONS).unwrap_or(usize::MAX) {
+        return Err(Error::invalid(
+            "to",
+            format!("name 1 to {FORWARD_MAX_DESTINATIONS} destinations"),
+        ));
+    }
+    Ok(())
+}
+
+fn unsupported_thread() -> Error {
+    Error::Unsupported("an agent thread receives forwarded messages as conversation input")
+}
+
+/// A checked delivery may use a subset of a full plan (home quotes versus elsewhere copies).
+/// Every used selector must have one consistent expected identity and creation place.
+fn expected_destination(
+    plans: &[PlannedDestination],
+    requested: &Destination,
+    root: Id,
+) -> Result<DestinationState, Error> {
+    let mut matching = plans.iter().filter(|plan| plan.requested == *requested);
+    let Some(first) = matching.next() else {
+        return Err(at(requested, Error::StaleDestination));
+    };
+    if matching.any(|plan| plan.state != first.state) {
+        return Err(at(requested, Error::StaleDestination));
+    }
+    let valid = match (*requested, first.state) {
+        (Destination::Chat(chat), DestinationState::ExistingChat(expected)) => chat == expected,
+        (Destination::User(_), DestinationState::ExistingChat(_)) => true,
+        (
+            Destination::User(user),
+            DestinationState::NewDirect {
+                root: expected_root,
+                user: expected_user,
+            },
+        ) => root == expected_root && user == expected_user,
+        _ => false,
+    };
+    if !valid {
+        return Err(at(requested, Error::StaleDestination));
+    }
+    Ok(first.state)
 }
 
 /// The messages to forward, read: the chat they are in, and the messages.
@@ -232,6 +342,8 @@ pub struct Delivery<'a> {
 pub struct Sent {
     /// The chat.
     pub chat: Id,
+    /// The exact resolved effect, including direct creation, before response projection.
+    pub destination: PlannedDestination,
     /// The message, by the caller.
     pub written: Written,
 }
@@ -244,36 +356,86 @@ pub async fn deliver(
     delivery: &Delivery<'_>,
     keys: KeyProvider<'_>,
 ) -> Result<Vec<Sent>, Error> {
-    if delivery.to.is_empty()
-        || delivery.to.len() > usize::try_from(FORWARD_MAX_DESTINATIONS).unwrap_or(usize::MAX)
-    {
-        return Err(Error::invalid(
-            "to",
-            format!("name 1 to {FORWARD_MAX_DESTINATIONS} destinations"),
-        ));
+    deliver_in(conn, act, delivery, keys, None, None).await
+}
+
+/// The same writer with a checked destination plan. Every actual direct opening is compared
+/// before any message is posted. The caller must roll back its transaction on any Err, including
+/// provisional direct creation/member notifications or unhiding performed by chats::open.
+/// Byte reads retain their selected origins through the ordinary message writer's revalidation.
+pub async fn deliver_checked(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    delivery: &Delivery<'_>,
+    keys: KeyProvider<'_>,
+    plans: &[PlannedDestination],
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<Vec<Sent>, Error> {
+    deliver_in(conn, act, delivery, keys, Some(plans), Some(selected)).await
+}
+
+async fn deliver_in(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    delivery: &Delivery<'_>,
+    keys: KeyProvider<'_>,
+    plans: Option<&[PlannedDestination]>,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<Vec<Sent>, Error> {
+    check_destinations(delivery.to)?;
+    if let Some(plans) = plans {
+        for requested in delivery.to {
+            if matches!(requested, Destination::Thread(_)) {
+                return Err(at(requested, unsupported_thread()));
+            }
+            expected_destination(plans, requested, delivery.root)?;
+        }
     }
-    let mut destinations: Vec<(Id, Destination)> = Vec::new();
+    let mut destinations: Vec<(Id, PlannedDestination)> = Vec::new();
+    // A duplicate User selector may open the chat this same call just created. That is still
+    // our planned creation, not a concurrent new-to-existing change. The existing destination
+    // maximum bounds this ordered small list, as it bounds the deduplication below.
+    let mut created_here: Vec<(Id, Id)> = Vec::new();
     for to in delivery.to {
-        let chat = match to {
-            Destination::Chat(chat) => *chat,
+        let (chat, state) = match to {
+            Destination::Chat(chat) => (*chat, DestinationState::ExistingChat(*chat)),
             Destination::User(user) => {
-                chats::open(conn, act, delivery.root, &[*user], None)
+                let opened = chats::open(conn, act, delivery.root, &[*user], None)
                     .await
-                    .map_err(|error| at(to, error))?
-                    .chat
-                    .id
+                    .map_err(|error| at(to, error))?;
+                let chat = opened.chat.id;
+                if opened.created {
+                    created_here.push((*user, chat));
+                }
+                let created = opened.created
+                    || created_here
+                        .iter()
+                        .any(|(who, made)| who == user && *made == chat);
+                let state = if created {
+                    DestinationState::NewDirect {
+                        root: delivery.root,
+                        user: *user,
+                    }
+                } else {
+                    DestinationState::ExistingChat(chat)
+                };
+                (chat, state)
             }
-            Destination::Thread(_) => {
-                return Err(at(
-                    to,
-                    Error::Unsupported(
-                        "an agent thread receives forwarded messages as conversation input",
-                    ),
-                ));
-            }
+            Destination::Thread(_) => return Err(at(to, unsupported_thread())),
         };
+        if let Some(plans) = plans
+            && expected_destination(plans, to, delivery.root)? != state
+        {
+            return Err(at(to, Error::StaleDestination));
+        }
         if !destinations.iter().any(|(each, _)| *each == chat) {
-            destinations.push((chat, *to));
+            destinations.push((
+                chat,
+                PlannedDestination {
+                    requested: *to,
+                    state,
+                },
+            ));
         }
     }
     // Ascending order of identifier, so that two forwards never wait for each
@@ -281,7 +443,8 @@ pub async fn deliver(
     let mut order = destinations.clone();
     order.sort_by_key(|(chat, _)| *chat);
     let mut written: Vec<Sent> = Vec::new();
-    for (chat, to) in order {
+    for (chat, destination) in order {
+        let to = destination.requested;
         if delivery.only.is_some_and(|only| only != chat) {
             return Err(at(
                 &to,
@@ -315,21 +478,29 @@ pub async fn deliver(
                 ),
             ));
         }
-        let sent = messages::post_copies(
-            conn,
-            act,
-            &mut loaded,
-            Post {
-                parts,
-                reply_to: None,
-                client_id: delivery.client_id.to_owned(),
-            },
-            &redactor,
-        )
-        .await
+        let input = Post {
+            parts,
+            reply_to: None,
+            client_id: delivery.client_id.to_owned(),
+        };
+        let sent = match selected {
+            Some(selected) => {
+                messages::post_copies_with_blob_origins(
+                    conn,
+                    act,
+                    &mut loaded,
+                    input,
+                    &redactor,
+                    selected,
+                )
+                .await
+            }
+            None => messages::post_copies(conn, act, &mut loaded, input, &redactor).await,
+        }
         .map_err(|error| at(&to, error))?;
         written.push(Sent {
             chat,
+            destination,
             written: sent,
         });
     }

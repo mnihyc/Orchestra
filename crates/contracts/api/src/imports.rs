@@ -11,6 +11,8 @@
 //! the person's own record ([`Import`]) with its report, a row for each object, and it can be undone ([`ImportUndo`])
 //! after a plan of what that would take away ([`ImportUndoPreflight`]).
 
+use crate::operations::OperationSpec as Op;
+
 use orch_types::{Hash, Id, Json, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -506,6 +508,9 @@ pub struct ImportFailure {
 /// An import: a person's own record of what they brought into a place, with the job that did it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Import {
+    /// This private artifact was read through current browser administration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admin_access: Option<crate::access::AdminAccess>,
     /// Its identifier.
     pub id: Id,
     /// The place it went into; `null` once the place was purged.
@@ -719,27 +724,67 @@ pub struct ImportUndoBody {
     pub client_id: Option<String>,
 }
 
+/// The accepted or replayed undo job without stored progress, people, logs or results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportUndoReceipt {
+    /// Identifies this sparse acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual accepted or replayed job.
+    pub id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The native undo job or its accepted identity when metadata Read is not held.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ImportUndoResponse { Full(Job), Receipt(ImportUndoReceipt), }
+}
+
+/// Accepted native import/job identities without private metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ImportCreationReceipt {
+    /// This acknowledgement contains no replacement job projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual newly queued or replayed native job.
+    pub id: Id,
+    /// The associated private import.
+    pub import_id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The unchanged native job or its sparse accepted identity.
+    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
+    pub enum ImportCreationResponse {Full(Job),Receipt(ImportCreationReceipt),}
+}
+
 crate::endpoints! {
     /// Says what an import into a place would do: the action for each object, the people, the conflicts, the losses and what stands in its way. Nothing is made.
-    NodeImportPreflight: POST "/nodes/{id}/imports/preflight", Permission("node.view"), none, json ImportPreflightRequest, json ImportPlan, 200;
+    NodeImportPreflight: POST "/nodes/{id}/imports/preflight", Permission("node.view"), none, json ImportPreflightRequest, json ImportPlan, 200,
+        operation Op::facets(&crate::import_preview_sources::PREFLIGHT_FACETS);
     /// Shows an item of the source as text, before it is brought.
-    NodeImportPreview: POST "/nodes/{id}/imports/preview", Permission("node.view"), none, json ImportPreviewRequest, json ImportPreview, 200;
+    NodeImportPreview: POST "/nodes/{id}/imports/preview", Permission("node.view"), none, json ImportPreviewRequest, json ImportPreview, 200,
+        operation Op::facets(&crate::import_preview_sources::PREVIEW_FACETS);
     /// Brings an Orch package or plain files into a place, written by a job; each thing is made by the caller's creation rights at the moment it is made.
-    NodeImportCreate: POST "/nodes/{id}/imports", Permission("node.view"), none, json ImportRequest, json Job, 202;
+    NodeImportCreate: POST "/nodes/{id}/imports", Permission("node.view"), none, json ImportRequest, json ImportCreationResponse, 202,
+        operation Op::receipt(&Op::variants(&crate::import_creation_sources::VARIANTS));
     /// Lists the caller's own imports, newest first.
-    MeImportList: GET "/me/imports", User, query PageQuery, none, json Page<ImportLine>, 200;
+    MeImportList: GET "/me/imports", User, query PageQuery, none, json Page<ImportLine>, 200,
+        operation Op::facets(&crate::artifact_sources::IMPORT_LIST_FACETS);
     /// Reads one of the caller's imports.
-    ImportGet: GET "/imports/{id}", Rule("its person"), none, none, json Import, 200;
+    ImportGet: GET "/imports/{id}", Rule("its person"), none, none, json Import, 200,
+        operation Op::facets(&crate::artifact_sources::IMPORT_GET_FACETS);
     /// Lists the names of the files one of the caller's imports was made from, in the order they were given.
-    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query PageQuery, none, json Page<String>, 200;
+    ImportFileList: GET "/imports/{id}/files", Rule("its person"), query PageQuery, none, json Page<String>, 200,
+        operation Op::facets(&crate::artifact_sources::IMPORT_FILES_FACETS);
     /// Lists the report of an import: a row for each object and what became of it.
-    ImportReportList: GET "/imports/{id}/report", Rule("its person"), query ImportReportListQuery, none, json Page<ImportReportRow>, 200;
+    ImportReportList: GET "/imports/{id}/report", Rule("its person"), query ImportReportListQuery, none, json Page<ImportReportRow>, 200,
+        operation Op::facets(&crate::artifact_sources::IMPORT_REPORT_FACETS);
     /// Fetches the whole report of an import as a file.
-    ImportReportDownload: GET "/imports/{id}/report/download", Rule("its person, in a browser session or with a token of theirs"), query ImportReportDownloadQuery, none, raw, 200;
+    ImportReportDownload: GET "/imports/{id}/report/download", Rule("its person, in a browser session or with a token of theirs"), query ImportReportDownloadQuery, none, raw, 200,
+        operation Op::facets(&crate::artifact_sources::IMPORT_REPORT_DOWNLOAD_FACETS);
     /// Says what taking an import back would remove. Nothing is changed.
-    ImportUndoPreflight: POST "/imports/{id}/undo/preflight", Rule("its person"), none, none, json ImportUndoPlan, 200;
+    ImportUndoPreflight: POST "/imports/{id}/undo/preflight", Rule("its person"), none, none, json ImportUndoPlan, 200,
+        operation Op::facets(&crate::import_undo_sources::PREFLIGHT_FACETS);
     /// Takes an import back as a whole: what it made is deleted, and can be brought back for as long as deletions can.
-    ImportUndo: POST "/imports/{id}/undo", Rule("its person"), none, json ImportUndoBody, json Job, 202;
+    ImportUndo: POST "/imports/{id}/undo", Rule("its person"), none, json ImportUndoBody, json ImportUndoResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::import_undo_sources::CREATE_FACETS));
 }
 
 #[cfg(test)]

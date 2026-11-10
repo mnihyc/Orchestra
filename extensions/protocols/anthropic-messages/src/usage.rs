@@ -28,7 +28,9 @@
 //! nothing: the forwarder asks for an uncompressed answer or decodes it first.
 
 use orch_agent_contract::events::{TokenUsage, TokensReportedApart};
-use orch_model_contract::usage::{ObservedUsage, SseEvent, SseParser, UsageObserver};
+use orch_model_contract::usage::{
+    ObservedUsage, ResponseFacts, SseEvent, SseParser, UsageObserver,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -74,6 +76,9 @@ struct Probe<'a> {
 /// The members of a usage object that matter here.
 #[derive(Deserialize)]
 struct UsageView {
+    server_tool_use: Option<Value>,
+    speed: Option<Value>,
+    service_tier: Option<Value>,
     input_tokens: Option<Value>,
     output_tokens: Option<Value>,
     cache_creation_input_tokens: Option<Value>,
@@ -116,7 +121,11 @@ fn written_to_cache(usage: &UsageView) -> Option<i64> {
         let breakdown = usage.cache_creation.as_ref()?;
         let short = count(breakdown.get("ephemeral_5m_input_tokens"));
         let long = count(breakdown.get("ephemeral_1h_input_tokens"));
-        (short.is_some() || long.is_some()).then(|| short.unwrap_or(0) + long.unwrap_or(0))
+        if short.is_some() || long.is_some() {
+            short.unwrap_or(0).checked_add(long.unwrap_or(0))
+        } else {
+            None
+        }
     })
 }
 
@@ -130,9 +139,13 @@ fn replace(slot: &mut Option<i64>, new: Option<i64>) {
 /// What the vendor has said of the counts so far; each member is the latest word on it.
 #[derive(Debug, Clone, Default)]
 struct Figures {
+    web_searches: Option<i64>,
+    successful_searches: Option<i64>,
+    web_fetches: Option<i64>,
     input: Option<i64>,
     cache_read: Option<i64>,
     cache_write: Option<i64>,
+    cache_write_1h: Option<i64>,
     output: Option<i64>,
     thinking: Option<i64>,
     cost: Option<String>,
@@ -141,12 +154,71 @@ struct Figures {
 impl Figures {
     /// Takes in a usage object: every member it carries replaces what was known of that member.
     fn take(&mut self, usage: &UsageView) {
+        replace(
+            &mut self.successful_searches,
+            usage
+                .server_tool_use
+                .as_ref()
+                .and_then(|usage| usage.get("tool_search"))
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0),
+        );
+        replace(
+            &mut self.web_fetches,
+            usage
+                .server_tool_use
+                .as_ref()
+                .and_then(|tools| tools.get("web_fetch_requests"))
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0),
+        );
+        replace(
+            &mut self.web_searches,
+            usage
+                .server_tool_use
+                .as_ref()
+                .and_then(|usage| usage.get("web_search_requests"))
+                .and_then(Value::as_i64)
+                .filter(|count| *count >= 0),
+        );
         replace(&mut self.input, count(usage.input_tokens.as_ref()));
         replace(
             &mut self.cache_read,
             count(usage.cache_read_input_tokens.as_ref()),
         );
         replace(&mut self.cache_write, written_to_cache(usage));
+        if let Some(value) = usage
+            .cache_creation
+            .as_ref()
+            .and_then(|group| group.get("ephemeral_1h_input_tokens"))
+        {
+            let mut long = value.as_i64().filter(|value| *value >= 0);
+            if let (Some(short), Some(total), Some(value)) = (
+                usage
+                    .cache_creation
+                    .as_ref()
+                    .and_then(|group| group.get("ephemeral_5m_input_tokens"))
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value >= 0),
+                usage
+                    .cache_creation_input_tokens
+                    .as_ref()
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value >= 0),
+                long,
+            ) && short.checked_add(value) != Some(total)
+            {
+                long = None;
+            }
+            self.cache_write_1h = long;
+        } else if usage
+            .cache_creation_input_tokens
+            .as_ref()
+            .and_then(Value::as_i64)
+            == Some(0)
+        {
+            self.cache_write_1h = Some(0);
+        }
         replace(&mut self.output, count(usage.output_tokens.as_ref()));
         replace(
             &mut self.thinking,
@@ -186,8 +258,13 @@ impl Figures {
 /// What has been learned of the message so far.
 #[derive(Debug, Clone, Default)]
 struct Seen {
+    facts: ResponseFacts,
+    declared: orch_model_contract::declared_usage::DeclaredUsage,
+    cost_unit: Option<String>,
     id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
+    capacity_tier: Option<String>,
     figures: Figures,
 }
 
@@ -195,7 +272,24 @@ impl Seen {
     /// Takes in a usage object given as raw text.
     fn take_usage(&mut self, raw: &RawValue) {
         if let Ok(usage) = serde_json::from_str::<UsageView>(raw.get()) {
+            if let Some(speed) = text(usage.speed.clone()) {
+                self.service_tier = Some(speed);
+            }
+            if let Some(capacity) = text(usage.service_tier.clone()) {
+                self.capacity_tier = Some(capacity);
+            }
+            let previous_cost = self.figures.cost.clone();
             self.figures.take(&usage);
+            if self.declared.has_reported_cost() {
+                self.figures.cost = previous_cost;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(raw.get()) {
+                self.declared.observe_usage(&value);
+            }
+            if let Some((actual, unit)) = self.declared.reported_cost(raw.get()) {
+                self.figures.cost = crate::decimal::plain(actual.get());
+                self.cost_unit = unit;
+            }
         }
     }
 
@@ -212,8 +306,49 @@ impl Seen {
         }
     }
 
+    fn take_facts(&mut self, body: &Value) {
+        let message = body.get("message").unwrap_or(body);
+        if let Some(id) = message
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        {
+            self.facts.request_id = Some(id.to_owned());
+        }
+        self.facts.output_started |= body["type"] == "content_block_delta"
+            && ["text", "thinking", "partial_json"].into_iter().any(|key| {
+                body.get("delta")
+                    .and_then(|delta| delta.get(key))
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| !text.is_empty())
+            });
+        self.facts.completed |= body["type"] == "message_stop";
+        if let Some(error) = body.get("error").filter(|error| !error.is_null()) {
+            self.facts.failure = Some(serde_json::json!({"error":error}));
+        }
+        if body["stop_reason"] == "refusal"
+            || body.pointer("/delta/stop_reason") == Some(&Value::String("refusal".into()))
+        {
+            let words = body
+                .get("content")
+                .and_then(Value::as_array)
+                .and_then(|content| {
+                    content
+                        .iter()
+                        .find_map(|part| part.get("text").and_then(Value::as_str))
+                })
+                .unwrap_or("The vendor filter refused this request.");
+            self.facts.failure = Some(
+                serde_json::json!({"error":{"type":"model_refused","message":words,"reason":body.pointer("/stop_details/category")}}),
+            );
+        }
+    }
+
     /// Takes in one event of a stream.
     fn take_event(&mut self, event: &SseEvent) {
+        if let Ok(body) = serde_json::from_str::<Value>(&event.data) {
+            self.take_facts(&body);
+        }
         let kind = match event.event.as_deref() {
             Some(name) => name,
             None => match serde_json::from_str::<Probe<'_>>(&event.data)
@@ -246,12 +381,25 @@ impl Seen {
 
     /// What was seen, if it holds figures.
     fn observed(&self) -> Option<ObservedUsage> {
-        Some(ObservedUsage {
+        let mut observed = ObservedUsage {
+            web_searches: self
+                .figures
+                .successful_searches
+                .or(self.figures.web_searches),
+            declared_counters: Default::default(),
+            cost_unit: self.cost_unit.clone(),
+            web_fetches: self.figures.web_fetches,
+            service_tier: self.service_tier.clone(),
+            capacity_tier: self.capacity_tier.clone(),
+            cache_write_1h_tokens: self.figures.cache_write_1h,
+            cache_write_12h_tokens: None,
             model: self.model.clone(),
             tokens: self.figures.tokens()?,
             cost: self.figures.cost.clone(),
             request_ref: self.id.clone(),
-        })
+        };
+        self.declared.apply(&mut observed);
+        Some(observed)
     }
 }
 
@@ -283,6 +431,13 @@ impl MessagesUsage {
 }
 
 impl UsageObserver for MessagesUsage {
+    fn configure_capabilities(
+        &mut self,
+        bindings: &orch_model_contract::usage::NativeBindings,
+    ) -> bool {
+        self.seen.declared.configure(bindings);
+        true
+    }
     fn observe(&mut self, chunk: &[u8]) {
         let Self { body, seen } = self;
         if matches!(body, Body::Undecided) {
@@ -321,11 +476,22 @@ impl UsageObserver for MessagesUsage {
         }
         self.seen.observed()
     }
+    fn response_facts(&self) -> ResponseFacts {
+        let mut seen = self.seen.clone();
+        if let Body::Plain(Some(bytes)) = &self.body
+            && let Ok(body) = serde_json::from_slice::<Value>(bytes)
+        {
+            seen.take_facts(&body);
+            seen.facts.completed = true;
+        }
+        seen.facts
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// A stream as the vendor writes one: a text answer.
     const STREAM: &str = concat!(
@@ -355,6 +521,90 @@ mod tests {
 
     fn whole(body: &str) -> Option<ObservedUsage> {
         feed(&[body.as_bytes()]).usage()
+    }
+
+    #[test]
+    fn hourly_cache_counts_are_retained_inside_the_total_and_bad_breakdowns_are_not_zero() {
+        let seen=whole(r#"{"usage":{"input_tokens":600,"cache_read_input_tokens":100,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200},"output_tokens":200}}"#).unwrap();
+        assert_eq!(seen.cache_write_1h_tokens, Some(200));
+        assert_eq!(seen.tokens.cache_write_tokens, 300);
+        assert_eq!(seen.tokens.input_tokens, 1000);
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!("200"),
+            serde_json::json!(false),
+            serde_json::json!(301),
+        ] {
+            let body = serde_json::json!({"usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":300,
+                "cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":value}}});
+            let seen = whole(&body.to_string()).unwrap();
+            assert!(seen.cache_write_1h_tokens.is_none());
+            assert_eq!(seen.tokens.cache_write_tokens, 300);
+        }
+        assert_eq!(
+            whole(
+                r#"{"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0}}"#
+            )
+            .unwrap()
+            .cache_write_1h_tokens,
+            Some(0)
+        );
+        assert!(whole(r#"{"usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":300}}"#).unwrap().cache_write_1h_tokens.is_none());
+    }
+
+    #[test]
+    fn capacity_reports_never_replace_inference_speed_and_final_stream_facts_remain_separate() {
+        let plain=whole(r#"{"id":"capacity-plain","model":"chosen","usage":{"input_tokens":10,"output_tokens":2,"speed":"fast","service_tier":"priority"}}"#).unwrap();
+        assert_eq!(plain.service_tier.as_deref(), Some("fast"));
+        assert_eq!(plain.capacity_tier.as_deref(), Some("priority"));
+        let start=br#"data: {"type":"message_start","message":{"id":"capacity-stream","model":"chosen","usage":{"input_tokens":10,"output_tokens":0,"speed":"fast","service_tier":"priority"}}}
+
+"#;
+        let end=br#"data: {"type":"message_delta","usage":{"output_tokens":2,"service_tier":"standard"}}
+
+"#;
+        let usage = feed(&[start, end]).usage().unwrap();
+        assert_eq!(usage.service_tier.as_deref(), Some("fast"));
+        assert_eq!(usage.capacity_tier.as_deref(), Some("standard"));
+        assert_eq!(usage.tokens, plain.tokens);
+        let absent =
+            whole(r#"{"usage":{"input_tokens":10,"output_tokens":2,"speed":"standard"}}"#).unwrap();
+        assert!(absent.capacity_tier.is_none());
+    }
+
+    #[test]
+    fn output_evidence_exists_before_a_usage_body() {
+        let mut observer = MessagesUsage::new();
+        observer.observe(b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n");
+        assert!(observer.response_facts().output_started);
+        assert!(observer.usage().is_none());
+    }
+
+    #[test]
+    fn successful_searches_override_attempts_even_at_zero_or_across_later_deltas() {
+        for successes in [0, 2] {
+            let stream = [
+                json!({"type":"message_start","message":{"id":"m","model":"opaque-model","usage":{
+                    "input_tokens":10,"output_tokens":1,"server_tool_use":{"tool_search":successes,"web_search_requests":7}
+                }}}),
+                json!({"type":"message_delta","delta":{},"usage":{"output_tokens":4,"server_tool_use":{"web_search_requests":9}}}),
+            ].iter().map(|frame| format!("event: {}\ndata: {frame}\n\n", frame["type"].as_str().unwrap())).collect::<String>();
+            assert_eq!(whole(&stream).unwrap().web_searches, Some(successes));
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_success_totals_preserve_the_reported_legacy_attempt_count() {
+        for success in [serde_json::Value::Null, json!(-1), json!("unknown")] {
+            let body = json!({"id":"m","model":"opaque-model","usage":{
+                "input_tokens":10,"output_tokens":2,
+                "server_tool_use":{"tool_search":success,"web_search_requests":3}
+            }})
+            .to_string();
+            assert_eq!(whole(&body).unwrap().web_searches, Some(3));
+        }
+        let missing = json!({"usage":{"input_tokens":10,"output_tokens":2}}).to_string();
+        assert_eq!(whole(&missing).unwrap().web_searches, None);
     }
 
     #[test]
@@ -557,5 +807,28 @@ mod tests {
         observer.observe(br#""usage":{"input_tokens":1,"output_tokens":1}}"#);
         assert_eq!(observer.usage(), None);
         assert!(matches!(observer.body, Body::Plain(None)));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "a test fails by panicking")]
+mod declared_counter_tests {
+    use super::*;
+    #[test]
+    fn endpoint_counters_override_generic_attempts_and_keep_searches_and_fetches_apart() {
+        let bindings: orch_model_contract::usage::NativeBindings =
+            serde_json::from_value(serde_json::json!({"web_search":{"counters":{
+            "web_searches":{"pointer":"/usage/server_tool_use/actual_searches","cumulative":true},
+            "web_fetches":{"pointer":"/usage/server_tool_use/actual_fetches","cumulative":true}}}}))
+            .unwrap();
+        let mut observer = MessagesUsage::new();
+        observer.configure_capabilities(&bindings);
+        let body = serde_json::json!({"id":"fixture-message","model":"fixture-model","usage":{"input_tokens":10,"output_tokens":2,"server_tool_use":{"web_search_requests":8,"actual_searches":3,"actual_fetches":1}}});
+        observer.observe(body.to_string().as_bytes());
+        let seen = observer.usage().unwrap();
+        assert_eq!(seen.web_searches, Some(3));
+        assert_eq!(seen.web_fetches, Some(1));
+        assert_eq!(seen.tokens.total_tokens, 12);
+        assert_eq!(seen.declared_counters["web_searches"], Some(3));
     }
 }

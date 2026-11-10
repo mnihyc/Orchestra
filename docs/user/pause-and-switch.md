@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Pause, switch and remove
 screens: /resources/providers/$id, /resources/agents/$id, /resources/environments/$id, /thread/$threadId
 keywords: disable, enable, provider, profile, model, environment, stop, switch, queue, delete
+summary: Understand disabling, enabling, switching and deleting resources and their effect on waiting work.
 ---
 
 # Pause, switch and remove

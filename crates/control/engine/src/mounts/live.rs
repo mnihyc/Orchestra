@@ -10,6 +10,20 @@ use orch_db::queries::{
 use orch_link_contract::commands::{NodeMountsApply, NodeMountsApplyResult, SerialKey};
 use orch_types::{Id, Json};
 
+enum MountPlan {
+    Absent,
+    Status {
+        runtime: Id,
+        reason: Option<String>,
+    },
+    Apply {
+        runtime: Id,
+        machine: Id,
+        wanted: Json,
+        layers: serde_json::Map<String, Json>,
+    },
+}
+
 impl Engine {
     pub(crate) fn mount_serial(&self, environment: Id) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
@@ -79,98 +93,197 @@ impl Engine {
         Ok(())
     }
 
+    /// One native read-only mount planner serves ordinary and scoped inherited application.
+    async fn prepare_mount_application(
+        &self,
+        conn: &mut orch_db::Conn,
+        environment: Id,
+    ) -> Result<MountPlan, EngineError> {
+        let Some(env) = environments::environment(conn, environment).await? else {
+            return Ok(MountPlan::Absent);
+        };
+        if !orch_db::queries::environment_facts::has_unit(conn, environment).await?
+            || env.status != "running"
+            || changes::environment_hold(conn, environment)
+                .await?
+                .is_some()
+        {
+            return Ok(MountPlan::Absent);
+        }
+        let Some(runtime) = environments::live_runtime(conn, environment).await? else {
+            return Ok(MountPlan::Absent);
+        };
+        if runtime.state != "running" {
+            return Ok(MountPlan::Absent);
+        }
+        let Some(host) = hosts::host(conn, runtime.host_id).await? else {
+            return Ok(MountPlan::Absent);
+        };
+        let resolved = super::resolve(conn, environment, self.inner.clock.now()).await?;
+        let layers: serde_json::Map<String, Json> = resolved
+            .iter()
+            .filter_map(|mount| {
+                mount
+                    .layer
+                    .clone()
+                    .map(|layer| (format!("over:{}", mount.view.mount.id), layer))
+            })
+            .collect();
+        let desired = resolved
+            .into_iter()
+            .filter_map(|mount| mount.spec)
+            .collect::<Vec<_>>();
+        let wanted = serde_json::to_value(desired)?;
+        let old = match mounts::applied(conn, runtime.id).await? {
+            Some(old) => Some(old),
+            None => changes::definition(conn, runtime.id)
+                .await?
+                .and_then(|definition| definition.get("mounts").cloned()),
+        };
+        let requested = mounts::requested(conn, runtime.id).await?;
+        let replay_pending = runtime.state_detail.as_deref().is_some_and(|detail| {
+            detail.starts_with("mount changes pending:")
+                || detail.starts_with("mount changes need recreate:")
+        });
+        if old.as_ref() == Some(&wanted)
+            && requested
+                .as_ref()
+                .is_none_or(|requested| requested == &wanted)
+            && !replay_pending
+        {
+            return Ok(MountPlan::Status {
+                runtime: runtime.id,
+                reason: None,
+            });
+        }
+
+        let created = changes::definition(conn, runtime.id).await?;
+        if requested.is_none()
+            && crate::isolation::unit_driver(&host.drivers, &runtime.driver, created.as_ref())
+                .as_ref()
+                .and_then(|descriptor| descriptor.pointer("/live_changes/mounts"))
+                .and_then(Json::as_bool)
+                != Some(true)
+        {
+            return Ok(MountPlan::Status {
+                runtime: runtime.id,
+                reason: Some("the driver does not apply mounts to running units".to_owned()),
+            });
+        }
+        Ok(MountPlan::Apply {
+            runtime: runtime.id,
+            machine: host.machine_id,
+            wanted,
+            layers,
+        })
+    }
+
     /// A successful complete set is remembered by the existing command journal; a refusal remains an update.
     pub async fn apply_environment_mounts(&self, environment: Id) -> Result<(), EngineError> {
+        self.apply_environment_mounts_origin(environment, None)
+            .await
+    }
+    pub(crate) async fn apply_environment_mounts_for_setting(
+        &self,
+        environment: Id,
+        origin: &orch_authz::CapturedOperation,
+        change: &crate::setting_operations::Change,
+    ) -> Result<(), EngineError> {
+        self.apply_environment_mounts_origin(environment, Some((origin, change)))
+            .await
+    }
+    async fn apply_environment_mounts_origin(
+        &self,
+        environment: Id,
+        application: Option<(
+            &orch_authz::CapturedOperation,
+            &crate::setting_operations::Change,
+        )>,
+    ) -> Result<(), EngineError> {
         let serial = self.mount_serial(environment);
         let _serial = serial.lock().await;
-        let (runtime, machine, wanted) = {
-            let mut conn = self.db().acquire().await?;
-            let Some(env) = environments::environment(&mut conn, environment).await? else {
-                return Ok(());
-            };
-            if !orch_db::queries::environment_facts::has_unit(&mut conn, environment).await?
-                || env.status != "running"
-                || changes::environment_hold(&mut conn, environment)
-                    .await?
-                    .is_some()
-            {
-                return Ok(());
-            }
-            let Some(runtime) = environments::live_runtime(&mut conn, environment).await? else {
-                return Ok(());
-            };
-            if runtime.state != "running" {
-                return Ok(());
-            }
-            let Some(host) = hosts::host(&mut conn, runtime.host_id).await? else {
-                return Ok(());
-            };
-            let resolved = super::resolve(&mut conn, environment, self.inner.clock.now()).await?;
-            let layers: serde_json::Map<String, Json> = resolved
-                .iter()
-                .filter_map(|mount| {
-                    mount
-                        .layer
-                        .clone()
-                        .map(|layer| (format!("over:{}", mount.view.mount.id), layer))
-                })
-                .collect();
-            let desired = resolved
-                .into_iter()
-                .filter_map(|mount| mount.spec)
-                .collect::<Vec<_>>();
-            let wanted = serde_json::to_value(desired)?;
-            let old = match mounts::applied(&mut conn, runtime.id).await? {
-                Some(old) => Some(old),
-                None => changes::definition(&mut conn, runtime.id)
-                    .await?
-                    .and_then(|definition| definition.get("mounts").cloned()),
-            };
-            let requested = mounts::requested(&mut conn, runtime.id).await?;
-            let replay_pending = runtime.state_detail.as_deref().is_some_and(|detail| {
-                detail.starts_with("mount changes pending:")
-                    || detail.starts_with("mount changes need recreate:")
-            });
-            if old.as_ref() == Some(&wanted)
-                && requested
-                    .as_ref()
-                    .is_none_or(|requested| requested == &wanted)
-                && !replay_pending
-            {
-                mounts::live_result(&mut conn, runtime.id, None, self.inner.clock.now()).await?;
-                return Ok(());
-            }
-            let created = changes::definition(&mut conn, runtime.id).await?;
-            if requested.is_none()
-                && crate::isolation::unit_driver(&host.drivers, &runtime.driver, created.as_ref())
-                    .as_ref()
-                    .and_then(|descriptor| descriptor.pointer("/live_changes/mounts"))
-                    .and_then(Json::as_bool)
-                    != Some(true)
-            {
-                mounts::live_result(
-                    &mut conn,
-                    runtime.id,
-                    Some("the driver does not apply mounts to running units"),
-                    self.inner.clock.now(),
+        let mut tx = self.db().begin().await?;
+        let mut ready = if let Some((origin, change)) = application {
+            Some(
+                crate::setting_operations::prepare_work(
+                    &mut tx,
+                    self.inner.clock.as_ref(),
+                    origin,
+                    crate::setting_operations::Work {
+                        change: change.clone(),
+                        target: crate::setting_operations::TargetWork::Environment(environment),
+                    },
                 )
-                .await?;
+                .await?,
+            )
+        } else {
+            None
+        };
+        let plan = self.prepare_mount_application(&mut tx, environment).await?;
+        let (runtime, machine, wanted, layers) = match plan {
+            MountPlan::Absent => {
+                tx.commit().await.map_err(orch_db::DbError::from)?;
                 return Ok(());
             }
-            if !layers.is_empty() {
-                mounts::retain_layers(&mut conn, runtime.id, &Json::Object(layers)).await?;
+            MountPlan::Status { runtime, reason } => {
+                if let Some(ready) = ready.take() {
+                    ready
+                        .first_effect
+                        .check(self.inner.clock.as_ref())
+                        .map_err(EngineError::unreadable)?;
+                }
+                mounts::live_result(&mut tx, runtime, reason.as_deref(), self.inner.clock.now())
+                    .await?;
+                tx.commit().await.map_err(orch_db::DbError::from)?;
+                return Ok(());
             }
-            (runtime, host.machine_id, wanted)
+            MountPlan::Apply {
+                runtime,
+                machine,
+                wanted,
+                layers,
+            } => (runtime, machine, wanted, layers),
         };
-        let command = Outgoing::new(
+        if ready.as_ref().is_some_and(|ready| {
+            !ready
+                .value
+                .runtime
+                .is_some_and(|(id, _, recipient)| id == runtime && recipient == machine)
+        }) {
+            return Err(EngineError::unreadable(
+                "the prepared setting runtime changed before mount application",
+            ));
+        }
+        if !layers.is_empty() {
+            if let Some(ready) = ready.take() {
+                ready
+                    .first_effect
+                    .check(self.inner.clock.as_ref())
+                    .map_err(EngineError::unreadable)?;
+            }
+            mounts::retain_layers(&mut tx, runtime, &Json::Object(layers)).await?;
+        }
+        // No connection is retained across native machine IO. The private journal evidence
+        // checks the same original source again at actual queue/send/replay checkpoints.
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        let mut command = Outgoing::new(
             orch_types::new_id(),
             machine,
-            SerialKey::Runtime(runtime.id),
+            SerialKey::Runtime(runtime),
             &NodeMountsApply {
-                runtime_id: runtime.id,
+                runtime_id: runtime,
                 mounts: wanted,
             },
         )?;
+        if let Some((origin, change)) = application {
+            command = crate::setting_operations::command(
+                origin,
+                change,
+                crate::setting_operations::TargetWork::Environment(environment),
+                runtime,
+                command,
+            )?;
+        }
         let (applied, reason) = match self.ask_bounded(command).await? {
             Some(Outcome::Succeeded(value)) => {
                 let result: NodeMountsApplyResult = serde_json::from_value(value)?;
@@ -184,7 +297,7 @@ impl Engine {
         let mut conn = self.db().acquire().await?;
         mounts::live_result(
             &mut conn,
-            runtime.id,
+            runtime,
             if applied { None } else { reason.as_deref() },
             self.inner.clock.now(),
         )
@@ -193,7 +306,8 @@ impl Engine {
             .await?;
         drop(conn);
         if applied {
-            self.refresh_driver_mounts(environment, runtime.id).await?;
+            self.refresh_driver_mounts_origin(environment, runtime, application)
+                .await?;
         }
         Ok(())
     }
@@ -203,8 +317,42 @@ impl Engine {
         environment: Id,
         runtime: Id,
     ) -> Result<bool, EngineError> {
+        let origin =
+            crate::setting_operations::last_mount_origin(&mut *self.db().acquire().await?, runtime)
+                .await?;
+        self.refresh_driver_mounts_origin(
+            environment,
+            runtime,
+            origin.as_ref().map(|(origin, change)| (origin, change)),
+        )
+        .await
+    }
+    async fn refresh_driver_mounts_origin(
+        &self,
+        environment: Id,
+        runtime: Id,
+        application: Option<(
+            &orch_authz::CapturedOperation,
+            &crate::setting_operations::Change,
+        )>,
+    ) -> Result<bool, EngineError> {
         let (machine, generation, body) = {
-            let mut conn = self.db().acquire().await?;
+            let mut conn = self.db().begin().await?;
+            if let Some((origin, change)) = application {
+                let ready = crate::setting_operations::prepare_work(
+                    &mut conn,
+                    self.inner.clock.as_ref(),
+                    origin,
+                    crate::setting_operations::Work {
+                        change: change.clone(),
+                        target: crate::setting_operations::TargetWork::Environment(environment),
+                    },
+                )
+                .await?;
+                if ready.value.runtime.is_none_or(|(id, _, _)| id != runtime) {
+                    return Ok(false);
+                }
+            }
             let Some(env) = environments::environment(&mut conn, environment).await? else {
                 return Ok(false);
             };
@@ -235,14 +383,24 @@ impl Engine {
             body.mounts = None;
             body.variables = with.variables;
             body.secrets = with.secrets;
+            conn.commit().await.map_err(orch_db::DbError::from)?;
             (machine, env.generation, body)
         };
-        let command = Outgoing::new(
+        let mut command = Outgoing::new(
             orch_types::new_id(),
             machine,
             SerialKey::Environment(environment),
             &body,
         )?;
+        if let Some((origin, change)) = application {
+            command = crate::setting_operations::command(
+                origin,
+                change,
+                crate::setting_operations::TargetWork::Environment(environment),
+                runtime,
+                command,
+            )?;
+        }
         if let Some(Outcome::Succeeded(facts)) = self.ask_bounded(command).await? {
             let mut conn = self.db().acquire().await?;
             if environments::environment(&mut conn, environment)

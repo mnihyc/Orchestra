@@ -2,15 +2,15 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { type Guide, useGuide } from '@/help';
-import type { TranslationKey } from '@/i18n';
-import { GUIDANCE, guideWords } from '@/help/guidance';
-import { PROVIDER_EXAMPLES, PROVIDER_GUIDES } from '@/help/providers';
-import { TEMPLATE_GUIDE } from '@/help/templates';
-import { TASK_GUIDES } from '@/help/tasks';
-import { articleInLanguage } from '@/help/guide';
-import { settingHelpEntries } from '@/features/help/settings';
-import type { SettingDef } from '@/generated/api-types';
+import { type Guide, useGuide } from './index';
+import type { TranslationKey } from '../i18n';
+import { GUIDANCE, guideWords } from './guidance';
+import { PROVIDER_EXAMPLES, PROVIDER_GUIDES } from './providers';
+import { TEMPLATE_GUIDE } from './templates';
+import { TASK_GUIDES } from './tasks';
+import { articleInLanguage } from './guide';
+import { settingHelpEntries } from '../features/help/settings';
+import type { SettingDef } from '../generated/api-types';
 
 const TITLES: Readonly<Partial<Record<string, TranslationKey>>> = {
   updates: 'componentUpdates.guideTitle',

@@ -6,6 +6,8 @@
 )]
 mod common;
 mod hosting;
+#[path = "trace_retention/scopes.rs"]
+mod scopes;
 use common::World;
 use orch_db::queries::{
     environments::{hosting as rows, retained},
@@ -682,15 +684,24 @@ async fn restore_uses_the_acknowledged_private_layout_after_its_command_journal_
         panic!("the node refused its private layout")
     };
     let mut conn = world.pool.acquire().await.unwrap();
+    let acknowledged = orch_db::queries::link::command(&mut conn, command)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(acknowledged.machine_id, host.machine);
+    assert_eq!(acknowledged.kind, K::NodeMountsApply.as_str());
+    assert_eq!(acknowledged.state, "succeeded");
+    assert_eq!(acknowledged.result.as_ref(), Some(&result));
     assert!(
-        orch_db::queries::link::finish_command(
+        !orch_db::queries::link::finish_command(
             &mut conn,
             command,
             &orch_db::queries::link::Ending::Succeeded(&result),
             world.clock.now()
         )
         .await
-        .unwrap()
+        .unwrap(),
+        "the awaited durable receipt already owns the first terminal result"
     );
     orch_db::queries::resources::mounts::retain_layers(
         &mut conn,
@@ -707,11 +718,12 @@ async fn restore_uses_the_acknowledged_private_layout_after_its_command_journal_
         .unwrap()
         .unwrap();
     assert_eq!(row.plan["retained_spec"]["mounts"], mounts);
-    sqlx::query("DELETE FROM commands WHERE id=$1")
+    let removed = sqlx::query("DELETE FROM commands WHERE id=$1")
         .bind(command)
         .execute(world.pool.pool())
         .await
         .unwrap();
+    assert_eq!(removed.rows_affected(), 1);
     let restored = claim(&world, made.id, false).await;
     host.wait_for(K::NodeRuntimeStart, 2).await;
     let _new_unit = hosting::enroll(&world, host.started().unwrap()).await;

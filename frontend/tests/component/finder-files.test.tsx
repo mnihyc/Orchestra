@@ -1,3 +1,4 @@
+import { useSelectedOrg } from '@/shell/org';
 /** Finder filename hits keep the shared compact file chip and open its ordinary viewer by keyboard or tap. */
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -17,7 +18,7 @@ const person = { id: 'reader', kind: 'human' as const, username: 'reader', displ
 const topic = { id: 'topic', kind: 'topic' as const, name: 'Release', redacted: false };
 const at = '2026-10-25T00:00:00Z';
 const hit: SearchHit = { kind: 'document', matches: [[0, 5]], snippet: 'photo.png', block_id: null, by: null, path: [topic],
-  document: { id: 'doc', title: 'Release notes', description: '', description_source: 'auto', description_line: '', node: topic,
+  document: { id: 'doc', title: 'Release notes', description: '', description_line: '', node: topic,
     owner: person, owners: 1, created_by: person, page: 'follows', seq: 1, block_count: 1, bytes: 20, files_bytes: 128,
     version: 1, open_discussions: 0, updated_at: at, updated_by: person, discussion_level: 'involved', seen_seq: null, archived: false, deleted: false },
   file: { id: 'file', name: 'photo.png', media_type: 'image/png', size: 128, is_text: false, added_by: null, added_at: at },
@@ -31,10 +32,11 @@ vi.mock('@/api/search', async (original) => ({ ...await original<typeof Search>(
 vi.mock('@/api/trace', async (original) => ({ ...await original(), traceRequest: calls.request }));
 vi.mock('@/features/files/viewers/Image', () => ({ default: () => <span data-viewer="image">Image viewer</span> }));
 const before = useFinder.getState();
-beforeEach(() => { vi.clearAllMocks(); useFinder.setState(before); useWorkbench.setState({ chipSizes: {} });
+const selectedOrgBefore = useSelectedOrg.getState();
+beforeEach(() => { useSelectedOrg.setState({ orgId: '00000000-0000-4000-8000-000000000001' }); vi.clearAllMocks(); useFinder.setState(before); useWorkbench.setState({ chipSizes: {} });
   calls.request.mockImplementation(() => Promise.resolve(Response.json({ state: 'ready', hash: 'a'.repeat(64), size: 128, media_type: 'image/png', is_text: false,
     image: 'data:image/png;base64,cGl4ZWxz', text: null, width: 1, height: 1, duration_seconds: null, entry_count: null }))); });
-afterEach(() => { cleanup(); useFinder.setState(before); });
+afterEach(() => { useSelectedOrg.setState(selectedOrgBefore); cleanup(); useFinder.setState(before); });
 
 for (const action of ['tap', 'keyboard'] as const) it(`opens a filename result in the shared viewer by ${action}`, async () => {
   const user = userEvent.setup();

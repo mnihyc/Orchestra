@@ -82,7 +82,7 @@ export function MoveDocumentDialog({ doc, open, onClose }: DialogProps) {
   if (whole.data !== undefined) return <MoveDialog doc={whole.data} open={open} onOpenChange={(next) => !next && onClose()} />;
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()} size="md" title={t('documents.move.title', { title: doc.title })}>
-      {whole.isError ? <ErrorState compact error={whole.error} retrying={whole.isRefetching} onRetry={() => void whole.refetch()} /> : <SkeletonRows rows={3} className="py-2" />}
+      {whole.isError ? <ErrorState compact error={whole.error} retrying={whole.isRefetching} onRetry={() => void whole.refetch()} /> : <SkeletonRows read={whole} rows={3} className="py-2" />}
     </Dialog>
   );
 }

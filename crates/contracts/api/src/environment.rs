@@ -11,6 +11,13 @@
 //! its [`EnvironmentSupport`]; and a fleet view lists the environments under a
 //! node with their load, to be recycled, moved or updated together.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Revision, Seq, Time};
@@ -336,6 +343,9 @@ pub struct PlanHostBlocker {
 /// A host an environment could be placed on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaceHost {
+    /// Stored home, protected origin and the native placement verdict.
+    #[serde(default, flatten)]
+    pub grouping: crate::resource_groups::ResourceGrouping,
     /// The host.
     pub host: HostRef,
     /// Its labels.
@@ -400,6 +410,9 @@ pub enum EnvironmentReason {
 /// An existing environment the caller manages, as a place to run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PlaceEnvironment {
+    /// Stored home, protected origin and the native placement verdict.
+    #[serde(default, flatten)]
+    pub grouping: crate::resource_groups::ResourceGrouping,
     /// The environment.
     pub environment: EnvironmentRef,
     /// The host it is on, if managed.
@@ -459,6 +472,28 @@ pub struct ExecOffer {
     pub reason: Option<String>,
 }
 
+/// A manager's recorded consent for the current version of one machine program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentProgramApproval {
+    /// The person who allowed this program version.
+    pub by: crate::users::UserRef,
+    /// When the environment manager allowed it.
+    pub at: Time,
+}
+
+/// An executor supplied by a confirmed program on the connected machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMachineProgram {
+    /// The harness kind whose program supplies the executor.
+    pub harness_kind: String,
+    /// The confirmed program's path.
+    pub path: String,
+    /// Its current probed version, or unknown.
+    pub version: String,
+    /// Consent matching this exact path and version, including a historical writer's reference.
+    pub approval: Option<EnvironmentProgramApproval>,
+}
+
 /// What an environment's exec node offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentExec {
@@ -468,6 +503,9 @@ pub struct EnvironmentExec {
     pub orch_tools: bool,
     /// On a person's machine: what its local policy lets it offer; `null` elsewhere.
     pub machine_offers: Option<Vec<String>>,
+    /// Confirmed local program executors; no managed cached build is replaced by these rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub machine_programs: Vec<EnvironmentMachineProgram>,
 }
 
 /// Where an MCP server was found, or was configured.
@@ -800,6 +838,13 @@ pub enum EnvironmentIndexReason {
 /// directory of its own.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Environment {
+    /// Protected origin and native contextual availability, beside home and owner.
+    #[serde(default, flatten)]
+    pub provenance: crate::resource_groups::ResourceProvenance,
+    /// The same sandbox explanation as its machine, on the environment's full individual page.
+    /// Absent from inventory and limited through-thread replies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_readiness: Option<EnvironmentSandboxReadiness>,
     /// Whether the current unavailable unit or machine permits an explicit loss plan.
     #[serde(default, skip_serializing_if = "crate::common::is_false")]
     pub can_declare_lost: bool,
@@ -979,9 +1024,50 @@ pub struct EnvironmentMcpServerRef {
     pub own: bool,
 }
 
+/// A stable catalogue reason; masked native diagnostic text is carried separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum McpReasonCode {
+    /// Its resource is switched off.
+    #[serde(rename = "mcp.disabled")]
+    Disabled,
+    /// It belongs to another environment.
+    #[serde(rename = "mcp.other_environment")]
+    OtherEnvironment,
+    /// Its recorded machine is absent.
+    #[serde(rename = "mcp.no_machine")]
+    NoMachine,
+    /// Its private definition belongs to another machine.
+    #[serde(rename = "mcp.other_machine")]
+    OtherMachine,
+    /// The machine accepts no environment-owned definition.
+    #[serde(rename = "mcp.add_disabled")]
+    AddDisabled,
+    /// The machine accepts no imported definition.
+    #[serde(rename = "mcp.import_disabled")]
+    ImportDisabled,
+    /// Another selected server has the same name.
+    #[serde(rename = "mcp.name_conflict")]
+    NameConflict,
+    /// The original enabling actor has lost Use.
+    #[serde(rename = "mcp.access_lost")]
+    AccessLost,
+    /// A required capability is not granted.
+    #[serde(rename = "mcp.capability_required")]
+    CapabilityRequired,
+    /// The host reports a failure; its masked explanation remains a diagnostic.
+    #[serde(rename = "mcp.failed")]
+    Failed,
+    /// A host requirement is unavailable; its masked explanation remains a diagnostic.
+    #[serde(rename = "mcp.unavailable")]
+    Unavailable,
+}
+
 /// An MCP server that is switched on for an environment, and what became of it there.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentMcpServer {
+    /// The stored home, protected copy origin and this environment's native availability.
+    #[serde(default, flatten)]
+    pub grouping: crate::resource_groups::ResourceGrouping,
     /// Batched giving and reported calls, where the caller may read this server's resource.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<crate::resource_facts::ResourceFacts>,
@@ -996,6 +1082,9 @@ pub struct EnvironmentMcpServer {
     /// imported from another machine, whoever switched it on may not use it, or two share a
     /// name.
     pub reason: Option<String>,
+    /// The catalogue sentence to show before optional native diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<McpReasonCode>,
     /// How many tools it listed when it last started.
     pub tools: Option<i64>,
 }
@@ -1289,6 +1378,109 @@ pub struct EnvironmentUpdateBatchPlan {
     pub estimate: Estimate,
 }
 
+/// A stored update review without existing Environment content or protected names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeEnvironmentUpdatePreflightReceipt {
+    /// This response contains only the generated review outcome.
+    pub projection: crate::common::ReceiptProjection,
+    /// The real selector used by this review.
+    pub node_id: Id,
+    /// The stored native review that may subsequently be confirmed.
+    pub preflight_id: Id,
+    /// Its native expiry, unchanged by optional response disclosure.
+    pub expires_at: Time,
+    /// The number of unblocked native recipes stored by this review.
+    pub executable: i64,
+    /// How many visible requested members the native review skipped.
+    pub skipped: i64,
+}
+
+/// The existing native plan or its same-operation generated acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NodeEnvironmentUpdatePreflightResponse {
+    /// Existing native wire shape.
+    Full(Box<EnvironmentUpdateBatchPlan>),
+    /// Stored review ids and counts, without existing member data.
+    Receipt(NodeEnvironmentUpdatePreflightReceipt),
+}
+impl NodeEnvironmentUpdatePreflightResponse {
+    /// Select a full native plan explicitly.
+    pub fn into_full(
+        self,
+    ) -> Result<EnvironmentUpdateBatchPlan, NodeEnvironmentUpdatePreflightReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// A generated native move review without existing content or context names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeEnvironmentMovePreflightReceipt {
+    /// Generated outcome only.
+    pub projection: crate::common::ReceiptProjection,
+    /// Actual native selector.
+    pub node_id: Id,
+    /// Stored native review.
+    pub preflight_id: Id,
+    /// Native expiry.
+    pub expires_at: Time,
+    /// Actual unblocked recipe count.
+    pub executable: i64,
+}
+/// Native full plan or the same operation's generated receipt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NodeEnvironmentMovePreflightResponse {
+    /// Existing native wire body.
+    Full(Box<EnvironmentMoveBatchPlan>),
+    /// Stored native id, expiry and count without existing content.
+    Receipt(NodeEnvironmentMovePreflightReceipt),
+}
+impl NodeEnvironmentMovePreflightResponse {
+    /// Require full native content explicitly.
+    pub fn into_full(
+        self,
+    ) -> Result<EnvironmentMoveBatchPlan, NodeEnvironmentMovePreflightReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// A saved review without permission to disclose stored environment metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentUpdateBatchPreflightReceipt {
+    /// Identifies this receipt shape.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual saved review, usable by the separately authorized confirmation.
+    pub preflight_id: Id,
+}
+/// Ordinary full preview or a truthful saved-review receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EnvironmentUpdateBatchPreflightResponse {
+    /// Saved without disclosing existing metadata.
+    Receipt(EnvironmentUpdateBatchPreflightReceipt),
+    /// The unchanged ordinary preview.
+    Full(EnvironmentUpdateBatchPlan),
+}
+impl EnvironmentUpdateBatchPreflightResponse {
+    /// Select the ordinary reading shape explicitly.
+    #[must_use]
+    pub fn into_full(self) -> Option<EnvironmentUpdateBatchPlan> {
+        match self {
+            Self::Full(full) => Some(full),
+            Self::Receipt(_) => None,
+        }
+    }
+}
+
 /// The job of one environment of a batch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnvironmentBatchJob {
@@ -1306,6 +1498,108 @@ pub struct EnvironmentBatch {
     pub batch_id: Id,
     /// The jobs.
     pub jobs: Vec<EnvironmentBatchJob>,
+}
+
+/// Generated acknowledgement of the accepted native mixed-lifecycle batch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeEnvironmentMoveCreateReceipt {
+    /// Generated outcome without existing member or job content.
+    pub projection: crate::common::ReceiptProjection,
+    /// Actual native selection root.
+    pub node_id: Id,
+    /// Generated native batch.
+    pub batch_id: Id,
+    /// Generated member jobs in native order.
+    pub job_ids: Vec<Id>,
+}
+/// Current full native batch or its same accepted generated acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NodeEnvironmentMoveCreateResponse {
+    /// Existing native batch wire shape.
+    Full(Box<EnvironmentBatch>),
+    /// Generated accepted batch/jobs without existing content.
+    Receipt(NodeEnvironmentMoveCreateReceipt),
+}
+impl NodeEnvironmentMoveCreateResponse {
+    /// Require current full native content explicitly.
+    pub fn into_full(self) -> Result<EnvironmentBatch, NodeEnvironmentMoveCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// Accepted native update jobs without existing Environment or progress content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NodeEnvironmentUpdateCreateReceipt {
+    /// Only the accepted generated outcome is disclosed.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual selector of the confirmed review.
+    pub node_id: Id,
+    /// Generated native batch identity.
+    pub batch_id: Id,
+    /// Generated jobs, in the native reviewed member order.
+    pub job_ids: Vec<Id>,
+}
+/// Existing native batch body or its same-operation accepted acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum NodeEnvironmentUpdateCreateResponse {
+    /// Native job batch wire shape.
+    Full(Box<EnvironmentBatch>),
+    /// Actual accepted batch and jobs without existing member data.
+    Receipt(NodeEnvironmentUpdateCreateReceipt),
+}
+impl NodeEnvironmentUpdateCreateResponse {
+    /// Require the native full shape explicitly.
+    pub fn into_full(self) -> Result<EnvironmentBatch, NodeEnvironmentUpdateCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// One actual queued replacement, without existing environment or job content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentUpdateBatchJobReceipt {
+    /// The actual selected environment.
+    pub environment_id: Id,
+    /// The durable queued job.
+    pub job_id: Id,
+}
+/// A truthful outcome independent of optional stored metadata reading.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentUpdateBatchCreateReceipt {
+    /// Identifies the sparse outcome.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual replacement batch.
+    pub batch_id: Id,
+    /// Only accepted queued members.
+    pub jobs: Vec<EnvironmentUpdateBatchJobReceipt>,
+}
+/// Ordinary batch content or its sparse native accepted outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EnvironmentUpdateBatchCreateResponse {
+    /// Existing content was not disclosed.
+    Receipt(EnvironmentUpdateBatchCreateReceipt),
+    /// The unchanged ordinary batch response.
+    Full(EnvironmentBatch),
+}
+impl EnvironmentUpdateBatchCreateResponse {
+    /// Choose the ordinary full-content shape explicitly.
+    #[must_use]
+    pub fn into_full(self) -> Option<EnvironmentBatch> {
+        match self {
+            Self::Full(full) => Some(full),
+            Self::Receipt(_) => None,
+        }
+    }
 }
 
 /// Which environments the caller holds a permission on.
@@ -1356,6 +1650,10 @@ pub struct EnvironmentSyncGetQuery {
 pub struct EnvironmentSyncGetReply {
     /// The environment.
     pub environment: Environment,
+    /// Its giving and reported use, under the ordinary Library View check and privacy projection.
+    /// Null when this caller may read the environment through another door but not its Library facts.
+    #[serde(default)]
+    pub library: Option<crate::resource_facts::ResourceFacts>,
     /// The sequence of its feed now.
     pub seq: Seq,
     /// The sequence the request started from.
@@ -1413,6 +1711,38 @@ pub struct EnvironmentUpdateBody {
     pub expected_revision: Revision,
 }
 
+/// Accepted configuration mutation without existing Environment content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentUpdateReceipt {
+    /// Receipt discriminator.
+    pub projection: crate::common::ReceiptProjection,
+    /// Actual changed Environment.
+    pub environment_id: Id,
+    /// Native revision after the accepted mutation or unchanged request.
+    pub revision: Revision,
+    /// Whether the native request wrote a change.
+    pub changed: bool,
+}
+
+/// Native full content when independently readable, otherwise the accepted acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EnvironmentUpdateResponse {
+    /// The original Environment wire shape.
+    Full(Box<Environment>),
+    /// Successful mutation acknowledgement.
+    Receipt(EnvironmentUpdateReceipt),
+}
+impl EnvironmentUpdateResponse {
+    /// Select the native full result explicitly.
+    pub fn into_full(self) -> Result<Environment, EnvironmentUpdateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Imports an MCP server found in the configuration of a harness there: the connector keeps a
 /// copy of its definition, which is what runs from then on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -1454,6 +1784,37 @@ pub struct EnvironmentMcpServerCreateBody {
     /// Whether to switch it on for the environment; it is unless this is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
+}
+
+/// An accepted server creation without stored resource or parent metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMcpCreateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual server inserted by the native writer.
+    pub server_id: Id,
+    /// The Environment where the definition was added or imported.
+    pub environment_id: Id,
+}
+
+/// Native server content when independently readable, otherwise its accepted creation receipt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EnvironmentMcpCreateResponse {
+    /// The unchanged native individual server projection.
+    Full(Box<crate::resources::McpServer>),
+    /// Successful creation without previously stored context.
+    Receipt(EnvironmentMcpCreateReceipt),
+}
+
+impl EnvironmentMcpCreateResponse {
+    /// Preserve restricted success as a distinct outcome.
+    pub fn into_full(self) -> Result<crate::resources::McpServer, EnvironmentMcpCreateReceipt> {
+        match self {
+            Self::Full(server) => Ok(*server),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// Stops an environment.
@@ -1558,6 +1919,9 @@ pub struct EnvironmentMovePreflightBody {
 /// A machine offering directory lifecycles, with its own policy and declared data-making support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MoveMachine {
+    /// Stored home and the same native directory-placement judgement.
+    #[serde(default, flatten)]
+    pub grouping: crate::resource_groups::ResourceGrouping,
     /// The destination machine; its managers choose its policy and storages.
     pub machine: MachineRef,
     /// Its host page, if the same machine also offers units.
@@ -1575,7 +1939,7 @@ pub enum EnvironmentMovePlace {
     /// A host making a unit from the selected template.
     Host(Box<PlaceHost>),
     /// A machine attaching fresh data made by Orch.
-    Machine(MoveMachine),
+    Machine(Box<MoveMachine>),
 }
 
 /// The environments under a node to list.
@@ -1632,6 +1996,48 @@ pub struct RecycleReply {
     pub skipped_active: i64,
 }
 
+/// Generated recycling outcomes, without existing candidate content or labels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RecycleReceipt {
+    /// Content-free accepted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual requested node.
+    pub node_id: Id,
+    /// Whether this was the native no-stop branch.
+    pub dry_run: bool,
+    /// How many eligible candidates were observed by this invocation.
+    pub candidates: i64,
+    /// How many real stop decisions committed, including reducing cleanup still in progress.
+    pub accepted: i64,
+    /// How many native stops completed.
+    pub stopped: i64,
+    /// How many were left alone without current management authority.
+    pub skipped_no_permission: i64,
+    /// How many failed the native idle/activity checks.
+    pub skipped_active: i64,
+    /// How many candidates were not attempted after the request source closed.
+    pub remaining: i64,
+}
+
+/// Native candidate content or the exact same operation's generated outcome counts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RecycleResponse {
+    /// Existing native fleet reply shape.
+    Full(Box<RecycleReply>),
+    /// Safe acknowledgement without existing candidate data.
+    Receipt(RecycleReceipt),
+}
+impl RecycleResponse {
+    /// Select native full content explicitly.
+    pub fn into_full(self) -> Result<RecycleReply, RecycleReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Asks for a plan to move several environments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1660,6 +2066,35 @@ pub struct NodeEnvironmentUpdatePreflightBody {
     pub environment_ids: Vec<Id>,
 }
 
+/// Accepted registration identity without existing Environment content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MachineEnvironmentCreateReceipt {
+    /// Content-free generated outcome.
+    pub projection: crate::common::ReceiptProjection,
+    /// Actual new Environment.
+    pub environment_id: Id,
+    /// Native initial revision.
+    pub revision: Revision,
+}
+/// Native full Environment or the same registration's generated acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MachineEnvironmentCreateResponse {
+    /// Existing native Environment wire shape.
+    Full(Box<Environment>),
+    /// Accepted id/revision without existing data or labels.
+    Receipt(MachineEnvironmentCreateReceipt),
+}
+impl MachineEnvironmentCreateResponse {
+    /// Select a native full response explicitly.
+    pub fn into_full(self) -> Result<Environment, MachineEnvironmentCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
 /// Registers a directory on the caller's own machine as an environment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -1667,8 +2102,9 @@ pub struct MachineEnvironmentCreateBody {
     /// Data root choices. When absent the legacy root selects an existing workspace directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_sources: Option<orch_driver_contract::runtime::EnvironmentDataSources>,
-    /// Its home org: the caller's domain or an org inside it.
-    pub home_id: Id,
+    /// Its registration org. When omitted, use the machine's registered home.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_id: Option<Id>,
     /// Its name.
     pub name: String,
     /// The directory that becomes the workspace root; the machine checks it against its local
@@ -1854,83 +2290,283 @@ pub struct AgentReachOverviewBrowserProfile {
     pub name: String,
 }
 
+/// The actual newly accepted standalone Environment and provision without existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentCreateReceipt {
+    /// Restricted successful projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The native new Environment.
+    pub environment_id: Id,
+    /// Its actual native first provision.
+    pub job_id: Id,
+    /// Its native creation revision.
+    pub revision: Revision,
+}
+/// The original new Environment or its successful restricted acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum EnvironmentCreateResponse {
+    /// The independently readable native Environment.
+    Full(Box<Environment>),
+    /// The real creation without stored content.
+    Receipt(EnvironmentCreateReceipt),
+}
+impl EnvironmentCreateResponse {
+    /// Extract ordinary content while keeping write-only success explicit.
+    pub fn into_full(self) -> Result<Environment, EnvironmentCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The actual retained-file job without existing resource or progress content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RetainedChangeReceipt {
+    /// Restricted successful projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The requested native retained Environment.
+    pub environment_id: Id,
+    /// The actual new or already pending lifecycle job.
+    pub job_id: Id,
+}
+/// The native job or a successful restricted acknowledgement of the same reservation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum RetainedChangeResponse {
+    /// The original independently readable native Job.
+    Full(Box<Job>),
+    /// The real saved reservation without stored content.
+    Receipt(RetainedChangeReceipt),
+}
+impl RetainedChangeResponse {
+    /// Extract the original ordinary result without treating a receipt as content.
+    pub fn into_full(self) -> Result<Job, RetainedChangeReceipt> {
+        match self {
+            Self::Full(job) => Ok(*job),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The accepted capability removal without stored Environment or job content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct CapabilityRevokeReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual changed Environment.
+    pub environment_id: Id,
+    /// The revoked capability named by the request.
+    pub key: String,
+    /// Its native follow-up job, or null when no unit work was needed.
+    pub job_id: Option<Id>,
+}
+
+/// The original optional native job or a safe acknowledgement of the same accepted effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CapabilityRevokeResponse {
+    /// The native job projection, including the original null no-job outcome.
+    Full(Option<Box<Job>>),
+    /// A successful removal whose stored response content cannot be disclosed.
+    Receipt(CapabilityRevokeReceipt),
+}
+
+impl CapabilityRevokeResponse {
+    /// Extract the native optional job, preserving a receipt as a distinct outcome.
+    pub fn into_full(self) -> Result<Option<Job>, CapabilityRevokeReceipt> {
+        match self {
+            Self::Full(job) => Ok(job.map(|job| *job)),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+
+    /// Whether the native full outcome confirms that no job was needed.
+    /// A restricted receipt remains a distinct outcome.
+    pub fn is_none(&self) -> bool {
+        matches!(self, Self::Full(None))
+    }
+}
+
+/// A saved native move review without existing environment data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMovePreflightReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The environment named by this move.
+    pub environment_id: Id,
+    /// The newly saved review.
+    pub preflight_id: Id,
+    /// When this review expires.
+    pub expires_at: Time,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary move review or its restricted acknowledgement.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum EnvironmentMovePreflightResponse { Full(EnvironmentMovePlan), Receipt(EnvironmentMovePreflightReceipt), }
+}
+/// The newly queued move, without an existing job or environment projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentMoveCreateReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The environment named by this move.
+    pub environment_id: Id,
+    /// The newly queued job.
+    pub job_id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary move job or its restricted acknowledgement.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum EnvironmentMoveCreateResponse { Full(Job), Receipt(EnvironmentMoveCreateReceipt), }
+}
+
 crate::endpoints! {
     /// Lists kept environments under each one's restoration authority.
-    NodeDeletedEnvironmentList: GET "/nodes/{id}/environments/deleted", Rule("environment manager or current home admin for each entry"), query NodeDeletedEnvironmentListQuery, none, json crate::common::Page<DeletedEnvironment>, 200;
+    NodeDeletedEnvironmentList: GET "/nodes/{id}/environments/deleted", Rule("environment manager or current home admin for each entry"), query NodeDeletedEnvironmentListQuery, none, json crate::common::Page<DeletedEnvironment>, 200,
+        operation Op::facets(&crate::environment_sources::DELETED_LIST_FACETS);
     /// Restores kept files into a verified stopped generation.
-    EnvironmentRestore: POST "/environments/{id}/restore", Rule("environment manager or current home admin"), none, json EnvironmentRestoreBody, json crate::workspace::Job, 202;
+    EnvironmentRestore: POST "/environments/{id}/restore", Rule("environment manager or current home admin"), none, json EnvironmentRestoreBody, json RetainedChangeResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::RETAINED_CHANGE_FACETS));
     /// Permanently removes kept files after confirmation by a current home admin.
-    EnvironmentPurge: DELETE "/environments/{id}/purge", Rule("current home admin"), query EnvironmentPurgeQuery, none, json crate::workspace::Job, 202;
+    EnvironmentPurge: DELETE "/environments/{id}/purge", Rule("current home admin"), query EnvironmentPurgeQuery, none, json RetainedChangeResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::RETAINED_CHANGE_FACETS));
     /// Lists where an environment made for an org or a project could be, for the caller.
-    NodePlaceList: GET "/nodes/{id}/places", Permission("node.interact"), query PlaceListQuery, none, json Vec<Place>, 200;
+    NodePlaceList: GET "/nodes/{id}/places", Permission("node.interact"), query PlaceListQuery, none, json Vec<Place>, 200,
+        operation Op::facets(&crate::environment_sources::PLACE_LIST_FACETS);
     /// Lists the environments the caller owns or holds a permission on, of whatever org.
-    EnvironmentList: GET "/environments", User, query EnvironmentListQuery, none, json Vec<crate::common::Listed<Environment>>, 200;
+    EnvironmentList: GET "/environments", User, query EnvironmentListQuery, none, json Vec<crate::common::Listed<Environment>>, 200,
+        operation Op::facets(&crate::environment_sources::LIST_FACETS);
     /// Makes an environment, the caller's own, in status `none` until it is first used or started.
-    EnvironmentCreate: POST "/environments", Rule("what creating an environment needs in its home"), none, json NewEnvironment, json Environment, 201;
+    EnvironmentCreate: POST "/environments", Rule("what creating an environment needs in its home"), none, json NewEnvironment, json EnvironmentCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::CREATE_FACETS));
     /// Reads an environment.
-    EnvironmentGet: GET "/environments/{id}", Rule("any permission on the environment, or node.view on a thread bound to it"), query crate::nodes::DeletedInspectionQuery, none, json Environment, 200;
+    EnvironmentGet: GET "/environments/{id}", Rule("any permission on the environment, or node.view on a thread bound to it"), query crate::nodes::DeletedInspectionQuery, none, json Environment, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "read",
+                selector: "inspect_deleted is false or absent",
+                facets: &crate::environment_sources::GET_READ_FACETS,
+            },
+            Variant {
+                name: "inspect_deleted",
+                selector: "inspect_deleted=true under current restoration authority",
+                facets: &crate::environment_sources::GET_INSPECT_FACETS,
+            },
+        ]);
     /// Brings a client up to date on an environment: the environment, its feed's sequence and the jobs about it.
-    EnvironmentSyncGet: GET "/environments/{id}/sync", Rule("any permission on the environment, or node.view on a thread bound to it"), query EnvironmentSyncGetQuery, none, json EnvironmentSyncGetReply, 200;
+    EnvironmentSyncGet: GET "/environments/{id}/sync", Rule("any permission on the environment, or node.view on a thread bound to it"), query EnvironmentSyncGetQuery, none, json EnvironmentSyncGetReply, 200,
+        operation Op::facets(&crate::environment_sources::SYNC_FACETS);
     /// Lists everybody who can reach into an environment now, and how.
-    EnvironmentReachGet: GET "/environments/{id}/reach", Rule("any permission on the environment"), none, none, json EnvironmentReach, 200;
+    EnvironmentReachGet: GET "/environments/{id}/reach", Rule("any permission on the environment"), none, none, json EnvironmentReach, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("reach_threads")),
+        ]);
     /// Says what the agents of an environment can reach, cut by the caller's own rights on its files, browsers, threads and settings.
-    EnvironmentAgentReachGet: GET "/environments/{id}/agent-reach", Rule("environment.view, or node.view on a thread bound to it for the cut view"), none, none, json AgentReachOverview, 200;
+    EnvironmentAgentReachGet: GET "/environments/{id}/agent-reach", Rule("environment.view, or node.view on a thread bound to it for the cut view"), none, none, json AgentReachOverview, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Environment)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("agent_reach_threads")),
+            Facet::required(Read, &[Object(K::Mount)], Target::ResolvedCollection("agent_reach_mounts")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("agent_reach_names_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("agent_reach_names_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("agent_reach_names_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("agent_reach_names_threads")),
+        ]);
     /// Changes an environment; what the running unit cannot take is stored and listed in `updates`.
-    EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json Environment, 200;
+    EnvironmentUpdate: PATCH "/environments/{id}", Rule("environment.manage, and for another home also node.interact on the new home"), none, json EnvironmentUpdateBody, json EnvironmentUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::UPDATE_FACETS));
     /// Lists the MCP servers of an environment and those found in the harness configuration there that nobody imported.
-    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200;
+    EnvironmentMcpGet: GET "/environments/{id}/mcp", Rule("any permission on the environment"), none, none, json EnvironmentMcp, 200,
+        operation Op::facets(&crate::environment_sources::MCP_GET_FACETS);
     /// Imports an MCP server found in the harness configuration of an environment; the connector keeps a copy of its definition.
-    EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json crate::resources::McpServer, 201;
+    EnvironmentMcpImportCreate: POST "/environments/{id}/mcp/imports", Rule("environment.manage; on a person's machine also being the machine's owner, or managing every environment of that machine once its owner handed the policy key for imports over"), none, json EnvironmentMcpImportCreateBody, json EnvironmentMcpCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::MCP_CREATE_FACETS));
     /// Writes an MCP server of the environment's own, switched on there at once.
-    EnvironmentMcpServerCreate: POST "/environments/{id}/mcp/servers", Rule("environment.manage; on a person's machine also that the machine's local policy takes a server written from here"), none, json EnvironmentMcpServerCreateBody, json crate::resources::McpServer, 201;
+    EnvironmentMcpServerCreate: POST "/environments/{id}/mcp/servers", Rule("environment.manage; on a person's machine also that the machine's local policy takes a server written from here"), none, json EnvironmentMcpServerCreateBody, json EnvironmentMcpCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::MCP_CREATE_FACETS));
     /// Restarts only the named server with its failure count cleared; the environment and turns keep running.
     EnvironmentMcpServerRestart: POST "/environments/{id}/mcp/servers/{name}/restart", Permission("environment.manage"), none, none, json crate::workspace::Job, 202;
     /// Starts a stopped environment by hand; a turn's pre-flight starts one by itself.
     EnvironmentStart: POST "/environments/{id}/start", Permission("environment.manage"), none, none, json Job, 202;
     /// Stops an environment, returning a handed-over credential first.
-    EnvironmentStop: POST "/environments/{id}/stop", Permission("environment.manage"), none, json EnvironmentStopBody, json Environment, 200;
+    EnvironmentStop: POST "/environments/{id}/stop", Permission("environment.manage"), none, json EnvironmentStopBody, json Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Restarts the same managed unit and preserves queued inputs and every file.
     EnvironmentRestart: POST "/environments/{id}/restart", Permission("environment.manage"), none, json EnvironmentRestartBody, json Job, 202;
     /// Counts as activity now, so that the idle timeout starts over; keeping it running is managing it.
-    EnvironmentKeepAwake: POST "/environments/{id}/keep-awake", Permission("environment.manage"), none, none, json Environment, 200;
+    EnvironmentKeepAwake: POST "/environments/{id}/keep-awake", Permission("environment.manage"), none, none, json Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Plans an update of an environment's unit, or a plain recreation, before anything is done.
     EnvironmentUpdatePreflight: POST "/environments/{id}/updates/preflight", Permission("environment.manage"), none, json UpdatePreflightBody, json EnvironmentUpdatePlan, 200;
     /// Carries out a plan of an update as a job; the environment and its threads are locked at once.
-    EnvironmentUpdateCreate: POST "/environments/{id}/updates", Permission("environment.manage"), query UpdateConfirmQuery, json ForkCreateBody, json Job, 202;
+    EnvironmentUpdateCreate: POST "/environments/{id}/updates", Permission("environment.manage"), query UpdateConfirmQuery, json ForkCreateBody, json crate::workspace::JobCreationResponse, 202,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject));
     /// Takes back a capability that was granted to an environment, which recreates it.
-    EnvironmentCapabilityRevoke: DELETE "/environments/{id}/capabilities/{key}", Rule("ports.manage for a gateway capability; environment.manage or host.manage for a native capability"), none, none, json Option<Job>, 202;
+    EnvironmentCapabilityRevoke: DELETE "/environments/{id}/capabilities/{key}", Rule("ports.manage for a gateway capability; environment.manage or host.manage for a native capability"), none, none, json CapabilityRevokeResponse, 202,
+        operation Op::receipt(&Op::facets(&crate::environment_sources::CAPABILITY_REVOKE_FACETS));
     /// Switches an environment off.
-    EnvironmentDisable: POST "/environments/{id}/disable", Permission("environment.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Environment, 200;
+    EnvironmentDisable: POST "/environments/{id}/disable", Permission("environment.manage"), query crate::resource_facts::ResourcePauseQuery, none, json Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Switches an environment on again.
-    EnvironmentEnable: POST "/environments/{id}/enable", Permission("environment.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Environment, 200;
+    EnvironmentEnable: POST "/environments/{id}/enable", Permission("environment.manage"), query crate::resource_facts::ResourceResumeQuery, none, json Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Schedules an environment's removal, which the reaper does; of a directory on a person's machine only the registration goes.
-    EnvironmentDelete: DELETE "/environments/{id}", Permission("environment.manage"), query EnvironmentDeleteQuery, none, json Environment, 202;
+    EnvironmentDelete: DELETE "/environments/{id}", Permission("environment.manage"), query EnvironmentDeleteQuery, none, json Environment, 202,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Withdraws a scheduled removal that has not begun.
-    EnvironmentKeep: POST "/environments/{id}/keep", Permission("environment.manage"), none, none, json Environment, 200;
+    EnvironmentKeep: POST "/environments/{id}/keep", Permission("environment.manage"), none, none, json Environment, 200,
+        operation Op::returning(Manage, &[Object(K::Environment)], Target::PermissionObject);
     /// Lists permitted destination lifecycles and their actual facts before a move.
     EnvironmentMovePlaceList: GET "/environments/{id}/moves/places", Permission("environment.manage"), query PlaceListQuery, none, json Vec<EnvironmentMovePlace>, 200;
     /// Plans a move by data ownership to a permitted machine, before anything is done.
-    EnvironmentMovePreflight: POST "/environments/{id}/moves/preflight", Rule("environment.manage and use of the destination machine's declared lifecycle and template"), none, json EnvironmentMovePreflightBody, json EnvironmentMovePlan, 200;
+    EnvironmentMovePreflight: POST "/environments/{id}/moves/preflight", Rule("environment.manage and use of the destination machine's declared lifecycle and template"), none, json EnvironmentMovePreflightBody, json EnvironmentMovePreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::environment_sources::lifecycle::FACETS));
     /// Carries out a plan of a move as a job; the environment and its threads are locked at once.
-    EnvironmentMoveCreate: POST "/environments/{id}/moves", Rule("environment.manage and current use of the reviewed destination machine and template"), none, json ForkCreateBody, json Job, 202;
+    EnvironmentMoveCreate: POST "/environments/{id}/moves", Rule("environment.manage and current use of the reviewed destination machine and template"), none, json ForkCreateBody, json EnvironmentMoveCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::environment_sources::lifecycle::FACETS));
     /// Lists the environments that threads under a node run in and those whose home is there, with the hosts the caller manages.
-    NodeEnvironmentList: GET "/nodes/{id}/environments", Permission("node.view"), query NodeEnvironmentListQuery, none, json NodeEnvironmentListReply, 200;
+    NodeEnvironmentList: GET "/nodes/{id}/environments", Permission("node.view"), query NodeEnvironmentListQuery, none, json NodeEnvironmentListReply, 200,
+        operation Op::facets(&crate::environment_sources::FLEET_FACETS);
     /// Stops the environments under a node that have been idle for long enough, or only lists them.
-    NodeEnvironmentRecycle: POST "/nodes/{id}/environments/recycle", Rule("environment.manage, on each environment"), none, json RecycleBody, json RecycleReply, 200;
+    NodeEnvironmentRecycle: POST "/nodes/{id}/environments/recycle", Rule("environment.manage, on each environment"), none, json RecycleBody, json RecycleResponse, 200,
+        operation Op::receipt(&Op::facets(crate::environment_sources::RECYCLE_FACETS));
     /// Plans moves to a declared unit or directory lifecycle, or an available destination for each.
-    NodeEnvironmentMovePreflight: POST "/nodes/{id}/environments/moves/preflight", Rule("environment.manage on each environment and use of the destination machine's declared lifecycle and template"), none, json NodeEnvironmentMovePreflightBody, json EnvironmentMoveBatchPlan, 200;
+    NodeEnvironmentMovePreflight: POST "/nodes/{id}/environments/moves/preflight", Rule("environment.manage on each environment and use of the destination machine's declared lifecycle and template"), none, json NodeEnvironmentMovePreflightBody, json NodeEnvironmentMovePreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::move_batch_sources::FACETS));
     /// Carries out a plan of several moves: one job for each plan without blockers, a few at a time.
-    NodeEnvironmentMoveCreate: POST "/nodes/{id}/environments/moves", Rule("environment.manage on each environment and current use of the reviewed destination machine and template"), none, json ForkCreateBody, json EnvironmentBatch, 202;
+    NodeEnvironmentMoveCreate: POST "/nodes/{id}/environments/moves", Rule("environment.manage on each environment and current use of the reviewed destination machine and template"), none, json ForkCreateBody, json NodeEnvironmentMoveCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::move_batch_sources::FACETS));
     /// Plans an update of several environments.
-    NodeEnvironmentUpdatePreflight: POST "/nodes/{id}/environments/updates/preflight", Rule("environment.manage, on each environment"), none, json NodeEnvironmentUpdatePreflightBody, json EnvironmentUpdateBatchPlan, 200;
+    NodeEnvironmentUpdatePreflight: POST "/nodes/{id}/environments/updates/preflight", Rule("environment.manage, on each environment"), none, json NodeEnvironmentUpdatePreflightBody, json NodeEnvironmentUpdatePreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::environment_sources::update_batch::NODE_PREFLIGHT_FACETS));
     /// Carries out a plan of several updates: one job for each plan without blockers, each rolling back alone.
-    NodeEnvironmentUpdateCreate: POST "/nodes/{id}/environments/updates", Rule("environment.manage, on each environment"), query UpdateConfirmQuery, json ForkCreateBody, json EnvironmentBatch, 202;
+    NodeEnvironmentUpdateCreate: POST "/nodes/{id}/environments/updates", Rule("environment.manage, on each environment"), query UpdateConfirmQuery, json ForkCreateBody, json NodeEnvironmentUpdateCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::environment_sources::update_batch::NODE_CREATE_FACETS));
     /// Plans updates of visible environments across hosts and places.
-    EnvironmentUpdateBatchPreflight: POST "/environments/updates/preflight", Rule("environment.manage, on each environment"), none, json NodeEnvironmentUpdatePreflightBody, json EnvironmentUpdateBatchPlan, 200;
+    EnvironmentUpdateBatchPreflight: POST "/environments/updates/preflight", Rule("environment.manage, on each environment"), none, json NodeEnvironmentUpdatePreflightBody, json EnvironmentUpdateBatchPreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::environment_sources::update_batch::BATCH_FACETS));
     /// Confirms a reviewed cross-place batch, checking every member again.
-    EnvironmentUpdateBatchCreate: POST "/environments/updates", Rule("environment.manage, on each environment"), query UpdateConfirmQuery, json ForkCreateBody, json EnvironmentBatch, 202;
+    EnvironmentUpdateBatchCreate: POST "/environments/updates", Rule("environment.manage, on each environment"), query UpdateConfirmQuery, json ForkCreateBody, json EnvironmentUpdateBatchCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::environment_sources::update_batch::BATCH_CREATE_FACETS));
     /// Registers a permitted machine directory as an environment whose first owner is the caller.
-    MachineEnvironmentCreate: POST "/machines/{id}/environments", Rule("machine.use within its entry limits and machine policy; the home is their domain or an org inside it"), none, json MachineEnvironmentCreateBody, json Environment, 200;
+    MachineEnvironmentCreate: POST "/machines/{id}/environments", Rule("machine.use within its entry limits and machine policy; the home is their domain or an org inside it"), none, json MachineEnvironmentCreateBody, json MachineEnvironmentCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Write, &[Object(K::Machine)], Target::Path("id")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::Resolved("home")),
+            Facet::response_content(
+                &[Object(K::Environment)],
+                Target::Resolved("created_environment"),
+            ),
+            Facet::response_content(&[Object(K::Template),Object(K::Host),Object(K::Machine),Object(K::Mount)],Target::ResolvedCollection("machine_created_sources")),
+            Facet::response_content(&[Identity(orch_access_contract::key_scope::KeyIdentityKind::Group)],Target::ResolvedCollection("machine_created_groups")),
+            Facet::response_content(&[Object(K::Org)],Target::ResolvedCollection("machine_created_orgs")),
+            Facet::response_content(&[Object(K::Project)],Target::ResolvedCollection("machine_created_projects")),
+            Facet::response_content(&[Object(K::Topic)],Target::ResolvedCollection("machine_created_topics")),
+            Facet::response_content(&[Object(K::Thread)],Target::ResolvedCollection("machine_created_threads")),
+        ]));
 }
 
 #[cfg(test)]
@@ -1939,6 +2575,30 @@ mod tests {
     use serde_json::{Value, json};
 
     const AT: &str = "2026-10-08T17:04:05.123Z";
+
+    #[test]
+    fn a_native_diagnostic_is_distinct_from_its_stable_mcp_catalogue_reason() {
+        let legacy = merged(&[
+            json!({"home":null,"home_path":[],"origin_machine":null,"availability":[]}),
+            json!({"server":{"id":"11111111-1111-4111-8111-111111111111","name":"tools","address":"tools","machine":null,"own":true},"from":null,"state":"unavailable","reason":"a native diagnostic","tools":null}),
+        ]);
+        let older: EnvironmentMcpServer = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(older.reason_code, None);
+        assert_eq!(
+            older.grouping,
+            crate::resource_groups::ResourceGrouping::default()
+        );
+        assert_eq!(serde_json::to_value(&older).unwrap(), legacy);
+        let mut current = legacy;
+        current["reason_code"] = json!("mcp.unavailable");
+        let decoded: EnvironmentMcpServer = serde_json::from_value(current).unwrap();
+        assert_eq!(decoded.reason_code, Some(McpReasonCode::Unavailable));
+        assert_eq!(decoded.reason.as_deref(), Some("a native diagnostic"));
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["reason_code"],
+            "mcp.unavailable"
+        );
+    }
 
     fn user() -> Value {
         json!({ "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a6b", "kind": "human", "username": "alice", "display_name": "Alice", "avatar": { "text": "A", "color": 4 } })
@@ -1963,6 +2623,7 @@ mod tests {
     #[test]
     fn an_environment_says_what_became_of_its_mounts_and_what_its_exec_node_offers() {
         let written = merged(&[
+            json!({ "origin_machine": null, "availability": [] }),
             json!({
                 "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01", "name": "Main", "owner": user(),
                 "address": "acme.research.alice.main", "ports_exposed": false, "placement": "managed", "status": "running",

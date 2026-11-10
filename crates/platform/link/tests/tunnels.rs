@@ -82,7 +82,15 @@ async fn world(grace: Duration) -> World {
         &spec(vec![Role::Environment]),
     );
     opener.link.connected().await;
+    assert!(
+        opener.link.data_frame_bytes().is_some(),
+        "connected must install the session before a caller can open its first tunnel"
+    );
     destination.link.connected().await;
+    assert!(
+        destination.link.data_frame_bytes().is_some(),
+        "connected must install the destination session without another wait or yield"
+    );
     let incoming = tokio::sync::Mutex::new(destination.link.incoming_tunnels());
     World {
         clock,

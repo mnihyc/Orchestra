@@ -1,7 +1,7 @@
 /** Every view of the workspace and the runtime asked, in both themes, whether anything on it is a serious barrier: the tree, a file in the code view and in each viewer, the search, a menu and a dialog, Changes, Git, Processes, Resources, a shell, the outline, the environment and the parameters. */
 import { expect, test } from '@playwright/test';
 
-import { begin, editor, fileTree, filesPanel, openThread, row, showView, workspace } from '../e2e/inspector-support.ts';
+import { begin, chooseFileTreeAction, editor, fileTree, filesPanel, openThread, row, showView, workspace } from '../e2e/inspector-support.ts';
 import { expectAccessibleInBothThemes } from '../e2e/support.ts';
 
 test.use({ viewport: { width: 1600, height: 1000 } });
@@ -21,6 +21,7 @@ test('the tree, a file in the code view, the search and the menu of a row', asyn
   await expect(editor(page)).toContainText("import { greet }");
   await expectAccessibleInBothThemes(page);
 
+  await filesPanel(page).getByRole('button', { name: 'Search the files', exact: true }).click();
   await filesPanel(page).getByRole('textbox', { name: 'Search the files' }).fill('util');
   await expect(page.getByTestId('search-results')).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -46,7 +47,7 @@ test('the viewers: Markdown, an image, an archive, a file with no preview, and a
   await expect(page.locator('[data-viewer="image"] img')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await filesPanel(page).getByRole('button', { name: 'Up to the parent directory' }).click();
+  await chooseFileTreeAction(page, 'Up to the parent directory');
   await row(page, /^data/).click();
   await row(page, /^bundle\.zip/).click();
   await expect(page.getByRole('tree', { name: 'Contents of the archive' })).toBeVisible();
@@ -55,7 +56,7 @@ test('the viewers: Markdown, an image, an archive, a file with no preview, and a
   await expect(page.getByText('blob.bin has no preview')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await filesPanel(page).getByRole('button', { name: 'Back to the thread\'s directory' }).click();
+  await chooseFileTreeAction(page, 'Back to the thread\'s directory');
   await row(page, /^src/).click();
   await row(page, /^app\.ts/).click();
   await editor(page).click();

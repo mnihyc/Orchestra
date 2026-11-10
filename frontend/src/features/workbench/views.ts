@@ -66,6 +66,8 @@ export interface ViewDefinition {
   targeted?: () => boolean;
   /** Opening a different target reuses this view's one tab, preserving its position. */
   singleton?: boolean;
+  /** Its body can move to the shared modeless window and retain its own visible opening. */
+  window?: boolean;
   /** Draws it. */
   body: ComponentType<ViewProps>;
 }
@@ -112,6 +114,7 @@ export function offers(definition: ViewDefinition, screen: ScreenKind, context: 
   if (definition.screens !== 'all' && !definition.screens.includes(screen) && !workspaceView) return false;
   if (context !== null && definition.available?.() === false) return false;
   if (name === 'help') return context?.views?.help !== false;
+  if (name === 'ask') return true;
   if (['screen', 'navigation', 'resource-navigation'].includes(name)) return true;
   if (name === 'search-result') return definition.available?.() !== false;
   const available = context?.views;

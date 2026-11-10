@@ -19,5 +19,5 @@
   {"method":"error","params":{"error":{"message":"Selected model is at capacity. Please try a different model.","codexErrorInfo":"serverOverloaded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216"},"emittedAtMs":1791799419478},
   {"method":"turn/completed","params":{"threadId":"01a12f90-7b67-7c30-98aa-1dd02c7610db","turn":{"id":"01a12f90-7bd0-74a1-a3de-dad2654d3216","rootTurnId":"01a12f90-7bd0-74a1-a3de-dad2654d3216","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"Selected model is at capacity. Please try a different model.","codexErrorInfo":"serverOverloaded","additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799419,"durationMs":59032}},"emittedAtMs":1791799419538}
  ],
- "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "Selected model is at capacity", "said_also": "tried again 5 times"}
+ "expect": {"outcome": "failed", "code": "overloaded", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "Selected model is at capacity", "said_also": "tried again 5 times"}
 }

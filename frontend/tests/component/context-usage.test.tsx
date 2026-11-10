@@ -59,6 +59,19 @@ beforeEach(() => {
 });
 
 describe('the context ring', () => {
+  it.each([['en','light'],['en','dark'],['zh-CN','light'],['zh-CN','dark']] as const)('names the explicitly reported model of the current window (%s, %s)',async(locale,theme)=>{
+    const previousLocale=currentLocale();const previousTheme=document.documentElement.getAttribute('data-theme');
+    await setLocale(locale);document.documentElement.setAttribute('data-theme',theme);
+    try {
+    const thread=threadWith(100_000,200_000,null);
+    thread.model='requested-route';thread.model_display='Requested model';
+    thread.usage={...thread.usage!,context_model:'safe-route',context_model_display:'Safety model'};
+    show(<ContextRing thread={thread}/>);
+    expect(screen.getByRole('button',{name:/Safety model/})).toBeVisible();
+    expect(screen.queryByRole('button',{name:/Requested model/})).not.toBeInTheDocument();
+    } finally {await setLocale(previousLocale);if(previousTheme===null)document.documentElement.removeAttribute('data-theme');else document.documentElement.setAttribute('data-theme',previousTheme);}
+  });
+
   it('says the share of the window, the tokens and where the conversation is shortened, and marks that point', () => {
     show(<ContextRing thread={threadWith(142_000, 200_000, 180_000)} />);
     const ring = screen.getByRole('button', { name: /Show what fills the context \(Context 142k of 200k \(71%\); shortens at 90%\)/ });
@@ -139,6 +152,21 @@ describe('the bar of a turn', () => {
     usage_detail: { subagents: { input_tokens: 2_000, cached_input_tokens: 1_000, output_tokens: 1_000, reasoning_tokens: 0, total_tokens: 3_000 }, by_subagent: [{ stream: 'sub:helper', tokens: { input_tokens: 2_000, cached_input_tokens: 1_000, output_tokens: 1_000, reasoning_tokens: 0, total_tokens: 3_000 } }], models: [], context_window: 200_000, context_used: 142_000, compact_at: 180_000, shortenings: [], breakdown: false },
     context: null, interrupted_by: null, limit_bypass: [], phase: null, plan: false, started_at: AT, completed_at: AT, waiting_since: null, waited_ms: 0, seq_updated: 4,
     ...over,
+  });
+
+  it.each(['en','zh-CN'] as const)('keeps a counter-only model token share unknown in %s',async(locale)=>{
+    const previous=currentLocale();await setLocale(locale);
+    try {
+      const original=turn();
+      const zero={input_tokens:0,cached_input_tokens:0,output_tokens:0,reasoning_tokens:0,total_tokens:0};
+      const models=[{model:'Search helper',tokens:zero,tokens_reported:false,counts:{web_search:2}}];
+      show(<TurnCost threadId="thread-1" turn={turn({usage_detail:{...original.usage_detail!,models}})} />);
+      await userEvent.click(screen.getByRole('button',{name:/12/}));
+      const details=await screen.findByRole('dialog');
+      const label=within(details).getByText('Search helper',{exact:true});
+      expect(label.parentElement).toHaveTextContent(i18n.t('usagePerf.notMeasured'));
+      expect(label.parentElement).not.toHaveTextContent(/^Search helper0$/);
+    } finally {await setLocale(previous);}
   });
 
   it.each([

@@ -12,6 +12,7 @@
 )]
 #![allow(dead_code, reason = "each test file uses some of what is here")]
 
+pub mod capabilities;
 pub mod cluster;
 pub mod physical;
 

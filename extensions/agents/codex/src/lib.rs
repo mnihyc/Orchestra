@@ -35,7 +35,11 @@ pub mod events;
 pub mod failure;
 pub mod history;
 mod input_prefix;
+mod model_catalogue;
+mod model_processes;
 mod native_history;
+mod native_schema;
+mod native_web;
 pub mod parameters;
 pub mod performance;
 pub mod process;
@@ -44,6 +48,7 @@ pub mod provider;
 pub mod review;
 pub mod runtime;
 pub mod sessions;
+mod viewed_images;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -153,6 +158,8 @@ struct Running {
     overrides: Vec<String>,
     kill: Arc<Notify>,
     pump: JoinHandle<()>,
+    catalogue: Option<Arc<model_catalogue::Catalogue>>,
+    events: Arc<model_processes::ProcessEvents>,
 }
 
 impl Drop for Running {
@@ -163,10 +170,12 @@ impl Drop for Running {
 
 /// The adapter of the Codex command line.
 pub struct CodexAdapter {
+    native_schemas: crate::native_schema::NativeSchemas,
     launcher: Arc<dyn Launcher>,
     clock: Arc<dyn Clock>,
     patience: Patience,
     running: Option<Running>,
+    model_processes: HashMap<model_catalogue::Identity, Running>,
     /// Exact lanes observed idle when the native client unsubscribed them.
     prefix_sources: std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
     history_inventory: Option<(Id, Arc<native_history::Inventory>)>,
@@ -271,10 +280,12 @@ impl CodexAdapter {
     #[must_use]
     pub fn with_launcher(launcher: Arc<dyn Launcher>) -> Self {
         Self {
+            native_schemas: Default::default(),
             launcher,
             clock: Arc::new(SystemClock),
             patience: Patience::default(),
             running: None,
+            model_processes: HashMap::new(),
             prefix_sources: Default::default(),
             history_inventory: None,
         }
@@ -294,6 +305,19 @@ impl CodexAdapter {
         self
     }
 
+    /// Install the generated schema of the same exact verified native build at composition time.
+    /// Never use request/profile data. Shipped schemas are immutable and cannot be overridden.
+    pub fn with_native_schema(
+        mut self,
+        version: String,
+        schema: Json,
+    ) -> Result<Self, AdapterError> {
+        self.native_schemas
+            .insert(version, schema)
+            .map_err(AdapterError::Internal)?;
+        Ok(self)
+    }
+
     fn live(&self) -> Result<(Arc<Shared>, &Running), AdapterError> {
         let running = self.running.as_ref().ok_or_else(|| {
             AdapterError::HarnessUnavailable("the harness is not started".to_owned())
@@ -308,11 +332,22 @@ impl CodexAdapter {
 
     // -- starting and stopping -----------------------------------------------------------------------
 
+    async fn launch(&self, start: AgentStart, sink: EventSink) -> Result<Running, AdapterError> {
+        self.launch_model(start, model_processes::ProcessEvents::new(sink), None)
+            .await
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "starting the harness is one sequence, each step of which depends on the one before"
     )]
-    async fn launch(&self, start: AgentStart, sink: EventSink) -> Result<Running, AdapterError> {
+    async fn launch_model(
+        &self,
+        start: AgentStart,
+        events: Arc<model_processes::ProcessEvents>,
+        catalogue: Option<Arc<model_catalogue::Catalogue>>,
+    ) -> Result<Running, AdapterError> {
+        let sink = events.sink_for(catalogue.as_ref().map(|catalogue| catalogue.identity));
         if start.profile.attach_mode() == AttachMode::Daemon {
             return Err(AdapterError::Unsupported(
                 "attaching to a daemon: this adapter starts the harness itself and talks to it over its standard streams"
@@ -340,9 +375,18 @@ impl CodexAdapter {
             .map(PathBuf::from);
         let initialize_timeout = provider::initialize_timeout(&start.provider_config)?;
         let options = process::home_options(&start.provider_config, managed);
-        let config = process::effective_config(&options, &start.profile.config);
-        let mut overrides = Vec::new();
-        if managed {
+        let mut config = process::effective_config(&options, &start.profile.config);
+        let mut overrides = if catalogue.is_some()
+            || start.provider_kind == Some(orch_agent_contract::descriptor::ProviderKind::Api)
+        {
+            let provider = catalogue
+                .as_ref()
+                .map_or(start.provider_id, |catalogue| catalogue.identity.provider);
+            process::configure_forwarded(&mut config, provider, &start.loopback)
+        } else {
+            Vec::new()
+        };
+        if managed && catalogue.is_none() {
             if let Some(home) = &own_home {
                 process::prepare_home(home).map_err(|error| {
                     AdapterError::HarnessUnavailable(format!(
@@ -362,6 +406,13 @@ impl CodexAdapter {
             }
         } else {
             overrides = process::overrides(&config);
+        }
+        if let Some(catalogue) = &catalogue {
+            let pin = toml::Table::from_iter([(
+                "model_catalog_json".into(),
+                toml::Value::String(catalogue.path().to_string_lossy().into_owned()),
+            )]);
+            overrides.extend(process::overrides(&pin));
         }
         let program = start
             .binary
@@ -465,6 +516,8 @@ impl CodexAdapter {
                     "clientInfo": { "name": "orch", "title": "Orch", "version": env!("CARGO_PKG_VERSION") },
                     "capabilities": {
                         "experimentalApi": true,
+                        "requiredHumanApproval": true,
+                        "explicitGatewayOauth": true,
                         "requestAttestation": false,
                         // Data forms still need a person in bypass mode; the native client requires this opt-in.
                         "extensions": { "openai/standard-form-input": {} },
@@ -510,6 +563,8 @@ impl CodexAdapter {
             )));
         };
         let mut declared = descriptor::descriptor(&version);
+        let background_control = self.native_schemas.background_control(&version);
+        declared.capabilities.background_commands = background_control;
         // The harness's no-prompt mode is never declared to a root process.
         if std::fs::read_to_string("/proc/self/status")
             .ok()
@@ -553,6 +608,7 @@ impl CodexAdapter {
                     .map(str::to_owned)
             });
         let shared = Shared::new(ProcessParts {
+            background_control,
             sink: sink.clone(),
             clock: Arc::clone(&self.clock),
             outputs: OutputStore::new(outputs_home.join("outputs")),
@@ -589,6 +645,8 @@ impl CodexAdapter {
             overrides,
             kill,
             pump,
+            catalogue,
+            events,
         })
     }
 
@@ -596,9 +654,23 @@ impl CodexAdapter {
     async fn teardown(&mut self) {
         self.prefix_sources.clear();
         self.history_inventory = None;
-        let Some(running) = self.running.take() else {
-            return;
-        };
+        let mut stopping = self
+            .model_processes
+            .drain()
+            .map(|(_, running)| Self::stop_running(running))
+            .collect::<Vec<_>>();
+        if let Some(running) = self.running.take() {
+            stopping.push(Self::stop_running(running));
+        }
+        let _ = futures::future::join_all(stopping).await;
+    }
+
+    async fn stop_running(running: Running) {
+        let events = Arc::clone(&running.events);
+        let identity = running
+            .catalogue
+            .as_ref()
+            .map(|catalogue| catalogue.identity);
         running.shared.stopping();
         running.shared.rpc().finish();
         if running.shared.exit_message(STOP_GRACE).await.is_none() {
@@ -611,6 +683,7 @@ impl CodexAdapter {
             let _ = pump.await;
         })
         .await;
+        events.forget(identity);
     }
 
     /// Starts the harness again as it was started, so that it reads what was written to its home.
@@ -621,7 +694,7 @@ impl CodexAdapter {
             ));
         };
         let start = running.start.clone();
-        let sink = running.shared.sink().clone();
+        let sink = running.events.sink().clone();
         self.teardown().await;
         self.running = Some(self.launch(start, sink).await?);
         Ok(())
@@ -738,7 +811,8 @@ impl CodexAdapter {
         } else {
             sessions::WorkspaceLook::default()
         };
-        let (shared, running) = self.live()?;
+        let identity = self.prepare_model_process(&spec).await?;
+        let (shared, running) = self.live_model(identity)?;
         let rpc = shared.rpc().clone();
         let mode = spec.settings.mode;
         if matches!(mode, SessionMode::Resume | SessionMode::Adopt)
@@ -746,7 +820,7 @@ impl CodexAdapter {
         {
             if shared
                 .with_session(spec.settings.thread_id, |record| {
-                    record.mapper.turn_in_progress()
+                    record.mapper.turn_in_progress() || record.mapper.background_running()
                 })
                 .unwrap_or(false)
             {
@@ -794,9 +868,9 @@ impl CodexAdapter {
         // A session is held to the servers it is given: the others the harness would load are switched off.
         let place = (spec.exec.executor.is_none())
             .then_some((spec.settings.directory.as_str(), spec.settings.cwd.as_str()));
-        // A configuration of the workspace's own that its environment's managers trusted keeps its servers.
+        let (switched_off, pin_mismatches) = discovery::session_configuration(&rpc, place).await?;
         let context = OpenContext {
-            switched_off: discovery::servers_to_switch_off(&rpc, place, !look.trusted).await?,
+            switched_off,
             default_provider: running.default_provider.clone(),
             fork_through,
             projects: look.projects,
@@ -860,6 +934,7 @@ impl CodexAdapter {
                 ));
             }
         }
+        let expected_native_settings = events::native_settings_snapshot(&plan.params);
         let opened = rpc.call(plan.method, plan.params).await.map_err(map_rpc)?;
         let thread = opened.get("thread").unwrap_or(&Json::Null);
         let native = thread
@@ -901,13 +976,26 @@ impl CodexAdapter {
         }
         let resumed = matches!(mode, SessionMode::Resume | SessionMode::Adopt);
         let settings = &spec.settings;
+        let mut mapper = Mapper::new(MapperConfig {
+            thread_id: settings.thread_id,
+            segment_id: settings.segment_id,
+            native_thread: native.clone(),
+            directory: settings.directory.clone(),
+        })
+        .with_native_web_results(true)
+        .with_external_images(
+            spec.exec.executor.is_some()
+                || settings.arrangement
+                    == orch_agent_contract::descriptor::ArrangementType::Separated,
+        )
+        .with_opened_model(&settings.model, sessions::reported_model(&opened))
+        .with_background_control(shared.background_control())
+        .with_expected_native_settings(expected_native_settings)
+        .with_observed_native_settings(&opened);
+        let pin_reports =
+            mapper.managed_configuration_mismatches(&pin_mismatches, shared.clock().time());
         let record = SessionRecord {
-            mapper: Mapper::new(MapperConfig {
-                thread_id: settings.thread_id,
-                segment_id: settings.segment_id,
-                native_thread: native.clone(),
-                directory: settings.directory.clone(),
-            }),
+            mapper,
             directory: settings.directory.clone(),
             cwd: settings.cwd.clone(),
             workspace_root: settings.workspace_root.clone(),
@@ -926,15 +1014,20 @@ impl CodexAdapter {
             approval_mode: settings.approval_mode,
         };
         shared
-            .register(
+            .register_with_images(
                 record,
                 settings.raw_events,
                 SessionEvent::SessionOpened(SessionOpenedEvent {
                     native_session_ref: native.clone(),
                     resumed,
                 }),
+                crate::viewed_images::Sources::new(running.home.clone(), thread)
+                    .with_web_version(&running.started.harness_version),
             )
             .await;
+        for event in pin_reports {
+            shared.report(settings.thread_id, event).await;
+        }
         // The instruction files the harness reported it reads, in its order.
         let sources = sessions::reported_instruction_sources(
             &opened,
@@ -972,8 +1065,8 @@ impl CodexAdapter {
 
     /// Reads the history of a thread from the harness and reports it as events of the session.
     async fn replay(&self, thread: ThreadId) -> Result<u32, AdapterError> {
-        let (shared, _) = self.live()?;
-        let (native, config) = shared.with_session(thread, |record| {
+        let (shared, _) = self.live_session(thread)?;
+        let (native, config, external_images) = shared.with_session(thread, |record| {
             (
                 record.mapper.native_thread().to_owned(),
                 MapperConfig {
@@ -982,6 +1075,7 @@ impl CodexAdapter {
                     native_thread: record.mapper.native_thread().to_owned(),
                     directory: record.directory.clone(),
                 },
+                record.mapper.images_are_external(),
             )
         })?;
         // A page of turns at a time, oldest first: the events of a page are reported before the next is read, so that
@@ -992,7 +1086,10 @@ impl CodexAdapter {
             outputs: &outputs,
             windows: None,
         };
-        let mut replay = events::Replay::new(config);
+        let segment = config.segment_id;
+        let mut replay = events::Replay::new(config)
+            .with_external_images(external_images)
+            .with_native_web_results();
         let mut items = 0u32;
         let mut cursor: Option<String> = None;
         loop {
@@ -1010,6 +1107,28 @@ impl CodexAdapter {
                 .and_then(Json::as_array)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            if external_images {
+                let prepared = shared
+                    .image_results(
+                        thread,
+                        segment,
+                        &native,
+                        crate::viewed_images::page_keys(&native, turns),
+                    )
+                    .await;
+                replay.install_view_results(prepared);
+            }
+            replay.install_web_results(
+                shared
+                    .web_results(
+                        thread,
+                        segment,
+                        &native,
+                        crate::viewed_images::page_web_keys(&native, turns),
+                        crate::native_web::page_reported(&native, turns),
+                    )
+                    .await,
+            );
             for event in replay.page(turns, &ctx, stable_turn_id) {
                 if matches!(event, SessionEvent::ItemCompleted(_)) {
                     items += 1;
@@ -1075,7 +1194,7 @@ impl CodexAdapter {
         let sink = self
             .running
             .as_ref()
-            .map(|running| running.shared.sink().clone());
+            .map(|running| running.events.sink().clone());
         self.restart().await?;
         let (shared, _) = self.live()?;
         let signed_in = provider::auth_mode(shared.rpc()).await?.is_some();
@@ -1130,6 +1249,12 @@ impl AgentAdapter for CodexAdapter {
         KIND
     }
 
+    fn output_directory(&self) -> Option<PathBuf> {
+        self.running
+            .as_ref()
+            .map(|running| running.shared.outputs().directory().to_owned())
+    }
+
     fn native_check(&self) -> orch_agent_contract::conformance::NativeCheck {
         use orch_agent_contract::conformance::{ModelPaths, NativeCheck};
         NativeCheck {
@@ -1141,6 +1266,29 @@ impl AgentAdapter for CodexAdapter {
                 allowed: vec!["/responses".to_owned(), "/models".to_owned()],
                 exact: Vec::new(),
             },
+            auto_review: Some(
+                orch_agent_contract::conformance::NativeAutoReview::Notifications(
+                    orch_agent_contract::conformance::NativeNotificationReview {
+                        // Real pinned 0.165.0 requests and native outcomes: auto-approval-trial/run-codex-01
+                        // and the explicit allow/deny/unavailable matrix. This does not activate Auto.
+                        model: crate::review::CODEX_REVIEW_MODEL.to_owned(),
+                        command_arguments: json!({"sandbox_permissions":"require_escalated",
+                    "justification":"Write only the native conformance disposable marker"}),
+                        allow_response: json!({"outcome":"allow","risk_level":"low","user_authorization":"high",
+                    "rationale":"Synthetic fixture allows only the disposable diagnostic marker."}),
+                        deny_response: json!({"outcome":"deny","risk_level":"high","user_authorization":"low",
+                    "rationale":"Synthetic fixture denies the disposable diagnostic marker."}),
+                        schema_pointer: "/text/format/schema".to_owned(),
+                        response_schema: json!({"type":"object","additionalProperties":false,"properties":{
+                    "risk_level":{"type":"string","enum":["low","medium","high","critical"]},
+                    "user_authorization":{"type":"string","enum":["unknown","low","medium","high"]},
+                    "outcome":{"type":"string","enum":["allow","deny"]},
+                    "rationale":{"type":"string"}},"required":["outcome"]}),
+                        started_method: "item/autoApprovalReview/started".to_owned(),
+                        completed_method: "item/autoApprovalReview/completed".to_owned(),
+                    },
+                ),
+            ),
         }
     }
 
@@ -1169,6 +1317,15 @@ impl AgentAdapter for CodexAdapter {
                 != Some(false)
             {
                 return Err(format!("{} traffic was not disabled", path[0]));
+            }
+        }
+        for (path, expected) in process::automation_pins() {
+            let value = path
+                .split('.')
+                .try_fold(&config, |value, part| value.get(part));
+            let actual = value.and_then(|value| serde_json::to_value(value).ok());
+            if actual.as_ref() != Some(&expected) {
+                return Err(format!("native automation pin {path} was not applied"));
             }
         }
         if config
@@ -1264,17 +1421,18 @@ impl AgentAdapter for CodexAdapter {
                 "A continuation resume keeps its retained native session.",
             ));
         }
-        let (shared, running) = self.live()?;
-        if running.started.harness_version != "0.165.0" {
-            return Err(AdapterError::Unsupported(
-                "Exact continuation resume requires Codex 0.165.0.".into(),
-            ));
+        let (shared, running) = self.live_session(source.thread_id)?;
+        if !descriptor::is_pinned_build(&running.started.harness_version) {
+            return Err(AdapterError::Unsupported(format!(
+                "Exact continuation resume requires Codex {}.",
+                descriptor::SUPPORTED_RANGE.trim_start_matches('=')
+            )));
         }
         if let Ok((native, segment, busy)) = shared.with_session(source.thread_id, |record| {
             (
                 record.mapper.native_thread().to_owned(),
                 record.mapper.segment_id(),
-                record.mapper.turn_in_progress(),
+                record.mapper.turn_in_progress() || record.mapper.background_running(),
             )
         }) && (busy
             || !(segment == source.segment_id && native == source.native_session_ref
@@ -1335,11 +1493,12 @@ impl AgentAdapter for CodexAdapter {
         for request in sources {
             let started_by_orch = request.started_by_orch;
             let source = request.source;
-            let active = shared
+            let (owner, _) = self.live_session(source.thread_id)?;
+            let active = owner
                 .with_session(source.thread_id, |record| {
                     (
                         record.mapper.native_thread().to_owned(),
-                        record.mapper.turn_in_progress(),
+                        record.mapper.turn_in_progress() || record.mapper.background_running(),
                         !record.approvals.is_empty(),
                     )
                 })
@@ -1367,7 +1526,7 @@ impl AgentAdapter for CodexAdapter {
                             .is_some_and(|(native, _, _)| native == &source.native_session_ref)
                     {
                         self.close_session(source.thread_id).await?;
-                        shared
+                        owner
                             .unload_before_resume(&source.native_session_ref)
                             .await?;
                     }
@@ -1406,7 +1565,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn close_session(&mut self, thread: ThreadId) -> Result<(), AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(thread)?;
         let state = shared.with_session(thread, |record| {
             (
                 record.mapper.running_turn(),
@@ -1451,7 +1610,7 @@ impl AgentAdapter for CodexAdapter {
         {
             return Err(AdapterError::Unsupported("Auto is unavailable until its reviewer model has passed the integrator's real trial".to_owned()));
         }
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(turn.thread_id)?;
         shared.with_session(turn.thread_id, |record| {
             // A configuration that appeared since the session was opened, an agent's own included, is refused
             // until somebody who manages the environment has answered for it.
@@ -1473,7 +1632,7 @@ impl AgentAdapter for CodexAdapter {
                 if record.mapper.turn_in_progress() {
                     return Err(conflict("a turn is already running in this session"));
                 }
-                record.mapper.expect_turn(turn.turn_id);
+                record.mapper.expect_turn_model(turn.turn_id, &turn.model);
                 record.approval_mode = turn.approval_mode;
                 let was_planning = std::mem::replace(&mut record.planning, turn.plan);
                 Ok((
@@ -1547,9 +1706,13 @@ impl AgentAdapter for CodexAdapter {
             params.insert("environments".to_owned(), json!([remote.selection()]));
         }
         TurnSettings::from_params(&turn.params).put_into(&mut params, turn.effort.as_deref());
+        let params = Json::Object(params);
         let asked = shared.clock().time();
-        shared.with_session(turn.thread_id, |record| record.mapper.request_asked(asked))?;
-        match shared.rpc().call("turn/start", Json::Object(params)).await {
+        shared.with_session(turn.thread_id, |record| {
+            record.mapper.expect_native_settings(&params);
+            record.mapper.request_asked(asked)
+        })?;
+        match shared.rpc().call("turn/start", params).await {
             Ok(_) => Ok(()),
             Err(error) => {
                 abandon(&shared);
@@ -1559,7 +1722,7 @@ impl AgentAdapter for CodexAdapter {
     }
 
     async fn steer(&mut self, steer: TurnSteer) -> Result<(), AdapterError> {
-        let (shared, harness) = self.live()?;
+        let (shared, harness) = self.live_session(steer.thread_id)?;
         let (native, running) = shared.with_session(steer.thread_id, |record| {
             (
                 record.mapper.native_thread().to_owned(),
@@ -1579,7 +1742,7 @@ impl AgentAdapter for CodexAdapter {
         }
         let mut params =
             json!({ "threadId": native, "expectedTurnId": native_turn, "input": input });
-        if harness.started.harness_version == "0.165.0" {
+        if descriptor::is_pinned_build(&harness.started.harness_version) {
             params["clientUserMessageId"] = json!(orch_types::new_id().to_string());
         }
         shared
@@ -1594,7 +1757,7 @@ impl AgentAdapter for CodexAdapter {
         &mut self,
         thread: ThreadId,
     ) -> Result<orch_agent_contract::background::NativeBackground, AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(thread)?;
         shared.background(thread).await
     }
 
@@ -1603,12 +1766,12 @@ impl AgentAdapter for CodexAdapter {
         thread: ThreadId,
         command: &str,
     ) -> Result<orch_agent_contract::background::NativeBackgroundEnd, AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(thread)?;
         shared.end_background(thread, command).await
     }
 
     async fn interrupt(&mut self, thread: ThreadId, turn: TurnId) -> Result<(), AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(thread)?;
         let (native, running) = shared.with_session(thread, |record| {
             (
                 record.mapper.native_thread().to_owned(),
@@ -1636,7 +1799,7 @@ impl AgentAdapter for CodexAdapter {
         request_ref: &str,
         decision: ApprovalDecision,
     ) -> Result<(), AdapterError> {
-        let (shared, _) = self.live()?;
+        let (shared, _) = self.live_session(thread)?;
         shared.resolve(thread, request_ref, &decision).await
     }
 
@@ -1654,7 +1817,7 @@ impl AgentAdapter for CodexAdapter {
         native_session_ref: &str,
         write: bool,
     ) -> Result<orch_agent_contract::discovery::SessionRecord, AdapterError> {
-        let (shared, running) = self.live()?;
+        let (shared, running) = self.live_native(native_session_ref)?;
         let directory = running
             .home
             .clone()
@@ -1669,16 +1832,44 @@ impl AgentAdapter for CodexAdapter {
             outputs: &outputs,
             windows: None,
         };
-        let record = discovery::read_session(
+        let record = discovery::read_session_with_images(
             shared.rpc(),
             native_session_ref,
             write,
             &directory,
             &ctx,
             stable_turn_id,
+            Some(
+                crate::viewed_images::Sources::new(running.home.clone(), &Json::Null)
+                    .with_web_version(&running.started.harness_version),
+            ),
         )
         .await;
+        let promoted = if let Ok(record) = &record
+            && let Some(file) = &record.file
+        {
+            let file = PathBuf::from(&file.path);
+            let temporary = outputs.clone();
+            let retained = shared.outputs().clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::viewed_images::promote_record(&file, &temporary, &retained)
+            })
+            .await
+            {
+                Ok(result) => result.map_err(|error| {
+                    AdapterError::HarnessError(format!(
+                        "the native record's outputs could not be retained: {error}"
+                    ))
+                }),
+                Err(error) => Err(AdapterError::Internal(format!(
+                    "the native record's output reader ended: {error}"
+                ))),
+            }
+        } else {
+            Ok(())
+        };
         let _ = std::fs::remove_dir_all(&scratch);
+        promoted?;
         record
     }
 

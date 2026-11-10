@@ -72,6 +72,6 @@ describe('mounts in a plan', () => {
       { id: 'b', name: 'local-db', own: false, imported: true, fate: 'lost', reason: 'its imported definition belongs to another machine' },
     ], t);
     expect(lines[0]).toMatchObject({ tone: 'plain', text: 'The MCP server tmux is there too' });
-    expect(lines[1]).toMatchObject({ tone: 'warning', text: 'The MCP server local-db will not be there: its imported definition belongs to another machine' });
+    expect(lines[1]).toMatchObject({ tone: 'warning', text: t('mcpPlan.lostBecause', { name: 'local-db', reason: t('mcpWords.reasons.otherMachine') }) });
   });
 });

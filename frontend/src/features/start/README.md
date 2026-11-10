@@ -10,15 +10,18 @@ used only in the same place, while usable, and cannot override the place's fresh
 topic's directory merely because creating an environment is forbidden. Optional arrangement follows the current native preference;
 remembered setup is not renewed credential-sharing consent. Starting work leaves defaults unchanged, including a topic's
 default environment. Set as default is a separate explicit act. Start freezes the displayed binding/model/location before any asynchronous
-creation; later inventory changes cannot substitute another agent or model in that attempt.
+creation; later inventory changes cannot substitute another agent or model in that attempt. The confirmed agent contribution,
+human audience and first input belong to the same frozen creation request. Changing a parent preset does not rewrite existing grants.
 Change opens the dialog with the first message retained. Where something is missing the same place says which (a provider, an agent, a model, an
 environment that may be used or made, a way of placing the agent) and asks for that one choice; for whoever manages the place it offers
 to keep the choice as the default of the topic, the project or the org, the widest ticked, and for whoever may not it offers to ask. An
 agent whose harness has not reported what it can do is waited for, with nothing offered that cannot run, and the box comes alive by itself
 when the report arrives.
 
-The dialog initially asks only Provider, Agent, Model and Where it runs, through ordinary shared selects. Effort, arrangement, access,
-directory/source override, naming, first message and environment creation/registration are under Options. A missing arrangement opens
+The dialog uses ordinary shared selects for Provider, Agent, Model and Where it runs. Human audience and the exact Agent access
+choice stay visible before creation. Agent access uses the inherited creation preset and preserves Documents-only Custom choices;
+Nothing makes no owner contribution. Effort, arrangement, directory/source override, naming, first message and environment
+creation/registration stay under Options. A missing arrangement opens
 Options itself, so a required choice cannot be hidden behind a disabled act. Collapsing Options retains the chosen values. Machines are
 read only while their optional registration tools are visible; their pending state does not pretend there are no machines.
 Everything it lists is what the server says a thread there could be bound to, asked before the

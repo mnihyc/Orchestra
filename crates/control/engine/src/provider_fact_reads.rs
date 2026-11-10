@@ -83,7 +83,9 @@ pub fn normalize_observation(value: &orch_types::Json) -> Result<orch_types::Jso
     Ok(orch_types::Json::Object(combined))
 }
 
-/// Only the contract's told admission members hold work; money and percentages do not decide it.
+/// Classifies the last reported vendor quota for observational status only.
+/// It never decides whether a later normal request may be dispatched; money and
+/// percentages remain separate observations. The name is retained for existing consumers.
 #[must_use]
 pub fn admission_exhausted(
     facts: &orch_agent_contract::facts::ProviderFacts,
@@ -173,6 +175,32 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
             .is_none_or(|(old, new)| new >= old),
         _ => true,
     };
+    // A fresh label/item does not make an explicitly older monetary observation current.
+    // These fixed quantities are optional in every credit shape; absent prior money stays absent,
+    // while required id/unit/period/enabled fields keep their existing validation and behavior.
+    let current_amounts = |group: &str, previous: Option<&Json>, incoming: &Json| {
+        let mut value = incoming.clone();
+        if let Some(object) = value.as_object_mut() {
+            for quantity in orch_provider_contract::credit_fields::known_fields(group)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|field| matches!(**field, "remaining" | "total" | "used" | "limit"))
+            {
+                let clock = orch_provider_contract::credit_fields::field_time_key(group, quantity);
+                if !current(&clock) {
+                    if let Some(known) = previous.and_then(|known| known.get(*quantity)) {
+                        object.insert((*quantity).to_owned(), known.clone());
+                    } else {
+                        object.remove(*quantity);
+                    }
+                }
+            }
+        }
+        value
+    };
+    // Only actually accepted whole credit replacements can advance inherited finer evidence.
+    // Explicit incoming field clocks remain independent of a newer label/item observation.
+    let mut credit_replacements = serde_json::Map::new();
     for (key, value) in update {
         if key == "field_times" {
             continue;
@@ -193,16 +221,30 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
                 let Some(id) = window.get("id").and_then(Json::as_str) else {
                     continue;
                 };
-                if !current(&format!("{key}.{id}")) {
+                let item_key = format!("{key}.{id}");
+                if !current(&item_key) {
                     continue;
+                }
+                if matches!(key.as_str(), "balances" | "spend")
+                    && let Some(time) = supplied_times.get(&item_key)
+                {
+                    credit_replacements.insert(item_key.clone(), time.clone());
                 }
                 if let Some(index) = windows
                     .iter()
                     .position(|old| old.get("id").and_then(Json::as_str) == Some(id))
                 {
-                    windows[index] = window.clone();
+                    windows[index] = if matches!(key.as_str(), "balances" | "spend") {
+                        current_amounts(&item_key, windows.get(index), window)
+                    } else {
+                        window.clone()
+                    };
                 } else {
-                    windows.push(window.clone());
+                    windows.push(if matches!(key.as_str(), "balances" | "spend") {
+                        current_amounts(&item_key, None, window)
+                    } else {
+                        window.clone()
+                    });
                 }
             }
             merged.insert(key.clone(), Json::Array(windows));
@@ -240,13 +282,74 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
                 merged.insert(key.clone(), Json::Object(extra));
             }
         } else {
-            merged.insert(key.clone(), value.clone());
+            let replacement = if matches!(key.as_str(), "balances" | "spend") {
+                value
+                    .as_array()
+                    .map(|items| {
+                        Json::Array(
+                            items
+                                .iter()
+                                .map(|item| {
+                                    let Some(id) = item.get("id").and_then(Json::as_str) else {
+                                        return item.clone();
+                                    };
+                                    let previous =
+                                        known.get(key).and_then(Json::as_array).and_then(|items| {
+                                            items.iter().find(|item| {
+                                                item.get("id").and_then(Json::as_str) == Some(id)
+                                            })
+                                        });
+                                    current_amounts(&format!("{key}.{id}"), previous, item)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_else(|| value.clone())
+            } else if key == "extra_usage" {
+                current_amounts(key, known.get(key), value)
+            } else {
+                value.clone()
+            };
+            merged.insert(key.clone(), replacement);
+            if matches!(key.as_str(), "balances" | "spend" | "extra_usage")
+                && let Some(time) = supplied_times.get(key)
+            {
+                credit_replacements.insert(key.clone(), time.clone());
+                for item in value.as_array().into_iter().flatten() {
+                    if let Some(id) = item.get("id").and_then(Json::as_str) {
+                        let item_key = format!("{key}.{id}");
+                        if let Some(time) = supplied_times.get(&item_key) {
+                            credit_replacements.insert(item_key, time.clone());
+                        }
+                    }
+                }
+            }
         }
     }
     let mut times = known_times.clone();
     for (field, time) in &supplied_times {
         if current(field) {
             times.insert(field.clone(), time.clone());
+        }
+    }
+    for (field, previous) in &known_times {
+        if supplied_times.contains_key(field) {
+            continue;
+        }
+        let Some(group) = orch_provider_contract::credit_fields::field_time_group(field) else {
+            continue;
+        };
+        let member = group.split('.').next().unwrap_or(&group);
+        if let Some(replacement) = credit_replacements
+            .get(&group)
+            .or_else(|| credit_replacements.get(member))
+            && previous
+                .as_str()
+                .zip(replacement.as_str())
+                .is_some_and(|(old, new)| new >= old)
+        {
+            // Updating only existing evidence preserves Empty without making unsupported nulls Told.
+            times.insert(field.clone(), replacement.clone());
         }
     }
     // An explicit later admission ends the old limit even if this source does not repeat it as null.
