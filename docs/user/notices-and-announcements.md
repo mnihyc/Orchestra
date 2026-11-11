@@ -1,7 +1,9 @@
 ---
+group: access
 title: Read notices and send announcements
 screens: /inbox, /settings/notifications, /org/$slug, /project/$projectId, /topic/$topicId, /thread/$threadId, /org/$slug/settings/$section, /admin/$section
 keywords: inbox, notice, announcement, milestone, delivery, wake, unread, mentions, bell, notification
+summary: Read Inbox notices, choose notification delivery and send announcements with visible outcomes.
 ---
 
 # Read notices and send announcements
@@ -15,6 +17,12 @@ the previous read state. Older rows load through the page controls.
 An Inbox row does not grant access to the original work. A changed permission
 can remove its private detail. Notification settings decide outward delivery;
 marking work read and pausing delivery have different effects.
+
+Messages in the left bar shows your unread chat count for the current root
+organization. The organization in the rail uses the same count for its dot.
+Both update from your personal chat state even while Chats is hidden in the
+tree. Hidden or unfollowed chats contribute nothing; reading in another browser
+updates the count here too.
 
 ## Choose when to be told
 
@@ -34,8 +42,20 @@ archived place cannot send.
 Review delivery before sending. Next turn waits; Steer joins an active turn
 when supported; Interrupt stops that turn before delivery. Default takes the
 place's setting. The fallback decides what happens when steering is unavailable.
-Wake decides whether idle threads start for the announcement. These choices
-affect agent work, so read the selected audience and delivery together.
+Start idle threads is a checkbox, unticked for each send. Tick it only when you
+want this announcement to start a turn. The `broadcast.wake_idle` setting allows
+that choice and ships on; switching it off disables the checkbox with a reason.
+Leaving the checkbox unticked keeps idle threads waiting for their next turn.
+These choices affect agent work, so review the audience and delivery together.
+
+Agents also choose `wake_idle: true` explicitly for `announce` or a thread-targeted
+`send_message`; omission means false. A true request where the receiving topic
+forbids wake is refused and names `broadcast.wake_idle`. A send across several
+topics is refused as a whole if any receiving topic forbids the requested wake.
+The shipped hourly limits are 12 announcements (`broadcast.rate_per_hour`) and
+60 individual thread messages (`broadcast.thread_messages_per_hour`), separately
+for each sending thread. Zero forbids that kind of send. Follower-only milestones
+use neither limit.
 
 ## Follow the result
 

@@ -1,0 +1,9 @@
+# The deciding cases of the Rust changes made since the thirty-third batch, each with the other cases of its file.
+test -p orch-api-core --test provider_read_latency -- --nocapture
+test -p orch-api-core --test forks -- immediate_native_scopes --nocapture
+test -p orch-engine --test native_executor_loss
+test -p orch-api-admin --lib -- routes::personal::viewed::tests
+test -p orch-authz --lib -- holders::tests::a_person_is_read_with_their_groups_trees_and_suspensions --exact
+test -p orch-api-core --test provider_crud_scopes --test provider_list_scopes --test provider_name_operation_scopes --test provider_admin_sources --test providers
+# Last, since one of its cases did not end in earlier batches: the engine's unit-test program whole.
+test -p orch-engine --lib

@@ -4,7 +4,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import { OUTSIDER } from '../doubles/access.ts';
 import { id } from '../doubles/fixtures.ts';
 import { agentMessage } from '../doubles/thread-rows.ts';
-import { chats, secondReader } from './chat-support.ts';
+import { chats, composer, secondReader } from './chat-support.ts';
 import { ACME, changeTree, deny, emit, PEOPLE, scenario, signIn } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
@@ -25,7 +25,11 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation' });
+const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation', exact: true });
+/** The address of the org's home: its list keeps its own choices there, and nothing else is in it. */
+const HOME = /\/org\/acme(\?list=[^&]*&_list=true)?$/;
+/** The org's own acts are in the menu of Navigation's title row. */
+const orgMenu = (page: Page) => page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Navigation actions', exact: true });
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Orgs and your own places' });
 const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
@@ -35,9 +39,11 @@ const head = (page: Page) => bar(page).getByRole('link').first();
 const begins = (page: Page) => bar(page).getByRole('group', { name: 'Where the tree begins' });
 /** The place the tree begins at, as its heading names it. */
 const beginsAt = (page: Page) => begins(page).locator('[data-tree-begins]');
-const section = (page: Page, name: 'Starred' | 'Recent' | 'Projects') => bar(page).getByRole('button', { name, exact: true });
+/** What each section's heading is called: Recent's names its shortcuts, as the switch between the tree and every recent item is called Recent too, and the projects' section is Work. */
+const HEADINGS = { Starred: 'Starred', Recent: 'Recent shortcuts', Projects: 'Work' } as const;
+const section = (page: Page, name: keyof typeof HEADINGS) => bar(page).getByRole('button', { name: HEADINGS[name], exact: true });
 /** A whole section of the bar, with its heading and its rows. */
-const sectionOf = (page: Page, name: 'Starred' | 'Recent' | 'Projects') => bar(page).locator('section').filter({ has: page.getByRole('button', { name, exact: true }) });
+const sectionOf = (page: Page, name: keyof typeof HEADINGS) => bar(page).locator('section').filter({ has: page.getByRole('button', { name: HEADINGS[name], exact: true }) });
 /** A row of the tree that is a place or a thread, by the name it begins with (what follows is its kind, what it holds, and the names of its buttons). */
 const row = (page: Page, name: string): Locator => tree(page).getByRole('treeitem', { name: new RegExp(`^(Waiting for approval |Blocked |Running |Starting |Idle )?${name}( |$)`) });
 /** The row of a document, which its glyph names before its title. */
@@ -202,7 +208,7 @@ test('whoever manages a place gives its icon a colour, takes it back and picks o
   await viewer.page.getByTestId('main').getByRole('button', { name: /^Actions for Web(?: · .+)?$/, exact: true }).click();
   const off = viewer.page.getByRole('menuitem', { name: /^Colour…/ });
   await expect(off).toHaveAttribute('aria-disabled', 'true');
-  await expect(off).toContainText('Manage');
+  await expect(off).toContainText('You can’t manage Web.');
   await viewer.page.keyboard.press('Escape');
 
   await signIn(page);
@@ -218,11 +224,12 @@ test('whoever manages a place gives its icon a colour, takes it back and picks o
   await expect(dialog.getByRole('group', { name: 'Colours' }).getByRole('button')).toHaveCount(12);
   await expect(dialog.getByRole('button', { name: 'As its kind' })).toHaveAttribute('aria-pressed', 'true');
 
-  // One of the twelve, by its name: the row, the way above the screen and the other person's page all take it.
+  // One of the twelve, by its name: the row, the mark at the head of its screen and the other person's page all take it
+  // (the way above a screen ends at its parent).
   await dialog.getByRole('button', { name: 'Green' }).click();
   await expect(dialog.getByRole('button', { name: 'Green' })).toHaveAttribute('aria-pressed', 'true');
   await expect(icon(page)).toHaveAttribute('data-node-color', '5');
-  await expect(page.locator('nav[aria-label="Where this is"] [data-node-icon="project"]')).toHaveAttribute('data-node-color', '5');
+  await expect(page.getByTestId('main').locator('[data-node-icon="project"]').first()).toHaveAttribute('data-node-color', '5');
   await expect(icon(viewer.page)).toHaveAttribute('data-node-color', '5');
 
   // At random: another than the one in use.
@@ -249,8 +256,11 @@ test('documents stand under the org, the project, the folder, the topic and the 
   await makeDocument(ACME.org, 'Company handbook');
   const asked: string[] = [];
   page.on('request', (request) => {
-    const found = /\/nodes\/([^/]+)\/documents/.exec(request.url());
+    const url = new URL(request.url());
+    const found = /\/nodes\/([^/]+)\/documents/.exec(url.pathname);
     if (found?.[1] !== undefined) asked.push(found[1]);
+    // The tree asks the first page of several places in one request, which names them.
+    if (/\/nodes\/[^/]+\/document-pages$/.test(url.pathname)) asked.push(...(url.searchParams.get('node_ids') ?? '').split(',').filter((one) => one !== ''));
   });
   await signIn(page);
   await page.goto('/org/acme');
@@ -336,7 +346,7 @@ test('a document made beside a place arrives in the tree, and one deleted from i
   await confirm.getByRole('button', { name: 'Delete Idle-stop notes' }).click();
   await expect(doc(page, 'Idle-stop notes')).toHaveCount(0);
   // The reader stays where they were.
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(HOME);
   await page.getByRole('region', { name: /^Notifications/ }).getByRole('button', { name: 'Undo' }).click();
   await expect(doc(page, 'Idle-stop notes')).toBeVisible();
 });
@@ -417,7 +427,7 @@ test('a thread is unread from what its reader has really read, on its own row an
 
   // She reads the thread in a second browser: two seconds on screen, and the first browser shows it read on every row.
   const second = await secondReader(browser, baseURL, `/thread/${ACME.mainThread}`, PEOPLE.dora);
-  await expect(second.page.getByText('A first answer.')).toBeVisible();
+  await expect(second.page.getByTestId('main').getByText('A first answer.', { exact: true })).toBeVisible();
   await expect(inside(page, 'Web')).toHaveCount(0, { timeout: 30_000 });
   await row(page, 'Web').press('ArrowRight');
   // Repro, which she follows with the topic and may not see, has as much to read as it had: it is no row of her tree, and says nothing on the rows above it.
@@ -446,15 +456,17 @@ test('a closed row says the most urgent thing that goes on in it, and the keys g
   await signIn(page);
   await page.goto('/org/acme');
   await expect(row(page, 'Infra')).toBeVisible();
-  // Infra holds a thread that is blocked; Evals one that is starting. Open, a project says nothing of it itself: its topic does.
+  // Infra holds a thread that is blocked; Evals one that is starting. Open or closed, a project keeps the mark of the most urgent of them, as its topic does.
   await expect(row(page, 'Idle-stop rework').getByRole('img', { name: 'Blocked inside' })).toBeVisible();
-  await expect(row(page, 'Infra').getByRole('img', { name: 'Blocked inside' })).toHaveCount(0);
-  await row(page, 'Infra').press('ArrowLeft');
   await expect(row(page, 'Infra').getByRole('img', { name: 'Blocked inside' })).toBeVisible();
-  // Web hides a thread that runs and one that waits for an approval: the number of decisions that wait says the more urgent of the two, once.
+  await row(page, 'Infra').press('ArrowLeft');
+  await expect(row(page, 'Infra')).toHaveAttribute('aria-expanded', 'false');
+  await expect(row(page, 'Infra').getByRole('img', { name: 'Blocked inside' })).toBeVisible();
+  // Web hides a thread that runs and one that waits for an approval: its one mark says the more urgent of the two, and the number how many decisions wait.
   await row(page, 'Web').press('ArrowLeft');
   await expect(row(page, 'Web').getByText('1 approval waits inside')).toBeAttached();
-  await expect(row(page, 'Web').getByRole('img', { name: /inside$/ })).toHaveCount(0);
+  await expect(row(page, 'Web').getByRole('img', { name: /inside$/ })).toHaveCount(1);
+  await expect(row(page, 'Web').getByRole('img', { name: 'Waiting for approval inside' })).toBeVisible();
 
   // Alt+Down goes to the first thread of the tree from a screen that is none, and on to the next from there.
   await page.keyboard.press('Alt+ArrowDown');
@@ -474,7 +486,8 @@ test('somebody let into a thread below places they may not see reads the way to 
   await page.goto(`/thread/${ACME.mainThread}`);
 
   const way = crumbs(page);
-  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: 'Main thread', exact: true })).toBeVisible();
+  // The tab of a thread names its state before its name.
+  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: /^(\w+ )?Main thread$/ })).toBeVisible();
   await expect(way.locator('a[aria-current="page"]')).toHaveCount(0);
   // The topic they may see is a link; the first place of the way is private, and no link.
   await expect(way.getByRole('link', { name: 'Fix login' })).toBeVisible();
@@ -484,17 +497,21 @@ test('somebody let into a thread below places they may not see reads the way to 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(way.getByRole('button', { name: 'Ancestor places', exact: true })).toHaveCount(0);
   await expect(way.locator('a:visible')).toHaveCount(1);
-  await expect(way.getByRole('link', { name: 'Fix login', exact: true })).toHaveAttribute('href', `/topic/${ACME.fixLogin}`);
+  await expect(way.getByRole('link', { name: 'Fix login', exact: true })).toHaveAttribute('href', new RegExp(`^/topic/${ACME.fixLogin}(\\?|$)`));
   await expect(way.getByRole('link', { name: /Private/ })).toHaveCount(0);
   // No name of a place they may not see is anywhere on the page.
   for (const hidden of ['Acme', 'Research', 'Web']) await expect(page.getByText(hidden, { exact: true })).toHaveCount(0);
 
   // The place they may see leads to its own screen.
   await page.setViewportSize({ width: 1280, height: 900 });
-  await expect(way.getByRole('link', { name: 'Fix login' })).toHaveAttribute('href', `/topic/${ACME.fixLogin}`);
+  await expect(way.getByRole('link', { name: 'Fix login' })).toHaveAttribute('href', new RegExp(`^/topic/${ACME.fixLogin}(\\?|$)`));
 });
 
 test('Messages in the left bar and the org in the rail say that a chat is unread, from one count: it rises with a message, falls when the chat is read in another browser, and never counts a chat that was hidden', async ({ page, browser, baseURL }) => {
+  const listReads: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'GET' && /\/orgs\/[^/]+\/chats$/.test(new URL(request.url()).pathname)) listReads.push(request.url());
+  });
   await signIn(page);
   await page.goto('/org/acme');
   const messages = bar(page).getByRole('link', { name: /^Messages/ });
@@ -531,6 +548,7 @@ test('Messages in the left bar and the org in the rail say that a chat is unread
   await expect(bar(second.page).getByRole('link', { name: /^Messages/ })).toHaveAccessibleName('Messages');
   await expect(rail(page).locator('[data-unread-chats]')).toHaveCount(0);
   await expect(rail(page).getByRole('link', { name: 'Acme', exact: true })).toBeVisible();
+  expect(listReads).toEqual([]);
   await second.context.close();
 });
 
@@ -543,9 +561,9 @@ test('the rail has every org one press away, their own first and each told from 
   await expect(rail(page).getByRole('link', { name: 'Ada Lovelace (your own)' })).toBeVisible();
   // The org in view is marked: as the page in view on its own home, as the current one anywhere else in it.
   await expect(rail(page).getByRole('link', { name: 'Acme', exact: true })).toHaveAttribute('aria-current', /^(page|true)$/);
-  // A screen without a body has no navigation offer; the orgs remain together.
-  await expect(rail(page).getByRole('link', { name: 'Shared with me' })).toHaveCount(0);
-  await expect(rail(page).getByRole('list').getByRole('link').last()).toHaveAccessibleName('Acme');
+  // What was shared with the person from elsewhere stands after the orgs, which remain together.
+  await expect(rail(page).getByRole('link', { name: 'Shared with me' })).toHaveAttribute('href', '/shared');
+  await expect(orgs.last()).toHaveAccessibleName('Acme');
 
   // A second team is made: it is in the rail at once, after the first, and one press brings each into the bar.
   await rail(page).getByRole('button', { name: 'New org or join one' }).click();
@@ -557,20 +575,20 @@ test('the rail has every org one press away, their own first and each told from 
   // A name that begins like no other shows its first letter alone.
   await expect(orgs).toHaveText(['Ad', 'Ac', 'Z']);
   await expect(rail(page).getByRole('link', { name: 'Zeta Labs' })).toHaveAttribute('aria-current', /^(page|true)$/);
-  await expect(head(page)).toHaveText('Zeta Labs');
+  await expect(head(page)).toHaveAccessibleName('Zeta Labs');
 
   await rail(page).getByRole('link', { name: 'Acme', exact: true }).click();
-  await expect(head(page)).toHaveText('Acme');
+  await expect(head(page)).toHaveAccessibleName('Acme');
   await expect(row(page, 'Web')).toBeVisible();
 
   // The org's own colour is the colour of its mark: given one, the rail shows it.
   // Found by its place in the page: behind an open dialog the page is hidden from a screen reader.
   const mark = page.locator('nav[aria-label="Orgs and your own places"] a[href="/org/acme"] .avatar');
-  await bar(page).getByRole('button', { name: /^Actions for Acme(?: · .+)?$/ }).click();
+  await orgMenu(page).click();
   await page.getByRole('menuitem', { name: 'Colour…' }).click();
-  await page.getByRole('dialog', { name: 'Colour of Acme' }).getByRole('button', { name: 'Green' }).click();
+  await page.getByRole('dialog', { name: /^Colour of (the \w+ )?Acme(, in .+)?$/ }).getByRole('button', { name: 'Green' }).click();
   await expect(mark).toHaveClass(/bg-\(--identity-4\)/);
-  await page.getByRole('dialog', { name: 'Colour of Acme' }).getByRole('button', { name: 'Close' }).first().click();
+  await page.getByRole('dialog', { name: /^Colour of (the \w+ )?Acme(, in .+)?$/ }).getByRole('button', { name: 'Close' }).first().click();
 
   // Inbox and Approvals stand here, each hint with the key that goes there.
   await rail(page).getByRole('link', { name: /^Inbox/ }).hover();
@@ -587,7 +605,7 @@ test('the rail has every org one press away, their own first and each told from 
   await page.goto('/shared');
   await expect(page).toHaveURL(/\/shared$/);
   await rail(page).getByRole('link', { name: 'Ada Lovelace (your own)' }).click();
-  await expect(head(page)).toHaveText('Ada Lovelace');
+  await expect(head(page)).toHaveAccessibleName('Ada Lovelace');
 });
 
 test('the bar begins with the org’s own rows, its head is the org’s name with the org’s menu, and Inbox, Approvals and what was shared are not in it; a small screen keeps the way to another org at its head', async ({ page }) => {
@@ -595,52 +613,56 @@ test('the bar begins with the org’s own rows, its head is the org’s name wit
   await page.goto('/org/acme');
   await expect(row(page, 'Web')).toBeVisible();
 
-  // The head names the org and leads to its home; beside it the org's own menu. It is no second way to another org.
-  await expect(head(page)).toHaveText('Acme');
+  // The head names the org and leads to its home; the org's own menu is in Navigation's title row. Beside the rail it is no
+  // second way to another org.
+  await expect(head(page)).toHaveAccessibleName('Acme');
   await expect(head(page)).toHaveAttribute('href', '/org/acme');
-  await bar(page).getByRole('button', { name: /^Actions for Acme(?: · .+)?$/ }).click();
-  await expect(page.getByRole('menu', { name: /^Actions for Acme(?: · .+)?$/ }).getByRole('menuitem', { name: 'New project…' })).toBeVisible();
+  await orgMenu(page).click();
+  await expect(page.getByRole('menu', { name: 'Navigation actions' }).getByRole('menuitem', { name: 'New project…' })).toBeVisible();
   await page.keyboard.press('Escape');
-  await expect(bar(page).getByRole('button', { name: 'Acme', exact: true })).toHaveCount(0);
+  await expect(bar(page).getByRole('combobox', { name: 'Your orgs' })).toHaveCount(0);
+  await expect(bar(page).getByRole('button', { name: 'Other places' })).toHaveCount(0);
 
   // Its first rows are the org's: the team's chat and Messages. What is a person's own stands in the rail.
-  await expect(bar(page).getByRole('link').nth(1)).toHaveText('Team chat');
-  await expect(bar(page).getByRole('link').nth(2)).toHaveText('Messages');
+  await expect(bar(page).getByRole('list').first().getByRole('listitem')).toHaveText(['Team chat', 'Messages']);
   for (const gone of ['Inbox', 'Approvals', 'Shared with me']) await expect(bar(page).getByRole('link', { name: gone })).toHaveCount(0);
   for (const kind of ['Providers', 'Agents', 'Machines']) await expect(bar(page).getByRole('link', { name: kind, exact: true })).toHaveCount(0);
   await expect(rail(page).getByRole('link', { name: /^Inbox/ })).toBeVisible();
   await expect(rail(page).getByRole('link', { name: /^Approvals/ })).toBeVisible();
 
-  // The team's chat is the chat of the org: its row leads there.
-  await bar(page).getByRole('link', { name: 'Team chat' }).click();
-  await expect(page).toHaveURL(/\/org\/acme\?panel=chat$/);
+  // The team's chat is the chat of the org: its shortcut brings that chat forward, and the page in view stays.
+  await bar(page).getByRole('button', { name: 'Team chat' }).click();
+  await expect(composer(page)).toBeVisible();
+  await expect(page).toHaveURL(HOME);
 
   // A person's own org has no team, and no such row.
   await rail(page).getByRole('link', { name: 'Ada Lovelace (your own)' }).click();
-  await expect(head(page)).toHaveText('Ada Lovelace');
+  await expect(head(page)).toHaveAccessibleName('Ada Lovelace');
   await expect(bar(page).getByRole('link', { name: 'Messages' })).toBeVisible();
-  await expect(bar(page).getByRole('link', { name: 'Team chat' })).toHaveCount(0);
+  await expect(bar(page).getByRole('button', { name: 'Team chat' })).toHaveCount(0);
 
-  // A small screen has no rail: the head of the bar is the way to another org there, with what was shared after the last of them.
+  // A small screen has no rail: the head of the bar is the way to another org there, and its menu has what the rail has
+  // after its orgs.
   await page.setViewportSize({ width: 390, height: 800 });
   await page.getByRole('button', { name: 'Navigation', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: 'Navigation' });
-  await drawer.getByRole('button', { name: 'Ada Lovelace', exact: true }).click();
-  // The list takes the name of the button that opened it.
-  const orgs = page.getByRole('menu', { name: 'Ada Lovelace', exact: true });
-  // After the orgs it has what the rail has after its orgs: what was shared, and the resources.
-  await expect(orgs.getByRole('menuitem')).toHaveText(['Ada Lovelace (your own)', 'Acme', 'Resources']);
-  await orgs.getByRole('menuitem', { name: 'Acme' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
-  // The drawer is still open after another org was chosen in it: its tree is what was asked for. Its foot has no links.
+  await drawer.getByRole('combobox', { name: 'Your orgs' }).click();
+  const orgs = page.getByRole('listbox', { name: 'Your orgs' });
+  await expect(orgs.getByRole('option')).toHaveText(['Ada Lovelace (your own)', 'Acme']);
+  await orgs.getByRole('option', { name: 'Acme' }).click();
+  await expect(page).toHaveURL(HOME);
+  // The org chosen is in view: the drawer is put away, and opens again on its tree, whose foot has no links.
+  await expect(drawer).toHaveCount(0);
+  await page.getByRole('button', { name: 'Navigation', exact: true }).click();
   await expect(drawer.getByRole('treeitem', { name: /^Shop / })).toBeVisible();
   await expect(drawer.getByRole('link', { name: 'Resources', exact: true })).toHaveCount(0);
-  await drawer.getByRole('button', { name: 'Acme', exact: true }).click();
+  await drawer.getByRole('button', { name: 'Other places', exact: true }).click();
+  await expect(page.getByRole('menu', { name: 'Other places' }).getByRole('menuitem')).toHaveText(['Shared with me', 'Resources']);
   await page.getByRole('menuitem', { name: 'Resources', exact: true }).click();
   await expect(page).toHaveURL(/\/resources\/providers$/);
   // The drawer is put away: the screen that was asked for is not left under it.
   await expect(drawer).toHaveCount(0);
-  await expect(page.getByRole('navigation', { name: 'Kinds of resources' }).getByRole('link')).toHaveText(['Providers', 'Agents', 'Machines', 'Environments', 'Templates', 'Hosts']);
+  await expect(page.getByRole('navigation', { name: 'Kinds of resources' }).getByRole('link')).toHaveText(['Providers', 'Agents', 'Machines', 'Environments', 'Templates', 'Hosts', 'MCP servers', 'Mounts', 'Skills']);
 });
 
 test('the rail’s Resources brings the kinds of resource to the front of the left bar, each with how many its reader may see and opening to its things; the main area shows the one chosen, and the view stays in front from screen to screen', async ({ page }) => {
@@ -654,9 +676,10 @@ test('the rail’s Resources brings the kinds of resource to the front of the le
   const view = page.getByRole('navigation', { name: 'Resource navigation', exact: true });
   const kinds = view.getByRole('tree', { name: 'Kinds of resource and what each holds' });
   // Every kind there is, in the order their own screens name them, each with a number; the heading names no org.
-  await expect(kinds.getByRole('treeitem')).toHaveCount(6);
-  await expect(kinds.getByRole('treeitem')).toHaveText([/^Providers\d+$/, /^Agents\d+$/, /^Machines\d+$/, /^Environments\d+$/, /^Templates\d+$/, /^Hosts\d+$/]);
-  await expect(view.getByRole('heading', { name: 'Resource navigation' })).toBeVisible();
+  await expect(kinds.getByRole('treeitem')).toHaveCount(9);
+  await expect(kinds.getByRole('treeitem')).toHaveText([/^Providers\d+$/, /^Agents\d+$/, /^Machines\d+$/, /^Environments\d+$/, /^Templates\d+$/, /^Hosts\d+$/, /^MCP servers\d+$/, /^Mounts\d+$/, /^Skills\d+$/]);
+  // The view is named in the bar's title row, as every view of the bar is.
+  await expect(page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Resource navigation', exact: true })).toBeVisible();
   await expect(view).not.toContainText('Acme');
   await expect(rail(page).getByRole('button', { name: 'Resource navigation' })).toHaveAttribute('aria-pressed', 'true');
   await expect(bar(page)).toBeHidden();
@@ -720,7 +743,7 @@ test('the tree is narrowed to one place from the place’s menu and stays there:
   await expect(row(page, 'Infra')).toHaveCount(0);
   await expect(row(page, 'Shop')).toHaveCount(0);
   await expect(beginsAt(page)).toHaveText('Shop');
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(HOME);
   // The keyboard is in the tree, on its first row.
   await expect(row(page, 'Checkout')).toBeFocused();
 
@@ -735,7 +758,7 @@ test('the tree is narrowed to one place from the place’s menu and stays there:
   await expect(row(page, 'Card fees')).toHaveAttribute('aria-level', '1');
   await expect(beginsAt(page)).toHaveText('Payments');
   await expect(row(page, 'Infra')).toHaveCount(0);
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(HOME);
 
   // It belongs to the work on this device: the same person's other browser shows everything.
   const second = await secondReader(browser, baseURL, '/org/acme', PEOPLE.ada);
@@ -914,7 +937,10 @@ test('the finder finds the acts that move the tree’s beginning by the words ot
   await expect(finder.getByRole('option', { name: /^Show everything/ })).toHaveCount(0);
   await finder.getByRole('combobox', { name: 'Search terms', exact: true }).fill('>show one place up');
   await finder.getByRole('option', { name: /^Show one place up/ }).click();
-  // Topic -> project -> org, without an authority-changing shortcut.
+  // Topic -> project -> the org inside -> the whole org, one place at a time, without an authority-changing shortcut.
+  await expect(beginsAt(page)).toHaveText('Web');
+  await begins(page).getByRole('button', { name: 'Show one place up' }).click();
+  await expect(beginsAt(page)).toHaveText('Research');
   await begins(page).getByRole('button', { name: 'Show one place up' }).click();
   await expect(begins(page)).toHaveCount(0);
   await expect(row(page, 'Infra')).toBeVisible();
@@ -1047,18 +1073,17 @@ test('the field at the top of the tree narrows it by a name: what is found stays
   await expect(field).not.toBeFocused();
   await page.keyboard.press('?');
   const keys = page.getByRole('dialog', { name: 'Keyboard shortcuts' });
-  // What acts here is listed first; the keys of other screens follow, to be changed from anywhere.
-  const here = keys.getByRole('list', { name: 'Here' });
-  await expect(here.getByText('Previous thread', { exact: true })).toBeVisible();
-  await expect(here.getByText('Next unread thread', { exact: true })).toBeVisible();
-  await expect(here.getByText('Narrow the tree of the left bar by name')).toHaveCount(0);
-  await expect(keys.getByRole('list', { name: 'On other screens' }).getByText('Narrow the tree of the left bar by name')).toBeVisible();
+  // Each binding says where it acts: here, or on other screens, whose keys can be changed from anywhere.
+  const binding = (name: string) => keys.getByRole('row').filter({ has: page.getByRole('cell', { name, exact: true }) });
+  await expect(binding('Previous thread').getByRole('cell', { name: 'Here', exact: true })).toBeVisible();
+  await expect(binding('Next unread thread').getByRole('cell', { name: 'Here', exact: true })).toBeVisible();
+  await expect(binding('Narrow the tree of the left bar by name').getByRole('cell', { name: 'On other screens', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(keys).toHaveCount(0);
   // Asked from the tree, the list has it here, and still has it while the list itself holds the keyboard.
   await row(page, 'Web').focus();
   await page.keyboard.press('?');
-  await expect(here.getByText('Narrow the tree of the left bar by name')).toBeVisible();
+  await expect(binding('Narrow the tree of the left bar by name').getByRole('cell', { name: 'Here', exact: true })).toBeVisible();
 });
 
 // ---------------------------------------------------------------- what the tree shows
@@ -1103,25 +1128,22 @@ test('the tree shows threads, documents and chats as its reader ticks them, kept
   await tick(second.page, 'Threads');
   await expect(row(page, 'Repro')).toBeVisible();
 
-  // Chats: every place somebody wrote in has a row for its chat, after its documents, and the team's chat is the tree's last row.
+  // Chats: every place somebody wrote in has a row for its chat, after its documents. The team's chat keeps its one home, the
+  // Team container, which the shortcut above the tree brings forward, ticked or not.
   await tick(second.page, 'Chats');
   await expect(chatRow(page)).toHaveCount(1);
-  await expect(chatRow(page, 'Team chat')).toHaveAttribute('aria-level', '1');
   const names = await standing(page);
   expect(names.indexOf('Chat')).toBeGreaterThan(names.indexOf('Rollout plan'));
   expect(names.indexOf('Chat')).toBeLessThan(names.indexOf('Migrate CI'));
-  expect(names.at(-1)).toBe('Team chat');
-  // The row "Team chat" above Starred has gone: the one in the tree is the one.
-  await expect(bar(page).getByRole('link', { name: 'Team chat' })).toHaveCount(1);
+  await expect(chatRow(page, 'Team chat')).toHaveCount(0);
+  await expect(bar(page).getByRole('button', { name: 'Team chat' })).toHaveCount(1);
   await page.reload();
-  await expect(chatRow(page, 'Team chat')).toBeVisible();
   await expect(chatRow(page)).toHaveCount(1);
 
-  // Unticked again, the tree has no chats and the team's chat is back at the top.
+  // Unticked again, the tree has no chats, and the shortcut stays.
   await tick(page, 'Chats');
   await expect(chatRow(page)).toHaveCount(0);
-  await expect(chatRow(page, 'Team chat')).toHaveCount(0);
-  await expect(bar(page).getByRole('link', { name: 'Team chat' })).toHaveCount(1);
+  await expect(bar(page).getByRole('button', { name: 'Team chat' })).toHaveCount(1);
   await expect(chatRow(second.page, 'Team chat')).toHaveCount(0);
   await second.context.close();
 });
@@ -1171,7 +1193,7 @@ test('a chat that is unread makes the closed row above it bold with a dot and no
 
   // The glyph leads to the chat; read there, nothing is left on the row.
   await fix.getByRole('link', { name: 'Chat', exact: true }).click();
-  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?panel=chat`));
+  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?(.*&)?panel=chat(&|$)`));
   // Her name in the message is drawn as a mention of its own: the words after it are what is looked for.
   await expect(page.getByText('can you look at this?').first()).toBeVisible();
   await expect(fix.getByText('1 mention of you inside')).toHaveCount(0, { timeout: 30_000 });
@@ -1220,7 +1242,7 @@ test('with chats in the tree, a message arrives on the chat’s row as it is wri
   await page.keyboard.press('Alt+Shift+ArrowDown');
   await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
   await page.keyboard.press('Alt+Shift+ArrowDown');
-  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?panel=chat`));
+  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?(.*&)?panel=chat(&|$)`));
   await expect(chatRow(page)).toHaveAttribute('aria-current', 'page');
   await expect(page.getByText('One more thing.').first()).toBeVisible();
 });
@@ -1246,15 +1268,15 @@ test('a chat its reader does not follow is a quiet row that says nothing on the 
 
   // She sets the chat to nothing herself, and is mentioned there: the row stays quiet and carries the mention.
   await quiet.getByRole('link').click();
-  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.upgradeDeps}\\?panel=chat`));
+  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.upgradeDeps}\\?(.*&)?panel=chat(&|$)`));
   // The chat is shown before its bell is pressed: a list opened while the chat is still being read closes again.
   await expect(page.getByText('Which versions?').first()).toBeVisible();
   await page.getByRole('button', { name: 'Notification settings', exact: true }).click();
-  await expect(page.getByText(/^You have not chosen here/)).toBeVisible();
+  // The reader has chosen nothing here: the default is in force, and is what the list says it is.
+  await expect(page.getByRole('menuitemradio', { name: /^Default/ })).toHaveAttribute('aria-checked', 'true');
   await page.getByRole('menuitemradio', { name: 'Off', exact: true }).click();
   await page.getByRole('button', { name: 'Notification settings', exact: true }).click();
-  await expect(page.getByText('You chose no notifications', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'You chose no notifications', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('menuitemradio', { name: 'Off', exact: true })).toHaveAttribute('aria-checked', 'true');
   await page.keyboard.press('Escape');
   await page.goto('/org/acme');
   await expect(chatRow(page)).toHaveCount(1);

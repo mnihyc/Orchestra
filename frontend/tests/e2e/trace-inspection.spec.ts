@@ -45,5 +45,8 @@ test('a deleted folder and topic reuse place content, check their children separ
 
 test('purged content and revoked restoration authority show the safe refusal without old content', async ({ page }) => {
   await signIn(page); await page.goto(`/inspect/thread/${TRACE.purged}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible(); await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
-  await deny('ada', [`topic.manage@${ACME.fixLogin}`]); await page.goto(`/inspect/thread/${TRACE.thread}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible(); await expect(page.getByText('Ask Ada Lovelace')).toBeVisible(); await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
+  await deny('ada', [`topic.manage@${ACME.fixLogin}`]); await page.goto(`/inspect/thread/${TRACE.thread}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible();
+  await page.getByRole('button', { name: 'Review access', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Review access', exact: true })).toContainText('Ask Ada Lovelace');
+  await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
 });

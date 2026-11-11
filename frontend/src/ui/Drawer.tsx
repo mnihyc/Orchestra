@@ -10,6 +10,7 @@ import type { CSSProperties, ReactNode, PointerEventHandler, MouseEventHandler }
 import { useTranslation } from 'react-i18next';
 
 import { cx } from '@/ui/cx';
+import { quietFocusScope } from '@/ui/focus';
 import { ContentBoundary } from '@/ui/ContentBoundary';
 import { overlayClasses, useOpener } from '@/ui/Dialog';
 import { scrollAreaClasses } from '@/ui/ScrollArea';
@@ -71,11 +72,20 @@ export function Drawer({ open, prompt = true, modal = true, persistent = false, 
           style={{ ...style, ...layer.style }}
           data-prompt-current={prompt && !layer.covered}
           aria-describedby={undefined}
-          onOpenAutoFocus={opener.remember}
+          onOpenAutoFocus={(event) => {
+            opener.remember();
+            if (!prompt) {
+              const release = quietFocusScope(event.currentTarget as HTMLElement);
+              // Radix chooses its ordinary first control synchronously after this event.
+              queueMicrotask(release);
+            }
+          }}
           onCloseAutoFocus={(event) => { if (restoreFocus) opener.giveBack(event); else event.preventDefault(); }}
           onInteractOutside={(event) => { if (persistent) event.preventDefault(); }}
           className={cx(
-            'fixed z-(--layer-modal) flex flex-col border-border bg-surface shadow-lg',
+            'fixed flex flex-col border-border bg-surface shadow-lg',
+            // Modeless layout sheets stay below detached views; real prompts keep their modal layer.
+            prompt || modal ? 'z-(--layer-modal)' : 'z-[calc(var(--layer-overlay)-1)]',
             SIDES[side],
             className,
           )}

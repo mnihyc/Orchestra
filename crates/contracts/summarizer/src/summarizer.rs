@@ -1,8 +1,8 @@
 //! Summarize operation and typed failure boundary.
 //!
-//! A **summarizer** turns activity into text. Each of a node's title, description and tags is maintained by
-//! people or by automation; what automation does is configuration (`auto.title`, `auto.description`,
-//! `auto.tags`), and `auto.summarizer` names the implementation and configures it. The engine owns
+//! A **summarizer** turns activity into text. Titles and tags may be maintained by people or automation;
+//! `auto.title` and `auto.tags` choose that behavior, while `auto.summarizer` selects and configures the
+//! producer. Written descriptions are never automation targets. The engine owns
 //! triggering, rate limiting, the rule that a person's edit wins, and the ledger; a summarizer only turns
 //! activity into text. A summarizer that needs no model (rules, templates, an internal service) is as valid
 //! as one that calls one.
@@ -26,6 +26,8 @@ use crate::result::SummaryResult;
 
 /// The longest title: 80 characters.
 pub const TITLE_MAX_CHARS: u32 = 80;
+/// The default small paragraph budget; each target may choose another positive budget.
+pub const SUMMARY_CHARS: u32 = 600;
 /// The longest description: one line of 200 characters.
 pub const DESCRIPTION_MAX_CHARS: u32 = 200;
 /// A handoff stays small without truncating an exact path or command.
@@ -50,6 +52,7 @@ impl SummaryLimits {
     pub const fn for_field(field: SummaryField, max_tags: u32) -> Self {
         Self {
             max_chars: match field {
+                SummaryField::Summary => SUMMARY_CHARS,
                 SummaryField::Title => TITLE_MAX_CHARS,
                 SummaryField::Description | SummaryField::Rollup => DESCRIPTION_MAX_CHARS,
                 SummaryField::Tags => 0,

@@ -1,4 +1,4 @@
-/** Seven ordinary detail pages stay within two screens, with visible tabs and quiet unopened panels. */
+/** Seven ordinary detail pages stay within two screens, with reachable tabs and quiet unopened panels. */
 import { expect, type Page, type Request, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
@@ -12,16 +12,28 @@ const pages = [
 ] as const;
 const creationKinds = { agent: 'agents', machine: 'machines', environment: 'environments', host: 'hosts', template: 'templates', mcp: 'mcp', mount: 'mounts' } as const;
 
-async function allTabsVisible(page: Page, overview: string) {
+async function allTabsReachable(page: Page, overview: string) {
   const tabs = page.getByRole('tablist').filter({ has: page.getByRole('tab', { name: overview, exact: true }) });
   const choices = tabs.getByRole('tab');
-  expect(await choices.count()).toBeGreaterThanOrEqual(3); expect(await choices.count()).toBeLessThanOrEqual(6);
-  for (const choice of await choices.all()) await expect(choice).toBeInViewport();
-  const bounds = await tabs.evaluate((element) => Array.from(element.querySelectorAll<HTMLElement>('[role="tab"]')).map((tab) => {
-    const rect = tab.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width };
-  }));
+  const count = await choices.count();
+  expect(count).toBeGreaterThanOrEqual(3);
+  expect(count).toBeLessThanOrEqual(6);
   const width = page.viewportSize()?.width ?? 0;
-  for (const bound of bounds) { expect(bound.left).toBeGreaterThanOrEqual(0); expect(bound.width).toBeGreaterThan(0); expect(bound.right).toBeLessThanOrEqual(width + 1); }
+  // Scroll the shared strip while keeping Overview selected for the unopened-panel checks.
+  for (const target of [tabs, ...await choices.all()]) {
+    await target.scrollIntoViewIfNeeded();
+    await expect(target).toBeInViewport();
+    const bound = await target.evaluate((element) => {
+      const { left, right, width } = element.getBoundingClientRect();
+      return { left, right, width };
+    });
+    expect(bound.left).toBeGreaterThanOrEqual(0);
+    expect(bound.width).toBeGreaterThan(0);
+    expect(bound.right).toBeLessThanOrEqual(width + 1);
+  }
+  const selected = tabs.getByRole('tab', { name: overview, exact: true });
+  await selected.scrollIntoViewIfNeeded();
+  await expect(selected).toHaveAttribute('aria-selected', 'true');
 }
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1440, 400]) {
@@ -44,7 +56,15 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       reads = []; pending.clear(); await page.goto(path);
       const heading = page.getByRole('heading', { level: 1 }); await expect(heading).toHaveCount(1); await expect(heading).toBeVisible();
       await expect(page.getByRole('button', { name: words.resourceCreation[creationKinds[kind]], exact: true })).toHaveCount(0);
-      await expect(page.locator('[data-resource-facts]')).toHaveCount(1); await allTabsVisible(page, words.resourceDetails.overview);
+      // The active overview and its optional disclosure have separate checks.
+      const overview = page.getByRole('tabpanel', { name: words.resourceDetails.overview, exact: true });
+      const facts = overview.locator('[data-resource-facts]:visible:not([data-resource-details] *)');
+      if (kind === 'machine' || kind === 'host') {
+        const about = kind === 'machine' ? words.machines.overview.about : words.hosts.overview.about;
+        await expect.poll(() => facts.evaluateAll((groups) => groups.map((group) => group.getAttribute('aria-label'))))
+          .toEqual([about, words.regionalGateways.connector]);
+      } else await expect(facts).toHaveCount(1);
+      await allTabsReachable(page, words.resourceDetails.overview);
       await expect(page.locator('[data-resource-details][open]')).toHaveCount(0);
       const height = await heading.evaluate((element) => {
         const body = element.closest('header')?.parentElement; if (body === null || body === undefined) throw new Error('The resource lost its page body');
@@ -60,8 +80,39 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     // The shared route is left idle for a complete minute; this is an executable gate, never a writer's claimed measurement.
     reads = []; await page.waitForTimeout(60_000); expect(reads).toEqual([]);
     if (locale === 'en' && theme === 'light' && width === 1440) {
-      await page.evaluate(() => { document.documentElement.style.zoom = '2'; }); await allTabsVisible(page, words.resourceDetails.overview);
+      await page.evaluate(() => { document.documentElement.style.zoom = '2'; }); await allTabsReachable(page, words.resourceDetails.overview);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     }
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`keeps machine Access in its six-tab Policy group (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    expect((await page.request.post(`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/__double/request-feeds/fixtures`)).ok()).toBe(true);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/resources/machines/${RUNS_ON.laptop}?tab=access`);
+    const navigation = page.getByRole('tablist', { name: words.machines.tabs.label, exact: true });
+    await expect(navigation.getByRole('tab')).toHaveCount(6);
+    await expect(navigation.getByRole('tab', { name: words.machines.tabs.policy, exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('[data-resource-section="access"]')).toBeVisible();
+    const sections = page.locator('[data-section-nav]').filter({ has: page.locator('a[data-section-id="access"]') });
+    const choice = sections.getByRole('combobox', { name: words.machines.tabs.policy, exact: true });
+    if (await choice.isVisible()) {
+      await expect(choice).toHaveValue(words.machines.tabs.access);
+      await choice.click();
+      await page.getByRole('option', { name: words.machines.tabs.policy, exact: true }).click();
+    } else await sections.getByRole('link', { name: words.machines.tabs.policy, exact: true }).click();
+    await expect(page.locator('[data-resource-section="policy"]')).toBeVisible();
+    await expect(page).toHaveURL(/tab=policy/);
   });
 }

@@ -1,6 +1,9 @@
 //! Current thread command rosters, reviewed exact End requests and factual outcomes.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
 use crate::routes::Access::Permission;
+use orch_access_contract::key_scope::{KeyAction::Read, KeyTargetKind::Object};
+use orch_access_contract::permissions::ObjectKind as K;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,22 @@ pub enum BackgroundPlace {
     Provider,
 }
 
+/// A safe action-specific cause, separate from availability of the native inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundEndReason {
+    /// This reader has no current thread Interact.
+    InteractRequired,
+    /// The native source does not support exact End.
+    Unsupported,
+    /// The native session is disconnected.
+    Offline,
+    /// Current End facts could not be obtained.
+    Unavailable,
+    /// No current native target can be reviewed for this work.
+    NoCurrentTarget,
+}
+
 /// One current command with its durable source links and optional native facts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct BackgroundCommand {
@@ -65,11 +84,17 @@ pub struct BackgroundCommand {
     pub cpu_percent: Option<f64>,
     /// Its native memory use, if reported.
     pub memory_bytes: Option<i64>,
+    /// Why this command cannot currently be ended, without disclosing private sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<BackgroundEndReason>,
 }
 
 /// A live roster lives only in memory and is never a durable sync row or job result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ThreadBackground {
+    /// Recorded owned tasks, their completion policy and visible admission holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wake: Option<BackgroundWakeStatus>,
     /// Native listing and exact End are both supported.
     pub supported: bool,
     /// The observation's moment, when known.
@@ -88,8 +113,53 @@ pub struct ThreadBackground {
     pub list_ref: Option<String>,
     /// Thirty seconds after this review's most recent active transfer.
     pub expires_at: Option<Time>,
-    /// Current thread Interact and native support permit End.
+    /// Current thread Interact, native support and an exact current target permit End.
     pub can_end: bool,
+    /// Why End is unavailable for this reader and current native set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<BackgroundEndReason>,
+}
+
+/// The session's effective completion behavior beside its named owned work.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BackgroundWakeStatus {
+    /// Current inherited value, rechecked before any completion turn.
+    pub setting: bool,
+    /// Value accepted by the existing native session.
+    pub effective: bool,
+    /// Session refresh is deferred while this work runs.
+    pub refresh_deferred: bool,
+    /// Running work and work lost with the current session.
+    pub tasks: Vec<BackgroundWork>,
+    /// Finished tasks whose wake is held by Stop until a human sends input.
+    pub held_completions: i64,
+}
+
+/// A named recorded task, never an arbitrary process or unredacted native roster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BackgroundWork {
+    /// Opaque identity within the retained segment.
+    pub id: String,
+    /// The original timeline item, including the subagent lane anchor.
+    pub item_id: Id,
+    /// The originating turn.
+    pub turn_id: Id,
+    /// The accepted input that started this work.
+    pub input_id: Id,
+    /// That input's original author, when still available.
+    pub author: Option<crate::users::UserRef>,
+    /// Command or child agent.
+    pub kind: crate::native::BackgroundTaskKind,
+    /// Reported name or command preview, masked by the current reader's rules.
+    pub label: String,
+    /// Last recorded native state.
+    pub state: crate::native::BackgroundTaskState,
+    /// Current Interact and this native kind's support permit opening an exact End review.
+    pub can_end: bool,
+    /// Matching current native review identity; absent when End is unsupported or unavailable.
+    pub end_id: Option<String>,
+    /// When the session's loss was observed.
+    pub lost_at: Option<Time>,
 }
 
 /// A reviewed selected set, or every member of one complete captured snapshot.
@@ -172,7 +242,21 @@ pub struct ThreadBackgroundGetQuery {
 
 crate::endpoints! {
     /// Reads the current native commands of this thread's existing sessions.
-    ThreadBackgroundGet: GET "/threads/{id}/background", Permission("thread.view"), query ThreadBackgroundGetQuery, none, json ThreadBackground, 200;
+    ThreadBackgroundGet: GET "/threads/{id}/background", Permission("thread.view"), query ThreadBackgroundGetQuery, none, json ThreadBackground, 200,
+        operation Op::facets(&[
+            Facet::required(
+                Read,
+                &[Object(K::Thread)],
+                Target::TypedPath {
+                    parameter: "id",
+                    kind: Object(K::Thread),
+                },
+            ),
+            Facet::response_content(
+                &[Object(K::Provider)],
+                Target::ResolvedCollection("background_provider_directories"),
+            ),
+        ]);
     /// Ends exactly the reviewed commands through an attributed job.
     ThreadBackgroundEnd: POST "/threads/{id}/background/end", Permission("thread.interact"), none, json BackgroundEndRequest, json crate::workspace::Job, 202;
 }

@@ -12,34 +12,38 @@ test('only the top bar holds the switch; native-only rows carry one mark and eve
   const beta = { id: '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b01', kind: 'org' as const, name: 'Beta', redacted: false };
   const betaReach = { place: beta, private: false };
   const otherId = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5b02';
-  // Only the three typed answers under review are controlled. Real layout, navigation, cache
+  // Only the typed answers under review are controlled. Real layout, navigation, cache
   // rebasing, commands and the global/mirror controls remain the application's own.
   await page.route('**/api/v1/me/admin-mode', async (route) => {
-    if (route.request().method() === 'PUT') {
-      const body: unknown = route.request().postDataJSON();
-      if (typeof body !== 'object' || body === null || !('as_admin' in body) || typeof body.as_admin !== 'boolean') throw new Error('Wrong session-mode body');
-      enabled = body.as_admin;
-    }
-    await route.fulfill({ json: { available: true, as_admin: enabled } });
-  });
-  await page.route(/\/api\/v1\/environments(?:\?|$)/, async (route) => {
     const reply = await route.fetch();
     const body: unknown = await reply.json();
-    const items = Array.isArray(body) ? body : typeof body === 'object' && body !== null && 'items' in body && Array.isArray(body.items) ? body.items : [];
-    // These are complete real fixture records, with only the reviewed reach/identity facts varied.
-    const supplied = items as Environment[];
-    own ??= supplied.find((row) => typeof row.name === 'string' && 'access' in row);
-    if (own === undefined) throw new Error('The development world has no complete environment fixture');
+    if (reply.status() !== 200 || typeof body !== 'object' || body === null || !('as_admin' in body) || typeof body.as_admin !== 'boolean') throw new Error('Wrong session-mode answer');
+    enabled = body.as_admin;
+    // Use the real session state so a fresh bootstrap preserves the chosen mode too.
+    await route.fulfill({ response: reply, json: body });
+  });
+  await page.route(/\/api\/v1\/everything(?:\?|$)/, async (route) => {
+    if (own === undefined) {
+      const reply = await route.fetch({ url: new URL('/api/v1/environments', route.request().url()).href });
+      const body: unknown = await reply.json();
+      if (!Array.isArray(body)) throw new Error('The environment fixture list must be an array');
+      // The resource library now reads typed details through Everything, rather than the legacy list.
+      own = (body as Environment[]).find((row) => typeof row.name === 'string' && 'access' in row);
+      if (own === undefined) throw new Error('The development world has no complete environment fixture');
+    }
     const ordinary = { ...own, name: 'My environment', access: { ...own.access, admin_access: null, participating: true, admin_only: [] } };
     const elevated = { ...own, id: otherId, name: 'Other org environment', home: beta, org_id: beta.id,
       access: { ...own.access, admin_access: betaReach, admin_place: beta, participating: false, admin_only: ['environment.view', 'environment.manage'] } };
-    await route.fulfill({ json: enabled ? [ordinary, elevated] : [ordinary] });
-  });
-  await page.route(/\/api\/v1\/everything(?:\?|$)/, async (route) => {
-    const row = inventoryRow({ id: otherId, kind: 'environment', name: 'Other org environment', parent_id: null,
-      href: `/resources/environments/${otherId}`, owner: own?.owner ?? null, place_label: 'Beta', admin_access: betaReach });
-    const focused = new URL(route.request().url()).searchParams.get('participating') === 'true';
-    await route.fulfill({ json: { items: enabled && !focused ? [row] : [], next_cursor: null } });
+    const query = new URL(route.request().url()).searchParams;
+    const items = (enabled ? [ordinary, elevated] : [ordinary])
+      .filter((row) => row.name.toLowerCase().includes((query.get('q') ?? '').toLowerCase()))
+      .filter((row) => query.get('participating') !== 'true' || row.access.participating)
+      .filter((row) => query.get('admin_access') !== 'false' || row.access.admin_access === null)
+      .map((row) => inventoryRow({ id: row.id, kind: 'environment', name: row.name,
+        href: `/resources/environments/${row.id}`, owner: row.owner, place_label: row.id === otherId ? 'Beta' : null,
+        admin_access: row.access.admin_access, participating: row.access.participating,
+        resource: { kind: 'environment', value: row } }));
+    await route.fulfill({ json: { items, next_cursor: null } });
   });
   await signIn(page);
   await page.goto('/resources/environments');
@@ -61,14 +65,19 @@ test('only the top bar holds the switch; native-only rows carry one mark and eve
   await expect(ownRow.locator('[data-resource-owner]')).toBeVisible();
   await page.goto('/everything?q=Other%20org%20environment');
   const everything = page.getByRole('treegrid');
-  await expect(everything.getByRole('link', { name: 'Other org environment', exact: true })).toBeVisible();
+  const inventoryLink = everything.getByRole('link', { name: 'Other org environment · Beta', exact: true });
+  await expect(inventoryLink).toBeVisible();
   await expect(everything.getByRole('img', { name: 'You see this as an admin of Beta', exact: true })).toBeVisible();
-  const filtered = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith('/everything') && new URL(request.url()).searchParams.get('admin_access') === 'true');
-  await page.getByRole('checkbox', { name: 'As admin', exact: true }).click();
+  const filtered = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith('/everything') && new URL(request.url()).searchParams.get('admin_access') === 'false');
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
+  await page.getByRole('checkbox', { name: 'Hide admin-only', exact: true }).click();
   await filtered;
-  await expect(everything.getByRole('link', { name: 'Other org environment', exact: true })).toBeVisible();
+  await expect(inventoryLink).toHaveCount(0);
+  await page.getByRole('checkbox', { name: 'Hide admin-only', exact: true }).click();
+  await page.keyboard.press('Escape');
+  await expect(inventoryLink).toBeVisible();
   await asAdmin(page, false);
-  await expect(everything.getByRole('link', { name: 'Other org environment', exact: true })).toHaveCount(0);
+  await expect(inventoryLink).toHaveCount(0);
   await page.goto('/resources/environments');
   await expect(table.getByRole('link', { name: 'Other org environment', exact: true })).toHaveCount(0);
   await expect(control).toHaveAttribute('data-as-admin', 'false');

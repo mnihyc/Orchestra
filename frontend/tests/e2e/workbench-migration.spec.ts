@@ -1,11 +1,12 @@
 /** Device layouts from the tab-bar release retain every chosen location and target after upgrading. */
 import { expect, type Page, test } from '@playwright/test';
-import type { Layout } from '../../src/features/workbench/layout';
+import { LAYOUT_VERSION, type Layout } from '../../src/features/workbench/layout';
 import { id, RUNS_ON } from '../doubles/fixtures';
 import { begin } from './inspector-support';
 import { ACME, signIn } from './support';
 
 const KEY = `orch.${id(1, 1)}.workbench.thread`;
+const WORKSPACE = `orch.${id(1, 1)}.workbench.workspace`;
 const file = (name: string, path: string) => ({ id: name, view: 'file', of: { env: RUNS_ON.workspace, thread: ACME.mainThread, path }, keep: true });
 function legacy() {
   return {
@@ -20,7 +21,15 @@ function legacy() {
   };
 }
 async function seed(page: Page, layout: unknown) {
-  await page.evaluate(({ key, layout }) => localStorage.setItem(key, JSON.stringify({ arrangement: 'conversation', layout: JSON.stringify(layout) })), { key: KEY, layout });
+  // Model an old installation before the workspace exists. Sign-in has already
+  // created today's workspace, so seed once before the next app boot; reloads
+  // then exercise the migrated saved value instead of reseeding the fixture.
+  await page.addInitScript(({ key, workspace, layout }) => {
+    if (sessionStorage.getItem('legacy-workspace-seeded') !== null) return;
+    localStorage.removeItem(workspace);
+    localStorage.setItem(key, JSON.stringify({ arrangement: 'conversation', layout: JSON.stringify(layout) }));
+    sessionStorage.setItem('legacy-workspace-seeded', 'true');
+  }, { key: KEY, workspace: WORKSPACE, layout });
 }
 async function saved(page: Page): Promise<Layout | null> {
   return page.evaluate((key) => {
@@ -28,7 +37,7 @@ async function saved(page: Page): Promise<Layout | null> {
     if (text === null) return null;
     const envelope = JSON.parse(text) as { layout: string };
     return JSON.parse(envelope.layout) as Layout;
-  }, KEY);
+  }, WORKSPACE);
 }
 
 test.beforeEach(async () => { await begin(); });
@@ -40,16 +49,21 @@ test('a rearranged v1 layout keeps its side-bar choices, main split, bottom, siz
   await seed(page, old);
   await page.goto(`/thread/${ACME.mainThread}`);
   await expect(page.locator('[data-workbench-bar="left"]')).toHaveAttribute('data-active-container', 'code');
-  await expect(page.locator('[data-workbench-bar="left"]').getByRole('button', { name: 'Files', exact: true })).toBeVisible();
+  await expect(page.locator('[data-workbench-bar="left"] [data-section-view="files"]')).toBeVisible();
   await expect(page.locator('[data-workbench-bar="right"]')).toHaveAttribute('data-active-container', 'code');
   await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
   await expect(page.getByRole('tab', { name: 'app.ts', exact: true })).toBeVisible();
   // An ordinary choice writes the migrated value; loading alone does not discard or replace the old value.
   await page.getByRole('button', { name: 'Left bar', exact: true }).click();
   await page.getByRole('button', { name: 'Left bar', exact: true }).click();
-  await expect.poll(async () => (await saved(page))?.version).toBe(2);
+  await expect.poll(async () => (await saved(page))?.version).toBe(LAYOUT_VERSION);
   const layout = await saved(page);
-  expect(layout?.main).toEqual(old.main);
+  // The old live screen becomes its addressed page; split, identities and file target are retained.
+  const [route, editor] = old.main.children;
+  if (route === undefined || editor === undefined) throw new Error('The legacy fixture has both main cells');
+  expect(layout?.main).toEqual({ ...old.main, children: [
+    { ...route, tabs: [{ id: 'screen', view: 'page', of: { href: `/thread/${ACME.mainThread}` } }] }, editor,
+  ] });
   expect(layout?.bottom).toEqual(old.bottom);
   expect(layout?.left.size).toBe(333);
   expect(layout?.right.size).toBe(367);
@@ -67,21 +81,24 @@ test('the secondary main tab list shows every visible title, the dirty dot and C
   await seed(page, { ...old, bottom: { ...old.bottom, open: false }, main: { kind: 'group', id: 'editors', active: 'app', tabs: [{ id: 'screen', view: 'screen' }, file('app', 'web/src/app.ts'), file('util', 'web/src/util.ts')] } });
   await page.goto(`/thread/${ACME.mainThread}`);
   await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab')).toHaveCount(3);
+  // Inactive file readers stay quiet; explicitly visit each retained target to admit its title.
+  await page.locator('#tab-util').click();
   await expect(page.getByRole('tab', { name: 'util.ts', exact: true })).toBeVisible();
+  await page.locator('#tab-app').click();
   await expect(page.locator('[data-file-tab="web/src/app.ts"] .cm-content')).toBeVisible();
   await page.locator('[data-file-tab="web/src/app.ts"] .cm-content').fill('export const changed = true;');
   const all = page.getByRole('button', { name: 'Find tab in Main area', exact: true });
   await all.click();
-  const menu = page.getByRole('menu', { name: 'Find tab in Main area', exact: true });
-  await expect(menu.getByRole('menuitem', { name: 'Main thread', exact: true })).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: 'app.ts, unsaved', exact: true }).locator('[data-unsaved]')).toBeVisible();
-  await expect(menu.getByRole('menuitem', { name: 'Close app.ts', exact: true })).toBeVisible();
-  await menu.getByRole('menuitem', { name: 'util.ts', exact: true }).click();
+  const menu = page.getByRole('dialog', { name: 'Find tab in Main area', exact: true });
+  await expect(menu.getByRole('option', { name: 'Main thread', exact: true })).toBeVisible();
+  await expect(menu.getByRole('option', { name: 'app.ts, unsaved', exact: true }).locator('[data-unsaved]')).toBeVisible();
+  await expect(menu.getByRole('button', { name: 'Close app.ts', exact: true })).toBeVisible();
+  await menu.getByRole('option', { name: 'util.ts', exact: true }).click();
   const selected = page.getByRole('tab', { name: 'util.ts', exact: true });
   await expect(selected).toHaveAttribute('aria-selected', 'true');
   await expect(selected).toBeInViewport();
   await all.click();
-  await menu.getByRole('menuitem', { name: 'Close util.ts', exact: true }).click();
+  await menu.getByRole('button', { name: 'Close util.ts', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'util.ts', exact: true })).toHaveCount(0);
 });
 
@@ -106,24 +123,20 @@ test('main and bottom groups wrap all their tabs and retain pointer and keyboard
     const tabs = page.getByRole('tablist', { name, exact: true }).getByRole('tab');
     const strip = page.getByRole('tablist', { name, exact: true });
     await expect(tabs).toHaveCount(count);
-    const box = await strip.boundingBox();
-    expect(box).not.toBeNull();
-    if (box === null) continue;
+    // The strip wraps up to two rows and scrolls further rows in its native viewport.
+    // Every retained tab must fit and remain clickable when brought into view.
     for (const tab of await tabs.all()) {
-      await expect(tab).toBeVisible();
-      const control = await tab.boundingBox();
-      expect(control).not.toBeNull();
-      if (control === null) continue;
-      expect(control.x).toBeGreaterThanOrEqual(box.x - 1);
-      expect(control.x + control.width).toBeLessThanOrEqual(box.x + box.width + 1);
-      expect(control.y).toBeGreaterThanOrEqual(box.y - 1);
-      expect(control.y + control.height).toBeLessThanOrEqual(box.y + box.height + 1);
+      await expect.poll(async () => {
+        await tab.scrollIntoViewIfNeeded();
+        const box = await strip.boundingBox(), control = await tab.boundingBox();
+        return box !== null && control !== null && control.x >= box.x - 1
+          && control.x + control.width <= box.x + box.width + 1 && control.y >= box.y - 1
+          && control.y + control.height <= box.y + box.height + 1;
+      }).toBe(true);
     }
-    const first = await tabs.first().boundingBox();
-    const last = await tabs.last().boundingBox();
-    expect(first).not.toBeNull();
-    expect(last).not.toBeNull();
-    if (first !== null && last !== null) expect(last.y).toBeGreaterThan(first.y);
+    const positions = await tabs.evaluateAll((items) => [items[0]?.getBoundingClientRect().top, items.at(-1)?.getBoundingClientRect().top]);
+    expect(positions[0]).toBeDefined(); expect(positions[1]).toBeDefined();
+    expect(positions[1]).toBeGreaterThan(positions[0]!);
     await tabs.last().click();
     await expect(tabs.last()).toHaveAttribute('aria-selected', 'true');
     await tabs.last().press('Home');

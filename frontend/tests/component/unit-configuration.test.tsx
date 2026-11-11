@@ -93,7 +93,8 @@ it.each(['environment','provider'] as const)('shows the declared resource settin
 
 it('shows each applicable value with its actual ancestor and when it takes effect', async () => {
   server.rows = [setting('env.variables', { PATH_HINT: 'literal' }, { source: { scope: 'org', node: { id: 'org', kind: 'org', name: 'Acme', redacted: false } } }),
-    setting('env.storage', { workspace: 'fast' }), setting('env.after_up', {}), setting('runtime.renew_days', 7)];
+    setting('env.storage', { workspace: 'fast' }), setting('env.after_up', {}), setting('runtime.renew_days', 7),
+    ...['idle', 'active', 'recent', 'refused'].map((kind) => setting(`providers.facts_${kind}_minutes`, 5))];
   draw();
   const values = await screen.findByRole('list', { name: 'Unit configuration' });
   const variables = visibleSetting(values,'env.variables');
@@ -105,6 +106,7 @@ it('shows each applicable value with its actual ancestor and when it takes effec
   const commands=screen.getByRole('region',{name:'Commands after start'});
   expect(within(commands).getByText(i18n.t('unitConfiguration.commandTiming'))).toBeVisible();
   expect(values.querySelector('[data-setting="runtime.renew_days"]')).toBeNull();
+  for (const kind of ['idle', 'active', 'recent', 'refused']) expect(values.querySelector(`[data-setting="providers.facts_${kind}_minutes"]`)).toBeNull();
   expect(values.querySelector('[data-setting="env.after_up"]')).toBeNull();
 });
 

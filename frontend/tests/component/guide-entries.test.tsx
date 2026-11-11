@@ -1,5 +1,5 @@
 /** Repeated cards contribute one real guide entry, with a named fallback when the first view disappears. */
-import { screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
@@ -7,6 +7,8 @@ import { CreationPermissionLink } from '@/features/help/CreationPermissionLink';
 import { GuideLink } from '@/features/help/GuideLink';
 import { ProviderGuideLink } from '@/features/help/ProviderGuideLink';
 import { i18n, setLocale } from '@/i18n';
+import { useGuideEntry } from '@/lib/guideEntries';
+import { Popover } from '@/ui/Popover';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ open: vi.fn(), access: vi.fn() }));
@@ -14,6 +16,50 @@ vi.mock('@/features/help/open', () => ({ useHelpOpener: () => calls.open }));
 vi.mock('@/features/access/AccessDialog', () => ({ openAccess: calls.access }));
 
 describe('one guide entry on the screen', () => {
+
+  it('keeps inactive background guides suppressed while a modal covers the screen, then restores one entry', async () => {
+    const view = show(<section data-testid="covered-help"><GuideLink guide="how-approvals-work" /><GuideLink guide="how-approvals-work" /></section>);
+    const background = screen.getByTestId('covered-help');
+    await waitFor(() => expect(background.querySelectorAll('button')).toHaveLength(1));
+    await act(async () => { background.setAttribute('aria-hidden', 'true'); await Promise.resolve(); });
+    await waitFor(() => expect(background.querySelectorAll('button')).toHaveLength(0));
+    await act(async () => { background.removeAttribute('aria-hidden'); await Promise.resolve(); });
+    await waitFor(() => expect(background.querySelectorAll('button')).toHaveLength(1));
+    expect(screen.getByRole('button', { name: 'How approvals work' })).toBeVisible();
+    view.unmount();
+  });
+
+  it('keeps an explanation open when its own floating card offers the same guide destination', async () => {
+    function Explanation() {
+      const entry = useGuideEntry('nested-explanation', 'section');
+      return <span ref={entry.ref}>{!entry.hidden && <Popover label="Explanation" trigger={<button>Open explanation</button>}>
+        <ArticleGuideLink article="nested-explanation" heading="section" title="Read this guide" />
+      </Popover>}</span>;
+    }
+    show(<Explanation />);
+    await userEvent.click(screen.getByRole('button', { name: 'Open explanation' }));
+    expect(await screen.findByRole('dialog', { name: 'Explanation' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Read this guide' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Open explanation' })).toBeVisible();
+  });
+  it('does not re-read every guide style for unrelated floating motion, while a hidden owner still promotes its fallback', async () => {
+    function Entry() {
+      const entry = useGuideEntry('contextual-guide', 'section');
+      return <span ref={entry.ref}>{!entry.hidden && <button>Contextual guide</button>}</span>;
+    }
+    render(<><section data-testid="guide-first"><Entry /></section><section data-testid="guide-second"><Entry /></section><div data-testid="floating-motion" /></>);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Contextual guide' })).toHaveLength(1));
+    await act(async () => { await Promise.resolve(); });
+    const styles = vi.spyOn(globalThis, 'getComputedStyle');
+    try {
+      await act(async () => { screen.getByTestId('floating-motion').style.transform = 'translateX(4px)'; await Promise.resolve(); });
+      expect(styles).not.toHaveBeenCalled();
+      await act(async () => { screen.getByTestId('guide-first').hidden = true; await Promise.resolve(); });
+      await waitFor(() => expect(screen.getByTestId('guide-second').querySelector('button')).not.toBeNull());
+      expect(styles).toHaveBeenCalled();
+      expect(screen.getAllByRole('button', { name: 'Contextual guide' })).toHaveLength(1);
+    } finally { styles.mockRestore(); }
+  });
   it('names the different guides instead of repeating How this works, in both languages', async () => {
     for (const locale of ['en', 'zh-CN'] as const) {
       await setLocale(locale);
@@ -52,10 +98,10 @@ describe('one guide entry on the screen', () => {
 });
 
 describe('the empty place’s creation question', () => {
-  it.each(['org', 'project'] as const)('opens %s’s own interaction row without an access write', async (kind) => {
+  it.each(['org', 'project'] as const)('opens %s’s own creation row without an access write', async (kind) => {
     calls.access.mockClear();
     show(<CreationPermissionLink place={{ kind, id: 'actual-place', name: 'My place' }} />);
     await userEvent.click(screen.getByRole('button', { name: kind === 'org' ? 'Who may make projects here?' : 'Who may open topics here?' }));
-    expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: `${kind}.interact` });
+    expect(calls.access).toHaveBeenCalledWith({ kind, id: 'actual-place', name: 'My place' }, { share: false, permission: kind === 'project' ? 'project.create_topics' : 'org.interact' });
   });
 });

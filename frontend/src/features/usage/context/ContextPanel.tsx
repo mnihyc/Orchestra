@@ -6,6 +6,7 @@
  * counts as its own is a row of that part. Opening the panel on an idle thread whose harness counts on
  * request has it counted once for the turn. Nothing is shown that nobody reported.
  */
+import { modelDisplayName } from '@/features/models/names';
 import { useQuery } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { ChevronRight } from 'lucide-react';
@@ -17,6 +18,7 @@ import { programNameIn } from '@/features/resources/programNames';
 import { useProviderHealth } from '@/features/usage/PerformancePlaces';
 import {
   countKey,
+  contextModelName,
   type FillKey,
   fillSegments,
   freedBy,
@@ -145,6 +147,7 @@ export function ContextPanel({ thread }: { thread: Thread }) {
         <h2 className="text-base font-semibold text-text">{t('contextUsage.panel.title')}</h2>
         {fill !== null && <span className="text-xs text-text-subtle" data-context-count={fill.count}>{t(countKey(fill.count), { harness })}</span>}
       </div>
+      {contextModelName(thread)!==null && <p className="text-sm text-text-muted">{t('contextUsage.panel.model',{model:modelDisplayName(contextModelName(thread)??'',t)})}</p>}
       {ring !== null && (
         <p className="text-sm text-text-muted tabular-nums">
           {t(ring.compactPercent === null ? 'contextUsage.ring.labelBare' : 'contextUsage.ring.label', {
@@ -158,7 +161,7 @@ export function ContextPanel({ thread }: { thread: Thread }) {
       {kept.isError ? (
         <ErrorAlert error={kept.error} />
       ) : data === undefined ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={kept} rows={3} />
       ) : fill === null ? (
         <p className="text-sm text-text-muted" data-context-absent>
           {t(data.reports.context ? 'contextUsage.absent.noFillYet' : 'contextUsage.absent.noContext', { harness })}

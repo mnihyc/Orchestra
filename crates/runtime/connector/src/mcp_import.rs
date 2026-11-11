@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use orch_agent_contract::discovery::{McpFound, McpImportRequest, McpScope, McpSearch};
 use orch_envhost::environment::EnvHost;
-use orch_link_contract::commands::{CommandError, ErrorCode, McpImport, McpImportResult};
+use orch_link_contract::commands::{
+    CommandError, ErrorCode, McpImport, McpImportResult, McpSnapshotTransfer, Sealed,
+};
 use orch_link_contract::events::EnvironmentFacts;
 use orch_types::Id;
 
@@ -30,6 +32,7 @@ use crate::harnesses::Hosting;
 pub struct McpImports {
     host: EnvHost,
     hosting: Option<Arc<Hosting>>,
+    keys: Arc<crate::roles::Keys>,
 }
 
 impl std::fmt::Debug for McpImports {
@@ -54,8 +57,16 @@ impl McpImports {
     /// Imports over the environments of `host`, asking the harness processes of `hosting` (a machine that
     /// hosts none finds nothing).
     #[must_use]
-    pub fn new(host: EnvHost, hosting: Option<Arc<Hosting>>) -> Self {
-        Self { host, hosting }
+    pub fn new(
+        host: EnvHost,
+        hosting: Option<Arc<Hosting>>,
+        keys: Arc<crate::roles::Keys>,
+    ) -> Self {
+        Self {
+            host,
+            hosting,
+            keys,
+        }
     }
 
     /// The servers the harnesses here have configured, by name: those of their users' own configuration and
@@ -107,7 +118,49 @@ impl McpImports {
     /// `mcp.import`: reads the definition of one server out of the harness's configuration, through that
     /// harness's adapter, and keeps a copy of it on this machine. The definition is not in the answer.
     pub async fn import(&self, body: &McpImport) -> Result<McpImportResult, CommandError> {
-        let environment = self.host.environment(body.environment_id)?;
+        if let Some(transfer) = &body.transfer {
+            match transfer {
+                McpSnapshotTransfer::Issue { recipient } => {
+                    let (definition, mut reply) = self.host.mcp_transfer_read(body)?;
+                    let bytes = serde_json::to_string(&definition).map_err(|_| {
+                        CommandError::new(
+                            ErrorCode::Internal,
+                            "the native MCP snapshot could not be encoded",
+                        )
+                    })?;
+                    reply.snapshot = Some(Sealed {
+                        value: self.keys.seal_with(
+                            &recipient.public_key,
+                            &transfer_info(body, recipient.machine_id)?,
+                            &bytes,
+                        )?,
+                    });
+                    return Ok(reply);
+                }
+                McpSnapshotTransfer::Receive {
+                    recipient,
+                    snapshot,
+                } => {
+                    let text = self
+                        .keys
+                        .open_with(&transfer_info(body, *recipient)?, &snapshot.value)?;
+                    let definition = serde_json::from_str(&text).map_err(|_| {
+                        CommandError::new(ErrorCode::Internal, "the sealed MCP snapshot is invalid")
+                    })?;
+                    return Ok(self.host.mcp_transfer_receive(body, &definition)?);
+                }
+            }
+        }
+        if body.stored.is_some() {
+            return Ok(self.host.mcp_stored_copy(body)?);
+        }
+        let environment_id = body.environment_id.ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::Unsupported,
+                "an offering import needs its actual environment",
+            )
+        })?;
+        let environment = self.host.environment(environment_id)?;
         if !environment.mcp().import_allowed() {
             return Err(orch_envhost::error::HostError::McpImportDisabled.into());
         }
@@ -146,4 +199,21 @@ impl McpImports {
         }
         Err(CommandError::new(ErrorCode::NotFound, reason))
     }
+}
+
+fn transfer_info(body: &McpImport, recipient: Id) -> Result<Vec<u8>, CommandError> {
+    let source = body.stored.as_ref().ok_or_else(|| {
+        CommandError::new(
+            ErrorCode::Unsupported,
+            "a sealed copy needs its exact stored native source",
+        )
+    })?;
+    serde_json::to_vec(&("orch/mcp/stored-copy/v1", source, body.server_id, recipient)).map_err(
+        |_| {
+            CommandError::new(
+                ErrorCode::Internal,
+                "the native MCP snapshot purpose could not be encoded",
+            )
+        },
+    )
 }

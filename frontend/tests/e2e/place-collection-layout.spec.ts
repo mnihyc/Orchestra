@@ -134,7 +134,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
       };
     });
     await signIn(page); await appearance(locale);
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=agent.default_provider_id`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=agent.default_provider_id`);
     const row = page.locator('[data-setting="agent.default_provider_id"]');
     const field = row.getByRole('combobox');
     await expect(field).toHaveValue('OpenAI key');

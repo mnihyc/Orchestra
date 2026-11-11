@@ -6,6 +6,7 @@ import { settingChoice } from '@/i18n/choices';
 import type { SettingDef } from '@/generated/api-types';
 import { numericSettingDisplay, numericSettingText, settingFieldName } from '@/features/settings/settingText';
 import { formatNumber } from '@/lib/format';
+import { OrgTermsPreview } from '@/features/settings/OrgTerms';
 import { ValueSummary } from '@/ui/ValueSummary';
 import { modelDisplayName } from '@/features/models/names';
 import { ProviderDefaultName } from '@/features/settings/ProviderChoice';
@@ -20,13 +21,19 @@ import { useHarnessNames } from '@/features/resources/harnesses';
 import { CurrentDetailPage } from '@/features/resources/CurrentDetailPage';
 import { ErrorState } from '@/ui/ErrorState';
 import { StateLine } from '@/ui/StateLine';
+import { AGENT_ACCESS_SETTING, AgentAccessSummary, agentAccessValue } from '@/features/access/AgentAccessChoice';
+import type { SettingsTarget } from '@/api/settings';
+import { CapabilityBackendSummary } from './CapabilityBackendChoice';
+import { isCapabilityBackendSetting } from './capabilityBackendValue';
 
 export function emptySettingValue(value: unknown): boolean {
   return value === null || value === undefined || value === '' || (typeof value === 'object' && Object.keys(value).length === 0);
 }
 
 /** A missing semantic choice and an unlimited disk share use their product meanings. */
-export function emptySettingText(key: string | undefined, defaultValue: boolean, t: TFunction): string {
+export function emptySettingText(key: string | undefined, defaultValue: boolean, t: TFunction, display?: SettingDef['display']): string {
+  if (display?.zero === 'no_limit') return t('goals.editor.noLimit');
+  if (key === 'agents.prompt_cache_ttl') return t('promptCacheTtl.nativeDefault');
   if (key === EMBEDDINGS_SETTING) return t('admin.semantic.notSet');
   if (key === 'search.semantic.max_disk_share') return t('admin.semantic.noLimit');
   return t(defaultValue ? 'settings.compact.defaultNone' : 'settings.compact.none');
@@ -52,11 +59,16 @@ function ProgramPolicySummary({ value }: { value: object }) {
   </div>;
 }
 
-export function SettingSummary({ value, def, inControl = false, example = false }: { value: unknown; def: Partial<Pick<SettingDef, 'key' | 'title' | 'display' | 'schema'>>; inControl?: boolean; example?: boolean }) {
+export function SettingSummary({ value, def, inControl = false, example = false, target }: { value: unknown; def: Partial<Pick<SettingDef, 'key' | 'title' | 'display' | 'schema'>>; inControl?: boolean; example?: boolean; target?: SettingsTarget | undefined }) {
   const { t, i18n } = useTranslation();
   const locale=i18n.resolvedLanguage??'en';
   const display=numericSettingDisplay(def);
   const number=(value:number)=>display===null ? formatNumber(value,locale) : numericSettingText(value,display,locale,t);
+  if (def.key !== undefined && isCapabilityBackendSetting(def.key)) return example ? <span>{t('capabilityBackend.example')}</span> : <CapabilityBackendSummary settingKey={def.key} value={value} target={target} />;
+  if (def.key === AGENT_ACCESS_SETTING) {
+    const choice = agentAccessValue(value);
+    if (choice !== null) return <AgentAccessSummary value={choice} />;
+  }
   if (def.key === PROGRAM_VERSIONS_KEY && typeof value === 'object' && value !== null && !Array.isArray(value)) {
     return <ProgramPolicySummary value={value} />;
   }
@@ -66,10 +78,11 @@ export function SettingSummary({ value, def, inControl = false, example = false 
   if (def.key === 'search.semantic.max_disk_share' && emptySettingValue(value)) return <span>{emptySettingText(def.key, false, t)}</span>;
   // A goal's credits are a decimal, and zero is no limit.
   if (def.key === 'thread.goal.max_credits' && (value === '0' || value === 0)) return <span>{t('goals.editor.noLimit')}</span>;
+  if (def.key === 'org.terms' && typeof value === 'string') return <OrgTermsPreview text={value} />;
   if (def.key === SEMANTIC_TUNING_SETTING || def.key === WORD_TUNING_SETTING) return <SemanticTuningSummary value={value} label={def.title} inControl={inControl} />;
   if (def.key === 'auto.summarizer' && !example && typeof value === 'object' && value !== null && 'kind' in value && value.kind === 'model' && 'provider_id' in value) {
-    return <ProviderDefaultName value={value.provider_id}>{(provider) => <ValueSummary
-      value={{ ...value, provider_id: provider.name }} label={def.title} inControl={inControl}
+    return <ProviderDefaultName value={value.provider_id}>{(name) => <ValueSummary
+      value={{ ...value, provider_id: name }} label={def.title} inControl={inControl}
       fieldName={(name) => settingFieldName(name, def.key, t)} number={number} />}</ProviderDefaultName>;
   }
   if (def.key !== undefined && isResourceSetting(def.key)) return <ResourceSettingName settingKey={def.key} value={value} example={example} />;

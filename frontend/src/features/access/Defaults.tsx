@@ -93,7 +93,7 @@ export function Defaults({ place }: { place: AccessRowTarget }) {
   const [asked, setAsked] = useState<Asked | null>(null);
   const [chosen, setChosen] = useState<Inside | null>(null);
 
-  if (catalogueQuery.isPending || pageQuery.isPending) return <SkeletonRows rows={6} />;
+  if (catalogueQuery.isPending || pageQuery.isPending) return <SkeletonRows reads={[catalogueQuery, pageQuery]} rows={6} />;
   if (pageQuery.isError) return <ErrorState compact error={pageQuery.error} retrying={pageQuery.isRefetching} onRetry={() => void pageQuery.refetch()} />;
   if (catalogueQuery.isError) return <ErrorState compact error={catalogueQuery.error} retrying={catalogueQuery.isRefetching} onRetry={() => void catalogueQuery.refetch()} />;
 

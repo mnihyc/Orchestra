@@ -88,11 +88,17 @@ pub fn provider_custodian_name(provider_id: Id) -> String {
 /// The ids of the providers whose records the store holds.
 #[must_use]
 pub fn provider_ids(names: &[String]) -> Vec<Id> {
-    names
+    let mut ids: Vec<Id> = names
         .iter()
         .filter(|name| !name.ends_with(LOCAL_KEY_SUFFIX))
-        .filter_map(|name| name.strip_prefix(PROVIDER_PREFIX)?.parse().ok())
-        .collect()
+        .filter_map(|name| {
+            let id = name.strip_prefix(PROVIDER_PREFIX)?;
+            id.strip_suffix(".copy").unwrap_or(id).parse().ok()
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 /// The sealed store of one data directory.

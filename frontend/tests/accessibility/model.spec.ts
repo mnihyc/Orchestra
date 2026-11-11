@@ -4,6 +4,7 @@ import { expect, type Page, test } from '@playwright/test';
 import { id } from '../doubles/fixtures.ts';
 import { SOL_A, SOL_B } from '../doubles/model.ts';
 import { ACME, deny, emit, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
+import { makeCap, writeHistory } from '../e2e/usage-support.ts';
 
 const MAIN = ACME.mainThread;
 const CODEX = id(0x22, 2);
@@ -45,11 +46,15 @@ test("a provider's Models tab: the groups above the list, each model with what i
 });
 
 test('the row editor of a model: switches off, then on with what a thread starts with, a refused largest context, groups and limits', async ({ page }) => {
+  // The limits are the provider's caps in the shared ledger: one on the model's group that today's use brings near it, and one on its family.
+  await writeHistory(1);
+  await makeCap(PEOPLE.ada, { provider_id: CODEX, meter: 'credits', amount: '45', period: 'month', models: ['@frontier'] });
+  await makeCap(PEOPLE.ada, { provider_id: CODEX, meter: 'tokens', amount: '2000000', split: 'each', models: ['gpt-5.5*'] });
   await open(page, `/resources/providers/${CODEX}?tab=models`);
   await page.getByRole('button', { name: 'Actions for GPT-5.5 Codex', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Edit options…' }).click();
   await expect(editor(page)).toBeVisible();
-  await expect(editor(page).getByRole('group', { name: 'Limits on this model' }).getByText('Near its limit')).toBeVisible();
+  await expect(editor(page).getByRole('group', { name: 'Limits on this model' }).getByRole('listitem').filter({ hasText: 'the frontier group' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role=dialog]');
 
   // Everything on: a speed and a program with what a thread starts with, the largest context with its start, a step of the rate.

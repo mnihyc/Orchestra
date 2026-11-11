@@ -1,7 +1,7 @@
 /** The Links section of a document's right bar: what refers to it, what it refers to, what is related, and the graph around it.
  *
  * It replaces the separate Related section. Four tabs on one edge store; a tab the document switches off is not
- * drawn, and with all four off the section is not offered. The counts are the rows already read: a count that
+ * drawn, and with all four off the inline section stays hidden; an explicitly opened view explains that choice. The counts are the rows already read: a count that
  * reaches more pages says so with a plus, and nothing counts a row the reader may not see.
  */
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
@@ -15,6 +15,7 @@ import { GraphTab } from '@/features/links/GraphTab';
 import { ReferencedBy } from '@/features/links/ReferencedBy';
 import { References } from '@/features/links/References';
 import { RelatedTab } from '@/features/links/RelatedTab';
+import { LinksDialog } from '@/features/links/LinksDialog';
 import { useViewInstance } from '@/features/workbench/instance';
 import type { ViewProps } from '@/features/workbench/views';
 import { useViewShown } from '@/features/workbench/viewOpening';
@@ -27,6 +28,7 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Tabs, type TabDefinition } from '@/ui/Tabs';
 import { Tooltip } from '@/ui/Tooltip';
+import { StateLine } from '@/ui/StateLine';
 
 const LOADING_ROWS = 3;
 
@@ -45,7 +47,7 @@ function LinksDocument({ documentId }: { documentId: string }) {
   const shown = useViewShown();
   if (state.ended !== null || state.error !== null || state.document?.deleted === true) return null;
   if (!state.loaded || state.document === null) return <SkeletonRows rows={LOADING_ROWS} />;
-  return <LinksPanel documentId={documentId} seq={state.document.seq} enabled={shown} />;
+  return <LinksPanel documentId={documentId} seq={state.document.seq} enabled={shown} explainHidden />;
 }
 
 /** The count a tab carries: the rows read, with a plus where more pages follow. */
@@ -54,7 +56,7 @@ function Count({ rows, more }: { rows: number | undefined; more: boolean }) {
   return more ? <Badge>{`${rows}+`}</Badge> : <Badge count={rows} />;
 }
 
-export function LinksPanel({ documentId, seq, enabled = true }: { documentId: string; seq: number; enabled?: boolean }) {
+export function LinksPanel({ documentId, seq, enabled = true, explainHidden = false }: { documentId: string; seq: number; enabled?: boolean; explainHidden?: boolean }) {
   const { t } = useTranslation();
   const tabs = useQuery({ ...documentLinksQuery(documentId), enabled });
   const shown: readonly LinksTab[] = tabs.data?.shown ?? [];
@@ -63,12 +65,18 @@ export function LinksPanel({ documentId, seq, enabled = true }: { documentId: st
   // The tab last chosen on this device is where a new visit begins; a choice made now holds even where none can be kept.
   const [stored, remember] = useViewChoice<string>('links', 'tab', 'referenced_by');
   const [picked, setPicked] = useState<string | null>(null);
+  const [configuring, setConfiguring] = useState(false);
   const chosen = picked ?? stored;
   const choose = (tab: string) => { setPicked(tab); remember(tab); };
   if (!enabled) return null;
-  if (tabs.isPending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (tabs.isPending) return <SkeletonRows read={tabs} rows={LOADING_ROWS} />;
   if (tabs.isError) return <ErrorAlert error={tabs.error} action={<Button size="sm" onClick={() => void tabs.refetch()}>{t('common.tryAgain')}</Button>} />;
-  if (shown.length === 0) return null;
+  if (shown.length === 0) return !explainHidden ? null : <>
+    <StateLine compact message={t('implicitAvailability.linksOff')} action={<Button size="sm" blocked={!tabs.data.writable}
+      reason={!tabs.data.writable ? tabs.data.locked ? t('links.dialog.locked') : t('implicitAvailability.docManage') : undefined}
+      onClick={() => setConfiguring(true)}>{t('links.dialog.title')}</Button>} />
+    <LinksDialog documentId={documentId} open={configuring} onOpenChange={setConfiguring} />
+  </>;
   const active: LinksTab = shown.find((tab) => tab === chosen) ?? shown[0] ?? 'referenced_by';
   const counted = (tab: LinksTab) => {
     const query = tab === 'referenced_by' ? incoming : tab === 'references' ? outgoing : null;

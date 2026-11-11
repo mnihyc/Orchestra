@@ -2,13 +2,22 @@
 
 OpenAI Responses wire-protocol implementation.
 
-The relay of the Responses format of OpenAI: it lets through `POST /responses`, `POST /responses/compact` and
-`GET /models` and nothing else, presents the key and the endpoint's headers and query as its options say, refuses in
+Codex remote compaction uses `compaction_trigger` inputs on ordinary `POST /responses`.
+The separate `/responses/compact` route is not relayed.
+
+The relay of the Responses format of OpenAI: it lets through `POST /responses` and
+`GET /models`, and gates `POST /alpha/search` on the endpoint's native binding and the admitted thread resolution. It presents the key and the endpoint's headers and query as its options say, refuses in
 the vendor's own error document, and reads the usage of a stream or of a plain answer as it passes by. It also turns an
 endpoint's list of models into suggestions (the one number such a list gives for the context is the largest the endpoint takes, put among what
 the model offers and not among what a manager opened), writes the list a lease answers, and issues the key as it is. Each rule has
 a unit test, requests are relayed through the scripted model server of `orch-testkit` (cut streams among them), and one
 real request, made only with `ORCH_REAL_API_CHECK=1`, checks the usage observer against a real stream.
+
+Standalone search uses the same bounded plain-response reader and lease meter.
+Only a whole successful HTTP result with the native output shape establishes
+a search or page operation. Multiple queries and citations are not additional
+operations. Errors, cut or malformed bodies and unknown actions establish no
+successful quantity. Search-only replies do not report generation tokens.
 
 `OpenAiChat` serves Chat Completions through the same credential, discovery and bounded usage machinery,
 without translating request or reply bytes. It allows only `POST /chat/completions` and the lease's `GET /models`.

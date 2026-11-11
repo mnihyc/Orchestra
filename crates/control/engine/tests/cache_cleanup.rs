@@ -1533,7 +1533,7 @@ async fn a_failed_common_purge_stays_purge_only_and_its_retry_keeps_the_original
     let now = world.clock.now();
     let session = new_id();
     let mut tx = world.pool.begin().await.unwrap();
-    sqlx::query("INSERT INTO sessions(id,user_id,refresh_hash,expires_at) VALUES($1,$2,$3,$4)")
+    sqlx::query("INSERT INTO sessions(id,user_id,refresh_hash,expires_at,as_admin) VALUES($1,$2,$3,$4,true)")
         .bind(session)
         .bind(world.ada)
         .bind(session.as_bytes().as_slice())

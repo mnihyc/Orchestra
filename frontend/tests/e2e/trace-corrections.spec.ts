@@ -1,5 +1,5 @@
 /** Recorded agent responsibility, request continuation and guarded mixed restores remain usable by keyboard on a phone. */
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import { World } from '../doubles/world';
 import { TRACE } from '../doubles/fixtures';
@@ -13,6 +13,7 @@ async function control(path: string, body: Record<string, unknown> = {}): Promis
 }
 interface Recorded { records: { entry: TraceEntry }[]; deletion_ids: Record<string, string>; requests: { method: string; path: string; body: Record<string, unknown>; idempotency_key: string | null }[] }
 const state = async () => control('/state') as Promise<Recorded>;
+const restoredEnvironment = (dialog: Locator) => dialog.locator(`[data-restore-result="${TRACE.environment}"]`).getByRole('status').filter({ hasText: 'Restoration returns Stopped.' });
 async function choose(page: Page, id: string) { const tick = page.locator(`[data-trace-object="${id}"]`).getByRole('checkbox'); await tick.focus(); await page.keyboard.press('Space'); await expect(tick).toBeChecked(); }
 test.beforeEach(async () => { await scenario(); });
 
@@ -37,7 +38,9 @@ test('keyboard selection confirms a mixed parent group, document and environment
   await page.setViewportSize({ width: 390, height: 844 }); await signIn(page); await page.goto('/org/acme/settings/audit?kind=deleted');
   for (const id of [TRACE.project, TRACE.child, TRACE.document, TRACE.environment]) await choose(page, id);
   await page.getByRole('button', { name: 'Bring back', exact: true }).click(); const dialog = page.getByRole('dialog'); await expect(dialog.getByText('Included with Archived experiment; no separate request.', { exact: true })).toBeVisible(); await expect(dialog.getByRole('button', { name: 'Bring back', exact: true })).toBeEnabled(); await expectAccessibleSettled(page, '[role="dialog"]');
-  await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Archived experiment · Archived', { exact: true })).toBeVisible(); await expect(dialog.getByText('Brought back Investigation notes · Document', { exact: true })).toBeVisible(); await expect(dialog.getByText('Stopped', { exact: true })).toBeVisible(); await expect(dialog.getByText('Brought back with Archived experiment', { exact: true })).toBeVisible();
+  await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Archived experiment · Archived', { exact: true })).toBeVisible(); await expect(dialog.getByText('Brought back Investigation notes · Document', { exact: true })).toBeVisible(); await expect(dialog.getByText('Brought back with Archived experiment', { exact: true })).toBeVisible();
+  await expect(restoredEnvironment(dialog)).toContainText('Done');
+  await expect(restoredEnvironment(dialog).getByRole('link', { name: 'Open environment', exact: true })).toHaveAttribute('href', `/resources/environments/${TRACE.environment}`);
   const traffic = await state(); const requests = traffic.requests.filter((row) => row.method === 'POST' && row.path.endsWith('/restore')); expect(requests.map((row) => row.path).sort()).toEqual([`/nodes/${TRACE.project}/restore`, `/documents/${TRACE.document}/restore`, `/environments/${TRACE.environment}/restore`].sort()); expect(requests.every((row) => row.idempotency_key !== null)).toBe(true); expect(requests.find((row) => row.path.startsWith('/nodes'))?.body.expected_deletion_id).toBeTruthy(); expect(traffic.requests.filter((row) => /\/(start|inputs|read|seen|subscription)$/.test(row.path) && row.method !== 'GET')).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
@@ -51,7 +54,7 @@ test('a newer deletion at the same time, lost document authority and a winning p
   await signIn(page); await page.goto('/org/acme/settings/audit?kind=deleted'); for (const id of [TRACE.project, TRACE.thread, TRACE.document, TRACE.environment]) await choose(page, id);
   await page.getByRole('button', { name: 'Bring back', exact: true }).click(); const dialog = page.getByRole('dialog'); await expect(dialog.getByRole('button', { name: 'Bring back', exact: true })).toBeEnabled();
   await control('/deletion', { id: TRACE.thread, redelete: true }); await deny('ada', [`doc.manage@${TRACE.document}`]); await control('/retention', { environment: TRACE.environment, phase: 'purging', hold_jobs: true });
-  await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Archived experiment · Archived', { exact: true })).toBeVisible(); for (const id of [TRACE.thread, TRACE.document, TRACE.environment]) await expect(dialog.locator(`[data-restore-result="${id}"]`).getByRole('alert')).toBeVisible(); await expect(dialog.getByText('Stopped', { exact: true })).toHaveCount(0);
+  await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Archived experiment · Archived', { exact: true })).toBeVisible(); for (const id of [TRACE.thread, TRACE.document, TRACE.environment]) await expect(dialog.locator(`[data-restore-result="${id}"]`).getByRole('alert')).toBeVisible(); await expect(restoredEnvironment(dialog)).toHaveCount(0);
   await dialog.getByRole('button', { name: 'Close results', exact: true }).click(); await page.getByRole('button', { name: 'Refresh', exact: true }).click(); const held = await state(); const records = held.records.map((row) => row.entry).filter((row) => row.object.id === TRACE.thread && row.kind === 'deleted'); const old = records.find((row) => row.event_deletion_id !== held.deletion_ids[TRACE.thread])!; const newer = records.find((row) => row.event_deletion_id === held.deletion_ids[TRACE.thread])!; expect(old.at).toBe(newer.at); await expect(page.locator(`[data-trace-row="${old.id}"]`).getByRole('checkbox')).toHaveCount(0); await expect(page.locator(`[data-trace-row="${newer.id}"]`).getByRole('checkbox')).toBeVisible();
 });
 
@@ -61,7 +64,7 @@ test('refreshing an old selection shows the changed deletion before confirmation
 });
 
 test('a changed removal revision refuses only the environment and a document success stays visible', async ({ page }) => {
-  await signIn(page); await page.goto('/org/acme/settings/audit?kind=deleted'); await choose(page, TRACE.document); await choose(page, TRACE.environment); await page.getByRole('button', { name: 'Bring back', exact: true }).click(); const dialog = page.getByRole('dialog'); await expect(dialog.getByRole('button', { name: 'Bring back', exact: true })).toBeEnabled(); await control('/retention', { environment: TRACE.environment, stale: true }); await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Investigation notes · Document', { exact: true })).toBeVisible(); await expect(dialog.locator(`[data-restore-result="${TRACE.environment}"]`).getByRole('alert')).toBeVisible(); await expect(dialog.getByText('Stopped', { exact: true })).toHaveCount(0);
+  await signIn(page); await page.goto('/org/acme/settings/audit?kind=deleted'); await choose(page, TRACE.document); await choose(page, TRACE.environment); await page.getByRole('button', { name: 'Bring back', exact: true }).click(); const dialog = page.getByRole('dialog'); await expect(dialog.getByRole('button', { name: 'Bring back', exact: true })).toBeEnabled(); await control('/retention', { environment: TRACE.environment, stale: true }); await dialog.getByRole('button', { name: 'Bring back', exact: true }).click(); await expect(dialog.getByText('Brought back Investigation notes · Document', { exact: true })).toBeVisible(); await expect(dialog.locator(`[data-restore-result="${TRACE.environment}"]`).getByRole('alert')).toBeVisible(); await expect(restoredEnvironment(dialog)).toHaveCount(0);
 });
 
 test('revoked trail authority clears the phone selection along with the rows and Download', async ({ page }) => {

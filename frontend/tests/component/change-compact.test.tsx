@@ -13,6 +13,7 @@ import type { EnvironmentRef, ForkPlan, ForkPlanHistory, Place, PlaceEnvironment
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 
+import { host as hostPlace, placeEnvironment } from '../unit/start-fixtures';
 import { show } from './support';
 
 const fixture = vi.hoisted(() => ({ places: [] as Place[], summary: true, history: 'carry' }));
@@ -30,10 +31,10 @@ vi.mock('@/realtime/stores/thread', async (original) => ({ ...await original<obj
 
 const owner: UserRef = { id: 'owner', kind: 'human', username: 'owner', display_name: 'Other Owner', avatar: { color: 1, text: 'O' } };
 const environment: EnvironmentRef = { id: 'other', name: 'Other workspace', address: 'team.owner.other', placement: 'connected', status: 'running', owner, ports_exposed: false };
-const place: PlaceEnvironment = {
-  environment, host: null, machine: { id: 'workstation', name: 'Workstation', online: true, placement: 'connected', platform_os: 'linux' },
-  facts: { os: 'linux', cpus: 4, memory_mb: 8192 }, threads: 2, topics: [], topics_hidden: 0, mounts: [], usable: true, reasons: [], current: false,
-};
+const place: PlaceEnvironment = placeEnvironment(environment.id, {
+  environment, machine: { id: 'workstation', name: 'Workstation', online: true, placement: 'connected', platform_os: 'linux' },
+  facts: { os: 'linux', cpus: 4, memory_mb: 8192 }, threads: 2,
+});
 // This editor reads only topic_id and the source environment; no unrelated thread fact is fabricated.
 const thread = { topic_id: 'topic', environment: { ...environment, id: 'source', name: 'Source workspace' } } as unknown as Thread;
 
@@ -76,6 +77,12 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(sent).toHaveBeenLastCalledWith({ mode: 'selection', include: ['src/**'] });
     await user.click(screen.getByRole('radio', { name: words.none }));
     expect(sent).toHaveBeenLastCalledWith({ mode: 'none' });
+    await user.keyboard('{Home}');
+    await waitFor(() => expect(screen.getByRole('radio', { name: words.all })).toBeChecked());
+    expect(sent).toHaveBeenLastCalledWith({ mode: 'all' });
+    await user.keyboard('{End}');
+    await waitFor(() => expect(screen.getByRole('radio', { name: words.none })).toBeChecked());
+    expect(sent).toHaveBeenLastCalledWith({ mode: 'none' });
   });
 
   it(`destination names say share or copy and inventory details stay in the dropdown (${locale})`, async () => {
@@ -95,12 +102,14 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(screen.getByRole('option', { name: words.fresh })).toBeVisible();
     await user.click(screen.getByRole('option', { name: words.existing }));
     const picker = await screen.findByRole('combobox', { name: words.picker });
-    expect(picker).toHaveTextContent('Other workspace');
+    expect(picker).toHaveValue('Other workspace');
     expect(screen.queryByText(/Other Owner/)).toBeNull();
     await user.click(picker);
     expect(screen.getByRole('option', { name: /Other workspace/ })).toBeVisible();
     expect(screen.getByText(/Other Owner/)).toBeVisible();
     await user.keyboard('{Escape}');
+    expect(picker).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryAllByRole('listbox')).toHaveLength(0);
     expect(screen.queryByText(/Other Owner/)).toBeNull();
     expect(sent).toHaveBeenLastCalledWith(expect.objectContaining({ environment: { use: 'other' } }));
   });
@@ -191,13 +200,10 @@ for (const locale of ['en', 'zh-CN'] as const) {
 }
 
 it('keeps host capacity and policy refusals inside the open picker without weakening the gate', async () => {
-  const host: PlaceHost = {
-    host: { id: 'host', name: 'Build host', address: 'team.owner.build' }, owner, labels: [],
-    capacity: { cpu_millis: 4000, memory_mb: 8192, disk_gb: 100 }, declared: { cpu_millis: 1000, memory_mb: 2048, disk_gb: 10 },
-    free: { cpu_millis: 3000, memory_mb: 6144, disk_gb: 90 }, used: { cpu_percent: 5, memory_mb: 1024, disk_gb: 8 },
-    environments: { running: 1, idle: 0 }, storages: [], mounts: [], when_full: 'block', usable: false,
-    reasons: [], policy_refusal: 'Machine policy forbids writes.', warnings: [], current: false, automatic: false,
-  };
+  const host: PlaceHost = hostPlace('host', 'Build host', {
+    host: { id: 'host', name: 'Build host', address: 'team.owner.build' }, owner,
+    when_full: 'block', usable: false, policy_refusal: 'Machine policy forbids writes.',
+  });
   const changed = vi.fn();
   show(<HostChoices hosts={[host]} value={null} loading={false} onChange={changed} />);
   expect(screen.queryByText('Machine policy forbids writes.')).toBeNull();
