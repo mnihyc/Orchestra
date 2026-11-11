@@ -6,6 +6,7 @@ import { expect, it, vi } from 'vitest';
 
 import { DetailCard } from '@/ui/DetailCard';
 import { Combobox } from '@/ui/Combobox';
+import { Dialog } from '@/ui/Dialog';
 import { Select } from '@/ui/Select';
 import { Menu } from '@/ui/Menu';
 import { show } from './support';
@@ -33,6 +34,26 @@ it('opens on focus, keeps on Enter and Escape dismisses it while returning focus
   await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Environment' })).not.toBeInTheDocument());
   expect(screen.queryByRole('button', { name: 'Open environment' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Environment' })).toHaveFocus();
+});
+
+it('keeps an escaped inspection closed until a new pointer entry follows a leave', () => {
+  vi.useFakeTimers();
+  const view = show(<DetailCard label="Provider" content={() => <span>Provider details</span>}>Provider</DetailCard>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Provider' });
+    act(() => { trigger.focus(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+    fireEvent.keyDown(trigger, { key: 'Escape' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.queryByText('Provider details')).not.toBeInTheDocument();
+    fireEvent.pointerOut(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse', relatedTarget: document.body });
+    act(() => { vi.runOnlyPendingTimers(); });
+    expect(screen.getByText('Provider details')).toBeVisible();
+  } finally { view.unmount(); vi.useRealTimers(); }
 });
 
 it('keeps a clicked card when the pointer leaves and closes it on an outside press', async () => {
@@ -99,7 +120,7 @@ it('opens a choice card from its own control without choosing', async () => {
 it('keeps the next option reachable when a phone picker has no room beside it', async () => {
   const previousFont = document.documentElement.style.fontSize;
   const previousWidth = window.innerWidth;
-  const original = Reflect.get(HTMLElement.prototype, 'getBoundingClientRect') as HTMLElement['getBoundingClientRect'];
+  const original = Reflect.get<HTMLElement, 'getBoundingClientRect'>(HTMLElement.prototype, 'getBoundingClientRect');
   const boxes = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect');
   try {
     document.documentElement.style.fontSize = '16px';
@@ -202,4 +223,23 @@ it('keeps touch browsing clear until the option inspection control is used', asy
   await user.click(screen.getByRole('button', { name: 'Inspect Bravo' }));
   expect(await screen.findByRole('dialog', { name: 'Bravo' })).toHaveTextContent('Bravo details');
   expect(choose).not.toHaveBeenCalled();
+});
+
+it('gives the first Escape to the form above a card that opened while the form covered it', () => {
+  vi.useFakeTimers();
+  const closed = vi.fn();
+  const view = show(<>
+    <DetailCard label="Workspace" content={() => <span>Workspace details</span>}>Workspace</DetailCard>
+    <Dialog open title="Find a file" onOpenChange={closed}><input aria-label="Find" /></Dialog>
+  </>);
+  try {
+    const trigger = screen.getByRole('button', { name: 'Workspace', hidden: true });
+    // The pointer rests over the control under the form; the form's arrival makes it enter, and its card opens hidden behind the form.
+    fireEvent.pointerOver(trigger, { pointerType: 'mouse' });
+    act(() => { vi.runOnlyPendingTimers(); });
+    // Without a way to be seen it is not drawn at all, so it cannot hold the key.
+    expect(screen.queryByText('Workspace details')).not.toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: 'Escape' });
+    expect(closed).toHaveBeenCalledWith(false);
+  } finally { view.unmount(); vi.useRealTimers(); }
 });

@@ -7,16 +7,16 @@
  */
 import { useQuery } from '@tanstack/react-query';
 
-import type { Guide } from '@/help/guide';
+import type { Guide } from './guide';
 
-export { belongsTo } from '@/help/guide';
-export type { Article, Guide, Heading } from '@/help/guide';
+export { belongsTo } from './guide';
+export type { Article, Guide, Heading } from './guide';
 
 let loading: Promise<Guide> | null = null;
 
 /** The guide, read once. */
 export function loadGuide(): Promise<Guide> {
-  loading ??= import('@/help/library').then((module) => module.guide);
+  loading ??= import('./library').then((module) => module.guide);
   return loading;
 }
 

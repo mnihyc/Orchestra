@@ -39,7 +39,7 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
   it('shows one action per task and loads a section only when selected',async()=>{
     await setLocale(locale);document.documentElement.dataset.theme=theme;
     const t=i18n.getFixedT(locale);const user=userEvent.setup();
-    show(<Page/>);
+    const shown=show(<Page/>);
     await screen.findByRole('heading',{level:1,name:provider.name});
     const tabs=screen.getByRole('tablist');
     expect(within(tabs).getAllByRole('tab')).toHaveLength(6);
@@ -47,7 +47,9 @@ for(const locale of ['en','zh-CN'] as const)for(const theme of ['light','dark'])
       expect(within(tabs).getByRole('tab',{name:(name)=>name===t(`providers.tabs.${key}`)||name.startsWith(t(`providers.tabs.${key}`)+' ')})).toBeVisible();
     expect(screen.queryByRole('button',{name:t('resourceCreation.providers')})).not.toBeInTheDocument();
     expect(screen.getAllByRole('button',{name:t('resources.act.nextSignIn')})).toHaveLength(1);
-    expect(screen.getAllByText(t('providerDetails.notReadOnce'),{exact:false})).toHaveLength(1);
+    expect(shown.container.querySelectorAll('[data-unread-members]')).toHaveLength(1);
+    expect(shown.container.querySelector('[data-unread-members]')).toHaveTextContent(t('providerDetails.notReadOnce'));
+    expect(screen.getByRole('group',{name:t('providerDetails.members.identity')})).toHaveTextContent(t('providerDetails.notReadOnce'));
     expect(screen.getAllByText(t('providerDetails.members.identity'),{exact:true})).toHaveLength(1);
     expect(panel).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button',{name:t('resources.act.nextSignIn')}));

@@ -23,6 +23,7 @@ import { NetworkError } from '@/lib/requests';
 import { agentMessage, userMessage } from '../doubles/thread-rows';
 import { A, B, C, deferred, opening, projection, snapshot, summary, viewedPrompt } from '../unit/continuation-fixtures';
 import { show } from './support';
+import { audienceReply } from './thread-audience-fixture';
 
 vi.mock('@/realtime/live', async (load) => ({ ...await load<typeof Live>(), useSocketStatus: () => ({ phase: 'ready' }) }));
 
@@ -85,6 +86,8 @@ function transport() {
     items: [spoken(current(id))], turns: [], segments: [], has_older: true, has_newer: true });
   vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = input instanceof Request ? input : new Request(input, init), url = new URL(request.url); calls.push(request);
+    const audience = audienceReply(request, { id: SIDE, name: reference.name, owner });
+    if (audience !== null) return Promise.resolve(audience);
     const match = /^\/api\/v1\/threads\/([^/]+)(.*)$/.exec(url.pathname);
     if (match?.[1] !== SIDE || match[2] === undefined) return Promise.reject(new Error('A side read must keep its actual native thread ID'));
     const selected = url.searchParams.get('continuation_id'), id = selected ?? state.active, suffix = match[2];

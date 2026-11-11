@@ -7,6 +7,12 @@ test.beforeEach(async () => {
   await scenario();
 });
 
+/** List choices are retained in either serialization order; the landing path and allowed keys stay exact. */
+function atOrgHome(path: RegExp) {
+  return (address: URL) => path.test(address.pathname) && (address.search === ''
+    || address.searchParams.size === 2 && address.searchParams.has('list') && address.searchParams.get('_list') === 'true');
+}
+
 test('a system with no user leads everybody to the setup, and the first person becomes its administrator', async ({ page }) => {
   await scenario({ scenario: 'fresh' });
 
@@ -32,12 +38,12 @@ test('a system with no user leads everybody to the setup, and the first person b
   await page.getByRole('button', { name: 'Create administrator' }).click();
 
   // They are signed in, in their own org, inside the workbench.
-  await expect(page).toHaveURL(/\/org\/root$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/root$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 
   // The setup is over for good: its address leads into the application now.
   await page.goto('/setup');
-  await expect(page).toHaveURL(/\/org\/root$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/root$/));
 });
 
 test('a wrong password is said at its field, and the right one gets in', async ({ page }) => {
@@ -60,7 +66,7 @@ test('a wrong password is said at its field, and the right one gets in', async (
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.ada.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 
@@ -81,7 +87,7 @@ test('somebody with an authenticator is asked for its code after a right passwor
 
   await code.fill(PEOPLE.grace.totp);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('somebody whose second step is a mailed code is sent one at once, and gets in with it', async ({ page }) => {
@@ -96,7 +102,7 @@ test('somebody whose second step is a mailed code is sent one at once, and gets 
 
   await page.getByLabel('Code').fill(await mailed('linus', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('a code by mail gets somebody in without their password, and the page says the same whatever the name', async ({ page }) => {
@@ -125,7 +131,7 @@ test('a code by mail gets somebody in without their password, and the page says 
 
   await page.getByLabel('Code').fill(await mailed('margaret', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('a name that is locked says which proof is closed, until when, and what else works', async ({ page }) => {
@@ -194,7 +200,7 @@ test('a session outlives a reload, though its token was never kept anywhere', as
 
   await page.reload();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 

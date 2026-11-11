@@ -60,8 +60,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::time::Duration;
 
+struct ForkStart<'a> {
+    authority: source::Authority<'a>,
+    thread: &'a threads::ThreadRow,
+    draft: Draft,
+    batch: Option<Id>,
+    preflight: Id,
+}
+
+pub mod command;
+mod confirmation;
+mod files;
+pub mod operation;
 mod recovery;
 mod source;
+pub use confirmation::Confirmation;
 
 /// The word `thread_fork` jobs have for their kind.
 pub const KIND: &str = fork_rows::THREAD_FORK;
@@ -132,26 +145,25 @@ fn wants_history(request: &ForkRequest) -> bool {
 #[must_use]
 pub fn phases_of(plan: &ForkPlan) -> Vec<Phase> {
     let replace = plan.result == ForkResult::Replace;
-    let from_environment = plan
-        .from
-        .environment
-        .as_ref()
-        .map(|environment| environment.id);
+    let from_environment = plan.from.environment().map(|environment| environment.id);
     let moves_environment = match &plan.to.environment {
         ForkPlanTarget::Made { .. } => true,
         ForkPlanTarget::Existing(environment) => Some(environment.id) != from_environment,
     };
-    let moves_harness = plan.from.provider.id != plan.to.provider.id
-        || plan.from.agent.id != plan.to.agent.id
+    let moves_harness = plan.from.provider().id != plan.to.provider.id
+        || plan.from.agent().map(|agent| agent.id) != Some(plan.to.agent.id)
         || moves_environment;
+    let opens_session = plan.history.method != HistoryMethod::Nothing;
     let mut phases = vec![LOCK];
-    if moves_harness {
+    // Keeping the binding does not keep its process online. History opens a native session
+    // before commit, so it needs the same current environment/provider/harness readiness.
+    if moves_harness || opens_session {
         phases.push(PROVISION);
     }
     if plan.files.is_some() || plan.worktree.is_some() || plan.files_at.is_some() {
         phases.push(COPY);
     }
-    if plan.history.method != HistoryMethod::Nothing {
+    if opens_session {
         phases.push(HISTORY);
     }
     phases.push(VERIFY);
@@ -164,6 +176,34 @@ pub fn phases_of(plan: &ForkPlan) -> Vec<Phase> {
 
 // ---------------------------------------------------------------- what the job is asked
 
+/// Actual execution of the source, separate from the destination's native runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExecutionSource {
+    /// A native source with a real workspace.
+    Environment {
+        /// Actual source environment.
+        environment: Id,
+    },
+    /// A control-plane conversation has no source filesystem or native process.
+    Program {
+        /// Actual compiled program.
+        program: orch_api_contract::threads::BuiltinThreadProgramId,
+        /// Immutable knowledge domain of the source.
+        root_org_id: Id,
+    },
+}
+
+impl ExecutionSource {
+    /// A physical source only exists for the environment variant.
+    pub const fn environment(&self) -> Option<Id> {
+        match self {
+            Self::Environment { environment } => Some(*environment),
+            Self::Program { .. } => None,
+        }
+    }
+}
+
 /// What a job is asked to do, as it is kept in the job's plan; the members its phases add come beside.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -173,6 +213,9 @@ pub struct Recipe {
     pub result: ForkResult,
     /// What was asked.
     pub request: ForkRequest,
+    /// Captured at preview; old jobs must not acquire a later parent preset.
+    #[serde(default)]
+    pub agent_access: Option<crate::binding::BirthAgentAccess>,
     /// The plan as it was worked out when it was confirmed.
     pub forkplan: ForkPlan,
     /// The options that apply.
@@ -185,14 +228,50 @@ pub struct Recipe {
     pub new_segment: Id,
     /// Who confirmed it.
     pub by: Id,
-    /// The environment the source is in.
-    pub from_environment: Id,
+    /// An agent that confirmed a fork, while its giver remains the new thread's first owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<Id>,
+    /// The original directing turn, retained for truthful responsibility after the tool returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent_turn: Option<Id>,
+    /// Actual source execution; a program never borrows the destination environment.
+    pub source_execution: ExecutionSource,
     /// The environment the result lands in, when it exists already.
     pub to_environment: Option<Id>,
     /// The segment the source is in now.
     pub source_segment: Option<Id>,
     /// The batch it belongs to.
     pub batch_id: Option<Id>,
+}
+
+impl Recipe {
+    /// Actual environment-reach source of a native lifecycle switch, before any delegation is retained.
+    pub(crate) fn lifecycle_source(&self, row: &JobRow) -> Result<(Id, Id), EngineError> {
+        let source = source::retained(&row.plan)
+            .map_err(|error| EngineError::unreadable(format!("{error:?}")))?;
+        if row.kind != KIND
+            || row.node_id != Some(self.source_thread)
+            || row.created_by != Some(self.by)
+            || self.result != ForkResult::Replace
+            || self.new_thread.is_some()
+            || self.by_agent.is_some()
+            || self.by_agent_turn.is_some()
+            || source.cut_id != row.id
+            || source.thread != self.source_thread
+            || source.reach != crate::fork_plan::Reach::Environment
+            || source.operation.is_some()
+            || source.recovery_input.is_some()
+            || source.agent_thread.is_some()
+        {
+            return Err(EngineError::BeforeEffect(Box::new(
+                crate::operation_scope::continuing::Error::Refused,
+            )));
+        }
+        let environment = self.source_execution.environment().ok_or_else(|| {
+            EngineError::BeforeEffect(Box::new(crate::operation_scope::continuing::Error::Refused))
+        })?;
+        Ok((environment, self.source_thread))
+    }
 }
 
 /// What the phases of a job remember in its plan, member by member.
@@ -293,63 +372,22 @@ impl Engine {
         thread: Id,
         body: &ForkCreateBody,
     ) -> Result<JobRow, PlanError> {
-        let (_, stored) = self
-            .load_fork_plan(&mut tx, caller, body.preflight_id, Some(thread))
+        let prepared = self
+            .prepare_fork_confirmation(&mut tx, caller, thread, body)
             .await?;
-        // The thread is locked first: two confirmations of one thread are made to take turns.
-        let locked = threads::lock(&mut tx, thread)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-            .ok_or(PlanError::NotFound)?;
-        if !stored
-            .source_scope
-            .as_ref()
-            .is_some_and(|scope| scope.matches(&locked))
-        {
-            return Err(PlanError::Expired);
-        }
-        if let Some(job) = crate::locks::held_by(&mut tx, thread).await? {
-            return Err(PlanError::Held(job));
-        }
-        let mut request = stored.request.clone();
-        // A fingerprint is the observation shown at preflight, never a condition of moving or starting work.
-        request.check_fingerprints = None;
-        request.fingerprint_request_id = None;
-        if let Some(given) = &body.options {
-            let mut options = request.options.take().unwrap_or_default();
-            options.active_turn = given.active_turn.or(options.active_turn);
-            options.wait_minutes = given.wait_minutes.or(options.wait_minutes);
-            options.verify_timeout_secs = given.verify_timeout_secs.or(options.verify_timeout_secs);
-            options.keep_previous = given.keep_previous.or(options.keep_previous);
-            options.stop_processes = given.stop_processes.or(options.stop_processes);
-            request.options = Some(options);
-        }
         let draft = self
-            .draft_in(
-                &mut tx,
-                caller,
-                thread,
-                &request,
-                crate::fork_plan::Reach::Seen,
-                None,
-            )
+            .assemble_prepared_fork(&mut tx, prepared.selected())
             .await?;
-        if !draft.is_clear() {
-            return Err(PlanError::Blocked(Box::new(draft)));
-        }
-        let job = self
-            .start_fork_job(&mut tx, caller, &locked, draft, None, body.preflight_id)
-            .await?;
-        fork_rows::forget_preflight(&mut tx, body.preflight_id).await?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        self.kick();
-        self.wake(thread);
-        Ok(job)
+        self.commit_fork_confirmation(tx, caller, &prepared, draft, || Ok(()), || Ok(()))
+            .await
     }
 
-    /// Makes the job of a plan that has no blockers in the transaction of the caller, and takes the lock:
-    /// a switch of a thread that has no turn running leaves it blocked from now on.
-    pub(crate) async fn start_fork_job(
+    /// The same native first-insert writer for a prepared batch member and its real original act.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the native queue keeps its selected member, original source and first-effect callback together"
+    )]
+    pub(crate) async fn start_prepared_fork_job(
         &self,
         tx: &mut orch_db::Tx,
         caller: &Caller,
@@ -357,7 +395,104 @@ impl Engine {
         draft: Draft,
         batch: Option<Id>,
         preflight: Id,
+        origin: Option<&crate::fork_plan::operation::Origin>,
+        before: impl FnOnce() -> Result<(), EngineError> + Send,
     ) -> Result<JobRow, PlanError> {
+        let origin = origin
+            .map(|origin| origin.accepted_from(caller, None))
+            .transpose()?;
+        let authority = match &origin {
+            Some(origin) => source::Authority::Managed { caller, origin },
+            None => source::Authority::Direct(caller),
+        };
+        self.start_fork_job_with_authority(
+            tx,
+            ForkStart {
+                authority,
+                thread,
+                draft,
+                batch,
+                preflight,
+            },
+            || {
+                if let Some(origin) = &origin {
+                    origin.deadline(self.inner.clock.as_ref(), caller)?;
+                }
+                before()
+            },
+        )
+        .await
+    }
+
+    /// Starts a normal fork with retained agent/giver authority at every deferred boundary.
+    pub(crate) async fn start_agent_fork_job(
+        &self,
+        tx: &mut orch_db::Tx,
+        caller: &Caller,
+        origin: (Id, Id),
+        thread: &threads::ThreadRow,
+        draft: Draft,
+    ) -> Result<JobRow, PlanError> {
+        self.start_fork_job_with_authority(
+            tx,
+            ForkStart {
+                authority: source::Authority::Agent {
+                    caller,
+                    thread: origin.0,
+                    turn: origin.1,
+                },
+                thread,
+                draft,
+                batch: None,
+                preflight: new_id(),
+            },
+            || Ok(()),
+        )
+        .await
+    }
+
+    /// The configured recovery only replaces its existing binding. Its accepted input
+    /// origins remain independent through every later job checkpoint.
+    pub(crate) async fn start_recovery_fork_job(
+        &self,
+        tx: &mut orch_db::Tx,
+        callers: &crate::inputs::InputCallers,
+        input_id: Id,
+        thread: &threads::ThreadRow,
+        draft: Draft,
+        preflight: Id,
+    ) -> Result<JobRow, PlanError> {
+        self.start_fork_job_with_authority(
+            tx,
+            ForkStart {
+                authority: source::Authority::Recovery { input_id, callers },
+                thread,
+                draft,
+                batch: None,
+                preflight,
+            },
+            || Ok(()),
+        )
+        .await
+    }
+
+    async fn start_fork_job_with_authority(
+        &self,
+        tx: &mut orch_db::Tx,
+        start: ForkStart<'_>,
+        before: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<JobRow, PlanError> {
+        let ForkStart {
+            authority,
+            thread,
+            draft,
+            batch,
+            preflight,
+        } = start;
+        if matches!(&authority, source::Authority::Recovery { .. }) && draft.copy_worktree {
+            return Err(EngineError::unreadable("an input recovery cannot copy a worktree").into());
+        }
+        let actor = authority.actor();
         let now = self.inner.clock.now();
         let conn: &mut orch_db::Conn = &mut *tx;
         let replace = draft.request.result == ForkResult::Replace;
@@ -365,14 +500,20 @@ impl Engine {
         let reach = draft.source_scope.reach;
         let mount_decisions = draft.mount_decisions;
         let plan = draft.plan;
-        let from_environment = plan
-            .from
-            .environment
-            .as_ref()
-            .map(|environment| environment.id)
-            .ok_or_else(|| {
-                EngineError::unreadable("a thread that is switched is in an environment")
-            })?;
+        let from_environment = plan.from.environment().map(|environment| environment.id);
+        let source_execution = match &plan.from {
+            orch_api_contract::forks::ForkPlanFrom::Agent { .. } => ExecutionSource::Environment {
+                environment: from_environment.ok_or_else(|| {
+                    EngineError::unreadable("The native source has no environment")
+                })?,
+            },
+            orch_api_contract::forks::ForkPlanFrom::Program { program, .. } => {
+                ExecutionSource::Program {
+                    program: program.id,
+                    root_org_id: program.root_org_id,
+                }
+            }
+        };
         let to_environment = match &plan.to.environment {
             ForkPlanTarget::Existing(environment) => Some(environment.id),
             ForkPlanTarget::Made { .. } => None,
@@ -380,13 +521,22 @@ impl Engine {
         let recipe = Recipe {
             preflight_id: preflight,
             result: draft.request.result,
+            agent_access: Some(draft.agent_access),
             request: draft.request,
             options: plan.options.clone(),
             source_thread: thread.node_id,
             new_thread: (!replace).then(new_id),
             new_segment: new_id(),
-            by: caller.user(),
-            from_environment,
+            by: actor,
+            by_agent: match &authority {
+                source::Authority::Agent { thread, .. } => Some(*thread),
+                _ => None,
+            },
+            by_agent_turn: match &authority {
+                source::Authority::Agent { turn, .. } => Some(*turn),
+                _ => None,
+            },
+            source_execution,
             to_environment,
             source_segment: thread.current_segment_id,
             batch_id: batch,
@@ -395,50 +545,60 @@ impl Engine {
         let phases = phases_of(&recipe.forkplan);
         let mut plan_json = serde_json::to_value(&recipe)?;
         let operation = new_id();
-        let confirmed = source::confirmed(conn, thread, caller, &recipe, operation, reach).await?;
+        let confirmed =
+            source::confirmed(conn, thread, &authority, &recipe, operation, reach).await?;
         source::attach(&mut plan_json, &confirmed)?;
         plan_json["copy_worktree"] = json!(copy_worktree);
         plan_json["mount_decisions"] = serde_json::to_value(&mount_decisions)?;
-        plan_json["file_caller_token"] = json!(caller.grant().and_then(|grant| grant.token()));
+        if let source::Authority::Direct(caller) | source::Authority::Managed { caller, .. } =
+            &authority
+        {
+            plan_json["file_caller_token"] = json!(caller.grant().and_then(|grant| grant.token()));
+        }
         if let Some(object) = plan_json.as_object_mut() {
             object.insert(
                 "origin".to_owned(),
                 serde_json::to_value(orch_db::audit::current_origin())?,
             );
-            object.insert(
-                "from_environment".to_owned(),
-                Json::String(from_environment.to_string()),
-            );
+            if let Some(from_environment) = from_environment {
+                object.insert(
+                    "from_environment".to_owned(),
+                    Json::String(from_environment.to_string()),
+                );
+            }
             if let Some(to) = to_environment {
                 object.insert("to_environment".to_owned(), Json::String(to.to_string()));
             }
-            let machine = harnesses::machine_of(
-                thread.arrangement.as_deref(),
-                &resource_rows::provider(conn, thread.provider_id.unwrap_or_default())
-                    .await?
-                    .ok_or_else(|| EngineError::unreadable("the thread's provider is gone"))?,
-                environment_rows::environment(conn, from_environment)
-                    .await?
-                    .and_then(|environment| environment.machine_id),
-            );
-            if let Some(machine) = machine {
-                object.insert(
-                    made::OLD_MACHINE.to_owned(),
-                    Json::String(machine.to_string()),
+            if let Some(from_environment) = from_environment {
+                let machine = harnesses::machine_of(
+                    thread.arrangement.as_deref(),
+                    &resource_rows::provider(conn, thread.provider_id.unwrap_or_default())
+                        .await?
+                        .ok_or_else(|| EngineError::unreadable("the thread's provider is gone"))?,
+                    environment_rows::environment(conn, from_environment)
+                        .await?
+                        .and_then(|environment| environment.machine_id),
                 );
+                if let Some(machine) = machine {
+                    object.insert(
+                        made::OLD_MACHINE.to_owned(),
+                        Json::String(machine.to_string()),
+                    );
+                }
             }
         }
         let progress = serde_json::to_value(initial_progress(&phases))?;
+        before()?;
         let job = fork_rows::insert(
             conn,
             &fork_rows::NewForkJob {
                 id: operation,
                 thread: thread.node_id,
-                environment: to_environment.or(Some(from_environment)),
+                environment: to_environment.or(from_environment),
                 batch,
                 plan: &plan_json,
                 progress: &progress,
-                created_by: caller.user(),
+                created_by: actor,
             },
             now,
         )
@@ -577,13 +737,26 @@ impl Forking {
     async fn lock(&self, job: &Job) -> Result<Done, Stop> {
         let engine = job.engine();
         let thread = self.recipe.source_thread;
+        if crate::background_wake::running(
+            &mut *engine.db().acquire().await.map_err(EngineError::from)?,
+            Some(thread),
+            None,
+            None,
+        )
+        .await?
+        {
+            return Err(failed(
+                "background_tasks_running",
+                "Review and end the running background tasks before forking or switching this session.",
+            ));
+        }
         if !self.replace() && wants_history(&self.recipe.request) {
             // All on a confirmed empty source still owns an explicit empty cut
             // before any target is created. Missing is never evidence of empty.
             self.source_cut(job).await?;
         }
         if self.replace() {
-            engine.cancel_pending_approvals(thread).await?;
+            operation::cancel_approvals(job, thread).await?;
             let plan = job.plan().await?;
             let since = match member::<DateTime<Utc>>(&plan, made::WAITING_SINCE) {
                 Some(at) => at,
@@ -604,9 +777,7 @@ impl Forking {
                 let Some(turn) = active else { break };
                 match self.recipe.options.active_turn {
                     ActiveTurn::Interrupt => {
-                        engine
-                            .interrupt_for_change(thread, &turn, self.recipe.by)
-                            .await?;
+                        operation::interrupt(job, thread, &turn, self.recipe.by).await?;
                     }
                     ActiveTurn::Wait => {
                         let limit = chrono::Duration::minutes(self.recipe.options.wait_minutes);
@@ -624,6 +795,19 @@ impl Forking {
                 job.progress(0.0, Some("waiting for the turn to end"))
                     .await?;
                 job.pause(LOOK_EVERY).await?;
+            }
+            if crate::background_wake::running(
+                &mut *engine.db().acquire().await.map_err(EngineError::from)?,
+                Some(thread),
+                None,
+                None,
+            )
+            .await?
+            {
+                return Err(failed(
+                    "background_tasks_running",
+                    "Review and end the running background tasks before changing this session.",
+                ));
             }
             // With the turn out of the way, the thread stands blocked as `switching`.
             if let Err(error) = engine.preflight(thread).await {
@@ -699,9 +883,30 @@ impl Forking {
         }
         // Birth resolves the destination's inherited mode normally, so an offered locked value needs
         // no override. The history snapshot and publication still enforce the confirmed preview.
-        let page = fork_page(request.access.as_ref());
         let mut tx = engine.db().begin().await?;
-        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let authorized = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let source_subject =
+            crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Thread,
+                id: self.recipe.source_thread,
+            });
+        let outgoing = crate::copy_out::inspect(&mut tx, source_subject, Some(confirmed.topic))
+            .await
+            .map_err(|error| match error {
+                crate::copy_out::Error::Native(error) => Stop::from(error),
+                _ => failed(
+                    "authz.denied",
+                    "The source no longer permits a copy into this organization.",
+                ),
+            })?
+            .is_some();
+        let page = if outgoing && request.access.is_none() {
+            None
+        } else {
+            fork_page(request.access.as_ref())
+        };
+        let caller = authorized.creation_caller()?;
+        authorized.check(engine.inner.clock.as_ref())?;
         let created = engine
             .create_thread_in_transaction(
                 &mut tx,
@@ -718,6 +923,13 @@ impl Forking {
                     effort: plan.to.effort.clone(),
                 },
                 &crate::binding::Birth {
+                    let_into_environment: false,
+                    // Jobs written before this field existed do not gain a new preset on retry.
+                    agent_access: self
+                        .recipe
+                        .agent_access
+                        .clone()
+                        .unwrap_or_else(crate::binding::BirthAgentAccess::nothing),
                     first_input: None,
                     prepare_source: Some(false),
                     worktree: None,
@@ -739,6 +951,7 @@ impl Forking {
             ON CONFLICT(thread_id) DO UPDATE SET preparation_job=EXCLUDED.preparation_job,ready=false
             WHERE thread_native_guards.preparation_job=EXCLUDED.preparation_job")
             .bind(new_thread).bind(job.id()).execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
+        authorized.check(engine.inner.clock.as_ref())?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         // It is held from this moment: pre-flight finds the job and blocks it.
         if let Err(error) = engine.preflight(new_thread).await {
@@ -834,7 +1047,15 @@ impl Forking {
                 // An environment this job made is being made by its own job: it is waited for, not started.
                 "none" | "stopped" if has_unit && !asked_to_start && !self.makes_environment() => {
                     asked_to_start = true;
-                    if let Err(error) = engine.start_environment(id, Some(self.recipe.by)).await {
+                    let parent = job.row().await?;
+                    let starting = match operation::Preparation::from_job(&parent)? {
+                        Some(source) => engine.start_environment_from_fork(id, &source).await,
+                        None if crate::jobs::lifecycle_commands::environment::present(&parent) => {
+                            engine.start_environment_from_lifecycle(id, &parent).await
+                        }
+                        None => engine.start_environment(id, Some(self.recipe.by)).await,
+                    };
+                    if let Err(error) = starting {
                         return Err(failed("environment_unavailable", error.to_string()));
                     }
                 }
@@ -896,9 +1117,12 @@ impl Forking {
         } else {
             Vec::new()
         };
+        source::lock_operation_actor(&mut tx, job.id()).await?;
         let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
         let confirmed = source::retained(&owned.plan)?;
-        let caller = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let authorized = source::authorize(&mut tx, job, &self.recipe, &confirmed, None).await?;
+        let caller = authorized.creation_caller()?;
+        authorized.check(engine.inner.clock.as_ref())?;
         let principal = orch_authz::Principal::load(&mut tx, caller, Time::new(now))
             .await
             .map_err(EngineError::from)?;
@@ -939,7 +1163,14 @@ impl Forking {
         }
         let selectors = crate::volume_carry::carried(self.recipe.forkplan.files.as_ref());
         if !selectors.is_empty() {
-            let source = hosting_rows::live_runtime(&mut tx, self.recipe.from_environment)
+            let source_environment =
+                self.recipe.source_execution.environment().ok_or_else(|| {
+                    failed(
+                        "volume_copy_unavailable",
+                        "The source program has no workspace volumes",
+                    )
+                })?;
+            let source = hosting_rows::live_runtime(&mut tx, source_environment)
                 .await?
                 .ok_or_else(|| {
                     failed(
@@ -968,6 +1199,27 @@ impl Forking {
             .await
             .map_err(EngineError::from)?;
         }
+        if let Some(parent) = operation::Preparation::from_job(&owned)? {
+            crate::jobs::provision::retain_fork_provision_origin(
+                &mut tx,
+                &parent,
+                &made,
+                new.home_node_id.unwrap_or(topic),
+                engine.inner.clock.as_ref(),
+                engine.inner.access.as_ref(),
+            )
+            .await?;
+        } else if crate::jobs::lifecycle_commands::environment::present(&owned) {
+            crate::jobs::lifecycle_commands::environment::retain_child(
+                &mut tx,
+                &owned,
+                made.job.id,
+                engine.inner.clock.as_ref(),
+                engine.inner.access.as_ref(),
+            )
+            .await?;
+        }
+        authorized.check(engine.inner.clock.as_ref())?;
         tx.commit()
             .await
             .map_err(orch_db::DbError::from)
@@ -985,6 +1237,7 @@ impl Forking {
     ) -> Result<(), Stop> {
         use crate::providers::Keeping;
         let engine = job.engine();
+        let startup = engine.fork_startup(&job.row().await?)?;
         let plan = &self.recipe.forkplan;
         let (agent, provider, machine) = {
             let mut conn = engine.db().acquire().await.map_err(EngineError::from)?;
@@ -1014,7 +1267,11 @@ impl Forking {
         let path = crate::binding::credential_path(kind, &provider, &agent);
         if path == orch_agent_contract::credentials::CredentialPath::Forwarded {
             match engine
-                .ensure_provider_started(self.result_thread(), provider.id)
+                .ensure_provider_started_with_preparation(
+                    self.result_thread(),
+                    provider.id,
+                    startup.as_ref(),
+                )
                 .await?
             {
                 Keeping::Up => {}
@@ -1032,7 +1289,12 @@ impl Forking {
             machine,
         };
         match engine
-            .ensure_harness(key, &agent, ids::agent_start(job.id()))
+            .ensure_harness_with_preparation(
+                key,
+                &agent,
+                ids::agent_start(job.id()),
+                startup.as_ref(),
+            )
             .await?
         {
             harnesses::Started::Up => Ok(()),
@@ -1043,9 +1305,10 @@ impl Forking {
     }
 }
 
-/// The rows of the page a fork is given in its request; a fork that names none starts with the defaults
-/// of the place it is made in.
-fn fork_page(
+/// The page change applied during Birth, before the optional source overlay at commit.
+/// Omission initially follows destination defaults; `fork_page_source` selects the later copy.
+#[must_use]
+pub fn fork_page(
     access: Option<&orch_api_contract::access::ThreadAccess>,
 ) -> Option<orch_access_contract::pages::PageChange> {
     use orch_api_contract::access::{AccessPreset, ThreadAccess};
@@ -1068,6 +1331,59 @@ fn fork_page(
     }
 }
 
+/// The human page actually overlaid at fork commit, after the normal Birth page change.
+/// An explicit defaults/private/custom page carries no source; omission copies the source thread.
+#[must_use]
+pub fn fork_page_source(
+    source: Id,
+    access: Option<&orch_api_contract::access::ThreadAccess>,
+) -> Option<Id> {
+    match access {
+        None => Some(source),
+        Some(orch_api_contract::access::ThreadAccess::As(page)) => Some(page.source),
+        Some(_) => None,
+    }
+}
+
+/// A copy outside the original root starts with the destination's native page defaults.
+pub async fn fork_page_source_in(
+    conn: &mut orch_db::Conn,
+    source: Id,
+    access: Option<&orch_api_contract::access::ThreadAccess>,
+    destination: Id,
+) -> Result<Option<Id>, EngineError> {
+    let rows = orch_db::queries::hierarchy::with_ancestors(conn, &[source, destination]).await?;
+    let from = rows
+        .iter()
+        .find(|row| row.id == source)
+        .ok_or_else(|| EngineError::unreadable("The fork source is unavailable."))?;
+    let to = rows
+        .iter()
+        .find(|row| row.id == destination)
+        .ok_or_else(|| EngineError::unreadable("The fork destination is unavailable."))?;
+    Ok(if from.org_id == to.org_id {
+        fork_page_source(source, access)
+    } else {
+        None
+    })
+}
+
+/// The existing interrupt decision inside a caller's already guarded Unit; driving follows commit.
+pub(crate) async fn interrupt_for_change_in(
+    unit: &mut Unit<'_>,
+    thread: Id,
+    turn: &threads::TurnRow,
+    by: Id,
+) -> Result<(), EngineError> {
+    if turn.interrupted_by.is_none() && threads::lock(&mut *unit.conn, thread).await?.is_some() {
+        let seq = unit.stamp(thread).await?;
+        threads::set_interrupt_cause(&mut *unit.conn, turn.id, "environment_change").await?;
+        threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
+        unit.wake(thread);
+    }
+    Ok(())
+}
+
 impl Engine {
     /// Stops a turn for a person who confirmed a change that cannot wait for it, and sees that it is
     /// driven to its end: the harness is asked, and the engine ends it by force if it does not answer.
@@ -1081,13 +1397,7 @@ impl Engine {
             let mut tx = self.inner.db.begin().await?;
             let finished = {
                 let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-                if threads::lock(&mut *unit.conn, thread).await?.is_some() {
-                    let seq = unit.stamp(thread).await?;
-                    threads::set_interrupt_cause(&mut *unit.conn, turn.id, "environment_change")
-                        .await?;
-                    threads::mark_interrupted_by(&mut *unit.conn, turn.id, by, seq).await?;
-                    unit.wake(thread);
-                }
+                interrupt_for_change_in(&mut unit, thread, turn, by).await?;
                 unit.finish().await?
             };
             self.commit(tx, finished).await?;
@@ -1163,7 +1473,14 @@ impl Forking {
             .ok_or_else(|| failed(INTERNAL, "the environment the files go to is not known"))?;
         let (source, target) = {
             let mut conn = engine.db().acquire().await.map_err(EngineError::from)?;
-            let source = environment_rows::environment(&mut conn, self.recipe.from_environment)
+            let source_environment =
+                self.recipe.source_execution.environment().ok_or_else(|| {
+                    failed(
+                        "environment_unavailable",
+                        "The source program has no workspace files",
+                    )
+                })?;
+            let source = environment_rows::environment(&mut conn, source_environment)
                 .await
                 .map_err(EngineError::from)?
                 .ok_or_else(|| {
@@ -1505,8 +1822,16 @@ impl Forking {
                     engine,
                     &captured,
                     machine,
-                    plan.from.provider.id,
-                    plan.from.agent.id,
+                    plan.from.provider().id,
+                    plan.from
+                        .agent()
+                        .ok_or_else(|| {
+                            failed(
+                                "history_source_changed",
+                                "A program has no native profile archive",
+                            )
+                        })?
+                        .id,
                     ids::derived("fork.native-record", &[job.id().as_bytes()]),
                 )
                 .await?
@@ -1975,7 +2300,7 @@ impl Forking {
             let read = source::save(job, &self.recipe, "verify_child", read, None).await?;
             let child: orch_link_contract::commands::AgentReadSessionResult =
                 serde_json::from_value(source::run(job, read).await?).map_err(EngineError::from)?;
-            fork_history::cut::verify_native_record(engine, &boundary, &child).await?;
+            fork_history::cut::verify_native_record(engine, &cut, &boundary, &child).await?;
         }
         let report = opened
             .import_report
@@ -2456,7 +2781,8 @@ impl Engine {
             &parameters,
             &settings,
             path,
-        );
+        )
+        .map_err(EngineError::unreadable)?;
         if let Some(why) = self
             .bypass_environment(conn, environment.id, approval)
             .await?
@@ -2469,10 +2795,12 @@ impl Engine {
         } else {
             vec![plan.to.model.clone()]
         };
-        crate::approval_review::reviewer_allowed(
+        crate::approval_review::reviewer_allowed_for(
             approval,
             crate::harnesses::descriptor_of(agent)?.as_ref(),
             &available_models,
+            path,
+            &plan.to.model,
         )
         .map_err(EngineError::unreadable)?;
         let topic_name = threads::node_name(conn, thread.topic_id)
@@ -2489,13 +2817,14 @@ impl Engine {
             threads::other_topic_threads_in_environment(conn, thread.topic_id, environment.id)
                 .await?
                 > 0;
-        let tools = crate::tools::offered_for_session(
-            conn,
-            &thread,
-            descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
-            self.inner.clock.time(),
-        )
-        .await?;
+        let tools = self
+            .offered_tools_for_session(
+                conn,
+                &thread,
+                descriptor.capabilities.orch_tools == OrchToolsSupport::Mcp,
+                self.inner.clock.time(),
+            )
+            .await?;
         let view = self.environment_capabilities(conn, environment.id).await?;
         let isolation = view
             .as_ref()
@@ -2523,6 +2852,7 @@ impl Engine {
             agent_id: agent.id,
             provider_id: provider.id,
             environment_id: environment.id,
+            machine_id: environment.machine_id,
             env_generation: environment.generation,
             arrangement: arrangement.kind.as_str().to_owned(),
             executor: arrangement.executor.clone(),
@@ -2562,6 +2892,7 @@ impl Engine {
             limit_bypass: None,
             phase: None,
             phase_at: None,
+            phase_attempt: None,
             waiting_since: None,
             waited_ms: 0,
             interrupted_by: None,
@@ -2616,7 +2947,8 @@ impl Engine {
                     close_reason: None,
                 }
             });
-        Ok(StartSnapshot {
+        let mut snapshot = StartSnapshot {
+            native_model: None,
             material: self.topic_material(conn, thread_id).await?,
             thread,
             pending_notice_positions: Vec::new(),
@@ -2663,7 +2995,24 @@ impl Engine {
             unnamed_before: Vec::new(),
             // The session the fork opens is given where its agent is with its instructions.
             context_sent: Json::Null,
-        })
+        };
+        // This preparation has no input author. Use the actual confirming actor through the
+        // ordinary resource port; the job's original source/first-effect guard is unchanged.
+        let allowed = self
+            .capability_use_preview(
+                conn,
+                &crate::access::ProviderUse {
+                    person: recipe.by,
+                    node: thread_id,
+                    provider: provider.id,
+                    model: Some(&snapshot.turn.model),
+                    effort: snapshot.turn.effort.as_deref(),
+                },
+            )
+            .await?;
+        snapshot.native_model =
+            Box::pin(self.capture_native_model(conn, &snapshot, allowed)).await?;
+        Ok(snapshot)
     }
 }
 
@@ -2700,7 +3049,7 @@ impl Forking {
         let facts = Facts {
             descriptor,
             provider,
-            environment,
+            environment: Some(environment),
             offers: offers.offers,
             settings,
             entry: None,
@@ -2792,7 +3141,7 @@ impl Forking {
             .await
             .map_err(EngineError::from)?
             .ok_or_else(|| failed("verify_failed", "the provider is gone"))?;
-        if provider.status != "ready" {
+        if !crate::providers::request_status_available(&provider.status) {
             return Err(failed(
                 "verify_failed",
                 format!("the provider is {}", provider.status),
@@ -2825,13 +3174,43 @@ impl Forking {
             .ok_or_else(|| failed(INTERNAL, "the environment of the result is not known"))?;
         let now = job.now();
         let mut tx = engine.db().begin().await.map_err(EngineError::from)?;
+        let moving = source::retained(&plan_json)?
+            .operation
+            .as_ref()
+            .and_then(|origin| origin.input().moving())
+            .cloned();
+        if moving.is_some() {
+            orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
+        }
+
+        source::lock_operation_actor(&mut tx, job.id()).await?;
         let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
         if let Some(reason) = crate::jobs::runner::abort_reason(&owned)? {
             return Err(reason);
         }
         let confirmed = source::retained(&owned.plan)?;
         let target = threads::thread(&mut tx, self.result_thread()).await?;
-        source::authorize(&mut tx, job, &self.recipe, &confirmed, target.as_ref()).await?;
+        let mut authorized =
+            source::authorize(&mut tx, job, &self.recipe, &confirmed, target.as_ref()).await?;
+        let ending = if let Some(review) = &moving {
+            let principal = match &authorized {
+                source::Authorized::Managed { principal, .. } => principal,
+                _ => {
+                    return Err(failed(
+                        "authz.denied",
+                        "a Thread Move has no actual managed operation",
+                    ));
+                }
+            };
+            let ending =
+                crate::fork_plan::moving::prepare_ending(engine, &mut tx, principal, review)
+                    .await?;
+            authorized =
+                source::authorize(&mut tx, job, &self.recipe, &confirmed, target.as_ref()).await?;
+            Some(ending)
+        } else {
+            None
+        };
         if let Some(target) = owned.plan.get("history_target") {
             source::check_target(
                 &mut tx,
@@ -2841,11 +3220,14 @@ impl Forking {
             )
             .await?;
         }
+        authorized.check(engine.inner.clock.as_ref())?;
         if !orch_db::queries::jobs::pass_commit(&mut tx, job.id(), now).await? {
             return Err(Stop::Cancelled);
         }
         let finished = {
-            let mut unit = Unit::new(&mut tx, now);
+            let mut unit = Unit::with_first_effect(&mut tx, now, || {
+                authorized.check(engine.inner.clock.as_ref())
+            });
             let segment = if self.replace() {
                 self.commit_switch(&mut unit, job, target_id, opened.as_ref(), &plan_json)
                     .await?;
@@ -2907,6 +3289,17 @@ impl Forking {
             // Readable copy and every native/file consumer now own their result.
             // The release trigger refuses any still-unconfirmed original use.
             orch_db::queries::thread_history_cuts::release(unit.conn, job.id()).await?;
+            if let Some(ending) = &ending {
+                authorized.check(engine.inner.clock.as_ref())?;
+                crate::fork_plan::moving::finish(
+                    engine,
+                    unit.conn,
+                    ending,
+                    self.recipe.by,
+                    Time::new(now),
+                )
+                .await?;
+            }
             orch_db::queries::jobs::merge_plan(
                 &mut *unit.conn,
                 job.id(),
@@ -2917,6 +3310,7 @@ impl Forking {
             .map_err(EngineError::from)?;
             unit.finish().await.map_err(Stop::from)?
         };
+        authorized.check(engine.inner.clock.as_ref())?;
         engine.commit(tx, finished).await.map_err(Stop::from)?;
         if self.replace() {
             engine.forget_open_sessions(self.recipe.source_thread);
@@ -2977,8 +3371,8 @@ impl Forking {
             (arrangement.executor, arrangement.tool_set)
         };
         let seq = unit.stamp(thread_id).await?;
-        let same_runtime = plan.from.agent.id == plan.to.agent.id
-            && plan.from.provider.id == plan.to.provider.id
+        let same_runtime = plan.from.agent().map(|agent| agent.id) == Some(plan.to.agent.id)
+            && plan.from.provider().id == plan.to.provider.id
             && thread.arrangement.as_deref() == Some(kind.as_str());
         if let Some(old) = thread.current_segment_id {
             let reason = if same_runtime {
@@ -3043,6 +3437,12 @@ impl Forking {
         }) {
             crate::approval_rules::end_for_binding_change(unit, &thread).await?;
         }
+        if matches!(
+            self.recipe.source_execution,
+            ExecutionSource::Program { .. }
+        ) {
+            orch_db::queries::ask::end_program(unit.conn, thread_id).await?;
+        }
         threads::set_binding(
             &mut *unit.conn,
             thread_id,
@@ -3077,33 +3477,89 @@ impl Forking {
         .map_err(EngineError::from)?;
         self.write_model_settings(unit, thread_id).await?;
         let reference_time = orch_types::Time::new(unit.now());
-        let marker = orch_api_contract::threads::MarkerPayload::Switched(
-            orch_api_contract::threads::MarkerSwitched {
-                from: orch_api_contract::threads::MarkerSwitchedFrom {
-                    agent: plan.from.agent.clone(),
-                    provider: plan.from.provider.clone(),
-                    environment: plan.from.environment.clone(),
-                    directory: thread.workspace_dir.clone(),
-                },
-                to: orch_api_contract::threads::MarkerSwitchedTo {
-                    agent: plan.to.agent.clone(),
-                    provider: plan.to.provider.clone(),
-                    environment: serde_json::from_value(
-                        crate::views::environment_ref_json(
-                            &mut *unit.conn,
-                            &environment,
-                            reference_time,
-                        )
-                        .await?,
+        let marker = if let Some(from_environment) = plan
+            .from
+            .environment()
+            .filter(|from| same_runtime && from.id != target_id)
+        {
+            let old_environment = environment_rows::environment(unit.conn, from_environment.id)
+                .await?
+                .ok_or_else(|| {
+                    failed("environment_unavailable", "the source environment is gone")
+                })?;
+            let (from_host, from_machine) =
+                crate::views::environment_location_refs(unit.conn, from_environment.id).await?;
+            let (to_host, to_machine) =
+                crate::views::environment_location_refs(unit.conn, target_id).await?;
+            let detached = crate::mount_copies::of_plan(remembered)?.detached;
+            let notice = super::environment_move::notice::MoveNotice::prepare(
+                unit.conn,
+                &old_environment.facts,
+                &environment.facts,
+                &detached,
+                plan.files.as_ref().map_or(0, |files| files.missing.count),
+            )
+            .await?;
+            orch_api_contract::threads::MarkerPayload::EnvironmentMoved(
+                orch_api_contract::threads::MarkerEnvironmentMoved {
+                    from_host,
+                    from_machine,
+                    to_host,
+                    to_machine,
+                    from: from_environment.clone(),
+                    to: serde_json::from_value(
+                        crate::views::environment_ref_json(unit.conn, &environment, reference_time)
+                            .await?,
                     )
                     .map_err(EngineError::from)?,
-                    directory: plan.to.directory.clone(),
+                    path_map: plan
+                        .files
+                        .as_ref()
+                        .map(|files| files.path_map.clone())
+                        .unwrap_or_else(|| orch_api_contract::forks::PathMap {
+                            from: crate::sessions::absolute_directory(
+                                &old_environment.workspace_root,
+                                &thread.workspace_dir,
+                            ),
+                            to: crate::sessions::absolute_directory(
+                                &environment.workspace_root,
+                                &plan.to.directory,
+                            ),
+                        }),
+                    mounts_detached: notice.detached,
+                    by: serde_json::from_value(crate::views::user_ref_json(unit.conn, by).await?)
+                        .map_err(EngineError::from)?,
                 },
-                report: report.clone(),
-                by: serde_json::from_value(crate::views::user_ref_json(&mut *unit.conn, by).await?)
+            )
+        } else {
+            orch_api_contract::threads::MarkerPayload::Switched(
+                orch_api_contract::threads::MarkerSwitched {
+                    from: orch_api_contract::threads::MarkerSwitchedFrom {
+                        binding: plan.from.clone(),
+                        directory: thread.workspace_dir.clone(),
+                    },
+                    to: orch_api_contract::threads::MarkerSwitchedTo {
+                        agent: plan.to.agent.clone(),
+                        provider: plan.to.provider.clone(),
+                        environment: serde_json::from_value(
+                            crate::views::environment_ref_json(
+                                &mut *unit.conn,
+                                &environment,
+                                reference_time,
+                            )
+                            .await?,
+                        )
+                        .map_err(EngineError::from)?,
+                        directory: plan.to.directory.clone(),
+                    },
+                    report: report.clone(),
+                    by: serde_json::from_value(
+                        crate::views::user_ref_json(&mut *unit.conn, by).await?,
+                    )
                     .map_err(EngineError::from)?,
-            },
-        );
+                },
+            )
+        };
         crate::ingest::add_marker(
             unit,
             thread_id,
@@ -3301,6 +3757,7 @@ impl Forking {
                 turn_id: last_turn,
                 report: report.clone(),
                 by: by_ref.clone(),
+                by_agent: self.recipe.by_agent,
             },
         );
         crate::ingest::add_marker(
@@ -3312,6 +3769,42 @@ impl Forking {
             &format!("forked_from:{}", job.id()),
         )
         .await?;
+        if confirmed
+            .operation
+            .as_ref()
+            .and_then(|origin| origin.input().moving())
+            .is_some()
+        {
+            let notice: crate::fork_plan::moving::Notice =
+                serde_json::from_value(remembered.get("thread_move_notice").cloned().ok_or_else(
+                    || {
+                        failed(
+                            "move_notice_changed",
+                            "the accepted Move lost its reviewed notification choice",
+                        )
+                    },
+                )?)
+                .map_err(EngineError::from)?;
+            self.recipe
+                .by_agent
+                .is_none()
+                .then_some(())
+                .ok_or_else(|| {
+                    failed("authz.denied", "a personal Move notice has no agent sender")
+                })?;
+            job.engine()
+                .tell_thread_move(
+                    unit.conn,
+                    &crate::notifications::ThreadMoveNotice {
+                        job: job.id(),
+                        source: source_id,
+                        created: new_id_,
+                        notify: notice.notify,
+                        people: &notice.people,
+                    },
+                )
+                .await?;
+        }
         if let Some(source_segment) = confirmed.segment {
             let made = orch_api_contract::threads::MarkerPayload::Forked(
                 orch_api_contract::threads::MarkerForked {
@@ -3324,6 +3817,7 @@ impl Forking {
                     },
                     turn_id: last_turn,
                     by: by_ref,
+                    by_agent: self.recipe.by_agent,
                 },
             );
             crate::ingest::add_marker(
@@ -3341,6 +3835,14 @@ impl Forking {
             .await?;
         self.carry_page_of_source(unit, source_id, new_id_, by)
             .await?;
+        self.audit(
+            unit,
+            orch_db::audit::action!(AuditAction::ThreadForked),
+            source_id,
+            environment.id,
+            "forked a thread",
+        )
+        .await?;
         // A side thread that turns out to be worth keeping is forked in the ordinary way, and is closed
         // with the reason that it was kept.
         if keep_side {
@@ -3362,14 +3864,6 @@ impl Forking {
             .map_err(EngineError::from)?;
             unit.stamp(source_id).await?;
         }
-        self.audit(
-            unit,
-            orch_db::audit::action!(AuditAction::ThreadForked),
-            source_id,
-            environment.id,
-            "forked a thread",
-        )
-        .await?;
         Ok(segment)
     }
 
@@ -3533,25 +4027,65 @@ impl Forking {
         sentence: &str,
     ) -> Result<(), Stop> {
         use orch_db::audit::{self, Actor, Entry, Origin};
-        let mut entry = Entry::new(
-            Actor::User(self.recipe.by),
-            action.as_str(),
-            "thread",
-            Some(thread),
-            sentence,
-        );
+        let action = if self.recipe.by_agent.is_some() && action == AuditAction::ThreadForked {
+            audit::action!(AuditAction::ThreadForkedByAgent)
+        } else {
+            action
+        };
+        let actor = self
+            .recipe
+            .by_agent
+            .map_or(Actor::User(self.recipe.by), Actor::Agent);
+        let mut entry = Entry::new(actor, action.as_str(), "thread", Some(thread), sentence);
         entry.history = action.is_history_line();
         entry.node_id = Some(thread);
         entry.environment_id = Some(environment);
         entry.details = json!({
-            "from_agent": self.recipe.forkplan.from.agent.id,
+            "from_agent": self.recipe.forkplan.from.agent().map(|agent| agent.id),
             "to_agent": self.recipe.forkplan.to.agent.id,
-            "from_provider": self.recipe.forkplan.from.provider.id,
+            "from_provider": self.recipe.forkplan.from.provider().id,
             "to_provider": self.recipe.forkplan.to.provider.id,
             "result": self.recipe.result,
             "job": self.recipe.preflight_id,
+            "giver": self.recipe.by_agent.map(|_| self.recipe.by),
+            "turn_id": self.recipe.by_agent_turn,
         });
         let now = unit.now();
+        if matches!(
+            action,
+            AuditAction::ThreadForked | AuditAction::ThreadForkedByAgent
+        ) {
+            let destination = self
+                .recipe
+                .new_thread
+                .ok_or_else(|| failed("internal", "The fork has no native target thread."))?;
+            let subject =
+                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Thread,
+                    id: self.recipe.source_thread,
+                });
+            if let Some(boundary) =
+                crate::copy_out::inspect(&mut *unit.conn, subject, Some(destination))
+                    .await
+                    .map_err(|error| match error {
+                        crate::copy_out::Error::Native(error) => Stop::from(error),
+                        _ => failed(
+                            "authz.denied",
+                            "The source no longer permits a copy into this organization.",
+                        ),
+                    })?
+            {
+                crate::copy_out::record(
+                    &mut *unit.conn,
+                    boundary,
+                    actor,
+                    &Origin::default(),
+                    destination,
+                    now,
+                )
+                .await?;
+            }
+        }
         audit::append(&mut *unit.conn, &entry, &Origin::default(), now)
             .await
             .map_err(EngineError::from)?;
@@ -3570,69 +4104,29 @@ impl Forking {
         new: Id,
         by: Id,
     ) -> Result<(), Stop> {
-        use orch_access_contract::permissions::Permission;
-        use orch_api_contract::access::ThreadAccess;
-        use orch_db::queries::access::{self, NewEntry, PageKey, RowWrite};
-        let from = match &self.recipe.request.access {
-            None => source,
-            Some(ThreadAccess::As(as_page)) => as_page.source,
-            Some(_) => return Ok(()),
+        let source_subject =
+            crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Thread,
+                id: source,
+            });
+        if crate::copy_out::inspect(&mut *unit.conn, source_subject, Some(new))
+            .await
+            .map_err(|error| match error {
+                crate::copy_out::Error::Native(error) => Stop::from(error),
+                _ => failed(
+                    "authz.denied",
+                    "The source no longer permits a copy into this organization.",
+                ),
+            })?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let Some(from) = fork_page_source(source, self.recipe.request.access.as_ref()) else {
+            return Ok(());
         };
-        let now = unit.now();
-        let (from_page, new_page) = (
-            PageKey::new("node", from, "live"),
-            PageKey::new("node", new, "live"),
-        );
-        let owners = Permission::AccessOwn.as_str();
-        for row in access::stored_rows_of(&mut *unit.conn, &from_page)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|row| row.permission != owners)
-        {
-            access::write_row(
-                &mut *unit.conn,
-                &RowWrite {
-                    page: &new_page,
-                    profile: &row.profile,
-                    permission: &row.permission,
-                    inherit: row.inherit,
-                    locked: row.locked,
-                },
-                Some(by),
-                now,
-            )
-            .await
-            .map_err(EngineError::from)?;
-        }
-        for entry in access::entries_of(&mut *unit.conn, &from_page)
-            .await
-            .map_err(EngineError::from)?
-            .into_iter()
-            .filter(|entry| entry.permission != owners)
-        {
-            access::insert_entry(
-                &mut *unit.conn,
-                &NewEntry {
-                    id: new_id(),
-                    page: &new_page,
-                    profile: &entry.profile,
-                    permission: &entry.permission,
-                    holder_kind: &entry.holder_kind,
-                    holder_id: entry.holder_id,
-                    holder_role: entry.holder_role.as_deref(),
-                    options: &entry.options,
-                    expires_at: entry.expires_at,
-                    note: &entry.note,
-                    source: orch_access_contract::pages::EntrySource::Creation.as_str(),
-                    created_by: Some(by),
-                    at: now,
-                },
-            )
-            .await
-            .map_err(EngineError::from)?;
-        }
-        access::bump_epoch(&mut *unit.conn)
+        let now = Time::new(unit.now());
+        orch_authz::ownership::carry_fork_page(&mut *unit.conn, from, new, by, now)
             .await
             .map_err(EngineError::from)?;
         Ok(())

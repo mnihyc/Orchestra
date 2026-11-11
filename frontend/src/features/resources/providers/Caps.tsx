@@ -102,7 +102,7 @@ export function ModelLimits({ provider, model }: { provider: ProviderRef; model:
     <div className="flex flex-col gap-2">
       <p className="text-sm text-text-muted">{t('models.limits.lead')}</p>
       {query.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={query} rows={2} />
       ) : query.isError ? (
         <p className="text-sm text-text-muted">{t('models.limits.unavailable', { reason: describe(query.error).message })}</p>
       ) : covering.length === 0 ? (

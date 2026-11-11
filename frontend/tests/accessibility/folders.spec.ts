@@ -108,7 +108,7 @@ test('a topic that lies in folders, a folder’s menu, and the tree with a row c
   await expectAccessibleInBothThemes(page);
 
   await tree(page).getByRole('treeitem', { name: /^Checkout/ }).click({ button: 'right' });
-  await expect(page.getByRole('menu', { name: 'Menu of Checkout' })).toBeVisible();
+  await expect(page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'New folder…' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
@@ -132,10 +132,11 @@ test('folders on a small screen, and in Chinese at the compact density', async (
   await expect(page.locator('html')).toHaveAttribute('data-density', 'compact');
   await page.goto(`/project/${ACME.checkout}`);
   await expect(page.getByTestId('main').getByRole('region', { name: '文件夹' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '新建文件夹' }).first()).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('button', { name: '新建文件夹' }).first().click();
+  // A folder is made from the place's own menu.
+  await page.getByTestId('main').getByRole('button', { name: 'Checkout 的操作', exact: true }).click();
+  await page.getByRole('menuitem', { name: '新建文件夹…' }).click();
   await expect(page.getByRole('dialog', { name: '在 Checkout 中新建文件夹' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });

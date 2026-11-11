@@ -3,15 +3,21 @@ title: 引用和访问权限
 screens: /thread/$threadId, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /search, /shared, /documents/$nodeId, /document-folder/$folderId, /inbox, /approvals
 keywords: 引用, 预览, 标签, 复制引用, 链接, 块, 轮次, 消息, 文件, 行, 描述, read_shared, edit_document, 灰色, 锁定, 已删除, 申请权限, 快捷授权, 到期, 历史
 heading_id.预览和打开: preview-and-open
+heading_id.本部署的地址: installation-addresses
 heading_id.写出引用: write-a-reference
 heading_id.文件和行: files-and-lines
 heading_id.描述文档: describe-a-document
 heading_id.锁定的引用: locked-references
 heading_id.授予访问权限: giving-access
 heading_id.把引用交给代理: sharing-with-an-agent
+summary: 预览和跟随引用、申请访问，并在不扩大共享范围的情况下描述文档。
 ---
 
 # 引用和访问权限
+
+## 本部署的地址
+
+从本部署的公共地址或已声明的其他地址复制来的链接，会在当前地址中打开。配置了公共地址时，**复制链接**会使用该地址。其他 IP 及其端口只有在明确声明后才会被识别；相似域名和路径相同的其他网站仍是外部链接。链接本身不授予权限。参阅[问一问的地址处理](ask.md#installation-addresses)。
 
 ## 预览和打开
 
@@ -78,7 +84,7 @@ heading_id.把引用交给代理: sharing-with-an-agent
 在文档标题下写描述，帮助人和代理决定读什么。首行显示在共享列表和预览中。
 没有描述时，Orch 使用第一段的首行。
 
-代理可以通过 `edit_document` 描述文档；位置允许时，已配置的自动化也可维护描述。
+代理可以通过 `edit_document` 明确写入文档描述。描述只在有人写入后显示。
 描述帮助查找，不代替正文，也不扩大共享范围。
 
 ## 把引用交给代理
@@ -92,3 +98,5 @@ heading_id.把引用交给代理: sharing-with-an-agent
 代理的 **Where you are** 消息会给出其自身对话的路径。
 它可读取以前的轮次、按该路径搜索，或下载整份对话交给自己的工具处理，
 包括上下文缩短前的轮次。
+
+发送复制的引用时，编辑框可以提供查看权限选项，详见[复制链接并在发送时共享查看权限](link-sharing.md)。

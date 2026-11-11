@@ -26,14 +26,14 @@ function draw(cached = false, byAddress = false) {
 
 it('uses an already served exact address as an ordinary link without another read', () => {
   draw(true);
-  expect(screen.getByRole('link', { name: 'Set in Research' })).toHaveAttribute('href', '/org/acme.research/settings/policies?setting=agent.instructions');
+  expect(screen.getByRole('link', { name: 'Set in Research' })).toHaveAttribute('href', '/org/acme.research/settings/defaults?setting=agent.instructions');
   expect(server.read).not.toHaveBeenCalled();
   expect(server.open).not.toHaveBeenCalled();
 });
 
 it('reuses the native org-by-address read of a settings page without fetching that org by id', () => {
   draw(true, true);
-  expect(screen.getByRole('link', { name: 'Set in Research' })).toHaveAttribute('href', '/org/acme.research/settings/policies?setting=agent.instructions');
+  expect(screen.getByRole('link', { name: 'Set in Research' })).toHaveAttribute('href', '/org/acme.research/settings/defaults?setting=agent.instructions');
   expect(server.read).not.toHaveBeenCalled();
 });
 
@@ -46,7 +46,7 @@ it('does not fetch at mount, then reads the missing address once and opens only 
   link.focus();
   await user.keyboard('{Enter}');
   await waitFor(() => expect(server.read).toHaveBeenCalledExactlyOnceWith('org-id'));
-  await waitFor(() => expect(server.open).toHaveBeenCalledExactlyOnceWith('/org/acme.research/settings/policies?setting=agent.instructions'));
+  await waitFor(() => expect(server.open).toHaveBeenCalledExactlyOnceWith('/org/acme.research/settings/defaults?setting=agent.instructions'));
 });
 
 it('does not use even a cached address for a concealed source', () => {

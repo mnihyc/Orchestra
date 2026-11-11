@@ -7,7 +7,7 @@
 # naming a file that holds OPENROUTER_API_KEY, each harness also makes one small request to a real model.
 #
 # The stack is the one managed-environment makes (the pinned listener on the Docker bridge's address at the port it
-# listens on inside, the system's own name, the web edge's name as the public address), beside it a machine of a person
+# listens on inside, the system's own name, the public address of its own web edge), beside it a machine of a person
 # that holds only the provider role, and the scripted model server on the host.
 set -Eeuo pipefail
 # shellcheck source-path=SCRIPTDIR/..
@@ -35,7 +35,7 @@ TODAY="$(date -u +%F)"
 
 sed -i \
   -e "s|^name = \"Orch\"|name = \"$SYSTEM_NAME\"|" \
-  -e "s|^public_url = .*|public_url = \"http://frontend\"|" \
+  -e "s|^url = \"wss://gateway:9443\"|url = \"wss://$BRIDGE:$GATEWAY_PORT\"|" \
   -e "s|wss://gateway.orch.internal:9443|wss://gateway.orch.internal:$GATEWAY_PORT|g" \
   -e "s|wss://gateway:9443|wss://gateway:$GATEWAY_PORT|g" \
   -e "s|^pinned_bind = .*|pinned_bind = \"[::]:$GATEWAY_PORT\"|" \
@@ -144,8 +144,14 @@ TOPIC="$(call POST "/projects/$PROJECT_ID/topics" '{"name":"Landing page"}' | jq
 check "they were made" test -n "$ORG" -a -n "$PROJECT_ID" -a -n "$TOPIC"
 
 step "the scripted model server, and a machine of the person that holds the provider and nothing else"
-(cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
-MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+# The scripted model server is built from the tree, or is the program ORCH_SMOKE_MOCK_LLM names (to run where no toolchain is).
+if [ -n "${ORCH_SMOKE_MOCK_LLM:-}" ]; then
+  MOCK="$ORCH_SMOKE_MOCK_LLM"
+  [ -x "$MOCK" ] || abort "ORCH_SMOKE_MOCK_LLM does not name a program: $MOCK"
+else
+  (cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
+  MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+fi
 mkdir -p "$WORK/lab/data"
 MODEL_KEY="$(openssl rand -hex 16)"
 printf '%s\n' "$MODEL_KEY" > "$WORK/lab/model.key"; chmod 600 "$WORK/lab/model.key"
@@ -154,10 +160,19 @@ printf '%s\n' "$MODEL_KEY" > "$WORK/lab/model.key"; chmod 600 "$WORK/lab/model.k
 MODEL_PID=$!
 model_answers() { curl -fsS -H "authorization: Bearer $MODEL_KEY" "http://$BRIDGE:$MODEL_PORT/v1/models" > /dev/null; }
 wait_for 20 "the scripted model server answers with the key" model_answers
-CONNECTOR="$(find "$A" -maxdepth 1 -name 'orch-connector-linux-*-musl' | head -n 1)"
+CONNECTOR="$(find "$A" -maxdepth 1 -name "orch-connector-linux-$(uname -m)-musl" -print -quit)"
+[ -n "$CONNECTOR" ] || abort "the release has no Linux connector for $(uname -m)"
+# The release's files are downloads and carry no execute permission: the machine of the person runs a copy that has it.
+mkdir -p "$WORK/lab/bin"
+cp "$CONNECTOR" "$WORK/lab/bin/orch-connector"
+chmod 755 "$WORK/lab/bin/orch-connector"
+# A connector keeps a lock file beside its data directory, as the shipped Compose file gives the node one; the account
+# of the machine cannot make one in the root of the container.
+: > "$WORK/lab/data.orch-instance-lock"
 printf '[connector]\nroles = ["provider"]\n' > "$WORK/lab/data/config.toml"
 docker run -d --name "$LAB" --network "${PROJECT}_control" --user "$(id -u):$(id -g)" \
-  -v "$WORK/lab/data:/data" -v "$CONNECTOR:/usr/local/bin/orch-connector:ro" \
+  -v "$WORK/lab/data:/data" -v "$WORK/lab/data.orch-instance-lock:/data.orch-instance-lock" \
+  -v "$WORK/lab/bin/orch-connector:/usr/local/bin/orch-connector:ro" \
   debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 sleep infinity > /dev/null || abort "the machine of the person did not start"
 MACHINE_TOKEN="$(call POST /machines/enrollment-tokens '{"name_hint":"lab"}' | jq -r .token)"
 lab() { docker exec "$LAB" orch-connector --data-dir /data "$@"; }
@@ -206,7 +221,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 2
 done
 expect "the job succeeded" "succeeded" "$(printf '%s' "$JOB" | jq -r .state)"
-expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach verify commit" \
+expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach files after_up verify commit" \
   "$(printf '%s' "$JOB" | jq -r '[.progress.phases[].name] | join(" ")')"
 ENV="$(call GET "/environments/$ENV_ID")"
 expect "the environment is running" "running" "$(printf '%s' "$ENV" | jq -r .status)"
@@ -423,11 +438,18 @@ if [ "${ORCH_SMOKE_KEEP:-0}" = 1 ]; then
   exit 0
 fi
 
-step "the environment is removed, and its container goes"
+step "the environment is removed, its container goes, and its volumes are kept until they are purged"
 check "the topic is deleted, and its threads with it" api DELETE "/nodes/$TOPIC"
 check "the removal is accepted" api DELETE "/environments/$ENV_ID?confirm=Main"
 container_gone() { [ -z "$(docker ps -aq --filter "label=orch.system=$SYSTEM_NAME")" ]; }
 wait_for 120 "the container is gone" container_gone
+# A removed environment is no longer read by its own address: its kept files are listed at its home. They stay for the
+# days the removal froze, until a home admin confirms their permanent removal with the name and the revision.
+kept_removal() { call GET "/nodes/$PROJECT_ID/environments/deleted" | jq -r --arg env "$ENV_ID" '[.items[] | select(.environment.id == $env)][0].removal'; }
+files_are_kept() { [ "$(kept_removal | jq -r '"\(.phase) \(.can_purge)"')" = "kept true" ]; }
+wait_for 120 "its files are kept, and a home admin may purge them" files_are_kept
+check "the purge is accepted when it names the environment and the revision of its removal" \
+  api DELETE "/environments/$ENV_ID/purge?confirm=Main&expected_revision=$(kept_removal | jq -r .revision)"
 volumes_gone() { [ -z "$(docker volume ls -q | grep -F -e "$ENV_ID" -e "$UNIT" || true)" ]; }
-wait_for 60 "so are its volumes" volumes_gone
+wait_for 120 "its volumes are gone" volumes_gone
 expect "the errors the API logged in all this" "0" "$(compose logs --no-color api 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c ' ERROR ' || true)"

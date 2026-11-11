@@ -4,7 +4,7 @@ import { expect, it, vi } from 'vitest';
 import { applyChanges, findAct } from '@/api/acts';
 import type { Group } from '@/generated/api-types';
 
-const made: Group = { id: 'made', org_id: 'owner', name: 'Release managers', description: '', member_count: 0 };
+const made: Group = { revision: 1, id: 'made', org_id: 'owner', name: 'Release managers', description: '', member_count: 0 };
 for (const under of [false, true]) it(`inserts the accepted group in its owner with departments ${under ? 'included' : 'excluded'} without a read`, async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   const key = ['groups', 'owner', under];

@@ -1,4 +1,4 @@
-//! Native reviewer facts are visible and charged once; Auto admission stays closed before the real trial.
+//! Native reviewer facts are visible and charged once; an unproved fake harness still cannot open Auto.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -145,7 +145,7 @@ async fn a_reported_denial_is_a_visible_item_with_its_model_reason_and_separate_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn auto_is_refused_before_opening_a_session_until_the_integrators_trial() {
+async fn auto_is_refused_before_opening_a_session_for_an_unproved_harness() {
     let world = World::new().await;
     let thread = world.thread("Auto not proved").await;
     world.set(thread, keys::APPROVAL_MODE, json!("auto")).await;
@@ -163,4 +163,52 @@ async fn auto_is_refused_before_opening_a_session_until_the_integrators_trial() 
         )
         .await;
     assert_eq!(blocked, "binding_invalid");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_approved_native_review_is_a_visible_factual_card_without_a_person_request() {
+    let world = World::new().await;
+    let thread = world.thread("Approved review facts").await;
+    let (start, _) = world.running_turn(thread, "Work").await;
+    let events =
+        orch_agent_contract::review::reported(orch_agent_contract::review::ReportedReview {
+            native_ref: "approval-review:approved".into(),
+            turn: Some(start.turn_id),
+            at: world.clock.time(),
+            model: "codex-auto-review",
+            model_reported: false,
+            outcome: "approved",
+            reason: Some("The action stays inside the workspace"),
+            action: json!({"command":"build"}),
+            usage: None,
+            raw: &json!({"reviewId":"approved"}),
+        });
+    for event in events.iter().chain(events.iter()) {
+        let wire = serde_json::to_value(event).unwrap();
+        world
+            .say(
+                thread,
+                Event::decode(wire["kind"].as_str().unwrap(), wire["body"].clone()).unwrap(),
+            )
+            .await;
+    }
+    eventually("the native approval card",||async{world.count("SELECT count(*) FROM items WHERE thread_id=$1 AND native_ref='approval-review:approved' AND status='completed'",thread).await==1}).await;
+    let payload:Json=world.scalar("SELECT payload FROM items WHERE thread_id=$1 AND native_ref='approval-review:approved'",thread).await;
+    assert_eq!(
+        payload.pointer("/tool/result/outcome"),
+        Some(&json!("approved"))
+    );
+    assert_eq!(
+        payload.pointer("/tool/result/reported"),
+        Some(&json!(false))
+    );
+    assert!(payload.pointer("/tool/result/usage").unwrap().is_null());
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM approvals WHERE thread_id=$1", thread)
+            .await,
+        0
+    );
+    assert_eq!(world.ran(CommandKind::ApprovalResolve), 0);
+    assert_eq!(world.count("SELECT count(*) FROM usage_events WHERE turn_id=$1 AND request_ref='approval-review:approved'",start.turn_id).await,0,"an unreported separate use stays unknown");
 }

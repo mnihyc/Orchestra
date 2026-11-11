@@ -1,17 +1,23 @@
 /** Authorized file sources adapt attachments to the workspace's existing viewers without copying their rendering. */
+import { linkTo, referenceTo, type LinkPart } from '@/lib/links';
 import { queryOptions } from '@tanstack/react-query';
 import { createContext, useContext } from 'react';
 import { documentFileArchivePath, documentFilePath } from '@/api/documents';
+import { ADMIN_QUERY, queryAuthorityAllows } from '@/api/queryAuthority';
+import { queryClient } from '@/api/query';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { traceRequest } from '@/api/trace';
 import { bringFile, headQuery, type FileHead } from './content';
 import { type Door, readFileBytes, type FileBytes } from '@/api/workspace';
 import type { ArchiveListing, Author, ChatPart, ContentPart, DocumentFile, ReferencePreview } from '@/generated/api-types';
-import { attachmentFileReference, environmentFileReference, markdownReference } from '@/features/people/references';
+import { attachmentFileReference, environmentFileReference } from '@/features/people/references';
 import { extensionOf, languageOf } from './languages';
 
 export interface FileSource {
   /** An owner-specific API path, without the /api prefix. */
   url: string;
+  /** A custody opening requires current system administration, including its cached preview. */
+  adminOnly?: boolean;
   name: string;
   size?: number | undefined;
   mediaType?: string | undefined;
@@ -25,6 +31,7 @@ export interface FileSource {
   reference?: string | undefined;
   archiveUrl?: string | undefined;
   line?: number | undefined;
+  endLine?: number | undefined;
   owner?: Author | undefined;
   updatedAt?: string | undefined;
   description?: string | undefined;
@@ -55,14 +62,22 @@ const append = (url: string, values: Record<string, string>) => `${url}${url.inc
 export const FileSourceContext = createContext<FileSource | null>(null);
 export const useFileSource = () => useContext(FileSourceContext);
 
+/** Every derived cache of administrative bytes has the same retirement policy as its preview. */
+export const sourceReaderKey = (source: FileSource | null | undefined) => source?.adminOnly === true ? [libraryReader()] : [];
+export const sourceQueryAuthority = (source: FileSource | null | undefined) => source?.adminOnly === true ? { ...ADMIN_QUERY, staleTime: 0, gcTime: 0 } : {};
+function currentSource(source: FileSource, reader: ReturnType<typeof libraryReader>, signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+  if (source.adminOnly === true && (!sameLibraryReader(reader) || !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta))) throw new DOMException('The administrative file reader changed', 'AbortError');
+}
+
 export function blobSource(kind: 'chat' | 'thread' | 'upload', owner: string, blob: string, name: string, size?: number, mediaType?: string): FileSource {
   const url = kind === 'upload' ? `/uploads/${blob}?${new URLSearchParams({ name })}` : `/${kind}s/${owner}/blobs/${blob}`;
-  return { url, name, size, mediaType, hash: blob, archiveUrl: `/uploads/${blob}?${new URLSearchParams({ name, archive: 'true' })}` };
+  return { ...(kind === 'chat' ? { href: linkTo({ kind: 'chat', id: owner }) } : {}), url, name, size, mediaType, hash: blob, archiveUrl: `/uploads/${blob}?${new URLSearchParams({ name, archive: 'true' })}` };
 }
 
 export function documentSource(id: string, file: DocumentFile, inspect = false): FileSource {
   const url = documentFilePath(id, file.id, inspect);
-  return { url, name: file.name, size: file.size, mediaType: file.media_type, fileId: file.id, version: file.added_at, updatedAt: file.added_at, owner: file.added_by ?? undefined, archiveUrl: documentFileArchivePath(id, file.id, inspect) };
+  return { href: linkTo({ kind: 'document', id }, { file: file.id }), url, name: file.name, size: file.size, mediaType: file.media_type, fileId: file.id, version: file.added_at, updatedAt: file.added_at, owner: file.added_by ?? undefined, archiveUrl: documentFileArchivePath(id, file.id, inspect) };
 }
 
 export function workspaceSource(door: Door, path: string, name = path.split('/').at(-1) ?? path, size?: number): FileSource {
@@ -75,36 +90,45 @@ export function referenceSource(preview: ReferencePreview): FileSource | null {
   if (file === undefined || file === null || file.missing) return null;
   const line = preview.part !== null && 'line' in preview.part.part ? preview.part.number : undefined;
   if (preview.kind === 'environment_file' && file.path !== null) return { ...workspaceSource({ environmentId: preview.id, threadId: null }, file.path, preview.title, file.size ?? undefined), line };
-  if (preview.kind === 'file' && file.owner_kind === 'chat' && file.owner_id !== null && typeof file.blob === 'string') return { ...blobSource('chat', file.owner_id, file.blob, preview.title, file.size ?? undefined, file.media_type ?? undefined), fileId: preview.id, line };
+  if (preview.kind === 'file' && file.owner_kind === 'chat' && file.owner_id !== null && typeof file.blob === 'string') return { ...blobSource('chat', file.owner_id, file.blob, preview.title, file.size ?? undefined, file.media_type ?? undefined), fileId: preview.id, line, href: linkTo(preview) };
   if (preview.kind !== 'file' || file.owner_kind !== 'document' || file.owner_id === null) return null;
-  return { url: documentFilePath(file.owner_id, preview.id), name: preview.title, size: file.size ?? undefined, mediaType: file.media_type ?? undefined, fileId: preview.id, version: preview.updated_at ?? undefined, archiveUrl: documentFileArchivePath(file.owner_id, preview.id), line };
+  return { url: documentFilePath(file.owner_id, preview.id), name: preview.title, size: file.size ?? undefined, mediaType: file.media_type ?? undefined, fileId: preview.id, version: preview.updated_at ?? undefined, archiveUrl: documentFileArchivePath(file.owner_id, preview.id), line, href: linkTo(preview) };
 }
 
 export const previewQuery = (source: FileSource) => queryOptions({
-  queryKey: ['file-preview', source.url, source.version ?? null] as const,
-  meta: { fileEnvironment: source.workspace?.door.environmentId ?? null, filePath: source.workspace?.path ?? null },
-  queryFn: async ({ signal }): Promise<FilePreview> => {
+  queryKey: ['file-preview', source.url, source.version ?? null, ...(source.adminOnly === true ? [libraryReader()] : [])] as const,
+  meta: { ...(source.adminOnly === true ? ADMIN_QUERY.meta : {}), fileEnvironment: source.workspace?.door.environmentId ?? null, filePath: source.workspace?.path ?? null },
+  queryFn: async ({ signal, client: cache }): Promise<FilePreview> => {
+    const reader = libraryReader();
+    if (source.adminOnly === true && !queryAuthorityAllows(cache, ADMIN_QUERY.meta)) throw new DOMException('The administrative file reader changed', 'AbortError');
     const response = await traceRequest(source.workspace === undefined ? append(source.url, { preview: 'true' }) : source.url, { signal });
     const preview = await response.json() as FilePreview;
+    signal.throwIfAborted();
+    if (source.adminOnly === true && (!sameLibraryReader(reader) || !queryAuthorityAllows(cache, ADMIN_QUERY.meta))) throw new DOMException('The administrative file reader changed', 'AbortError');
     const file = response.headers.get('x-orch-file-id');
     const path = response.headers.get('x-orch-file-path');
     return { ...preview, ...(file === null ? {} : { file_id: file }), ...(path === null ? {} : { path: decodeURIComponent(path.replace(/\+/g, ' ')) }) };
   },
-  staleTime: Number.POSITIVE_INFINITY, gcTime: 60_000, retry: false,
+  staleTime: source.adminOnly === true ? 0 : Number.POSITIVE_INFINITY, gcTime: source.adminOnly === true ? 0 : 60_000, retry: false,
   refetchOnWindowFocus: false, refetchOnReconnect: false,
 });
 
 /** Only an explicit viewer requests the original; text is read to its existing preview bound. */
 export async function sourceBytes(source: FileSource, hash: string, limit?: number, signal?: AbortSignal): Promise<FileBytes> {
+  const reader = libraryReader();
+  if (source.adminOnly === true && !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta)) throw new DOMException('The administrative file reader changed', 'AbortError');
   if (source.workspace !== undefined) return readFileBytes(source.workspace.door, source.workspace.path, hash, limit, signal);
   const response = await traceRequest(source.url, { ...(signal === undefined ? {} : { signal }), ...(limit === undefined ? {} : { headers: { Range: `bytes=0-${limit - 1}` } }) });
   const bytes = new Uint8Array(await response.arrayBuffer());
+  signal?.throwIfAborted();
+  if (source.adminOnly === true && (!sameLibraryReader(reader) || !queryAuthorityAllows(queryClient, ADMIN_QUERY.meta))) throw new DOMException('The administrative file reader changed', 'AbortError');
   const total = /\/(\d+)\s*$/.exec(response.headers.get('Content-Range') ?? '')?.[1];
   return { bytes, total: total === undefined ? bytes.length : Number(total) };
 }
 
 /** An explicit download lets the browser spool a Blob without allocating a second whole-file JavaScript buffer. */
 export async function sourceDownload(source: FileSource): Promise<void> {
+  const reader = libraryReader(); currentSource(source, reader);
   let url = `${source.url}${source.url.includes('?') ? '&' : '?'}download=true`;
   if (source.workspace !== undefined) {
     const { door, path } = source.workspace;
@@ -114,6 +138,7 @@ export async function sourceDownload(source: FileSource): Promise<void> {
   }
   const response = await traceRequest(url);
   const blob = await response.blob();
+  currentSource(source, reader);
   const address = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = address; link.download = source.name; link.click();
@@ -126,7 +151,8 @@ export function sourceHasReference(source: FileSource): boolean {
 
 /** The common viewer receives its normal head even when the file belongs to a chat or document. */
 export const sourceHeadQuery = (source: FileSource) => queryOptions({
-  queryKey: ['file-source-head', source.url, source.version ?? null] as const,
+  ...sourceQueryAuthority(source),
+  queryKey: ['file-source-head', source.url, source.version ?? null, ...sourceReaderKey(source)] as const,
   queryFn: async ({ client }): Promise<FileHead> => {
     if (source.workspace !== undefined) return client.query({ ...headQuery(source.workspace.door, source.workspace.path), staleTime: 0 });
     // Opening rechecks authority; a cached thumbnail alone never authorizes a new original view.
@@ -144,9 +170,9 @@ export function sourceReference(source: FileSource, line?: number): string {
   const at = line ?? source.line;
   if (source.workspace !== undefined) return environmentFileReference(source.workspace.door.environmentId, source.workspace.path, at);
   if (source.fileId !== undefined) return attachmentFileReference(source.fileId, source.name, at);
-  if (source.deliveredPath !== undefined) return markdownReference(source.name, `${source.deliveredPath}${at === undefined ? '' : `#${at}`}`);
+  if (source.deliveredPath !== undefined) return referenceTo({ href: source.deliveredPath, name: source.name }, at === undefined ? {} : { line: at });
   // A transient draft has no saved reference yet; its attachment link still names the exact original.
-  return markdownReference(source.name, source.url);
+  return referenceTo({ href: source.url, name: source.name });
 }
 
 // Arbitrary filename suffixes must not resolve inherited object members as media types.
@@ -174,21 +200,34 @@ export function sourcesOfParts(kind: 'chat' | 'thread', owner: string, parts: re
 }
 
 export async function sourceArchive(source: FileSource, inside: string, signal?: AbortSignal): Promise<ArchiveListing> {
+  const reader = libraryReader(); currentSource(source, reader, signal);
   const url = source.archiveUrl;
   if (url === undefined) throw new Error('No archive source');
-  return (await traceRequest(append(url, { inside }), { ...(signal === undefined ? {} : { signal }) })).json() as Promise<ArchiveListing>;
+  const listing = await (await traceRequest(append(url, { inside }), { ...(signal === undefined ? {} : { signal }) })).json() as ArchiveListing;
+  currentSource(source, reader, signal); return listing;
 }
 
 export async function sourceArchiveEntry(source: FileSource, entry: string, signal?: AbortSignal): Promise<Uint8Array> {
+  const reader = libraryReader(); currentSource(source, reader, signal);
   const url = source.archiveUrl;
   if (url === undefined) throw new Error('No archive source');
-  if (url.startsWith('/uploads/')) {
+  if (url.startsWith('/uploads/') || url.startsWith('/admin/uploads/')) {
     const response = await traceRequest(append(url, { entry }), { ...(signal === undefined ? {} : { signal }) });
-    return new Uint8Array(await response.arrayBuffer());
+    const bytes = new Uint8Array(await response.arrayBuffer()); currentSource(source, reader, signal); return bytes;
   }
   const split = url.indexOf('?');
   const base = split === -1 ? url : url.slice(0, split);
   const tail = split === -1 ? '' : url.slice(split);
   const response = await traceRequest(append(`${base}/entry${tail}`, { entry }), { ...(signal === undefined ? {} : { signal }) });
-  return new Uint8Array(await response.arrayBuffer());
+  const bytes = new Uint8Array(await response.arrayBuffer()); currentSource(source, reader, signal); return bytes;
+}
+
+/** Only an owner-backed page or a workspace source can provide a public web link. */
+export function sourceLink(source: FileSource, part: LinkPart = {}): string | null {
+  const at = { ...(source.line === undefined ? {} : { line: source.line }), ...(source.endLine === undefined ? {} : { endLine: source.endLine }), ...part };
+  if (source.workspace !== undefined) return linkTo({ kind: 'environment_file', id: source.workspace.door.environmentId,
+    threadId: source.workspace.door.threadId, path: source.workspace.path }, at);
+  if (source.href === undefined) return null;
+  if (new URL(source.href, location.origin).pathname.startsWith('/chat/') && source.fileId === undefined) return null;
+  return linkTo({ href: source.href }, { ...(source.fileId === undefined ? {} : { file: source.fileId }), ...at });
 }

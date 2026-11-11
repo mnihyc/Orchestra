@@ -9,6 +9,8 @@
 //! | `headers` | Headers sent with every request to that endpoint, as they are | None |
 //! | `secret_headers` | Names of headers whose values are secrets of the provider, stored and rotated like its key and never returned | None |
 //! | `query` | Query parameters appended to every request | None |
+//! | `params` | Additional model body defaults; explicit request values win | None |
+//! | `output_limit_field` | Native output-limit field for own Chat calls | `max_tokens` |
 //!
 //! A header the forwarder sets itself cannot be given: the one that carries the key, `Host`,
 //! `Content-Length` and the hop-by-hop headers. [`EndpointOptions::check`] refuses them when a provider is
@@ -55,6 +57,27 @@ impl AuthMode {
     }
 }
 
+/// Which native field bounds an own Chat completion; the requested amount does not change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputLimitField {
+    /// The field used by older compatible Chat endpoints.
+    #[default]
+    MaxTokens,
+    /// The field used by endpoints that count visible output and reasoning together.
+    MaxCompletionTokens,
+}
+impl OutputLimitField {
+    /// The exact request member named by this endpoint option.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxTokens => "max_tokens",
+            Self::MaxCompletionTokens => "max_completion_tokens",
+        }
+    }
+}
+
 /// What one endpoint of an API upstream may configure beyond its base address. An option that is not here
 /// is refused when the provider is saved.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -76,6 +99,16 @@ pub struct EndpointOptions {
     /// Query parameters appended to every request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub query: BTreeMap<String, String>,
+    /// Additional model request body defaults. Explicit request values take precedence.
+    /// Routing, prompt, tools, output bounds, retention and credentials remain owned by the caller.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, Json>,
+    /// The output-limit member of own Chat completions; other formats use their native member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_limit_field: Option<OutputLimitField>,
+    /// Option forms and constraints keyed by interface, composed with group and model declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_options: Option<orch_provider_contract::models::RequestOptions>,
 }
 
 /// One endpoint of an API upstream: the protocol it speaks, where it is, and its options.
@@ -92,8 +125,18 @@ pub struct Upstream {
 }
 
 impl EndpointOptions {
-    /// Reads the options of an endpoint of a built-in protocol. An option that is not one of the five is
-    /// refused.
+    /// The same object used by explicit model request options.
+    #[must_use]
+    pub fn request_params(&self) -> Json {
+        Json::Object(
+            self.params
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect(),
+        )
+    }
+
+    /// Reads the declared options of an endpoint of a built-in protocol; unknown option names are refused.
     pub fn parse(options: &Json) -> Result<Self, serde_json::Error> {
         if options.is_null() {
             return Ok(Self::default());
@@ -163,6 +206,19 @@ impl EndpointOptions {
     /// Every fault is returned.
     pub fn check(&self, default_auth: AuthMode) -> Result<(), Vec<OptionFault>> {
         let mut faults = Vec::new();
+        if let Err(reason) = (orch_provider_contract::models::ModelParameters {
+            request_options: self.request_options.clone(),
+            ..Default::default()
+        })
+        .check_option_schemas()
+        {
+            faults.push(OptionFault::new("request_options", reason));
+        }
+        if let Err(reason) =
+            orch_provider_contract::calls::completion_options(&self.request_params())
+        {
+            faults.push(OptionFault::new("params", reason));
+        }
         let mode = self.auth.unwrap_or(default_auth);
         match (mode, self.auth_header.as_deref()) {
             (AuthMode::Header, None) => {
@@ -254,6 +310,37 @@ pub enum AuthorizeError {
     BadHeader(String),
 }
 
+/// Append an interface-declared comma list, preserving token order and sensitivity.
+/// Duplicate tokens are case-sensitive; header names retain HTTP's own case-insensitive identity.
+pub fn append_comma_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    extra: HeaderValue,
+) -> Result<(), AuthorizeError> {
+    let mut tokens = Vec::<String>::new();
+    let mut sensitive = extra.is_sensitive();
+    for value in headers.get_all(&name).iter().chain(std::iter::once(&extra)) {
+        sensitive |= value.is_sensitive();
+        let value = value
+            .to_str()
+            .map_err(|_| AuthorizeError::BadHeader(name.to_string()))?;
+        for token in value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            if !tokens.iter().any(|known| known == token) {
+                tokens.push(token.into());
+            }
+        }
+    }
+    let mut value = HeaderValue::from_str(&tokens.join(", "))
+        .map_err(|_| AuthorizeError::BadHeader(name.to_string()))?;
+    value.set_sensitive(sensitive);
+    headers.insert(name, value);
+    Ok(())
+}
+
 /// Presents the key and the options of an endpoint on the headers of a request that is about to be
 /// forwarded, the way the forwarder does, and returns the query parameters to append.
 ///
@@ -262,12 +349,26 @@ pub enum AuthorizeError {
 /// way `auth` says, or the protocol's own way `default_auth` when it is absent; nothing for `none`. Then
 /// the fixed headers, then the secret ones, whose values come from `secrets` by name. The key and the
 /// secret values are marked sensitive, so that they are not printed with the headers.
+/// Interfaces with comma-list feature headers use [`authorize_joined`] for those declared names.
 pub fn authorize(
     headers: &mut HeaderMap,
     credential: Option<&Credential>,
     options: &EndpointOptions,
     secrets: &BTreeMap<String, Secret>,
     default_auth: AuthMode,
+) -> Result<Vec<(String, String)>, AuthorizeError> {
+    authorize_joined(headers, credential, options, secrets, default_auth, &[])
+}
+
+/// The same credential boundary with interface-declared comma-list header merging.
+/// Authentication/hop-by-hop headers are always replaced; list values retain program choices.
+pub fn authorize_joined(
+    headers: &mut HeaderMap,
+    credential: Option<&Credential>,
+    options: &EndpointOptions,
+    secrets: &BTreeMap<String, Secret>,
+    default_auth: AuthMode,
+    joined: &[&str],
 ) -> Result<Vec<(String, String)>, AuthorizeError> {
     let bad = |name: &str| AuthorizeError::BadHeader(name.to_owned());
     for name in ["authorization", "x-api-key", "cookie"]
@@ -276,12 +377,12 @@ pub fn authorize(
     {
         headers.remove(name);
     }
-    for name in options
-        .headers
-        .keys()
-        .chain(options.secret_headers.iter())
-        .chain(options.auth_header.iter())
-    {
+    for name in options.headers.keys().chain(options.secret_headers.iter()) {
+        if !joined.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            headers.remove(HeaderName::from_bytes(name.as_bytes()).map_err(|_| bad(name))?);
+        }
+    }
+    if let Some(name) = &options.auth_header {
         headers.remove(HeaderName::from_bytes(name.as_bytes()).map_err(|_| bad(name))?);
     }
     let key = || {
@@ -311,10 +412,12 @@ pub fn authorize(
     }
     for (name, value) in &options.headers {
         let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| bad(name))?;
-        headers.insert(
-            header_name,
-            HeaderValue::from_str(value).map_err(|_| bad(name))?,
-        );
+        let value = HeaderValue::from_str(value).map_err(|_| bad(name))?;
+        if joined.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            append_comma_header(headers, header_name, value)?;
+        } else {
+            headers.insert(header_name, value);
+        }
     }
     for name in &options.secret_headers {
         let header_name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| bad(name))?;
@@ -329,7 +432,11 @@ pub fn authorize(
             .ok_or_else(|| AuthorizeError::SecretMissing(name.clone()))?;
         let mut value = HeaderValue::from_str(secret.expose()).map_err(|_| bad(name))?;
         value.set_sensitive(true);
-        headers.insert(header_name, value);
+        if joined.iter().any(|known| known.eq_ignore_ascii_case(name)) {
+            append_comma_header(headers, header_name, value)?;
+        } else {
+            headers.insert(header_name, value);
+        }
     }
     Ok(options
         .query
@@ -391,7 +498,47 @@ pub fn standard_options() -> Vec<Field> {
     query.help = Some(
         "Parameters added to the address of every request, such as an API version.".to_owned(),
     );
-    vec![auth, auth_header, headers, secret_headers, query]
+    let mut params = Field::new("params", "Request defaults", FieldType::Json);
+    params.required = false;
+    params.default = Some(serde_json::json!({}));
+    params.help = Some(
+        "Additional JSON body defaults in this endpoint's format. Explicit request values take precedence. \
+         Nested vendor options are preserved; the model, prompt, tools, output limits and credentials cannot be replaced. \
+         A custom option does not establish that the upstream supports it."
+            .to_owned(),
+    );
+    let mut output_limit = Field::new(
+        "output_limit_field",
+        "Chat output token limit",
+        FieldType::Choice,
+    );
+    output_limit.required = false;
+    output_limit.choices = Some(
+        ["max_tokens", "max_completion_tokens"]
+            .into_iter()
+            .map(|value| Choice {
+                value: value.to_owned(),
+                label: value.to_owned(),
+            })
+            .collect(),
+    );
+    output_limit.help = Some("The field this endpoint accepts for the output limit of system Chat calls. Left out, max_tokens is used. Other formats keep their native output limit.".to_owned());
+    let mut request_options = Field::new("request_options", "Request options", FieldType::Json);
+    request_options.required = false;
+    request_options.help = Some(
+        "Option forms and constraints by interface. Group and model forms can be more specific; every layer still limits the final request."
+            .to_owned(),
+    );
+    vec![
+        auth,
+        auth_header,
+        headers,
+        secret_headers,
+        query,
+        params,
+        output_limit,
+        request_options,
+    ]
 }
 
 #[cfg(test)]
@@ -624,12 +771,21 @@ mod tests {
     }
 
     #[test]
-    fn a_form_asks_for_the_five_options_and_none_is_required() {
+    fn a_form_asks_for_endpoint_options_and_none_is_required() {
         let fields = standard_options();
         let names: Vec<_> = fields.iter().map(|field| field.name.as_str()).collect();
         assert_eq!(
             names,
-            ["auth", "auth_header", "headers", "secret_headers", "query"]
+            [
+                "auth",
+                "auth_header",
+                "headers",
+                "secret_headers",
+                "query",
+                "params",
+                "output_limit_field",
+                "request_options"
+            ]
         );
         assert!(
             fields
@@ -645,5 +801,57 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn declared_comma_lists_join_all_program_values_and_endpoint_flags_without_replacing_scalars() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-flags", HeaderValue::from_static("program-a, shared"));
+        headers.append("x-flags", HeaderValue::from_static("program-b"));
+        headers.insert("x-route", HeaderValue::from_static("old route"));
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer untrusted"),
+        );
+        authorize_joined(
+            &mut headers,
+            Some(&Credential::new("selected")),
+            &options(json!({"headers":{"X-Flags":"shared, endpoint", "x-route":"chosen route"}})),
+            &BTreeMap::new(),
+            AuthMode::Bearer,
+            &["x-flags"],
+        )
+        .unwrap();
+        assert_eq!(headers["x-flags"], "program-a, shared, program-b, endpoint");
+        assert_eq!(headers.get_all("x-flags").iter().count(), 1);
+        assert_eq!(headers["x-route"], "chosen route");
+        assert_eq!(headers["authorization"], "Bearer selected");
+        assert!(headers["authorization"].is_sensitive());
+    }
+
+    #[test]
+    fn joined_secret_list_headers_keep_every_value_sensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-flags", HeaderValue::from_static("program"));
+        let secrets = BTreeMap::from([("x-flags".into(), Secret::new("private-flag"))]);
+        authorize_joined(
+            &mut headers,
+            None,
+            &options(json!({"auth":"none","secret_headers":["x-flags"]})),
+            &secrets,
+            AuthMode::None,
+            &["x-flags"],
+        )
+        .unwrap();
+        assert_eq!(headers["x-flags"], "program, private-flag");
+        assert!(headers["x-flags"].is_sensitive());
+        append_comma_header(
+            &mut headers,
+            HeaderName::from_static("x-flags"),
+            HeaderValue::from_static("required, program"),
+        )
+        .unwrap();
+        assert_eq!(headers["x-flags"], "program, private-flag, required");
+        assert!(headers["x-flags"].is_sensitive());
     }
 }

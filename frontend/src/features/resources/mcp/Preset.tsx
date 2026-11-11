@@ -1,3 +1,6 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
+import { CopySetupResult, mcpCopySetup } from '@/features/duplicate/CopySetup';
 /** An MCP server's page: a preset's configuration, secrets and sharing; for an imported one, where it was found, the machine that keeps its definition, Import again and Forget; and where it is on.
  * Public definitions and revisioned edits use the served resource routes; imported definitions stay on their machine.
  */
@@ -9,7 +12,7 @@ import { Plug, Pencil, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { deleteMcp, mcpQuery, reimportMcp } from '@/api/resource-tools';
-import { entriesOf, shareAct } from '@/features/resources/acts';
+import { copyLinkAct, entriesOf, managedAct, shareAct } from '@/features/resources/acts';
 import { ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
 import { Facts } from '@/features/resources/Facts';
 import { PathValue } from '@/features/resources/TechnicalValue';
@@ -32,6 +35,8 @@ import { UserChip } from '@/ui/UserChip';
 import { EditMcp } from './Edit';
 import { connection } from './definition';
 import { McpOfferings } from './Offerings';
+import { McpEnabledIn } from './Enabled';
+import { mcpProgram } from './words';
 
 export { MCP_TABS, type McpTab };
 
@@ -45,15 +50,15 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
   const [localTab, setLocalTab] = useState<McpTab>('overview');
   const reimport = useMutation({ mutationFn: () => reimportMcp(id) });
   const remove = useMutation({ mutationFn: () => deleteMcp(id), onSuccess: () => { void navigate({ to: '/resources/mcp' }); } });
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={6} /> : <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   const server = query.data;
   const entry = connection(readObject(JSON.stringify(server.spec)) ?? {});
   const target = server.environment === null ? { kind: 'mcp_server' as const, id, name: server.name } : { kind: 'environment' as const, id: server.environment.id, name: server.environment.name };
   const manage = holds(server.access, server.environment === null ? 'mcp.manage' : 'environment.manage');
   const admin = adminSpec(server, server.environment === null ? 'mcp.manage' : 'environment.manage');
   const shown = tab ?? localTab;
-  const edit = manage ? { id: 'edit', label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(true) } : null;
-  const menu = entriesOf([shareAct(t, target, server.access)], [manage ? { id: 'delete', label: t('resourceDetails.remove'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) } : null]);
+  const edit = managedAct({ id: 'edit', label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(true) }, manage, t('resources.act.manageRequired'));
+  const menu = [...homeMoveEntries(t, 'mcp_server', server), ...resourceDuplicateEntries(t, 'mcp_server', server, { imported: server.imported !== null, setup: mcpCopySetup(server), ...(server.environment === null ? {} : { sourceView: 'environment.view' }) }), ...entriesOf([copyLinkAct(t, { kind: 'mcp_server', id }), shareAct(t, target, server.access)], [managedAct({ id: 'delete', label: t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget'), icon: <Trash2 aria-hidden />, danger: true, run: () => setRemoving(true) }, manage, t('resources.act.manageRequired'))])];
   const facts = [
       { name: t('resources.home.label'), value: server.home?.name ?? t('resourceDetails.system') },
       { name: t('resourceDetails.enabled'), value: <Badge tone={server.enabled ? 'accent' : 'neutral'}>{t(server.enabled ? 'resourceDetails.on' : 'resourceDetails.off')}</Badge> },
@@ -65,16 +70,18 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       ...(server.imported !== null ? [{ name: t('resourceDetails.layout.importedAt'), value: <RelativeTime at={server.imported.at} /> }] : [{ name: t('resourceDetails.mcp.form.authentication'), value: t(entry.authentication === 'bearer' ? 'resourceDetails.mcp.form.bearer' : entry.authentication === 'variables' ? 'resourceDetails.mcp.form.variables' : 'resourceDetails.mcp.form.none') }]),
   ];
   const overview = <>
+    <CopySetupResult kind="mcp_server" id={server.id} />
     <Section id="mcp-overview" title={t('resourceDetails.overview')}><div id="mcp-definition"><Facts compact label={t('resourceDetails.overview')} rows={facts} /></div></Section>
     {server.imported !== null && <div className="flex flex-col items-start gap-2">
       {server.imported.stale && <InlineAlert tone="warning">{t('resourceDetails.mcp.stale')}</InlineAlert>}
-      {manage && (server.offerings ?? []).some((offering) => offering.state === 'ready') && <Button admin={admin} pending={reimport.isPending} onClick={() => reimport.mutate()}>{t('resourceDetails.mcp.reimport')}</Button>}
+      {(server.offerings ?? []).some((offering) => offering.state === 'ready') && <Button admin={admin} blocked={!manage} reason={manage ? undefined : t('resources.act.manageRequired')} pending={reimport.isPending} onClick={() => { if (manage) reimport.mutate(); }}>{t('resourceDetails.mcp.reimport')}</Button>}
       {reimport.error !== null && <ErrorAlert error={reimport.error} />}
     </div>}
+    <McpEnabledIn server={server} />
     <ResourceDetails><Facts rows={[
       { name: t('resourceDetails.address'), value: server.address },
       ...(server.imported === null ? [] : [
-        { name: t('resourceDetails.layout.source'), value: server.imported.source },
+        { name: t('resourceDetails.layout.source'), value: mcpProgram(server.imported.source) },
         { name: t('resourceDetails.layout.originalName'), value: server.imported.name },
         { name: t('resourceDetails.layout.installedBy'), value: <UserChip user={server.imported.by} /> },
       ]),
@@ -86,11 +93,11 @@ export function McpScreen({ id, tab, onTab }: { id: string; tab?: McpTab; onTab?
       { value: 'overview', label: t('resourceDetails.overview'), panel: overview },
       { value: 'settings', label: t('resourceDetails.layout.settings'), panel: <ul aria-label={t('resourceDetails.layout.configuration')} className="divide-y divide-border rounded-lg border border-border">
         <SettingRow name={t('resourceDetails.layout.configuration')} value={server.imported === null ? entry.command === '' ? entry.url : /[\\/]/u.test(entry.command) ? <PathValue path={entry.command} /> : entry.command : t('resourceDetails.mcp.importedDefinition')} readOnly={!manage}
-          actions={edit === null ? undefined : <Button size="sm" onClick={edit.run}>{t('resources.act.editButton')}</Button>} />
+          actions={edit === null ? undefined : <Button size="sm" blocked={typeof edit.disabled === 'string'} reason={typeof edit.disabled === 'string' ? edit.disabled : undefined} onClick={edit.run}>{t('resources.act.editButton')}</Button>} />
       </ul> },
       { value: 'access', label: t('agents.tabs.access'), panel: <ResourceAccess access={server.access} target={target} /> },
     ]} />
     {editing && <EditMcp server={server} onClose={() => setEditing(false)} />}
-    <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t('resourceDetails.removeTitle', { name: server.name })} confirmLabel={t('resourceDetails.remove')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
+    <ConfirmDialog admin={admin} open={removing} onOpenChange={setRemoving} title={t(server.imported === null ? 'resourceDetails.removeTitle' : 'mcpWords.forgetTitle', { name: server.name })} confirmLabel={t(server.imported === null ? 'resourceDetails.remove' : 'mcpWords.forget')} danger pending={remove.isPending} error={remove.error} onConfirm={() => remove.mutate()}>{t(server.imported === null ? 'resourceDetails.mcp.removeHelp' : 'resourceDetails.mcp.forgetHelp')}</ConfirmDialog>
   </Page>;
 }

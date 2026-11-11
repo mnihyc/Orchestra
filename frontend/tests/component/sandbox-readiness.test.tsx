@@ -7,32 +7,28 @@ import { MachineSandboxReadiness, SandboxReadinessNotice } from '@/features/reso
 import type { EnvironmentSandboxReadiness } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
+import { sandboxReadiness as readiness } from '../fixtures/sandbox-readiness';
 
 vi.mock('@tanstack/react-router', () => ({
   Link: ({ to, params, search, children }: { to:string; params:{id:string}; search?:{tab:string}; children:ReactNode }) =>
     <a href={`${to.replace('$id', params.id)}${search ? `?tab=${search.tab}` : ''}`}>{children}</a>,
 }));
 
-function readiness():EnvironmentSandboxReadiness {
-  const named = { executor_ref: { kind: 'orch-exec', title: { en: 'Orch tools', 'zh-CN': 'Orch 工具' }, tool_set: null } };
-  return {
-    environment:{id:'environment',name:'Acme workspace',placement:'connected',status:'running',ports_exposed:false,address:'ada/work',
-      owner:{id:'ada',username:'ada',display_name:'Ada',kind:'human',avatar:{text:'A',color:1}}},
-    machine:{id:'machine',name:'world-box',placement:'connected',platform_os:'linux',online:true},
-    policy_manage:true,
-    sandbox:{...named,ready:false,requested:'open',widest:'workspace',source:'machine_policy',machine_limit:'workspace',template_limit:null,
-      executor:'orch-exec',enforceable:['open'],agent_modes:[],reason:null},
-  };
+async function explanation(value: EnvironmentSandboxReadiness) {
+  const term = i18n.t(value.sandbox.ready ? 'sandboxReadiness.ready' : 'sandboxReadiness.blocked', { name: value.environment.name });
+  await userEvent.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term }) }));
+  return screen.findByRole('dialog', { name: term });
 }
 
 describe('sandbox readiness before a thread exists', () => {
   it('names the machine ceiling, the actual tools and the permitted act', async () => {
     await setLocale('en');
-    show(<SandboxReadinessNotice value={readiness()} />);
+    const value=readiness(); show(<SandboxReadinessNotice value={value} />);
     expect(screen.getByRole('alert')).toHaveTextContent('Acme workspace: tool access needs attention');
-    expect(screen.getByRole('alert')).toHaveTextContent("world-box cannot restrict Orch tools. Full access uses the environment's own protection.");
-    expect(screen.getByRole('alert')).toHaveTextContent('at most Workspace (machine policy)');
-    expect(screen.getByRole('alert')).toHaveTextContent("Allow Full access in the machine's maximum tool access policy");
+    const details=await explanation(value);
+    expect(details).toHaveTextContent("world-box cannot restrict Orch tools. Full access uses the environment's own protection.");
+    expect(details).toHaveTextContent('at most Workspace (machine policy)');
+    expect(details).toHaveTextContent("Allow Full access in the machine's maximum tool access policy");
     expect(screen.getByRole('link',{name:'Open world-box policy'})).toHaveAttribute('href','/resources/machines/machine?tab=policy');
   });
 
@@ -41,7 +37,7 @@ describe('sandbox readiness before a thread exists', () => {
     const value=readiness();
     value.policy_manage=false;
     show(<SandboxReadinessNotice value={value} />);
-    expect(screen.getByRole('alert')).toHaveTextContent('world-box');
+    expect(await explanation(value)).toHaveTextContent('world-box');
     expect(screen.queryByRole('link',{name:'Open world-box policy'})).not.toBeInTheDocument();
     expect(screen.getByRole('link',{name:'Open environment'})).toHaveAttribute('href','/resources/environments/environment');
   });
@@ -51,8 +47,9 @@ describe('sandbox readiness before a thread exists', () => {
     const value=readiness();
     value.sandbox={...value.sandbox,source:'template',widest:'read_only',machine_limit:'open',template_limit:'read_only'};
     show(<SandboxReadinessNotice value={value} />);
-    expect(screen.getByRole('alert')).toHaveTextContent('at most Read only (template limit)');
-    expect(screen.getByRole('alert')).toHaveTextContent("Allow Full access in the environment template's maximum tool access");
+    const details=await explanation(value);
+    expect(details).toHaveTextContent('at most Read only (template limit)');
+    expect(details).toHaveTextContent("Allow Full access in the environment template's maximum tool access");
     expect(screen.queryByRole('link',{name:'Open world-box policy'})).not.toBeInTheDocument();
   });
 
@@ -61,8 +58,9 @@ describe('sandbox readiness before a thread exists', () => {
     const value=readiness();
     value.sandbox={...value.sandbox,requested:'workspace',widest:'open',machine_limit:'open'};
     show(<SandboxReadinessNotice value={value} />);
-    expect(screen.getByRole('alert')).toHaveTextContent('This place asks for Workspace');
-    expect(screen.getByRole('alert')).toHaveTextContent("Allow Full access in this place's Tool access setting");
+    const details=await explanation(value);
+    expect(details).toHaveTextContent('This place asks for Workspace');
+    expect(details).toHaveTextContent("Allow Full access in this place's Tool access setting");
     expect(screen.queryByRole('link',{name:'Open world-box policy'})).not.toBeInTheDocument();
   });
 
@@ -79,13 +77,14 @@ describe('sandbox readiness before a thread exists', () => {
 
   it('translates the capability, limit and recovery act in Chinese', async () => {
     await setLocale('zh-CN');
-    show(<SandboxReadinessNotice value={readiness()} />);
-    expect(screen.getByRole('alert')).toHaveTextContent('world-box');
+    const value=readiness(); show(<SandboxReadinessNotice value={value} />);
     expect(screen.getByRole('alert')).toHaveTextContent('Acme workspace：工具权限需要处理');
-    expect(screen.getByRole('alert')).toHaveTextContent('在机器的最高工具权限策略中允许完全访问');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('sandboxReadiness.');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('machine_policy');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('cannot confine commands');
+    const details=await explanation(value);
+    expect(details).toHaveTextContent('world-box');
+    expect(details).toHaveTextContent('在机器的最高工具权限策略中允许完全访问');
+    expect(details).not.toHaveTextContent('sandboxReadiness.');
+    expect(details).not.toHaveTextContent('machine_policy');
+    expect(details).not.toHaveTextContent('cannot confine commands');
     expect(screen.getAllByRole('link')).toHaveLength(2);
     await setLocale('en');
   });
@@ -98,8 +97,9 @@ for (const locale of ['en', 'zh-CN'] as const) it(`names a third program's repor
     const named = { executor_ref: { kind: 'research-exec', title: { en: 'Research tools', 'zh-CN': '研究工具' }, tool_set: null } };
     value.sandbox = { ...value.sandbox, ...named, executor: 'research-exec' };
     show(<SandboxReadinessNotice value={value} />);
-    expect(screen.getByRole('alert')).toHaveTextContent(locale === 'en' ? 'Research tools' : '研究工具');
-    expect(screen.getByRole('alert')).not.toHaveTextContent('research-exec');
+    const details=await explanation(value);
+    expect(details).toHaveTextContent(locale === 'en' ? 'Research tools' : '研究工具');
+    expect(details).not.toHaveTextContent('research-exec');
   } finally { await setLocale('en'); }
 });
 

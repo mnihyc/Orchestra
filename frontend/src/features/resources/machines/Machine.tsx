@@ -11,6 +11,8 @@ import { Laptop } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { machineQuery } from '@/api/resources';
+import { MachineGatewayStatus } from '@/features/gateways/MachineGatewayStatus';
+import { MachineTools } from '@/features/resources/machines/Tools';
 import { MachineProgramsTab } from '@/features/resources/machines/Programs';
 import { Installation,installationOf } from '@/features/resources/machines/Installation';
 import { UpdateNotice } from '@/features/resources/ComponentUpdate';
@@ -28,7 +30,7 @@ import { RegisteredHere } from '@/features/resources/machines/Registered';
 import { MachineSandboxReadiness } from '@/features/resources/SandboxReadiness';
 import { MountsHere } from '@/features/resources/mounts/Here';
 import { EnvironmentDirectoriesHere } from '@/features/resources/environments/DataSources';
-import { formatRate, OS_NAMES, readMachineFacts, SLOW_LINK_MS } from '@/features/resources/machines/facts';
+import { machineLinkWords, OS_NAMES, readMachineFacts, SLOW_LINK_MS } from '@/features/resources/machines/facts';
 import { useResourceHeading } from '@/features/resources/trail';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import type { Machine as MachineRow } from '@/generated/api-types';
@@ -40,18 +42,19 @@ import { Badge } from '@/ui/Badge';
 import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RelativeTime } from '@/ui/RelativeTime';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { JsonTree } from '@/ui/JsonTree';
+import { Tooltip } from '@/ui/Tooltip';
 
-export type MachineTab = 'overview' | 'registered' | 'sessions' | 'programs' | 'storage' | 'policy' | 'certificate' | 'installation' | 'access';
+export type MachineTab = 'overview' | 'tools' | 'registered' | 'sessions' | 'programs' | 'storage' | 'policy' | 'certificate' | 'installation' | 'access';
 
 /** How many days before its end a machine's certificate is called out: the connector renews it by itself, so a short notice is enough. */
 const CERTIFICATE_NOTICE_DAYS = 30;
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -75,7 +78,7 @@ function Overview({ machine }: { machine: MachineRow }) {
   const facts = readMachineFacts(machine.facts);
   const installation=machine.installation ?? installationOf(machine.facts);
   const link = facts.link;
-  const slow = link !== null && link.roundTripMs > SLOW_LINK_MS;
+  const slow = link !== null && link.roundTripMs !== null && link.roundTripMs > SLOW_LINK_MS;
   const certificateEnds = Date.parse(machine.cert_not_after);
   const lost = lostEnrollment(machine, now);
   const certificateSoon = lost === null && machine.status === 'active' && certificateEnds - now < CERTIFICATE_NOTICE_DAYS * DAY_MS;
@@ -98,25 +101,15 @@ function Overview({ machine }: { machine: MachineRow }) {
             ...(facts.memoryBytes === null ? [] : [{ name: t('machines.overview.memory'), value: formatBytes(facts.memoryBytes, locale) }]),
             { name: t('machines.overview.roles'), value: <MachineRoles machine={machine}/> },
             { name: t('machines.overview.lastSeen'), value: machine.last_seen_at === null ? t('machines.list.never') : <span className="flex flex-wrap items-center gap-x-2"><RelativeTime at={machine.last_seen_at} />{machine.last_ip !== null && <span className="text-text-muted">{t('machines.overview.from', { address: machine.last_ip })}</span>}</span> },
-            ...(link === null
-              ? []
-              : [
-                  {
-                    name: t('machines.overview.link'),
-                    value: (
-                      <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
-                        <span>
-                          {t('machines.overview.linkValue', {
-                            trip: formatNumber(link.roundTripMs, locale),
-                            up: formatRate(link.upBps, locale),
-                            down: formatRate(link.downBps, locale),
-                          })}
-                        </span>
-                        {slow && <Badge tone="warning">{t('machines.overview.slow')}</Badge>}
-                      </span>
-                    ),
-                  },
-                ]),
+            {
+              name: t(link === null ? 'machines.overview.linkPending' : 'machines.overview.link'),
+              value: <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                <Tooltip content={link === null ? t('machines.overview.notMeasured') : undefined}>
+                  <span tabIndex={link === null ? 0 : undefined}>{machineLinkWords(link, t, locale)}</span>
+                </Tooltip>
+                {slow && <Badge tone="warning">{t('machines.overview.slow')}</Badge>}
+              </span>,
+            },
             ...(facts.clockOffsetMs === null || Math.abs(facts.clockOffsetMs) < 1_000 ? [] : [{ name: t('machines.overview.clock'), value: t('machines.overview.clockValue', { seconds: formatNumber(Math.round(facts.clockOffsetMs / 1_000), locale) }) }]),
             { name: t('machineInstallation.version'), value: machine.connector_version },
             ...(installation === null ? [] : [
@@ -136,6 +129,8 @@ function Overview({ machine }: { machine: MachineRow }) {
         />
         {slow && <p className="text-sm text-text-muted">{t('machines.overview.slowWhy', { ms: SLOW_LINK_MS })}</p>}
       </Section>
+
+      <MachineGatewayStatus machineId={machine.id} online={machine.online} />
 
       <ResourceDetails><JsonTree value={machine.facts} label={t('machines.overview.about')} /></ResourceDetails>
 
@@ -178,13 +173,13 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
   const back = useResourceHeading('machines', Laptop, query.data?.name ?? t('common.loading'), query.data?.id);
   const acts = useMachineActs();
 
-  if (query.isPending) return <Skeletons />;
+  if (query.isPending) return <Skeletons read={query} />;
   if (query.isError) return <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const machine = query.data;
   const { edit, primary, menu } = acts.page(machine);
   const registration = tab === 'programs' || tab === 'sessions' ? tab : 'registered';
   const software = tab === 'installation' ? 'installation' : 'certificate';
-  const shown = tab === 'programs' || tab === 'sessions' ? 'registered' : tab === 'installation' ? 'certificate' : tab;
+  const shown = tab === 'programs' || tab === 'sessions' ? 'registered' : tab === 'installation' ? 'certificate' : tab === 'access' ? 'policy' : tab;
   const installation = machine.installation ?? installationOf(machine.facts);
   const sectionHref = (section: string) => `/resources/machines/${encodeURIComponent(machine.id)}?tab=${section}`;
 
@@ -210,6 +205,7 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
         onValueChange={onTab}
         tabs={[
           { value: 'overview', label: t('machines.tabs.overview'), panel: <Overview machine={machine} /> },
+          { value: 'tools', label: t('resourceDetails.layout.tools'), panel: <MachineTools machine={machine} /> },
           {
             value: 'registered',
             label: t('machines.tabs.registered'),
@@ -223,10 +219,14 @@ export function Machine({ machineId, tab, onTab }: MachineProps) {
           { value: 'storage', label: t('resourceDetails.layout.storage'), panel: <DetailSections label={t('resourceDetails.layout.storage')} sections={[
             { value: 'mounts', label: t('resourceDetails.mount.here.title'), panel: <MountsHere machine={machine.id} name={machine.name} /> },
             { value: 'directories', label: t('environmentData.roots'), panel: <EnvironmentDirectoriesHere machine={machine.id} /> },
-            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} /> },
+            { value: 'storages', label: t('machineStorage.title'), panel: <MachineStorages facts={machine.facts} dataDirectory={machine.data_directory} /> },
           ]} /> },
-          { value: 'policy', label: t('machines.tabs.policy'), panel: <MachinePolicyTab machine={machine} /> },
-          ...(machine.access === null || machine.access === undefined ? [] : [{value:'access' as const,label:t('machines.tabs.access'),panel:<ResourceAccess access={machine.access} target={{kind:machine.host ? 'host' : 'machine',id:machine.host?.id ?? machine.id,name:machine.name}} />}]),
+          { value: 'policy', label: t('machines.tabs.policy'), panel: machine.access === null || machine.access === undefined
+            ? <MachinePolicyTab machine={machine} />
+            : <DetailSections label={t('machines.tabs.policy')} value={tab === 'access' ? 'access' : 'policy'} onValueChange={onTab} hrefOf={sectionHref} sections={[
+              { value: 'policy', label: t('machines.tabs.policy'), panel: <MachinePolicyTab machine={machine} /> },
+              { value: 'access', label: t('machines.tabs.access'), panel: <ResourceAccess access={machine.access} target={{kind:machine.host ? 'host' : 'machine',id:machine.host?.id ?? machine.id,name:machine.name}} /> },
+            ]} /> },
           { value: 'certificate', label: t('resourceDetails.layout.software'), panel: <DetailSections label={t('resourceDetails.layout.software')} value={software} onValueChange={onTab} hrefOf={sectionHref} sections={[
             { value: 'certificate', label: t('machines.tabs.certificate'), panel: <Certificate machine={machine} /> },
             { value: 'installation', label: t('machineInstallation.title'), panel: <Installation facts={machine.facts} installation={installation} version={machine.connector_version} /> },

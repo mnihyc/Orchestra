@@ -78,6 +78,10 @@ pub struct Dispatcher {
     roles: HashMap<CommandKind, Vec<Arc<dyn RoleHandler>>>,
     policy: Arc<PolicyStore>,
     facts: Arc<FactsNow>,
+    local_harnesses: Option<(
+        Arc<crate::local_harnesses::Discovery>,
+        Arc<dyn crate::events::Publisher>,
+    )>,
     turn_admission: Arc<tokio::sync::RwLock<()>>,
     updates: Arc<crate::automatic::Requests>,
     programs: Option<(
@@ -187,6 +191,7 @@ impl Dispatcher {
             roles: HashMap::new(),
             policy,
             facts,
+            local_harnesses: None,
             turn_admission: Arc::new(tokio::sync::RwLock::new(())),
             updates: Arc::new(crate::automatic::Requests::new(
                 false,
@@ -196,6 +201,31 @@ impl Dispatcher {
             programs: None,
             role_changes: None,
         }
+    }
+
+    pub(crate) fn local_harnesses(
+        &mut self,
+        discovery: Arc<crate::local_harnesses::Discovery>,
+        publisher: Arc<dyn crate::events::Publisher>,
+    ) {
+        self.local_harnesses = Some((discovery, publisher));
+    }
+
+    async fn report_local_programs(
+        &self,
+        publisher: &dyn crate::events::Publisher,
+    ) -> MachineFacts {
+        let facts = (self.facts)();
+        if let Err(error) = publisher
+            .publish(
+                orch_link_contract::streams::Stream::Machine,
+                orch_link_contract::events::Event::MachineFacts(facts.clone()),
+            )
+            .await
+        {
+            tracing::warn!(%error, "local program facts could not be queued");
+        }
+        facts
     }
 
     /// Gives the common machine command the physical program's supervisor queue.
@@ -343,9 +373,75 @@ impl CommandHandler for Dispatcher {
             None
         };
         match command {
-            Command::MachineProbe(_) => return Ok(CommandResult::MachineProbe((self.facts)())),
+            Command::MachineProbe(_) => {
+                if let Some((discovery, _)) = &self.local_harnesses {
+                    discovery.refresh(&self.policy).await;
+                }
+                return Ok(CommandResult::MachineProbe((self.facts)()));
+            }
             Command::MachineRolesSet(body) => return self.machine_roles_set(&context, body),
             Command::MachinePrograms(request) => {
+                use orch_api_contract::machine_programs::MachineProgramsCommand;
+                let harness = match &request {
+                    MachineProgramsCommand::ConfirmHarness { kind, path } => {
+                        Some((kind.as_str(), path.as_str(), true))
+                    }
+                    MachineProgramsCommand::RemoveHarness { kind, path } => {
+                        Some((kind.as_str(), path.as_str(), false))
+                    }
+                    _ => None,
+                };
+                if let Some((kind, path, confirm)) = harness {
+                    let Some((discovery, publisher)) = &self.local_harnesses else {
+                        return Err(CommandError::new(
+                            ErrorCode::Unsupported,
+                            "this connector cannot inspect local harnesses",
+                        ));
+                    };
+                    let selected = self.policy.harness_selection(kind)?;
+                    if !discovery.supports(kind) {
+                        return Err(CommandError::new(
+                            ErrorCode::Unsupported,
+                            "this connector did not start with that harness kind",
+                        ));
+                    }
+                    if confirm {
+                        let program = std::path::Path::new(path);
+                        if !program.is_absolute() || !program.is_file() {
+                            return Err(CommandError::new(
+                                ErrorCode::Unsupported,
+                                "the harness program must be an absolute path to an existing file",
+                            ));
+                        }
+                    } else if !std::path::Path::new(path).is_absolute()
+                        || !selected
+                            .as_deref()
+                            .is_some_and(|selected| discovery.matches_selected_path(selected, path))
+                    {
+                        return Err(CommandError::new(
+                            ErrorCode::Conflict,
+                            "the harness selection changed; refresh the machine and try again",
+                        ));
+                    }
+                    self.policy.change_harness(
+                        kind,
+                        selected.as_deref(),
+                        confirm.then_some(path),
+                    )?;
+                    discovery.refresh(&self.policy).await;
+                    let facts = self.report_local_programs(publisher.as_ref()).await;
+                    return Ok(CommandResult::MachinePrograms(facts));
+                }
+                if matches!(&request, MachineProgramsCommand::Reload)
+                    && self.policy.policy().is_some()
+                    && let Some((discovery, publisher)) = &self.local_harnesses
+                {
+                    discovery.refresh(&self.policy).await;
+                    let facts = self.report_local_programs(publisher.as_ref()).await;
+                    if self.programs.is_none() {
+                        return Ok(CommandResult::MachinePrograms(facts));
+                    }
+                }
                 let Some((handler, services)) = &self.programs else {
                     return Err(CommandError::new(
                         ErrorCode::Unsupported,
@@ -415,7 +511,8 @@ impl CommandHandler for Dispatcher {
         let cooperative = reported.is_some()
             || matches!(
                 kind,
-                CommandKind::FsSnapshot
+                CommandKind::ProviderGenerate
+                    | CommandKind::FsSnapshot
                     | CommandKind::FsMaterialize
                     | CommandKind::FsDataExport
                     | CommandKind::FsDataImport
@@ -446,7 +543,7 @@ impl CommandHandler for Dispatcher {
                     cancel.cancel();
                     // Keep owning the future until its helper, streams and blocking workers have joined.
                     let _ = operation.await;
-                    Err(CommandError::new(ErrorCode::Timeout, "the filesystem operation exceeded its configured allowance"))
+                    Err(CommandError::new(ErrorCode::Timeout, "the operation exceeded its configured allowance"))
                 }
             };
         }
@@ -518,15 +615,237 @@ mod tests {
                     &Host::detect(),
                     FactsDraft::default(),
                     facts_policy.policy(),
-                    MachineFactsRates {
-                        up_bps: 0,
-                        down_bps: 0,
-                        round_trip_ms: 0,
-                    },
+                    MachineFactsRates::default(),
                     0,
                 )
             }),
         )
+    }
+
+    #[cfg(unix)]
+    #[derive(Default)]
+    struct LocalProgramReports(Mutex<Vec<MachineFacts>>);
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl crate::events::Publisher for LocalProgramReports {
+        async fn publish(
+            &self,
+            stream: orch_link_contract::streams::Stream,
+            event: orch_link_contract::events::Event,
+        ) -> Result<(), orch_link::streams::PublishError> {
+            assert_eq!(stream, orch_link_contract::streams::Stream::Machine);
+            let orch_link_contract::events::Event::MachineFacts(facts) = event else {
+                panic!("only local program facts are published")
+            };
+            self.0.lock().unwrap().push(facts);
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn local_program(path: &std::path::Path, text: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{text}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn program_dispatcher(directory: &std::path::Path) -> (Dispatcher, Arc<LocalProgramReports>) {
+        use crate::harnesses::{AdapterRegistration, AdapterRegistry, HomeRule};
+        let mut registry = AdapterRegistry::new();
+        registry
+            .register(AdapterRegistration {
+                kind: "codex",
+                adapter_version: 1,
+                builtin: true,
+                needs_binary: true,
+                home_rule: HomeRule::Connector,
+                factory: Arc::new(|_| panic!("program discovery never starts a harness adapter")),
+            })
+            .unwrap();
+        let discovery = Arc::new(crate::local_harnesses::Discovery::with_test_search(
+            Arc::new(registry),
+            directory.to_owned(),
+        ));
+        let mut config = ConnectorConfig::default();
+        config.connector.roles = vec!["environment".into()];
+        let mut dispatcher = dispatcher(config);
+        let prior = Arc::clone(&dispatcher.facts);
+        let found = Arc::clone(&discovery);
+        dispatcher.facts = Arc::new(move || {
+            let mut facts = prior();
+            found.apply(&mut facts);
+            facts
+        });
+        let reports = Arc::new(LocalProgramReports::default());
+        dispatcher.local_harnesses(discovery, reports.clone());
+        (dispatcher, reports)
+    }
+
+    #[cfg(unix)]
+    fn harness_action(action: &str, kind: &str, path: &std::path::Path) -> Command {
+        Command::MachinePrograms(
+            serde_json::from_value(serde_json::json!({
+                "action":action,"kind":kind,"path":path.to_string_lossy()
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_kept_harness_key_refuses_before_probing_or_writing_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("candidate-was-probed");
+        let candidate = directory.path().join("custom-codex");
+        let quoted = format!("'{}'", marker.display().to_string().replace('\'', "'\\''"));
+        local_program(
+            &candidate,
+            &format!("printf probed > {quoted}; printf '0.165.0\\n'"),
+        );
+        let (dispatcher, reports) = program_dispatcher(directory.path());
+        let before = dispatcher.policy.policy();
+        let error = dispatcher
+            .handle(
+                context(),
+                harness_action("confirm_harness", "codex", &candidate),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.details.unwrap()["policy_key"], "agent.harnesses");
+        assert_eq!(dispatcher.policy.policy(), before);
+        assert!(!marker.exists());
+        assert!(reports.0.lock().unwrap().is_empty());
+        dispatcher
+            .policy
+            .delegate(&["agent.harnesses".into()])
+            .unwrap();
+        let delegated = dispatcher.policy.policy();
+        for (kind, path) in [
+            ("unknown-harness", candidate.clone()),
+            ("codex", std::path::PathBuf::from("relative-program")),
+            ("codex", directory.path().join("missing-program")),
+        ] {
+            assert!(
+                dispatcher
+                    .handle(context(), harness_action("confirm_harness", kind, &path))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(dispatcher.policy.policy(), delegated);
+        assert!(!marker.exists());
+        assert!(reports.0.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_harness_replacement_refresh_and_bare_remove_do_not_wait_for_external_turn_admission()
+     {
+        let directory = tempfile::tempdir().unwrap();
+        let original = directory.path().join("codex");
+        let replacement = directory.path().join("custom-codex");
+        local_program(&original, "printf '0.165.0\\n'");
+        local_program(&replacement, "printf '0.166.0\\n'");
+        let (dispatcher, reports) = program_dispatcher(directory.path());
+        dispatcher
+            .policy
+            .delegate(&["agent.harnesses".into()])
+            .unwrap();
+        dispatcher
+            .policy
+            .change_harness("claude-code", None, Some("/kept/claude"))
+            .unwrap();
+        // Reuse the existing dispatch tests' observation headroom, while the real admission writer stays held.
+        let admission = Arc::clone(&dispatcher.turn_admission).write_owned().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            dispatcher.handle(
+                context(),
+                harness_action("confirm_harness", "codex", &original),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let CommandResult::MachinePrograms(facts) = result else {
+            panic!("program acknowledgement")
+        };
+        assert_eq!(facts.harnesses[0].version, "0.165.0");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            dispatcher.handle(
+                context(),
+                harness_action("confirm_harness", "codex", &replacement),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let CommandResult::MachinePrograms(facts) = result else {
+            panic!("program acknowledgement")
+        };
+        assert_eq!(facts.harnesses[0].path, replacement.display().to_string());
+        assert_eq!(facts.harnesses[0].version, "0.166.0");
+        let stale = dispatcher
+            .handle(
+                context(),
+                harness_action("remove_harness", "codex", &original),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(stale.code, "conflict");
+        assert_eq!(
+            dispatcher.policy.harness("codex").unwrap().path,
+            replacement.display().to_string()
+        );
+        local_program(&replacement, "printf '0.167.0\\n'");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            dispatcher.handle(
+                context(),
+                Command::MachinePrograms(
+                    orch_api_contract::machine_programs::MachineProgramsCommand::Reload,
+                ),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let CommandResult::MachinePrograms(facts) = result else {
+            panic!("program acknowledgement")
+        };
+        assert_eq!(facts.harnesses[0].version, "0.167.0");
+        dispatcher
+            .policy
+            .change_harness("codex", replacement.to_str(), Some("codex"))
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            dispatcher.handle(
+                context(),
+                harness_action("remove_harness", "codex", &original),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let CommandResult::MachinePrograms(facts) = result else {
+            panic!("program acknowledgement")
+        };
+        assert!(facts.harnesses.is_empty());
+        assert_eq!(
+            facts.discovered_harnesses.unwrap()[0].path,
+            original.display().to_string()
+        );
+        assert!(dispatcher.policy.harness("codex").is_none());
+        assert_eq!(
+            dispatcher.policy.harness("claude-code").unwrap().path,
+            "/kept/claude"
+        );
+        assert_eq!(reports.0.lock().unwrap().len(), 4);
+        drop(admission);
     }
 
     fn close() -> Command {
