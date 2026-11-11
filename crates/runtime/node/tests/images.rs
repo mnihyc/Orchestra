@@ -558,3 +558,76 @@ async fn a_shipped_node_never_polls_a_registry_and_an_explicit_schedule_does() {
         rig.stop().await;
     }
 }
+
+#[tokio::test]
+async fn a_template_archive_is_fetched_for_its_actual_running_command_and_removed_after_the_proposal()
+ {
+    use orch_link::commands::Progress;
+    use orch_testkit::doubles::driver::Operation;
+    let driver = with_import();
+    driver.set_import(
+        "dockerfile",
+        ImportProposal {
+            spec: json!({"build":{"dockerfile":"FROM x"}}),
+            notes: Vec::new(),
+        },
+    );
+    driver.hold(Operation::Import);
+    let mut rig = Rig::with_driver(driver);
+    rig.start().await;
+    let bytes = bytes::Bytes::from_static(b"the actual template context archive");
+    let hash = rig.blobs.insert(bytes.clone());
+    let unrelated = rig
+        .blobs
+        .insert(bytes::Bytes::from_static(b"a different archive"));
+    let mut body = import("dockerfile", LinkKind::Environment);
+    body.values["context_blob"] = json!(hash);
+    body.values["label"] = json!(unrelated);
+    let command = rig
+        .controller
+        .issue(&SerialKey::Machine, rig.deadline(), &body);
+    rig.blobs.open_command(command);
+    tokio::time::timeout(common::PATIENCE, async {
+        loop {
+            if rig
+                .driver
+                .calls()
+                .iter()
+                .any(|call| call.operation == Operation::Import)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the actual native import reached its driver");
+    let path = rig
+        .desk
+        .fetch(&hash)
+        .await
+        .expect("the import announced its actual archive before calling the driver");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        rig.desk.fetch(&unrelated).await.unwrap_err().code,
+        "not_found",
+        "an unrelated hash-looking value gives no archive source"
+    );
+    rig.driver.release(Operation::Import);
+    assert!(matches!(
+        tokio::time::timeout(common::PATIENCE, rig.controller.wait_command(command))
+            .await
+            .unwrap(),
+        Progress::Succeeded(_)
+    ));
+    assert!(
+        !path.exists(),
+        "the proposal's fetched archive goes with its actual command"
+    );
+    assert_eq!(rig.desk.fetch(&hash).await.unwrap_err().code, "not_found");
+    assert!(
+        rig.driver.units().is_empty() && rig.driver.volumes().is_empty(),
+        "import remains a proposal with no allocated unit"
+    );
+    rig.stop().await;
+}

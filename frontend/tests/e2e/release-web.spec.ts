@@ -1,8 +1,9 @@
 /** Environment access groups and access-program names in the shipped frontend. */
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test } from '@playwright/test';
-import type { BindingEnvironment } from '../../src/generated/api-types';
-import { ACME, PEOPLE, scenario, signIn } from './support';
+import type { BindingOptions, ProviderModel } from '../../src/generated/api-types';
+import { me, RUNS_ON, userRef } from '../doubles/fixtures';
+import { ACME, bodySent, PEOPLE, scenario, signIn } from './support';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
@@ -25,13 +26,23 @@ for (const width of [1280, 400]) for (const theme of ['light', 'dark'] as const)
     await page.setViewportSize({ width, height: 900 });
     await page.emulateMedia({ colorScheme: theme });
     const starts: string[] = [];
+    const partner = '00000000-0000-4000-8024-000000009999';
+    const owner = userRef(me(8, 'vera', 'Vera Rubin'));
     page.on('request', (request) => { if (request.method() === 'POST' && /\/topics\/[^/]+\/threads$/.test(new URL(request.url()).pathname)) starts.push(request.url()); });
     await page.route('**/api/v1/nodes/*/binding/options*', async (route) => {
+      if (new URL(route.request().url()).searchParams.get('environment_id') === partner) {
+        await route.fulfill({ status: 403, json: { type: 'orch:error:authz.denied', code: 'authz.denied', status: 403, title: 'Access denied',
+          detail: 'Use is needed', request_id: 'partner-use-required', requestable: true,
+          missing: [{ object: { kind: 'environment', id: partner, name: 'Partner workspace', owner }, permissions: ['environment.use'],
+            ask: [owner], ask_more: 0, closed: null, options: null, override: false }] } });
+        return;
+      }
       const response = await route.fetch();
-      const data = await response.json() as { environments: BindingEnvironment[] };
+      if (!response.ok()) { await route.fulfill({ response }); return; }
+      const data = await response.json() as BindingOptions;
       const usable = data.environments.find((row) => row.usable);
       if (usable === undefined) throw new Error('The scenario has no usable environment');
-      data.environments.push({ ...usable, environment: { ...usable.environment, id: '00000000-0000-4000-8024-000000009999', name: 'Partner workspace' }, usable: false, reason: 'environment_use_required', is_default: false });
+      data.environments.push({ ...usable, environment: { ...usable.environment, id: partner, name: 'Partner workspace', owner }, usable: false, reason: 'environment_use_required', is_default: false });
       await route.fulfill({ response, json: data });
     });
     await signIn(page);
@@ -39,13 +50,31 @@ for (const width of [1280, 400]) for (const theme of ['light', 'dark'] as const)
     await page.getByRole('region', { name: 'Start a thread' }).getByRole('button', { name: 'Thread setup' }).click();
     const dialog = page.getByRole('dialog', { name: 'New thread in Fix login' });
     await dialog.getByRole('combobox', { name: 'Where it runs' }).click();
-    const list = page.getByRole('listbox');
-    await expect(list.getByRole('group', { name: 'Can use' }).getByRole('option', { name: 'Workspace' })).toBeVisible();
+    // The popup owns a separate option list for each interactive home group.
+    const list = page.getByRole('dialog', { name: 'Where it runs', exact: true });
+    const usable = list.getByRole('group', { name: 'Can use' }).getByRole('listbox');
+    await expect(usable.getByRole('option', { name: 'Workspace' })).toBeVisible();
     const ask = list.getByRole('group', { name: 'Ask for access' });
-    await expect(ask.getByRole('option', { name: 'Partner workspace' })).toBeVisible();
-    await expect(list.getByRole('option', { name: 'New', exact: true })).toBeVisible();
+    const partnerOption = ask.getByRole('listbox').getByRole('option', { name: 'Partner workspace' });
+    await expect(partnerOption).toBeVisible();
+    for (const box of await list.getByRole('listbox').all()) {
+      expect(await box.getAttribute('aria-owns')).toBeNull();
+      expect(await box.locator('button, a[href]').count()).toBe(0);
+    }
+    const ownerControl = ask.getByRole('button', { name: 'Vera Rubin', exact: true });
+    const optionBox = await partnerOption.boundingBox(), ownerBox = await ownerControl.boundingBox();
+    if (optionBox === null || ownerBox === null) throw new Error('The choice and sibling owner action are visible');
+    // One CSS pixel allows fractional painting, retaining the shared row alignment.
+    expect(Math.abs(optionBox.y + optionBox.height / 2 - ownerBox.y - ownerBox.height / 2)).toBeLessThanOrEqual(1);
     const audit = await new AxeBuilder({ page }).include('[role="listbox"]').withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).analyze();
+    if (audit.violations.length > 0) await test.info().attach('environment-picker-axe', { body: JSON.stringify(audit.violations), contentType: 'application/json' });
     expect(audit.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical').map((violation) => violation.id)).toEqual([]);
+    // Creation moved from a list option to its own environment-setup choice.
+    await page.keyboard.press('Escape');
+    await expect(dialog.getByRole('radio', { name: 'Create new', exact: true })).toBeDisabled();
+    // The words are also the accessible description of the disabled choice, in a hidden node: the status line is the one that is shown.
+    await expect(dialog.getByRole('status').filter({ hasText: 'No host can make the default environment here' })).toBeVisible();
+    await dialog.getByRole('combobox', { name: 'Where it runs' }).click();
     await ask.getByRole('option', { name: 'Partner workspace' }).click();
     await expect(dialog.getByRole('textbox', { name: 'Why do you need it?' })).toBeVisible();
     expect(starts).toEqual([]);
@@ -53,13 +82,16 @@ for (const width of [1280, 400]) for (const theme of ['light', 'dark'] as const)
   });
 }
 
-test('the provider editor shows the vendor program name and saves the original id', async ({ page }) => {
+test('the provider editor shows the vendor program name and saves the original id', async ({ page, request }) => {
   await scenario();
-  await page.route('**/api/v1/providers/**', async (route) => {
-    const response = await route.fetch();
-    if (!(response.headers()['content-type'] ?? '').includes('json')) return route.fulfill({ response });
-    await route.fulfill({ response, json: vendorIds(await response.json()) });
-  });
+  const login = await request.post(`${DOUBLE}/api/v1/auth/login`, { data: { login: PEOPLE.ada.login, password: PEOPLE.ada.password } });
+  expect(login.status()).toBe(200);
+  const token = (await login.json() as { access_token: string }).access_token;
+  const models = await request.get(`${DOUBLE}/api/v1/providers/${RUNS_ON.codexSubscription}/models`, { headers: { Authorization: `Bearer ${token}` } });
+  expect(models.ok()).toBe(true);
+  const model = (await models.json() as ProviderModel[]).find((entry) => entry.model_name === 'gpt-5.5-codex');
+  if (model === undefined) throw new Error('The native provider fixture must contain the offered model');
+  await control('/model/entry', { provider_id: RUNS_ON.codexSubscription, model_name: model.model_name, parameters: vendorIds(model.parameters) });
   await signIn(page);
   await page.goto('/resources/providers/00000000-0000-4000-8022-000000000002?tab=models');
   await page.getByRole('table', { name: 'Models' }).waitFor();
@@ -68,9 +100,11 @@ test('the provider editor shows the vendor program name and saves the original i
   const dialog = page.getByRole('dialog', { name: 'What this model can be run with here' });
   const programs = dialog.getByRole('group', { name: 'Access programs' });
   await programs.getByRole('switch', { name: 'Daybreak Blue' }).click();
-  const saved = page.waitForRequest((request) => request.method() === 'PATCH' && /\/providers\/[^/]+\/models\/[^/]+/.test(new URL(request.url()).pathname));
+  const saved = page.waitForResponse((response) => response.request().method() === 'PATCH' && /\/providers\/[^/]+\/models\/[^/]+/.test(new URL(response.url()).pathname));
   await dialog.getByRole('button', { name: 'Save', exact: true }).click();
-  const body = (await saved).postDataJSON() as { parameters: { access_programs: string[] } };
+  const response = await saved;
+  expect(response.status()).toBe(200);
+  const body = await bodySent(response.request()) as { parameters: { access_programs: string[] } };
   expect(body.parameters.access_programs).toContain('daybreakBlue');
   await expect(dialog).not.toBeVisible();
 });
@@ -101,7 +135,7 @@ test('a thread and the usage log name access programs while retaining the progra
   await expect(log).toContainText('Daybreak Blue');
   const filters = page.getByRole('button', { name: 'Filter requests', exact: true });
   if (await filters.isVisible()) await filters.click();
-  await page.getByRole('combobox', { name: 'Access programme' }).click();
+  await page.getByRole('combobox', { name: 'Access program' }).click();
   await page.getByRole('option', { name: 'Daybreak Blue', exact: true }).click();
   await expect(page).toHaveURL(/program=daybreakBlue/);
 });

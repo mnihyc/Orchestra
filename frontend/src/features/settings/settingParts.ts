@@ -1,21 +1,27 @@
 /** Chooses the stored part a setting field edits, separately from inherited contributions and the resolved result. */
 import type { SettingsTarget } from '@/api/settings';
 import { emptyOf, type Shape } from '@/features/settings/settingsModel';
-import type { SettingDef, SettingPart, ResolvedSetting as SettingWithParts } from '@/generated/api-types';
+import type { SettingDef, SettingPart, SettingSource, ResolvedSetting as SettingWithParts } from '@/generated/api-types';
 
 /** A joining field is empty until this target has supplied its own part. */
-export function editableValue(def: Pick<SettingDef, 'merge'>, setting: SettingWithParts, shape: Shape): unknown {
-  if (def.merge === 'replace') return setting.own?.value ?? setting.value ?? emptyOf(shape);
+export function editableValue(def: Pick<SettingDef, 'merge'> & Partial<Pick<SettingDef, 'key'>>, setting: SettingWithParts, shape: Shape): unknown {
+  // This editor narrows the served list; an absent own part starts from its inherited entries.
+  if (def.key === 'ask.models') return setting.value ?? [];
+  if (def.merge === 'replace' || ['all', 'any', 'stricter'].includes(def.merge)) return setting.own?.value ?? setting.value ?? emptyOf(shape);
   if (setting.own !== null) return setting.own.value;
   return shape.type === 'int' ? '' : emptyOf(shape);
 }
 
 /** Whether a contribution belongs to the target, rather than a place which supplies it. */
 export function ownPart(part: SettingPart, target: SettingsTarget): boolean {
-  if (target.kind === 'system') return part.source.scope === 'system';
-  if (target.kind === 'environment') return part.source.scope === 'environment_own';
-  if (target.kind === 'provider') return part.source.scope === 'provider_own';
-  return part.source.node?.id === target.id;
+  return ownSource(part.source, target);
+}
+
+export function ownSource(source: SettingSource, target: SettingsTarget): boolean {
+  if (target.kind === 'system') return source.scope === 'system';
+  if (target.kind === 'environment') return source.scope === 'environment_own';
+  if (target.kind === 'provider') return source.scope === 'provider_own';
+  return source.node?.id === target.id;
 }
 
 /** Contributions above the target stay in resolution order, even when a lock ignores one. */

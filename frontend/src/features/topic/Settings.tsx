@@ -6,6 +6,6 @@
 import { TopicScopeSettings, type TopicSection } from '@/features/settings/ScopeSettings';
 import type { Topic } from '@/generated/api-types';
 
-export function TopicSettings({ topic, section, onSection }: { topic: Topic; section: TopicSection; onSection: (section: TopicSection) => void }) {
+export function TopicSettings({ topic, section, onSection }: { topic: Topic; section: string; onSection: (section: TopicSection) => void }) {
   return <TopicScopeSettings topic={topic} section={section} onSection={onSection} />;
 }

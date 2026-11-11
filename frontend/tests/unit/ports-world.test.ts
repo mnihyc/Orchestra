@@ -11,7 +11,7 @@ function fixture() {
   const world = new World(); const person = world.people.get('ada')!;
   world.ports.control('/set', { scene: 'full' });
   const path = `/environments/${RUNS_ON.sandbox}/ports`;
-  const call = (method: string, route: string, body: Record<string, unknown> = {}, query = '') => world.ports.handle(person, method, route, new URLSearchParams(query), body);
+  const call = (method: string, route: string, body: Record<string, unknown> = {}) => world.ports.handle(person, method, route, new URLSearchParams(), body);
   return { world, person, path, call };
 }
 describe('the current Ports producer', () => {
@@ -93,7 +93,11 @@ describe('the current Ports producer', () => {
     const page = (await call('GET', `/nodes/${ACME.org}/port-openings`))?.body as { items: PortOpenReply['opening'][] };
     expect(page.items).toHaveLength(1); expect(page.items[0]).toMatchObject({ kind: 'place', state: 'stopped', can: { close: true } });
     const opening = page.items[0]!;
-    expect((await call('DELETE', `/port-openings/${opening.id}`, {}, `expected_revision=${opening.revision}`))?.body).toMatchObject({ state: 'closed' });
+    const closePath = `/port-openings/${opening.id}`;
+    await expect(call('DELETE', closePath, { expected_revision: opening.revision - 1 })).rejects.toMatchObject({
+      answer: { status: 409, body: { code: 'conflict.revision' } },
+    });
+    expect((await call('DELETE', closePath, { expected_revision: opening.revision }))?.body).toMatchObject({ state: 'closed', revision: opening.revision + 1 });
     expect(((await call('GET', `/nodes/${ACME.org}/port-openings`))?.body as { items: unknown[] }).items).toHaveLength(0);
   });
 });

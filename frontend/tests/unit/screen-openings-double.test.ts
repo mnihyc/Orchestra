@@ -3,8 +3,21 @@
 import { expect, it } from 'vitest';
 import type { ChatDraft, Node } from '@/generated/api-types';
 import { ACME } from '../doubles/fixtures';
-import { chatOpening, nodeChatOpening, documentPages } from '../doubles/screen-openings';
+import { chatOpening, nodeChatOpening, documentPages, orgOverview } from '../doubles/screen-openings';
 import { Refusal, World } from '../doubles/world';
+
+it('opens the org overview through its bounded native child and recent readers', async () => {
+  const world = new World(), person = world.people.get('ada')!;
+  const result = await orgOverview(world, person, ACME.org, new URLSearchParams());
+  expect(result.children).toEqual((await world.requestFeeds.read(person, `/nodes/${ACME.org}/children?archived=exclude&limit=50`)).body);
+  expect(result.recent).toEqual((await world.requestFeeds.read(person, `/search/names?kinds=thread&limit=50&org_id=${ACME.org}`)).body);
+  expect(result.first_steps.status).toBe('ready');
+  expect(result.usage.status).toBe('ready');
+  expect(result.activity.status).toBe('ready');
+  expect(result.outside_openings.status).toBe('ready');
+  world.places.denied.set('ada', new Set(['org.view']));
+  await expect(orgOverview(world, person, ACME.org, new URLSearchParams())).rejects.toBeInstanceOf(Refusal);
+});
 
 it('admits the selected thread conversation and only the readable scopes around it', async () => {
   const world = new World(), person = world.people.get('ada')!;
@@ -29,6 +42,26 @@ it('carries the selected private draft without borrowing another reader’s word
   expect((await chatOpening(world, other, node.chat_id, new URLSearchParams())).draft).toBeNull();
   world.places.denied.set('ada', new Set(['chat.view']));
   await expect(chatOpening(world, person, node.chat_id, new URLSearchParams())).rejects.toBeInstanceOf(Refusal);
+});
+
+it('carries only the topic in view alongside the selected chat, even when chat reading is unavailable', async () => {
+  const world = new World(), person = world.people.get('ada')!, other = world.people.get('dora')!;
+  const target = { kind: 'topic', id: ACME.fixLogin } as const;
+  world.summaries.control('/set', { ...target, text: 'Only this reader’s topic paragraph.' });
+  const opened = await nodeChatOpening(world, person, target.id, new URLSearchParams({ scope: 'project' }));
+  expect(opened.opening?.sync.chat.node?.kind).toBe('project');
+  expect(opened.summaries?.find((view) => view.target.kind === 'topic')).toMatchObject({ target, text: 'Only this reader’s topic paragraph.' });
+  expect(opened.summaries).toHaveLength(3);
+  const others = await nodeChatOpening(world, other, target.id, new URLSearchParams());
+  expect(others.summaries?.find((view) => view.target.kind === 'topic')?.text).toBeNull();
+  world.places.denied.set('ada', new Set(['chat.view']));
+  const withoutChat = await nodeChatOpening(world, person, target.id, new URLSearchParams());
+  expect(withoutChat.scopes).toEqual([]); expect(withoutChat.opening).toBeNull();
+  expect(withoutChat.summaries).toHaveLength(1);
+  expect(withoutChat.summaries?.[0]).toMatchObject({ target, text: 'Only this reader’s topic paragraph.' });
+  expect(withoutChat.summary_range).toBeUndefined();
+  world.places.denied.set('ada', new Set(['topic.view']));
+  await expect(nodeChatOpening(world, person, target.id, new URLSearchParams())).rejects.toBeInstanceOf(Refusal);
 });
 
 it('batches first document pages without widening the native permission of any place', async () => {

@@ -44,7 +44,7 @@ export function ProjectStar({ projectId, name, view, readableTags, path = [] }: 
       />
       {safeSaved !== null && <Button size="sm" variant="ghost" asChild><a href={projectViewAddress(projectId, safeSaved)}>{t('day100.views.openStarred')}</a></Button>}
       {save.error !== null && <ErrorAlert error={save.error} />}
-      {favorites.isError && favorites.data === undefined && <ErrorState compact error={favorites.error} onRetry={() => void favorites.refetch()} />}
+      {favorites.isError && <ErrorState compact error={favorites.error} onRetry={() => void favorites.refetch()} />}
     </div>
   );
 }

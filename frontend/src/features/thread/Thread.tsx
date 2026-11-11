@@ -3,18 +3,20 @@ import { threadIconFacts } from '@/ui/ThreadState';
  *
  * The screen of a thread: its head, the conversation with the agent's work, what stands above the
  * composer (why the thread cannot go on, what holds it, a plan, approvals that wait, the queue), and the
- * composer, or in its place the card for somebody who may only watch, or the line that the thread is
- * archived. The thread is followed live, so the screen is always the thread as it is now, and says when
+ * composer, disabled for somebody who may only watch, or the line that the thread is archived.
+ * The thread is followed live, so the screen is always the thread as it is now, and says when
  * it could not be brought up to date.
  */
+import { ThreadSummaryInspector } from '@/features/summaries/ThreadSummaryInspector';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { Archive, MessageSquareText, ShieldQuestionMark } from 'lucide-react';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Archive, MessageSquareText } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useStore } from 'zustand';
 
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { useViewInstance, useContentFocused } from '@/features/workbench/instance';
+import { useViewShown } from '@/features/workbench/viewOpening';
 import { ApiError, client } from '@/api/client';
 import { unarchiveNode } from '@/api/nodes';
 import { limitsQuery } from '@/api/threads';
@@ -32,17 +34,22 @@ import { PersonThingProvider } from '@/features/people/personContext';
 import { useSelection } from '@/features/forward/Selection';
 import { LocalAddresses } from '@/features/ports/LocalAddresses';
 import { BindingSummary } from '@/features/thread/BindingSummary';
+import { ThreadGatewayStatus } from '@/features/gateways/ThreadGatewayStatus';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
+import { threadSwitchRecovery } from '@/features/thread/switchRecovery';
 import { ConnectionBanner } from '@/features/thread/ConnectionBanner';
 import { SourcePreparation } from '@/features/source/Preparation';
 import { ReviewTray } from '@/features/source/Review';
 import { ThreadHeader } from '@/features/thread/Header';
+import { AudienceBanner } from '@/features/thread/AudienceBanner';
+import { NowLine, ThreadNowProvider } from '@/features/thread/NowLine';
+import { PendingAgentSchedules } from '@/features/schedules/Schedules';
+import { PinnedApprovals } from '@/features/thread/PinnedApprovals';
 import { isThreadForScreen, threadCapabilities } from '@/features/thread/cached';
 import { GoalEditorHost } from '@/features/goal/GoalEditor';
 import { GoalLine } from '@/features/goal/GoalLine';
 import { LockBanner } from '@/features/thread/LockBanner';
 import { PassiveStrip } from '@/features/thread/PassiveStrip';
-import { WatchingCard } from '@/features/thread/WatchingCard';
 import type { ItemSelection, PromptFocus, SelectPromptVersion } from '@/features/timeline/context';
 import { FindInConversation } from '@/features/timeline/FindInConversation';
 import { PlanLine } from '@/features/timeline/PlanLine';
@@ -106,9 +113,13 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
   const read = useThreadReadRef(threadId);
   const instance = useViewInstance();
   const focusedContent = useContentFocused();
+  const shown = useViewShown();
   const root = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
+  const bindRoot = useCallback((element: HTMLDivElement | null) => {
+    root.current = element; setViewport(element);
+  }, []);
   const timeline = useRef<TimelineHandle>(null);
-  const [visible, setVisible] = useState<ReadonlySet<string>>(new Set());
   const [proceeding, setProceeding] = useState(false);
   useLayoutEffect(() => selectThreadContinuation(read, continuation), [read, continuation]);
   useThreadFeed(threadId);
@@ -180,16 +191,18 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
   }
 
   const mayDrive = holds(thread.access, 'thread.interact');
-  const pendingApprovals = view.order.flatMap((id) => {
-    const found = view.items.get(id);
-    return found?.kind === 'approval' && found.status === 'pending' ? [found] : [];
-  });
-  const offscreen = pendingApprovals.filter((found) => !visible.has(found.id));
-  const composerShown = !reading.readOnly && !thread.archived && mayDrive && thread.input_access.allowed;
+  const composerShown = !reading.readOnly && !thread.archived;
+  const drivingShown = composerShown && mayDrive && thread.input_access.allowed;
 
   return (
-    <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><div ref={root} className="flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto" data-screen="thread">
-      <ThreadHeader thread={thread} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+    <PersonThingProvider thing={{ kind: 'thread', id: threadId }}><ThreadNowProvider threadId={threadId}><div ref={bindRoot} className="flex h-full min-h-0 flex-col overflow-x-hidden overflow-y-auto" data-screen="thread" data-scroll-area>
+      <ThreadHeader thread={thread} recoverySwitchVisible={threadSwitchRecovery(thread, reading.readOnly) !== undefined} onRevealItem={(id) => timeline.current?.scrollToItem(id)} />
+      <AudienceBanner thread={thread} />
+      <Frame><ThreadSummaryInspector threadId={threadId} enabled={shown} /></Frame>
+      <NowLine threadId={threadId} />
+      {!reading.readOnly && thread.environment !== null && thread.binding !== null && <div className="min-w-0 shrink-0 px-4 pt-1">
+        <ThreadGatewayStatus threadId={threadId} executionRevision={thread.execution_revision} line />
+      </div>}
       {linkedTurn.isError && <ErrorAlert error={linkedTurn.error} />}
       <FindInConversation threadId={threadId} timeline={timeline} root={root} />
       {/* The thread's README stands above its conversation, folded to one line once it was read. */}
@@ -198,25 +211,27 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           <PlaceReadme readme={thread.readme} foldable />
         </div>
       )}
-      {/* A small cell retains one ordinary message row; excess controls scroll in this view. */}
-      <div className="min-h-16 flex-1">
+      {/* Virtual rows and excess controls share the view; the conversation retains its minimum row. */}
+      <div className="min-h-16 flex-auto shrink-0">
         {/* A local address an agent writes leads a reader of the environment's Ports door to that port. */}
         <LocalAddresses environmentId={thread.environment?.id ?? null} canView={thread.environment_permissions.includes('ports.view')}>
-          <Timeline
+          {viewport !== null && <Timeline
             key={windowKey}
             ref={timeline}
+            viewport={viewport}
             threadId={threadId}
             item={item ?? promptItem ?? linkedTurn.data?.items[0]?.id ?? null}
             items={items}
-            onVisible={setVisible}
+            pinApprovals={composerShown}
             selection={selection}
             onVersionSelect={onVersionSelect}
             focusPrompt={focusPrompt}
             highlightLink={prompt === undefined}
-            empty={thread.binding === null ? <p className="text-sm text-text-muted">{t('thread.screen.unbound')}</p> : <BindingSummary thread={thread} />}
-          />
+            empty={thread.binding === null && thread.program?.id !== 'orch' ? <p className="text-sm text-text-muted">{t('thread.screen.unbound')}</p> : <BindingSummary thread={thread} />}
+          />}
         </LocalAddresses>
       </div>
+      {shown && <PendingAgentSchedules thread={thread} readOnly={reading.readOnly} />}
       <Frame>
         {/* What says how things stand takes one row, the most urgent first; what waits for an answer keeps its own. */}
         <PassiveStrip entries={[
@@ -228,21 +243,13 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           { id: 'goal', node: <GoalLine thread={thread} /> },
           { id: 'continuation', node: <ContinuationNotice key={windowKey} threadId={threadId} view={view} onSelect={onVersionSelect} /> },
           ...(reading.readOnly ? [] : [{ id: 'source', node: <SourcePreparation thread={thread} /> }]),
-          ...(composerShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
+          ...(drivingShown && !picking.active ? [{ id: 'review', node: <ReviewTray threadId={threadId} /> }] : []),
         ]} />
-        {offscreen.length > 0 && (
-          <div role="status" className="flex items-center gap-2 rounded-lg border border-warning/40 bg-warning-subtle px-3 py-1 text-sm text-text">
-            <ShieldQuestionMark className="text-warning" aria-hidden />
-            <span className="flex-1">{t('approvals.barWaiting', { count: pendingApprovals.length })}</span>
-            <Button size="sm" onClick={() => timeline.current?.scrollToItem(offscreen[0]?.id ?? '')}>
-              {t('approvals.review')}
-            </Button>
-          </div>
-        )}
+        {composerShown && <PinnedApprovals threadId={threadId} />}
         <PlanLine threadId={threadId} onJump={(id) => timeline.current?.scrollToItem(id)} />
         <QueueTray threadId={threadId} queued={queuedInputs(view)} sending={sendingTray(view, sending)} readOnly={reading.readOnly} />
         {picking.active && !reading.readOnly ? (
-          <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={composerShown} onCancel={picking.clear} />
+          <TimelineSelectionBar threadId={threadId} ids={picking.ids} canQuote={drivingShown} onCancel={picking.clear} />
         ) : reading.readOnly ? null : thread.archived ? (
           <div className="flex flex-wrap items-center gap-3 rounded-lg border border-border bg-bg-subtle px-4 py-3 text-sm text-text">
             <Archive className="text-text-muted" aria-hidden />
@@ -258,9 +265,7 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           </div>
         ) : composerShown ? (
           <Composer thread={thread} onSent={() => timeline.current?.scrollToEnd()} />
-        ) : (
-          <WatchingCard thread={thread} />
-        )}
+        ) : null}
       </Frame>
       <GoalEditorHost thread={thread} />
       {proceeding && limits.data !== undefined && (
@@ -277,7 +282,7 @@ export function ThreadScreen({ threadId, item, items = null, turn, continuation 
           }}
         />
       )}
-    </div></PersonThingProvider>
+    </div></ThreadNowProvider></PersonThingProvider>
   );
 }
 

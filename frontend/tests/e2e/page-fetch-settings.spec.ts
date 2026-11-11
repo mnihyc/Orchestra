@@ -1,0 +1,81 @@
+/** Independent page fetching uses the ordinary nullable setting editor and revision writer. */
+import { expect, test } from '@playwright/test';
+import type { ResolvedSetting, SettingDef } from '../../src/generated/api-types';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
+import { ACME, scenario, signIn, supplyDefaults } from './support';
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1440, 400]) {
+  test(`page fetch stays independent until explicitly saved ${locale}/${theme}/${width}`, async ({ page }, info) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme, reducedMotion: 'reduce' });
+    const definition: SettingDef = {
+      key: 'agents.page_fetch', title: 'Page fetch', description: 'Program default when unset.',
+      scopes: ['org'], group: 'agent', class: 'parameter', merge: 'replace',
+      schema: { anyOf: [{ type: 'string', enum: ['off', 'on', 'service'] }, { type: 'null' }] },
+      default: null, example: null, text_key: null, keywords: [],
+    };
+    let current: ResolvedSetting = { key: definition.key, value: null, own: null,
+      writable: true, locked_by: null, source: { scope: 'default', node: null }, parts: [] };
+    const writes: { value: 'off' | 'on' | 'service' | null; expected_revision: number }[] = [];
+    await page.route('**/api/v1/settings/registry', (route) => route.fulfill({ json: [definition] }));
+    await page.route(`**/api/v1/nodes/${ACME.research}/settings`, (route) => route.fulfill({ json: [current] }));
+    await supplyDefaults(page, ACME.research, { registry: () => [definition], settings: () => [current] });
+    await page.route((url) => url.pathname === `/api/v1/nodes/${ACME.research}/settings/${definition.key}`, async (route) => {
+      expect(route.request().method()).toBe('PUT');
+      const body = route.request().postDataJSON() as { value: 'off' | 'on' | 'service' | null; expected_revision: number };
+      expect(body.expected_revision).toBe(current.own?.revision ?? 0);
+      writes.push(body);
+      current = { ...current, value: body.value,
+        own: { value: body.value, revision: body.expected_revision + 1, locked: false },
+        source: { scope: 'org', node: { id: ACME.research, kind: 'org', name: 'Research', redacted: false } } };
+      await route.fulfill({ json: current });
+    });
+    await signIn(page);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: /^(Language|语言)$/ }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+    }
+    const words = locale === 'en' ? english : chinese;
+    const title = words.settingRegistry.agents.page_fetch.title;
+    // EN: Organization → Settings → Page fetch: the unset value makes no write. Open the editor, choose Service and commit the completed edit.
+    // 中文：组织 → 设置 → 网页抓取：未设置时不会写入。明确选择“服务”并保存。
+    await page.goto('/org/acme.research/settings/defaults');
+    const row = page.locator('[data-setting="agents.page_fetch"]');
+    await expect(row).toContainText(title);
+    await expect(row).toContainText(words.settingRegistry.agents.page_fetch.description);
+    const edit = row.getByRole('button', { name: words.settings.compact.editValue.replace('{{name}}', title), exact: true });
+    expect(writes).toHaveLength(0);
+    // Complex values are summaries until explicitly opened; leaving the completed editor commits it.
+    await edit.click();
+    const selected = row.getByRole('checkbox', { name: words.settings.editor.nullableSet.replace('{{name}}', title), exact: true });
+    await expect(selected).not.toBeChecked();
+    expect(writes).toHaveLength(0);
+    await selected.check();
+    await row.getByRole('combobox', { name: title, exact: true }).click();
+    await expect(page.getByRole('option', { name: words.choiceCatalog.pageFetch.on.name, exact: true })).toBeVisible();
+    await page.getByRole('option', { name: words.choiceCatalog.pageFetch.service.name, exact: true }).click();
+    await edit.focus();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0]).toMatchObject({ value: 'service', expected_revision: 0 });
+    // EN: Reload, choose Off and commit a second revision; an inherited lock then removes editing.
+    // 中文：刷新，选择“关闭”并保存下一修订；继承锁定后不显示“保存”。
+    await page.reload();
+    await edit.click();
+    await expect(row.getByRole('combobox', { name: title, exact: true })).toHaveValue(words.choiceCatalog.pageFetch.service.name);
+    await row.getByRole('combobox', { name: title, exact: true }).click();
+    await page.getByRole('option', { name: words.choiceCatalog.pageFetch.off.name, exact: true }).click();
+    await edit.focus();
+    await expect.poll(() => writes.length).toBe(2);
+    expect(writes[1]).toMatchObject({ value: 'off', expected_revision: 1 });
+    current = { ...current, writable: false, locked_by: { scope: 'org', node: { id: ACME.org, kind: 'org', name: 'Acme', redacted: false } } };
+    await page.reload();
+    await expect(edit).toHaveCount(0);
+    await expect(row.getByRole('checkbox', { name: words.settings.editor.nullableSet.replace('{{name}}', title), exact: true })).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`page-fetch-${locale}-${theme}-${width}.png`), fullPage: true });
+  });
+}

@@ -25,7 +25,7 @@ test('a delayed check cannot recreate a plan after its destination changes', asy
   await signIn(page);
   await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
   await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-  await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
   const dialog = wizard(page, 'Move Sandbox');
   const row = dialog.getByRole('row').filter({ has: page.locator('[data-mount-fate="datasets"]') });
   await expect(row.getByRole('button', { name: 'Check', exact: true })).toBeEnabled();
@@ -41,7 +41,7 @@ test('a delayed check cannot recreate a plan after its destination changes', asy
     await dialog.getByRole('combobox', { name: 'Place', exact: true }).click();
     await page.getByRole('option', { name: 'build-host', exact: true }).click();
     await destinationRead;
-    await expect(dialog.getByRole('region', { name: 'Changes', exact: true })).toContainText('/mnt/checked-destination');
+    await expect(dialog.getByRole('region', { name: 'Stays as it is', exact: true })).toContainText('/mnt/checked-destination');
   } finally { release(); }
   await expect(row.getByRole('button', { name: 'Check', exact: true })).toBeEnabled();
   await expect(row.getByRole('status')).toHaveCount(0);
@@ -89,7 +89,7 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
       await signIn(page);
       await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
       await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-      await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
     } else {
       await openHistory(page);
       await conversation(page).getByText('The handler reads').first().click({ button: 'right' });
@@ -197,7 +197,7 @@ for (const width of [1280, 390]) for (const kind of ['move', 'fork'] as const) {
       await signIn(page);
       await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
       await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-      await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+      await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
     } else {
       await openHistory(page);
       await conversation(page).getByText('The handler reads').first().click({ button: 'right' });

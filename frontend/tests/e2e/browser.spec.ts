@@ -46,7 +46,9 @@ test('the list has the open browsers and the profiles none runs on; a new profil
   await expect(dialog.locator('[data-signins-sentence]')).toContainText('A browser acts at every site as whoever signed in to it there.');
   await dialog.getByRole('radio', { name: /notion/ }).click();
   await expect(dialog.getByRole('button', { name: 'Join the browser on notion' })).toBeVisible();
-  await dialog.getByRole('radio', { name: 'A new profile' }).click();
+  const newProfile = dialog.getByRole('radio', { name: 'New', exact: true });
+  await expect(newProfile).toHaveAccessibleDescription('A new profile');
+  await newProfile.click();
   await dialog.getByLabel('Name of the profile').fill('shop');
   await dialog.getByRole('button', { name: 'Open the browser' }).click();
   await expect(page.locator('[data-browser-front]')).toHaveAttribute('aria-label', 'The browser on shop');
@@ -86,10 +88,13 @@ test('a tab the page opened, a dialog and a file asked for reach whoever drives'
   await picture(page);
   await page.getByRole('button', { name: 'Drive' }).click();
   await control('/open-tab', { profile: 'notion', title: 'Sign in to Notion' });
-  await expect(page.getByRole('group', { name: 'Tabs of the browser' }).getByRole('button', { name: 'Sign in to Notion' })).toHaveAttribute('aria-pressed', 'true');
+  const popup = page.getByRole('group', { name: 'Tabs of the browser' }).getByRole('button', { name: 'Sign in to Notion', exact: true });
+  // Remote tab lists retain the viewer's chosen tab; choose the new page before driving it.
+  await popup.click();
+  await expect(popup).toHaveAttribute('aria-pressed', 'true');
   await control('/dialog', { profile: 'notion', kind: 'confirm', message: 'Leave this page?' });
   await expect(page.locator('[data-page-dialog="confirm"]')).toContainText('Leave this page?');
-  await page.getByRole('button', { name: 'OK' }).click();
+  await page.locator('[data-page-dialog="confirm"]').getByRole('button', { name: 'OK', exact: true }).click();
   await expect.poll(async () => (await received('notion')).some((entry) => entry.frame.op === 'dialog' && entry.frame.accept === true)).toBe(true);
   await control('/chooser', { profile: 'notion' });
   await page.getByLabel('The file to give, as a path of the workspace').fill('docs/plan.pdf');

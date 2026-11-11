@@ -154,6 +154,51 @@ pub struct Request {
     pub content: Option<Vec<ContentPart>>,
 }
 
+/// The same typed prompt-edit intent used by native and HTTP callers.
+pub fn edit(
+    input: Id,
+    body: orch_api_contract::threads::ThreadPromptVersionCreateBody,
+) -> (String, Request) {
+    (
+        body.client_id,
+        Request {
+            kind: Kind::Edit,
+            source_continuation_id: body.source_continuation_id,
+            before_input_id: Some(input),
+            target_continuation_id: None,
+            expected: Expected {
+                active_continuation_id: body.expected_active_continuation_id,
+                execution_revision: body.expected_execution_revision,
+                queue_revision: body.expected_queue_revision,
+            },
+            active_turn: super::admission::running(body.active_turn),
+            content: Some(body.content),
+        },
+    )
+}
+/// The same retained-continuation selection used by native and HTTP callers.
+pub fn activate(
+    target: Id,
+    body: orch_api_contract::threads::ThreadContinuationActivateBody,
+) -> (String, Request) {
+    (
+        body.client_id,
+        Request {
+            kind: Kind::Activate,
+            source_continuation_id: target,
+            before_input_id: None,
+            target_continuation_id: Some(target),
+            expected: Expected {
+                active_continuation_id: body.expected_active_continuation_id,
+                execution_revision: body.expected_execution_revision,
+                queue_revision: body.expected_queue_revision,
+            },
+            active_turn: super::admission::running(body.active_turn),
+            content: body.content,
+        },
+    )
+}
+
 /// Stable typed intent plus actual native results; an unknown open outcome remains the same command.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -164,6 +209,12 @@ pub struct Recipe {
     pub authorization_token: Option<Id>,
     /// Original token narrowing is checked as well as its currently stored grant.
     pub authorization_scope: Option<AuthorizationScope>,
+    /// Exact accepted operation and original/current credential ceilings for later native work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_origin: Option<orch_authz::CapturedOperation>,
+    /// Immutable saved-byte witnesses selected by the native admission, never target paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub byte_sources: Vec<(Hash, orch_chat::following::BlobOrigin)>,
     pub request: Request,
     pub request_hash: Hash,
     /// Failed-version retries reuse their immutable cut; known verified children are resumed.

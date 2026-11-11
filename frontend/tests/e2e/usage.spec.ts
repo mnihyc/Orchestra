@@ -20,6 +20,14 @@ const tile = (page: Page, name: 'Turns' | 'Tokens' | 'Credits') => page.getByRol
 
 const webUsage = `/usage?scope=node:${PLACES.web}`;
 
+async function chooseSpan(page: Page, name: string) {
+  const span = page.getByRole('combobox', { name: 'Span', exact: true });
+  if (await span.isVisible()) {
+    await span.click();
+    await page.getByRole('option', { name, exact: true }).click();
+  } else await page.getByRole('radio', { name, exact: true }).click();
+}
+
 test('a span is changed and every figure follows it', async ({ page }) => {
   await signIn(page);
   await page.goto('/usage');
@@ -31,7 +39,7 @@ test('a span is changed and every figure follows it', async ({ page }) => {
   await expect(tile(page, 'Credits')).toContainText('≈ 245.7 of them estimated');
   await expect(tile(page, 'Credits')).not.toContainText('without a rate');
 
-  await page.getByRole('radio', { name: '7 days', exact: true }).click();
+  await chooseSpan(page, '7 days');
   const week = sum(DAY.ada, 7);
   await expect(tile(page, 'Turns')).toContainText(String(week.turns));
   await expect(tile(page, 'Tokens')).toContainText('46.2M');
@@ -42,12 +50,14 @@ test('a span is changed and every figure follows it', async ({ page }) => {
   await expect(page).toHaveURL(/range=7d/);
 
   // This year counts the days of the year so far; all time reaches back to the first turn the ledger holds.
-  await page.getByRole('radio', { name: 'This year', exact: true }).click();
+  await chooseSpan(page, 'This year');
   const year = Math.min(dayOfYear(), 120);
   await expect(tile(page, 'Turns')).toContainText(String(DAY.ada.turns * year));
-  await page.getByRole('radio', { name: 'All time', exact: true }).click();
+  await chooseSpan(page, 'All time');
   await expect(tile(page, 'Turns')).toContainText(String(DAY.ada.turns * 120));
-  await expect(page.getByRole('radio', { name: 'All time', exact: true })).toBeChecked();
+  const span = page.getByRole('combobox', { name: 'Span', exact: true });
+  if (await span.isVisible()) await expect(span).toHaveText('All time');
+  else await expect(page.getByRole('radio', { name: 'All time', exact: true })).toBeChecked();
   await expect(page.getByText('Days use UTC',{exact:true})).toHaveCount(1);
 });
 
@@ -87,7 +97,7 @@ test('a span of one\'s own is set by its two days, and by dragging across the ba
 test('a break-down is opened into its table, and a row narrows the whole screen', async ({ page }) => {
   await signIn(page);
   await page.goto('/usage');
-  await page.getByRole('tab', { name: 'By model' }).click();
+  await page.getByRole('tab', { name: 'By model', exact: true }).click();
   const models = page.getByRole('table', { name: 'By model' });
   await expect(models.getByRole('row')).toHaveCount(3); // the header and Ada's two models
   await expect(models.getByRole('button', { name: /^GPT-5\.4/ })).toBeVisible();
@@ -135,7 +145,7 @@ test('what was used without any rate reads "–" and is counted beside a sum tha
   // Evals holds Dora's small model (an estimate) and Grace's own (no rate at all): 600 000 tokens of the second add nothing to the sum.
   await expect(credits).toContainText('18M tokens without a rate');
   await expect(credits).toContainText('≈ 18');
-  await page.getByRole('tab', { name: 'By model' }).click();
+  await page.getByRole('tab', { name: 'By model', exact: true }).click();
   const table = page.getByRole('table', { name: 'By model' });
   const local = table.getByRole('row').filter({ hasText: 'our-local-model' });
   await expect(local).toContainText('–');
@@ -204,7 +214,7 @@ test('an empty span says so and draws no broken chart', async ({ page }) => {
   await expect(page.getByText('Nothing was used in this span.')).toBeVisible();
   await expect(tile(page, 'Turns')).toContainText('0');
   await expect(page.locator('canvas')).toHaveCount(0);
-  await expect(page.getByRole('tab', { name: 'By model' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'By model', exact: true })).toBeVisible();
   await expect(page.getByRole('table', { name: 'Records' })).toHaveCount(0);
   await expect(page.getByText('Orch records what was used')).toBeVisible();
 });
@@ -259,7 +269,9 @@ test('a cap is made on a place, is reached by what was used, is raised in its ro
   await expect(row.getByText('Reached', { exact: true })).toBeVisible();
   await expect(row).toContainText('10.8M of 1M tokens');
   await expect(row).toContainText('starts again 00:00 UTC');
-  await expect(row).toContainText('Set by Ada Lovelace');
+  // The person's mark (an initial) sits between the words and the name.
+  await expect(row).toContainText('Set by');
+  await expect(row).toContainText('Ada Lovelace');
   await expect(row.getByRole('meter')).toHaveAttribute('aria-valuenow', '100');
 
   // Raised where it stands: no longer reached.
@@ -376,9 +388,10 @@ test('a cap for one person, for a group and for a role is made as each is named'
   await page.getByRole('option', { name: 'credits' }).click();
   await dialog.getByRole('combobox', { name: 'Period' }).click();
   await page.getByRole('option', { name: 'a week' }).click();
-  await expect(dialog.getByRole('status')).toHaveText('It says: Developers of Acme > Research > Web may use at most 300 credits a week on all models in project Web.');
+  // Credits cover models and services alike, and the sentence says so.
+  await expect(dialog.getByRole('status')).toHaveText('It says: Developers of Acme > Research > Web may use at most 300 credits a week on all models and services in project Web.');
   await dialog.getByRole('button', { name: 'Add limit' }).click();
-  await expect(limits.getByRole('listitem').first()).toContainText('Developers of Web on all models in project Web');
+  await expect(limits.getByRole('listitem').first()).toContainText('Developers of Web on all models and services in project Web');
 
   await limits.getByRole('button', { name: 'Add limit…' }).click();
   dialog = page.getByRole('dialog', { name: 'Add a limit' });

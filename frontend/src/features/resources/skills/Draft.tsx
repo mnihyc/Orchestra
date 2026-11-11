@@ -39,7 +39,7 @@ export function SkillDraftPanel({ skill }: { skill: Skill }) {
         {start.error !== null && <SkillRefusal error={start.error} />}
       </div>} />;
   }
-  if (draft.data === undefined) return draft.error === null ? <SkeletonRows rows={4} /> : <ErrorState error={draft.error} onRetry={() => void draft.refetch()} />;
+  if (draft.data === undefined) return draft.error === null ? <SkeletonRows read={draft} rows={4} /> : <ErrorState error={draft.error} onRetry={() => void draft.refetch()} />;
   return <DraftEditor skill={skill} draft={draft.data} />;
 }
 
@@ -154,7 +154,7 @@ function DraftFile({ skill, draft, path, executable, size, busy, onSave, onExecu
         {path !== SKILL_FILE && <Button size="sm" icon={<Trash2 aria-hidden />} disabled={busy} onClick={onDelete}>{t('resourceDetails.skill.draft.delete')}</Button>}
       </div>
     </div>
-    {content.data === undefined ? content.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={content.error} onRetry={() => void content.refetch()} />
+    {content.data === undefined ? content.error === null ? <SkeletonRows read={content} rows={6} /> : <ErrorState error={content.error} onRetry={() => void content.refetch()} />
       : content.data.text === null ? <EmptyState compact title={t('resourceDetails.skill.binary')} description={<ByteSize bytes={size} />} />
         : <div className="h-96 min-w-0 overflow-hidden rounded-lg border border-border">
           <CodeView text={content.data.text} version={`${path}:${draft.info.revision}`} label={path} language={language?.load ?? null} languageKey={language?.id ?? null}

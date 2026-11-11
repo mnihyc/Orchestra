@@ -1,17 +1,24 @@
 /** QS-003 and QS-013: real inspection envelopes and served host facts remain readable without invented requests or acts. */
-import { screen, within } from '@testing-library/react';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
+import { ApiError } from '@/api/client';
+import { LiveQueryClient } from '@/api/query';
 import { InspectionBanner, InspectionPage } from '@/features/trace/Inspection';
-import { KeptEnvironmentRow, RemovalFacts } from '@/features/trace/KeptEnvironments';
+import { KeptEnvironmentRow, KeptEnvironments, RemovalFacts } from '@/features/trace/KeptEnvironments';
 import { HostKept } from '@/features/trace/HostKept';
-import type { Host, HostKeptData, ThreadSync, DeletedEnvironment, DeletedInspection as Inspection } from '@/generated/api-types';
+import type { Host, HostKeptData, Job, ThreadSync, DeletedEnvironment, DeletedInspection as Inspection } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
 const read = vi.hoisted(() => vi.fn<(path: string, options?: unknown) => Promise<unknown>>());
+const retention = vi.hoisted(() => ({ list: vi.fn(), restore: vi.fn(), job: vi.fn() }));
 vi.mock('@/api/trace', async (original) => ({ ...await original<object>(), traceJson: read,
   retainedEnvironmentQuery: (id: string) => ({ queryKey: ['inspection-test', id], queryFn: () => read(`/environments/${id}?inspect_deleted=true`) }),
+  keptEnvironmentsQuery: (id: string) => ({ queryKey: ['trace-deleted', 'environments', id], queryFn: retention.list, initialPageParam: null, getNextPageParam: () => null }),
+  restoreEnvironment: retention.restore,
+  retentionJobQuery: (id: string) => ({ queryKey: ['retention-job-test', id], queryFn: retention.job }),
 }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
 vi.mock('@/features/resources/trail', () => ({ useResourceHeading: vi.fn() }));
@@ -24,7 +31,7 @@ const home = { id: 'home', kind: 'project' as const, name: 'Web', redacted: fals
 const row: Omit<DeletedEnvironment, 'removal'> = { environment, home, host: null, storage: null };
 const threadReply = (facts: Inspection | null | undefined) => ({ thread: { id: 'thread', name: 'Archived conversation', path: [], ...(facts === undefined ? {} : { inspection: facts }) }, items: [], turns: [], inputs: [], segments: [], has_older: false });
 
-beforeEach(() => { read.mockReset(); });
+beforeEach(() => { read.mockReset(); retention.list.mockReset(); retention.restore.mockReset(); retention.job.mockReset(); });
 
 it('QS-003 reads a thread banner from thread.inspection with no top-level copy', async () => {
   read.mockResolvedValue(threadReply(inspection));
@@ -70,6 +77,63 @@ it.each([null, undefined])('QS-003 a partial kept row (%s) is guarded before its
 it('QS-003 a missing banner or removal record never dereferences deletion facts', () => {
   show(<><InspectionBanner /><RemovalFacts entry={row} /></>);
   expect(screen.getByText('No content remains to inspect.')).toBeInTheDocument();
+});
+
+it('rereads the visible kept list after a competing purge refuses a stale restore', async () => {
+  const removal: DeletedEnvironment['removal'] = {
+    phase: 'kept', deleted_at: inspection.deleted_at, deleted_by: person, purge_at: inspection.purge_at,
+    keep_days: 7, purged_at: null, bytes: 0, size_at: null, reason: null, revision: 1,
+    can_inspect: true, can_restore: true, can_purge: true, job: null,
+  };
+  retention.list.mockResolvedValueOnce({ items: [{ ...row, removal }], next_cursor: null })
+    .mockResolvedValue({ items: [], next_cursor: null });
+  retention.restore.mockRejectedValue(new ApiError({ type: 'orch:error:resource.in_use', code: 'resource.in_use',
+    status: 409, title: 'A purge holds the files', detail: 'A purge holds the files', request_id: 'purge-race' }, null));
+  const client = new LiveQueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = show(<QueryClientProvider client={client}><KeptEnvironments node={home.id} open /></QueryClientProvider>);
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('trace.restore') }));
+    expect(await screen.findByText(i18n.t('trace.keptEmpty'))).toBeVisible();
+    expect(screen.queryByRole('button', { name: i18n.t('trace.restore') })).not.toBeInTheDocument();
+    expect(retention.list).toHaveBeenCalledTimes(2);
+  } finally {
+    view.unmount();
+    client.clear();
+  }
+});
+
+it('rereads the owning kept list once after a failed restore and keeps its original deadline', async () => {
+  const removal: DeletedEnvironment['removal'] = {
+    phase: 'kept', deleted_at: inspection.deleted_at, deleted_by: person, purge_at: inspection.purge_at,
+    keep_days: 7, purged_at: null, bytes: 0, size_at: null, reason: null, revision: 1,
+    can_inspect: true, can_restore: true, can_purge: true, job: null,
+  };
+  const job: Job = { id: 'restore-job', kind: 'environment_restore', state: 'queued', environment_id: environment.id,
+    node_id: home.id, provider_id: null, created_at: inspection.deleted_at, created_by: person,
+    started_at: null, finished_at: null, error: null, log: null, result: null, batch_id: null,
+    progress: { bytes_done: 0, bytes_total: 0, eta_seconds: null, files_done: 0, files_total: null,
+      message: null, rate_bps: null, phases: [], percent: 0, phase: 'Waiting for kept files' } };
+  const reason = 'The host has no free disk space; the original kept volumes remain.';
+  retention.list.mockResolvedValueOnce({ items: [{ ...row, removal }], next_cursor: null })
+    .mockResolvedValueOnce({ items: [{ ...row, removal: { ...removal, phase: 'restoring', can_restore: false } }], next_cursor: null })
+    .mockResolvedValue({ items: [{ ...row, removal: { ...removal, reason, revision: 3 } }], next_cursor: null });
+  retention.restore.mockResolvedValue(job);
+  retention.job.mockResolvedValue(job);
+  const client = new LiveQueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = show(<QueryClientProvider client={client}><KeptEnvironments node={home.id} open /></QueryClientProvider>);
+  try {
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('trace.restore') }));
+    await waitFor(() => expect(retention.list).toHaveBeenCalledTimes(2));
+    act(() => { client.setQueryData(['retention-job-test', job.id], { ...job, state: 'failed',
+      error: { code: 'environment.unavailable', message: reason, phase: 'Checking kept files', undone: true } }); });
+    expect(await screen.findByText(reason, { exact: true })).toBeVisible();
+    expect(screen.getByRole('button', { name: i18n.t('trace.restore') })).toBeEnabled();
+    expect(screen.getByText(/^Kept until /)).toHaveTextContent('Oct 19, 2026');
+    expect(retention.list).toHaveBeenCalledTimes(3);
+  } finally {
+    view.unmount();
+    client.clear();
+  }
 });
 
 const kept: HostKeptData[] = [

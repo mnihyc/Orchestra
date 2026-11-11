@@ -284,7 +284,10 @@ async fn a_dockerfile_is_built_once_for_each_definition_and_found_again() {
     });
     let unit = lab.run(&request).await;
     assert_eq!(
-        lab.read(&unit, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&unit, "/var/lib/orch/seen.txt", |text| text
+            == "built-for-tests\n")
+            .await
+            .as_deref(),
         Some("built-for-tests\n")
     );
     // Another definition is another build, and the spec's own name follows it.
@@ -671,7 +674,9 @@ async fn a_build_takes_the_files_of_its_context_from_an_uploaded_tar_a_tar_gz_or
         });
         let unit = lab.run(&request).await;
         assert_eq!(
-            lab.read(&unit, "/var/lib/orch/seen.txt").await.as_deref(),
+            lab.wait_read(&unit, "/var/lib/orch/seen.txt", |text| text == expected)
+                .await
+                .as_deref(),
             Some(expected),
             "{label}"
         );
@@ -750,7 +755,9 @@ async fn a_build_takes_the_files_of_its_context_from_a_git_repository_at_the_com
     });
     let unit = lab.run(&request).await;
     assert_eq!(
-        lab.read(&unit, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&unit, "/var/lib/orch/seen.txt", |text| text == "second\n")
+            .await
+            .as_deref(),
         Some("second\n")
     );
     // An address that needs a credential, or reaches into this machine, is refused.
@@ -810,7 +817,10 @@ async fn an_archive_is_loaded_once_for_each_blob_and_a_unit_runs_the_image_in_it
     });
     let unit = lab.run(&request).await;
     assert_eq!(
-        lab.read(&unit, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&unit, "/var/lib/orch/seen.txt", |text| text
+            == "from-the-archive\n")
+            .await
+            .as_deref(),
         Some("from-the-archive\n")
     );
     // A blob that is not an image archive is an image error.

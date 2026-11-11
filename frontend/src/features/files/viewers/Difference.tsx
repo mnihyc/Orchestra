@@ -10,7 +10,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { changesQuery, gitDiff, partOfDiff, workspaceKeys } from '@/api/workspace';
-import { CommentOnLines } from '@/features/source/Review';
+import { CommentOnLines, ReviewableDiff } from '@/features/source/Review';
 import { useTabName } from '@/features/workbench/store';
 import type { ViewProps } from '@/features/workbench/views';
 import { DiffView, type DiffLayout } from '@/ui/DiffView';
@@ -53,7 +53,7 @@ export function DifferenceTab({ tab }: ViewProps) {
   const title = of === null ? '' : baseName(of.path);
   useTabName(tab.id, title === '' ? undefined : t('files.difference.tab', { name: title }), FileDiff);
 
-  const changes = useQuery({ ...changesQuery(door ?? { environmentId: '', threadId: null }, true), enabled: of?.kind === 'change' && door !== null });
+  const changes = useQuery({ ...changesQuery(door ?? { environmentId: '', threadId: null }, true, undefined, of?.item === '' ? undefined : of?.item), enabled: of?.kind === 'change' && door !== null });
   const git = useQuery({
     queryKey: workspaceKeys.gitDiff(door ?? { environmentId: '', threadId: null }, of?.staged ?? false),
     queryFn: ({ signal }) => gitDiff(door ?? { environmentId: '', threadId: null }, of?.staged ?? false, signal),
@@ -68,25 +68,29 @@ export function DifferenceTab({ tab }: ViewProps) {
   if (doorState.kind === 'loading' || door === null) return <SkeletonRows rows={6} />;
   if (of.kind === 'git') {
     if (git.error !== null) return <ErrorState compact className="h-full" error={git.error} onRetry={() => void git.refetch()} />;
-    if (git.data === undefined) return <SkeletonRows rows={8} />;
+    if (git.data === undefined) return <SkeletonRows read={git} rows={8} />;
     return (
       <div className="flex h-full min-h-0 flex-col">
         <Header path={of.path} threadId={door.threadId} text={git.data.text} />
         <div className="min-h-0 flex-1 overflow-auto p-2" style={FILLS}>
-          <DiffView diff={git.data.text === '' ? null : git.data.text} layout={layout} onLayout={setLayout} label={t('files.difference.label', { name: of.path })} truncated={git.data.truncated} />
+          <ReviewableDiff threadId={door.threadId ?? ''} path={of.path} itemId={null} mayComment={door.threadId !== null} diff={git.data.text === '' ? null : git.data.text} layout={layout} onLayout={setLayout} label={t('files.difference.label', { name: of.path })} truncated={git.data.truncated} />
         </div>
       </div>
     );
   }
   if (changes.error !== null) return <ErrorState compact className="h-full" error={changes.error} onRetry={() => void changes.refetch()} />;
-  if (changes.data === undefined) return <SkeletonRows rows={8} />;
+  if (changes.data === undefined) return <SkeletonRows read={changes} rows={8} />;
   const change = changes.data.find((candidate) => candidate.path === of.path && (of.item === '' || candidate.item_id === of.item));
   if (change === undefined) return <EmptyState compact className="h-full" icon={<FileDiff aria-hidden />} title={t('files.difference.gone')} />;
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <Header path={change.path} threadId={door.threadId} text={change.diff ?? ''} item={change.item_id} />
+      <Header path={change.path} threadId={door.threadId} text={change.diff ?? ''} item={door.threadId === change.thread_id ? change.item_id : null} />
       <div className="min-h-0 flex-1 overflow-auto p-2" style={FILLS}>
-        <DiffView
+        <ReviewableDiff
+          threadId={door.threadId ?? ''}
+          path={change.path}
+          itemId={door.threadId === change.thread_id ? change.item_id : null}
+          mayComment={door.threadId !== null}
           diff={change.diff}
           change={change.change}
           binary={change.binary}

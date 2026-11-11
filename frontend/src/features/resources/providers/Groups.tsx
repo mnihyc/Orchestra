@@ -1,7 +1,7 @@
 /** The groups of a provider's models: chips on a model's row editor, added by typing with the provider's other groups offered, and the strip above the list with how many models each group has and "Limit this group…".
  *
  * A group is a name of the managers' own for several of a provider's models ("frontier", "small"): a limit,
- * an allowlist or somebody's access can name the group instead of each model. A model is in at most eight,
+ * an allowlist or somebody's access can name the group instead of each model. Membership count follows the home setting,
  * each named by letters a to z, digits, `-` and `_`.
  */
 import { useState } from 'react';
@@ -10,7 +10,10 @@ import { useTranslation } from 'react-i18next';
 import { groupPattern, GROUPS_MOST } from '@/features/models/patterns';
 import { groupFault } from '@/features/resources/providers/entry';
 import { AddLimit } from '@/features/resources/providers/Caps';
-import type { ProviderModel, ProviderRef } from '@/generated/api-types';
+import { GroupOptionsDialog } from '@/features/resources/providers/GroupOptions';
+import type { Provider, ProviderModel, ProviderRef } from '@/generated/api-types';
+import { useAppearance } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { Button } from '@/ui/Button';
 import { ActionIcon } from '@/ui/actions';
 import { Input } from '@/ui/Input';
@@ -46,12 +49,13 @@ export function GroupChip({ name, onRemove }: { name: string; onRemove?: () => v
 }
 
 /** The groups of one model: its chips, a field to put it in another by typing, and the provider's other groups to take from. */
-export function GroupsField({ groups, offered, onChange, error, disabled }: { groups: string[]; offered: readonly string[]; onChange: (groups: string[]) => void; error?: string | undefined; disabled: boolean }) {
+export function GroupsField({ groups, offered, onChange, error, disabled, maximum = GROUPS_MOST }: { groups: string[]; offered: readonly string[]; onChange: (groups: string[]) => void; error?: string | undefined; disabled: boolean; maximum?: number | undefined }) {
   const { t } = useTranslation();
   const [typed, setTyped] = useState('');
   const [fault, setFault] = useState<string | null>(null);
   const others = offered.filter((name) => !groups.includes(name));
-  const full = groups.length >= GROUPS_MOST;
+  const locale = useAppearance((state) => state.locale);
+  const full = groups.length >= maximum;
 
   const put = (name: string) => {
     const clean = name.trim();
@@ -80,7 +84,7 @@ export function GroupsField({ groups, offered, onChange, error, disabled }: { gr
         <div className="flex flex-wrap items-start gap-2">
           <Input
             label={t('models.groups.add')}
-            hint={full ? t('models.groups.full', { most: GROUPS_MOST }) : t('models.groups.addHint')}
+            hint={full ? maximum === 0 ? t('models.groups.off') : t('models.groups.full', { most: formatNumber(maximum, locale) }) : t('models.groups.addHint')}
             error={fault ?? error}
             value={typed}
             disabled={full}
@@ -119,8 +123,9 @@ export function GroupsField({ groups, offered, onChange, error, disabled }: { gr
 }
 
 /** The provider's groups above its list of models, each with how many models are in it and the means to limit the group. */
-export function GroupStrip({ provider, models, manage }: { provider: ProviderRef; models: readonly ProviderModel[]; manage: boolean }) {
+export function GroupStrip({ provider, models, manage, options, revision }: { provider: ProviderRef; models: readonly ProviderModel[]; manage: boolean; options?: Provider['model_group_options']; revision?: number }) {
   const { t } = useTranslation();
+  const [editing, setEditing] = useState<string | null>(null);
   const groups = groupsOf(models);
   // A provider with no model has nothing to put in a group; one the reader may not manage says nothing of groups that are not there.
   if (models.length === 0 || (groups.length === 0 && !manage)) return null;
@@ -138,11 +143,15 @@ export function GroupStrip({ provider, models, manage }: { provider: ProviderRef
                 <GroupChip name={group.name} />
                 <span className="text-sm text-text-muted">{t('models.groups.count', { count: group.models })}</span>
               </span>
-              {manage && <AddLimit provider={provider} models={[groupPattern(group.name)]} label={t('models.groups.limit')} />}
+              {manage && <span className="flex flex-wrap items-center gap-2">
+                {revision !== undefined && <Button size="sm" variant="ghost" action="edit" onClick={() => setEditing(group.name)}>{t('models.groups.options')}</Button>}
+                <AddLimit provider={provider} models={[groupPattern(group.name)]} label={t('models.groups.limit')} />
+              </span>}
             </li>
           ))}
         </ul>
       )}
+      {editing !== null && revision !== undefined && <GroupOptionsDialog key={editing} provider={provider} revision={revision} group={editing} options={options ?? {}} onClose={() => setEditing(null)} />}
     </section>
   );
 }

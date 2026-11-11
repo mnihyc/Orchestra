@@ -929,3 +929,6 @@ async fn complete_before_and_watcher_end_states_make_one_bounded_actual_change_h
         assert_eq!(pins, 0, "expiry releases each old source association once");
     }
 }
+
+#[path = "source/touched_restore.rs"]
+mod touched_restore;

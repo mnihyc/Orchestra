@@ -6,6 +6,7 @@ heading_id.打开相关内容: open-related-items
 heading_id.语义可用性: meaning-availability
 heading_id.调整排序: choose-ranking
 heading_id.让智能体查找: ask-an-agent
+summary: 查找通过语义、位置或引用关联且可阅读的文档、聊天和线程。
 ---
 
 # 相关内容
@@ -68,3 +69,6 @@ heading_id.让智能体查找: ask-an-agent
 共同引用按设置限定的不同目标窗口计算；重复引用不会提高分数。
 智能体可以用 `max_results` 指定页大小，保留 `related_to` 和筛选条件，带上返回的 `next_cursor` 继续。
 排序或权限变化使旧游标失效时，从第一页重新开始。
+
+
+智能体共享搜索的预算可在**设置 → 策略 → 智能体**中调整。`orch_tools.search_query_chars`、`orch_tools.search_results` 和 `orch_tools.search_context` 的出厂值分别为查询 1000 个字符、200 条结果、前后五行。调大预算会同时更新向智能体公布的工具格式及执行器。未指定结果数量时仍请求 50 条，未指定上下文时仍请求一行，并遵守已解析的预算。当前读取权限、字节和时间窗口、续查游标仍有效；这些设置不改变付费网页搜索。

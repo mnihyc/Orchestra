@@ -5,6 +5,10 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(windows)]
+#[path = "support/windows_terminal.rs"]
+mod windows_terminal;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -98,6 +102,7 @@ async fn a_windows_shell_runs_in_its_directory_and_replays_output_after_detach()
     open.env.insert("ORCH_TEST_NUMBER".into(), "42".into());
     terminals.open(open).unwrap();
     let mut screen = terminals.attach(id, true).unwrap();
+    windows_terminal::answer_initial_query(&mut screen).await;
     screen.resize(100, 30).unwrap();
     type_line(&screen, "cd & echo native-%ORCH_TEST_NUMBER%");
     let mut seen = String::new();

@@ -41,7 +41,7 @@ const click = (name: string, within?: string): ClickTarget => ({ role: 'button',
 /** These clicks open a form/picker only. No creation, confirmation, shell, browser or process is started. */
 const DIALOGS: Omit<CaptureState, 'signedIn' | 'kind' | 'pattern'>[] = [
   { id: 'find', label: 'Find anything', url: thread, clicks: [click('@finder.open', '[data-screen-titlebar]')], dialog: '@finder.title' },
-  { id: 'thread-share', label: 'Share thread', url: thread, clicks: [click('@actions.share.label', '[data-thread-header]')], dialog: '*' },
+  { id: 'thread-share', label: 'Share thread', url: thread, clicks: [click('@thread.header.shareThread', '[data-thread-header]')], dialog: '*' },
   { id: 'thread-find', label: 'Find in conversation', url: thread, clicks: [click('@search.find.command', '[data-thread-header]')], dialog: '@search.find.label' },
   { id: 'choose-view', label: 'Choose a workbench view', url: thread, view: 'chooser', dialog: '@workbench.openView.choose' },
   { id: 'add-provider', label: 'Add provider', url: '/resources/providers', clicks: [click('@providers.list.add')], dialog: '@providers.add.title' },

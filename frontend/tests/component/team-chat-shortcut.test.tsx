@@ -6,7 +6,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useComposerFocus, requestChatFocus } from '@/features/chat/focus';
 import { TeamChatShortcut } from '@/features/navigation/TeamChat';
 import { LeaveDrawer } from '@/features/navigation/OrgSwitcher';
-import { ViewRouteContext } from '@/features/workbench/viewOpening';
+import { ViewOpeningContext, ViewRouteContext } from '@/features/workbench/viewOpening';
 import { show } from './support';
 
 const world = vi.hoisted(() => ({ reveal: vi.fn(), takeQuotes: vi.fn() }));
@@ -38,7 +38,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`reveals the single team chat 
   expect(screen.getByRole('textbox', { name: 'Page draft' })).toHaveValue('Keep this');
   screen.getByRole('button', { name: i18n.t('navigation.teamChat') }).focus();
   act(() => requestChatFocus('team-chat'));
-  expect(screen.getByRole('textbox', { name: 'Chat draft' })).toHaveFocus();
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Chat draft' })).toHaveFocus());
 });
 
 it('does not steal focus on another screen when an old chat becomes ready later', () => {
@@ -48,4 +48,14 @@ it('does not steal focus on another screen when an old chat becomes ready later'
   view.rerender(<ViewRouteContext.Provider value="new-opening"><Composer ready /><input aria-label="Current page" /></ViewRouteContext.Provider>);
   expect(screen.getByRole('textbox', { name: 'Current page' })).toHaveFocus();
   expect(screen.getByRole('textbox', { name: 'Chat draft' })).not.toHaveFocus();
+});
+
+it('holds the focus request while a kept composer is hidden and delivers it when shown', async () => {
+  const view = show(<ViewOpeningContext.Provider value={null}><Composer ready /><input aria-label="Page draft" /></ViewOpeningContext.Provider>);
+  const pageDraft = screen.getByRole('textbox', { name: 'Page draft' });
+  pageDraft.focus();
+  act(() => requestChatFocus('team-chat'));
+  expect(pageDraft).toHaveFocus();
+  view.rerender(<ViewOpeningContext.Provider value="visible-chat"><Composer ready /><input aria-label="Page draft" /></ViewOpeningContext.Provider>);
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Chat draft' })).toHaveFocus());
 });

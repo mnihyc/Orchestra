@@ -85,6 +85,8 @@ pub fn baseline(program: &AcpProgram, learned: &Learned) -> Capabilities {
         steer: learned.has(Extra::Steering),
         interrupt: true,
         background_commands: false,
+        prompt_cache_ttl: false,
+        turn_changes_require_restart: false,
         approvals,
         subagents: false,
         subagent_limits: Vec::new(),
@@ -97,6 +99,7 @@ pub fn baseline(program: &AcpProgram, learned: &Learned) -> Capabilities {
         }),
         reasoning_summary: false,
         input_images: images,
+        image_generation: false,
         effort,
         mcp_discovery: false,
         mcp: McpSupport {
@@ -127,6 +130,7 @@ pub fn baseline(program: &AcpProgram, learned: &Learned) -> Capabilities {
         },
         phases: learned.has(Extra::Compaction),
         provider_facts: Vec::new(),
+        provider_fact_fields: Default::default(),
         model_discovery: false,
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,
@@ -219,6 +223,43 @@ pub fn descriptor(program: &AcpProgram, learned: &Learned) -> AgentDescriptor {
     if approval_modes.is_empty() {
         approval_modes = vec![orch_agent_contract::descriptor::ApprovalMode::Ask];
     }
+    let mut extensions = Extensions::new();
+    let mut parameters = Vec::new();
+    if let Some(mut declared) = program.capability_program.clone() {
+        if declared.title.is_empty() {
+            declared.title = program.title.clone();
+        }
+        if let Some(forwarded) = declared.access.get_mut("forwarded") {
+            let interfaces = program.protocol_order();
+            if forwarded.interfaces.is_empty() {
+                forwarded.interfaces = interfaces;
+            } else {
+                forwarded.interfaces.retain(|id| interfaces.contains(id));
+            }
+            forwarded.orch_tools &= capabilities.orch_tools != OrchToolsSupport::None;
+            if let Some(images) = forwarded.native.get_mut("image_input") {
+                images.enabled &= capabilities.input_images;
+            }
+            if forwarded.orch_tools || forwarded.native.contains_key("web_search") {
+                parameters.push(
+                    orch_agent_contract::parameters::web_search_capability_parameter(
+                        forwarded.native.get("web_search"),
+                        forwarded.orch_tools,
+                    ),
+                );
+            }
+        }
+        // The name carries the extension prefix, so the insert cannot refuse it.
+        if let Ok(value) = serde_json::to_value(declared) {
+            #[expect(
+                clippy::expect_used,
+                reason = "the fixed x_capability_program name has the x_ prefix Extensions requires"
+            )]
+            extensions
+                .insert("x_capability_program", value)
+                .expect("the fixed capability extension name is namespaced");
+        }
+    }
     AgentDescriptor {
         kind: program.kind.clone(),
         adapter_version: ADAPTER_VERSION,
@@ -240,10 +281,13 @@ pub fn descriptor(program: &AcpProgram, learned: &Learned) -> AgentDescriptor {
         sandbox_modes: program.sandbox_modes.clone(),
         side_thread_modes: Vec::new(),
         capabilities,
-        parameters: Vec::new(),
-        extensions: Extensions::new(),
+        parameters,
+        extensions,
     }
 }
+
+#[cfg(test)]
+mod capability_tests;
 
 #[cfg(test)]
 mod tests {
@@ -262,7 +306,7 @@ mod tests {
         .unwrap()
     }
 
-    fn learned() -> Learned {
+    pub(super) fn learned() -> Learned {
         let initialized = serde_json::from_value(json!({
             "protocolVersion": 1,
             "agentCapabilities": {
@@ -278,6 +322,195 @@ mod tests {
             hello: None,
             extras: Vec::new(),
         }
+    }
+
+    #[test]
+    fn capability_declarations_keep_future_members_and_narrow_to_observed_support() {
+        let mut program = program();
+        program.capability_program = Some(
+            serde_json::from_value(json!({
+                "access":{"forwarded":{
+                    "interfaces":["openai-chat","unknown-generation-interface"],
+                    "native":{"image_input":{"enabled":true,"modes":["native"],"future_support":7}},
+                    "orch_tools":true
+                }},
+                "future_declaration":{"value":7}
+            }))
+            .unwrap(),
+        );
+        let mut learned = learned();
+        learned
+            .initialized
+            .agent_capabilities
+            .prompt_capabilities
+            .image = false;
+        learned.initialized.agent_capabilities.mcp_capabilities.http = false;
+        let declared = descriptor(&program, &learned);
+        let facts = declared.capability_program();
+        assert_eq!(facts.title, program.title);
+        assert!(!facts.access.contains_key("native"));
+        let forwarded = &facts.access["forwarded"];
+        assert_eq!(forwarded.interfaces, ["openai-chat"]);
+        assert!(!forwarded.orch_tools);
+        assert!(!forwarded.native["image_input"].enabled);
+        assert_eq!(
+            forwarded.native["image_input"].extensions["future_support"],
+            7
+        );
+        assert_eq!(facts.extensions["future_declaration"], json!({"value":7}));
+        let original = program.capability_program.as_ref().unwrap();
+        assert!(original.title.is_empty());
+        assert_eq!(original.access["forwarded"].interfaces.len(), 2);
+        assert!(original.access["forwarded"].native["image_input"].enabled);
+    }
+
+    #[test]
+    fn the_shipped_forwarded_program_declares_only_its_actual_native_tools() {
+        let program = crate::programs::dsh().unwrap();
+        let declared = descriptor(&program, &learned());
+        let facts = declared.capability_program();
+        assert_eq!(facts.access.len(), 1);
+        let forwarded = &facts.access["forwarded"];
+        assert_eq!(forwarded.interfaces, program.protocol_order());
+        assert!(forwarded.orch_tools);
+        assert!(forwarded.native["generation"].enabled);
+        assert!(forwarded.native["image_input"].enabled);
+        assert!(forwarded.native["web_search"].enabled);
+        assert_eq!(
+            forwarded.native["web_search"].interfaces,
+            ["anthropic-messages"]
+        );
+        assert_eq!(forwarded.native["web_search"].modes, ["live"]);
+        assert!(declared.capabilities.turn_changes_require_restart);
+        assert_eq!(
+            forwarded.native["web_search"].default_mode.as_deref(),
+            Some("disabled")
+        );
+        assert!(forwarded.native["page_fetch"].enabled);
+        assert_eq!(
+            forwarded.native["page_fetch"].default_mode.as_deref(),
+            Some("on")
+        );
+        assert!(!forwarded.native.contains_key("image_generation"));
+        assert!(!forwarded.native.contains_key("embeddings"));
+        let search = declared
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "web_search")
+            .unwrap();
+        assert_eq!(
+            search.apply,
+            orch_agent_contract::parameters::ParameterApply::NewSession
+        );
+        assert_eq!(
+            search.projection(&Default::default())["resolved_default"],
+            "disabled"
+        );
+        assert_eq!(
+            search
+                .options_for(&Default::default())
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["disabled", "live", "service"]
+        );
+        let mut no_tools = learned();
+        no_tools
+            .initialized
+            .agent_capabilities
+            .mcp_capabilities
+            .http = false;
+        let without_tools = descriptor(&program, &no_tools);
+        let search = without_tools
+            .parameters
+            .iter()
+            .find(|parameter| parameter.key == "web_search")
+            .unwrap();
+        assert_eq!(
+            search
+                .options_for(&Default::default())
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["disabled", "live"]
+        );
+    }
+
+    #[test]
+    fn the_common_resolver_reports_the_shipped_search_switch_without_selecting_a_backend() {
+        use orch_provider_contract::capabilities::{
+            Declarations, Registry, ThreadContext, catalogue,
+        };
+        let program = crate::programs::dsh().unwrap();
+        let descriptor = descriptor(&program, &learned());
+        let mut registry = Registry::default();
+        registry.register("common", catalogue().unwrap()).unwrap();
+        let mut extension = Declarations::default();
+        extension
+            .programs
+            .insert(program.kind.clone(), descriptor.capability_program());
+        registry.register("test program", extension).unwrap();
+        let resolved = registry.resolve(&ThreadContext {
+            program: program.kind,
+            access: "forwarded".into(),
+            ..ThreadContext::default()
+        });
+        let search = resolved
+            .iter()
+            .find(|row| row.capability == "web_search")
+            .unwrap();
+        assert!(search.program_default);
+        assert_eq!(search.mode.as_deref(), Some("disabled"));
+        assert_eq!(search.reason.as_deref(), Some("disabled"));
+        assert_eq!(search.modes, ["disabled"]);
+        assert!(search.route.is_none());
+        assert!(search.route_view.is_none());
+        assert!(search.provider.is_none());
+        assert!(search.prices.is_empty());
+    }
+
+    #[test]
+    fn the_shipped_search_carries_a_model_tool_without_reopening_an_independent_program_fallback() {
+        let program = crate::programs::dsh().unwrap();
+        let declared = descriptor(&program, &learned());
+        let facts = declared.capability_program();
+        let forwarded = &facts.access["forwarded"];
+        let search = &forwarded.native["web_search"];
+        assert!(search.enabled);
+        assert_eq!(search.interfaces, ["anthropic-messages"]);
+        assert!(
+            orch_types::schema::validate(
+                &search.eligible_when,
+                &json!({
+                    "route_kind":"native-model", "access":"forwarded"
+                })
+            )
+            .is_ok()
+        );
+        for candidate in [
+            json!({}),
+            json!({"access":"forwarded"}),
+            json!({"route_kind":"native-program","access":"forwarded"}),
+            json!({"route_kind":"service","access":"forwarded"}),
+        ] {
+            assert!(
+                orch_types::schema::validate(&search.eligible_when, &candidate).is_err(),
+                "a missing/rejected model tool cannot be reclassified as an independent program tool"
+            );
+        }
+        let reader = &forwarded.native["page_fetch"];
+        assert!(reader.enabled);
+        assert_eq!(reader.default_mode.as_deref(), Some("on"));
+        assert!(
+            reader.eligible_when.is_null(),
+            "the ordinary HTTP reader does not depend on a model tool"
+        );
+        assert_eq!(
+            program.capability_program.as_ref().unwrap().access["forwarded"].native["web_search"]
+                .eligible_when,
+            search.eligible_when,
+            "observed descriptor projection preserves the authored predicate"
+        );
     }
 
     #[test]
