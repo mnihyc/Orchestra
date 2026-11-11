@@ -68,6 +68,7 @@ async fn inspecting_two_hundred_thousand_turns_holds_only_metadata_pages() {
         .start(
             AgentStart {
                 provider_id: new_id(),
+                provider_kind: None,
                 agent_id: new_id(),
                 harness_kind: "codex".into(),
                 profile: AgentProfile::default(),
@@ -128,6 +129,7 @@ async fn repeated_turn_cursors_refuse_without_an_unbounded_cursor_set_or_a_parti
             .start(
                 AgentStart {
                     provider_id: new_id(),
+                    provider_kind: None,
                     agent_id: new_id(),
                     harness_kind: "codex".into(),
                     profile: AgentProfile::default(),

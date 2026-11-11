@@ -4,6 +4,8 @@ use super::people::{Announced, NewNotification, notification_data};
 use crate::{Conn, DbError};
 use orch_types::{Hash, Id};
 
+pub mod ending;
+
 /// Stores an immutable accepted choice once, shared by its independent children.
 pub async fn save(
     conn: &mut Conn,
@@ -30,6 +32,16 @@ pub async fn save(
 pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<orch_types::Json>, DbError> {
     Ok(
         sqlx::query_scalar("SELECT data FROM notification_operations WHERE id=$1 FOR UPDATE")
+            .bind(id)
+            .fetch_optional(conn)
+            .await?,
+    )
+}
+
+/// Reads the immutable accepted choice without taking a completion-writer lock.
+pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<orch_types::Json>, DbError> {
+    Ok(
+        sqlx::query_scalar("SELECT data FROM notification_operations WHERE id=$1")
             .bind(id)
             .fetch_optional(conn)
             .await?,
@@ -93,12 +105,13 @@ pub async fn publish(
     Ok(Some(Announced { id, inbox_seq: seq }))
 }
 
-/// Active human receivers who have not switched this kind off in their own choices.
+/// Human receivers under the kind's native Inbox rule. Administrator messages are mandatory
+/// accepted Inbox records; their external-channel choice is checked by the ordinary route writer.
 pub async fn receivers(conn: &mut Conn, users: &[Id], kind: &str) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT u.id FROM users u LEFT JOIN notification_prefs p ON p.user_id=u.id
-       WHERE u.id=ANY($1) AND u.kind='human' AND u.status='active'
-         AND NOT COALESCE(p.disabled_kinds ? $2,false) ORDER BY u.id",
+       WHERE u.id=ANY($1) AND u.kind='human'
+         AND ($2='admin_message' OR (u.status='active' AND NOT COALESCE(p.disabled_kinds ? $2,false))) ORDER BY u.id",
     )
     .bind(users)
     .bind(kind)
@@ -197,4 +210,16 @@ pub async fn person_rate_release(
         .bind(needed)
         .fetch_optional(conn)
         .await?)
+}
+
+/// Tighten only the accepted raw-identity bounds of an already locked private notice source.
+/// Its original source, target, expected body and actual recipient associations remain unchanged.
+pub async fn retain_raw(
+    conn: &mut Conn,
+    id: Id,
+    before: &orch_types::Json,
+    accepted: &orch_types::Json,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE notification_operations SET data=jsonb_set(data,'{accepted_raw}',$3),updated_at=$4 WHERE id=$1 AND data=$2").bind(id).bind(before).bind(accepted).bind(at).execute(conn).await?.rows_affected()==1)
 }

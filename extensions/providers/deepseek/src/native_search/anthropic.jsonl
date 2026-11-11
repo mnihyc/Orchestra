@@ -1,0 +1,10 @@
+{"event":"message_start","data":{"type":"message_start","message":{"id":"msg_fixture","model":"deepseek-v4-pro","usage":{"input_tokens":256,"output_tokens":0}}}}
+{"event":"content_block_start","data":{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_fixture","name":"web_search","input":{},"caller":{"type":"direct"}}}}
+{"event":"content_block_delta","data":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"Python official"}}}
+{"event":"content_block_delta","data":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":" website\"}"}}}
+{"event":"content_block_stop","data":{"type":"content_block_stop","index":0}}
+{"event":"content_block_start","data":{"type":"content_block_start","index":1,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_fixture","content":[{"type":"web_search_result","title":"Python","url":"https://www.python.org/","encrypted_content":"opaque-fixture-not-presentation"}]}}}
+{"event":"content_block_start","data":{"type":"content_block_start","index":2,"content_block":{"type":"server_tool_use","id":"srv_failed_fixture","name":"web_search","input":{"query":"another query"},"caller":{"type":"direct"}}}}
+{"event":"content_block_start","data":{"type":"content_block_start","index":3,"content_block":{"type":"web_search_tool_result","tool_use_id":"srv_failed_fixture","content":[{"type":"web_search_tool_result_error","error_code":"max_uses_exceeded"}]}}}
+{"event":"message_delta","data":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2912,"cache_creation_input_tokens":0,"cache_read_input_tokens":256,"output_tokens":52,"server_tool_use":{"web_search_requests":4,"tool_search":1}}}}
+{"event":"message_stop","data":{"type":"message_stop"}}

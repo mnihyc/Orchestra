@@ -1,3 +1,4 @@
+import { selectContentTab } from '@/features/workbench/contentNavigation';
 import { LiveThreadStateIcon } from '@/ui/ThreadState';
 /** The workbench drawn from its layout tree: every group of tabs in its area, each view kept alive while its tab moves, and a tab carried from one place to another by pointer or by keyboard.
  *
@@ -14,6 +15,7 @@ import { openFinder } from '@/features/finder/store';
 import { ArrangementMenu } from '@/features/workbench/Arrangements';
 import { Button } from '@/ui/Button';
 import { ViewInstanceContext } from '@/features/workbench/instance';
+import { ViewWindowLease } from '@/features/workbench/ViewWindow';
 import { FocusedContentMetadata } from '@/features/workbench/PageView';
 import { contentLocation, contentTarget } from './contentAddress';
 import { WorkspaceContext } from './WorkspaceContext';
@@ -70,6 +72,7 @@ import {
   overSpot,
   spotId,
   spotLabel,
+  viewDragAnnouncements,
 } from '@/features/workbench/MoveView';
 import { RightBarOverMain, useShape } from '@/features/workbench/Narrow';
 import { sectionElementId, SideBarView } from '@/features/workbench/Sections';
@@ -134,7 +137,7 @@ export function ViewHost({ layout }: { layout: Layout }) {
     }
   }, [keys]);
 
-  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
+  return <><CachedTabNames layout={layout} /><FocusedContentMetadata />{placed.filter(({ tab }) => viewOf(tab.view)?.window === true).map(({ tab }) => <ViewWindowLease key={tab.id} tab={tab} />)}{placed.map(({ tab, area }) => createPortal(<ContentBoundary resetKey={viewKey(tab)} className="h-full"><ViewOpening view={viewKey(tab)} route={openingForView(tab.id)} hold={unsaved.has(tab.id)}><ViewBody tab={tab} area={area} /></ViewOpening></ContentBoundary>, homeOf(viewKey(tab)), viewKey(tab)))}</>;
 }
 
 /** Shows a view in the group that holds its tab, by taking in the element the view is drawn into. */
@@ -278,8 +281,12 @@ function TabHandle({ tab, group, index, area, active, tabbable, definition, pres
       dropBefore={drop.isOver && carriedTab !== null && carriedTab.id !== tab.id}
       carried={drag.isDragging}
       menu={tabEntries(layout, tab.id, t, change, helpFor)}
-      onSelect={() => useWorkbench.getState().focus(tab.id)}
+      onSelect={() => selectContentTab(tab.id)}
       onClose={() => useWorkbench.getState().close({ kind: 'tab', tab: tab.id })}
+      focusFallback={() => {
+        const selected = useWorkbench.getState().focusedMainTab;
+        return selected === null ? null : document.getElementById(tabElementId(selected));
+      }}
       onDoubleClick={area === 'main' ? () => change((current) => toggleMaximized(current, group.id)) : undefined}
       handleRef={(node) => {
         drag.setNodeRef(node);
@@ -407,7 +414,7 @@ function GroupView({ group: originalGroup, area, actions }: { group: Group; area
         const title = captions.get(tab.id) ?? named.get(tab.id)?.title ?? choice.name;
         return { id: tab.id, title: t('workbench.choices.tab.name', { name: title }), path: named.get(tab.id)?.path, description: t('workbench.choices.tab.description', { description: choice.description }), help: helpFor(title),
           icon: thread === undefined ? Icon === undefined ? undefined : <Icon aria-hidden /> : <LiveThreadStateIcon display={thread.display} threadId={thread.id} />, unsaved: unsaved.has(tab.id), closable: isClosable(layout, tab.id) && tab.pinned !== true,
-          onSelect: () => useWorkbench.getState().focus(tab.id), onClose: () => useWorkbench.getState().close({ kind: 'tab', tab: tab.id }) };
+          onSelect: () => selectContentTab(tab.id), onClose: () => useWorkbench.getState().close({ kind: 'tab', tab: tab.id }) };
       })}
       tabElementId={tabElementId}
       panelId={panelIdOf(group.id)}
@@ -523,7 +530,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
       onResize: (size) => change((current) => resizeBar(current, id, size)),
       content: id !== 'bottom' ? <SideBarView bar={id} layout={layout[id]} renderView={(tab) => <ViewSlot tab={tab} />}
         onSelectContainer={(name) => change((current) => { const next = selectContainer(current, id, name); return floating ? { ...next, [id]: { ...next[id], open: false } } : next; })}
-        addView={<AddViewButton />}
+        addView={null}
         actions={<>{floating && <IconButton size="sm" label={t('workbench.bars.pin')} icon={<Pin aria-hidden />} onClick={() => {
           change((current) => setBarOpen(current, id, true)); setOverlay(null);
           requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-workbench-bar="${id}"] button`)?.focus());
@@ -553,22 +560,7 @@ export function Board({ rail, top, status, pending }: BoardProps) {
       collisionDetection={overSpot}
       accessibility={{
         screenReaderInstructions: { draggable: t('workbench.drag.instructions') },
-        announcements: {
-          onDragStart: ({ active }) => t('workbench.drag.pickedUp', { title: (active.data.current as { title: string }).title }),
-          onDragOver: ({ active, over }) => {
-            const spot = spotOf(over?.data.current);
-            if (spot === null) return t('workbench.drag.nowhere');
-            // A tab that lies where it was picked up has been carried nowhere yet: nothing to say.
-            const from = findTab(layout, String(active.id));
-            if (from !== null && over?.id === spotId({ to: 'group', group: from.group.id, index: from.index })) return undefined;
-            return t('workbench.drag.over', { spot: spot.label });
-          },
-          onDragEnd: ({ over }) => {
-            const spot = spotOf(over?.data.current);
-            return spot === null ? t('workbench.drag.putBack') : t('workbench.drag.dropped', { spot: spot.label });
-          },
-          onDragCancel: () => t('workbench.drag.putBack'),
-        },
+        announcements: viewDragAnnouncements(layout, t),
       }}
       onDragStart={({ active }) => setCarried({ id: String(active.id), title: (active.data.current as { title: string }).title })}
       onDragCancel={() => setCarried(null)}

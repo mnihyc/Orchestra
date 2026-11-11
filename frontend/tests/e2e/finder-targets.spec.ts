@@ -17,7 +17,7 @@ test('a permission result discloses its real row and receives focus after the fi
   await page.goto(`/topic/${ACME.fixLogin}`);
   await page.getByRole('button',{name:'Actions for Fix login'}).first().click();
   await page.getByRole('menuitem',{name:'Share…'}).click();
-  const access = page.getByRole('dialog',{name:'Access to Fix login',exact:true});
+  const access = page.getByRole('dialog',{name:'Access to “Fix login”',exact:true});
   await expect(access).toBeVisible();
   await find(page,': topic.archive');
   const result = finder(page).getByRole('option').filter({hasText:'Archive Topic'});
@@ -41,7 +41,7 @@ test('a person card shows Message and a current share which opens its existing A
   await expect(finder(page).getByRole('button',{name:'Message',exact:true})).toBeVisible();
   const shares = finder(page).getByRole('region',{name:'Direct shares between you'});
   await shares.getByRole('button',{name:'Fix login',exact:true}).click();
-  const access = page.getByRole('dialog',{name:'Access to Fix login',exact:true});
+  const access = page.getByRole('dialog',{name:'Access to “Fix login”',exact:true});
   await expect(finder(page)).toHaveCount(0);
   await expect(access).toBeVisible();
   await expect(access.getByRole('group',{name:'Can view',exact:true})).toContainText('Dora Developer');

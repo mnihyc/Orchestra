@@ -97,6 +97,7 @@ pub fn serves(path: &str) -> bool {
     path.starts_with("/api/v1/downloads/")
         || path == ENROLL_PATH
         || path == RENEW_PATH
+        || path == orch_link_contract::gateways::DISCOVERY_PATH
         || path == BLOBS_PATH
         || path
             .strip_prefix(BLOBS_PATH)
@@ -115,6 +116,13 @@ struct Kinded {
 
 fn kinded(method: &Method, path: &str) -> Option<Kinded> {
     let request_time = Some(Duration::from_secs(u64::from(REQUEST_TIMEOUT_SECS)));
+    if path == orch_link_contract::gateways::DISCOVERY_PATH && method == Method::GET {
+        return Some(Kinded {
+            needs_machine: false,
+            body_limit: 0,
+            patience: request_time,
+        });
+    }
     if path.starts_with("/api/v1/downloads/") && matches!(*method, Method::GET | Method::HEAD) {
         return Some(Kinded {
             needs_machine: false,

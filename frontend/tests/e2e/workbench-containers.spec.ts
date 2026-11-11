@@ -1,6 +1,7 @@
 /** Every container, section and tab stays visible and reachable by pointer and keyboard at every workbench width. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
 import { ACME, scenario, signIn } from './support.ts';
+import { showWorkbenchView } from './workbench-support.ts';
 
 const right = (page: Page) => page.locator('[data-workbench-bar="right"]');
 async function chooseContainer(page: Page, name: string) {
@@ -10,6 +11,38 @@ async function chooseContainer(page: Page, name: string) {
   await expect(right(page)).toHaveAttribute('data-active-container', name.toLowerCase());
 }
 const section = (page: Page, name: string) => right(page).getByRole('button', { name, exact: true });
+
+async function openThread(page: Page) {
+  await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.getByRole('textbox', { name: 'Message to the agent', exact: true })).toBeVisible();
+  // Navigation preserves the workspace; choose the thread's full arrangement explicitly.
+  await page.getByRole('button', { name: 'Layout', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Conversation', exact: true }).click();
+  const narrow = page.locator('[data-narrow-containers]');
+  if (await narrow.isVisible()) await expect(narrow.getByRole('button', { name: 'Conversation', exact: true })).toBeVisible();
+  else await expect(right(page)).toHaveAttribute('data-active-container', 'conversation');
+}
+
+async function minimizeRightBar(page: Page) {
+  // End collapses; reopening restores the saved width, and ArrowRight reaches its guarded minimum.
+  const border = page.getByRole('separator', { name: 'Width of the right bar', exact: true });
+  await border.press('End');
+  await expect(right(page)).toBeHidden();
+  await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  await expect(right(page)).toBeVisible();
+  const minimum = await page.evaluate(() => {
+    const style = getComputedStyle(document.documentElement), value = style.getPropertyValue('--right-bar-min').trim();
+    return parseFloat(value) * (value.endsWith('rem') ? parseFloat(style.fontSize) : 1);
+  });
+  for (;;) {
+    const before = await right(page).boundingBox();
+    if (before === null) throw new Error('The reopened bar must remain visible while resizing');
+    if (before.width <= minimum + 1) { expect(before.width).toBeGreaterThanOrEqual(minimum - 1); return; }
+    await border.press('ArrowRight');
+    // Every step must shrink the actual bar; a stalled or wrong-direction key cannot loop.
+    await expect.poll(async () => (await right(page).boundingBox())?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(before.width);
+  }
+}
 
 async function expectInside(item: Locator, strip: Locator) {
   const control = await item.boundingBox();
@@ -29,7 +62,7 @@ test.beforeEach(async () => { await scenario(); });
 test('frame choices keep names and contextual destinations without duplicate captions or help', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   await page.getByRole('button', { name: 'Layout', exact: true }).click();
   const code = page.getByRole('menuitem', { name: 'Code', exact: true });
   await expect(code).toHaveAccessibleName('Code');
@@ -38,11 +71,11 @@ test('frame choices keep names and contextual destinations without duplicate cap
   await expect(page.getByRole('menu').locator('[data-choice-help]')).toHaveCount(0);
   await page.keyboard.press('Escape');
   // Inspecting the menu does not apply the arrangement.
-  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: 'Main thread', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ })).toHaveAttribute('aria-selected', 'true');
   await page.getByRole('button', { name: 'Add a view', exact: true }).first().click();
   const chooser = page.getByRole('dialog', { name: 'Views', exact: true });
-  const documents = chooser.getByRole('option', { name: 'Documents', exact: true });
-  await expect(documents).toHaveAccessibleName('Documents');
+  const documents = chooser.getByRole('option', { name: 'Place documents', exact: true });
+  await expect(documents).toHaveAccessibleName('Place documents');
   await expect(documents).toHaveAccessibleDescription('Team');
   await expect(documents.locator('[data-view-group]')).toHaveText('Team');
   await expect(documents).not.toContainText('The documents written beside this work.');
@@ -62,10 +95,10 @@ test('frame choices keep names and contextual destinations without duplicate cap
 test('Enter chooses the named view directly and reveals its one home', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   await page.getByRole('button', { name: 'Add a view', exact: true }).first().click();
   const chooser = page.getByRole('dialog', { name: 'Views', exact: true });
-  const documents = chooser.getByRole('option', { name: 'Documents', exact: true });
+  const documents = chooser.getByRole('option', { name: 'Place documents', exact: true });
   await expect(documents.locator('[data-view-group]')).toHaveText('Team');
   await expect(documents).not.toContainText('The documents written beside this work.');
   await expect(chooser.locator('[data-choice-help]')).toHaveCount(0);
@@ -73,13 +106,13 @@ test('Enter chooses the named view directly and reveals its one home', async ({ 
   await documents.press('Enter');
   await expect(chooser).toHaveCount(0);
   await expect(right(page)).toHaveAttribute('data-active-container', 'team');
-  await expect(section(page, 'Documents')).toHaveAttribute('aria-expanded', 'true');
+  await expect(section(page, 'Place documents')).toHaveAttribute('aria-expanded', 'true');
 });
 
 test('a lone section uses the bar title and keeps its actions and saved expansion', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   const left = page.locator('[data-workbench-bar="left"]');
   const navigationTitle = left.locator('[data-container-title]');
   await expect(left.locator('[data-section-header]')).toHaveCount(0);
@@ -106,7 +139,8 @@ test('a lone section uses the bar title and keeps its actions and saved expansio
   const title = right(page).locator('[data-container-title]');
   await expect(title.getByRole('button', { name: 'Help: Outline', exact: true })).toHaveCount(0);
   await expect(right(page).locator('[data-section-view="outline"]')).toBeVisible();
-  await title.getByRole('button', { name: 'Add a view', exact: true }).click();
+  // Add a view belongs to the shared titlebar rather than every sidebar title.
+  await page.getByRole('button', { name: 'Add a view', exact: true }).click();
   await page.getByRole('dialog', { name: 'Views' }).getByRole('option', { name: /^Outline/ }).click();
   await expect(right(page).locator('[data-section-view="outline"]')).toBeFocused();
   await title.getByRole('button', { name: 'Conversation actions', exact: true }).click();
@@ -116,17 +150,18 @@ test('a lone section uses the bar title and keeps its actions and saved expansio
   await expect(title.getByRole('button', { name: 'Help: Outline', exact: true })).toHaveCount(0);
 });
 
-test('container icons keep their names and show labels again when the bar has room', async ({ page }) => {
+test('container icons and full labels remain visible while the bar changes size', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   const names = ['Conversation', 'Team', 'Code', 'Environment', 'Agent'];
   await expect(right(page).getByRole('tablist', { name: 'View containers' }).getByRole('tab')).toHaveCount(names.length);
   for (const name of names) {
     const tab = right(page).getByRole('tab', { name, exact: true });
     await expect(tab).toHaveAccessibleName(name);
-    await expect(tab).toHaveText(name === 'Conversation' ? name : '');
-    await tab.hover();
+    await expect(tab).toHaveText(name);
+    await page.mouse.move(0, 0); await page.keyboard.press('Escape');
+    await tab.focus(); await tab.hover();
     await expect(page.getByRole('tooltip')).toHaveText(name);
   }
   await page.mouse.move(0, 0);
@@ -136,8 +171,8 @@ test('container icons keep their names and show labels again when the bar has ro
   for (const name of names) await expect(right(page).getByRole('tab', { name, exact: true })).toHaveText(name);
   await expect(right(page).getByRole('button', { name: 'More', exact: true })).toHaveCount(0);
   await expectStripControlsInside(page);
-  await border.press('End');
-  for (const name of names) await expect(right(page).getByRole('tab', { name, exact: true })).toHaveText(name === 'Conversation' ? name : '');
+  await minimizeRightBar(page);
+  for (const name of names) await expect(right(page).getByRole('tab', { name, exact: true })).toHaveText(name);
   await expectStripControlsInside(page);
 });
 
@@ -145,14 +180,14 @@ for (const width of [400, 1440]) {
   test(`viewer launch choices have compact state labels without captions or per-option guides at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 1000 });
     await signIn(page);
-    await page.goto(`/thread/${ACME.mainThread}`);
+    await openThread(page);
     const environment = async () => {
       if (width === 400) {
         await page.locator('[data-narrow-containers]').getByRole('button', { name: 'Environment', exact: true }).click();
         return page.getByRole('dialog', { name: 'Environment', exact: true });
       }
       await chooseContainer(page, 'Environment');
-      await page.getByRole('separator', { name: 'Width of the right bar', exact: true }).press('End');
+      await minimizeRightBar(page);
       return right(page);
     };
     for (const [sectionName, kind, label, viewer] of [['Browsers', 'browser', 'notion · Open', 'Browser'], ['Displays', 'display', 'Desktop · Open', 'VNC']] as const) {
@@ -191,7 +226,7 @@ for (const width of [400, 1440]) {
 test('sections collapse, hide and return with their saved choices', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   const history = section(page, 'History');
   await expect(history).toHaveAttribute('aria-expanded', 'false');
   await history.click();
@@ -201,7 +236,7 @@ test('sections collapse, hide and return with their saved choices', async ({ pag
   await expect(history).toHaveCount(0);
   await expect.poll(() => page.evaluate(() => {
     return Object.keys(localStorage).some((key) => {
-      if (!key.endsWith('.workbench.thread')) return false;
+      if (!key.endsWith('.workbench.workspace')) return false;
       return localStorage.getItem(key)?.includes('\\"hidden\\":true') === true;
     });
   })).toBe(true);
@@ -214,7 +249,7 @@ test('sections collapse, hide and return with their saved choices', async ({ pag
   await expect(history).toHaveAttribute('aria-expanded', 'true');
   await chooseContainer(page, 'Team');
   await expect(section(page, 'Chat')).toHaveAttribute('aria-expanded', 'true');
-  await expect(section(page, 'Documents')).toBeVisible();
+  await expect(section(page, 'Place documents')).toBeVisible();
   await expect(section(page, 'People')).toBeVisible();
 });
 
@@ -224,22 +259,32 @@ export { chooseContainer, expectInside };
 test('Open view lists the screen views with their containers and reveals a hidden section with focus', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
+  await expect(page.getByRole('textbox', { name: 'Message to the agent', exact: true })).toBeVisible();
+  await showWorkbenchView(page, 'Outline');
   await right(page).getByRole('button', { name: 'Conversation actions' }).click();
   await page.getByRole('menuitemcheckbox', { name: 'Outline', exact: true }).click();
-  await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  if (await right(page).isVisible()) await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  await expect(right(page)).toBeHidden();
   await page.keyboard.press('Control+k');
   const finder = page.getByRole('dialog', { name: 'Find', exact: true });
   await finder.getByRole('combobox').fill('> Open view');
   await finder.getByRole('option', { name: /^Open view…/ }).click();
   const chooser = page.getByRole('dialog', { name: 'Views' });
   await expect(chooser.getByRole('option', { name: /^Outline/ })).toContainText('Conversation');
-  await expect(chooser.getByRole('option', { name: /^Documents/ })).toContainText('Team');
+  const documents = chooser.locator('[role="option"][data-value="commands:view.open.documents"]');
+  await expect(documents).toHaveAccessibleName('Place documents');
+  await expect(documents).toContainText('Team');
   await chooser.getByRole('combobox').fill('Outline');
   await chooser.getByRole('option', { name: /^Outline/ }).click();
+  await expect(right(page).getByRole('group', { name: 'Outline', exact: true })).toBeVisible();
+  const revealed = right(page).locator('[data-section-view="outline"]');
+  await expect(revealed).toBeVisible();
+  await expect(revealed.getByText('Nothing to go to yet', { exact: true })).toBeVisible();
+  // A multi-section container reveals and focuses its header; a lone merged view owns focus directly.
   await expect(section(page, 'Outline')).toHaveAttribute('aria-expanded', 'true');
   await expect(section(page, 'Outline')).toBeFocused();
-  await right(page).getByRole('button', { name: 'Add a view' }).click();
+  await page.getByRole('button', { name: 'Add a view', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Views' })).toBeVisible();
   await page.keyboard.press('Escape');
 });
@@ -247,21 +292,32 @@ test('Open view lists the screen views with their containers and reveals a hidde
 test('a section is dragged to another container and moved to the bottom from its menu', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
-  await section(page, 'History').dragTo(right(page).getByRole('tab', { name: 'Code', exact: true }));
+  await openThread(page);
+  const source = await section(page, 'History').boundingBox();
+  const destination = await right(page).getByRole('tab', { name: 'Code', exact: true }).boundingBox();
+  if (source === null || destination === null) throw new Error('The carried section and destination must be visible');
+  await page.mouse.move(source.x + source.width / 2, source.y + source.height / 2);
+  await page.mouse.down();
+  try {
+    // Cross the handle before the destination, allowing the mouse sensor to establish its native drag.
+    await page.mouse.move(source.x + source.width - 1, source.y + source.height / 2);
+    await expect(page.locator('[id^="DndLiveRegion"]')).toHaveText(/^(Picked up History\.|Over .+\.)$/);
+    await page.mouse.move(destination.x + destination.width / 2, destination.y + destination.height / 2);
+    await expect(page.locator('[id^="DndLiveRegion"]')).toHaveText('Over Code.');
+  } finally { await page.mouse.up(); }
   await expect(right(page)).toHaveAttribute('data-active-container', 'code');
   await expect(section(page, 'History')).toBeVisible();
   await right(page).getByRole('button', { name: 'Actions for History' }).click();
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).hover();
   await page.getByRole('menuitem', { name: 'Bottom', exact: true }).click();
-  await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'History', exact: true })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'History · Main thread · Fix login', exact: true })).toBeVisible();
   await expect(right(page).getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
 });
 
 test('keyboard carrying a section can be cancelled and arrangements restore the same view set', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   await section(page, 'Outline').focus();
   await page.keyboard.press('Space');
   await expect(page.locator('[id^="DndLiveRegion"]')).toHaveText('Picked up Outline.');
@@ -273,25 +329,26 @@ test('keyboard carrying a section can be cancelled and arrangements restore the 
     await page.getByRole('button', { name: 'Layout', exact: true }).click();
     await page.getByRole('menuitem', { name: arrangement, exact: true }).click();
     await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: main, exact: true })).toBeVisible();
-    await expect(right(page).getByRole('button', { name: 'Main thread', exact: true })).toBeVisible();
+    // Arrangements preserve ordinary content tabs in the main area.
+    await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ })).toBeVisible();
   }
   await page.getByRole('button', { name: 'Layout', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Reset layout', exact: true }).click();
-  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: 'Main thread', exact: true })).toBeVisible();
+  await expect(page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ })).toBeVisible();
   await expect(right(page)).toHaveAttribute('data-active-container', 'conversation');
 });
 
 test('a phone offers the desktop containers in order and draws their sections in sheets', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
-  await page.goto(`/thread/${ACME.mainThread}`);
+  await openThread(page);
   const controls = page.locator('[data-narrow-containers]');
   const names = await controls.locator('[data-container-name]').allTextContents();
-  expect(names.map((name) => name.trim()).slice(0, 7)).toEqual(['Navigation', 'Resources', 'Conversation', 'Team', 'Code', 'Environment', 'Agent']);
+  expect(names.map((name) => name.trim()).slice(0, 7)).toEqual(['Navigation', 'Resource navigation', 'Conversation', 'Team', 'Code', 'Environment', 'Agent']);
   await controls.getByRole('button', { name: 'Team', exact: true }).click();
   const sheet = page.getByRole('dialog', { name: 'Team', exact: true });
   await expect(sheet.getByRole('button', { name: 'Chat', exact: true })).toHaveAttribute('aria-expanded', 'true');
-  for (const name of ['Documents', 'People']) await expect(sheet.getByRole('button', { name, exact: true })).toBeVisible();
+  for (const name of ['Place documents', 'People']) await expect(sheet.getByRole('button', { name, exact: true })).toBeVisible();
   await controls.getByRole('button', { name: 'Code', exact: true }).click();
   const code = page.getByRole('dialog', { name: 'Code', exact: true });
   await expect(code.getByRole('button', { name: 'Changes', exact: true })).toBeVisible();
@@ -304,7 +361,7 @@ test('a phone offers the desktop containers in order and draws their sections in
 
 const THREAD_SECTIONS = [
   ['Conversation', ['Outline', 'History']],
-  ['Team', ['Chat', 'Documents', 'People']],
+  ['Team', ['Chat', 'Place documents', 'People']],
   ['Code', ['Changes', 'Files', 'Git']],
   ['Environment', ['Overview', 'Processes', 'Resources', 'Ports', 'Browsers', 'Displays']],
   ['Agent', ['Parameters', 'Usage', 'Knowledge', 'Given to the agent', 'Diagnostics']],
@@ -340,9 +397,9 @@ for (const width of [1280, 1440, 1920, 'minimum bar'] as const) {
     test.slow(); // This case opens every view twice, including the lazy bodies and their data.
     await page.setViewportSize({ width: typeof width === 'number' ? width : 1440, height: 1000 });
     await signIn(page);
-    await page.goto(`/thread/${ACME.mainThread}`);
+    await openThread(page);
     if (width === 'minimum bar') {
-      await page.getByRole('separator', { name: 'Width of the right bar', exact: true }).press('End');
+      await minimizeRightBar(page);
       const minimum = await page.evaluate(() => {
         const style = getComputedStyle(document.documentElement);
         const value = style.getPropertyValue('--right-bar-min').trim();
@@ -374,6 +431,8 @@ for (const width of [1280, 1440, 1920, 'minimum bar'] as const) {
         await reachByTab(page, header);
         await page.keyboard.press('Enter');
         await expect(header).toHaveAttribute('aria-expanded', 'true');
+        // Opening focuses the section body; closing acts on its named header again.
+        await header.focus();
         await page.keyboard.press('Enter');
         await expect(header).toHaveAttribute('aria-expanded', 'false');
       }

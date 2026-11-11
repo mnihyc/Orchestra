@@ -5,7 +5,7 @@
  */
 import { Check } from 'lucide-react';
 import { RadioGroup as Primitive } from 'radix-ui';
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 
 import { Choice, hasChoiceDescription, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
@@ -43,6 +43,8 @@ export function RadioGroup<Value extends string>({
   className,
   presentation = 'form',
 }: RadioGroupProps<Value>) {
+  const descriptionBase = useId();
+  const compact = presentation === 'compact';
   const described = options.map((option) => {
     const off = option.disabled !== undefined && option.disabled !== null && option.disabled !== false;
     const why = typeof option.disabled === 'boolean' ? undefined : option.disabled;
@@ -64,43 +66,51 @@ export function RadioGroup<Value extends string>({
       disabled={disabled}
       className={cx(variant === 'cards' ? 'grid grid-cols-[repeat(auto-fill,minmax(min(100%,14rem),1fr))] gap-3' : 'flex flex-col gap-2', className)}
     >
-      {described.map(({ option, off, description, reason }) => {
+      {described.map(({ option, off, description, reason }, index) => {
+        const descriptionId = compact && description !== undefined ? `${descriptionBase}-${index}` : undefined;
         return (
         <Choice
           key={option.value}
           name={option.name ?? option.label}
           description={description}
+          accessory={option.accessory}
           help={option.help}
           presentation={presentation}
           nameClassName="font-medium"
           className="max-w-full items-start"
-        >{(content, control) => <Tooltip content={presentation === 'compact' ? description : undefined}><Primitive.Item
-          {...control}
-          value={option.value}
-          // Both Radix primitives publish data-state; the control owns its checked styling.
-          data-state={(value ?? '') === option.value ? 'checked' : 'unchecked'}
-          disabled={off}
-          aria-description={reason}
-          title={reason}
-          className={cx(
-            'choice-radio flex min-w-0 max-w-full flex-auto items-start gap-3 rounded-lg border bg-surface p-3 text-left text-text transition-colors disabled:cursor-not-allowed disabled:text-text-disabled',
-          )}
         >
-          {option.icon !== undefined && (
-            <span className="mt-0.5 flex shrink-0 text-text-muted [&_svg]:size-5" aria-hidden>
-              {option.icon}
-            </span>
-          )}
-          {content}
-          <span
-            aria-hidden
-            className="mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border border-control-border bg-surface"
-          >
-            <Primitive.Indicator className="flex size-4 items-center justify-center rounded-full bg-accent-solid text-text-on-accent">
-              <Check className="size-3" />
-            </Primitive.Indicator>
-          </span>
-        </Primitive.Item></Tooltip>}</Choice>
+          {(content, control) => <>
+            <Tooltip content={compact ? description : undefined}>
+              <Primitive.Item
+                {...control}
+                aria-describedby={descriptionId ?? control['aria-describedby']}
+                value={option.value}
+                // Both Radix primitives publish data-state; the control owns its checked styling.
+                data-state={(value ?? '') === option.value ? 'checked' : 'unchecked'}
+                disabled={off}
+                aria-description={reason}
+                title={reason}
+                className={cx(
+                  'choice-radio flex min-w-0 max-w-full flex-auto border bg-surface text-left text-text transition-colors disabled:cursor-not-allowed disabled:text-text-disabled',
+                  compact ? 'min-h-(--control-md) items-center gap-2 rounded-md px-3' : 'items-start gap-3 rounded-lg p-3',
+                )}
+              >
+                {option.icon !== undefined && (
+                  <span className={cx('flex shrink-0 text-text-muted [&_svg]:size-5', !compact && 'mt-0.5')} aria-hidden>
+                    {option.icon}
+                  </span>
+                )}
+                {content}
+                <span aria-hidden className={cx('flex size-4 shrink-0 items-center justify-center rounded-full border border-control-border bg-surface', !compact && 'mt-0.5')}>
+                  <Primitive.Indicator className="flex size-4 items-center justify-center rounded-full bg-accent-solid text-text-on-accent">
+                    <Check className="size-3" />
+                  </Primitive.Indicator>
+                </span>
+              </Primitive.Item>
+            </Tooltip>
+            {descriptionId !== undefined && <span id={descriptionId} hidden>{description}</span>}
+          </>}
+        </Choice>
         );
       })}
     </Primitive.Root>

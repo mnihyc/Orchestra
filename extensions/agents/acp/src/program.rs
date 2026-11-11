@@ -114,6 +114,8 @@ pub enum ToolFamily {
     Command,
     /// A read of a file.
     Read,
+    /// An image opened by a native tool; its reported bytes become an image result.
+    Image,
     /// A new file, whole.
     Write,
     /// A change of part of a file.
@@ -228,6 +230,9 @@ pub struct AcpProgram {
     /// `{ "telemetry_off": true, "mcp": { "strict": true } }`. `null` removes a member.
     #[serde(default)]
     pub capabilities: Option<Json>,
+    /// Per-access facts in the shared capability declaration contract.
+    #[serde(default)]
+    pub capability_program: Option<orch_provider_contract::capabilities::Program>,
     /// Whether the program uses the client's own file and terminal methods, which the adapter then carries out in
     /// the environment through Orch's executor: the arrangement `separated` is real for it.
     #[serde(default)]
@@ -386,6 +391,48 @@ pub enum ProgramError {
 }
 
 impl AcpProgram {
+    /// Read one core-carried public switch for this exact model and capability. Opaque routes,
+    /// other capabilities and undeclared names/values cannot become launch configuration.
+    pub(crate) fn resolved_native<'a>(
+        &self,
+        native: &'a orch_agent_contract::session::NativeModelContext,
+        model: &str,
+        capability: &str,
+        name: &str,
+    ) -> Option<&'a Json> {
+        if native.model != model {
+            return None;
+        }
+        let switch = self
+            .capability_program
+            .as_ref()?
+            .native_switches
+            .get(name)?;
+        if switch.capability != capability {
+            return None;
+        }
+        let mut selected = None;
+        for resolution in native.capabilities.as_array()? {
+            if resolution.get("capability").and_then(Json::as_str) != Some(capability) {
+                continue;
+            }
+            let Some(value) = resolution
+                .get("native_config")
+                .and_then(|config| config.get(name))
+            else {
+                continue;
+            };
+            if !(value.is_string() || value.is_boolean() || value.as_i64().is_some())
+                || !switch.values.values().any(|known| known == value)
+                || selected.is_some_and(|previous| previous != value)
+            {
+                return None;
+            }
+            selected = Some(value);
+        }
+        selected
+    }
+
     /// Reads launch data as the manifest carries it.
     pub fn from_json(data: &Json) -> Result<Self, ProgramError> {
         serde_json::from_value(data.clone())
@@ -586,7 +633,7 @@ pub struct Variables {
 
 impl Variables {
     /// The names a template may use, and what each is.
-    pub const NAMES: [(&'static str, &'static str); 26] = [
+    pub const NAMES: [(&'static str, &'static str); 29] = [
         ("home", "the program's home directory, absolute"),
         (
             "profile_home",
@@ -612,6 +659,18 @@ impl Variables {
             "the token of the connector's listener, for the forwarder",
         ),
         ("model", "the model's routing name"),
+        (
+            "web_search_native",
+            "`true` for a selected live native search, else `false`",
+        ),
+        (
+            "web_search_url",
+            "the same session's guarded Messages search base address",
+        ),
+        (
+            "page_fetch_native",
+            "`false` when the resolved page-fetch choice disables the native reader",
+        ),
         (
             "models_json",
             "the models the session may use, as a JSON list of names",
@@ -661,7 +720,65 @@ impl Variables {
         variables.set("home", home.to_string_lossy());
         variables.set("agents_home", home.join("agents").to_string_lossy());
         variables.set("neutral_dir", home.join("neutral").to_string_lossy());
+        variables.set("web_search_native", "false");
+        variables.set("page_fetch_native", "true");
         variables
+    }
+
+    /// Render the shared choice; an Orch service never enables the native search tool.
+    pub fn select_web_search(
+        &mut self,
+        params: &Json,
+        default: Option<&str>,
+    ) -> Result<(), ProgramError> {
+        let selected = orch_agent_contract::parameters::WebSearchMode::selected(params)
+            .map_err(|error| ProgramError::Unreadable(error.to_owned()))?;
+        let native = selected
+            .map(|mode| mode.native_mode())
+            .or(default)
+            .unwrap_or("disabled");
+        self.set(
+            "web_search_native",
+            if native == "live" { "true" } else { "false" },
+        );
+        Ok(())
+    }
+
+    /// Prefer the already resolved carrier over stored intent. A present carrier without a known
+    /// instruction leaves this program's default; older callers retain the legacy parameter path.
+    pub(crate) fn select_web_search_for_model(
+        &mut self,
+        params: &Json,
+        default: Option<&str>,
+        program: &AcpProgram,
+        model: &str,
+        native: Option<&orch_agent_contract::session::NativeModelContext>,
+    ) -> Result<(), ProgramError> {
+        let Some(native) = native else {
+            return self.select_web_search(params, default);
+        };
+        let key = orch_agent_contract::parameters::WEB_SEARCH_KEY;
+        let mut selected = Json::Object(Default::default());
+        if let Some(value) = program.resolved_native(native, model, key, key) {
+            selected[key] = value.clone();
+        }
+        self.select_web_search(&selected, default)
+    }
+
+    /// The independent page-fetch capability controls its native reader. Search mode is
+    /// intentionally not an input: managed search alone must not remove ordinary HTTP fetch.
+    pub(crate) fn select_page_fetch_for_model(
+        &mut self,
+        default: Option<&str>,
+        program: &AcpProgram,
+        model: &str,
+        native: Option<&orch_agent_contract::session::NativeModelContext>,
+    ) {
+        let enabled = native
+            .and_then(|native| program.resolved_native(native, model, "page_fetch", "page_fetch"))
+            .and_then(Json::as_bool)
+            .unwrap_or(default != Some("off"));
+        self.set("page_fetch_native", if enabled { "true" } else { "false" });
     }
 
     /// The home.

@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Which skills a place gives its threads: each skill named here off, at its latest version or at a pinned one; a skill is added from those the person may switch on. */
 import { useQuery } from '@tanstack/react-query';
 import { X } from 'lucide-react';
@@ -62,7 +63,7 @@ export function SkillsSettingChoice({ value, label, onChange, onEdited, disabled
         onChoose={(next) => write(chosen.map(([id, old]) => [id, id === skill ? next : old]))}
         onRemove={() => write(chosen.filter(([id]) => id !== skill))} />)}
     </ul>}
-    <Select size="sm" label={t('settings.skills.add')} hideLabel value="" open={open} onOpenChange={setOpen} disabled={disabled} error={error}
+    <ResourcePicker pickerKey="settings.SkillsChoice.settings.skills.add" size="sm" label={t('settings.skills.add')} hideLabel value="" open={open} onOpenChange={setOpen} disabled={disabled} error={error}
       placeholder={t(open && skills.isPending ? 'common.loading' : 'settings.skills.add')}
       options={offered.map((skill) => ({ value: skill.id, label: skill.name, ...resourceChoice({ kind: 'skill', skill }) }))}
       onValueChange={(skill) => write([...chosen, [skill, LATEST]])} />

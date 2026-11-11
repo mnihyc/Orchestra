@@ -187,6 +187,7 @@ impl Engine {
                     | crate::jobs::runner::MakeError::NoEnvironment,
                 ) => {}
                 Err(crate::jobs::runner::MakeError::Db(error)) => return Err(error.into()),
+                Err(crate::jobs::runner::MakeError::Internal(error)) => return Err(error),
             }
         }
         Ok(())

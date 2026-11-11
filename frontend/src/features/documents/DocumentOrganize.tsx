@@ -15,7 +15,7 @@ export function DocumentOrganize({ id, command, onClose }: { id: string; command
   const read = useQuery(documentTreeEntryQuery({ kind: 'document', id }, cache));
   const row = read.data?.entries.find((entry) => entry.entry.item.kind === 'document' && entry.entry.item.id === id);
   if (row === undefined || read.isError) return <Dialog open title={t(`documentFolders.actions.${command}`)} onOpenChange={(open) => { if (!open) onClose(); }}>
-    {read.isPending ? <SkeletonRows rows={2} /> : <ErrorState compact error={read.error ?? new Error('The document metadata omitted its entry')}
+    {read.isPending ? <SkeletonRows read={read} rows={2} /> : <ErrorState compact error={read.error ?? new Error('The document metadata omitted its entry')}
       onRetry={() => void read.refetch()} />}
   </Dialog>;
   return <TreeActionDialog command={command} rows={[row]} onClose={onClose} onDone={() => {

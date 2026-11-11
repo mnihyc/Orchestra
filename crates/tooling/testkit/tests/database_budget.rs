@@ -26,6 +26,9 @@ const PORTS: std::ops::RangeInclusive<u16> = 41000..=41999;
 /// This worker's ordinary test also verifies one real fixture on the configured server.
 const WORKER: &str = "fixture_databases_keep_their_schema_until_they_are_closed";
 const COUNT_VARIABLE: &str = "ORCH_TESTKIT_CAPACITY_COUNT";
+/// The same immutable PostgreSQL image already prepared by the CI database service.
+const POSTGRES_IMAGE: &str =
+    "postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24";
 
 struct Server {
     name: String,
@@ -65,7 +68,7 @@ impl Server {
                 "POSTGRES_PASSWORD=orch",
             ])
             .args([
-                "postgres:17-alpine",
+                POSTGRES_IMAGE,
                 "-c",
                 &format!("max_connections={connections}"),
             ])

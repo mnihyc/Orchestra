@@ -88,7 +88,7 @@ export function PaletteInput({ trailing, className, ...input }: ComponentProps<t
       <Search className="text-text-subtle" aria-hidden />
       <Command.Input
         className={cx(
-          'focus-inset my-2 h-(--control-md) min-w-0 flex-1 rounded-sm border border-control-border bg-surface px-2 text-md text-text placeholder:text-text-subtle',
+          'focus-inset my-2 h-(--control-md) min-w-0 flex-1 rounded-sm border border-control-border bg-surface px-3 text-md text-text placeholder:text-text-subtle',
           className,
         )}
         {...input}

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use orch_db::queries::settings::SettingRow;
 use orch_settings_contract::merge::{Layer, resolve};
 use orch_settings_contract::provenance::Resolved;
-use orch_settings_contract::registry::{Scope, SettingDef};
+use orch_settings_contract::registry::{Scope, SettingDef, keys};
 use orch_types::{Id, Json};
 
 /// One node on the way from the root org down to the place that is read.
@@ -50,7 +50,13 @@ impl Rows {
     }
 
     /// Puts a row, in place of the one there was.
-    pub fn put(&mut self, row: SettingRow) {
+    pub fn put(&mut self, mut row: SettingRow) {
+        // Old stored choices must not turn wake availability into an implicit send choice.
+        if row.key == keys::BROADCAST_AGENT_OPTIONS
+            && let Some(options) = row.value.as_array_mut()
+        {
+            options.retain(|option| option.as_str() != Some("wake_idle"));
+        }
         self.by_node
             .entry(row.node_id)
             .or_default()
@@ -172,6 +178,23 @@ mod tests {
             updated_by: None,
             updated_at: Utc.with_ymd_and_hms(2026, 10, 8, 14, 0, 0).unwrap(),
         }
+    }
+
+    #[test]
+    fn stored_announcement_choices_drop_wake_without_losing_delivery() {
+        let topic = new_id();
+        let rows = Rows::new(vec![row(
+            Some(topic),
+            keys::BROADCAST_AGENT_OPTIONS,
+            json!(["steer", "wake_idle", "next_turn"]),
+            false,
+        )]);
+        assert_eq!(
+            rows.get(Some(topic), keys::BROADCAST_AGENT_OPTIONS)
+                .unwrap()
+                .value,
+            json!(["steer", "next_turn"])
+        );
     }
 
     #[test]

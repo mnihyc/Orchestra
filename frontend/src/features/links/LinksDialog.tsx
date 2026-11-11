@@ -30,14 +30,15 @@ export function LinksDialog({ documentId, open, onOpenChange }: { documentId: st
   const close = (next: boolean) => { if (!next) setDraft(null); onOpenChange(next); };
   const locked = links?.locked === true;
   const writable = links?.writable === true;
+  const reason = locked ? t('links.dialog.locked') : !writable ? t('implicitAvailability.docManage') : undefined;
   return <Dialog open={open} onOpenChange={close} title={t('links.dialog.title')} size="sm"
     footer={links === undefined ? undefined : <div className="flex w-full min-w-0 flex-wrap items-center gap-2">
-      <span className="min-w-0 flex-1 text-sm text-text-muted">{locked ? t('links.dialog.locked') : ''}</span>
-      {links.own !== null && !locked && <Button variant="ghost" disabled={!writable || write.isPending} onClick={() => write.mutate(null)}>{t('links.dialog.useDefault')}</Button>}
+      <span className="min-w-0 flex-1 text-sm text-text-muted">{reason ?? ''}</span>
+      {links.own !== null && <Button variant="ghost" blocked={!writable} reason={reason} disabled={write.isPending} onClick={() => write.mutate(null)}>{t('links.dialog.useDefault')}</Button>}
       <Button variant="secondary" onClick={() => close(false)}>{t('common.cancel')}</Button>
-      <Button variant="primary" pending={write.isPending} disabled={!writable || draft === null} onClick={() => write.mutate([...current])}>{t('common.save')}</Button>
+      <Button variant="primary" pending={write.isPending} blocked={!writable} reason={reason} disabled={draft === null} onClick={() => write.mutate([...current])}>{t('common.save')}</Button>
     </div>}>
-    {read.isPending ? <SkeletonRows rows={4} /> : read.isError ? <ErrorAlert error={read.error} action={<Button size="sm" onClick={() => void read.refetch()}>{t('common.tryAgain')}</Button>} />
+    {read.isPending ? <SkeletonRows read={read} rows={4} /> : read.isError ? <ErrorAlert error={read.error} action={<Button size="sm" onClick={() => void read.refetch()}>{t('common.tryAgain')}</Button>} />
       : <div className="flex flex-col gap-3">
         {LINKS_TABS.map((tab) => <Checkbox key={tab} label={t(`links.tabs.${tab}`)} checked={current.includes(tab)} disabled={!writable}
           onCheckedChange={(on) => setDraft(LINKS_TABS.filter((each) => (each === tab ? on : current.includes(each))))} />)}

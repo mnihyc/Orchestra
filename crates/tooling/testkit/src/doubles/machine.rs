@@ -266,6 +266,7 @@ impl ScriptedMachine {
     ) -> Self {
         let link = MachineLink::start(
             MachineConfig {
+                gateway: Default::default(),
                 hosted_endpoints: None,
                 follow_system_endpoints: false,
                 machine_id: identity.machine_id,

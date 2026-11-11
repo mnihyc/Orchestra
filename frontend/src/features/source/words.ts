@@ -8,6 +8,7 @@ import type { TFunction } from 'i18next';
 import { ApiError } from '@/api/client';
 import type { DirectoryWork, RestorePlan, ReviewComment, Snapshot, ThreadAttention, ThreadLink } from '@/generated/api-types';
 import { graphemeCount } from '@/lib/grapheme';
+import { fencedCode } from '@/lib/fencedCode';
 
 /** Source writes obey the machine's policy; protocol codes never become the explanation. */
 export function sourceFailure(t: TFunction, reason: string): string {
@@ -21,8 +22,9 @@ export function restorable(snapshot: Snapshot): boolean {
 }
 
 /** Whether a plan may be confirmed: it writes something, keeps a complete undo state, and nothing stops it. */
-export function confirmable(plan: RestorePlan): boolean {
-  return plan.paths.length > 0 && plan.undo_available && plan.blockers.length === 0;
+export function confirmable(plan: RestorePlan, overwrite: readonly string[] = []): boolean {
+  return plan.paths.length > 0 && plan.undo_available && plan.blockers.length === 0
+    && (plan.form.kind !== 'touched_files' || plan.paths.every((path) => path.later_change === false || overwrite.includes(path.path)));
 }
 
 /** Why a turn's files cannot be put back as a whole, in the reader's words. */
@@ -30,7 +32,18 @@ export function unrecordedReason(t: TFunction, snapshot: Snapshot | null): strin
   if (snapshot === null) return t('source.restore.why.notRecorded');
   if (snapshot.state === 'expired') return t('source.restore.why.expired');
   if (snapshot.state === 'running') return t('source.restore.why.recording');
-  switch (snapshot.unavailable_reason) {
+  if (snapshot.unavailable_reason === null) return snapshot.state === 'complete' ? t('source.restore.why.missing', { count: snapshot.missing_count }) : t('source.restore.why.incomplete');
+  return wholeUnavailableReason(t, snapshot.unavailable_reason);
+}
+
+/** A whole-state failure is an explanation for the selected-file form, never a raw protocol code. */
+export function wholeUnavailableReason(t: TFunction, reason: string): string {
+  if (/^entries:\d+$/u.test(reason)) return t('largeTree.reasons.entriesWithLimit', { count: Number(reason.slice('entries:'.length)) });
+  switch (reason) {
+    case 'entries': return t('largeTree.reasons.entries');
+    case 'watches': return t('largeTree.reasons.watches');
+    case 'scan_time': return t('largeTree.reasons.scan_time');
+    case 'chosen': return t('largeTree.reasons.chosen');
     case 'live_tree':
       return t('source.restore.why.liveTree');
     case 'not_ready':
@@ -43,8 +56,7 @@ export function unrecordedReason(t: TFunction, snapshot: Snapshot | null): strin
       return t('source.restore.why.recordingOff');
     case 'offline':
       return t('source.restore.why.offline');
-    case null:
-      return snapshot.state === 'complete' ? t('source.restore.why.missing', { count: snapshot.missing_count }) : t('source.restore.why.incomplete');
+    case 'expired': return t('source.restore.why.expired');
     default:
       return t('source.restore.why.other');
   }
@@ -52,6 +64,7 @@ export function unrecordedReason(t: TFunction, snapshot: Snapshot | null): strin
 
 /** Why a restore plan cannot be confirmed, in words, or nothing where another line of the plan says it already (a missing undo). Never the protocol code. */
 export function restoreBlocker(t: TFunction, code: string): string | null {
+  if (code.startsWith('preimage_unavailable:')) return t('source.restore.blocked.preimage', { path: code.slice('preimage_unavailable:'.length) });
   switch (code) {
     case 'complete_undo_unavailable': return null;
     case 'interrupt_not_allowed': return t('source.restore.blocked.interruptNotAllowed');
@@ -190,7 +203,7 @@ export function reviewMessage(t: TFunction, comments: readonly ReviewComment[]):
       const where = comment.from_line === comment.to_line
         ? t('source.review.message.line', { path: comment.path, line: comment.from_line, side: t(`source.review.side.${comment.side}`) })
         : t('source.review.message.lines', { path: comment.path, from: comment.from_line, to: comment.to_line, side: t(`source.review.side.${comment.side}`) });
-      return `${where}\n\n\`\`\`diff\n${comment.hunk}\n\`\`\`\n\n${comment.text.trim()}`;
+      return `${where}\n\n${fencedCode(comment.hunk, 'diff')}\n\n${comment.text.trim()}`;
     })
     .join('\n\n---\n\n');
 }

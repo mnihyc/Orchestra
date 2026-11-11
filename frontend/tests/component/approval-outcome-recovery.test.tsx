@@ -43,8 +43,8 @@ afterEach(async () => {
   if (originalTheme === undefined) delete document.documentElement.dataset.theme;
   else document.documentElement.dataset.theme = originalTheme;
 });
-function removeFromList() {
-  act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [], next_cursor: null }], pageParams: [null] }));
+async function removeFromList() {
+  await act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [], next_cursor: null }], pageParams: [null] }));
 }
 function showWaiting() {
   return show(<><Capture /><WaitingList shape={{ filter: { scope: 'mine', state: 'pending' }, empty: { title: 'Nothing waits', description: '' } }} /></>);
@@ -57,7 +57,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     calls.read.mockReturnValueOnce(pending.promise).mockResolvedValueOnce(decided);
     showWaiting();
     expect(await screen.findByText('check redirect')).toBeVisible();
-    removeFromList();
+    await removeFromList();
     await waitFor(() => expect(calls.read).toHaveBeenCalledExactlyOnceWith(request.id));
     expect(screen.queryByText('Nothing waits')).not.toBeInTheDocument();
     await act(async () => {
@@ -79,10 +79,10 @@ it('does not show a failed outcome beside a request that returned to the waiting
     title: 'Not found', detail: 'Not found', request_id: 'read-gone' }, null));
   showWaiting();
   expect(await screen.findByText('check redirect')).toBeVisible();
-  removeFromList();
+  await removeFromList();
   expect(await screen.findByRole('alert')).toBeVisible();
   expect(screen.queryByText('A private request')).not.toBeInTheDocument();
-  act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [request], next_cursor: null }], pageParams: [null] }));
+  await act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [request], next_cursor: null }], pageParams: [null] }));
   expect(await screen.findByText('check redirect')).toBeVisible();
   expect(screen.queryByRole('alert')).not.toBeInTheDocument();
 });
@@ -94,7 +94,7 @@ it('keeps an unreadable newer outcome before an older waiting request', async ()
     title: 'Unavailable', detail: 'Try again', request_id: 'read-failed' }, null));
   const view = showWaiting();
   await waitFor(() => expect(screen.getAllByText('check redirect')).toHaveLength(2));
-  act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [earlier], next_cursor: null }], pageParams: [null] }));
+  await act(() => cache.setQueryData(['outcome-list'], { pages: [{ items: [earlier], next_cursor: null }], pageParams: [null] }));
   const failed = (await screen.findByRole('alert')).closest('li');
   const old = view.container.querySelector('[data-approval="earlier"]')?.closest('li');
   if (failed === null || old === null || old === undefined) throw new Error('Both request rows must be shown.');

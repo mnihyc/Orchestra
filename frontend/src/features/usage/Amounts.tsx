@@ -9,13 +9,15 @@ import { useTranslation } from 'react-i18next';
 import type { UsageEvent, UsageFigures } from '@/generated/api-types';
 import { creditsState, decimal, ESTIMATE_MARK, formatCredits } from '@/features/usage/figures';
 import { useFormatContext } from '@/lib/appearance';
-import { formatTokens } from '@/lib/format';
+import { formatNumber, formatTokens } from '@/lib/format';
 
 /** The credits of a sum, as a cell of a table says them. */
 export function SumCredits({ figures, align = 'end' }: { figures: UsageFigures; align?: 'start' | 'end' }) {
   const { t } = useTranslation();
   const { locale } = useFormatContext();
   const state = creditsState(figures);
+  const unpricedServices=figures.unrated_services??0;
+  const serviceNote=unpricedServices===0?null:t('usage.serviceUnits.unpriced',{count:unpricedServices,value:formatNumber(unpricedServices,locale)});
   const side = align === 'end' ? 'items-end text-right' : 'items-start text-left';
   if (state.none) {
     return (
@@ -24,7 +26,8 @@ export function SumCredits({ figures, align = 'end' }: { figures: UsageFigures; 
           <span aria-hidden>–</span>
           <span className="sr-only">{t('usage.amounts.noRate')}</span>
         </span>
-        <span className="text-xs text-text-muted">{t('usage.amounts.unratedOnly', { tokens: formatTokens(state.unrated, locale) })}</span>
+        {state.unrated>0 && <span className="text-xs text-text-muted">{t('usage.amounts.unratedOnly', { tokens: formatTokens(state.unrated, locale) })}</span>}
+        {serviceNote!==null && <span className="text-xs text-text-muted">{serviceNote}</span>}
       </span>
     );
   }
@@ -41,6 +44,7 @@ export function SumCredits({ figures, align = 'end' }: { figures: UsageFigures; 
       </span>
       {state.estimated > 0 && !state.allEstimated && <span className="text-xs text-text-muted">{t('usage.amounts.estimatedPart', { amount: formatCredits(state.estimated, locale) })}</span>}
       {state.unrated > 0 && <span className="text-xs text-text-muted">{t('usage.amounts.unrated', { tokens: formatTokens(state.unrated, locale) })}</span>}
+      {serviceNote!==null && <span className="text-xs text-text-muted">{serviceNote}</span>}
     </span>
   );
 }

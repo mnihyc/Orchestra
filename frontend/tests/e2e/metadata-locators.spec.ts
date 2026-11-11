@@ -57,14 +57,14 @@ function answer(page: Page, path: string, method = 'GET', matches: (query: URLSe
 }
 
 async function settled(page: Page) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    await Promise.all(document.getAnimations().filter((animation) => {
+  await expect.poll(() => page.evaluate(() => ({
+    fonts: document.fonts.status,
+    animations: document.getAnimations().filter((animation) => {
       const end = animation.effect?.getComputedTiming().endTime;
       return animation.playState === 'running' && typeof end === 'number' && Number.isFinite(end);
-    }).map((animation) => animation.finished.catch(() => undefined)));
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-  });
+    }).map((animation) => animation instanceof CSSAnimation ? animation.animationName : animation.id),
+  }))).toEqual({ fonts: 'loaded', animations: [] });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 async function layout(page: Page, mode: Layout) {
   await page.setViewportSize({ width: mode.width, height: 900 }); await page.emulateMedia({ colorScheme: mode.theme });
@@ -234,15 +234,20 @@ test('native agent metadata keeps pending/error identity, filters by raw kind an
     await page.getByRole('button', { name: words.resources.controls.filter, exact: true }).click();
     const panel = page.locator('[data-resource-filter-panel]'), filter = panel.getByRole('combobox', { name: words.agents.list.harnessFilter, exact: true });
     await closeSearch(filter);
-    await expect(filter).toHaveValue('Codex'); await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
+    // The address keeps its raw choice while the catalogue owns its display name.
+    await expect(filter).toHaveValue(words.resources.harnessNameUnknown);
+    expect(new URL(page.url()).searchParams.get('harness')).toBe('codex');
+    await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
     await capture(page, info, 'agent-filter-pending-1440-light', filter);
     release(); await expect(panel.getByRole('alert')).toBeVisible();
-    await layout(page, layouts[1]); await expect(filter).toHaveValue('Codex');
+    await layout(page, layouts[1]); await expect(filter).toHaveValue(words.resources.harnessNameUnknown);
+    expect(new URL(page.url()).searchParams.get('harness')).toBe('codex');
     await expect(panel).not.toContainText('Private registry diagnostic'); await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
     await capture(page, info, 'agent-filter-error-400-dark', filter);
     expect(observed.calls.filter((call) => call.path === '/api/v1/harness-kinds')).toHaveLength(1);
     const retry = answer(page, '/api/v1/harness-kinds'); await panel.getByRole('button', { name: words.common.tryAgain, exact: true }).click();
     const replied = await retry; expect(replied.status()).toBe(200); const catalogue = await replied.json() as HarnessKindInfo[];
+    await expect(filter).toHaveValue('Codex');
     expect(observed.calls.filter((call) => call.path === '/api/v1/harness-kinds')).toHaveLength(2);
     const other = catalogue.find((kind) => kind.kind !== 'codex');
     if (other === undefined) throw new Error('The real registry has no second adapter for this workflow');

@@ -9,6 +9,7 @@ heading_id.开始线程: start-a-thread
 heading_id.一起工作: work-together
 heading_id.试用脚本示例: try-the-scripted-example
 heading_id.查找帮助和恢复访问: find-help-and-recover-access
+summary: 准备所属位置、模型和环境，再与同事和代理开始协作。
 ---
 
 # 开始使用
