@@ -76,8 +76,8 @@ describe('compact names in the page, explanations inside open pickers', () => {
       environment, { ...node, help: { label: 'Guide to Node', onOpen: guide } },
     ]} />);
     const choice = screen.getByRole('radio', { name: 'Node' });
-    expect(choice).not.toHaveAttribute('aria-describedby');
-    expect(screen.queryByText(node.description)).not.toBeInTheDocument();
+    expect(choice).toHaveAccessibleDescription(node.description);
+    expect(screen.getByText(node.description)).not.toBeVisible();
     expect(screen.queryByRole('button', { name: 'Guide to Node' })).not.toBeInTheDocument();
     expect(guide).not.toHaveBeenCalled();
     expect(choose).not.toHaveBeenCalled();

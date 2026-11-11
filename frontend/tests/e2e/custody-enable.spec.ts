@@ -30,6 +30,10 @@ for(const kind of ['provider','model','agent','environment'] as const)for(const 
     });
     await page.goto(source.path);await screenReady(page,locale,theme);
     if(kind==='model')await page.getByRole('switch',{name:caption('@providers.models.enabledLabel',locale).replace('{{name}}',source.name),exact:true}).click();
+    else if(kind==='environment'){
+      await page.getByRole('button',{name:caption('@resources.act.menuOf',locale).replace('{{name}}',source.name),exact:true}).click();
+      await page.getByRole('menuitem',{name:caption('@resources.act.enable',locale),exact:true}).click();
+    }
     else await page.getByRole('button',{name:new RegExp(`^${caption('@resources.act.enable',locale)}`,'u')}).first().click();
     const dialog=page.getByRole('alertdialog',{name:caption('@resourceImpact.enableTitle',locale).replace('{{name}}',source.name),exact:true});
     const waiting=dialog.getByRole('checkbox',{name:caption('@resourceImpact.runWaiting',locale),exact:true});await expect(waiting).not.toBeChecked();expect(accepted).toBe(0);

@@ -315,6 +315,7 @@ impl PolicyKey {
             Self::ProviderSignIn | Self::ProviderPrograms | Self::ProviderArrangements
         ) && roles.contains(&Role::Agent)
             || self == Self::AgentMaxSandbox && roles.contains(&Role::Agent)
+            || self == Self::AgentHarnesses && roles.contains(&Role::Environment)
             || self == Self::ToolsFetch && roles.contains(&Role::Node)
             || matches!(self, Self::EnvironmentRoots | Self::EnvironmentAfterUp)
                 && roles

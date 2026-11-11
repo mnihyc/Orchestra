@@ -1,7 +1,8 @@
 /** A team owner's setup choice, scoped facts and portable dismissal; personal spaces have no team-setup card. */
 import { expect, test } from '@playwright/test';
+import type { OrgOverviewResponse } from '../../src/generated/api-types.ts';
 
-import { ACME, deny, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, deny, expectAccessibleInBothThemes, PEOPLE, replySent, scenario, signIn } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const CONTROL_TIMEOUT_MS = 10_000;
@@ -39,16 +40,17 @@ test('many readable teams keep personal fallback without setup guidance and canc
   await control('/org', { name: 'Another team', slug: 'another-team' });
   await control('/landing', { org: '00000000-0000-4000-8000-ffffffffffff' });
   await signIn(page);
-  await expect(page).toHaveURL(/\/org\/ada$/);
+  // Org homes retain their list choices in the address, in either query-key order.
+  await expect(page).toHaveURL(/\/org\/ada(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
   const first = page.getByTestId('first-steps');
   await expect(first).toHaveCount(0);
-  const create = page.getByTestId('main').getByRole('button', { name: 'New project', exact: true });
+  const create = page.getByRole('main').getByRole('button', { name: 'New project', exact: true });
   await create.focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog', { name: 'New project in Ada Lovelace' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('menu')).toHaveCount(0);
-  await expect(page).toHaveURL(/\/org\/ada$/);
+  await expect(page).toHaveURL(/\/org\/ada(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
   await expect(first).toHaveCount(0);
 });
 
@@ -58,16 +60,20 @@ test('a readable saved department remains the landing place without changing the
   await control('/landing', { org: ACME.research });
   await control('/choice', { org: ACME.research, mode: 'team' });
   await signIn(page);
-  await expect(page).toHaveURL(/\/org\/acme\.research$/);
+  await expect(page).toHaveURL((url) => url.pathname === '/org/acme.research');
   await expect(page.getByRole('heading', { name: 'Research', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   expect(reads).toEqual([]);
+  expect((await control('/state'))?.reads).toBe(0);
 });
 
 test('an established root has no setup card even before a mode was chosen', async ({ page }) => {
-  const read = page.waitForResponse((response) => response.url().includes('/me/first-steps') && response.url().includes(ACME.org));
+  // Setup is supplied by the joined org opening instead of a separate request.
+  const read = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/orgs/${ACME.org}/overview`);
   await signIn(page);
-  await read;
+  // Several readable teams make the personal org the default landing place.
+  await page.goto('/org/acme');
+  expect(await replySent(await read)).toMatchObject({ mode: 'overview', data: { first_steps: { status: 'ready' } } });
   await expect(page.getByRole('heading', { name: 'Acme', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
 });
@@ -80,6 +86,7 @@ test('a member never requests or receives the owner’s setup card', async ({ pa
   await expect(page.getByRole('heading', { name: 'Acme', exact: true })).toBeVisible();
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   expect(reads).toEqual([]);
+  expect((await control('/state', { username: 'vera' }))?.reads).toBe(0);
 });
 
 test('an unfinished root offers setup without repeating its name or probing a model', async ({ page }) => {
@@ -114,7 +121,7 @@ test('an incomplete team keeps its own facts and remembers dismissal on another 
     await peer.goto('/org/setup-team');
     await expect(peer.getByRole('button', { name: 'Dismiss', exact: true })).toBeVisible();
     const reads: string[] = [];
-    peer.on('request', (request) => { if (request.method() === 'GET' && /\/me\/(first-steps|state)(?:\?|$)/.test(request.url())) reads.push(request.url()); });
+    peer.on('request', (request) => { if (request.method() === 'GET' && (/\/me\/(first-steps|state)(?:\?|$)/.test(request.url()) || request.url().includes(`/orgs/${team}/overview`))) reads.push(request.url()); });
     const writes: string[] = [];
     page.on('request', (request) => { if (request.method() !== 'GET' && request.url().includes('/me/first-steps')) writes.push(request.method()); });
     await first.getByRole('button', { name: 'Dismiss', exact: true }).click();
@@ -129,11 +136,11 @@ test('an incomplete team keeps its own facts and remembers dismissal on another 
   try {
     const second = await other.newPage();
     await signIn(second);
-    await expect(second).toHaveURL(/\/org\/setup-team$/);
+    await expect(second).toHaveURL(/\/org\/setup-team(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
     await expect(second.getByRole('button', { name: 'Show first steps' })).toBeVisible();
     await second.getByRole('button', { name: 'Show first steps' }).click();
     await expect(second.getByTestId('first-steps').locator('[data-step="provider"]')).toContainText('Not done yet');
-    await expect(page).toHaveURL(/\/org\/setup-team$/);
+    await expect(page).toHaveURL(/\/org\/setup-team(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
   } finally { await other.close(); }
 });
 
@@ -142,12 +149,13 @@ test('a new team is created in the existing form before its first provider or in
   await page.goto('/org/ada');
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   await page.locator('[data-screen-titlebar]:visible').getByRole('switch', { name: 'As admin: Off', exact: true }).click();
-  await page.getByRole('button', { name: 'New org…', exact: true }).click();
+  await page.getByRole('button', { name: 'New org or join one', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'New org…', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('First steps team');
   await dialog.getByRole('textbox', { name: 'Short name', exact: true }).fill('first-steps-team');
   await dialog.getByRole('button', { name: 'Create org', exact: true }).click();
-  await expect(page).toHaveURL(/\/org\/first-steps-team$/);
+  await expect(page).toHaveURL(/\/org\/first-steps-team(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
   const first = page.getByTestId('first-steps');
   await first.getByRole('button', { name: 'Use this team', exact: true }).click();
   await expect(first.locator('[data-step="provider"]')).toContainText('Not done yet');
@@ -173,7 +181,11 @@ test('loading or failed observations do not invent missing setup, and lost View 
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
   await expect(page.getByTestId('first-steps').locator('[data-step="provider"]')).toContainText('Not done yet');
   await control('/set', { delayMs: 0, failed: true });
-  const failedRead = page.waitForResponse((response) => response.url().includes('/me/first-steps') && response.status() >= 400);
+  const failedRead = page.waitForResponse(async (response) => {
+    if (new URL(response.url()).pathname !== `/api/v1/orgs/${org}/overview` || !response.ok()) return false;
+    const opening = await replySent(response) as OrgOverviewResponse;
+    return opening.mode === 'overview' && opening.data.first_steps.status === 'failed';
+  });
   await page.reload();
   await failedRead;
   await expect(page.getByTestId('first-steps')).toHaveCount(0);
@@ -240,7 +252,7 @@ test(`the compact card works by keyboard at 1440 and 400 in both themes (${local
   await expect(first.locator('[data-step="team"]')).toHaveCount(0);
   await page.goto('/org/ada');
   await expect(first).toHaveCount(0);
-  await expect(page.getByTestId('main').getByRole('button', { name: locale === 'en' ? 'New project' : '新建项目', exact: true })).toHaveCount(1);
+  await expect(page.getByRole('main').getByRole('button', { name: locale === 'en' ? 'New project' : '新建项目', exact: true })).toHaveCount(1);
 });
 }
 

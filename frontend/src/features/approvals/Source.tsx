@@ -5,6 +5,7 @@ import { CardFrame, DecidedCard } from '@/features/approvals/Card';
 import { PlanAnswer } from '@/features/approvals/PlanAnswer';
 import { planDecision } from '@/features/approvals/Harness';
 import { useDecision } from '@/features/approvals/Decision';
+import { decisionReason } from '@/features/approvals/current';
 import { DecisionError } from '@/features/approvals/DecisionError';
 import { Body } from '@/features/chat/Body';
 import { queuePreview } from '@/features/composer/queue';
@@ -22,8 +23,9 @@ export function SourceCard({approval,live,onSettled}:{approval:SourceApproval;li
   const decision=useDecision(approval.id,{onDecided:onSettled,onLost:onSettled});
   if(approval.state!=='pending')return <DecidedCard approval={approval}><SourceBrief approval={approval}/></DecidedCard>;
   const may=approval.can_decide&&live;
+  const reason=decisionReason(approval,live,decision.pending,t);
   return <CardFrame approval={approval}><SourceBrief approval={approval}/>
-    {approval.kind==='plan'?<PlanAnswer disabled={!may} pending={decision.pending?(decision.pressed==='proceed'?'proceed':'keep'):null} onProceed={()=>decision.decide(planDecision(true),'proceed')} onKeepPlanning={(words)=>decision.decide(planDecision(false,words),'keep')}/>:<Button size="sm" variant="primary" className="self-start" disabled={!may} pending={decision.pending} onClick={()=>decision.decide({run:true},'run')}>{t('composer.queue.runIt')}</Button>}
+    {approval.kind==='plan'?<PlanAnswer disabled={!may} reason={reason} pending={decision.pending?(decision.pressed==='proceed'?'proceed':'keep'):null} onProceed={()=>decision.decide(planDecision(true),'proceed')} onKeepPlanning={(words)=>decision.decide(planDecision(false,words),'keep')}/>:<Button size="sm" variant="primary" className="self-start" disabled={!may} reason={reason} pending={decision.pending} onClick={()=>decision.decide({run:true},'run')}>{t('composer.queue.runIt')}</Button>}
     {!may&&<span className="text-sm text-text-muted">{t(!live?'approvals.waitForLine':'approvals.cannotAnswer')}</span>}
     {decision.error!==null&&<DecisionError error={decision.error}/>}</CardFrame>;
 }

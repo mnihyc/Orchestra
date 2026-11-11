@@ -35,7 +35,8 @@ export function IntentCard({ trigger, label, children, onOpenChange, padded = tr
       if (!content.current?.contains(document.activeElement)) shown(false);
     }, 300);
   }
-  const classes = `z-(--layer-dropdown) w-(--menu-max-width) max-w-[min(20rem,calc(100vw-2rem))] overflow-y-auto ${padded ? 'p-3' : ''} text-base text-text ${cardClasses}`;
+  // A directly owned people list shrinks within the card's existing height after its padding is taken.
+  const classes = `z-(--layer-dropdown) w-(--menu-max-width) max-w-[min(20rem,calc(100vw-2rem))] overflow-y-auto [&:has(>[data-people-list])]:flex [&:has(>[data-people-list])]:flex-col ${padded ? 'p-3' : ''} text-base text-text ${cardClasses}`;
   return <Popover.Root open={open} onOpenChange={(next) => { if (!next) pinned(false); }}>
     <Popover.Trigger asChild
       onPointerEnter={(event) => { if (event.pointerType === 'touch') return; clearTimer(); timer.current = setTimeout(() => shown(true), 700); }}

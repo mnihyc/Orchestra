@@ -53,7 +53,7 @@ export function ImportProgress({ id, onReport }: { id: string; onReport: (id: st
   const report = supplied ?? lookup.data?.id ?? null;
   const stop = useMutation({ mutationFn: () => cancelJob(id), onSuccess: (value) => cache.setQueryData(exportKeys.job(id), value) });
   useEffect(() => { if (done && report !== null) onReport(report); }, [done, onReport, report]);
-  if (job.isPending) return <SkeletonRows rows={3} />;
+  if (job.isPending) return <SkeletonRows read={job} rows={3} />;
   if (job.isError) return <ErrorState compact error={job.error} onRetry={() => void job.refetch()} />;
   const current = job.data;
   return <div className="flex flex-col gap-3">
@@ -64,6 +64,6 @@ export function ImportProgress({ id, onReport }: { id: string; onReport: (id: st
     {stop.isError && <ErrorAlert error={stop.error} />}
     {(current.state === 'failed' || current.state === 'lost') && <InlineAlert tone="danger">{current.error === null ? t('importWizard.run.failed') : importReason(current.error, t, format.locale)}</InlineAlert>}
     {current.state === 'cancelled' && <StateLine compact message={t('importWizard.run.cancelled')} />}
-    {done && report === null && (lookup.isPending ? <SkeletonRows rows={1} /> : lookup.isError ? <ErrorAlert error={lookup.error} action={<Button size="sm" onClick={() => void lookup.refetch()}>{t('common.tryAgain')}</Button>} /> : <StateLine compact message={t('importWizard.run.reportMissing')} action={<Button asChild size="sm"><Link to="/settings/imports">{t('importWizard.mine.title')}</Link></Button>} />)}
+    {done && report === null && (lookup.isPending ? <SkeletonRows read={lookup} rows={1} /> : lookup.isError ? <ErrorAlert error={lookup.error} action={<Button size="sm" onClick={() => void lookup.refetch()}>{t('common.tryAgain')}</Button>} /> : <StateLine compact message={t('importWizard.run.reportMissing')} action={<Button asChild size="sm"><Link to="/settings/imports">{t('importWizard.mine.title')}</Link></Button>} />)}
   </div>;
 }

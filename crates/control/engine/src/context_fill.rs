@@ -557,7 +557,19 @@ impl Engine {
         turn: &TurnRow,
         usage: &UsageUpdated,
     ) -> Result<(), EngineError> {
-        let report = usage.report.clone().unwrap_or_default();
+        let mut report = usage.report.clone().unwrap_or_default();
+        if report.counters_only {
+            report.api_time_ms = None;
+            report.subagents = None;
+            report.by_subagent.clear();
+            report.compact_at = None;
+            report.shortened = None;
+            report.context = None;
+            for model in &mut report.models {
+                model.tokens = TokenUsage::default();
+                model.tokens_reported = false;
+            }
+        }
         let mut detail: TurnUsageDetail = read(turn.usage_detail.as_ref()).unwrap_or_default();
         let before = detail.clone();
         if report.api_time_ms.is_some() {
@@ -570,7 +582,33 @@ impl Engine {
             detail.by_subagent = report.by_subagent;
         }
         if !report.models.is_empty() {
-            detail.models = report.models;
+            let mut models = report.models;
+            for model in &mut models {
+                model.counts.retain(|_, count| *count >= 0);
+            }
+            // A later token-only observation cannot erase independently reported capability quantities.
+            for known in &detail.models {
+                if known.counts.is_empty() {
+                    continue;
+                }
+                if let Some(model) = models.iter_mut().find(|model| model.model == known.model) {
+                    if !model.tokens_reported && known.tokens_reported {
+                        model.tokens = known.tokens;
+                        model.tokens_reported = true;
+                    }
+                    for (capability, count) in &known.counts {
+                        model.counts.entry(capability.clone()).or_insert(*count);
+                    }
+                } else {
+                    models.push(orch_api_contract::context::ModelTokens {
+                        model: known.model.clone(),
+                        tokens: known.tokens,
+                        tokens_reported: known.tokens_reported,
+                        counts: known.counts.clone(),
+                    });
+                }
+            }
+            detail.models = models;
         }
         if usage.context_window.is_some() {
             detail.context_window = usage.context_window;
@@ -589,12 +627,14 @@ impl Engine {
         {
             detail.shortenings.push(shortened);
         }
-        if usage.report.is_some() {
+        if usage.report.is_some() && !report.counters_only {
             detail.breakdown = report.breakdown;
         }
         let fill = match report.context {
             Some(fill) => {
-                let family = crate::token_density::of(&turn.model);
+                let family = crate::token_density::of(
+                    detail.effective_model.as_deref().unwrap_or(&turn.model),
+                );
                 // Orch's share is an addition: where what it sent cannot be read, the harness's breakdown stands alone.
                 match seen_safely(&mut *unit.conn, turn.segment_id, family).await? {
                     Some(seen) => Some(with_orch_share(fill, &seen, family)),
@@ -645,7 +685,8 @@ impl Engine {
         let mut savepoint = sqlx::Connection::begin(&mut *unit.conn)
             .await
             .map_err(orch_db::DbError::from)?;
-        let family = crate::token_density::of(&row.model);
+        let family =
+            crate::token_density::of(detail.effective_model.as_deref().unwrap_or(&row.model));
         let estimated = async {
             let seen = seen_of(&mut savepoint, row.segment_id, family).await?;
             let fill = compose(
@@ -737,7 +778,9 @@ impl Engine {
         let Some(turn) = latest else {
             return Ok(Some(fill));
         };
-        let family = crate::token_density::of(&turn.model);
+        let detail: TurnUsageDetail = read(turn.usage_detail.as_ref()).unwrap_or_default();
+        let family =
+            crate::token_density::of(detail.effective_model.as_deref().unwrap_or(&turn.model));
         let fill = match seen_safely(&mut tx, segment, family).await? {
             Some(seen) => with_orch_share(fill, &seen, family),
             None => fill,
@@ -935,11 +978,14 @@ pub async fn turn_cost(
         return Ok(None);
     }
     let mut observations = ledger::events_of_turn(conn, turn).await?;
-    let per_request = observations
-        .iter()
-        .any(|row| row.origin == ledger::origin::HARNESS && row.scope == ledger::scope::REQUEST);
+    let per_request = observations.iter().any(|row| {
+        (row.origin == ledger::origin::HARNESS
+            || row.measurement_states.get("_adapter_request_ref").is_some())
+            && row.scope == ledger::scope::REQUEST
+    });
     observations.retain(|row| {
-        row.origin != ledger::origin::FORWARDER
+        (row.origin != ledger::origin::FORWARDER
+            || row.measurement_states.get("_adapter_request_ref").is_some())
             && row.purpose == ledger::purpose::TURN
             && (!per_request || row.scope == ledger::scope::REQUEST)
     });

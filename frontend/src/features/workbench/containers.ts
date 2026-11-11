@@ -33,13 +33,13 @@ export function useContainers(): readonly ContainerDefinition[] {
 const BUILT_INS = [
   ['navigation', FolderTree, 'left'], ['resource-navigation', Boxes, 'left'],
   ['conversation', MessagesSquare, 'right'], ['team', Users, 'right'], ['code', Code, 'right'],
-  ['environment', Server, 'right'], ['agent', SlidersHorizontal, 'right'], ['document', FileText, 'right'], ['help', LifeBuoy, 'right'],
+  ['environment', Server, 'right'], ['agent', SlidersHorizontal, 'right'], ['document', FileText, 'right'], ['ask', MessagesSquare, 'right'], ['help', LifeBuoy, 'right'],
 ] as const;
 
 for (const [name, icon, area] of BUILT_INS) registerContainer({
   name, icon, area,
-  title: name === 'navigation' ? 'views.navigation.title' : name === 'resource-navigation' ? 'navigation.resources.title' : name === 'help' ? 'views.help.title' : `workbench.containers.${name}.title`,
-  about: name === 'navigation' ? 'views.navigation.about' : name === 'resource-navigation' ? 'navigation.resources.about' : name === 'help' ? 'views.help.about' : `workbench.containers.${name}.about`,
+  title: name === 'navigation' ? 'views.navigation.title' : name === 'resource-navigation' ? 'navigation.resources.title' : name === 'help' ? 'views.help.title' : name === 'ask' ? 'ask.title' : `workbench.containers.${name}.title`,
+  about: name === 'navigation' ? 'views.navigation.about' : name === 'resource-navigation' ? 'navigation.resources.about' : name === 'help' ? 'views.help.about' : name === 'ask' ? 'ask.about' : `workbench.containers.${name}.about`,
 });
 
 /** A moved extension can use its own view's name even before it contributes a container. */

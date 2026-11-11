@@ -126,7 +126,8 @@ for (const width of [1440, 400]) {
       await photograph(page, `${prefix}-editor-closed`);
       await dialog.getByLabel('Objective', { exact: true }).fill(BASE.objective);
       await dialog.getByLabel('Done when', { exact: true }).fill(CONDITION);
-      await dialog.locator('summary').filter({ hasText: /^Limits: none$/ }).click();
+      // An empty override follows the place; open the same disclosure regardless of its summary value.
+      await dialog.locator('summary').filter({ hasText: /^Limits:/ }).click();
       await expect(dialog.getByLabel('Turns', { exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled();
       await photograph(page, `${prefix}-editor-open`);
@@ -163,10 +164,12 @@ for (const width of [1440, 400]) {
           plan('busy-plan', [{ text: 'Check the redirect', status: 'in_progress' }, { text: 'Run the tests', status: 'pending' }], { turn: 'busy-turn' })],
       });
       await expect(page.locator('[data-passive="blocked"]')).toBeVisible();
-      const approvalBar = page.getByRole('status').filter({ hasText: '1 approval waiting' });
+      // Waiting decisions are ordinary pinned cards above the composer, rather than a duplicate status strip.
+      const approvalBar = page.locator('[data-pinned-approvals]');
       const planLine = page.getByRole('button', { name: 'Step 1 of 2: Check the redirect', exact: true });
       const queue = page.locator('[data-queue]');
       await expect(approvalBar).toBeVisible();
+      await expect(approvalBar.locator('[data-pinned-approval="goal-approval-item"]')).toHaveCount(1);
       await expect(planLine).toBeVisible();
       await expect(queue).toBeVisible();
       const topEdges = await Promise.all([page.locator('[data-passive-strip]'), approvalBar, planLine, queue].map(async (row) => {

@@ -30,6 +30,8 @@ async function open(page: Page, height = WINDOW_HEIGHT): Promise<string[]> {
   return broken;
 }
 
+const pendingApprovals = (page: Page) => page.getByRole('region', { name: 'Waiting for approval', exact: true });
+
 test('every kind of item and of step is drawn, says what it is, and breaks nothing', async ({ page }) => {
   const broken = await open(page);
   const log = conversation(page);
@@ -54,25 +56,30 @@ test('every kind of item and of step is drawn, says what it is, and breaks nothi
   await expect(step(/^Fetched example\.org\/safe/)).toBeVisible();
   await expect(step(/^Looked at login\.png/)).toBeVisible();
   await expect(step(/^tracker · search · login bug/)).toBeVisible();
-  await expect(step(/^tracker · get_issue/)).toBeVisible();
+  const failedTracker = step(/^tracker · get_issue/);
+  await expect(failedTracker).toBeVisible();
+  await failedTracker.click();
   await expect(log.getByText('The tracker is not reachable.')).toBeVisible();
   await expect(step(/^Sub-agent reviewer/)).toBeVisible();
   await expect(step(/^Listed shared files/)).toBeVisible();
   await expect(step(/^custom_tool/)).toBeVisible();
   // A change to several files says what each came to.
+  await step(/^Edited 4 files/).click();
   await expect(log.getByText('src/new.ts', { exact: false }).first()).toBeVisible();
   await expect(log.getByText('This file is not text, so there is no difference to show.')).toBeVisible();
-  await expect(log.getByText('The model refused one request and the harness went on.')).toBeVisible();
+  await expect(log.locator('[data-item="err-1"]').getByRole('alert')).toContainText('The operation stopped before it finished. Retry it from its controls.');
 
   // Four requests that are a button wait, two that are more, and one was answered.
-  await expect(log.getByRole('button', { name: /^Allow once · / })).toHaveCount(4);
+  const approvals = pendingApprovals(page);
+  await expect(approvals.getByRole('button', { name: /^Allow once · / })).toHaveCount(4);
   for (const target of ['rm -rf build && npm run build', 'Change src/login.ts', 'More permissions', 'Something else the harness asks']) {
-    await expect(log.getByRole('button', { name: `Allow once · ${target}`, exact: true })).toBeVisible();
+    await expect(approvals.getByRole('button', { name: `Allow once · ${target}`, exact: true })).toBeVisible();
   }
-  await expect(log.getByRole('button', { name: /^Run npm install · Allow once by Grace Hopper/ })).toBeVisible();
+  await expect(log.getByRole('button', { name: /^Run npm install Allow once by Grace Hopper\b/u })).toBeVisible();
 
   // The beginning of it: the history lines, and a person's words with an image and a file.
-  await log.evaluate((element) => {
+  // The thread's controls and its virtual history share the scroll of the thread's screen.
+  await log.locator('xpath=ancestor::*[@data-screen="thread"][1]').evaluate((element) => {
     element.scrollTop = 0;
   });
   await expect(log.getByText('Look at these, then fix it:')).toBeVisible();
@@ -101,7 +108,7 @@ test('a conversation shorter than its window is drawn whole, from its first row 
 
 test('questions of the agent are answered in place, one option, several, and words of one’s own', async ({ page }) => {
   await open(page);
-  const card = conversation(page).getByRole('region', { name: 'The agent asks you' });
+  const card = pendingApprovals(page).getByRole('region', { name: 'The agent asks you' });
   await expect(card).toBeVisible();
   // Nothing is sent before every question has its answer.
   await expect(card.getByRole('button', { name: 'Send answers' })).toBeDisabled();
@@ -111,13 +118,13 @@ test('questions of the agent are answered in place, one option, several, and wor
   await card.getByRole('textbox', { name: 'Is there anything it should know?' }).fill('Use the existing helper');
   await expect(card.getByRole('button', { name: 'Send answers' })).toBeEnabled();
   await card.getByRole('button', { name: 'Send answers' }).click();
-  await expect(conversation(page).getByRole('button', { name: /^The agent asks you · Answered/ })).toBeVisible();
-  await expect(conversation(page).getByRole('region', { name: 'The agent asks you' })).toHaveCount(0);
+  await expect(conversation(page).getByRole('button', { name: /^The agent asks you.*Answered/ })).toBeVisible();
+  await expect(card).toHaveCount(0);
 });
 
 test('a form an MCP server asks for is filled in place and accepted', async ({ page }) => {
   await open(page);
-  const card = conversation(page).getByRole('region', { name: 'The tracker asks for details' });
+  const card = pendingApprovals(page).getByRole('region', { name: 'The tracker asks for details' });
   await expect(card).toBeVisible();
   await expect(card.getByText('The tracker needs a few details to file the issue.')).toBeVisible();
   // What it needs comes first: the answer cannot be sent without it.
@@ -127,29 +134,29 @@ test('a form an MCP server asks for is filled in place and accepted', async ({ p
   await page.getByRole('option', { name: 'high' }).click();
   await card.getByRole('checkbox', { name: 'Urgent' }).check();
   await card.getByRole('button', { name: 'Accept' }).click();
-  await expect(conversation(page).getByRole('region', { name: 'The tracker asks for details' })).toHaveCount(0);
+  await expect(card).toHaveCount(0);
   await expect(conversation(page).getByRole('button', { name: /^The tracker asks for details/ })).toBeVisible();
 });
 
 test('a form an MCP server asks for can be declined', async ({ page }) => {
   await open(page);
-  const card = conversation(page).getByRole('region', { name: 'The tracker asks for details' });
+  const card = pendingApprovals(page).getByRole('region', { name: 'The tracker asks for details' });
   await card.getByRole('button', { name: 'Decline' }).click();
-  await expect(conversation(page).getByRole('region', { name: 'The tracker asks for details' })).toHaveCount(0);
-  await expect(conversation(page).getByRole('button', { name: /^The tracker asks for details · Denied/ })).toBeVisible();
+  await expect(card).toHaveCount(0);
+  await expect(conversation(page).getByRole('button', { name: /^The tracker asks for details.*Denied/ })).toBeVisible();
 });
 
 test('a change to files and more permissions are decided with the options the harness gave', async ({ page }) => {
   await open(page);
-  const files = conversation(page).getByRole('region', { name: 'Change src/login.ts' });
+  const files = pendingApprovals(page).getByRole('region', { name: 'Change src/login.ts' });
   await expect(files).toBeVisible();
   await expect(files.getByRole('table', { name: /src\/login\.ts/ })).toContainText('return redirect(next ?? "/");');
   await files.getByRole('button', { name: 'Deny' }).click();
-  await expect(conversation(page).getByRole('button', { name: /^Change src\/login\.ts · Deny by Ada Lovelace/ })).toBeVisible();
+  await expect(conversation(page).getByRole('button', { name: /^Change src\/login\.ts.*Deny by Ada Lovelace/ })).toBeVisible();
 
-  const permissions = conversation(page).getByRole('region', { name: 'More permissions' });
+  const permissions = pendingApprovals(page).getByRole('region', { name: 'More permissions' });
   await expect(permissions).toBeVisible();
   await expect(permissions.getByText('To fetch packages')).toBeVisible();
   await permissions.getByRole('button', { name: 'Allow for this session' }).click();
-  await expect(conversation(page).getByRole('button', { name: /^More permissions · Allow for this session by Ada Lovelace/ })).toBeVisible();
+  await expect(conversation(page).getByRole('button', { name: /^More permissions.*Allow for this session by Ada Lovelace/ })).toBeVisible();
 });

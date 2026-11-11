@@ -137,6 +137,7 @@ impl System {
         );
         *self.enrolled.lock().unwrap() = Some((enrolled.machine_id, Arc::new(controller)));
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),
@@ -941,7 +942,7 @@ async fn the_program_enrolls_takes_its_limits_holds_a_session_hosts_a_turn_and_s
     step(began, "policy set, delegate and status done");
     assert!(status.contains("by-hand"), "{status}");
     assert!(
-        status.contains("Adapters     claude-code, codex, fake"),
+        status.contains("Adapters     claude-code, codex, dsh, fake"),
         "{status}"
     );
     assert!(
@@ -1280,3 +1281,6 @@ async fn local_http_enrollment_finishes_and_its_machine_uses_the_pinned_tls_gate
     }
     local_enrollment.abort();
 }
+
+#[path = "program/platform_observations.rs"]
+mod platform_observations;

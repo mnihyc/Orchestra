@@ -230,6 +230,54 @@
         },
         {
           "name": "ThreadStartParams.selectedCapabilityRoots"
+        },
+        {
+          "name": "hook/started"
+        },
+        {
+          "name": "hook/completed"
+        },
+        {
+          "name": "item/autoApprovalReview/started"
+        },
+        {
+          "name": "item/plan/delta"
+        },
+        {
+          "name": "mcpServer/startupStatus/updated"
+        },
+        {
+          "name": "model/rerouted"
+        },
+        {
+          "name": "thread/settings/updated"
+        },
+        {
+          "name": "thread/status/changed"
+        },
+        { "name": "thread/environment/connected" },
+        { "name": "thread/environment/disconnected" },
+        { "name": "model/safetyBuffering/updated" },
+        { "name": "thread/goal/updated" },
+        { "name": "thread/goal/cleared" },
+        { "name": "thread/goal/get" },
+        {
+          "name": "InitializeCapabilities.requiredHumanApproval"
+        },
+        {
+          "name": "InitializeCapabilities.explicitGatewayOauth"
+        },
+        {
+          "name": "CommandExecutionRequestApprovalParams.kind"
+        },
+        {
+          "name": "CommandExecutionRequestApprovalParams.networkApprovalContext"
+        },
+        {
+          "name": "CommandExecutionRequestApprovalParams.proposedExecpolicyAmendment"
+        },
+        {
+          "name": "CommandExecutionRequestApprovalParams.proposedNetworkPolicyAmendments"
         }
       ]
     },
@@ -240,6 +288,10 @@
       {
         "name": "command_approval",
         "feature": "approvals.command"
+      },
+      {
+        "name": "auto_review",
+        "feature": "approval_modes.auto"
       },
       {
         "name": "user_input",

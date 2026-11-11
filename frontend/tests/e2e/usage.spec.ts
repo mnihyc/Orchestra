@@ -20,6 +20,14 @@ const tile = (page: Page, name: 'Turns' | 'Tokens' | 'Credits') => page.getByRol
 
 const webUsage = `/usage?scope=node:${PLACES.web}`;
 
+async function chooseSpan(page: Page, name: string) {
+  const span = page.getByRole('combobox', { name: 'Span', exact: true });
+  if (await span.isVisible()) {
+    await span.click();
+    await page.getByRole('option', { name, exact: true }).click();
+  } else await page.getByRole('radio', { name, exact: true }).click();
+}
+
 test('a span is changed and every figure follows it', async ({ page }) => {
   await signIn(page);
   await page.goto('/usage');
@@ -31,7 +39,7 @@ test('a span is changed and every figure follows it', async ({ page }) => {
   await expect(tile(page, 'Credits')).toContainText('≈ 245.7 of them estimated');
   await expect(tile(page, 'Credits')).not.toContainText('without a rate');
 
-  await page.getByRole('radio', { name: '7 days', exact: true }).click();
+  await chooseSpan(page, '7 days');
   const week = sum(DAY.ada, 7);
   await expect(tile(page, 'Turns')).toContainText(String(week.turns));
   await expect(tile(page, 'Tokens')).toContainText('46.2M');
@@ -42,12 +50,14 @@ test('a span is changed and every figure follows it', async ({ page }) => {
   await expect(page).toHaveURL(/range=7d/);
 
   // This year counts the days of the year so far; all time reaches back to the first turn the ledger holds.
-  await page.getByRole('radio', { name: 'This year', exact: true }).click();
+  await chooseSpan(page, 'This year');
   const year = Math.min(dayOfYear(), 120);
   await expect(tile(page, 'Turns')).toContainText(String(DAY.ada.turns * year));
-  await page.getByRole('radio', { name: 'All time', exact: true }).click();
+  await chooseSpan(page, 'All time');
   await expect(tile(page, 'Turns')).toContainText(String(DAY.ada.turns * 120));
-  await expect(page.getByRole('radio', { name: 'All time', exact: true })).toBeChecked();
+  const span = page.getByRole('combobox', { name: 'Span', exact: true });
+  if (await span.isVisible()) await expect(span).toHaveText('All time');
+  else await expect(page.getByRole('radio', { name: 'All time', exact: true })).toBeChecked();
   await expect(page.getByText('Days use UTC',{exact:true})).toHaveCount(1);
 });
 

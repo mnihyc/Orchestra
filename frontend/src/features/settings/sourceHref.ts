@@ -8,9 +8,9 @@ export function sourceSettingHref(source: SettingSource, def: Pick<SettingDef, '
   if (node !== null) {
     if (node.redacted || node.name === null) return null;
     switch (node.kind) {
-      case 'org': return orgAddress === undefined ? null : `/org/${encodeURIComponent(orgAddress)}/settings/policies?${query}`;
-      case 'project': return `/project/${node.id}/settings?section=policies&${query}`;
-      case 'topic': return `/topic/${node.id}?tab=settings&section=policies&${query}`;
+      case 'org': return orgAddress === undefined ? null : `/org/${encodeURIComponent(orgAddress)}/settings/defaults?${query}`;
+      case 'project': return `/project/${node.id}/settings?section=defaults&${query}`;
+      case 'topic': return `/topic/${node.id}?tab=settings&section=defaults&${query}`;
       case 'thread': return `/thread/${node.id}?${query}`;
     }
   }

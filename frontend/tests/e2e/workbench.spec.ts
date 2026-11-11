@@ -27,7 +27,7 @@ async function openAcme(page: Page): Promise<void> {
   await page.goto('/org/ada');
   await page.waitForLoadState('networkidle');
   await rail(page).getByRole('link', { name: 'Acme' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(tree(page).getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
 }
 
@@ -91,7 +91,7 @@ test('a token that ended is renewed behind the reader, who goes on as if nothing
   await rail(page).getByRole('link', { name: 'Acme' }).click();
   expect((await renewed).status()).toBe(200);
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(tree(page).getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
 });
 
@@ -289,7 +289,7 @@ test('a small screen shows one thing at a time: the screen, the navigation as a 
 
   // Another view of the topic opens as a sheet over it.
   await page.locator('[data-narrow-containers]').getByRole('button', { name: 'Team', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Team', exact: true }).getByText('No messages yet. Say something to the people on this topic.')).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Team', exact: true }).getByText('Say something to the people on this topic.', { exact: true })).toBeVisible();
 });
 
 async function openAcmeSmall(page: Page): Promise<void> {
