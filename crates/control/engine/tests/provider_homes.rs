@@ -8,7 +8,7 @@ mod common;
 mod hosting;
 mod runtimes;
 
-use common::World;
+use common::{World, eventually};
 use hosting::{ScriptedHost, serve, wait_over};
 use orch_api_contract::environment::UpdatePreflightReason;
 use orch_authz::{Caller, Principal};
@@ -80,7 +80,7 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
     serve(&world);
     let host = ScriptedHost::on(&world, "Home host", 16384).await;
     let provider = borrowed(&world, &host).await;
-    let (old, _unit) = runtimes::made(&world, &host, provider).await;
+    let (old, original) = runtimes::made(&world, &host, provider).await;
     let first = host
         .calls()
         .into_iter()
@@ -96,6 +96,10 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
         1,
         "only private state is allocated; the borrowed directory is never created or chowned"
     );
+    // Keep the observed sign-in state from before the runtime is stopped.
+    let status = provider_status(&world, provider).await;
+    let stopped_before = host.began(K::NodeRuntimeStop);
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
     let mut tx = world.pool.begin().await.unwrap();
     let principal = Principal::load(
         &mut tx,
@@ -117,18 +121,93 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
         .unwrap();
     assert!(draft.blockers.is_empty(), "{:?}", draft.blockers);
     assert!(draft.recipe.data_sources.is_none());
+    assert_eq!(
+        draft.recipe.old_facts["provider_status"].as_str(),
+        Some(status.as_str())
+    );
     let job = orch_engine::jobs::recreate::queue(&mut tx, draft, None, world.clock.now())
         .await
         .unwrap();
     tx.commit().await.unwrap();
     world.engine().kick();
+    host.wait_began(K::NodeRuntimeStop, stopped_before + 1)
+        .await;
+    // A successful native stop means the old unit's peer has joined, not merely that its row changed.
+    original.added.machine.link.shutdown().await;
+    eventually("the stopped old connector is offline", || async {
+        !world
+            .scalar::<bool>("SELECT online FROM machines WHERE id=$1", original.id)
+            .await
+    })
+    .await;
+    host.added.machine.handler.release();
     host.wait_for(K::NodeRuntimeStart, 2).await;
     let next = host.started().unwrap();
-    let status = provider_status(&world, provider).await;
-    let candidate = runtimes::enrol(&world, next).await;
-    answers_refresh(&candidate, status);
+    let candidate =
+        runtimes::enrol_with(&world, next, |candidate| answers_refresh(candidate, status)).await;
     let (state, _, error) = wait_over(&world, job.id).await;
+    if state != "succeeded" {
+        let verify = orch_engine::ids::derived("provider.refresh", &[job.id.as_bytes()]);
+        let bindings: orch_types::Json = sqlx::query_scalar(
+            "SELECT jsonb_build_object('job_runtime',j.plan->'runtime',
+                'runtimes',(SELECT jsonb_agg(jsonb_build_object('runtime_id',r.id,
+                    'machine_id',r.machine_id,'state',r.state)) FROM runtimes r
+                    WHERE r.id=$2 OR r.id=$3 OR r.id::text=j.plan->>'runtime'))
+                FROM jobs j WHERE j.id=$1",
+        )
+        .bind(job.id)
+        .bind(old)
+        .bind(next)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        eprintln!("provider-home-verify bindings={bindings}");
+        eprintln!(
+            "provider-home-verify job={} provider={} old_runtime={} candidate_runtime={} old_machine={} candidate_machine={} primary_machine={} host_machine={} host_refresh_runs={} expected_command={}",
+            job.id,
+            provider,
+            old,
+            next,
+            original.id,
+            candidate.id,
+            world.machine_id,
+            host.machine,
+            host.began(K::ProviderRefresh),
+            verify
+        );
+        let issued: Vec<_> = world
+            .commands
+            .issued_commands("provider.refresh")
+            .into_iter()
+            .map(|(machine, command)| {
+                json!({"command_id":command.id,"machine_id":machine,"key":command.key,
+                    "provider_id":command.body.get("provider_id"),"is_verify":command.id==verify})
+            })
+            .collect();
+        eprintln!("provider-home-verify issued={}", json!(issued));
+        for (name, machine) in [
+            ("original", &original.added.machine),
+            ("candidate", &candidate.added.machine),
+            ("primary", &world.machine),
+            ("host", &host.added.machine),
+        ] {
+            let executed: Vec<_> = machine
+                .handler
+                .executions()
+                .into_iter()
+                .filter(|run| run.kind == K::ProviderRefresh)
+                .map(|run| json!({"command_id":run.id,"is_verify":run.id==verify}))
+                .collect();
+            eprintln!(
+                "provider-home-verify executed_on={name} commands={}",
+                json!(executed)
+            );
+        }
+    }
     assert_eq!(state, "succeeded", "{error:?}");
+    let verify = orch_engine::ids::derived("provider.refresh", &[job.id.as_bytes()]);
+    assert_eq!(original.added.machine.handler.runs_of(verify), 0);
+    assert_eq!(candidate.added.machine.handler.runs_of(verify), 1);
     let mut conn = world.pool.acquire().await.unwrap();
     let replacement = rows::runtime(&mut conn, next).await.unwrap().unwrap();
     let original = rows::runtime(&mut conn, old).await.unwrap().unwrap();
@@ -254,8 +333,8 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
     target.wait_for(K::NodeRuntimeStart, 1).await;
     let next = target.started().unwrap();
     let status = provider_status(&world, provider).await;
-    let candidate = runtimes::enrol(&world, next).await;
-    answers_refresh(&candidate, status);
+    let _candidate =
+        runtimes::enrol_with(&world, next, |candidate| answers_refresh(candidate, status)).await;
     let (state, _, error) = wait_over(&world, job.id).await;
     assert_eq!(state, "succeeded", "{error:?}");
     let kinds = target.kinds();

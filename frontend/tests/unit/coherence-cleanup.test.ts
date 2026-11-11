@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyChanges, findAct, followWith, resourceChanges, userEventChanges } from '@/api/acts';
 import { ApiError, type Act } from '@/api/client';
 import { namesKey } from '@/api/search';
-import type { NameHit, ResolvedSetting, Thread } from '@/generated/api-types';
-import { ACME } from '../doubles/fixtures';
+import type { NameHit, ResolvedSetting, RoleHeld, Thread } from '@/generated/api-types';
+import { ACME, me, userRef } from '../doubles/fixtures';
 import { World } from '../doubles/world';
 
 let cache: QueryClient;
@@ -37,10 +37,115 @@ function setting(key: string, value: unknown): ResolvedSetting {
   return { key, value, own: null, source: { scope: 'system', node: null }, locked_by: null, writable: true, parts: [] };
 }
 
-const visited: NameHit = { id: 'topic-one', kind: 'topic', name: 'Fix login', path: [], recent: true, archived: false,
+const visited: NameHit = { home_path: [], id: 'topic-one', kind: 'topic', name: 'Fix login', path: [], recent: true, archived: false,
   address: null, avatar: null, owner: null, username: null, color: null, custom_color: null, tag: null, thread_attention: null };
 
 describe('the registry replaces the last screen refreshes', () => {
+  it.each([
+    ['PUT', '/me/favorites/topic-one'], ['DELETE', '/me/favorites/topic-one'],
+    ['PUT', '/me/favorites/provider/provider-one'], ['DELETE', '/me/favorites/provider/provider-one'],
+  ])('repairs displayed favorite and name projections after bodyless %s %s', async (method, path) => {
+    const hit: NameHit = path.includes('/provider/') ? { ...visited, kind: 'provider', id: 'provider-one', name: 'Team' } : visited;
+    const empty = namesKey({ kinds: [hit.kind], q: '', orgId: 'org-one' });
+    const typed = namesKey({ kinds: [hit.kind], q: hit.name, orgId: 'org-one' });
+    const starred = namesKey({ kinds: [hit.kind], q: '', starred: true, orgId: 'org-one' });
+    const inactive = namesKey({ kinds: [hit.kind], q: 'old', orgId: 'org-one' });
+    const before = { items: [{ ...hit, starred: method === 'DELETE' }], partial: false };
+    const after = { items: [{ ...hit, starred: method === 'PUT' }], partial: false };
+    const acceptedFavorites = method === 'PUT' ? [{ id: hit.id }] : [];
+    const favorites = await watch(['favorites'], method === 'DELETE' ? [{ id: hit.id }] : []);
+    const recent = await watch(empty, before), search = await watch(typed, before), saved = await watch(starred, before);
+    const detail = await watch(['provider', 'provider-one'], { id: 'provider-one', name: 'Team' });
+    cache.setQueryData(inactive, before);
+    favorites.mockResolvedValue(acceptedFavorites);
+    for (const read of [recent, search, saved]) read.mockResolvedValue(after);
+    await acted(method, path);
+    expect(cache.getQueryData(['favorites'])).toEqual(acceptedFavorites);
+    for (const key of [empty, typed, starred]) expect(cache.getQueryData(key)).toEqual(after);
+    for (const read of [favorites, recent, search, saved]) expect(read).toHaveBeenCalledTimes(2);
+    expect(cache.getQueryData(inactive)).toBeUndefined();
+    expect(detail).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs only the adopted session source while retaining the accepted native thread', async () => {
+    const world = new World();
+    const person = world.people.get('ada');
+    const source = world.places.rowOf(ACME.mainThread);
+    if (person === undefined || source === undefined) throw new Error('The complete thread fixture is missing');
+    const thread: Thread = { ...world.threads.thread(person, source), id: 'adopted-thread', name: 'Adopted session' };
+    const session = { native_session_ref: 'native-one', title: 'Saved session', cwd: '/work', updated_at: null, adopted_thread_id: null };
+    const sessions = await watch(['harness-sessions', 'provider-one', 'agent-one'], [session]);
+    const otherAgent = await watch(['harness-sessions', 'provider-one', 'agent-two'], [session]);
+    const otherProvider = await watch(['harness-sessions', 'provider-two', 'agent-one'], [session]);
+    sessions.mockResolvedValue([{ ...session, adopted_thread_id: thread.id }]);
+    await acted('POST', '/topics/topic-one/threads/adopt', { input: { provider_id: 'provider-one', agent_id: 'agent-one', native_session_ref: session.native_session_ref }, answer: thread });
+    // The accepted thread seeds its node detail before a conversation is opened.
+    expect(cache.getQueryData(['node', thread.id])).toEqual(thread);
+    expect(cache.getQueryData(['harness-sessions', 'provider-one', 'agent-one'])).toEqual([{ ...session, adopted_thread_id: thread.id }]);
+    expect(sessions).toHaveBeenCalledTimes(2);
+    expect(otherAgent).toHaveBeenCalledTimes(1); expect(otherProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it('repairs only permission pages that depend on the changed typed object', async () => {
+    const object = { id: 'provider-one', kind: 'provider', name: 'Provider' };
+    const before = { depends: [{ object, open: 'none' }] };
+    const after = { depends: [{ object, open: 'all' }] };
+    const read = await watch(['page', 'nodes', 'thread-one'], before);
+    const another = await watch(['page', 'nodes', 'thread-two'], before);
+    const unrelated = await watch(['page', 'nodes', 'unrelated'], { depends: [{ object: { ...object, kind: 'environment' }, open: 'none' }] });
+    const target = await watch(['page', 'providers', object.id], { object, rows: [] });
+    cache.setQueryData(['page', 'nodes', 'inactive'], before);
+    read.mockResolvedValue(after); another.mockResolvedValue(after);
+    await acted('PATCH', `/providers/${object.id}/permissions`, { answer: { object, rows: [] } });
+    expect(cache.getQueryData(['page', 'nodes', 'thread-one'])).toEqual(after);
+    expect(cache.getQueryData(['page', 'nodes', 'thread-two'])).toEqual(after);
+    expect(cache.getQueryData(['page', 'nodes', 'inactive'])).toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(2); expect(another).toHaveBeenCalledTimes(2);
+    expect(unrelated).toHaveBeenCalledTimes(1); expect(target).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a dependency reference kind when a resource subtype updates its name', async () => {
+    const reference = { kind: 'provider', id: 'provider-one', name: 'Before' };
+    const page = { depends: [{ object: reference, permission: 'provider.use' }] };
+    cache.setQueryData(['page', 'nodes', 'thread-one'], page);
+    const provider = { id: reference.id, kind: 'api', name: 'After', access: { permissions: ['provider.view', 'provider.use'] } };
+    await applyChanges([{ row: { kind: 'provider', id: reference.id, value: provider } }], cache);
+    expect(cache.getQueryData(['page', 'nodes', 'thread-one'])).toEqual({
+      depends: [{ object: { ...reference, name: 'After' }, permission: 'provider.use' }],
+    });
+    expect(cache.getQueryData(['provider', reference.id])).toEqual(provider);
+  });
+
+  it('keeps created, edited and removed roles coherent in their own and inherited lists without another read', async () => {
+    const person = userRef(me(1, 'ada', 'Ada'));
+    const role: RoleHeld = { id: 'role-one', node: { id: 'web', kind: 'project', name: 'Web', redacted: false },
+      subject: { kind: 'user', id: person.id, user: person }, role: 'viewer', revision: 1, domain: false, outside: false,
+      expires_at: null, note: '', created_by: person, created_at: '2026-10-01T09:00:00.000Z' };
+    const empty = { owners: [{ kind: 'user', user: person }], own: [], above: [], can_give: ['viewer', 'developer'] };
+    const ownRead = await watch(['roles', 'web'], empty);
+    const inheritedRead = await watch(['roles', 'topic'], empty);
+    const otherRead = await watch(['roles', 'other'], empty);
+    await acted('POST', '/nodes/web/roles', { answer: role });
+    expect(cache.getQueryData(['roles', 'web'])).toEqual({ ...empty, own: [role] });
+    expect(cache.getQueryData(['roles', 'other'])).toEqual(empty);
+
+    cache.setQueryData(['roles', 'topic'], { ...empty, above: [role] });
+    const edited: RoleHeld = { ...role, role: 'developer', revision: 2 };
+    await acted('PATCH', '/roles/role-one', { answer: edited });
+    expect(cache.getQueryData(['roles', 'web'])).toEqual({ ...empty, own: [edited] });
+    expect(cache.getQueryData(['roles', 'topic'])).toEqual({ ...empty, above: [edited] });
+    const dated: RoleHeld = { ...edited, expires_at: '2026-12-01T00:00:00.000Z', revision: 3 };
+    await acted('PATCH', '/roles/role-one', { answer: dated });
+    expect(cache.getQueryData(['roles', 'web'])).toEqual({ ...empty, own: [dated] });
+    expect(cache.getQueryData(['roles', 'topic'])).toEqual({ ...empty, above: [dated] });
+
+    await acted('DELETE', '/roles/role-one');
+    expect(cache.getQueryData(['roles', 'web'])).toEqual(empty);
+    expect(cache.getQueryData(['roles', 'topic'])).toEqual(empty);
+    expect(cache.getQueryData(['roles', 'other'])).toEqual(empty);
+    for (const read of [ownRead, inheritedRead, otherRead]) expect(read).toHaveBeenCalledTimes(1);
+  });
+
   it('a visit starts no lookup, while native recents update without changing the held empty or typed finder', async () => {
     const recent = ['recents'];
     const empty = namesKey({ kinds: ['org', 'topic'], q: '' });

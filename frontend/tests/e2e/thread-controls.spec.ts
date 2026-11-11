@@ -1,9 +1,9 @@
 /** The compact header and full composer row at desktop and phone widths, with native-mode choices and references that wait in the draft. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
-import type { ThreadSync } from '../../src/generated/api-types';
+import type { ThreadOpening } from '../../src/generated/api-types';
 
 import { begin } from './inspector-support.ts';
-import { ACME, emit, PEOPLE, playScene, signIn, threadHeld } from './support.ts';
+import { ACME, emit, PEOPLE, playScene, replySent, signIn, threadHeld } from './support.ts';
 import { turn } from '../doubles/thread-rows.ts';
 
 const MAIN = ACME.mainThread;
@@ -57,45 +57,43 @@ for (const width of [1280, 1440, 390, 400]) {
     await page.setViewportSize({ width, height: 900 });
     await open(page);
     const header = page.locator('[data-thread-header]');
-    const quick = header.getByRole('group', { name: 'Thread actions', exact: true });
-    for (const button of await quick.getByRole('button').all()) {
-      const rect = await bounds(button);
-      const frame = await bounds(header);
-      // Frequent acts are icons on one compact row, including on the phone.
-      expect(rect.height).toBeLessThanOrEqual(29);
-      expect(rect.x).toBeGreaterThanOrEqual(frame.x - 1);
-      expect(rect.x + rect.width).toBeLessThanOrEqual(Math.min(width, frame.x + frame.width) + 1);
-    }
-    const title = await bounds(header.getByRole('heading', { name: 'Main thread' }));
+    const quick = header.locator('[data-thread-quick-actions]');
+    const actionsMode = await header.getAttribute('data-thread-actions-mode');
+    const frame = await bounds(header), title = await bounds(header.getByRole('heading', { name: 'Main thread' }));
     const state = await bounds(header.getByText('Idle', { exact: true }));
-    expect(state.x).toBeGreaterThanOrEqual(title.x + title.width);
+    expect(state.x).toBeGreaterThanOrEqual(frame.x); expect(state.x + state.width).toBeLessThanOrEqual(frame.x + frame.width);
     const actionRow = await bounds(header.locator('[data-thread-actions-row]'));
     if (width < 640) expect(actionRow.y).toBeGreaterThanOrEqual(title.y + title.height);
-    const actionCenters: number[] = [];
-    // Fractional text metrics and icon-button padding may round differently by a pixel.
-    for (const action of ['Star', 'Notifications for this thread', 'Share', 'Actions for Main thread']) {
-      const button = await bounds(header.getByRole('button', { name: action, exact: true }));
-      actionCenters.push(button.y + button.height / 2);
-      if (width >= 640) expect(Math.abs(button.y + button.height / 2 - state.y - state.height / 2)).toBeLessThanOrEqual(2);
-      expect(button.x + button.width).toBeLessThanOrEqual(width);
+    const frequent = ['Duplicate', 'Duplicate to…', 'Side thread…', 'Switch provider or agent…', 'Find in the conversation'];
+    if (actionsMode === 'all') {
+      for (const name of frequent) {
+        const button = quick.getByRole('button', { name, exact: true }), rect = await bounds(button);
+        expect(rect.height).toBeLessThanOrEqual(29); expect(rect.x).toBeGreaterThanOrEqual(frame.x - 1);
+        expect(rect.x + rect.width).toBeLessThanOrEqual(Math.min(width, frame.x + frame.width) + 1); await expect(button).toHaveText('');
+      }
+    } else {
+      await expect(quick).not.toBeVisible(); await header.locator('[data-thread-more]').click();
+      for (const name of frequent) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(1);
+      await page.keyboard.press('Escape');
     }
-    for (const name of ['Fork', 'Fork to…', 'Ask on the side…', 'Switch provider or agent…', 'Find in the conversation']) {
-      const button = quick.getByRole('button', { name, exact: true });
-      const rect = await bounds(button);
-      actionCenters.push(rect.y + rect.height / 2);
-      await expect(button).toHaveText('');
+    const actionCenters: number[] = [];
+    for (const action of ['Star', 'Notifications for this thread', 'Share thread', 'Actions for Main thread']) {
+      if (actionsMode === 'menu' && action !== 'Actions for Main thread') continue;
+      const button = await bounds(header.getByRole('button', { name: action, exact: true }));
+      actionCenters.push(button.y + button.height / 2); expect(button.x + button.width).toBeLessThanOrEqual(width);
     }
     expect(Math.max(...actionCenters) - Math.min(...actionCenters)).toBeLessThanOrEqual(2);
     await expect(header.getByText('Add a description')).toHaveCount(0);
     await expect(header.getByRole('button', { name: /Model and effort|Approval mode|Show what fills the context|Edit links/ })).toHaveCount(0);
     const row = controls(page);
-    const names = await row.getByRole('button').evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label') ?? button.textContent.trim()));
-    expect(names[0]).toBe('Add to message');
-    expect(names[1]).toMatch(/^Agent:/);
-    expect(names[2]).toMatch(/^Model and effort:/);
-    expect(names[3]).toBe('Approval mode: On request');
-    expect(names[4]).toMatch(/^Show what fills the context/);
-    expect(names.slice(5)).toEqual(['Send', 'More ways to send']);
+    const order = await row.locator('[data-composer-control]').evaluateAll((items) => items.map((item) => item.getAttribute('data-composer-control')));
+    expect(order.slice(0, 5)).toEqual(['attach', 'agent', 'model', 'mode', 'sandbox']);
+    expect(order.slice(-2)).toEqual(['context', 'send']);
+    await expect(row.getByRole('button', { name: /^Agent:/ })).toBeVisible();
+    await expect(row.locator('[data-composer-control="model"]').getByRole('button', { name: /^Model and effort:/ })).toBeVisible();
+    await expect(row.locator('[data-composer-control="sandbox"]').getByRole('button')).toBeVisible();
+    expect(await row.locator('[data-composer-control="send"]').getByRole('button').allTextContents()).toEqual(['Send', '']);
+    await expect(row.getByRole('button', { name: 'More ways to send' })).toBeVisible();
     const add = await bounds(row.getByRole('button', { name: 'Add to message' }));
     const mode = await bounds(row.getByRole('button', { name: 'Approval mode: On request' }));
     const ring = await bounds(row.getByRole('button', { name: /^Show what fills the context/ }));
@@ -110,8 +108,10 @@ for (const width of [1280, 1440, 390, 400]) {
     expect(send.y + send.height).toBeLessThanOrEqual(rowBox.y + rowBox.height + 1);
     expect(send.y + send.height).toBeLessThanOrEqual(900);
     expect(send.x).toBeGreaterThanOrEqual(rowBox.x);
-    expect(Math.abs(add.y - send.y)).toBeLessThanOrEqual(1);
-    expect(Math.abs(mode.y + mode.height / 2 - send.y - send.height / 2)).toBeLessThanOrEqual(2);
+    for (const control of [add, mode, ring, send, more]) {
+      expect(control.x).toBeGreaterThanOrEqual(rowBox.x - 1); expect(control.x + control.width).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1);
+      expect(control.y).toBeGreaterThanOrEqual(rowBox.y - 1); expect(control.y + control.height).toBeLessThanOrEqual(rowBox.y + rowBox.height + 1);
+    }
     await expect(box(page)).toHaveCSS('resize', 'none');
     if (width < 640) await expect(page.locator('[data-mobile-main] + nav')).toHaveCount(0);
     await expect(row.getByRole('button', { name: 'Send', exact: true })).toBeDisabled();
@@ -129,11 +129,14 @@ for (const width of [1440, 400]) {
     const stop = await bounds(row.getByRole('button', { name: 'Stop', exact: true }));
     const mode = await bounds(row.getByRole('button', { name: 'Approval mode: On request' }));
     const more = await bounds(row.getByRole('button', { name: 'More ways to send' }));
+    const rowBox = await bounds(row);
     expect(stop.height).toBe(mode.height);
     expect(more.height).toBe(mode.height);
     expect(more.x + more.width).toBeLessThanOrEqual(width);
     expect(stop.y + stop.height).toBeLessThanOrEqual(900);
-    expect(Math.abs(stop.y - mode.y)).toBeLessThanOrEqual(1);
+    // Controls wrap to the pane width while the delivery buttons stay together at the end.
+    expect(Math.abs(stop.y - more.y)).toBeLessThanOrEqual(1);
+    expect(Math.abs(more.x + more.width - rowBox.x - rowBox.width)).toBeLessThanOrEqual(1);
     await row.getByRole('button', { name: 'More ways to send' }).click();
     await expect(page.getByRole('menuitem', { name: /^Queue/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /^Steer now/ })).toBeVisible();
@@ -167,7 +170,7 @@ for (const width of [1440, 400]) {
   });
 }
 
-test('at 400 px a long title keeps every word beside its state, above one action row', async ({ page }) => {
+test('at 400 px a long title keeps every word above its state and actions', async ({ page }) => {
   await page.setViewportSize({ width: 400, height: 900 });
   await open(page);
   const name = 'New thread about the release and the final provider review';
@@ -178,19 +181,18 @@ test('at 400 px a long title keeps every word beside its state, above one action
   const title = await bounds(heading);
   const state = await bounds(header.getByText('Idle', { exact: true }));
   expect(title.x + title.width).toBeLessThanOrEqual(400);
-  expect(state.x).toBeGreaterThanOrEqual(title.x + title.width);
+  expect(state.y).toBeGreaterThanOrEqual(title.y + title.height);
   expect((await bounds(header.locator('[data-thread-actions-row]'))).y).toBeGreaterThanOrEqual(title.y + title.height);
-  await expect(header.getByRole('button', { name: 'Share', exact: true })).toBeVisible();
+  await expect(header.getByRole('button', { name: 'Share thread', exact: true })).toBeVisible();
   await header.getByRole('button', { name: /Rename/ }).click();
   await expect(header.getByRole('textbox')).toHaveValue(name);
 });
 
 test('at 400 px full agent and long model names stay available without enlarging Send’s row', async ({ page }) => {
   await page.setViewportSize({ width: 400, height: 900 });
+  const opening = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/threads/${MAIN}/opening` && response.ok());
   await open(page);
-  const response = await page.request.get(`/api/v1/threads/${MAIN}/sync`);
-  expect(response.ok()).toBe(true);
-  const { thread } = await response.json() as ThreadSync;
+  const { sync: { thread } } = await replySent(await opening) as ThreadOpening;
   if (thread.binding === null) throw new Error('The main fixture needs its real agent binding');
   const agent = 'Scripted agent for the release review';
   const model = 'Mock Large reasoning model for release work';
@@ -203,8 +205,11 @@ test('at 400 px full agent and long model names stay available without enlarging
   await expect(page.getByRole('tooltip')).toContainText(agent);
   await agentButton.focus();
   await expect(page.getByRole('tooltip')).toContainText(agent);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('tooltip')).toHaveCount(0);
   const modelButton = row.getByRole('button', { name: /^Model and effort: Mock Large reasoning model for release work/ });
   await expect(modelButton).toContainText(model);
+  await modelButton.scrollIntoViewIfNeeded();
   await modelButton.hover();
   await expect(page.getByRole('tooltip')).toContainText(model);
   await modelButton.focus();
@@ -219,8 +224,9 @@ test('at 400 px full agent and long model names stay available without enlarging
   await expect(send).toBeEnabled();
   const sendBox = await bounds(send);
   expect(sendBox.height).toBe((await bounds(modelButton)).height);
-  expect(sendBox.height).toBe((await bounds(agentButton)).height);
-  expect(Math.abs(sendBox.y - (await bounds(modelButton)).y)).toBeLessThanOrEqual(1);
+  // The compact agent control can wrap its name and provider while Send stays an ordinary control.
+  expect(sendBox.height).toBe((await bounds(row.getByRole('button', { name: /^Approval mode:/ }))).height);
+  expect(Math.abs(sendBox.y - (await bounds(row.getByRole('button', { name: 'More ways to send', exact: true }))).y)).toBeLessThanOrEqual(1);
   expect(sendBox.y + sendBox.height).toBeLessThanOrEqual(900);
 });
 
@@ -285,9 +291,9 @@ test('the composer approval picker changes the displayed native mode without inv
   await open(page);
   await controls(page).getByRole('button', { name: 'Approval mode: On request' }).click();
   const modes = page.getByRole('dialog', { name: 'Approval mode', exact: true });
-  await expect(modes.getByRole('button', { name: 'Ask', exact: true })).toBeEnabled();
+  await expect(modes.getByRole('button', { name: 'Start side thread', exact: true })).toBeEnabled();
   await expect(modes.getByRole('button', { name: 'Auto', exact: true })).toHaveCount(0);
-  await modes.getByRole('button', { name: 'Ask', exact: true }).click();
+  await modes.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(controls(page).getByRole('button', { name: 'Approval mode: Ask' })).toBeVisible();
   expect((await threadHeld(MAIN)).inputs).toHaveLength(0);
 });

@@ -3,6 +3,7 @@ import { useMatches, useRouter, useRouterState } from '@tanstack/react-router';
 import { useLayoutEffect, useReducer, useRef } from 'react';
 import { useStore } from 'zustand';
 import { client } from '@/api/client';
+import { useNodeLabel } from '@/features/navigation/placeLabels';
 import { usePageTitle } from '@/lib/title';
 import { focusScreenHeading, useCurrentHeading } from '@/shell/screen';
 import { allTabs, findTab, mapGroups, setTabTarget } from './layout';
@@ -25,7 +26,7 @@ export function PageRouting({ ready, onAddressed }: { ready: boolean; onAddresse
   const resolving = useRef<string | null>(null);
   const [resolvedVisit, reconsiderFocus] = useReducer((version: number) => version + 1, 0);
   const heading = useCurrentHeading();
-  usePageTitle(heading?.title);
+  usePageTitle(useNodeLabel(heading?.nodeId, heading?.title));
   useLayoutEffect(() => focusScreenHeading(active), [active]);
   useLayoutEffect(() => bindContentNavigation((owner, href, replace) => {
     const state = useWorkbench.getState(), tab = findTab(state.layout, owner)?.tab;

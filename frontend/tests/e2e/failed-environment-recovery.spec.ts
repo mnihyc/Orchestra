@@ -55,7 +55,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await dialog.getByRole('combobox', { name: words.change.where.label, exact: true }).click();
       await page.getByRole('option', { name: words.changeCompact.destination.use, exact: true }).click();
       await dialog.getByRole('combobox', { name: words.change.where.another, exact: true }).click();
-      await page.getByRole('option', { name: /Acme workspace/ }).click();
+      await dialog.getByRole('combobox', { name: words.change.where.another, exact: true }).fill('Workspace');
+      await page.getByRole('option', { name: /^Workspace\b/ }).click();
       // Explicitly choose not to copy from the failed setup in the reviewed plan.
       await dialog.getByRole('radio', { name: words.changeCompact.files.none, exact: true }).click();
       const confirm = dialog.getByRole('button', { name: words.change.confirm.switch, exact: true });

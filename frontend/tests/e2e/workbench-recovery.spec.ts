@@ -36,9 +36,9 @@ for (const theme of ['light', 'dark'] as const) test(`a cold main Chat retains i
   await page.getByRole('menuitem', { name: 'Main area', exact: true }).press('Enter');
   const tabs = page.getByRole('tablist', { name: 'Main area', exact: true });
   const movedChat = tabs.getByRole('tab', { name: /^Chat · Main thread(?: · Fix login)?$/ });
-  const conversation = tabs.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ });
+  const conversation = tabs.getByRole('tab', { name: /^Running Main thread(?: · Fix login)?$/ });
   await expect(movedChat).toHaveAttribute('aria-selected', 'true');
-  await expect(conversation.locator('svg.lucide-message-square-text')).toBeVisible();
+  await expect(conversation.getByRole('img', { name: 'Running', exact: true })).toBeVisible();
   const chatIdentity = await movedChat.getAttribute('id'), threadIdentity = await conversation.getAttribute('id');
   if (chatIdentity === null || threadIdentity === null) throw new Error('The actual view tabs must have stable identities');
   // Wait for the existing layout debounce, rather than injecting a layout into storage.
@@ -106,9 +106,13 @@ for (const theme of ['light', 'dark'] as const) test(`agent replies use compact 
   const message = page.locator('[data-item="compact-answer"]').getByText('The release investigation is complete.', { exact: true });
   await expect(message).toBeVisible();
   const footer = page.locator('[data-footer="compact-turn"]');
-  const select = footer.getByRole('button', { name: 'Select this turn', exact: true });
-  await expect(select).toBeVisible();
-  await expect(select).toHaveText('');
+  const actions = footer.getByRole('button', { name: 'More turn actions', exact: true });
+  await expect(actions).toBeVisible();
+  await expect(actions).toHaveText('');
+  await actions.click();
+  await expect(page.getByRole('menuitem', { name: 'Select this turn', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
   await message.click({ button: 'right' });
   await expect(page.getByRole('menuitem', { name: 'Select this turn', exact: true })).toBeVisible();
   await capture(page, info, `agent-context-${theme}`);

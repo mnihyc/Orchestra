@@ -17,7 +17,7 @@ test('a message sent in a topic’s chat is seen by a second reader as it arrive
   await signIn(page);
   await page.goto(TOPIC);
   await expect(page.getByRole('radiogroup', { name: 'Chats of this place' })).toBeVisible();
-  await expect(page.getByText('No messages yet. Say something to the people on this topic.')).toBeVisible();
+  await expect(page.getByText('Say something to the people on this topic.', { exact: true })).toBeVisible();
 
   const second = await secondReader(browser, baseURL, TOPIC);
   await sendMessage(page, 'The session ends after ten minutes.');
@@ -110,7 +110,8 @@ test('a message is pinned for everybody, listed under Pinned, and unpinned again
 
   await openMessageMenu(page, 'The staging box is rebuilt every night');
   await page.getByRole('menuitem', { name: 'Pin', exact: true }).click();
-  await expect(messageSaying(second.page, 'The staging box is rebuilt every night')).toContainText('Pinned by Ada Lovelace');
+  // Who pinned it is their chip after the words, with the avatar's initial in its text.
+  await expect(messageSaying(second.page, 'The staging box is rebuilt every night')).toContainText(/Pinned by\s*\S?Ada Lovelace/);
 
   await second.page.getByRole('button', { name: 'Pinned messages' }).click();
   await expect(second.page.getByRole('dialog', { name: 'Pinned messages' }).getByText('The staging box is rebuilt every night')).toBeVisible();
@@ -132,7 +133,13 @@ test('a reply shows the first line of what it answers, and pressing that goes ba
 
   await openMessageMenu(second.page, 'Which environment does it run in?');
   await second.page.getByRole('menuitem', { name: 'Reply' }).click();
-  await expect(second.page.getByText('Replying to Ada Lovelace')).toBeVisible();
+  // The line above the box names whom it answers by their chip, and can be put away.
+  const cancelReply = second.page.getByRole('button', { name: 'Cancel reply', exact: true });
+  const replyDraft = cancelReply.locator('..');
+  await expect(cancelReply).toBeVisible();
+  await expect(replyDraft).toContainText('Replying to');
+  await expect(replyDraft.getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
+  await expect(replyDraft).toContainText('Which environment does it run in?');
   await composer(second.page).fill('Main, on host-2');
   await composer(second.page).press('Enter');
 
@@ -186,7 +193,7 @@ test('a direct chat is made from New message, opens empty, and shows up for the 
   await dialog.getByRole('button', { name: /Dora Developer/ }).click();
   await dialog.getByRole('button', { name: 'Message Dora Developer' }).click();
   await expect(page).toHaveURL(/chat=/);
-  await expect(page.getByText('No messages yet. Say hello to Dora Developer.')).toBeVisible();
+  await expect(page.getByText('Say hello to Dora Developer.', { exact: true })).toBeVisible();
 
   await sendMessage(page, 'Have you got a minute?');
   const row = second.page.getByRole('list', { name: 'Chats' }).getByRole('listitem').filter({ hasText: 'Ada Lovelace' });
@@ -211,15 +218,22 @@ test('several people make a group with a name; an admin who leaves reads on, rea
   await dialog.getByRole('button', { name: /Dora Developer/ }).click();
   await dialog.getByRole('button', { name: /Linus Pauling/ }).click();
   await dialog.getByRole('textbox', { name: /^Name/ }).fill('Release crew');
-  await dialog.getByRole('button', { name: 'Start a group of 2' }).click();
+  await dialog.getByRole('button', { name: 'Start a group of 3' }).click();
 
   await expect(page.getByRole('heading', { name: 'Release crew' })).toBeVisible();
   await expect(page.getByText('Ada Lovelace made this group')).toBeVisible();
   await page.getByRole('button', { name: 'Group', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'People in this group' }).click();
-  const people = page.getByRole('dialog', { name: 'People in this group' });
+  await page.getByRole('menuitem', { name: 'Members' }).click();
+  const people = page.getByRole('dialog', { name: 'Members' });
   await expect(people.getByText('Dora Developer')).toBeVisible();
   await expect(people.getByText('Linus Pauling')).toBeVisible();
+  await page.keyboard.press('Escape');
+
+  // A group keeps a manager when its first manager leaves.
+  await page.getByRole('button', { name: 'Group', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Members' }).click();
+  await page.getByRole('dialog', { name: 'Members' }).getByRole('combobox', { name: 'Role for Dora Developer' }).click();
+  await page.getByRole('option', { name: 'Manager', exact: true }).click();
   await page.keyboard.press('Escape');
 
   // An admin of the org who leaves the group is no longer in it, and may still read it as an admin does.
@@ -286,9 +300,9 @@ test('messages are picked, with a range by Shift, and forwarded to a group chat 
 
   await page.getByRole('button', { name: 'Forward…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Forward' });
-  await dialog.getByRole('searchbox', { name: 'Search chats and people' }).fill('Launch');
+  await dialog.getByRole('searchbox', { name: 'Search chats, people and threads' }).fill('Launch');
   await dialog.getByRole('button', { name: /Launch crew/ }).click();
-  await dialog.getByRole('searchbox', { name: 'Search chats and people' }).fill('linus');
+  await dialog.getByRole('searchbox', { name: 'Search chats, people and threads' }).fill('linus');
   await dialog.getByRole('button', { name: /Linus Pauling/ }).click();
   await expect(dialog.getByText(/1 chat and Linus Pauling will get a copy of/)).toBeVisible();
   await dialog.getByRole('textbox', { name: /^Add a comment/ }).fill('For the record');
@@ -315,9 +329,9 @@ test('one destination that refuses stops the whole forward, and the dialog says 
   await openMessageMenu(page, 'Please take a look at');
   await page.getByRole('menuitem', { name: 'Forward…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Forward' });
-  await dialog.getByRole('searchbox', { name: 'Search chats and people' }).fill('Launch');
+  await dialog.getByRole('searchbox', { name: 'Search chats, people and threads' }).fill('Launch');
   await dialog.getByRole('button', { name: /Launch crew/ }).click();
-  await dialog.getByRole('searchbox', { name: 'Search chats and people' }).fill('Upgrade');
+  await dialog.getByRole('searchbox', { name: 'Search chats, people and threads' }).fill('Upgrade');
   await dialog.getByRole('button', { name: /Upgrade deps/ }).click();
   await dialog.getByRole('button', { name: 'Forward to 2 places' }).click();
   await expect(dialog.getByRole('alert')).toContainText('Nothing was sent');
@@ -326,7 +340,7 @@ test('one destination that refuses stops the whole forward, and the dialog says 
   // Nothing went anywhere: the group is as empty as it was.
   await page.keyboard.press('Escape');
   await page.goto(`${MESSAGES}?chat=${String(made.chat)}`);
-  await expect(page.getByText('No messages yet. Say something to the group.')).toBeVisible();
+  await expect(page.getByText('Say something to the group.', { exact: true })).toBeVisible();
 });
 
 test('a timeline item quoted into a thread’s chat is a card that leads back to the item', async ({ page }) => {

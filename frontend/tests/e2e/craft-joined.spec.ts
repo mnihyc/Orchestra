@@ -10,17 +10,27 @@ async function ports(path: string, body: unknown = {}) {
 }
 test.beforeEach(async () => { await scenario(); });
 
-test('a thread trail keeps its thread ancestor and its own linked leaf in the same title bar at both widths', async ({ page }) => {
+test('a thread trail keeps its thread ancestor beside its selected Audit tab at both widths', async ({ page }) => {
   await signIn(page);
-  await page.goto(`/trace/${ACME.mainThread}`);
+  const tracePath = `/trace/${ACME.mainThread}`;
+  const atTrace = (url: URL) => url.pathname === tracePath && (url.search === ''
+    || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list'));
+  await page.goto(tracePath);
   const path = page.locator('[data-screen-path]');
   await expect(path).toHaveCount(1);
   await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toHaveAttribute('href', `/thread/${ACME.mainThread}`);
-  await expect(path.locator('a[aria-current="page"]')).toHaveAttribute('href', `/trace/${ACME.mainThread}`);
+  // The current page is named by its tab; the shared title bar contains only ancestors.
+  const tab = page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name: 'Audit', exact: true });
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL(atTrace);
+  await expect(path.locator('[aria-current="page"]')).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(path).toHaveCount(1);
-  await expect(path.locator('a[aria-current="page"]')).toBeVisible();
-  await expect(path.locator('a[aria-current="page"]')).toHaveAttribute('href', `/trace/${ACME.mainThread}`);
+  await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toBeVisible();
+  await expect(path.getByRole('link', { name: 'Main thread', exact: true })).toHaveAttribute('href', `/thread/${ACME.mainThread}`);
+  await expect(tab).toBeVisible();
+  await expect(tab).toHaveAttribute('aria-selected', 'true');
+  await expect(page).toHaveURL(atTrace);
 });
 
 test('a trace grouping and closed filters survive another place and a reload without changing the choice', async ({ page }) => {

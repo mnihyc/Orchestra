@@ -12,7 +12,7 @@ export function System() {
   const { t } = useTranslation();
   const system = useQuery(systemQuery);
   return <div className="flex flex-col gap-6">
-    {system.isPending ? <SkeletonRows rows={1} /> : system.isError ? <ErrorState error={system.error} onRetry={() => void system.refetch()} /> :
+    {system.isPending ? <SkeletonRows read={system} rows={1} /> : system.isError ? <ErrorState error={system.error} onRetry={() => void system.refetch()} /> :
       <Facts rows={[{name:t('componentUpdates.runningServer'),value:system.data.version}]} />}
     <Installation />
     <ArticleGuideLink article="updates" title={t('componentUpdates.guideTitle')} />

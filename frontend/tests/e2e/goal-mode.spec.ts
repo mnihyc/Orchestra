@@ -126,7 +126,8 @@ for (const width of [1440, 400]) {
       await photograph(page, `${prefix}-editor-closed`);
       await dialog.getByLabel('Objective', { exact: true }).fill(BASE.objective);
       await dialog.getByLabel('Done when', { exact: true }).fill(CONDITION);
-      await dialog.locator('summary').filter({ hasText: /^Limits: none$/ }).click();
+      // An empty override follows the place; open the same disclosure regardless of its summary value.
+      await dialog.locator('summary').filter({ hasText: /^Limits:/ }).click();
       await expect(dialog.getByLabel('Turns', { exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled();
       await photograph(page, `${prefix}-editor-open`);

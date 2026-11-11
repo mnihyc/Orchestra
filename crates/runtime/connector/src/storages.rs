@@ -385,10 +385,10 @@ pub fn remove_generation(
 }
 
 #[cfg(test)]
+#[cfg(target_os = "linux")]
 mod tests {
     use super::*;
     #[test]
-    #[cfg(target_os = "linux")]
     fn a_move_generation_is_fresh_and_retry_keeps_it_without_replacing_an_earlier_directory() {
         let root = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();

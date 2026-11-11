@@ -1,5 +1,5 @@
 /** The list a conversation is drawn in, when it is opened at its end: it holds on to the end while the rows that come into view are measured, and lets go when the list has stopped moving. */
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VirtualList } from '@/ui/VirtualList';
@@ -13,14 +13,16 @@ const WINDOW_PX = 600;
  */
 function machine() {
   const content = { height: 2_000 };
+  const observers = new Set<() => void>();
+  let viewport = WINDOW_PX;
   let top = 0;
   let now = 0;
   let waiting: { id: number; callback: FrameRequestCallback }[] = [];
   let ids = 0;
-  const furthest = () => Math.max(0, content.height - WINDOW_PX);
+  const furthest = () => Math.max(0, content.height - viewport);
   vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(() => content.height);
-  vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(() => WINDOW_PX);
-  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(() => WINDOW_PX);
+  vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(() => viewport);
+  vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(() => viewport);
   vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(() => top);
   vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation((value: number) => {
     top = Math.max(0, Math.min(value, furthest()));
@@ -34,7 +36,18 @@ function machine() {
   vi.stubGlobal('cancelAnimationFrame', (id: number) => {
     waiting = waiting.filter((entry) => entry.id !== id);
   });
+  vi.stubGlobal('ResizeObserver', class implements ResizeObserver {
+    private readonly report: () => void;
+    constructor(callback: ResizeObserverCallback) { this.report = () => callback([], this); }
+    observe() { observers.add(this.report); }
+    unobserve() { observers.delete(this.report); }
+    disconnect() { observers.delete(this.report); }
+  });
   return {
+    resize: (height: number) => {
+      viewport = height;
+      for (const report of observers) report();
+    },
     /** The rows measured so far make the content this much taller. */
     grow: (pixels: number) => {
       content.height += pixels;
@@ -51,10 +64,21 @@ function machine() {
   };
 }
 
-function drawn() {
-  render(<VirtualList count={40} keyOf={(index) => `row-${index}`} estimate={() => 50} render={(index) => <p>Row {index}</p>} label="Conversation" />);
+function drawn(startAtEnd = true) {
+  render(<VirtualList count={40} keyOf={(index) => `row-${index}`} estimate={() => 50} render={(index) => <p>Row {index}</p>} label="Conversation" startAtEnd={startAtEnd} />);
   return screen.getByRole('log', { name: 'Conversation' });
 }
+
+it('keeps the first row in view when the list resizes before a scroll event', () => {
+  const layout = machine();
+  const log = drawn(false);
+  expect(log.scrollTop).toBe(0);
+  act(() => {
+    layout.resize(WINDOW_PX - 50);
+    layout.frame(16);
+  });
+  expect(log.scrollTop).toBe(0);
+});
 
 describe('a list opened at its end', () => {
   beforeEach(() => {

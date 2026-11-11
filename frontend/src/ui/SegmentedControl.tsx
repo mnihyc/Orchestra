@@ -1,8 +1,9 @@
 /** Shared SegmentedControl component (navigation); primitives are wrapped here.
  *
- * A choice among a few things that are all in view, one of which is always chosen: a theme, a
+ * A choice among a few things that are all in view: a theme, a
  * density, a way of looking at a list. The arrow keys go from one to the next. Short names alone
  * determine the buttons' widths; descriptions open only in that option's hover/focus tooltip.
+ * A choice not reported yet is null, leaving every segment unselected until it is known or chosen.
  */
 import { RadioGroup } from 'radix-ui';
 import { type ReactNode, useRef } from 'react';
@@ -24,12 +25,16 @@ export type Segment<Value extends string> = ChoiceName & ChoiceDetails & {
 export interface SegmentedControlProps<Value extends string> {
   /** What is being chosen, for a screen reader. */
   label: string;
-  value: Value;
+  value: Value | null;
   onValueChange: (value: Value) => void;
   segments: readonly Segment<Value>[];
+  /** A pending save holds the value and keeps keyboard focus on its segment. */
+  pending?: boolean;
   size?: 'sm' | 'md';
   /** Gives the group the available width; options keep the width of their short names. */
   block?: boolean;
+  /** Keep related labels on one line when the caller supplies a narrow alternative. */
+  wrap?: boolean;
   /** Marks the chosen one as where the keyboard begins when a dialog that holds the control opens. */
   startsKeyboard?: boolean;
   className?: string;
@@ -40,8 +45,10 @@ export function SegmentedControl<Value extends string>({
   value,
   onValueChange,
   segments,
+  pending = false,
   size = 'md',
   block = false,
+  wrap = true,
   startsKeyboard = false,
   className,
 }: SegmentedControlProps<Value>) {
@@ -52,9 +59,10 @@ export function SegmentedControl<Value extends string>({
       ref={group}
       data-segmented=""
       aria-label={label}
-      value={value}
+      aria-busy={pending || undefined}
+      value={value ?? ''}
       // A real radio group selects on arrow navigation and never clears the chosen value.
-      onValueChange={(next) => onValueChange(next as Value)}
+      onValueChange={(next) => { if (!pending) onValueChange(next as Value); }}
       onKeyDownCapture={(event)=>{
         if(event.ctrlKey || event.altKey || event.metaKey)return;
         const target=event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-segment-value]') : null;
@@ -70,11 +78,13 @@ export function SegmentedControl<Value extends string>({
         if(segment===undefined)return;
         // Select during the key press so a quick release cannot move focus without changing the choice.
         event.preventDefault();event.stopPropagation();
+        if (pending) return;
         if(segment.value!==value)onValueChange(segment.value);
         requestAnimationFrame(()=>Array.from(group.current?.querySelectorAll<HTMLElement>('[data-segment-value]') ?? []).find((button)=>button.dataset.segmentValue===segment.value)?.focus());
       }}
       className={cx(
-        'inline-flex max-w-full flex-wrap items-stretch gap-0.5 rounded-md bg-bg-muted p-0.5',
+        'inline-flex max-w-full items-stretch gap-0.5 rounded-md bg-bg-muted p-0.5',
+        wrap ? 'flex-wrap' : 'flex-nowrap',
         block && 'flex w-full',
       )}
     >
@@ -96,9 +106,11 @@ export function SegmentedControl<Value extends string>({
           // A tooltip's open state must not replace the radio's selected state.
           data-state={value === segment.value ? 'checked' : 'unchecked'}
           disabled={segment.disabled}
+          aria-disabled={pending || undefined}
           {...(startsKeyboard && segment.value === value ? { 'data-autofocus': '' } : {})}
           className={cx(
-            'choice-option inline-flex min-w-0 flex-auto items-center justify-center gap-1 rounded-sm px-2 font-medium whitespace-normal text-text-muted transition-colors',
+            'choice-option inline-flex min-w-0 flex-auto items-center justify-center gap-1 rounded-sm px-2 font-medium text-text-muted transition-colors',
+            wrap ? 'whitespace-normal' : 'whitespace-nowrap',
             size === 'md' ? 'min-h-8 text-base' : 'min-h-6 text-sm',
             'hover:text-text',
             // System colours can erase the selected ground: its underline keeps a non-colour mark.

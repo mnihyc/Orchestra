@@ -30,6 +30,9 @@ CREATE TRIGGER agent_program_kinds_build AFTER INSERT ON agent_program_builds FO
 
 CREATE TABLE agent_program_kinds (
     kind text NOT NULL,
+    profile_count bigint DEFAULT 0 NOT NULL CHECK (profile_count >= 0),
+    machine_count bigint DEFAULT 0 NOT NULL CHECK (machine_count >= 0),
+    build_count bigint DEFAULT 0 NOT NULL CHECK (build_count >= 0),
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     manifest jsonb,
     search_text text GENERATED ALWAYS AS (orch_program_search_text(kind, (manifest -> 'names'::text))) STORED,
@@ -61,6 +64,7 @@ CREATE TABLE agents (
     owner_id uuid,
     org_id uuid,
     home_id uuid,
+    home_overridden_at timestamp with time zone,
     harness_kind text NOT NULL,
     machine_id uuid,
     profile jsonb DEFAULT '{}'::jsonb NOT NULL,
@@ -131,6 +135,11 @@ CREATE INDEX model_call_recovery_due_idx ON model_call_recovery USING btree (due
 
 CREATE INDEX model_call_recovery_workflow_idx ON model_call_recovery USING btree (node_id, purpose, ((context ->> 'workflow_id'::text)), updated_at DESC) WHERE (state <> 'dismissed'::text);
 
+CREATE INDEX model_call_recovery_resource_summary_due_idx
+    ON model_call_recovery (due_at NULLS FIRST, updated_at, call_key, node_id)
+    WHERE purpose='summary' AND context->>'task'='resource_summary'
+      AND state IN ('scheduled','running');
+
 CREATE TABLE model_call_recovery_attempts (
     id uuid NOT NULL,
     node_id uuid NOT NULL,
@@ -162,14 +171,18 @@ CREATE TABLE providers (
     owner_id uuid NOT NULL,
     org_id uuid NOT NULL,
     home_id uuid NOT NULL,
+    home_overridden_at timestamp with time zone,
     kind text NOT NULL,
     sources jsonb DEFAULT '{}'::jsonb NOT NULL,
     harness_kind text,
     agent_id uuid,
     upstreams jsonb DEFAULT '[]'::jsonb NOT NULL,
+    model_group_options jsonb DEFAULT '{}'::jsonb NOT NULL,
+    service_offerings jsonb DEFAULT '{}'::jsonb NOT NULL,
     config jsonb DEFAULT '{}'::jsonb NOT NULL,
     login_state jsonb,
     login_pending bytea,
+    login_authority jsonb,
     login_pending_at timestamp with time zone,
     protocols text[] DEFAULT '{}'::text[] NOT NULL,
     machine_id uuid,
@@ -178,6 +191,7 @@ CREATE TABLE providers (
     held_by_environment_id uuid,
     held_since timestamp with time zone,
     runtime_config jsonb DEFAULT '{}'::jsonb NOT NULL,
+    credential_home jsonb,
     status text DEFAULT 'needs_setup'::text NOT NULL,
     status_detail text,
     status_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -198,7 +212,10 @@ CREATE TABLE providers (
     CONSTRAINT providers_check1 CHECK (((kind = 'subscription'::text) = (agent_id IS NOT NULL))),
     CONSTRAINT providers_check2 CHECK (((kind <> 'api'::text) OR (jsonb_array_length(upstreams) > 0))),
     CONSTRAINT providers_check3 CHECK (((held_by_environment_id IS NULL) = (held_since IS NULL))),
+    CONSTRAINT providers_credential_home_check CHECK (credential_home IS NULL OR (kind = 'subscription' AND credential_home = '{"kind":"made_by_orch"}'::jsonb)),
     CONSTRAINT providers_kind_check CHECK ((kind = ANY (ARRAY['subscription'::text, 'api'::text]))),
+    CONSTRAINT providers_model_group_options_check CHECK (jsonb_typeof(model_group_options) = 'object'),
+    CONSTRAINT providers_service_offerings_check CHECK (jsonb_typeof(service_offerings) = 'object'),
     CONSTRAINT providers_name_check CHECK (((char_length(name) >= 1) AND (char_length(name) <= 80))),
     CONSTRAINT providers_status_check CHECK ((status = ANY (ARRAY['needs_setup'::text, 'ready'::text, 'exhausted'::text, 'error'::text, 'offline'::text, 'disabled'::text]))),
     CONSTRAINT providers_pkey PRIMARY KEY (id),
@@ -207,6 +224,22 @@ CREATE TABLE providers (
     CONSTRAINT providers_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id),
     CONSTRAINT providers_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES users(id)
 );
+
+-- The same factual option sources accompany every stored model reader.
+CREATE FUNCTION provider_option_layers(uuid, text[]) RETURNS jsonb
+    LANGUAGE sql STABLE
+AS $$
+SELECT jsonb_build_object(
+    'endpoints', COALESCE((
+        SELECT jsonb_object_agg(endpoint.value->>'protocol',
+            COALESCE(NULLIF(endpoint.value#>'{options,request_options}', 'null'::jsonb), '{}'::jsonb))
+          FROM jsonb_array_elements(provider.upstreams) AS endpoint(value)
+    ), '{}'::jsonb),
+    'groups', COALESCE((SELECT jsonb_object_agg(entry.key, entry.value)
+        FROM jsonb_each(provider.model_group_options) AS entry WHERE entry.key = ANY($2)), '{}'::jsonb)
+)
+FROM providers AS provider WHERE provider.id = $1
+$$;
 
 CREATE INDEX provider_runtime_config_facts_idx ON providers USING gin (runtime_config jsonb_path_ops);
 
@@ -225,6 +258,9 @@ ALTER TABLE jobs ADD CONSTRAINT jobs_provider_id_fkey FOREIGN KEY (provider_id) 
 ALTER TABLE leases ADD CONSTRAINT leases_provider_id_fkey FOREIGN KEY (provider_id) REFERENCES providers(id);
 
 CREATE TABLE summary_calls (
+    prepared_command jsonb CHECK (prepared_command IS NULL OR jsonb_typeof(prepared_command) = 'object'),
+    entry_id uuid,
+    issued_by uuid,
     id uuid NOT NULL,
     node_id uuid NOT NULL,
     topic_id uuid NOT NULL,
@@ -287,7 +323,6 @@ CREATE TABLE provider_models (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     pause_note text,
     CONSTRAINT provider_models_display_name_check CHECK ((char_length(display_name) <= 120)),
-    CONSTRAINT provider_models_groups_check CHECK ((cardinality(groups) <= 8)),
     CONSTRAINT provider_models_model_name_check CHECK (((char_length(model_name) >= 1) AND (char_length(model_name) <= 200))),
     CONSTRAINT provider_models_source_check CHECK ((source = ANY (ARRAY['manual'::text, 'suggested'::text]))),
     CONSTRAINT provider_models_pkey PRIMARY KEY (id),
@@ -363,6 +398,7 @@ CREATE TABLE skills (
     id uuid NOT NULL,
     org_id uuid NOT NULL,
     home_id uuid NOT NULL,
+    home_overridden_at timestamp with time zone,
     owner_id uuid NOT NULL,
     name text NOT NULL,
     description text DEFAULT ''::text NOT NULL,
@@ -399,3 +435,33 @@ CREATE TRIGGER skill_source_secrets_release AFTER DELETE ON skills FOR EACH ROW 
 ALTER TABLE skill_drafts ADD CONSTRAINT skill_drafts_skill_id_fkey FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE;
 
 ALTER TABLE skill_versions ADD CONSTRAINT skill_versions_skill_id_fkey FOREIGN KEY (skill_id) REFERENCES skills(id) ON DELETE CASCADE;
+
+
+CREATE TABLE machine_program_adapters (
+    machine_id uuid NOT NULL,
+    kind text NOT NULL,
+    PRIMARY KEY (machine_id, kind)
+);
+CREATE INDEX machine_program_adapters_kind_idx ON machine_program_adapters (kind, machine_id);
+
+CREATE TABLE machine_harness_builds (
+    machine_id uuid NOT NULL,
+    kind text NOT NULL,
+    version text NOT NULL,
+    PRIMARY KEY (machine_id, kind, version)
+);
+CREATE INDEX machine_harness_builds_kind_idx ON machine_harness_builds (kind, version, machine_id);
+
+CREATE TABLE machine_executor_reports (
+    machine_id uuid NOT NULL,
+    ordinal bigint NOT NULL,
+    payload jsonb NOT NULL,
+    PRIMARY KEY (machine_id, ordinal)
+);
+
+CREATE TRIGGER agent_program_totals_agent AFTER INSERT OR DELETE OR UPDATE OF harness_kind, deleted_at ON agents
+    FOR EACH ROW EXECUTE FUNCTION orch_program_totals();
+CREATE TRIGGER agent_program_totals_report AFTER INSERT OR DELETE OR UPDATE OF kind ON agent_program_reports
+    FOR EACH ROW EXECUTE FUNCTION orch_program_totals();
+CREATE TRIGGER agent_program_totals_build AFTER INSERT OR DELETE OR UPDATE OF kind ON agent_program_builds
+    FOR EACH ROW EXECUTE FUNCTION orch_program_totals();

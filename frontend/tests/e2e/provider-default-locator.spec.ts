@@ -59,12 +59,13 @@ function answer(page: Page, path: string, method = 'GET', match: (query: URLSear
   return page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); });
 }
 async function prepare(page: Page, request: APIRequestContext, locale: 'en' | 'zh-CN', width: number, theme: 'light' | 'dark') {
-  await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme }); await signIn(page);
+  await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
   expect((await request.post(`${double}/__double/first-steps/appearance`, { data: { locale, theme: 'system' } })).ok()).toBe(true);
-  await page.goto(`/project/${ACME.web}/settings?section=policies&setting=${KEY}`);
+  await signIn(page);
+  await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=${KEY}`);
   await expect(page.locator('html')).toHaveAttribute('lang', locale); await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const words = locale === 'en' ? english : chinese;
-  const row = page.locator(`[data-setting="${KEY}"]`), field = row.getByRole('combobox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });
+  const row = page.locator(`[data-setting="${KEY}"]`), field = row.getByRole('combobox', { name: words.settingRegistry.agent.default_provider_id.title, exact: true });
   await expect(field).toBeVisible(); return { row, field, words };
 }
 async function capture(page: Page, info: TestInfo, name: string, input: Locator) {
@@ -114,13 +115,13 @@ test('provider default searches and pages the native usable inventory, then save
     const firstRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('resource_view') === 'usable');
     await field.click(); const firstReply = await firstRead; expect(firstReply.status()).toBe(200); const first = await firstReply.json() as EverythingRowPage;
     expect(first.items).toHaveLength(PAGE_SIZE); expect(first.next_cursor).not.toBeNull(); expect(first.items.some((item) => item.id === held.late.id)).toBe(false);
-    const list = page.getByRole('listbox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });
+    const list = page.getByRole('dialog', { name: words.settingRegistry.agent.default_provider_id.title, exact: true });
     await expect(list.getByRole('option')).toHaveCount(first.items.length + (first.items.some((item) => item.id === held.current.id) ? 0 : 1));
     expect(seen.choices()[0]?.query).toEqual(nativeArgs); await capture(page, info, 'provider-default-browse-1440-en-light', field);
     const searchRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && !q.has('cursor'));
     await field.fill('Default locator'); const searchReply = await searchRead; expect(searchReply.status()).toBe(200); const matching = await searchReply.json() as EverythingRowPage;
     expect(matching.items).toHaveLength(PAGE_SIZE); expect(matching.next_cursor).not.toBeNull(); await expect(list.getByRole('option')).toHaveCount(PAGE_SIZE);
-    const more = page.getByRole('dialog', { name: words.day100.builtin.agent.default_provider_id.title, exact: true }).getByRole('button', { name: words.ui.pagination.more, exact: true });
+    const more = page.getByRole('dialog', { name: words.settingRegistry.agent.default_provider_id.title, exact: true }).getByRole('button', { name: words.ui.pagination.more, exact: true });
     await field.press('Tab'); await expect(more).toBeFocused();
     const nextRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && q.get('cursor') === matching.next_cursor);
     await more.press('Enter'); const next = await nextRead; expect(next.status()).toBe(200); expect((await next.json() as EverythingRowPage).next_cursor).toBeNull();
@@ -135,7 +136,7 @@ test('provider default searches and pages the native usable inventory, then save
     const savedRead = answer(page, settingPath, 'PUT'); await field.press('Enter'); const savedReply = await savedRead; expect(savedReply.status()).toBe(200);
     const saved = await savedReply.json() as ResolvedSetting; await expect(field).toHaveValue(held.late.name); await expect(field).toHaveAttribute('aria-expanded', 'false');
     await expect.poll(async () => (await writes(page)).length).toBe(1); expect((await writes(page))[0]).toEqual({ value: held.late.id, expected_revision: held.before.own!.revision });
-    const undone = answer(page, settingPath, 'PUT'); await row.getByRole('button', { name: words.settings.compact.undoNamed.replace('{{name}}', words.day100.builtin.agent.default_provider_id.title), exact: true }).click();
+    const undone = answer(page, settingPath, 'PUT'); await row.getByRole('button', { name: words.settings.compact.undoNamed.replace('{{name}}', words.settingRegistry.agent.default_provider_id.title), exact: true }).click();
     expect((await undone).status()).toBe(200); await expect(field).toHaveValue(held.current.name); await expect.poll(async () => (await writes(page)).length).toBe(2);
     expect((await writes(page))[1]).toEqual({ value: held.current.id, locked: held.before.own!.locked, expected_revision: saved.own!.revision });
     await page.waitForTimeout(OBSERVE_MS); expect(seen.choices()).toHaveLength(4);

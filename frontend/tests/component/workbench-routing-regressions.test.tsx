@@ -17,6 +17,7 @@ import { loadWorkspace } from '@/features/workbench/persistence';
 import { registerShippedViews } from '@/features/workbench/shippedViews';
 import { useWorkbench } from '@/features/workbench/store';
 import { retireThreadWindows } from '@/features/workbench/threadWindows';
+import { treeWriter } from '@/realtime/stores/tree';
 import { clearViewOpenings } from '@/features/workbench/viewOpening';
 import { registerView } from '@/features/workbench/views';
 import { workspaceEntries } from '@/features/workbench/workspaceActions';
@@ -27,6 +28,7 @@ import { Route as OrgSettingsRoute } from '@/routes/org/$slug/settings/$section/
 import { Route as AdminRoute } from '@/routes/admin/$section/index';
 import { clearScreenHeading, focusScreenHeading } from '@/shell/screen';
 import { TooltipProvider } from '@/ui/Tooltip';
+import { treeNode } from '../doubles/tree-node';
 import { RoutingFrame } from './workbench-routing/frame';
 import {
   bodies, BottomInspector, canonicalCalls, capturedNavigate, department, holdCanonical,
@@ -101,6 +103,7 @@ afterEach(async () => {
   for (const history of histories.splice(0)) history.destroy();
   await act(async () => { releasePendingCanonical(); await queryClient.cancelQueries(); });
   queryClient.clear(); queryClient.setDefaultOptions(originalDefaults);
+  treeWriter.clear();
   for (const remove of unregister.splice(0)) remove();
   clearPageNavigation(pageNavigationOrigin()); usePageFailures.setState({ byTab: new Map() }); clearViewOpenings();
   focusScreenHeading(null); clearScreenHeading();
@@ -196,6 +199,22 @@ function runPalette(id: string): void {
   if (command === undefined) throw new Error(`No registered workspace command ${id}`);
   command.run('here');
 }
+
+it('adds the org to a browser title when another known department has the same name', async () => {
+  treeWriter.reset('label-acme', [
+    treeNode({ id: 'label-acme', kind: 'org', parent_id: null, name: 'Acme' }),
+    treeNode({ id: ORG_ID, kind: 'org', parent_id: 'label-acme', name: department.name }),
+  ], 1);
+  const drawn = draw(`/org/${ORG_ADDRESS}`);
+  await settled(drawn);
+  await waitFor(() => expect(document.title).toMatch(/^Synthetic Research · [^·]+$/));
+
+  act(() => treeWriter.reset('label-beta', [
+    treeNode({ id: 'label-beta', kind: 'org', parent_id: null, name: 'Beta' }),
+    treeNode({ id: 'label-beta-department', kind: 'org', parent_id: 'label-beta', name: department.name }),
+  ], 1));
+  await waitFor(() => expect(document.title).toMatch(/^Synthetic Research · Acme · /));
+});
 
 describe('duplicate instances and owned URL changes', () => {
   it.each(['new', 'beside'] as const)('the actual %s opener gives a duplicate its own body and ordinary reuse prefers that active owner', async (mode) => {

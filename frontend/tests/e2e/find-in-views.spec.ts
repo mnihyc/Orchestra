@@ -50,7 +50,8 @@ test('chat Find accepts two letters, steps only this chat, and returns to the sa
   await expect(draft).toBeFocused();
   await expect(draft).toHaveValue('Keep this unsent message');
   expect(await draft.evaluate((element: HTMLTextAreaElement) => element.selectionStart)).toBe(4);
-  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}$`));
+  await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && (url.search === ''
+    || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list')));
 });
 
 test('document Find searches only that document, steps its blocks, and restores the editor selection', async ({ page }) => {

@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-connector-core/test-observers"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -26,6 +30,7 @@ orch-envhost.workspace = true
 orch-executor-codex.workspace = true
 orch-executor-orch.workspace = true
 orch-executor-contract.workspace = true
+orch-image-backends.workspace = true
 orch-link-contract.workspace = true
 orch-pki.workspace = true
 orch-plugin.workspace = true
@@ -33,6 +38,7 @@ orch-plugin-contract.workspace = true
 orch-protocol-anthropic-messages.workspace = true
 orch-protocol-openai-responses.workspace = true
 orch-provider-contract.workspace = true
+orch-provider-builtins.workspace = true
 orch-provider-deepseek.workspace = true
 orch-provider-openrouter.workspace = true
 orch-telemetry.workspace = true

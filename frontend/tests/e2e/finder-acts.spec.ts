@@ -31,6 +31,7 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
   test(`native acts and a searchable shortcut table at ${width}px, ${theme}, ${locale}`, async ({ page }, info) => {
     await page.setViewportSize({ width, height: width === 400 ? 860 : 900 });
     await appearance(page, locale, theme); await page.goto(`/thread/${ACME.mainThread}`);
+    await expect(page.locator('[data-thread-header]')).toBeVisible();
     const finder = await open(page, locale, '>');
     await expect(finder.getByRole('button', { name: caption('@finder.modes.commands', locale), exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(finder.getByRole('switch')).toHaveCount(0);
@@ -113,11 +114,14 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
 
 test('New document creates one native document, and Fork invokes the ordinary one-request act', async ({ page }) => {
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
   const creates: string[] = [];
   page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/documents')) creates.push(request.url()); });
   await act(page, 'en', '> new document', 'create.document');
   await expect(page).toHaveURL(/\/doc\//); expect(creates).toHaveLength(1);
-  await page.goto(`/thread/${ACME.mainThread}`); await change.mode('auto');
+  await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
+  await change.mode('auto');
   const forks: string[] = [];
   page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/forks/now')) forks.push(request.url()); });
   await act(page, 'en', '> fork', 'thread.change-fork-now');
@@ -142,8 +146,9 @@ test('administrator reach is the same session act, once in each direction, and i
   await expect(finder.locator('[data-value^="commands:account.admin."]')).toHaveCount(0);
 });
 
-test('Ask on the side opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
+test('Side thread opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
   const finder = await open(page, 'en', '> ask side');
   const ask = finder.locator('[data-value="commands:thread.side-ask"]'); await expect(ask).toBeVisible();
   await expect(ask).not.toHaveAttribute('aria-disabled', 'true');

@@ -7,6 +7,7 @@
  * throughout.
  */
 import { LoaderCircle } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 import { Popover as Primitive } from 'radix-ui';
 import { usePromptCovered } from '@/ui/PromptScope';
 import { type ComponentProps, type KeyboardEvent, type ReactNode, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
@@ -29,6 +30,8 @@ export interface ComboboxOption<Value extends string> {
   fullLabel?: string;
   /** One quiet line under the name. */
   description?: ReactNode;
+  /** Related chips remain outside the row's selectable control. */
+  accessory?: ReactNode;
   /** A mark before the name: an avatar, an icon. */
   icon?: ReactNode;
   /** Why it cannot be chosen; the option is then shown quietly with these words. */
@@ -43,6 +46,9 @@ export interface ComboboxGroup<Value extends string> {
   id: string;
   /** Names the group above its options. */
   label: string;
+  /** Optional group controls stay outside the selectable row sequence. */
+  heading?: ReactNode;
+  collapsed?: boolean;
   options: readonly ComboboxOption<Value>[];
 }
 
@@ -124,6 +130,7 @@ export function Combobox<Value extends string>({
   fieldClassName,
   className,
 }: ComboboxProps<Value>) {
+  const { t } = useTranslation();
   const covered = usePromptCovered();
   const listId = useId();
   const [focused, setFocused] = useState(false);
@@ -143,17 +150,20 @@ export function Combobox<Value extends string>({
   const restoringInput = useRef(false);
   const footerFocus = useRef(false);
 
-  const flat = groups.flatMap((group) => group.options);
   const asked = query.trim().length >= minChars;
-  const open = (requestedOpen ?? (focused && !dismissed)) && !disabled && asked;
+  const offered = asked ? groups : [];
+  const flat = offered.flatMap((group) => group.collapsed === true ? [] : group.options);
+  const open = (requestedOpen ?? (focused && !dismissed)) && !disabled;
   const optionId = (index: number) => `${listId}-option-${index}`;
   const initial = initialActiveValue === undefined ? 0 : Math.max(0, flat.findIndex((option) => option.value === initialActiveValue));
   const current = Math.min(active ?? initial, Math.max(0, flat.length - 1));
   const activeHelp = flat[current]?.help;
   const hasGuides = flat.some((option) => option.help !== undefined);
-  const hasFooter = footer !== undefined && footer !== null && footer !== false;
+  const hasFooter = asked && footer !== undefined && footer !== null && footer !== false;
   const hasPreviews = flat.some((option) => option.preview !== undefined);
-  const hasControls = hasGuides || hasFooter || hasPreviews;
+  const hasGroupControls = offered.some((group) => group.heading !== undefined);
+  const hasAccessories = flat.some((option) => option.accessory !== undefined);
+  const hasControls = hasGuides || hasFooter || hasPreviews || hasGroupControls || hasAccessories;
   const inPreview = (target: EventTarget | null) => target instanceof Element && target.closest('[data-choice-preview]')?.getAttribute('data-choice-preview') === listId;
   const guides = flat.flatMap((option, at) => {
     const help = option.help;
@@ -170,8 +180,8 @@ export function Combobox<Value extends string>({
   // receive explicit requests instead; echoing their props would close a retry
   // while its previous mutation is still pending.
   useEffect(() => {
-    if (requestedOpen === undefined) onOpenChange?.(open && !covered);
-  }, [requestedOpen, open, covered, onOpenChange]);
+    if (requestedOpen === undefined) onOpenChange?.(open && asked && !covered);
+  }, [requestedOpen, open, asked, covered, onOpenChange]);
 
   useEffect(() => {
     if (requestedOpen === true && !disabled && !covered) input.current?.focus();
@@ -182,12 +192,12 @@ export function Combobox<Value extends string>({
     const popup = content.current;
     if (popup === null) return;
     if (popup.ownerDocument.activeElement !== input.current) return;
-    const list = popup.querySelector<HTMLElement>('[role="listbox"]');
+    const list = hasControls ? popup.querySelector<HTMLElement>('[data-combobox-options]') : popup;
     const option = list?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
     const viewport = hasFooter ? list : popup;
     if (option === null || option === undefined || viewport === null || viewport.clientHeight === 0 || viewport.offsetHeight === 0) return;
     revealOption(viewport, option);
-  }, [open, covered, hasFooter]);
+  }, [open, covered, hasFooter, hasControls]);
 
   // Portal mount and Popper's available-height constraint settle after the input opens.
   // Observe the actual local viewport/list, including later wrapping or paging, without moving ancestors.
@@ -195,7 +205,7 @@ export function Combobox<Value extends string>({
     if (!open || covered) return;
     const popup = content.current;
     if (popup === null) return;
-    const list = popup.querySelector<HTMLElement>('[role="listbox"]');
+    const list = hasControls ? popup.querySelector<HTMLElement>('[data-combobox-options]') : popup;
     const viewport = hasFooter ? list : popup;
     if (list === null || viewport === null) return;
     let live = true;
@@ -206,7 +216,7 @@ export function Combobox<Value extends string>({
     for (const group of Array.from(list.children)) observer?.observe(group);
     reveal();
     return () => { live = false; observer?.disconnect(); };
-  }, [open, covered, contentVersion, hasFooter, current, query, groups, revealCurrent]);
+  }, [open, covered, contentVersion, hasFooter, hasControls, current, query, groups, revealCurrent]);
 
   const choose = (option: ComboboxOption<Value>) => {
     if (disabled || loading) return;
@@ -224,10 +234,10 @@ export function Combobox<Value extends string>({
     if (event.key === 'F1' && activeHelp !== undefined) {
       event.preventDefault(); event.stopPropagation(); openGuide(activeHelp); return true;
     }
-    if (event.key === 'Tab' && (guides.length > 0 || hasFooter || hasPreviews)) {
+    if (event.key === 'Tab' && (guides.length > 0 || hasFooter || hasPreviews || hasGroupControls || hasAccessories)) {
       // Paging and guidance keep their existing Tab order. Right Arrow always reaches inspection;
       // a picker without those controls also exposes the highlighted row's inspector through Tab.
-      const buttons = Array.from(content.current?.querySelectorAll<HTMLElement>(hasFooter
+      const buttons = Array.from(content.current?.querySelectorAll<HTMLElement>(hasGroupControls || hasAccessories ? `[data-combobox-group-heading] button:not([disabled]), [data-combobox-group-heading] a[href], [data-choice-help], [data-choice-accessory] button:not([disabled]), [data-choice-accessory] a[href], [data-choice-description] a[href], [data-choice-description] button:not([disabled]), [data-choice-for="${optionId(current)}"], [data-combobox-footer] button:not([disabled]), [data-combobox-footer] a[href], [data-combobox-footer] [tabindex="0"]` : hasFooter
         ? '[data-choice-help], [data-combobox-footer] button:not([disabled]), [data-combobox-footer] a[href], [data-combobox-footer] [tabindex="0"]'
         : guides.length > 0 ? '[data-choice-help]' : `[data-choice-for="${optionId(current)}"]`) ?? []);
       if (buttons.length === 0) return false;
@@ -284,7 +294,7 @@ export function Combobox<Value extends string>({
   };
 
   // Where each group begins in the one list the arrow keys go through.
-  const starts = groups.map((_, at) => groups.slice(0, at).reduce((sum, earlier) => sum + earlier.options.length, 0));
+  const starts = groups.map((_, at) => groups.slice(0, at).reduce((sum, earlier) => sum + (earlier.collapsed === true ? 0 : earlier.options.length), 0));
   return (
     <Field label={label} optional={optional} hint={hint} error={error} hideLabel={hideLabel} aside={aside} help={help} className={fieldClassName} id={id}>
       {(control) => (
@@ -308,7 +318,7 @@ export function Combobox<Value extends string>({
                 placeholder={placeholder}
                 value={open ? query : displayValue ?? query}
                 data-overflow-text={open ? undefined : displayFullValue}
-                className={cx(fieldBoxClasses, size === 'sm' && 'h-(--control-sm) px-2 text-sm',
+                className={cx(fieldBoxClasses, !open && 'truncate', size === 'sm' && 'h-(--control-sm) px-2 text-sm',
                   (loading || trailing !== undefined) && 'pr-10',
                   loading && trailing !== undefined && 'pr-[calc(var(--control-sm)+2.5rem)]', className)}
                 onChange={(event) => {
@@ -340,8 +350,10 @@ export function Combobox<Value extends string>({
           <Primitive.Portal>
             <Primitive.Content
               ref={attachContent}
-              {...(hasControls ? { id: `${listId}-popup` } : {})}
-              aria-label={hasControls && typeof label === 'string' ? label : undefined}
+              id={hasControls ? `${listId}-popup` : listId}
+              role={hasControls ? 'dialog' : 'listbox'}
+              aria-label={typeof label === 'string' ? label : undefined}
+              aria-busy={!hasControls && loading || undefined}
               style={covered ? { display: 'none' } : undefined}
               align="start"
               sideOffset={4}
@@ -389,21 +401,24 @@ export function Combobox<Value extends string>({
                 cardClasses,
               )}
             >
-              <ChoiceInspection><div id={listId} role="listbox" aria-label={typeof label === 'string' ? label : undefined} aria-busy={loading || undefined}
+              <ChoiceInspection><div data-combobox-options {...(hasControls ? { id: listId, ...(!hasGroupControls ? { role: 'listbox', 'aria-label': typeof label === 'string' ? label : undefined, 'aria-busy': loading || undefined } : {}) } : {})}
                 className={hasFooter ? 'min-h-0 overflow-y-auto' : undefined}>
-                {groups
-                  .map((group, at) => group.options.length === 0 ? null : (
+                {!asked && <p className="px-2 py-1 text-sm text-text-muted">{t('ui.combobox.minimumQuery', { count: minChars })}</p>}
+                {offered
+                  .map((group, at) => group.options.length === 0 && group.heading === undefined ? null : (
 
                     // A list of one unnamed group (a plain locator) has no heading row and no empty group name.
                     <div key={group.id} {...(group.label === '' ? {} : { role: 'group', 'aria-label': group.label })}>
-                      {group.label !== '' && <div aria-hidden className="px-2 py-1 text-xs font-medium text-text-subtle">
+                      {group.heading !== undefined ? <div data-combobox-group-heading className="px-1">{group.heading}</div> : group.label !== '' && <div aria-hidden className="px-2 py-1 text-xs font-medium text-text-subtle">
                         {group.label}
                       </div>}
-                      {group.options.map((option, position) => {
+                      {/* Interactive headings belong to the popup; only their choices belong to each listbox. */}
+                      <div {...(hasGroupControls ? { role: 'listbox', 'aria-label': typeof label !== 'string' ? group.label : offered.length === 1 || group.label === '' ? label : `${label} · ${group.label}`, 'aria-busy': loading || undefined } : {})}>
+                      {(group.collapsed === true ? [] : group.options).map((option, position) => {
                         const mine = (starts[at] ?? 0) + position;
-                        const off = option.disabled === true || typeof option.disabled === 'string';
+                        const off = loading || option.disabled === true || typeof option.disabled === 'string';
                         return (
-                          <Choice presentation="picker" key={option.value} name={option.preview?.renderName === undefined ? option.fullLabel === undefined ? option.label : <span data-overflow-text={option.fullLabel}>{option.label}</span> : option.preview.renderName(option.label)} description={typeof option.disabled === 'string' ? option.disabled : option.description} compact>
+                          <Choice presentation="picker" key={option.value} name={option.preview?.renderName === undefined ? option.fullLabel === undefined ? option.label : <span data-overflow-text={option.fullLabel}>{option.label}</span> : option.preview.renderName(option.label)} description={typeof option.disabled === 'string' ? option.disabled : option.description} accessory={option.accessory} compact>
                           {(content, words) => <ChoiceCard preview={option.preview} active={mine === current && open && !touchPreview} controller={mine === current ? previewCard : undefined} owner={listId} returnFocus={() => { restoringInput.current = true; input.current?.focus(); restoringInput.current = false; }}><div
                             {...words}
                             id={optionId(mine)}
@@ -411,8 +426,8 @@ export function Combobox<Value extends string>({
                             aria-selected={mine === current}
                             aria-disabled={off || undefined}
                             // The pointer chooses on release, but the field must not lose the keyboard first.
-                            onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => choose(option)}
+                            onMouseDown={(event) => { if (!(event.target instanceof Element && event.target.closest('a[href],button,[data-choice-inspection]'))) event.preventDefault(); }}
+                            onClick={(event) => { if (!(event.target instanceof Element && event.target.closest('a[href],button,[data-choice-inspection]'))) choose(option); }}
                             onMouseMove={() => setActive(mine)}
                             onPointerMove={(event) => { if (event.pointerType !== 'touch') setTouchPreview(false); }}
                             className={cx(
@@ -427,9 +442,10 @@ export function Combobox<Value extends string>({
                           </Choice>
                         );
                       })}
+                      </div>
                     </div>
                   ))}
-                {flat.length === 0 && !loading && empty !== undefined && <EmptyState compact className="px-2" title={empty} />}
+                {asked && flat.length === 0 && !groups.some((group)=>group.collapsed === true) && !loading && empty !== undefined && <EmptyState compact className="px-2" title={empty} />}
               </div>
               {guides.length > 0 && <div className={cx('flex flex-col gap-2 border-t border-border p-2', hasFooter && 'shrink-0')}>
                 {guides.map(({ option, help: guide }) => <Choice presentation="picker" key={option.value} name={option.label} compact

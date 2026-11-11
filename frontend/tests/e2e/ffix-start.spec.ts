@@ -12,6 +12,14 @@ test.beforeEach(async () => {
 
 const MODEL = 'gpt-5.4';
 
+async function expectStartSummary(page: Page, environment: string, effort = 'High'): Promise<void> {
+  const values = { agent: 'Codex', provider: 'OpenAI key', model: 'GPT-5.4', effort, environment };
+  // The starter now names each chosen value beside its origin instead of combining them into prose.
+  for (const [field, name] of Object.entries(values)) {
+    await expect(starter(page).locator(`[data-runs-on] [data-start-value="${field}"]`).getByText(name, { exact: true })).toBeVisible();
+  }
+}
+
 /** Opens the dialog that makes a thread, from the button of the topic's threads. */
 async function openDialog(page: Page, person: { login: string; password: string } = PEOPLE.ada): Promise<void> {
   await signIn(page, person);
@@ -28,7 +36,7 @@ test('typing in a topic whose defaults are whole starts a thread with one Enter,
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
   // The line under the box says what will happen.
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in Workspace')).toBeVisible();
+  await expectStartSummary(page, 'Workspace');
 
   const text = 'Why does the login page send people to the wrong place?';
   await starterBox(page).fill(text);
@@ -61,7 +69,7 @@ test('a topic starter remembers its successful environment without changing the 
   await page.getByTestId('main').getByRole('button', { name: 'New topic', exact: true }).click();
   await page.getByRole('dialog', { name: 'New topic in Web' }).getByRole('button', { name: 'Create topic', exact: true }).click();
   await expect(page).toHaveURL(/\/topic\//);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in a new environment')).toBeVisible();
+  await expectStartSummary(page, 'a new environment');
 
   await starterBox(page).fill('Move the session cookie into its own module');
   await starterBox(page).press('Enter');
@@ -82,7 +90,7 @@ test('a topic starter remembers its successful environment without changing the 
 
   // This person's last successful setup can reuse its environment; the topic default remains untouched.
   await page.goto(`/topic/${topic}`);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in Main')).toBeVisible();
+  await expectStartSummary(page, 'Main');
   await starterBox(page).fill('And the same for the logout page');
   await starterBox(page).press('Enter');
   expect(await openedThread(page)).not.toBe(first);
@@ -231,7 +239,7 @@ test('where no harness has reported what it can do, the starter says so, offers 
   // The machine reports once, and the starter comes alive by itself.
   await agentReports('Codex', true);
   await expect(starter(page).locator('[data-missing-default]')).toHaveCount(0);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (Medium), in a new environment')).toBeVisible();
+  await expectStartSummary(page, 'a new environment', 'Medium');
   await expect(starterBox(page)).toHaveValue('Look at the idle stop');
   await starterBox(page).press('Enter');
   await openedThread(page);

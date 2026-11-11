@@ -1,0 +1,187 @@
+//! The permission page of a resource, read and changed through the requests that serve the page of anything: who is named in which row, what each row follows, and the one change that names owners and holders at a choice.
+//!
+//! The page of a node is read by the routes of the hierarchy; the requests are the same for a
+//! resource, and the page machinery is the access engine's for both. What a resource adds is its home:
+//! its page follows the defaults of the org it belongs to, and the two policies that govern a change
+//! (whether its owners may name somebody from outside its root org, and whether the subscription it
+//! may be is kept to its first owner) are the settings of that org.
+
+use crate::middleware::authorization::refusals;
+
+use crate::middleware::authorization::resource_kind_of;
+
+use crate::middleware::requests::ApiError;
+
+use crate::middleware::requests::ApiResult;
+
+use crate::registry::Ctx;
+
+use crate::routes::access::page_operations;
+
+use crate::routes::resources::providers::home_policies;
+
+use crate::sign_in::origin;
+
+use orch_access_contract::decisions::ObjectRef;
+
+use orch_access_contract::permissions::ResourceKind;
+
+use orch_api_contract::access as api;
+
+use orch_authz::pages;
+
+use orch_authz::pages::ChangeError;
+
+use orch_authz::usable::ResourcePolicy;
+
+use orch_authz::Policy;
+
+use orch_authz::resources;
+
+use orch_db::Conn;
+
+use orch_db::DbError;
+
+use orch_types::Id;
+/// The resource a `{object}/{id}` path names.
+fn named(ctx: &Ctx) -> ApiResult<(ResourceKind, Id)> {
+    let kind = resource_kind_of(ctx.param("object")?).ok_or_else(ApiError::not_found)?;
+    Ok((kind, ctx.id("id")?))
+}
+
+/// The policies that govern a change of the page of a resource at its home: those of sharing, which
+/// the access engine asks of any page (whether its owners may name somebody from outside its root
+/// org, and whether somebody who holds it without managing its page may share it), and the
+/// subscription it may be, if it is one, which its home may keep to its first owner.
+async fn policy_of(
+    conn: &mut Conn,
+    home: Option<Id>,
+    kind: ResourceKind,
+) -> ApiResult<(Policy, ResourcePolicy)> {
+    let sharing = crate::routes::access::subject::policy_at_place(conn, home).await?;
+    let shared_subscriptions = if let Some(home) = home
+        && kind == ResourceKind::Provider
+    {
+        home_policies(conn, home).await?.subscription_sharing
+    } else {
+        None
+    };
+    Ok((
+        sharing,
+        ResourcePolicy {
+            owners_name_outsiders: sharing.owners_name_outsiders,
+            shared_subscriptions,
+        },
+    ))
+}
+
+/// Reads the page of a resource: whoever holds any permission on it.
+pub async fn get(ctx: &Ctx) -> ApiResult<api::PermissionPage> {
+    crate::routes::access::operations::read_page(ctx).await
+}
+orch_api_base::__api_bind_d4b53ba781!();
+
+/// Changes the page of a resource, as a whole or not at all: the one change that names owners and
+/// holders at a choice. Who may is the engine's, and it was asked before this ran.
+pub async fn update(
+    ctx: &Ctx,
+    body: &api::PageChange,
+) -> ApiResult<api::PermissionPageWriteResponse> {
+    let (kind, id) = named(ctx)?;
+    let (change, people) = crate::routes::notifications::person::page_change(body)?;
+    let (ctx, mut tx, guard) = page_operations::action(ctx).await?;
+    let principal = guard.principal().clone();
+    let object = ObjectRef {
+        kind: kind.into(),
+        id,
+    };
+    let (_, resource, _) = resources::site(&mut tx, object)
+        .await
+        .map_err(|error| match error {
+            orch_authz::Error::NotFound(_) => ApiError::not_found(),
+            other => ApiError::internal(other),
+        })?;
+    if resource.deleted {
+        return Err(ApiError::not_found());
+    }
+    let (sharing, policy) = policy_of(&mut tx, resource.home, kind).await?;
+    if crate::routes::notifications::person::replay_page(&ctx, &mut tx, &principal, body).await? {
+        crate::routes::access::subject::require_page(
+            &mut tx,
+            &principal,
+            orch_authz::things::Thing::Other(object),
+            sharing,
+        )
+        .await?;
+        let view = pages::read(
+            &mut tx,
+            &principal,
+            orch_authz::things::Thing::Other(object).target(),
+            sharing,
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        let receipt = page_operations::acknowledged(&ctx, view.revision)?;
+        tx.commit().await.map_err(DbError::from)?;
+        return page_operations::reply(&ctx, &principal, receipt).await;
+    }
+    crate::routes::access::link_origin::check(&mut tx, &principal, body.link_origin).await?;
+    let accepted_revision = match pages::change_resource_under_fenced(
+        &mut tx,
+        &principal,
+        object,
+        &change,
+        sharing,
+        &policy,
+        &origin(&ctx),
+        || guard.check_deadline(&ctx),
+    )
+    .await
+    {
+        Ok(outcome) => outcome.revision,
+        Err(pages::ChangeFailure::Native(ChangeError::Stale { current })) => {
+            let page = page_operations::current(&ctx, &mut tx, &principal).await?;
+            let mut error = refusals::change_failed(&mut tx, ChangeError::Stale { current }).await;
+            if let Some(page) = page {
+                error = error.with("current", page);
+            }
+            return Err(error);
+        }
+        Err(pages::ChangeFailure::Native(ChangeError::SubscriptionNotShared)) => {
+            return Err(subscription_not_shared(&resource));
+        }
+        Err(pages::ChangeFailure::Native(error)) => {
+            return Err(refusals::change_failed(&mut tx, error).await);
+        }
+        Err(pages::ChangeFailure::BeforeEffect(error)) => return Err(error),
+    };
+    if !people.is_empty() {
+        crate::routes::notifications::person::tell(
+            &ctx,
+            &mut tx,
+            &principal,
+            ctx.param("object")?,
+            id,
+            &people,
+            body.notify_anchor,
+            None,
+        )
+        .await?;
+    }
+    let receipt = page_operations::acknowledged(&ctx, accepted_revision)?;
+    crate::routes::notifications::person::keep_page(&ctx, &mut tx, &principal, body).await?;
+    tx.commit().await.map_err(DbError::from)?;
+    page_operations::reply(&ctx, &principal, receipt).await
+}
+orch_api_base::__api_bind_26051412f4!();
+
+/// The refusal to name anybody in the Use row of a subscription that its home keeps to its first
+/// owner, with the harness and the place that says so.
+fn subscription_not_shared(resource: &resources::Resource) -> ApiError {
+    ApiError::new(
+        orch_api_contract::common::ErrorCode::ProviderSubscriptionNotShared,
+        "a subscription of this harness stays with its first owner, so nobody else is named in its Use row",
+    )
+    .with("harness_kind", resource.subscription.clone())
+    .with("scope", resource.home)
+}

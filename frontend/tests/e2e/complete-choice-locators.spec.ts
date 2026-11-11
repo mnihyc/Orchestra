@@ -151,9 +151,10 @@ for (const mode of MODES) {
       const response = await answered;
       expect(response.status()).toBe(200);
       expect(await page.evaluate(() => (window as typeof window & { __orchChoiceDecisions: unknown[] }).__orchChoiceDecisions)).toEqual([{ action: 'accept', content: { queue: 'queue-12' } }]);
-      const approved = await response.json() as Approval;
-      expect(approved.state).toBe('approved');
-      expect(approved.decision).toEqual({ action: 'accept', content: { queue: 'queue-12' } });
+      const decided = await response.json() as Approval;
+      // MCP elicitation records the accepted content as an answered request.
+      expect(decided.state).toBe('answered');
+      expect(decided.decision).toEqual({ action: 'accept', content: { queue: 'queue-12' } });
       await expect(accept).toHaveCount(0);
       expect(observed.calls.filter((call) => call.path === decisionPath)).toHaveLength(1);
     } finally { observed.stop(); await recordCalls(info, observed.calls); }
@@ -184,8 +185,10 @@ for (const mode of MODES) {
         await noTypingIo(page, observed.calls, async () => {
           await input.click();
           const list = page.getByRole('listbox', { name: words.usage.chart.splitBy, exact: true });
-          // Acme is an org: ten declared dimensions + Thread + None; Performance adds Topic.
-          await expect(list.getByRole('option')).toHaveCount(view === 'usage' ? 12 : 13);
+          // Acme includes Model or service and Purpose. Performance also offers Topic.
+          await expect(list.getByRole('option')).toHaveCount(view === 'usage' ? 14 : 15);
+          await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.offering.name, exact: true })).toBeVisible();
+          await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.purpose.name, exact: true })).toBeVisible();
           await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.thread.name, exact: true })).toBeVisible();
           await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.model.name, exact: true })).toHaveAttribute('aria-selected', 'true');
           await input.pressSequentially('program');

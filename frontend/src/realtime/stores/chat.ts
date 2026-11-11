@@ -390,12 +390,13 @@ export const useChatStates = create<StatesStore>(() => ({ states: new Map(), lat
 /** Within one observed revision reads advance; a newer deliberate revision may move backwards. */
 export function mergeState(held: ChatState | undefined, incoming: ChatState): ChatState {
   if (held === undefined) return incoming;
-  if (incoming.read_revision > held.read_revision) return incoming;
-  if (incoming.read_revision < held.read_revision) return held;
+  const lastMessage = Math.max(held.last_message_seq, incoming.last_message_seq);
+  if (incoming.read_revision > held.read_revision) return { ...incoming, last_message_seq: lastMessage };
+  if (incoming.read_revision < held.read_revision) return { ...held, last_message_seq: lastMessage };
   const lastRead = Math.max(held.last_read_seq, incoming.last_read_seq);
   // Mentions counted before the position the person has read to are read.
   const mentions = incoming.last_read_seq >= held.last_read_seq ? incoming.mentions_unread : Math.min(incoming.mentions_unread, held.mentions_unread);
-  return { ...incoming, last_read_seq: lastRead, mentions_unread: mentions };
+  return { ...incoming, last_message_seq: lastMessage, last_read_seq: lastRead, mentions_unread: mentions };
 }
 
 export const statesWriter = {

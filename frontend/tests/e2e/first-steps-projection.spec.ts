@@ -37,7 +37,7 @@ test.describe('the first-steps double reads its ordinary world', () => {
     held.firstSteps.control('/answer', { thread: ACME.mainThread, scripted: true });
     const data = held.firstSteps.projection(person, ACME.org);
     expect(data.steps.find((step) => step.id === 'work')).toMatchObject({ fact: 'answered_once', state: 'done', scripted: true });
-    expect(data.steps.find((step) => step.id === 'away')).toMatchObject({ state: 'unknown', fact: 'unknown', action: { url: '/settings/notifications', allowed: true } });
+    expect(data.steps.find((step) => step.id === 'away')).toMatchObject({ state: 'open', fact: 'not_done', action: { url: '/settings/notifications', allowed: true } });
   });
 
   test('omits invitation for a saved solo choice', () => {

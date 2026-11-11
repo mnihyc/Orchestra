@@ -60,7 +60,9 @@ for (const locale of ['en', 'zh-CN'] as const) test(`resource tabs retain names,
   expect(faults).toEqual([]);
   await page.screenshot({ path: info.outputPath(`resource-titles-${locale}.png`), animations: 'disabled' });
   reads.length = 0;
-  await selected.locator('..').locator('button').click();
+  await selected.focus();
+  await page.keyboard.press('Shift+F10');
+  await page.getByRole('menu').getByRole('menuitem', { name: locale === 'en' ? 'Close' : '关闭', exact: true }).click();
   await expect(selected).toHaveCount(0);
   await expect(page).toHaveURL(/\/resources\/mcp\/?$/);
   await expect.poll(() => reads).toEqual(['mcp_server']);

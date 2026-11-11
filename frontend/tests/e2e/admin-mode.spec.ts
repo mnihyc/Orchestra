@@ -176,5 +176,5 @@ test('the finder’s ordinary focus is keyboard-operated without activating its 
   await focus.focus();
   await page.keyboard.press('Alt+Enter');
   await expect(finder).toBeVisible();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });

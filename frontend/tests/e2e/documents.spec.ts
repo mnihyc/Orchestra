@@ -49,7 +49,8 @@ test('a page shows a block of every one of the twenty kinds as it is stored', as
   await expect(page_.locator('video')).toHaveCount(0);
   // The title and the line under it.
   await expect(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Rollout plan');
-  await expect(page.getByText('Ada Lovelace changed this')).toBeVisible();
+  const changed = page.locator('[data-screen="document"] p').filter({ hasText: 'Changed by' });
+  await expect(changed.getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
   await expect(page.locator('[data-access-state]').filter({ hasText: 'Uses Fix login permissions' })).toBeVisible();
   // Opening a page writes nothing.
   expect((await held(DOCS.plan)).seq).toBe(1);
@@ -61,7 +62,8 @@ test('one press makes a document and opens its title, then Enter writes its body
   await expect(page.getByRole('link', { name: 'Rollout plan' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Notes from the canary' })).toBeVisible();
   await page.getByRole('button', { name: 'New document', exact: true }).click();
-  await expect(page).toHaveURL(/\/doc\/[0-9a-f-]+$/);
+  await expect(page).toHaveURL((url) => /^\/doc\/[0-9a-f-]+$/u.test(url.pathname) && url.hash === '' && (url.search === ''
+    || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list')));
   const title = page.getByRole('textbox', { name: 'Title' });
   await expect(title).toBeFocused();
   await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveCount(0);

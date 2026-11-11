@@ -10,10 +10,13 @@ test('the account menu leads to last week for a place and a visible thread break
   await page.getByRole('button',{name:'Your account'}).click();
   await page.getByRole('menuitem',{name:'Usage',exact:true}).click();
   await expect(page).toHaveURL(/\/usage/);
-  const header=page.locator('header').filter({has:page.getByRole('heading',{name:'Usage',level:1,exact:true})});
-  await header.getByRole('combobox',{name:'Scope'}).click();
+  await page.getByRole('combobox',{name:'Scope',exact:true}).fill('Acme');
   await page.getByRole('option',{name:'Acme',exact:true}).click();
-  await header.getByRole('button',{name:'Last week',exact:true}).click();
+  const span=page.getByRole('combobox',{name:'Span',exact:true});
+  if(await span.isVisible()) {
+    await span.click();
+    await page.getByRole('option',{name:'Last week',exact:true}).click();
+  } else await page.getByRole('radio',{name:'Last week',exact:true}).click();
   await expect.poll(()=>new URL(page.url()).searchParams.get('scope')).toBe(`node:${ACME.org}`);
   await expect.poll(()=>new URL(page.url()).searchParams.get('range')).toBe('last_week');
   const totals=page.getByRole('list',{name:'Figures of the span'});

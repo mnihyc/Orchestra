@@ -119,7 +119,7 @@ for (const warm of [false, true]) test(`a dirty file retains its original worksp
   await expect(code).toContainText("import { greet } from './util';");
   if (warm) {
     await workspace('/bind-thread', { environment: MAIN_ENVIRONMENT, thread: MAIN, directory: 'web' });
-    await expect(filesPanel(page).getByRole('heading', { name: 'web/ in Workspace', exact: true })).toBeVisible();
+    await expect(filesPanel(page).getByRole('heading', { name: 'Files · web/ in Workspace', exact: true })).toBeVisible();
     await row(page, /^src/).click(); await row(page, /^app\.ts/).click();
     await expect(code).toContainText("import { greet } from './util';");
   }

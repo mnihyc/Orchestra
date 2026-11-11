@@ -1,3 +1,4 @@
+import type * as RouterModule from '@tanstack/react-router';
 /** The server's native-only fact has one form in real resource rows, the tree and a page header. */
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -14,13 +15,13 @@ import { AdminActNotice, adminSpec, isAdminAct } from '@/ui/AdminAct';
 import { AsAdminMark } from '@/ui/AsAdminMark';
 import { Button } from '@/ui/Button';
 import { ConfirmDialog } from '@/ui/ConfirmDialog';
-import { show } from './support';
+import { show, tableDataRows } from './support';
 import { planProvider } from '../unit/provider-plan-fixtures';
 
 vi.mock('@/features/navigation/placeLabels', () => ({ usePlaceLabel: () => (place: NodeRef) => place.redacted ? null : place.name }));
 vi.mock('@/features/resources/trail', () => ({ rememberList: vi.fn(), useResourceHeading: vi.fn() }));
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }) }));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="#place">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }) }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
 vi.mock('@/features/navigation/DocMenu', () => ({ DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
 vi.mock('@/features/chat/open', () => ({ isPlainClick: () => true, useOpenPath: () => vi.fn() }));
@@ -44,7 +45,8 @@ function List() {
 it('marks only the native-only served resource row, preserves order and shows its owner on a narrow table', () => {
   show(<List />);
   const table = screen.getByRole('table', { name: 'Environments' });
-  const body = within(table).getAllByRole('row').slice(1);
+  const body = tableDataRows(table);
+  expect(table.querySelectorAll('th[scope="rowgroup"]')).toHaveLength(1);
   expect(body).toHaveLength(2);
   expect(within(body[0]!).getByRole('link', { name: 'My environment' })).toBeVisible();
   expect(body[0]!.querySelector('[data-as-admin-mark]')).toBeNull();
@@ -58,7 +60,7 @@ it('uses the same named shield alone in the actual navigation tree, without a ma
   const node = (id: string, parent_id: string | null, admin_access: AdminAccess | null): TreeNode => ({
     id, parent_id, kind: parent_id === null ? 'org' : 'project', name: id, address: null, color: null,
     archived: false, deleted: false, restricted: false, tree_seq: 1, topic: null, thread: null,
-    chat: { id: `chat-${id}`, seq: 0 }, docs: 0, participating: admin_access === null, admin_access,
+    chat: { id: `chat-${id}`, seq: 0 }, docs: 0, docs_seq: 0, participating: admin_access === null, admin_access,
   });
   const tree = { nodes: new Map([['root', node('root', null, null)], ['mine', node('mine', 'root', null)], ['other', node('other', 'root', reach)]]), lastSeq: 1, loaded: true, error: null };
   const shown = show(<NodeTree tree={tree} rootId="root" view={{}} expanded={new Set()} onExpandedChange={vi.fn()} currentId={null} locale="en" me="ada" />);

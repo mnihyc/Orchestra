@@ -50,10 +50,11 @@ test('the tree opens at the thread\'s directory, and a file opens in the code vi
   await expect(editor(page)).toContainText("import { greet } from './util';");
   // The conversation stays where it was.
   await expect(page.getByRole('tab', { name: 'Main thread' })).toBeVisible();
-  // Looking at another file gives the tab of the one that was only looked at to the next.
+  // Ordinary files now retain their tabs; selecting another keeps the first and focuses the second.
   await row(page, /^util\.ts/).click();
   await expect(page.getByRole('tab', { name: 'util.ts' })).toBeVisible();
-  await expect(page.getByRole('tab', { name: 'app.ts' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'app.ts' })).toBeVisible();
+  await expect(page.getByRole('tab', { name: 'util.ts' })).toHaveAttribute('aria-selected', 'true');
   await expect(editor(page)).toContainText('export const VERSION = 3;');
 });
 

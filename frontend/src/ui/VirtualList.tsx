@@ -264,11 +264,23 @@ export function VirtualList({
     });
   });
 
+  const checkEnd = useCallback((element: HTMLDivElement) => {
+    const near = element.scrollHeight - element.scrollTop - element.clientHeight <= endSlackPx;
+    if (near !== atEnd.current) {
+      atEnd.current = near;
+      onAtEnd?.(near);
+    }
+    return near;
+  }, [endSlackPx, onAtEnd]);
+
   // The list itself gets smaller or larger (the composer under it grows, a banner comes): a reader who
   // was at the end stays at it.
   useEffect(() => {
     const element = scroller.current;
-    if (!follow || element === null || typeof ResizeObserver === 'undefined') return;
+    if (element === null) return;
+    // A link to the first row may already be in position and never emit a scroll event.
+    checkEnd(element);
+    if (!follow || typeof ResizeObserver === 'undefined') return;
     let height = element.clientHeight;
     let frame = 0;
     const observer = new ResizeObserver(() => {
@@ -286,22 +298,18 @@ export function VirtualList({
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [follow]);
+  }, [checkEnd, follow]);
 
   const check = useCallback(() => {
     const element = scroller.current;
     if (element === null) return;
-    const near = element.scrollHeight - element.scrollTop - element.clientHeight <= endSlackPx;
-    if (near !== atEnd.current) {
-      atEnd.current = near;
-      onAtEnd?.(near);
-    }
+    const near = checkEnd(element);
     if (positioned.current && onPosition !== undefined) {
       const first = virtualizer.getVirtualItems().find((row) => row.end > element.scrollTop);
       onPosition({ key: near || first === undefined ? null : keyOf(first.index), offset: first === undefined ? 0 : Math.max(0, element.scrollTop - first.start), atEnd: near });
     }
     if (element.scrollTop < nearStartPx) onNearStart?.();
-  }, [endSlackPx, nearStartPx, onAtEnd, onNearStart, onPosition, keyOf, virtualizer]);
+  }, [checkEnd, nearStartPx, onNearStart, onPosition, keyOf, virtualizer]);
 
   // Which rows are in view, for whoever asked.
   const range = virtualizer.range;
@@ -324,18 +332,20 @@ export function VirtualList({
       onScroll={check}
       className={className}
     >
-      <div style={{ height: total, position: 'relative', width: '100%' }}>
+      <ol role="list" className="m-0 list-none p-0" style={{ height: total, position: 'relative', width: '100%' }}>
         {virtualizer.getVirtualItems().map((row) => (
-          <div
+          <li
             key={row.key}
             data-index={row.index}
+            aria-posinset={row.index + 1}
+            aria-setsize={count}
             ref={virtualizer.measureElement}
             style={{ position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${row.start}px)` }}
           >
             {render(row.index)}
-          </div>
+          </li>
         ))}
-      </div>
+      </ol>
     </div>
   );
 }

@@ -1,5 +1,7 @@
 /** P9: a person opens and types in Find while the real shell aggregate is held, then keeps that same field. */
 import { expect, test } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { ACME, PEOPLE, scenario, signIn } from './support.ts';
 
 test.beforeEach(async () => { await scenario(); });
@@ -39,7 +41,9 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await expect(page.locator('[data-main-area]').getByRole('status', { name: /^(Loading…|加载中…)$/, exact: true })).toBeVisible();
       if (width === 1440) {
         await expect(page.locator('[data-navigation-rail]')).toBeVisible();
-        await expect(page.locator('[data-workbench-bar="left"]')).toBeVisible();
+        // View bodies wait for admitted bootstrap; their retained chrome starts disabled.
+        const words = locale === 'en' ? english : chinese;
+        await expect(page.getByRole('button', { name: words.workbench.areas.left, exact: true })).toBeDisabled();
       } else await expect(page.locator('[data-narrow-containers]')).toBeVisible();
       expect(reads.filter((path) => /^\/(?:orgs|topics|projects|threads|documents|environments|providers|agents)(?:\/|$)/.test(path))).toEqual([]);
       expect(reads.filter((path) => path.startsWith('/me/') && path !== '/me/bootstrap')).toEqual([]);

@@ -1,9 +1,12 @@
+import type { PlanMcpServer } from '../../src/generated/api-types';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 /** Ordinary wizard pickers and action rows at desktop and phone widths in both themes. */
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { RUNS_ON } from '../doubles/fixtures.ts';
 import { expectOrdinaryWizardControls, expectSameActionRow } from './change-control-geometry.ts';
-import { BUILD_HOST, change, conversation, openBlocked, openHistory, tabTo, wizard } from './change-support.ts';
+import { BUILD_HOST, change, confirmNoAgentAccess, conversation, openBlocked, openHistory, tabTo, wizard } from './change-support.ts';
 import { startDialog } from './start-support.ts';
 import { ACME, scenario, signIn } from './support.ts';
 
@@ -12,7 +15,7 @@ async function picker(page:Page,dialog:Locator,name:string):Promise<void> {
   await expect(choice).toBeVisible();
   await tabTo(page,name);
   await expect(choice).toBeFocused();
-  await page.keyboard.press('Enter');
+  await page.keyboard.press('ArrowDown');
   await expect(page.getByRole('listbox')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(choice).toBeFocused();
@@ -66,6 +69,7 @@ for(const width of [1440,400]) for(const theme of ['light','dark'] as const) {
       await expect(dialog.locator('[data-plan]')).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('data-theme',theme);
       for(const name of ['History','Provider','Environment']) await picker(page,dialog,name);
+      await confirmNoAgentAccess(dialog);
       await dialog.getByRole('button',{name:/^Options/}).click();
       await expectOrdinaryWizardControls(dialog,'fork options');
       await expect(dialog.locator('[data-confirm]')).not.toHaveAttribute('aria-disabled','true');
@@ -110,7 +114,7 @@ for(const width of [1440,400]) for(const theme of ['light','dark'] as const) {
         await route.fulfill({response,json:{...plan,blockers:[{code:'no_host',message:'No host is available.'}]}});
       });
       await page.getByRole('button',{name:'Actions for Sandbox'}).click();
-      await page.getByRole('menuitem',{name:'Move…',exact:true}).click();
+      await page.getByRole('menuitem',{name:english.change.env.menu.move,exact:true}).click();
       dialog=wizard(page,'Move Sandbox');
       await expect(dialog.locator('[data-plan]').getByRole('button',{name:'Try again'})).toBeVisible();
       await expectOrdinaryWizardControls(dialog,'blocked move and retry');
@@ -134,5 +138,37 @@ for(const width of [1440,400]) for(const theme of ['light','dark'] as const) {
         await dialog.getByRole('button',{name:'Cancel',exact:true}).click();
       } finally {release();}
     });
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`lists a retained MCP server once before the fork is confirmed (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await change.mode('manual');
+    await page.setViewportSize({ width, height: 1000 });
+    await page.emulateMedia({ colorScheme: theme });
+    await openHistory(page);
+    const threadUrl = page.url();
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+      await page.goto(threadUrl);
+    }
+    const kept: PlanMcpServer = { id: 'retained-mcp-proof', name: 'Retained research tools', own: false, imported: false, fate: 'kept', reason: null };
+    await page.route('**/api/v1/threads/*/forks/preflight', async (route) => {
+      const response = await route.fetch();
+      const plan: unknown = await response.json();
+      if (typeof plan !== 'object' || plan === null || !('mcp' in plan) || !Array.isArray(plan.mcp)) throw new Error('The native fork preview must declare its MCP fates.');
+      await route.fulfill({ response, json: { ...plan, mcp: [...plan.mcp as unknown[], kept] } });
+    });
+    const words = locale === 'en' ? english : chinese;
+    await conversation(page).getByText('The handler reads').first().click({ button: 'right' });
+    await page.getByRole('menuitem', { name: words.change.item.fork, exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    const stays = dialog.getByRole('region', { name: words.change.lists.stays, exact: true });
+    await expect(stays.getByText(kept.name, { exact: true })).toHaveCount(1);
+    await expect(dialog.getByRole('region', { name: words.change.lists.changes, exact: true })).not.toContainText(kept.name);
   });
 }

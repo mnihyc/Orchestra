@@ -8,14 +8,18 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation' });
+const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation', exact: true });
 const main = (page: Page) => page.getByTestId('main');
 
-/** The colour dialog of a place, opened from its "⋯" in the left bar, and one of the twelve chosen in it by name. */
-async function colour(page: Page, place: string, name: string): Promise<void> {
-  await bar(page).getByRole('button', { name: new RegExp(`^Actions for ${place}(?: · .+)?$`), exact: true }).first().click();
+/** The colour dialog of a place, opened from its "⋯" in the left bar (the org in view is no row: its own acts are in the menu of Navigation's title row), and one of the twelve chosen in it by name. */
+async function colour(page: Page, place: string, name: string, org = false): Promise<void> {
+  const opener = org
+    ? page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Navigation actions', exact: true })
+    : bar(page).getByRole('button', { name: new RegExp(`^Actions for ${place}(?: · .+)?$`), exact: true }).first();
+  await opener.click();
   await page.getByRole('menuitem', { name: 'Colour…' }).click();
-  const dialog = page.getByRole('dialog', { name: `Colour of ${place}` });
+  // The dialog names the place by its kind and where it lies, as every dialog of a place does.
+  const dialog = page.getByRole('dialog', { name: new RegExp(`^Colour of (the \\w+ )?${place}(, in .+)?$`) });
   await dialog.getByRole('button', { name }).click();
   await expect(dialog.getByRole('button', { name })).toHaveAttribute('aria-pressed', 'true');
   await dialog.getByRole('button', { name: 'Close' }).first().click();
@@ -44,13 +48,14 @@ test('a place has the icon of its kind in the colour it was given wherever it is
   const finder = page.getByRole('dialog', { name: 'Find', exact: true });
   await expect(finder).toBeVisible();
   await finder.getByRole('combobox', { name: 'Search terms', exact: true }).pressSequentially('Shop', { delay: 20 });
-  const found = finder.getByRole('option', { name: /^Shop/ }).first();
+  // The place itself, among the places to go to (the commands about it stand above).
+  const found = finder.getByRole('group', { name: 'Go to' }).getByRole('option', { name: /^Shop project/ }).first();
   await expect(found.locator('[data-node-icon="project"]')).toHaveAttribute('data-node-color', '5');
   await page.keyboard.press('Escape');
 
   // The tree of ticks in the dialog that exports the org.
   await page.goto('/org/acme');
-  await bar(page).getByRole('button', { name: /^Actions for Acme(?: · .+)?$/, exact: true }).click();
+  await page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Navigation actions', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Export…' }).click();
   const exporting = page.getByRole('dialog', { name: 'Export Acme' });
   await expect(exporting.getByRole('treeitem', { name: /^Shop/ }).first().locator('[data-node-icon="project"]').first()).toHaveAttribute('data-node-color', '5');
@@ -60,24 +65,26 @@ test('an org has one colour: the one it was given in the bar is the mark of its 
   await signIn(page);
   await page.goto('/org/acme');
   await expect(bar(page).getByRole('treeitem', { name: /^Web/ })).toBeVisible();
-  await colour(page, 'Acme', 'Green');
+  await colour(page, 'Acme', 'Green', true);
   const mark = (where: Page) => where.locator('nav[aria-label="Orgs and your own places"] a[href="/org/acme"] .avatar');
   await expect(mark(page)).toHaveClass(/bg-\(--identity-4\)/);
   // Its home.
   await expect(main(page).locator('.avatar').first()).toHaveClass(/bg-\(--identity-4\)/);
   // Its settings.
   await page.goto('/org/acme/settings/general');
-  await expect(page.getByRole('heading', { name: 'Settings of Acme', level: 1 })).toBeVisible();
-  await expect(page.locator('h1', { hasText: 'Settings of Acme' }).locator('xpath=ancestor::*[.//*[contains(@class, "avatar")]][1]').locator('.avatar').first()).toHaveClass(/bg-\(--identity-4\)/);
+  // Its settings name the section in view, with the org's mark beside the title.
+  await expect(main(page).getByRole('heading', { name: 'General', level: 1 })).toBeVisible();
+  await expect(main(page).locator('h1', { hasText: 'General' }).locator('xpath=ancestor::*[.//*[contains(@class, "avatar")]][1]').locator('.avatar').first()).toHaveClass(/bg-\(--identity-4\)/);
 });
 
 test('an org reached by its id is taken to its address with what the address said: the chat panel opens, and the chat of an org is called Team chat in the bar and in the panel', async ({ page }) => {
   await signIn(page, PEOPLE.ada);
   await page.goto(`/org/${ACME.org}?panel=chat`);
-  await expect(page).toHaveURL(/\/org\/acme\?panel=chat$/);
+  // The org's address, with what it asked for kept beside its home's own choices.
+  await expect(page).toHaveURL(/\/org\/acme\?(.*&)?panel=chat(&|$)/);
   await expect(composer(page)).toBeVisible();
-  // One word for it: the bar's row, and the panel's header.
-  await expect(bar(page).getByRole('link', { name: 'Team chat' })).toBeVisible();
+  // One word for it: the bar's shortcut, and the panel's header.
+  await expect(bar(page).getByRole('button', { name: 'Team chat' })).toBeVisible();
   await expect(page.getByText('Team chat', { exact: true }).first()).toBeVisible();
   await expect(page.getByText(/org chat/i)).toHaveCount(0);
 });

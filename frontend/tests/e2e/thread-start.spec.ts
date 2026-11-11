@@ -27,16 +27,16 @@ test('a thread is made from the defaults of its place, with a name and a first m
 
   // What may be run on comes first, and what may not is said below with why.
   const providers = form.getByRole('combobox', { name: 'Provider', exact: true });
-  await expect(providers).toContainText('OpenAI key');
+  await expect(providers).toHaveValue('OpenAI key');
   await providers.click();
   await expect(page.getByRole('option', { name: /OpenAI key/ })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByRole('option', { name: /Codex subscription/ })).toBeVisible();
   await expect(page.getByRole('option', { name: /Team Anthropic/ })).toBeVisible();
-  await expect(page.locator('[role="option"][data-disabled]')).toHaveCount(2);
+  await expect(page.getByRole('dialog', { name: 'Provider', exact: true }).locator('[role="option"][aria-disabled="true"]')).toHaveCount(1);
   await page.keyboard.press('Escape');
   // The environment that the topic names is the one chosen, and the agent and the model follow the provider.
-  await expect(form.getByRole('combobox', { name: 'Where it runs' })).toContainText('Workspace');
-  await expect(form.getByRole('combobox', { name: 'Agent' })).toContainText('Codex');
+  await expect(form.getByRole('combobox', { name: 'Where it runs' })).toHaveValue(/Workspace/u);
+  await expect(form.getByRole('combobox', { name: 'Agent' })).toHaveValue(/Codex/u);
   await expect(form.getByRole('combobox', { name: 'Model' })).toContainText('GPT-5.4');
 
   await form.getByRole('textbox', { name: nameField }).fill('Investigate the flaky test');
@@ -90,9 +90,10 @@ test('a provider that is not ready cannot be chosen, and the dialog says why', a
   const providers = form.getByRole('combobox', { name: 'Provider', exact: true });
   await providers.click();
   await expect(page.getByRole('option', { name: /Fresh key/ })).toHaveAttribute('aria-disabled', 'true');
-  await expect(page.getByRole('option', { name: /Claude subscription/ })).toHaveAttribute('aria-disabled', 'true');
   await expect(page.getByRole('option', { name: /Fresh key/ })).toContainText('it needs a credential or a model before it can be used');
-  await expect(page.getByRole('option', { name: /Claude subscription/ })).toContainText('it has reached its limit');
+  // A vendor-limited provider remains a binding choice and reports its reset time.
+  await expect(page.getByRole('option', { name: /Claude subscription/ })).not.toHaveAttribute('aria-disabled', 'true');
+  await expect(page.getByRole('option', { name: /Claude subscription/ })).toContainText('At limit until');
   await page.keyboard.press('Escape');
-  await expect(providers).toContainText('OpenAI key');
+  await expect(providers).toHaveValue('OpenAI key');
 });

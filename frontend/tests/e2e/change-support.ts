@@ -1,5 +1,6 @@
 /** What the end-to-end tests of changing where and on what work runs share: the controls of the part of the fake API that plans and carries changes out, and the names it is steered by. */
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
 import type { Job } from '../../src/generated/api-types.ts';
 
 import { id as fixtureId, KIND } from '../doubles/fixtures.ts';
@@ -112,6 +113,15 @@ export async function openHistory(page: Page): Promise<void> {
   await expect(conversation(page).getByText('Please fix it, and run the tests.')).toBeVisible();
 }
 
+/** Confirms the displayed Nothing reach in forks whose fixture has no preset. */
+export async function confirmNoAgentAccess(dialog: Locator): Promise<void> {
+  const words = english.agentAccess;
+  const access = dialog.getByRole('region', { name: words.title, exact: true });
+  await access.getByRole('button', { name: words.change, exact: true }).click();
+  await expect(access.getByRole('combobox', { name: words.scope, exact: true })).toContainText(words.where.nothing);
+  await access.getByRole('button', { name: words.confirm, exact: true }).click();
+}
+
 /** Presses Tab until the focus stands on the control with this name (its label, else its words): what a person does who has no pointer. */
 export async function tabTo(page: Page, name: string | RegExp, limit = 60): Promise<void> {
   for (let presses = 0; presses < limit; presses += 1) {
@@ -124,6 +134,7 @@ export async function tabTo(page: Page, name: string | RegExp, limit = 60): Prom
       return (element.getAttribute('aria-label') ?? label ?? element.textContent).replace(/\s+/g, ' ').trim();
     });
     if (typeof name === 'string' ? label === name : name.test(label)) return;
+    if (await page.getByRole('listbox').isVisible()) await page.keyboard.press('Escape');
   }
   throw new Error(`the focus did not reach ${String(name)} in ${limit} presses of Tab`);
 }

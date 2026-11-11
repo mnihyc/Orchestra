@@ -34,6 +34,7 @@ export interface RateDialogProps {
   /** The card as this place writes it now, and the revision of that setting where one was written. */
   card: Card;
   revision: number | null;
+  unavailableReason?: string | undefined;
   onClose: () => void;
 }
 
@@ -42,7 +43,7 @@ function Decimal({ label, value, onChange, error, optional = false, className }:
   return <Input label={label} optional={optional} value={value} inputMode="decimal" onChange={(event) => onChange(event.target.value)} error={error} fieldClassName={className} />;
 }
 
-export function RateDialog({ node, mode, initial, replacing, card, revision, onClose }: RateDialogProps) {
+export function RateDialog({ node, mode, initial, replacing, card, revision, unavailableReason, onClose }: RateDialogProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(initial);
@@ -67,7 +68,7 @@ export function RateDialog({ node, mode, initial, replacing, card, revision, onC
 
   const submit = () => {
     setTried(true);
-    if (Object.keys(faults).length > 0) return;
+    if (unavailableReason !== undefined || write.isPending || Object.keys(faults).length > 0) return;
     write.mutate(cardWith(card, draft, replacing));
   };
 
@@ -86,14 +87,14 @@ export function RateDialog({ node, mode, initial, replacing, card, revision, onC
         footer={
           <>
             {mode === 'edit' && replacing !== null && (
-              <Button variant="ghost" className="mr-auto" disabled={write.isPending} onClick={() => setRemoving(true)}>
+              <Button variant="ghost" className="mr-auto" disabled={write.isPending || unavailableReason !== undefined} reason={unavailableReason} onClick={() => setRemoving(true)}>
                 {t('usage.rates.form.remove')}
               </Button>
             )}
             <Button variant="ghost" disabled={write.isPending} onClick={onClose}>
               {t('common.cancel')}
             </Button>
-            <Button variant="primary" pending={write.isPending} onClick={submit}>
+            <Button variant="primary" pending={write.isPending} blocked={unavailableReason !== undefined} reason={unavailableReason} onClick={submit}>
               {t('usage.rates.form.save')}
             </Button>
           </>
@@ -125,6 +126,7 @@ export function RateDialog({ node, mode, initial, replacing, card, revision, onC
               <Decimal label={t('usage.rates.col.input')} value={draft.input} onChange={(next) => set('input', next)} error={say('input')} />
               <Decimal label={t('usage.rates.col.cached')} value={draft.cached} onChange={(next) => set('cached', next)} error={say('cached')} />
               <Decimal label={t('usage.rates.col.output')} value={draft.output} onChange={(next) => set('output', next)} error={say('output')} />
+              <Decimal label={t('webSearch.price')} optional value={draft.webSearch ?? ''} onChange={(next) => set('webSearch', next)} error={say('webSearch')} />
               <Decimal label={t('usage.rates.col.cacheWrite')} optional value={draft.cacheWrite} onChange={(next) => set('cacheWrite', next)} error={say('cacheWrite')} />
             </div>
           </fieldset>
@@ -191,9 +193,11 @@ export function RateDialog({ node, mode, initial, replacing, card, revision, onC
         confirmLabel={t('usage.rates.form.removeConfirm', { pattern: replacing ?? '' })}
         danger
         pending={write.isPending}
+        disabled={unavailableReason !== undefined}
+        footerStart={unavailableReason === undefined ? undefined : <span className="text-sm text-text-muted">{unavailableReason}</span>}
         error={removing ? write.error : undefined}
         onConfirm={() => {
-          if (replacing !== null) write.mutate(cardWithout(card, replacing));
+          if (replacing !== null && unavailableReason === undefined) write.mutate(cardWithout(card, replacing));
         }}
       >
         {t('usage.rates.form.removeAbout')}

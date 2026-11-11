@@ -1,0 +1,63 @@
+{
+  "status": "supported",
+  "events": [
+    {
+      "name": "adapter.result",
+      "body": {
+        "method": "start",
+        "ok": true,
+        "value": {
+          "harness_version": "0.170.0"
+        }
+      },
+      "subset": true
+    },
+    {
+      "name": "adapter.result",
+      "body": {
+        "method": "open_session",
+        "ok": true,
+        "value": {
+          "native_session_ref": "fixture-thread",
+          "resumed": false
+        }
+      },
+      "subset": true
+    },
+    {
+      "name": "session.opened",
+      "body": {
+        "native_session_ref": "fixture-thread",
+        "resumed": false
+      },
+      "subset": true
+    },
+    {
+      "name": "adapter.result",
+      "body": {
+        "method": "background_commands",
+        "ok": true,
+        "value": {
+          "supported": false,
+          "state": "unavailable",
+          "items": [],
+          "total": null
+        }
+      },
+      "subset": true
+    },
+    {
+      "name": "adapter.result",
+      "body": {
+        "method": "close_session",
+        "ok": true
+      },
+      "subset": true
+    }
+  ],
+  "quiet": false,
+  "ignore_events": [
+    "harness.status",
+    "model.request"
+  ]
+}
