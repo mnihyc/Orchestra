@@ -4,7 +4,7 @@
 //! carries it ([`HistoryMethod`]) decides what becomes of each kind of item; [`report_counts`] says so before the
 //! job runs, from [`Counts`] that SQL made, and the adapter's own report replaces it once the session is open.
 //! **Nothing here holds a history.** A plan counts one; a carry takes the newest turns that fit a bound, read from
-//! the end a page at a time ([`newest`], `cut::recent`); a transcript is written to a file a page of turns at a
+//! the end a page at a time (`newest`, `cut::recent`); a transcript is written to a file a page of turns at a
 //! time (`cut::transcript_file`). What they cost follows the bound or the page, never the length of the history.
 //!
 //! **The neutral archive** is one JSON object to a line, oldest first: `kind`, `status`, `stream`,
@@ -56,7 +56,7 @@ fn reason_not_carried(kind: &str) -> &'static str {
     }
 }
 
-/// A bounded part of a history: the turns of it that were taken and the items they hold ([`newest`] takes the newest turns
+/// A bounded part of a history: the turns of it that were taken and the items they hold (`newest` takes the newest turns
 /// that fit a bound; nothing here is a whole history).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Selected {
@@ -95,6 +95,21 @@ pub async fn copy_conversation(
             "The requested source segment is no longer selected.",
         ));
     }
+    // This legacy API means all finished selected turns when no range was supplied.
+    // The durable cut API requires an explicit bound; None there means no turns.
+    let range = match range {
+        Some(range) => Some(range),
+        None => Some((
+            1,
+            orch_db::queries::thread_history_cuts::last_finished(
+                unit.conn,
+                source,
+                source_row.active_continuation_id,
+            )
+            .await?
+            .unwrap_or(0),
+        )),
+    };
     let at = unit.now();
     let captured = orch_db::queries::thread_history_cuts::capture(
         unit.conn,
@@ -131,13 +146,13 @@ pub struct Counts {
     /// The first turn the thread has, when the history begins later: those before it are left out.
     pub left_out_before: Option<i32>,
     /// How much room the payloads of those items take as the database keeps them: what a reader that loads them all is
-    /// measured against ([`native_proof_limit`]). Nought where it was not measured.
+    /// measured against (`native_proof_limit`). Nought where it was not measured.
     pub bytes: i64,
 }
 
 /// The default of the setting `thread.native_fork_check_bytes`: the most a history may take, as the database keeps its words, for
 /// a native fork point to be proved against it. It is the largest record of a session that an adapter writes, 32 MiB. The proof
-/// reads the whole record and, beside it, every item of the history it is made for, and matches them one to one; a history that
+/// streams the record against compact identities of paged frozen items, and matches them one to one; a history that
 /// takes more than a record can hold cannot be matched to a complete one, so no proof is begun for it, nothing of it is read, and
 /// it travels as the newest turns that fit.
 pub(crate) const NATIVE_PROOF_DEFAULT_BYTES: i64 =
@@ -174,7 +189,7 @@ impl Counts {
 }
 
 /// What a method does with the items of a history, counted by kind. `carried` says what a handoff in writing puts
-/// into the new agent's context ([`carried_words`]); a general sentence stands where it is not known.
+/// into the new agent's context (`carried_words`); a general sentence stands where it is not known.
 #[must_use]
 pub fn report(method: HistoryMethod, selected: &Selected, carried: Option<&str>) -> HistoryReport {
     let mut items: BTreeMap<String, i64> = BTreeMap::new();
@@ -451,6 +466,7 @@ pub(crate) async fn newest(
             let ordinal = bundle.turn.ordinal;
             let kept: Vec<ItemRow> = bundle
                 .items
+                .into_vec()?
                 .into_iter()
                 .filter(|item| (item.turn_id.is_some() || item.before_orch) && is_seen(item))
                 .collect();

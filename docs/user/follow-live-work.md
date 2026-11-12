@@ -1,7 +1,9 @@
 ---
+group: work
 title: Follow progress and arrange status items
 screens: /workbench, /thread/$threadId, /resources/environments, /resources/environments/$id, /resources/hosts/$id, /resources/providers/$id, /resources/mounts/$id, /settings/exports, /admin/$section
 keywords: progress, counting, copying, stalled, stopping, cancel, rate, time left, status items, speed, elapsed, layout, migration
+summary: Follow counts and transfers, cancel running work and arrange your status items.
 ---
 
 # Follow progress and arrange status items

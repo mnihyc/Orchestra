@@ -18,7 +18,7 @@ test('a behind machine shows Update available, Update now stays Updating until i
   await page.getByRole('button',{name:'Update now',exact:true}).first().click();
   await expect(page.getByText('Updating…',{exact:true}).first()).toBeVisible();
   await page.goto('/resources/machines');
-  await expect(row.getByText('Updating…',{exact:true})).toBeVisible();
+  await expect(row.getByRole('status').filter({hasText:/^Updating…$/})).toBeVisible();
   const reconnected=await request.post(`${DOUBLE}/__double/resources/component-update`,{data:{machine:id,reconnect:true}});
   expect(reconnected.ok()).toBeTruthy();
   await expect(row.getByText('Updating…',{exact:true})).toHaveCount(0);

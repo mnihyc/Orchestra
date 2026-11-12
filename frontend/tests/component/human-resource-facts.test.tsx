@@ -44,14 +44,15 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     show(<Where compact place={{ id: 'topic', name: 'Release', kind: 'topic', parentId: 'project', archived: false, status: 'open', folder: false }}
       homeId="acme" machines={[]} options={options({ environments: [available, blocked], can_create: { allowed: false, missing: [] } })} value={blocked.environment.id} onChange={choose} requesting={null} onRequestingChange={() => undefined} />);
     const trigger = screen.getByRole('combobox', { name: i18n.t('start.where.title') });
-    expect(trigger).toHaveTextContent(blocked.environment.name);
+    expect(trigger).toHaveValue(blocked.environment.name);
     await userEvent.click(trigger);
     const list = await screen.findByRole('listbox');
     const off = within(list).getByRole('option', { name: blocked.environment.name });
     expect(off).toHaveAttribute('aria-disabled', 'true');
     expect(off).toHaveAccessibleDescription();
     expect(within(off).getByText(i18n.t('start.where.closed'))).toBeVisible();
-    expect(within(list).getByText(i18n.t('start.where.topicDefault'))).toBeVisible();
+    expect(within(list).queryByText(i18n.t('start.topicDefault'))).toBeNull();
+    expect(within(list).getByRole('option', { name: available.environment.name })).not.toHaveAttribute('aria-disabled', 'true');
     expect(list).not.toHaveTextContent(available.environment.address);
     expect(list).not.toHaveTextContent(blocked.environment.address);
     await userEvent.click(off);
@@ -64,7 +65,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); useAppearance.setState({ locale, theme }); document.documentElement.dataset.theme = theme;
     const user = userEvent.setup();
     const write = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined);
-    const hit: NameHit = { id: 'crew', kind: 'group', name: 'Release crew', address: 'acme.crew', username: null, avatar: null, path: [], owner: null,
+    const hit: NameHit = { home_path: [], id: 'crew', kind: 'group', name: 'Release crew', address: 'acme.crew', username: null, avatar: null, path: [], owner: null,
       href: null, tag: null, thread_attention: null, color: null, custom_color: null, archived: false, recent: true };
     const view = show(<Card hit={hit} onBack={() => undefined} onPage={null} />);
     expect(screen.getByRole('heading', { name: hit.name })).toBeVisible();

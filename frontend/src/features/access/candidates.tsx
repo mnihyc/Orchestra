@@ -207,8 +207,9 @@ export function useCandidates(query: string, orgId: string | null, options: Cand
     const user = item.holder.kind === 'user' ? item.holder.user : undefined;
     byValue.set(value, { input: item.input, holder: item.holder, name, outside: item.outside, ...(user === undefined ? {} : { user }) });
     found.push({ value, label: name, text: name, icon: user === undefined ? kind === 'group' ? <Users aria-hidden /> : <ShieldCheck aria-hidden /> : personIcon(user),
-      description: t(`access.candidates.kind.${kind === 'role' && item.holder.kind === 'role' && item.holder.role === 'viewer' ? 'everyone' : kind}`),
-      disabled: item.outside && options.outsiderOff !== undefined ? options.outsiderOff : false });
+      description: [t(`access.candidates.kind.${kind === 'role' && item.holder.kind === 'role' && item.holder.role === 'viewer' ? 'everyone' : kind}`),
+        ...(item.outside ? [t('access.holder.outside')] : [])].join(' · '),
+      disabled: item.outside && options.outsiderOff !== undefined ? `${t('access.holder.outside')} · ${options.outsiderOff}` : false });
   }
   return { groups: [{ id: 'holders', label: t('access.candidates.results'), options: found }], byValue,
     loading: results.isFetching || query !== settled, placePicker: picker };

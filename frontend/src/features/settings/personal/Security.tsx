@@ -8,7 +8,7 @@
  */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Link2, Mail, Monitor, Smartphone } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { type ReactNode, useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { metaQuery, meQuery, PASSWORD_MIN_CHARS } from '@/api/auth';
@@ -344,11 +344,15 @@ function WayRow({
   disabled?: boolean;
   reason?: string;
 }) {
+  const reasonId = useId();
+  // The switch stays compact; why it cannot be turned on is its state, said in one line beside it (C1045), never a
+  // description of the choice.
   return (
     <li className="flex items-start gap-3 px-4 py-3">
       <span className="mt-0.5 text-text-subtle">{icon}</span>
-      <div className="min-w-0 flex-1">
-        <Switch presentation="compact" label={title} hint={reason ?? about} checked={on} disabled={disabled === true} onCheckedChange={onToggle} />
+      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <Switch presentation="compact" label={title} hint={about} checked={on} disabled={disabled === true} onCheckedChange={onToggle} aria-describedby={reason === undefined ? undefined : reasonId} />
+        {reason !== undefined && <span id={reasonId} className="text-sm text-text-muted">{reason}</span>}
       </div>
     </li>
   );
@@ -376,8 +380,8 @@ function SecondStep({ me }: { me: Me }) {
   const showCodes = (codes: string[]) => { recoveryCodesIssued(); setSavedCodes(codes); };
   const confirmed = me.email !== null && me.email_verified;
   const mailAllowed = me.email_code.includes('second_step');
-  // A mailed code is offered where the orgs allow it and there is an address to send it to; one that is on can always be switched off.
-  const showMail = me.email_code_second_step || (mailAllowed && confirmed);
+  // An enabled method remains removable when sign-in policy changes.
+  const mailDisabled = !me.email_code_second_step && (!mailAllowed || !confirmed);
   const setUp = me.totp_enabled || me.email_code_second_step;
   const places = requiredBy(me, t('secondStep.system'));
   return (
@@ -398,21 +402,20 @@ function SecondStep({ me }: { me: Me }) {
           about={t('security.second.authenticatorAbout')}
           onToggle={(next) => setDialog({ way: 'authenticator', turning: next ? 'on' : 'off' })}
         />
-        {showMail && (
-          <WayRow
-            icon={<Mail className="size-4" aria-hidden />}
-            title={t('security.second.mail')}
-            on={me.email_code_second_step}
-            about={t('security.second.mailAbout', { email: me.email ?? '' })}
-            onToggle={(next) => setDialog({ way: 'mail', turning: next ? 'on' : 'off' })}
-          />
-        )}
+        <WayRow
+          icon={<Mail className="size-4" aria-hidden />}
+          title={t('security.second.mail')}
+          on={me.email_code_second_step}
+          about={t('security.second.mailAbout', { email: me.email ?? '' })}
+          disabled={mailDisabled}
+          reason={mailDisabled ? t(confirmed ? 'security.second.mailPolicyBlocked' : 'security.second.mailAddressRequired') : undefined}
+          onToggle={(next) => setDialog({ way: 'mail', turning: next ? 'on' : 'off' })}
+        />
       </ul>
       {me.totp_enabled && <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-4 py-3">
         <span className="text-base text-text">{t('security.recovery.title')}</span>
         <Button size="sm" onClick={() => setReplacing(true)}>{t('security.recovery.replace')}</Button>
       </div>}
-      {mailAllowed && !confirmed && !me.email_code_second_step && <p className="text-sm text-text-muted">{t('security.second.mailNeedsAddress')}</p>}
       <p className="text-sm text-text-muted">{t('security.second.lost')}</p>
       {dialog !== null && (
         <SecondStepDialog
@@ -550,7 +553,7 @@ function Sessions() {
     <Section id="security-sessions" title={t('security.sessions.title')} lead={t('security.sessions.lead')}
       action={list.data?.some((session) => !session.current) === true ? <Button size="sm" disabled={end.isPending || others.isPending} onClick={() => setEndingOthers(true)}>{t('security.sessions.endOthers')}</Button> : undefined}>
       {list.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={list} rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : (
@@ -610,7 +613,7 @@ export function Security() {
   return (
     <PersonalFrame page="security" lead={t('security.lead')}>
       {me.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={me} rows={4} />
       ) : me.isError ? (
         <ErrorState error={me.error} retrying={me.isRefetching} onRetry={() => void me.refetch()} />
       ) : (

@@ -28,13 +28,13 @@ export function ProgramSettings({ detail }: { detail: ProgramDetail }) {
     reloadDetail();
     void client.invalidateQueries({ queryKey: version === undefined ? adminProgramBuildsQuery(kind, undefined).queryKey : adminProgramVersionQuery(kind, version).queryKey, exact: true });
   }, [client, kind, version, reloadDetail]);
-  if (settings.isPending) return <SkeletonRows rows={2} />;
+  if (settings.isPending) return <SkeletonRows read={settings} rows={2} />;
   if (settings.isError) return <ErrorState compact error={settings.error} onRetry={() => void settings.refetch()} />;
   return <div className="flex min-w-0 flex-col gap-4">
     <HarnessVersions kinds={[kind]} title={() => name} catalogue={() => detail.program?.checks ?? null} builds={rows ?? []} knownBuilds={rows ?? []} selectedBuilds={detail.resolved_builds}
       onFetch={async (version) => { const found = await fetchAdminProgramVersion(kind, version); client.setQueryData(adminProgramVersionQuery(kind, version).queryKey, found); setRequested(version); return found; }}
       onFollow={follow} onPolicyChange={reloadDetail} />
-    {(version === undefined ? first.isPending : exact.isPending) && <SkeletonRows rows={1} />}
+    {(version === undefined ? first.isPending : exact.isPending) && <SkeletonRows reads={[first, exact]} rows={1} />}
     {(version === undefined ? first.error : exact.error) !== null && <ErrorAlert error={version === undefined ? first.error : exact.error} />}
   </div>;
 }

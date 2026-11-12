@@ -1,0 +1,1 @@
+{"direction":"from_harness","frame":{"type":"result","subtype":"success","is_error":true,"num_turns":1,"terminal_reason":"api_error","api_error_status":429,"result":"You've hit your limit"}}

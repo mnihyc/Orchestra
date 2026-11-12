@@ -74,6 +74,10 @@ pub fn hash_code(code: &str) -> [u8; 32] {
 /// The address a person opens to be linked, and until when it counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
+    /// The actual route whose link generation was created.
+    pub route: Id,
+    /// The native high-entropy code's existing lookup digest, never its secret.
+    pub code_hash: [u8; 32],
     /// The address that opens the bot with the code.
     pub url: String,
     /// When the code stops counting.
@@ -136,7 +140,12 @@ pub async fn start(
         )
         .await?;
     }
-    Ok(Started { url, expires_at })
+    Ok(Started {
+        route: route.id,
+        code_hash: hash_code(&code),
+        url,
+        expires_at,
+    })
 }
 
 /// What the names of kept link codes begin with, among the secrets of their channel.

@@ -1,6 +1,6 @@
 //! Real recorded turns plus explicit reader metadata; no native fork/activation claim.
 
-#[path = "../../../../api/tests/continuation_read_support/mod.rs"]
+#[path = "../../../../api/base/tests/continuation_read_support/mod.rs"]
 mod reader;
 
 use super::*;

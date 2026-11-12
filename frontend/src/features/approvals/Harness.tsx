@@ -126,7 +126,7 @@ function QuestionField({ question, value, other, onValue, onOther, disabled }: {
 }
 
 /** The questions as a form; the answers are sent when every question has one. */
-export function AnswersForm({ questions, disabled, pending, onSend }: { questions: readonly Question[]; disabled: boolean; pending: boolean; onSend: (answers: Record<string, string[]>) => void }) {
+export function AnswersForm({ questions, disabled, pending, reason, onSend }: { questions: readonly Question[]; disabled: boolean; pending: boolean; reason?: string | undefined; onSend: (answers: Record<string, string[]>) => void }) {
   const { t } = useTranslation();
   const [values, setValues] = useState<Record<string, string[]>>({});
   const [others, setOthers] = useState<Record<string, string>>({});
@@ -156,7 +156,7 @@ export function AnswersForm({ questions, disabled, pending, onSend }: { question
         />
       ))}
       <div className="flex items-center gap-2">
-        <Button type="submit" variant="secondary" pending={pending} disabled={disabled || !complete}>
+        <Button type="submit" variant="secondary" pending={pending} disabled={disabled || !complete} reason={reason ?? (!complete ? t('approvals.answerAll') : undefined)}>
           {t('approvals.sendAnswers')}
         </Button>
         {!complete && <span className="text-sm text-text-muted">{t('approvals.answerAll')}</span>}
@@ -181,7 +181,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 const plain = (value: unknown): string => (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' ? String(value) : '');
 
 /** The form for the shape an MCP server wants back, with the ways to answer it: accept, decline, cancel. */
-export function ElicitationForm({ schema, message, disabled, pending, onSend }: { schema: unknown; message: string; disabled: boolean; pending: boolean; onSend: (action: ElicitationAction, content?: Record<string, unknown>) => void }) {
+export function ElicitationForm({ schema, message, disabled, pending, reason, onSend }: { schema: unknown; message: string; disabled: boolean; pending: boolean; reason?: string | undefined; onSend: (action: ElicitationAction, content?: Record<string, unknown>) => void }) {
   const { t } = useTranslation();
   const inHeading = useApprovalSubject()?.trim() === message.trim();
   const properties = isRecord(schema) && isRecord(schema.properties) ? (schema.properties as Record<string, SchemaProperty>) : {};
@@ -241,13 +241,13 @@ export function ElicitationForm({ schema, message, disabled, pending, onSend }: 
         );
       })}
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="submit" variant="secondary" pending={pending} disabled={disabled || missing}>
+        <Button type="submit" variant="secondary" pending={pending} disabled={disabled || missing} reason={reason ?? (missing ? t('ui.unavailable.requiredFields') : undefined)}>
           {t('approvals.accept')}
         </Button>
-        <Button variant="ghost" disabled={disabled || pending} onClick={() => onSend('decline')}>
+        <Button variant="ghost" disabled={disabled || pending} reason={reason} onClick={() => onSend('decline')}>
           {t('approvals.decline')}
         </Button>
-        <Button variant="ghost" disabled={disabled || pending} onClick={() => onSend('cancel')}>
+        <Button variant="ghost" disabled={disabled || pending} reason={reason} onClick={() => onSend('cancel')}>
           {t('approvals.cancel')}
         </Button>
       </div>
@@ -283,7 +283,7 @@ export function matcherWords(matcher: ApprovalMatcher, t: TFunction): string {
 }
 
 /** One button for each option the harness offers, in the order it gave them. */
-export function OptionButtons({ options, disabled, pressed, onChoose, target }: { target?: string; options: readonly ApprovalOption[]; disabled: boolean; pressed: string | null; onChoose: (option: ApprovalOption) => void }) {
+export function OptionButtons({ options, disabled, pressed, reason, onChoose, target }: { target?: string; options: readonly ApprovalOption[]; disabled: boolean; pressed: string | null; reason?: string | undefined; onChoose: (option: ApprovalOption) => void }) {
   const { t } = useTranslation();
   // An option for this thread is offered only with the matcher it keeps, shown before it is chosen; one without
   // a matcher offers nothing for the thread.
@@ -307,6 +307,7 @@ export function OptionButtons({ options, disabled, pressed, onChoose, target }: 
           size="md"
           pending={pressed === option.label}
           disabled={disabled}
+          reason={reason}
           onClick={() => onChoose(option)}
         >
           {optionWords(option, t)}

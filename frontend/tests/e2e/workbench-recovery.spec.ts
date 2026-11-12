@@ -36,9 +36,11 @@ for (const theme of ['light', 'dark'] as const) test(`a cold main Chat retains i
   await page.getByRole('menuitem', { name: 'Main area', exact: true }).press('Enter');
   const tabs = page.getByRole('tablist', { name: 'Main area', exact: true });
   const movedChat = tabs.getByRole('tab', { name: /^Chat · Main thread(?: · Fix login)?$/ });
-  const conversation = tabs.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ });
+  const conversation = tabs.getByRole('tab', { name: /^Running Main thread(?: · Fix login)?$/ });
   await expect(movedChat).toHaveAttribute('aria-selected', 'true');
-  await expect(conversation.locator('svg.lucide-message-square-text')).toBeVisible();
+  // Thread tabs now expose the native running state instead of a static thread-kind glyph.
+  await expect(conversation.getByRole('img', { name: 'Running', exact: true })).toBeVisible();
+  await expect(conversation.locator('[data-work-state="running"] svg.lucide-loader-circle')).toBeVisible();
   const chatIdentity = await movedChat.getAttribute('id'), threadIdentity = await conversation.getAttribute('id');
   if (chatIdentity === null || threadIdentity === null) throw new Error('The actual view tabs must have stable identities');
   // Wait for the existing layout debounce, rather than injecting a layout into storage.
@@ -106,9 +108,15 @@ for (const theme of ['light', 'dark'] as const) test(`agent replies use compact 
   const message = page.locator('[data-item="compact-answer"]').getByText('The release investigation is complete.', { exact: true });
   await expect(message).toBeVisible();
   const footer = page.locator('[data-footer="compact-turn"]');
-  const select = footer.getByRole('button', { name: 'Select this turn', exact: true });
-  await expect(select).toBeVisible();
-  await expect(select).toHaveText('');
+  // Selection now shares the compact footer menu with the identical context-menu action.
+  await footer.hover();
+  const more = footer.getByRole('button', { name: 'More turn actions', exact: true });
+  await expect(more).toBeVisible();
+  await expect(more).toHaveText('');
+  await expect(footer.getByRole('button', { name: 'Copy turn as Markdown', exact: true })).toHaveText('');
+  await more.click();
+  await expect(page.getByRole('menuitem', { name: 'Select this turn', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
   await message.click({ button: 'right' });
   await expect(page.getByRole('menuitem', { name: 'Select this turn', exact: true })).toBeVisible();
   await capture(page, info, `agent-context-${theme}`);

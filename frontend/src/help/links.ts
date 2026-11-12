@@ -1,7 +1,12 @@
 /** Links in bundled guides retain their document namespace and resolve without a network lookup. */
+// The Help build loads this module before Vite's application aliases are available.
+import { readOrchLink } from '../lib/orchLinks';
+
 export interface ArticleLink { article: string; heading: string | null }
 
 export function resolveArticleLink(href: string, prefix = ''): ArticleLink | null {
+  const url = readOrchLink(href);
+  if (url !== null) href = `${url.pathname}${url.search}${url.hash}`;
   const help = /^\/help\/([\w-]+)(?:#([^\s]+))?$/.exec(href);
   if (help !== null) return { article: help[1] ?? '', heading: help[2] ?? null };
   if (/^(?:[a-z][a-z\d+.-]*:|\/\/|\/|#)/i.test(href)) return null;
