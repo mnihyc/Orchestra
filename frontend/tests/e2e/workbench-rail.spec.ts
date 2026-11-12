@@ -13,7 +13,7 @@ for (const theme of ['light', 'dark'] as const) {
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     const rail = page.getByRole('navigation', { name: 'Orgs and your own places', exact: true });
     const organization = rail.getByRole('link', { name: /^Acme\b/ });
-    const resources = rail.getByRole('button', { name: 'Resources', exact: true });
+    const resources = rail.getByRole('button', { name: 'Resource navigation', exact: true });
     const left = page.locator('[data-workbench-bar="left"]');
     const main = page.locator('[data-main-area]');
     const floating = page.getByRole('dialog', { name: 'Left bar', exact: true });
@@ -188,14 +188,14 @@ for (const width of [1100, 1440]) {
     await page.goto('/settings/profile');
     await expect(page.getByRole('heading', { name: 'Profile', exact: true })).toBeVisible();
     await org.click();
-    await expect(page).toHaveURL(/\/org\/acme\/?$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     await expect(left).toHaveAttribute('data-active-container', 'navigation');
     await expect(left.getByRole('tree', { name: 'Orgs, projects, topics and threads' })).toBeVisible();
     await expect(org).toHaveAttribute('data-active-left-view', 'navigation');
     await expect(rail.locator('[data-active-left-view]')).toHaveCount(1);
     await org.click();
     await expect(left).toHaveCount(0);
-    await expect(page).toHaveURL(/\/org\/acme\/?$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     await org.press('Enter');
     await expect(left).toHaveAttribute('data-active-container', 'navigation');
     await expect(org).toHaveAttribute('data-active-left-view', 'navigation');
@@ -215,7 +215,7 @@ test('keyboard org navigation from a thread or resource page opens the org home 
     await expect(page.getByRole('tooltip')).toHaveText('Open Acme home');
     await org.focus();
     await org.press('Enter');
-    await expect(page).toHaveURL(/\/org\/acme\/?$/);
+    await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
     await expect(page.locator('[data-workbench-bar="left"]')).toHaveAttribute('data-active-container', 'navigation');
     await expect(org).toHaveAttribute('data-active-left-view', 'navigation');
   }
@@ -231,7 +231,8 @@ test('the clicked org is selected and names the pending tab before its overview 
   const waiting = new Promise<void>((resolve) => { release = resolve; });
   let arrived: (() => void) | undefined;
   const requested = new Promise<void>((resolve) => { arrived = resolve; });
-  await page.route(`**/nodes/${ACME.org}/children*`, async (route) => { arrived?.(); await waiting; await route.continue(); });
+  // The native overview now supplies the initial children as part of this single opening.
+  await page.route(`**/orgs/${ACME.org}/overview*`, async (route) => { arrived?.(); await waiting; await route.continue(); });
   try {
     const rail = page.getByRole('navigation', { name: 'Orgs and your own places', exact: true });
     const org = rail.getByRole('link', { name: /^Acme\b/ });
@@ -255,7 +256,7 @@ test('a modified org click keeps its native link behavior and leaves this page a
   const otherTab = context.waitForEvent('page');
   await org.click({ modifiers: ['ControlOrMeta'] });
   const opened = await otherTab;
-  await expect(opened).toHaveURL(/\/org\/acme\/?$/);
+  await expect(opened).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(page).toHaveURL(/\/settings\/profile$/);
   await expect(page.locator('[data-workbench-bar="left"]')).toHaveAttribute('data-active-container', 'resource-navigation');
   await opened.close();

@@ -1,5 +1,29 @@
 -- Announcements, notifications, channels, routes, destinations and the outbox.
 
+-- An accepted administrator message and its frozen audience share one creation transaction.
+CREATE TABLE admin_messages (
+    id uuid PRIMARY KEY,
+    org_id uuid REFERENCES nodes(id) ON DELETE CASCADE,
+    org_name text,
+    title text NOT NULL CHECK (char_length(btrim(title)) > 0),
+    body text NOT NULL CHECK (char_length(btrim(body)) > 0),
+    sender_id uuid NOT NULL REFERENCES users(id),
+    sender jsonb NOT NULL,
+    created_at timestamp with time zone NOT NULL DEFAULT now(),
+    recipient_count bigint NOT NULL DEFAULT 0 CHECK (recipient_count >= 0),
+    delivery_job_id uuid REFERENCES jobs(id) ON DELETE SET NULL,
+    CHECK ((org_id IS NULL) = (org_name IS NULL))
+);
+CREATE INDEX admin_messages_scope_page_idx ON admin_messages (org_id, created_at DESC, id DESC);
+
+CREATE TABLE admin_message_recipients (
+    message_id uuid NOT NULL REFERENCES admin_messages(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    delivered_at timestamp with time zone,
+    PRIMARY KEY (message_id,user_id)
+);
+CREATE INDEX admin_message_recipients_user_idx ON admin_message_recipients (user_id,message_id);
+
 CREATE TABLE announcements (
     id uuid NOT NULL,
     topic_id uuid NOT NULL,
@@ -19,6 +43,7 @@ CREATE TABLE announcements (
     topic_seq bigint NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     reference_body text,
+    posting_provenance jsonb,
     CONSTRAINT announcements_body_check CHECK ((char_length(body) <= 8000)),
     CONSTRAINT announcements_category_check CHECK ((category = ANY (ARRAY['notice'::text, 'milestone'::text]))),
     CONSTRAINT announcements_check CHECK (((from_thread_id IS NULL) <> (from_user_id IS NULL))),

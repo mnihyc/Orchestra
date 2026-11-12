@@ -155,7 +155,7 @@ impl Source {
                 row.kind = "'chat_message'::text";
                 row.source = "m.chat_id";
                 row.part = "m.id";
-                row.node = "COALESCE(c.node_id,c.org_id)";
+                row.node = "COALESCE(c.node_id,c.home_id,c.org_id)";
                 row.tier = "0::int";
                 row.text = "m.search_text";
                 row.at = "m.created_at";

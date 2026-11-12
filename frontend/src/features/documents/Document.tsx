@@ -1,16 +1,19 @@
+import { duplicateEntries } from '@/features/duplicate/target';
 /** A document's page: its title, its description, the line under it with who changed it last and its access in words, who is here, its blocks, Comments, History, and its menu (Private, Move, Share with an agent, Export, Print, Delete).
  *
  * One view, and it is the document: whoever may write in it clicks and types. There is no Save and no
  * preview beside it; the header says "Saving…" and then "Saved". Somebody who may only read sees the
  * same page without a caret and is told so in one line.
  */
+import { ResourceSummary } from '@/features/summaries/ResourceSummary';
+import { linkTo, referenceTo } from '@/lib/links';
 import { useViewSaveGuard } from '@/features/workbench/CloseViews';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useWorkbench } from '@/features/workbench/store';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useBlocker } from '@tanstack/react-router';
 import { Clock, FileText, History as HistoryIcon, MoreHorizontal, Search, Share2 } from 'lucide-react';
-import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { AdminReachNotice } from '@/features/access/AdminReachNotice';
@@ -36,6 +39,7 @@ import { HistoryDrawer, useHistoryDot } from '@/features/documents/History';
 import { highlightBlock, revealDocumentBlock, useDocumentMarksScope, useDocumentMarksStore } from '@/features/documents/marks';
 import { PrivateDialog } from '@/features/documents/Placement';
 import { LinksDialog } from '@/features/links/LinksDialog';
+import { DocumentSummaryOptionsDialog } from '@/features/summaries/DocumentOptions';
 import { SinceYouLooked } from '@/features/documents/SinceYouLooked';
 import type { SavePhase } from '@/features/documents/sync';
 import { revealComments } from '@/features/documents/views';
@@ -90,6 +94,7 @@ export interface DocumentPageProps {
   /** An attached file to open, optionally at a text line. */
   file?: string | undefined;
   line?: number | undefined;
+  endLine?: number | undefined;
   onFileClosed?: (() => void) | undefined;
   /** A version to show instead of the present one. */
   version?: number | undefined;
@@ -112,8 +117,9 @@ function madeBy(t: Say, doc: Document): string | null {
   return null;
 }
 
-export function DocumentPage({ documentId, block, file, line, onFileClosed, version, fresh = false, onOffered, onVersion, embedded = false }: DocumentPageProps) {
+export function DocumentPage({ documentId, block, file, line, endLine, onFileClosed, version, fresh = false, onOffered, onVersion, embedded = false }: DocumentPageProps) {
   const { t } = useTranslation();
+  const cache = useQueryClient();
   const instance = useViewInstance();
   const marks = useDocumentMarksStore();
   const marksScope = useDocumentMarksScope();
@@ -126,7 +132,16 @@ export function DocumentPage({ documentId, block, file, line, onFileClosed, vers
   const visitId = doc !== null && !doc.deleted && state.ended === null ? doc.id : undefined;
   const place = useQuery({ ...nodeQuery(doc?.node.id ?? ''), enabled: doc !== null && !doc.node.redacted }).data;
   // A document that switches every tab of its Links section off does not offer the section.
-  const tabs = useQuery({ ...documentLinksQuery(documentId), enabled: doc !== null && !doc.deleted && state.ended === null });
+  const nativeTabs = doc?.link_settings;
+  useLayoutEffect(() => {
+    if (nativeTabs === undefined || nativeTabs === null) return;
+    const key = documentLinksQuery(documentId).queryKey;
+    const held = cache.getQueryState(key);
+    // The native setting's own accepted changes/refusals outrank an opening's seed.
+    if (held?.data === undefined && held?.status !== 'error') cache.setQueryData(key, nativeTabs);
+  }, [cache, documentId, nativeTabs]);
+  const tabs = useQuery({ ...documentLinksQuery(documentId), enabled: (query) => doc !== null && !doc.deleted && state.ended === null
+    && (nativeTabs === undefined || nativeTabs === null || query.state.data !== undefined || query.state.status === 'error') });
   // The places of the document's org: where it can be moved to, and what a link in its text can name.
   useOrgTreeFeed(doc?.path[0]?.redacted === false ? doc.path[0].id : null);
   const [editor, setEditor] = useState<EditorApi | null>(null);
@@ -144,7 +159,7 @@ export function DocumentPage({ documentId, block, file, line, onFileClosed, vers
   }, [documentId, marks]);
   const find = useViewFind({ root, filters: { document_id: documentId, kinds: ['document'] }, label: t('search.find.document'), onHit: findHit, content: 'article', enabled: doc !== null && !doc.deleted && state.ended === null && version === undefined });
   const [history, setHistory] = useState(false);
-  const [dialog, setDialog] = useState<null | 'move' | 'private' | 'delete' | 'files' | 'duplicate' | 'links'>(null);
+  const [dialog, setDialog] = useState<null | 'move' | 'private' | 'delete' | 'files' | 'duplicate' | 'links' | 'summary-options'>(null);
   const me = useStore(client.session, (session) => session.userId);
   // Beginning a discussion, from the words selected or from a block's menu, brings the Comments view to the front: it is where it is written.
   const beside = useShape() === 'wide';
@@ -265,6 +280,7 @@ export function DocumentPage({ documentId, block, file, line, onFileClosed, vers
             <DocumentLocation metadata={metadata.data} error={metadata.error} onRetry={() => void metadata.retry()} />
             <TitleField key={`title-${doc.id}`} doc={doc} editable={editable} fresh={fresh} onOffered={onOffered}
               onEnter={() => { if (editor !== null) editor.editor.commands.focus('start'); else enterBody.current = true; }} />
+            {version === undefined && !doc.deleted && <ResourceSummary target={{ kind: 'document', id: doc.id }} reference={`/doc/${doc.id}`} className="mb-3" />}
             <DescriptionField key={`description-${doc.id}`} doc={doc} editable={editable}
               onEnter={() => { if (editor !== null) editor.editor.commands.focus('start'); else enterBody.current = true; }} />
             <LineUnderTitle doc={doc} />
@@ -290,7 +306,8 @@ export function DocumentPage({ documentId, block, file, line, onFileClosed, vers
       />
       <PrivateDialog doc={doc} open={dialog === 'private'} onOpenChange={(open) => !open && setDialog(null)} />
       <LinksDialog documentId={doc.id} open={dialog === 'links'} onOpenChange={(open) => !open && setDialog(null)} />
-      <FilesDialog doc={doc} open={dialog === 'files' || file !== undefined} fileId={file} line={line} onOpenChange={(open) => { if (!open) { setDialog(null); onFileClosed?.(); } }} />
+      {dialog === 'summary-options' && <DocumentSummaryOptionsDialog documentId={doc.id} onOpenChange={(open) => !open && setDialog(null)} />}
+      <FilesDialog doc={doc} open={dialog === 'files' || file !== undefined} fileId={file} line={line} endLine={endLine} onOpenChange={(open) => { if (!open) { setDialog(null); onFileClosed?.(); } }} />
       {(dialog === 'move' || dialog === 'delete' || dialog === 'duplicate') && <DocumentOrganize id={doc.id} command={dialog === 'duplicate' ? 'copy' : dialog} onClose={() => setDialog(null)} />}
       <ConfirmDialog
         open={blocker.status === 'blocked'}
@@ -311,7 +328,7 @@ function VersionBody({ doc, version, onReady }: { doc: Document; version: number
   const read = useQuery(versionQuery(doc.id, version));
   if (read.isPending) {
     return (
-      <SkeletonGroup className="gap-3">
+      <SkeletonGroup read={read} className="gap-3">
         <Skeleton className="h-5 w-full" />
         <Skeleton className="h-5 w-5/6" />
         <Skeleton className="h-5 w-4/6" />
@@ -332,7 +349,7 @@ interface PageBarProps {
   editor: EditorApi | null;
   onHistory: () => void;
   onFind: (() => void) | null;
-  onDialog: (dialog: 'move' | 'private' | 'delete' | 'files' | 'duplicate' | 'links') => void;
+  onDialog: (dialog: 'move' | 'private' | 'delete' | 'files' | 'duplicate' | 'links' | 'summary-options') => void;
   me: string | null;
   /** The place the document is written beside, as the reader sees it: whose README it can be. */
   place: Node | undefined;
@@ -351,13 +368,14 @@ function PageBar({ doc, editor, onHistory, onFind, onDialog, me, place }: PageBa
     { id: 'history', label: t('documents.page.history'), icon: <HistoryIcon aria-hidden />, onSelect: onHistory },
     { type: 'separator', id: 'sep-0' },
     { id: 'files', label: t('documents.files.menu'), onSelect: () => onDialog('files') },
-    { id: 'duplicate', label: t('people.duplicate'), onSelect: () => onDialog('duplicate') },
+    ...duplicateEntries(t, { kind: 'document', id: doc.id, name: doc.title, directory: doc.location.parent }),
     { type: 'separator', id: 'sep-1' },
     doc.page === 'restricted'
       ? { id: 'open', action: 'inheritAccess', label: t('documents.menu.openAgain'), disabled: canShare ? false : t('documents.menu.needsManage'), onSelect: () => onDialog('private') }
       : { id: 'private', action: 'makePrivate', label: t('documents.menu.private'), disabled: canShare ? false : t('documents.menu.needsManage'), onSelect: () => onDialog('private') },
     { id: 'move', label: t('documents.menu.move'), disabled: canManage ? false : t('documents.menu.needsManage'), onSelect: () => onDialog('move') },
     { id: 'links', label: t('links.menu'), disabled: canManage ? false : t('documents.menu.needsManage'), onSelect: () => onDialog('links') },
+    { id: 'summary-options', label: t('summaryOptions.document.menu'), onSelect: () => onDialog('summary-options') },
     ...(readme === null ? [] : [readme]),
     ...exportEntries({
       allowed: holds(doc.access, 'doc.export'),
@@ -368,10 +386,11 @@ function PageBar({ doc, editor, onHistory, onFind, onDialog, me, place }: PageBa
       t,
     }),
     { id: 'print', label: t('documents.menu.print'), onSelect: () => printPage() },
+    { id: 'copy-reference', label: t('people.reference.copy'), onSelect: () => void copyText(referenceTo({ kind: 'document', id: doc.id, title: doc.title }), t('people.reference.copied')) },
     {
       id: 'copy',
       label: t('documents.menu.copyLink'),
-      onSelect: () => void copyText(`${location.origin}/doc/${doc.id}`, t('common.linkCopied')),
+      onSelect: () => void copyText(linkTo({ kind: 'document', id: doc.id }), t('common.linkCopied')),
     },
     { type: 'separator', id: 'sep-2' },
     { id: 'delete', label: t('documents.menu.delete'), danger: true, disabled: canManage ? false : t('documents.menu.needsManage'), onSelect: () => onDialog('delete') },

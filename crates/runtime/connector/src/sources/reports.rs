@@ -372,7 +372,16 @@ pub fn read(
                 || (strings(value, &["method"]) && native(name, value)))
             .then(|| value.clone()),
             "extra_usage" => (value.is_null()
-                || (strings(value, &["unit", "disabled_reason"]) && native(name, value)))
+                || (strings(value, &["unit", "disabled_reason"])
+                    && ["used", "limit"].iter().all(|member| {
+                        optional(value.get(*member), |amount| {
+                            decimal(amount)
+                                || amount.as_number().is_some_and(|number| {
+                                    limits::decimal_number(&number.to_string()).is_some()
+                                })
+                        })
+                    })
+                    && native(name, value)))
             .then(|| value.clone()),
             "plan_credits" | "key_usage" | "key_credits" | "key_usage_supported" => {
                 (value.is_null() || native(name, value)).then(|| value.clone())
@@ -433,7 +442,13 @@ pub fn models(value: &Json, secrets: &[String]) -> Result<ReadModels, &'static s
         let value = scrub_value(value, secrets);
         let mut value = item(
             &value,
-            &["model_name", "display_name", "parameters", "listed"],
+            &[
+                "model_name",
+                "display_name",
+                "parameters",
+                "listed",
+                "origins",
+            ],
         );
         if let Some(value) = value.as_mut().and_then(Json::as_object_mut)
             && let Some(name) = value.get("model_name").cloned()
@@ -441,6 +456,19 @@ pub fn models(value: &Json, secrets: &[String]) -> Result<ReadModels, &'static s
             value.entry("display_name").or_insert(name);
             value.entry("parameters").or_insert(json!({}));
             value.entry("listed").or_insert(json!(true));
+            let origins = value
+                .remove("origins")
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            value.insert(
+                "origins".into(),
+                Json::Object(
+                    origins
+                        .into_iter()
+                        .filter(|(pointer, origin)| pointer.starts_with('/') && origin.is_string())
+                        .collect(),
+                ),
+            );
         }
         let Some(value) = value
             .filter(|value| required(value, "model_name") && strings(value, &["display_name"]))

@@ -16,6 +16,7 @@ interface DocumentSearch {
   new?: boolean;
   file?: string;
   line?: number;
+  endLine?: number;
   /** The graph of what the document is linked with, in place of the document, and how it is drawn. */
   graph?: boolean;
   depth?: number;
@@ -35,6 +36,8 @@ export const Route = createFileRoute('/doc/$documentId/')({
     if (typeof search.file === 'string' && search.file !== '') out.file = search.file;
     const line = Number(search.line);
     if (Number.isSafeInteger(line) && line > 0) out.line = line;
+    const endLine = Number(search.endLine);
+    if (out.line !== undefined && Number.isSafeInteger(endLine) && endLine >= out.line) out.endLine = endLine;
     if (search.graph === true || search.graph === 'true' || search.graph === 1 || search.graph === '1') out.graph = true;
     const depth = Number(search.depth);
     if (depth === 1 || depth === 2 || depth === 3) out.depth = depth;
@@ -49,7 +52,7 @@ export const Route = createFileRoute('/doc/$documentId/')({
 
 function DocumentRoute() {
   const { documentId } = usePageParams(Route);
-  const { block, version, new: fresh, file, line, graph, depth, kinds, meaning, center } = usePageSearch(Route);
+  const { block, version, new: fresh, file, line, endLine, graph, depth, kinds, meaning, center } = usePageSearch(Route);
   const navigate = usePageNavigate(Route);
   if (graph === true) {
     return <GraphPage documentId={documentId} search={{ depth, kinds, meaning, center }}
@@ -61,7 +64,8 @@ function DocumentRoute() {
       block={block}
       file={file}
       line={line}
-      onFileClosed={() => void navigate({ search: (before) => ({ ...before, file: undefined, line: undefined }), replace: true })}
+      endLine={endLine}
+      onFileClosed={() => void navigate({ search: (before) => ({ ...before, file: undefined, line: undefined, endLine: undefined }), replace: true })}
       version={version}
       fresh={fresh === true}
       onOffered={() => void navigate({ search: (before) => ({ ...before, new: undefined }), replace: true })}

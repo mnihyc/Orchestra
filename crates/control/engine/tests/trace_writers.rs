@@ -39,6 +39,7 @@ async fn an_actual_agent_document_create_and_edit_keep_the_document_place_origin
             thread,
             orch_link_contract::events::Event::OrchToolCall(
                 orch_link_contract::events::OrchToolCall {
+                    deadline: None,
                     turn_id: turn.turn_id,
                     call_ref: listing_call.clone(),
                     attempt: None,
@@ -59,6 +60,7 @@ async fn an_actual_agent_document_create_and_edit_keep_the_document_place_origin
     let call = new_id().to_string();
     let event =
         orch_link_contract::events::Event::OrchToolCall(orch_link_contract::events::OrchToolCall {
+            deadline: None,
             turn_id: turn.turn_id,
             call_ref: call.clone(),
             attempt: None,
@@ -71,6 +73,7 @@ async fn an_actual_agent_document_create_and_edit_keep_the_document_place_origin
     world.say(thread, event).await;
     let call = new_id().to_string();
     world.say(thread,orch_link_contract::events::Event::OrchToolCall(orch_link_contract::events::OrchToolCall {
+                    deadline: None,
         turn_id:turn.turn_id,call_ref:call.clone(), attempt: None,tool:WireTool::EditDocument,
         arguments:json!({"command":"rewrite","path":format!("id:{document}"),"markdown":"a second private document body","seq":result["seq"]}),
     })).await;

@@ -86,8 +86,9 @@ is lifted.
 The host CLI also supports `admin grant`, `revoke`, `suspend` and `resume`.
 It refuses removing or suspending the last system administrator who can sign
 in. Run it with the deployment's configuration and secrets, and record the
-actual administrative act. Host recovery is not a way for an API token to gain
-browser-only administrator authority.
+actual administrative act. Host recovery retains its local deployment authority.
+An automation key still needs its explicitly selected operations and current account
+rights; it cannot obtain the browser's private-access override through recovery.
 
 ## Storage pressure and cleanup
 

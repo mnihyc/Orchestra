@@ -7,6 +7,7 @@
  * tags, who did what) is kept here, and every act changes both.
  */
 import { createHash, randomUUID } from 'node:crypto';
+import { treeNode } from './tree-node.ts';
 
 import type {
   Access,
@@ -302,14 +303,16 @@ export class Places {
    */
   rowsFor(person: Person, rows: readonly TreeNode[], since: number | null): TreeNode[] {
     const counts = this.documentCounts();
+    const documentSequences = this.world.documents.directorySequences();
     const waits = this.world.notifications.treeWaits(person, new Set(rows.filter((row) => row.kind === 'thread').map((row) => row.id)));
     return rows.flatMap((row): TreeNode[] => {
       const access = row.deleted ? null : this.access(person, row.id);
       const held = access?.permissions ?? [];
       if (held.includes(`${row.kind}.view`)) return [{ ...row, participating: access?.participating === true, docs: held.includes('doc.view') ? (counts.get(row.id) ?? 0) : 0,
+        docs_seq: held.includes('doc.view') ? documentSequences.get(row.id) ?? 0 : 0,
         thread: row.thread === null ? null : { ...row.thread, waiting: waits.get(row.id) ?? null } }];
       if (since === null) return [];
-      return [{ ...row, name: '', address: null, color: null, docs: 0, deleted: true, restricted: false, thread: null, topic: null, chat: { id: row.chat.id, seq: 0 } }];
+      return [{ ...row, name: '', address: null, color: null, docs: 0, docs_seq: 0, deleted: true, restricted: false, thread: null, topic: null, chat: { id: row.chat.id, seq: 0 } }];
     });
   }
 
@@ -363,7 +366,7 @@ export class Places {
     const reader = { ...person, me: { ...person.me, is_system_admin: false } };
     const first = this.rowOf(nodeId);
     if (first === undefined) return false;
-    return [first, ...this.descendants(nodeId)].some((row) => {
+    const worksHere = (row: TreeNode): boolean => {
       if (row.deleted || this.pathTo(row.id).some((step) => step.deleted)) return false;
       const root = this.rootOf(row.id);
       const domain = root === null ? undefined : this.roles.get(root)?.get(person.me.username)?.domain;
@@ -374,7 +377,10 @@ export class Places {
         || this.world.access.namedAt(reader, row.id)
         || [...(this.granted.get(person.me.username) ?? [])].some((entry) => entry.endsWith(`@${row.id}`))
         || (subscribed !== undefined && subscribed !== 'off') || (chat !== undefined && chat.effective_level !== 'off');
-    });
+    };
+    // Most native rows already carry this reader's own work. Do not build a complete
+    // descendant list before testing that row, especially for a large org opening.
+    return worksHere(first) || this.descendants(nodeId).some(worksHere);
   }
 
   access(person: Person, nodeId: string, includeWithheld = false): Access {
@@ -462,7 +468,7 @@ export class Places {
       owner: this.userOf(meta.owner),
       owners: 1,
       title_source: 'user' as const,
-      description_source: 'user' as const,
+
       tags: meta.tagIds.flatMap((tag) => this.tags.get(tag) ?? []),
       tags_source: 'user' as const,
       auto_updated_at: null,
@@ -612,24 +618,15 @@ export class Places {
 
   private fresh(kind: NodeKind, name: string, parentId: string, extra: Partial<TreeNode> = {}): TreeNode {
     const id = randomUUID();
-    return {
+    return treeNode({
       id,
       kind,
       name,
-      address: null,
       parent_id: parentId,
-      color: null,
-      docs: 0,
-      archived: false,
-      deleted: false,
-      restricted: false,
-      participating: true,
       chat: { id: randomUUID(), seq: 0 },
-      thread: null,
       topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-      tree_seq: 0,
       ...extra,
-    };
+    });
   }
 
   private invalid(path: string, message: string): never {
@@ -1047,7 +1044,7 @@ export class Places {
         const domain = this.must(held.domain);
         const target = this.world.people.get(username);
         const manages = this.access(person, orgId).permissions.includes('members.manage');
-        return {
+        return { terms_hash: null, terms_accepted_at: null,
           user: this.userOf(username),
           domain: this.ref(domain),
           address: `${this.addressOf(held.domain)}.${username}`,
@@ -1193,9 +1190,9 @@ export class Places {
   }
 
   /** A thread in a topic, as the tree holds it: the rest is the thread world's to say. */
-  makeThreadRow(person: Person, topicId: string, name: string): TreeNode {
+  makeThreadRow(person: Person, topicId: string, name: string, id?: string): TreeNode {
     this.node(person, topicId);
-    const row = this.fresh('thread', name, topicId, { thread: { state: 'idle', display: display('idle'), attention: { uncommitted: null, unpushed: null, failed: false, as_of: null, stale: false, reason: null }, blocked_reason: null, pending_approvals: 0, activity_seq: 1, last_activity_at: new Date().toISOString() } });
+    const row = this.fresh('thread', name, topicId, { ...(id === undefined ? {} : { id }), thread: { state: 'idle', display: display('idle'), attention: { uncommitted: null, unpushed: null, failed: false, as_of: null, stale: false, reason: null }, blocked_reason: null, pending_approvals: 0, activity_seq: 1, last_activity_at: new Date().toISOString() } });
     this.change(this.rootOf(topicId) ?? '', [row]);
     const meta = this.metaOf(row.id);
     meta.owner = person.me.username;

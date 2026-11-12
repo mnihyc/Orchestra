@@ -5,8 +5,9 @@ import { Box } from 'lucide-react';
 import { THREAD_GLYPHS } from '@/ui/ThreadState';
 import { NODE_GLYPHS } from '@/ui/NodeIcon';
 import { placedOfRow } from '@/features/navigation/placeLabels';
-import { knownPlaces, placeLabels } from '@/lib/placeLabel';
-import { pathTo, useTreeStore } from '@/realtime/stores/tree';
+import { knownPlaces, placeLabels, type KnownPlaces } from '@/lib/placeLabel';
+import { pathTo, useTreeStore, type OrgTree } from '@/realtime/stores/tree';
+import type { TreeNode } from '@/generated/api-types';
 import { allTabs, type Layout, type Tab } from './layout';
 import { pageAddress, pageResource, parsePageAddress } from './PageView';
 import { useWorkbench } from './store';
@@ -38,10 +39,9 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
   const { t } = useTranslation();
   const trees = useTreeStore((state) => state.byOrg);
   useEffect(() => {
-    const rows = [...trees.values()].flatMap((tree) => [...tree.nodes.values()].filter((node) => !node.deleted).map((node) => ({ tree, node, placed: placedOfRow(tree, node) })));
-    const labels = placeLabels(rows.map((row) => row.placed), knownPlaces(rows.map((row) => row.placed)));
     const before = useWorkbench.getState().named;
     const next = new Map(before);
+    let known: KnownPlaces | undefined;
     for (const tab of allTabs(layout)) {
       if (tab.view !== 'page' || before.get(tab.id)?.source === 'view') continue;
       const href = pageAddress(tab);
@@ -56,8 +56,18 @@ export function CachedTabNames({ layout }: { layout: Layout }) {
       }
       const target = pageResource(page);
       if (target === null) continue;
-      const found = rows.find((row) => row.node.id === target.id);
-      const title = found === undefined ? before.get(tab.id)?.title ?? t(`everything.kinds.${target.kind}`) : labels.get(target.id) ?? found.node.name;
+      let found: { tree: OrgTree; node: TreeNode } | undefined;
+      for (const tree of trees.values()) {
+        const node = tree.nodes.get(target.id);
+        if (node !== undefined && !node.deleted) { found = { tree, node }; break; }
+      }
+      let title = before.get(tab.id)?.title ?? t(`everything.kinds.${target.kind}`);
+      if (found !== undefined) {
+        // Only an unopened native tab needs a tree label. Live titles and static pages do not
+        // qualify thousands of unrelated nodes whenever a thread's running state changes.
+        known ??= knownPlaces([...trees.values()].flatMap((tree) => [...tree.nodes.values()].filter((node) => !node.deleted).map((node) => placedOfRow(tree, node))));
+        title = placeLabels([placedOfRow(found.tree, found.node)], known).get(target.id) ?? found.node.name;
+      }
       const path = found === undefined ? before.get(tab.id)?.path : pathTo(found.tree, found.node.id).map((node) => node.name).join(' / ');
       const display = found?.node.thread?.display;
       const icon = target.kind === 'thread' && display !== undefined ? THREAD_GLYPHS[display.state] : target.kind === 'environment' ? Box : NODE_GLYPHS[target.kind];

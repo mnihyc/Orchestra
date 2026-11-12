@@ -33,8 +33,9 @@ when its name tooltip opens; the tooltip does not repeat its accessible name as 
 A distinct `reason` still joins the value, so a blocked control explains the refusal. The native
 button applies this after tooltip composition; refs, events and focus retain their normal behavior.
 
-Primary navigation stays visible. `Tabs` and the native links/specialized tabs in `FoldingStrip`
-wrap onto further lines; arrows traverse the whole set, and Enter follows a focused native link.
+`Tabs` keeps one horizontally scrolling row and reveals the selected or focused tab inside it.
+Native links/specialized navigation in `FoldingStrip` wrap onto further lines; arrows traverse the
+whole set, and Enter follows a focused native link.
 `ViewGroup` keeps one horizontally scrolling strip at the ordinary tab height, so long tab sets leave
 the view usable. Its existing Palette locator searches titles and authorized paths, with dirty marks
 and an addressed Close action. Workbench containers keep their icons and full names visible,
@@ -57,7 +58,11 @@ reachable. An optional `style` reserves its measured height; prompt-layer styles
 `description` or `hint` below the name. `Choice` and `Checkbox` default to `presentation="form"`;
 `RadioGroup` offers explained form options. Toolbar callers use `SegmentedControl`, omit switch
 captions, or explicitly choose `presentation="compact"`. Supplying a form description must never
-silently discard it. Form and picker descriptions are associated through `aria-describedby`.
+silently discard it. Form and picker descriptions are associated through `aria-describedby`. A compact
+group shows an option's description on hover and on focus and keeps it, in a hidden node, as the
+option's accessible description; an option that cannot be chosen and says why is blocked
+(`aria-disabled`), not disabled: the arrow keys stop on it so that its reason can be reached
+without a pointer, and nothing chooses it.
 
 Open pickers keep descriptions inside their option, after its name. Their closed trigger keeps
 only the name. Person, group and place choices use one searchable locator. Any collection that

@@ -54,6 +54,8 @@ export function initialValue(field: FieldDeclaration): FormValue {
   switch (field.type) {
     case 'boolean':
       return field.default === true;
+    case 'json':
+      return JSON.stringify(field.default ?? {}, null, 2);
     case 'map':
     case 'secret_map':
       return {};
@@ -291,6 +293,28 @@ export function FieldForm({ fields, values, onChange, errors = {}, disabled = fa
         const aside = beside ?? undefined;
         const help = aside === undefined ? (field.help ?? undefined) : undefined;
         switch (field.type) {
+          case 'json': {
+            const text = asText(value);
+            let invalid: string | undefined;
+            if (text.trim() !== '') {
+              try { JSON.parse(text); } catch { invalid = t('settings.editor.jsonWrong'); }
+            }
+            return (
+              <Textarea
+                key={field.name}
+                label={field.label}
+                optional={!field.required}
+                hint={help}
+                help={aside}
+                error={error ?? invalid}
+                value={text}
+                disabled={disabled}
+                onChange={(event) => onChange(field.name, event.target.value)}
+                rows={6}
+                spellCheck={false}
+              />
+            );
+          }
           case 'text':
             return (
               <Input

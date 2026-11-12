@@ -24,6 +24,7 @@ use orch_settings_contract::provenance::{OwnRow, Resolved};
 use orch_settings_contract::registry::{self, DefaultOf, Scope, SettingDef, Supplier, keys};
 use orch_types::{Id, Json};
 use serde::de::DeserializeOwned;
+use std::sync::Arc;
 
 use crate::locks::Here;
 use crate::merge::{Link, OwnValues, Rows, Stack, Supply, resolve_key};
@@ -51,7 +52,7 @@ pub struct Snapshot {
     place: Place,
     scope: Scope,
     chain: Vec<Link>,
-    rows: Rows,
+    rows: Arc<Rows>,
     own: Option<OwnValues>,
     supplies: Supplies,
     defs: Vec<&'static SettingDef>,
@@ -203,7 +204,9 @@ impl Snapshot {
             }
         };
         let ids: Vec<Id> = facts.chain.iter().map(|link| link.id).collect();
-        let rows = Rows::new(queries::rows_on_chain(conn, &ids, row_keys.as_deref()).await?);
+        let rows = Arc::new(Rows::new(
+            queries::rows_on_chain(conn, &ids, row_keys.as_deref()).await?,
+        ));
         let mut snapshot = Self {
             place,
             scope: facts.scope,
@@ -285,7 +288,7 @@ impl Snapshot {
     }
 
     pub(crate) fn rows_mut(&mut self) -> &mut Rows {
-        &mut self.rows
+        Arc::make_mut(&mut self.rows)
     }
 
     /// What `def` resolves to at this place, with where it comes from.
@@ -481,22 +484,25 @@ pub struct ProviderAt<'a> {
     pub revision: i64,
 }
 
-/// Resolves a provider runtime key for a page of providers with shared ancestor and setting-row
-/// reads. The keys used here have fixed, unset or installation-seeded defaults, so their supplier
-/// does not depend on an individual provider's runtime facts.
-pub async fn get_at_providers<T: DeserializeOwned>(
+/// Reads several keys for a batch of providers in one ancestor/settings pass. These keys have
+/// fixed, unset or installation-seeded defaults, independent of individual runtime facts.
+pub async fn snapshots_at_providers(
     conn: &mut Conn,
     providers: &[ProviderAt<'_>],
-    key: &str,
-) -> Result<std::collections::HashMap<Id, Option<T>>, Error> {
-    let def = registry::get(key).ok_or_else(|| Error::UnknownKey(key.to_owned()))?;
-    if !matches!(
-        def.default,
-        DefaultOf::Value(_) | DefaultOf::Unset | DefaultOf::Supplied(Supplier::Seeds)
-    ) {
-        return Err(Error::Unreadable {
-            what: "a provider setting whose default needs its own runtime facts",
-        });
+    keys: &[&str],
+) -> Result<std::collections::HashMap<Id, Snapshot>, Error> {
+    let mut defs = Vec::with_capacity(keys.len());
+    for key in keys {
+        let def = registry::get(key).ok_or_else(|| Error::UnknownKey((*key).to_owned()))?;
+        if !matches!(
+            def.default,
+            DefaultOf::Value(_) | DefaultOf::Unset | DefaultOf::Supplied(Supplier::Seeds)
+        ) {
+            return Err(Error::Unreadable {
+                what: "a provider setting whose default needs its own runtime facts",
+            });
+        }
+        defs.push(def);
     }
     let mut result = std::collections::HashMap::new();
     if providers.is_empty() {
@@ -505,7 +511,10 @@ pub async fn get_at_providers<T: DeserializeOwned>(
     let homes: Vec<Id> = providers.iter().map(|provider| provider.home_id).collect();
     let nodes = hierarchy::with_ancestors(conn, &homes).await?;
     let ancestors: Vec<Id> = nodes.iter().map(|node| node.id).collect();
-    let rows = Rows::new(queries::rows_on_chain(conn, &ancestors, Some(&[key.to_owned()])).await?);
+    let names: Vec<String> = keys.iter().map(|key| (*key).to_owned()).collect();
+    let rows = Arc::new(Rows::new(
+        queries::rows_on_chain(conn, &ancestors, Some(&names)).await?,
+    ));
     let supplies = supplied::load(
         conn,
         &supplied::Context {
@@ -513,7 +522,7 @@ pub async fn get_at_providers<T: DeserializeOwned>(
             environment: None,
             model_for_effort: None,
         },
-        &[def],
+        &defs,
     )
     .await?;
     for provider in providers {
@@ -528,8 +537,23 @@ pub async fn get_at_providers<T: DeserializeOwned>(
                 revision: provider.revision,
             }),
             supplies: supplies.clone(),
-            defs: vec![def],
+            defs: defs.clone(),
         };
+        result.insert(provider.id, snapshot);
+    }
+    Ok(result)
+}
+
+/// Resolves one provider runtime key with the shared batch reader.
+pub async fn get_at_providers<T: DeserializeOwned>(
+    conn: &mut Conn,
+    providers: &[ProviderAt<'_>],
+    key: &str,
+) -> Result<std::collections::HashMap<Id, Option<T>>, Error> {
+    let snapshots = snapshots_at_providers(conn, providers, &[key]).await?;
+    let def = registry::get(key).ok_or_else(|| Error::UnknownKey(key.to_owned()))?;
+    let mut result = std::collections::HashMap::new();
+    for (provider, snapshot) in snapshots {
         let value = snapshot
             .resolve(def)
             .value
@@ -539,7 +563,7 @@ pub async fn get_at_providers<T: DeserializeOwned>(
                 key: key.to_owned(),
                 reason: error.to_string(),
             })?;
-        result.insert(provider.id, value);
+        result.insert(provider, value);
     }
     Ok(result)
 }

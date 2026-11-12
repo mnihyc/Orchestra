@@ -31,21 +31,18 @@ fn speed() -> Json {
     }])
 }
 
-/// Says that the agent publishes the speed. The machine of the tests answers `agent.start` with a descriptor
-/// of its own that has no parameters, which the engine keeps; a harness that declares the same at every start
-/// does not do that, so this is said again whenever a harness was started.
+/// Stored discovery and every native start publish the same service-tier parameter. A SQL-only
+/// declaration can be overwritten by an asynchronous harness start with the fixture's old descriptor.
 async fn declare(world: &World) {
-    sqlx::query("UPDATE agents SET descriptor = jsonb_set(descriptor, '{parameters}', $1)")
-        .bind(speed())
-        .execute(world.pool.pool())
-        .await
-        .unwrap();
+    let mut descriptor = common::descriptor();
+    descriptor["parameters"] = speed();
+    world.declares(descriptor).await;
 }
 
 /// A world with two models on its provider, `fake-1` in the group `frontier` and `fake-2` in none, both with a
 /// speed enabled; its agent publishes the speed.
 async fn world() -> World {
-    let world = World::new().await;
+    let world = World::observed().await;
     declare(&world).await;
     sqlx::query(
         "UPDATE provider_models SET groups = ARRAY['frontier'],
@@ -486,8 +483,12 @@ async fn waiting_and_release_order_include_only_the_caps_models_and_service_tier
         .await
         .unwrap();
     world.engine().cap_changed(temporary).await.unwrap();
-    world.turn_start(other_model, 0).await;
-    world.turn_start(ordinary, 0).await;
+    let other_start = world.turn_start(other_model, 0).await;
+    assert_eq!(other_start.model, OTHER);
+    assert_eq!(other_start.params["service_tier"], "fast");
+    let ordinary_start = world.turn_start(ordinary, 0).await;
+    assert_eq!(ordinary_start.model, MODEL);
+    assert!(ordinary_start.params.get("service_tier").is_none());
     assert!(world.turn_starts(first).is_empty() && world.turn_starts(second).is_empty());
     declare(&world).await;
     sqlx::query("UPDATE usage_caps SET amount = 1 WHERE id = $1")
@@ -497,16 +498,22 @@ async fn waiting_and_release_order_include_only_the_caps_models_and_service_tier
         .unwrap();
     world.engine().cap_changed(selected).await.unwrap();
     let start = world.turn_start(first, 0).await;
+    assert_eq!(start.model, MODEL);
+    assert_eq!(start.params["service_tier"], "fast");
     assert!(
         world.turn_starts(second).is_empty(),
         "the older matching input goes first"
     );
     world.say(first, common::turn_began(start.turn_id)).await;
+    world.wait_turn(start.turn_id, "running").await;
     world
         .say(first, turn_ended(start.turn_id, TurnOutcome::Completed))
         .await;
+    world.wait_turn(start.turn_id, "completed").await;
     declare(&world).await;
-    world.turn_start(second, 0).await;
+    let next = world.turn_start(second, 0).await;
+    assert_eq!(next.model, MODEL);
+    assert_eq!(next.params["service_tier"], "fast");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
