@@ -12,6 +12,16 @@ export function bindContentNavigation(next: Navigator): () => void {
   return () => { if (navigator === next) navigator = null; };
 }
 
+/** An explicit content-tab choice supersedes an older pending browser navigation, even if already selected. */
+export function selectContentTab(id: string): void {
+  useWorkbench.getState().focus(id);
+  const current = useWorkbench.getState();
+  if (current.activeContent !== id) return;
+  const tab = findTab(current.layout, id)?.tab;
+  const href = tab === undefined ? null : contentAddress(tab);
+  if (href !== null) navigator?.(id, href, true);
+}
+
 export function openContent(address: string | ContentLocation, mode: 'normal' | 'new' | 'beside' = 'normal', history: ContentHistory = 'none'): string | null {
   const parsed = typeof address === 'string' ? parseContentAddress(address) : parseContentAddress(contentHref(address));
   if (parsed === null) return null;

@@ -24,11 +24,10 @@ it.each(['en', 'zh-CN'] as const)('shows the membership date for a near expiry a
   show(<GroupMenu chat={row} me={ada.id} onLeft={() => undefined} />);
   await userEvent.click(screen.getByRole('button', { name: i18n.t('chat.group.menu') }));
   await userEvent.click(screen.getByRole('menuitem', { name: i18n.t('chat.group.people') }));
-  const member = screen.getByRole('button', { name: 'Vera Rubin' }).closest('li');
-  if (member === null) throw new Error('The timed member must have a roster row.');
+  const member = screen.getByRole('row', { name: /Vera Rubin/ });
   const time = member.querySelector('time');
   expect(time).toHaveAttribute('datetime', end);
   expect(time).toHaveTextContent(new Intl.DateTimeFormat(locale, { month: 'short', timeZone: 'UTC' }).format(new Date(end)));
   expect(within(member).getByText(i18n.t('chat.people.until'))).toBeVisible();
-  expect(screen.getByRole('button', { name: 'Ada Lovelace' }).closest('li')?.querySelector('time')).toBeNull();
+  expect(screen.getByRole('row', { name: /Ada Lovelace/ }).querySelector('time')).toBeNull();
 });

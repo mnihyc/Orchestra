@@ -41,7 +41,7 @@ function Frames({ threadId, segment }: { threadId: string; segment: string }) {
   if (view.error !== null && view.read?.ready !== true) return <ErrorState compact error={view.error} onRetry={() => reloadThread(read)} />;
   if (query.data === undefined) {
     const unavailable = typeof query.error === 'object' && query.error !== null && 'code' in query.error && query.error.code === 'read_unavailable';
-    return query.error === null ? <SkeletonRows rows={4} /> : <ErrorState compact error={query.error} onRetry={unavailable ? undefined : () => reloadThread(read)} />;
+    return query.error === null ? <SkeletonRows read={query} rows={4} /> : <ErrorState compact error={query.error} onRetry={unavailable ? undefined : () => reloadThread(read)} />;
   }
   const unique = new Map(query.data.pages.flatMap((page) => page.events).map((event) => [event.n, event]));
   const events = [...unique.values()].sort((one, other) => one.n - other.n).filter((event) => (direction === '' || event.direction === direction) && JSON.stringify(event.payload).toLocaleLowerCase().includes(search.toLocaleLowerCase()));

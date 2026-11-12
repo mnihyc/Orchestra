@@ -138,47 +138,61 @@ where
 {
     let asked_host: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let seen = Arc::clone(&asked_host);
+    let asked_purpose = Arc::new(Mutex::new(
+        orch_link_contract::gateways::SessionPurpose::Primary,
+    ));
+    let seen_purpose = Arc::clone(&asked_purpose);
     #[expect(
         clippy::result_large_err,
         reason = "the refusal is the library's own type, built once per connection that is refused"
     )]
-    let callback =
-        move |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
-            let refuse = |status: StatusCode, why: &str| {
-                let mut refusal = ErrorResponse::new(Some(why.to_owned()));
-                *refusal.status_mut() = status;
-                refusal
-            };
-            if request.uri().path() != SESSION_PATH {
-                return Err(refuse(StatusCode::NOT_FOUND, "no such path"));
-            }
-            let speaks = request
-                .headers()
-                .get_all(PROTOCOL_HEADER)
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .flat_map(|value| value.split(','))
-                .any(|protocol| protocol.trim() == SUBPROTOCOL);
-            if !speaks {
-                return Err(refuse(
-                    StatusCode::BAD_REQUEST,
-                    "the subprotocol orch-link.v1 is required",
-                ));
-            }
-            response
-                .headers_mut()
-                .insert(PROTOCOL_HEADER, HeaderValue::from_static(SUBPROTOCOL));
-            if let Some(host) = request
-                .headers()
-                .get("host")
-                .and_then(|value| value.to_str().ok())
-            {
-                *seen
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host_of(host));
-            }
-            Ok(response)
+    let callback = move |request: &Request,
+                         mut response: Response|
+          -> Result<Response, ErrorResponse> {
+        let refuse = |status: StatusCode, why: &str| {
+            let mut refusal = ErrorResponse::new(Some(why.to_owned()));
+            *refusal.status_mut() = status;
+            refusal
         };
+        if request.uri().path() != SESSION_PATH {
+            return Err(refuse(StatusCode::NOT_FOUND, "no such path"));
+        }
+        let protocols = request
+            .headers()
+            .get_all(PROTOCOL_HEADER)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        let protocol = if protocols.contains(&orch_link_contract::gateways::TUNNEL_SUBPROTOCOL) {
+            *seen_purpose
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                orch_link_contract::gateways::SessionPurpose::Tunnel;
+            orch_link_contract::gateways::TUNNEL_SUBPROTOCOL
+        } else if protocols.contains(&SUBPROTOCOL) {
+            SUBPROTOCOL
+        } else {
+            return Err(refuse(
+                StatusCode::BAD_REQUEST,
+                "the subprotocol orch-link.v1 is required",
+            ));
+        };
+        response
+            .headers_mut()
+            .insert(PROTOCOL_HEADER, HeaderValue::from_static(protocol));
+        if let Some(host) = request
+            .headers()
+            .get("host")
+            .and_then(|value| value.to_str().ok())
+        {
+            *seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(host_of(host));
+        }
+        Ok(response)
+    };
     let websocket =
         tokio_tungstenite::accept_hdr_async_with_config(stream, callback, Some(config()))
             .await
@@ -190,6 +204,9 @@ where
     {
         peer.host = Some(host);
     }
+    peer.purpose = *asked_purpose
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     Ok(connection_of(websocket, peer))
 }
 
@@ -217,6 +234,7 @@ pub async fn accept_tls(
     accept(
         stream,
         PeerInfo {
+            purpose: Default::default(),
             remote_ip,
             host: sni,
             client_certificate,
@@ -228,6 +246,7 @@ pub async fn accept_tls(
 /// Dials endpoints over TCP and TLS and upgrades them to a session socket.
 #[derive(Clone)]
 pub struct TlsDialer {
+    prober: Option<Arc<dyn crate::gateways::GatewayProber>>,
     pinned: Option<Arc<rustls::ClientConfig>>,
     public: Option<Arc<rustls::ClientConfig>>,
     connect_timeout: Duration,
@@ -250,6 +269,7 @@ impl TlsDialer {
         public: Option<Arc<rustls::ClientConfig>>,
     ) -> Self {
         Self {
+            prober: None,
             pinned,
             public,
             connect_timeout: Duration::from_secs(u64::from(CONNECT_TIMEOUT_SECS)),
@@ -272,7 +292,18 @@ impl TlsDialer {
         self
     }
 
-    async fn connect(&self, endpoint: &Endpoint) -> Result<Connection, DialError> {
+    /// Use the connector's shared verified HTTPS implementation for non-admitting probes.
+    #[must_use]
+    pub fn with_gateway_prober(mut self, prober: Arc<dyn crate::gateways::GatewayProber>) -> Self {
+        self.prober = Some(prober);
+        self
+    }
+
+    async fn connect(
+        &self,
+        endpoint: &Endpoint,
+        purpose: orch_link_contract::gateways::SessionPurpose,
+    ) -> Result<Connection, DialError> {
         let url = url::Url::parse(
             &endpoint
                 .session_url()
@@ -307,9 +338,14 @@ impl TlsDialer {
             .as_str()
             .into_client_request()
             .map_err(|e| DialError::Address(e.to_string()))?;
+        let protocol = if purpose.is_primary() {
+            SUBPROTOCOL
+        } else {
+            orch_link_contract::gateways::TUNNEL_SUBPROTOCOL
+        };
         request
             .headers_mut()
-            .insert(PROTOCOL_HEADER, HeaderValue::from_static(SUBPROTOCOL));
+            .insert(PROTOCOL_HEADER, HeaderValue::from_static(protocol));
         let (websocket, response) =
             tokio_tungstenite::client_async_with_config(request, stream, Some(config()))
                 .await
@@ -318,7 +354,7 @@ impl TlsDialer {
             .headers()
             .get(PROTOCOL_HEADER)
             .and_then(|value| value.to_str().ok())
-            == Some(SUBPROTOCOL);
+            == Some(protocol);
         if !agreed {
             return Err(DialError::Upgrade(
                 "the gateway does not speak orch-link.v1".to_owned(),
@@ -327,6 +363,7 @@ impl TlsDialer {
         Ok(connection_of(
             websocket,
             PeerInfo {
+                purpose,
                 host: Some(host.to_ascii_lowercase()),
                 ..PeerInfo::default()
             },
@@ -336,9 +373,36 @@ impl TlsDialer {
 
 #[async_trait]
 impl Dialer for TlsDialer {
+    async fn probe(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, DialError> {
+        let prober = self.prober.as_ref().ok_or_else(|| {
+            DialError::Connect("no verified gateway prober was configured".into())
+        })?;
+        prober.measure(endpoint).await
+    }
     async fn dial(&self, endpoint: &Endpoint) -> Result<Connection, DialError> {
-        tokio::time::timeout(self.connect_timeout, self.connect(endpoint))
-            .await
-            .map_err(|_| DialError::TimedOut)?
+        tokio::time::timeout(
+            self.connect_timeout,
+            self.connect(
+                endpoint,
+                orch_link_contract::gateways::SessionPurpose::Primary,
+            ),
+        )
+        .await
+        .map_err(|_| DialError::TimedOut)?
+    }
+
+    async fn dial_tunnel(&self, endpoint: &Endpoint) -> Result<Connection, DialError> {
+        tokio::time::timeout(
+            self.connect_timeout,
+            self.connect(
+                endpoint,
+                orch_link_contract::gateways::SessionPurpose::Tunnel,
+            ),
+        )
+        .await
+        .map_err(|_| DialError::TimedOut)?
     }
 }

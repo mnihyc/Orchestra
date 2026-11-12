@@ -44,6 +44,12 @@ function read(number: number): Promise<Read> {
   if (held !== undefined) return Promise.resolve(held);
   const gate = waiting.get(number) ?? deferred<Read>(); waiting.set(number, gate); return gate.promise;
 }
+/** Exercise an already-started native supplier, the supported fallback whose
+ * cancellation/reader behavior must survive the new cold aggregate owner. */
+function nativeAdmission() {
+  void observed(queryClient.query({ ...metaQuery, staleTime: 'static' }));
+  return observed(admit(visit));
+}
 function observeFrame() {
   const observer = new QueryObserver(queryClient, metaQuery);
   const off = observer.subscribe(() => undefined); release.push(off); return off;
@@ -81,7 +87,7 @@ beforeEach(() => {
     if (path === '/api/v1/meta') {
       const next = { request, reply: deferred<Response>() }; reads.push(next); waiting.get(reads.length)?.resolve(next); return next.reply.promise;
     }
-    if (path === '/api/v1/auth/refresh') { restoreStarted.resolve(undefined); return restoreReply.promise; }
+    if (path === '/api/v1/auth/session') { restoreStarted.resolve(undefined); return restoreReply.promise; }
     if (path === '/api/v1/auth/logout') return Promise.resolve(new Response(null, { status: 204 }));
     throw new Error(`Unexpected native request ${path}`);
   });
@@ -100,7 +106,7 @@ afterEach(async () => {
 });
 
 it.each(['restore first', 'Meta first'] as const)('retains actual admission across the frame handoff and refreshes caller-specific Meta once (%s)', async (order) => {
-  const admission = observed(admit(visit));
+  const admission = nativeAdmission();
   const initial = await read(1), detach = observeFrame(); refreshOnSignIn(detach);
   expect(initial.request.headers.has('authorization')).toBe(false);
   expect(observers()).toBe(2);
@@ -122,12 +128,12 @@ it.each(['restore first', 'Meta first'] as const)('retains actual admission acro
   expect(observers()).toBe(1); shell(); expect(observers()).toBe(0);
   await admit(visit); client.adopt(grant(first)); await admit(visit);
   expect(reads).toHaveLength(2); // Cached admission and same-reader renewal never poll Meta.
-  expect(transport.send.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith('/auth/refresh'))).toHaveLength(1);
+  expect(transport.send.mock.calls.filter(([request]) => new URL(request.url).pathname.endsWith('/auth/session'))).toHaveLength(1);
 });
 
 it('suppresses a late former caller permission and lets only the current identity refresh it', async () => {
   client.adopt(grant(first));
-  const admission = observed(admit(visit)); await read(1);
+  const admission = nativeAdmission(); await read(1);
   const shell = observeFrame();
   const oldFreshness = refreshMetaForSignIn(); freshness.push(oldFreshness);
   refreshOnSignIn(); client.adopt(grant(second));
@@ -142,7 +148,7 @@ it('suppresses a late former caller permission and lets only the current identit
 });
 
 it('retains the authorized followup when cached anonymous Meta settles before restoration and Shell is not ready', async () => {
-  const admission = observed(admit(visit)); await read(1);
+  const admission = nativeAdmission(); await read(1);
   const detach = observeFrame(); refreshOnSignIn();
   await answer(1, meta({ may_create_org: false }));
   expect(observers()).toBe(2); // Meta is cached, but admission still owns its restoration boundary.
@@ -183,7 +189,7 @@ it('cannot restore a former caller permission when explicit cancellation reverts
 
 it.each(['cancel', 'sign out'] as const)('preserves explicit cancellation despite the admission lease (%s)', async (boundary) => {
   client.adopt(grant(first));
-  const admission = observed(admit(visit)), initial = await read(1);
+  const admission = nativeAdmission(), initial = await read(1);
   queryClient.setQueryData(['private-old-reader'], 'Old private cache');
   const oldFreshness = refreshMetaForSignIn(); freshness.push(oldFreshness);
   expect(observers()).toBe(2);
@@ -200,7 +206,7 @@ it.each(['cancel', 'sign out'] as const)('preserves explicit cancellation despit
   expect(result.error).toBeInstanceOf(CancelledError); expect(initial.request.signal.aborted).toBe(true);
   await oldFreshness; expect(reads).toHaveLength(1); expect(observers()).toBe(0);
   client.adopt(grant(second));
-  const next = observed(admit(visit)); await read(2);
+  const next = nativeAdmission(); await read(2);
   // A late200 from the retired request cannot replace the new reader's cache.
   initial.reply.resolve(Response.json(meta({ may_create_org: true })));
   await answer(2, meta({ may_create_org: false })); expect(await next).toEqual({ ok: true });
@@ -208,7 +214,7 @@ it.each(['cancel', 'sign out'] as const)('preserves explicit cancellation despit
 });
 
 it('releases the admission observer and keeps a real Meta refusal as that same error', async () => {
-  const admission = observed(admit(visit)); const initial = await read(1), detach = observeFrame(); refreshOnSignIn(detach);
+  const admission = nativeAdmission(); const initial = await read(1), detach = observeFrame(); refreshOnSignIn(detach);
   await restoreAs();
   initial.reply.resolve(Response.json({ type: 'orch:error:internal', code: 'internal', title: 'Failed', detail: '', status: 500, request_id: 'meta-read' }, { status: 500 }));
   const result = await admission;
@@ -220,7 +226,7 @@ it('releases the admission observer and keeps a real Meta refusal as that same e
 });
 
 it.each([false, true])('releases admission when restoration fails while Meta is pending, preserving another legitimate observer (%s)', async (keepFrame) => {
-  const admission = observed(admit(visit)), initial = await read(1);
+  const admission = nativeAdmission(), initial = await read(1);
   const detach = keepFrame ? observeFrame() : undefined;
   await restoreStarted.promise;
   restoreReply.resolve(Response.json({ type: 'orch:error:internal', code: 'internal', title: 'Failed', detail: '', status: 500, request_id: 'restore-read' }, { status: 500 }));
@@ -239,7 +245,7 @@ it.each([false, true])('releases admission when restoration fails while Meta is 
 });
 
 it('keeps the native setup gate and releases its retained reader before redirecting', async () => {
-  const admission = observed(admit(visit)); await read(1); await restoreAs();
+  const admission = nativeAdmission(); await read(1); await restoreAs();
   await answer(1, meta({ needs_setup: true, may_create_org: false }));
   const result = await admission;
   expect(result.ok).toBe(false);

@@ -1,9 +1,23 @@
 /** Error positions and plugin schema navigation preserve the configuration's actual keys and values. */
+import { CompletionContext } from '@codemirror/autocomplete';
+import { json } from '@codemirror/lang-json';
+import { EditorState } from '@codemirror/state';
 import { expect, it } from 'vitest';
-import { jsonRanges, problemRange } from '@/features/resources/templates/JsonSpec';
+import { completeSpecProperty, jsonRanges, problemRange } from '@/features/resources/templates/JsonSpec';
 import { newValue, replaceAt, resolveSchema, schemaAt, templateExamples, valueAt } from '@/features/resources/templates/schema';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh-CN.json';
+
+it('matches a quoted key prefix and replaces it without displaying a quoted label', () => {
+  const text = '{\n  "ima';
+  const state = EditorState.create({ doc: text, extensions: json() });
+  const context = new CompletionContext(state, text.length, true);
+  const result = completeSpecProperty({ type: 'object', properties: { image: { type: 'string' } } }, () => '', context);
+  expect(result).toMatchObject({
+    from: text.indexOf('"'), to: text.length,
+    options: [{ label: '"image"', displayLabel: 'image', apply: '"image": ' }],
+  });
+});
 
 it('points an error to its nested array entry and escaped property rather than a same-named key elsewhere', () => {
   const text = '{\n  "first": {"memory_mb": 1},\n  "mounts": [\n    {"target": "/one"},\n    {"target": "/two"}\n  ],\n  "a/b~c": {"memory_mb": 0}\n}';

@@ -45,7 +45,12 @@ async fn a_read_only_mount_cannot_be_written_and_a_shared_one_is_written_through
         request["env"] = json!({ "LAB_RUN": "echo changed > /data/ro/a.txt; echo \"rc=$?\"; echo new > /data/ro/new.txt; echo \"rc=$?\"; echo written > /data/rw/new.txt; echo kept > /data/cache/kept.txt; cat /data/ro/a.txt" });
     });
     let unit = lab.run(&spec).await;
-    let run = lab.read(&unit, "/var/lib/orch/run.txt").await.unwrap();
+    let run = lab
+        .wait_read(&unit, "/var/lib/orch/run.txt", |text| {
+            text.ends_with("original\n")
+        })
+        .await
+        .unwrap();
     assert!(run.contains("Read-only file system"), "{run}");
     assert!(run.contains("rc=1") && !run.contains("rc=0"), "{run}");
     assert_eq!(
@@ -86,7 +91,9 @@ async fn a_read_only_mount_cannot_be_written_and_a_shared_one_is_written_through
     });
     let second = lab.run(&again).await;
     assert_eq!(
-        lab.read(&second, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&second, "/var/lib/orch/seen.txt", |text| text == "kept\n")
+            .await
+            .as_deref(),
         Some("kept\n")
     );
 }
@@ -157,7 +164,8 @@ async fn a_private_view_keeps_the_changes_of_one_environment_apart_from_the_data
         json!([ { "name": "tree", "path": "/data/tree", "mode": "private" } ])
     );
     assert_eq!(
-        lab.read(&writer_unit, "/var/lib/orch/ls.txt")
+        lab.wait_read(&writer_unit, "/var/lib/orch/ls.txt", |text| text
+            == "a.txt only-here.txt sub ")
             .await
             .as_deref(),
         Some("a.txt only-here.txt sub ")
@@ -176,13 +184,15 @@ async fn a_private_view_keeps_the_changes_of_one_environment_apart_from_the_data
     // Another environment, with a layer of its own, sees none of that.
     let reader_unit = lab.run(&reader).await;
     assert_eq!(
-        lab.read(&reader_unit, "/var/lib/orch/a.txt")
+        lab.wait_read(&reader_unit, "/var/lib/orch/a.txt", |text| text
+            == "original\n")
             .await
             .as_deref(),
         Some("original\n")
     );
     assert_eq!(
-        lab.read(&reader_unit, "/var/lib/orch/ls.txt")
+        lab.wait_read(&reader_unit, "/var/lib/orch/ls.txt", |text| text
+            == "a.txt gone.txt sub ")
             .await
             .as_deref(),
         Some("a.txt gone.txt sub ")
@@ -213,11 +223,17 @@ async fn a_private_view_keeps_the_changes_of_one_environment_apart_from_the_data
     lab.driver.remove(&writer_unit).await.unwrap();
     let again = lab.run(&successor).await;
     assert_eq!(
-        lab.read(&again, "/var/lib/orch/a.txt").await.as_deref(),
+        lab.wait_read(&again, "/var/lib/orch/a.txt", |text| text
+            == "changed\nnew\n")
+            .await
+            .as_deref(),
         Some("changed\nnew\n")
     );
     assert_eq!(
-        lab.read(&again, "/var/lib/orch/ls.txt").await.as_deref(),
+        lab.wait_read(&again, "/var/lib/orch/ls.txt", |text| text
+            == "a.txt only-here.txt sub ")
+            .await
+            .as_deref(),
         Some("a.txt only-here.txt sub ")
     );
     assert_eq!(
@@ -265,7 +281,10 @@ async fn a_volume_location_can_be_a_private_view_too() {
     });
     let second = lab.run(&viewer).await;
     assert_eq!(
-        lab.read(&second, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&second, "/var/lib/orch/seen.txt", |text| text
+            == "base\nbase.txt mine.txt ")
+            .await
+            .as_deref(),
         Some("base\nbase.txt mine.txt ")
     );
     // The volume itself did not get the file the view wrote.
@@ -278,7 +297,9 @@ async fn a_volume_location_can_be_a_private_view_too() {
     });
     let third = lab.run(&check).await;
     assert_eq!(
-        lab.read(&third, "/var/lib/orch/seen.txt").await.as_deref(),
+        lab.wait_read(&third, "/var/lib/orch/seen.txt", |text| text == "base.txt ")
+            .await
+            .as_deref(),
         Some("base.txt ")
     );
 }

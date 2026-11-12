@@ -9,6 +9,14 @@
 //! [`CapStatus`] says how much of it is used and whether it stands in the
 //! way.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Revision, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -154,6 +162,12 @@ pub struct UsageCap {
     /// Model names, patterns with `*` for a family, and `@<group>` for the models that a provider's
     /// managers put in that group; empty for every model.
     pub models: Vec<String>,
+    /// Service offering names, families and @groups; empty with models empty covers every offering.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
+    /// Usage purposes, intersected with the offering selection; empty covers every purpose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purposes: Vec<String>,
     /// The service tiers it covers, by id (`fast`); empty for whatever tier a turn runs with, the
     /// ordinary one included.
     pub tiers: Vec<String>,
@@ -240,6 +254,12 @@ pub struct CapInput {
     /// Model names, families and `@<group>`; empty for every model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// Service offering names, families and @groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    /// Usage purpose patterns; empty covers every purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<String>>,
     /// Service tiers by id; empty for whatever tier, the ordinary one included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiers: Option<Vec<String>>,
@@ -288,6 +308,9 @@ pub enum CapState {
 pub struct CapLeftOut {
     /// For caps in credits: tokens of models without a rate.
     pub unrated_tokens: i64,
+    /// Service requests whose measured quantity or entered quote could not be priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrated_services: Option<i64>,
     /// Covered threads in which nobody reports usage.
     pub unmetered_threads: i64,
 }
@@ -349,6 +372,10 @@ pub enum UsageDimension {
     Person,
     /// The model, by its routing name.
     Model,
+    /// Actual model or service offering, with its kind kept distinct.
+    Offering,
+    /// What the request was spent on.
+    Purpose,
     /// The provider it ran on.
     Provider,
     /// The harness kind, such as `codex` or `claude-code`.
@@ -360,7 +387,7 @@ pub enum UsageDimension {
     Effort,
     /// The service tier.
     Tier,
-    /// The access programme, where one was selected.
+    /// The access program, where one was selected.
     Program,
     /// The orgs directly inside the one asked about.
     Org,
@@ -382,12 +409,26 @@ pub enum UsageEnvironmentKind {
     Connected,
 }
 
+/// Actual service quantities and the evidence coverage behind their sum.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceUnitTotals {
+    /// Sum of the actually reported nonnegative quantities.
+    pub quantity: i64,
+    /// Requests with a reported quantity, including explicit zero.
+    pub known_requests: i64,
+    /// Requests whose quantity is missing or invalid; none is guessed from the result list.
+    pub unknown_requests: i64,
+}
+
 /// Counted consumption, with distinct turns from every matching historical record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UsageFigures {
     /// Distinct turns in the matching historical records, including turns with no token report.
     /// Multiple model requests or meters of the same turn count once within each group.
     pub turns: i64,
+    /// Separate actual service units, never converted to token counts or guessed from rows/results.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub service_units: std::collections::BTreeMap<String, ServiceUnitTotals>,
     /// Input with its cached part, output with its reasoning part, total.
     pub tokens: TokenUsage,
     /// A decimal: the sum over the use that had a rate. Use without one adds nothing here.
@@ -397,13 +438,44 @@ pub struct UsageFigures {
     pub estimated_credits: String,
     /// What that sum leaves out: tokens of models without a rate.
     pub unrated_tokens: i64,
+    /// Service requests whose measured quantity or entered quote could not be priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrated_services: Option<i64>,
     /// Request performance, kept apart from records whose source cannot measure it.
     #[serde(default, skip_serializing_if = "UsagePerformance::is_empty")]
     pub performance: UsagePerformance,
 }
 
+/// The selected service's immutable unit quote, distinct from a vendor-reported invoice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceUnitPrice {
+    /// Exact decimal amount per measured unit.
+    pub amount: String,
+    /// The original quote unit, such as credits or a catalogue currency.
+    pub currency: String,
+    /// What the quoted amount buys; kept even if it does not match the measured unit.
+    pub unit: String,
+}
+
+/// Actual service request facts carried by the existing request measurement envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceUsage {
+    /// The exact selected service offering; not a generation-model alias.
+    pub offering: String,
+    /// Declared charged unit, such as call, page or image.
+    pub unit: String,
+    /// Actual native quantity; missing is never a guessed successful call.
+    pub quantity: UsageMeasurement<i64>,
+    /// Original trusted offering quote, copied before the request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<ServiceUnitPrice>,
+    /// Applied credits per unit, after the existing catalogue scale where applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits_per_unit: Option<String>,
+}
+
 /// One measured member, with the same four states as provider facts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum UsageMeasurement<T> {
     /// This source cannot measure the member.
@@ -421,6 +493,12 @@ pub enum UsageMeasurement<T> {
 }
 
 impl<T> UsageMeasurement<T> {
+    /// Whether this quantity has no declared support, so older wire payloads may omit it.
+    #[must_use]
+    pub const fn is_unsupported(&self) -> bool {
+        matches!(self, Self::Unsupported)
+    }
+
     /// The reported value, only where measured.
     pub fn value(&self) -> Option<&T> {
         match self {
@@ -430,10 +508,74 @@ impl<T> UsageMeasurement<T> {
     }
 }
 
+/// A charge the vendor actually reported, kept in its original unit for audit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReportedCost {
+    /// Exact nonnegative decimal text, without a floating-point conversion.
+    pub amount: String,
+    /// Original unit from its extension; unknown when that source did not declare one.
+    pub unit: Option<String>,
+}
+
+/// Public native price terms selected on the actual request; a present null keeps its price unknown.
+pub type NativePrices = std::collections::BTreeMap<
+    String,
+    Option<orch_provider_contract::capabilities::pricing::NativePrice>,
+>;
+
 /// Request times exclude tools and human waits; milliseconds are whole nonnegative numbers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct RequestTiming {
+    /// Refusal or vendor-specific reason, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
+    /// The HTTP status actually received; absent for a transport failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_status: Option<i64>,
+    /// One-based attempt within the model step, when observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    /// Upstream request identity, separate from an adapter's own request reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request_id: Option<String>,
+
+    /// Vendor-reported native searches, separate from client tool calls and tokens.
+    pub web_searches: UsageMeasurement<i64>,
+    /// Successful native page fetches; unknown, unsupported and zero remain distinct.
+    #[serde(default, skip_serializing_if = "UsageMeasurement::is_unsupported")]
+    pub web_fetches: UsageMeasurement<i64>,
+    /// Other declaration-named actual usage quantities; no result/item count is inferred.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub declared_counters: std::collections::BTreeMap<String, UsageMeasurement<i64>>,
+    /// Selected declaration-owned quotes from the final native request; null is explicitly unknown.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub native_prices: NativePrices,
+    /// Actual service offering/unit facts; absent on ordinary model requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_usage: Option<ServiceUsage>,
+    /// Actual vendor charge in its declared original unit; absence never implies zero or a credit conversion.
+    #[serde(default, skip_serializing_if = "UsageMeasurement::is_unsupported")]
+    pub reported_cost: UsageMeasurement<ReportedCost>,
+    /// The actual upstream wire format, where this observation retained it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_protocol: Option<String>,
+    /// The processing tier requested by this model client, where known.
+    pub requested_service_tier: Option<String>,
+    /// The tier or speed the upstream actually reported; absence never proves ordinary speed.
+    pub reported_service_tier: UsageMeasurement<String>,
+    /// Capacity is independent of inference speed; omitted by older/unaware sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_capacity_tier: Option<String>,
+    /// The actual capacity class, never inferred from the requested automatic selection.
+    #[serde(default, skip_serializing_if = "UsageMeasurement::is_unsupported")]
+    pub reported_capacity_tier: UsageMeasurement<String>,
+    /// One-hour cache writes inside the inclusive cache-write count; absent is not measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<UsageMeasurement<i64>>,
+    /// Twelve-hour cache writes inside the inclusive count, independently measured from shorter writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_12h_tokens: Option<UsageMeasurement<i64>>,
     /// A child model call made while a tool/sub-agent runs, excluded from the main-stream time sum.
     pub subagent: bool,
     /// Raw observed boundaries retained for turn ordering and diagnostics.
@@ -467,9 +609,35 @@ pub struct RequestTiming {
 }
 
 impl RequestTiming {
+    /// No retained request facts or measured members. Tier-only observations remain
+    /// serializable without claiming token/timing measurement capability.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
     /// Whether this source declares no measured members.
     pub fn is_unsupported(&self) -> bool {
-        *self == Self::default()
+        // Request-option facts cannot manufacture token/timing measurement capability.
+        Self {
+            error_reason: None,
+            upstream_status: None,
+            attempt: None,
+            provider_request_id: None,
+            web_searches: UsageMeasurement::Unsupported,
+            web_fetches: UsageMeasurement::Unsupported,
+            declared_counters: Default::default(),
+            native_prices: Default::default(),
+            service_usage: None,
+            reported_cost: UsageMeasurement::Unsupported,
+            wire_protocol: None,
+            requested_service_tier: None,
+            reported_service_tier: UsageMeasurement::Unsupported,
+            requested_capacity_tier: None,
+            reported_capacity_tier: UsageMeasurement::Unsupported,
+            cache_write_1h_tokens: None,
+            cache_write_12h_tokens: None,
+            ..self.clone()
+        } == Self::default()
     }
 }
 
@@ -505,6 +673,20 @@ impl From<TokenUsage> for RequestTokens {
 }
 
 impl RequestTokens {
+    /// No token count was reported; an explicit zero remains a known count.
+    pub fn is_empty(&self) -> bool {
+        [
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.cache_write_tokens,
+            self.output_tokens,
+            self.reasoning_tokens,
+            self.total_tokens,
+        ]
+        .iter()
+        .all(Option::is_none)
+    }
+
     /// Known counts for the existing numeric ledger; the original nullable report is kept beside it.
     pub fn usage(&self) -> TokenUsage {
         let input = self.input_tokens.unwrap_or_default().max(0);
@@ -594,10 +776,13 @@ impl UsagePerformance {
 }
 
 /// Provider-side outcomes used by Performance's error rate and provider health.
-pub const PROVIDER_ERROR_CODES: [&str; 6] = [
+pub const PROVIDER_ERROR_CODES: [&str; 9] = [
     "provider_exhausted",
     "provider_unauthorized",
     "provider_busy",
+    "rate_limited",
+    "overloaded",
+    "stream_interrupted",
     "provider_unreachable",
     "model_unavailable",
     "model_refused",
@@ -646,6 +831,12 @@ pub enum UsageOutcomeFilter {
     ProviderUnauthorized,
     /// Provider rate-limited or overloaded.
     ProviderBusy,
+    /// The provider rate limit was reached.
+    RateLimited,
+    /// The provider has no serving capacity.
+    Overloaded,
+    /// A response failed after output began.
+    StreamInterrupted,
     /// Provider could not be reached.
     ProviderUnreachable,
     /// Model not available.
@@ -678,6 +869,9 @@ impl UsageOutcomeFilter {
             Self::ProviderExhausted => "provider_exhausted",
             Self::ProviderUnauthorized => "provider_unauthorized",
             Self::ProviderBusy => "provider_busy",
+            Self::RateLimited => "rate_limited",
+            Self::Overloaded => "overloaded",
+            Self::StreamInterrupted => "stream_interrupted",
             Self::ProviderUnreachable => "provider_unreachable",
             Self::ModelUnavailable => "model_unavailable",
             Self::ModelRefused => "model_refused",
@@ -692,16 +886,19 @@ impl UsageOutcomeFilter {
     }
 }
 
-/// One model, tier, effort and programme combination observed in this scope.
+/// One model, tier, effort and program combination observed in this scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UsageComparison {
     /// Routing model name.
     pub model: String,
-    /// Service tier, or the ordinary tier.
+    /// Service tier, or the ordinary tier when `tier_unknown` is false.
     pub tier: Option<String>,
+    /// A reporting-aware reply omitted its actual tier after an explicit nonordinary request.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub tier_unknown: bool,
     /// Reasoning effort, where selected.
     pub effort: Option<String>,
-    /// Access programme, where selected.
+    /// Access program, where selected.
     pub program: Option<String>,
     /// Its performance over the span.
     pub performance: UsagePerformance,
@@ -716,11 +913,26 @@ pub struct UsageKeyAgent {
     pub name: String,
 }
 
+/// Actual offering identity; a service is never disguised as a generation model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UsageOffering {
+    /// Open offering kind (generation model or service).
+    pub kind: String,
+    /// Native routing/offering name, as recorded.
+    pub name: String,
+}
+
 /// What a figure of a breakdown or of a series is about: the member of the dimension, and nothing
 /// else. A place the caller may not see is a redacted reference.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UsageKey {
-    /// The access programme; null means none selected.
+    /// Actual model/service identity when splitting by offering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offering: Option<UsageOffering>,
+    /// Actual purpose when splitting by purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    /// The access program; null means none selected.
     #[serde(
         default,
         deserialize_with = "crate::common::absent_or_null",
@@ -777,6 +989,9 @@ pub struct UsageKey {
     )]
     #[schemars(with = "Option<String>")]
     pub tier: Option<Option<String>>,
+    /// Distinguishes an unreported actual tier from the ordinary null tier.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub tier_unknown: bool,
     /// The org; `null` for the projects that lie directly in the org asked about.
     #[serde(
         default,
@@ -885,7 +1100,7 @@ pub struct UsageAnalytics {
     /// Model combinations observed here, with mergeable-histogram percentiles.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comparison: Vec<UsageComparison>,
-    /// What was asked about: `me`, `node:` and an identifier, or `provider:` and an identifier.
+    /// What was asked about: `me`, `system`, `node:` and an identifier, or `provider:` and an identifier.
     pub scope: String,
     /// The first day, UTC.
     pub from: String,
@@ -943,6 +1158,16 @@ pub enum UsagePurpose {
     Summary,
     /// Vectors of an org's text, or of a query, for search by meaning.
     Embeddings,
+    /// An agent permission review, accounted apart from its generation.
+    Review,
+    /// A native or selected service web search.
+    WebSearch,
+    /// A native or selected service page fetch.
+    PageFetch,
+    /// Image generation by the selected offering.
+    ImageGeneration,
+    /// A question explicitly issued by a person.
+    Ask,
 }
 
 /// What a ledger row counts.
@@ -965,16 +1190,27 @@ pub enum RateSource {
     RateCard,
     /// The shipped catalogue's estimate by model family.
     Catalogue,
+    /// A vendor-reported total, converted only in the matching catalogue currency.
+    Reported,
 }
 
 /// One row of the ledger: a use, with its thread and turn, what it ran on, the rate it was counted
 /// at and its credits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct UsageEvent {
+    /// The thread owner captured with the record, distinct from its input author.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_owner: Option<UserRef>,
+    /// Native tool items attributed to this request; absent without a proven association.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<i64>,
+    /// Sum of associated tool durations, absent while any duration is unreported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_ms: Option<i64>,
     /// The observed request times and outcome; unsupported is distinct from zero.
-    #[serde(default, skip_serializing_if = "RequestTiming::is_unsupported")]
+    #[serde(default, skip_serializing_if = "RequestTiming::is_empty")]
     pub timing: RequestTiming,
-    /// The access programme selected for this request.
+    /// The access program selected for this request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_program: Option<String>,
     /// Whether the model request is still running.
@@ -1026,9 +1262,12 @@ pub struct UsageEvent {
     pub effort: Option<String>,
     /// The service tier.
     pub tier: Option<String>,
+    /// A reporting-aware reply omitted its actual tier after an explicit nonordinary request.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub tier_unknown: bool,
     /// The tokens.
     pub tokens: TokenUsage,
-    /// The provider's own reference to the request.
+    /// The retained source reference: the adapter's id when known, otherwise the upstream reference.
     pub request_ref: Option<String>,
     /// How large the prompt was, where known.
     pub context_tokens: Option<i64>,
@@ -1182,19 +1421,22 @@ pub struct UsageGetQuery {
     /// The chart's measure; the answer retains all measures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measure: Option<UsageMeasure>,
-    /// Only this effort, tier, programme or outcome; `none` selects no value.
+    /// Only this effort, tier, program or outcome; `none` selects no value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     /// Only this service tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
-    /// Only this access programme.
+    /// Only reporting-aware requests whose actual tier was not reported; false selects known tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_unknown: Option<bool>,
+    /// Only this access program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
     /// Only this outcome code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<UsageOutcomeFilter>,
-    /// What to add up.
+    /// What to add up: `me`, `node:<id>`, `provider:<id>`, or `system` under current system administration.
     pub scope: String,
     /// The first day, UTC, as `YYYY-MM-DD`.
     pub from: String,
@@ -1221,6 +1463,12 @@ pub struct UsageGetQuery {
     /// Only this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Only this service offering, by its actual name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Only this actual usage purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
     /// Only what ran on this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<Id>,
@@ -1261,7 +1509,10 @@ pub struct UsageEventListQuery {
     /// Only this service tier; `none` selects the ordinary tier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
-    /// Only this access programme; `none` selects no programme.
+    /// Only reporting-aware requests whose actual tier was not reported; false selects known tiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_unknown: Option<bool>,
+    /// Only this access program; `none` selects no program.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
     /// Only this outcome code, or `running`.
@@ -1282,6 +1533,12 @@ pub struct UsageEventListQuery {
     /// Only this model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Only this service offering, by its actual name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Only this actual usage purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
     /// Only what ran on this provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_id: Option<Id>,
@@ -1437,6 +1694,12 @@ pub struct UsageCapUpdateBody {
     /// New model names, families and `@<group>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// Service offering names, families and @groups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    /// Usage purpose patterns; empty covers every purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purposes: Option<Vec<String>>,
     /// New service tiers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiers: Option<Vec<String>>,
@@ -1483,39 +1746,327 @@ pub struct UsageCapUpdateBody {
     pub expected_revision: Revision,
 }
 
+/// A completed cap mutation without stored cap content or subject metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct UsageCapReceipt {
+    /// This acknowledgement intentionally carries no full projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The cap actually created or changed.
+    pub id: Id,
+    /// Its accepted revision.
+    pub revision: Revision,
+}
+crate::common::full_or_receipt! {
+    /// Native cap content or the same completed mutation's acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum UsageCapWriteResponse {
+        /// Unchanged native full cap, admitted by this operation's Read.
+        Full(UsageCap),
+        /// The accepted effect without stored cap metadata.
+        Receipt(UsageCapReceipt),
+    }
+}
+
+const CAP_SELECTED: Facet = Facet::required(
+    Read,
+    &[
+        Object(K::Org),
+        Object(K::Project),
+        Object(K::Topic),
+        Object(K::Thread),
+        Object(K::Provider),
+        Identity(I::System),
+    ],
+    Target::ResolvedCollection("caps"),
+);
+const CAP_GROUPS: Facet = Facet::required(
+    Read,
+    &[Identity(I::Group)],
+    Target::ResolvedCollection("cap_groups"),
+);
+const USAGE_NAMES: Facet = Facet::required(
+    Read,
+    &[
+        Object(K::Org),
+        Object(K::Project),
+        Object(K::Topic),
+        Object(K::Thread),
+    ],
+    Target::ResolvedCollection("usage_names"),
+);
+
 crate::endpoints! {
     /// Current provider health, without chart, comparison or previous-span reads.
-    UsageHealthGet: GET "/usage/health", Rule("provider.view for provider_id"), query UsageHealthGetQuery, none, json UsageDegradation, 200;
+    UsageHealthGet: GET "/usage/health", Rule("provider.view for provider_id"), query UsageHealthGetQuery, none, json UsageDegradation, 200,
+        operation Op::single(Read, &[Object(K::Provider)], Target::Resolved("provider"));
     /// Adds up usage over a span: totals, a series and breakdowns, as deep as the caller's access for the scope allows.
-    UsageGet: GET "/usage", Rule("by scope: me needs sign-in; node:<id> needs usage.view, usage.summary or node.view there; provider:<id> needs provider.view"), query UsageGetQuery, none, json UsageAnalytics, 200;
+    UsageGet: GET "/usage", Rule("by scope: me needs sign-in; node:<id> needs usage.view, usage.summary or node.view there; provider:<id> needs provider.view; system needs current system administration"), query UsageGetQuery, none, json UsageAnalytics, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Provider),
+                Identity(I::Account),
+                Identity(I::System),
+            ],
+            Target::Resolved("scope"),
+        );
     /// Lists the ledger rows behind a figure, each with its thread and turn, what it ran on, the rate it was counted at and its credits.
-    UsageEventList: GET "/usage/events", Rule("by scope, as for the figures"), query UsageEventListQuery, none, json Page<UsageEvent>, 200;
+    UsageEventList: GET "/usage/events", Rule("by scope, as for the figures"), query UsageEventListQuery, none, json Page<UsageEvent>, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Provider),
+                Identity(I::Account),
+                Identity(I::System),
+            ],
+            Target::Resolved("scope"),
+        );
     /// Says what each model usable at a node would be counted at now, where that rate comes from, and which have none.
-    UsageRateTableGet: GET "/usage/rates", Rule("usage.view on node_id, or browser-session system admin for system=true"), query UsageRateTableGetQuery, none, json RateTable, 200;
+    UsageRateTableGet: GET "/usage/rates", Rule("usage.view on node_id, or browser-session system admin for system=true"), query UsageRateTableGetQuery, none, json RateTable, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "node",
+                selector: "node_id is present",
+                facets: &[Facet::required(
+                    Read,
+                    &[
+                        Object(K::Org),
+                        Object(K::Project),
+                        Object(K::Topic),
+                        Object(K::Thread),
+                    ],
+                    Target::Resolved("node"),
+                ), Facet::required(Read, &[Object(K::Provider)], Target::ResolvedCollection("rate_providers"))],
+            },
+            Variant {
+                name: "system",
+                selector: "system=true",
+                facets: &[Facet::required(
+                    Manage,
+                    &[Identity(I::System)],
+                    Target::System,
+                )],
+            },
+        ]);
     /// Reads the rate estimates as loaded, or with `q` the family that matches a model. Answers `null` when no catalogue has been loaded; an existing catalogue with no matching family has an empty `families` list.
-    UsageCatalogueGet: GET "/usage/catalogue", User, query UsageCatalogueGetQuery, none, json Option<RateCatalogue>, 200;
+    UsageCatalogueGet: GET "/usage/catalogue", User, query UsageCatalogueGetQuery, none, json Option<RateCatalogue>, 200,
+        operation Op::single(Read, &[Identity(I::System)], Target::System);
     /// Replaces the rate catalogue in force by a file, by one fetched from the configured address, or by the shipped one. A system admin.
-    AdminUsageCatalogueSet: POST "/admin/usage/catalogue", Session, none, json AdminUsageCatalogueSetBody, json RateCatalogue, 200;
+    AdminUsageCatalogueSet: POST "/admin/usage/catalogue", Session, none, json AdminUsageCatalogueSetBody, json RateCatalogue, 200,
+        operation Op::returning(Manage, &[Identity(I::System)], Target::System);
     /// Lists everything that bounds work at a node, with current use.
-    UsageLimitsGet: GET "/usage/limits", Rule("node.view on the node named by node_id; usage.view for somebody else's share"), query UsageLimitsGetQuery, none, json Limits, 200;
+    UsageLimitsGet: GET "/usage/limits", Rule("node.view on the node named by node_id; usage.view for somebody else's share"), query UsageLimitsGetQuery, none, json Limits, 200,
+        operation Op::facets(&[Facet::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+            ],
+            Target::Resolved("node"),
+        ), CAP_SELECTED, CAP_GROUPS, USAGE_NAMES]);
     /// Lists the caller's own share of every cap counted per person that covers them, anywhere.
-    MeLimitsGet: GET "/me/limits", User, none, none, json Vec<CapStatus>, 200;
+    MeLimitsGet: GET "/me/limits", User, none, none, json Vec<CapStatus>, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::CurrentAccount);
     /// Lists the caps defined on a node, on a provider or on the system, with their use.
-    UsageCapList: GET "/usage/caps", Rule("usage.view on the node, provider.view on the provider, or a system admin for the system's"), query UsageCapListQuery, none, json Vec<CapStatus>, 200;
+    UsageCapList: GET "/usage/caps", Rule("usage.view on the node, provider.view on the provider, or a system admin for the system's"), query UsageCapListQuery, none, json Vec<CapStatus>, 200,
+        operation Op::facets(&[Facet::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Provider),
+                Identity(I::System),
+            ],
+            Target::Resolved("cap_subjects"),
+        ), CAP_SELECTED, CAP_GROUPS, USAGE_NAMES]);
     /// Lists what waits for room in a cap on running turns, in the order it will run.
-    UsageCapWaitingList: GET "/usage/caps/{id}/waiting", Rule("as for reading that cap; and whoever it covers"), none, none, json UsageCapWaitingListReply, 200;
+    UsageCapWaitingList: GET "/usage/caps/{id}/waiting", Rule("as for reading that cap; and whoever it covers"), none, none, json UsageCapWaitingListReply, 200,
+        operation Op::facets(&[Facet::required(
+            Read,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Provider),
+                Identity(I::System),
+            ],
+            Target::Resolved("cap_subjects"),
+        ), USAGE_NAMES]);
     /// Makes a cap; a cap with the same node, provider, subject, split, models, tiers, harness kinds, meter and period is `409 conflict.exists`.
-    UsageCapCreate: POST "/usage/caps", Rule("provider.manage on the provider, usage.manage on the node, or a system admin for the system's; naming a node as well as a provider needs node.view on it"), none, json CapInput, json UsageCap, 201;
+    UsageCapCreate: POST "/usage/caps", Rule("provider.manage on the provider, usage.manage on the node, or a system admin for the system's; naming a node as well as a provider needs node.view on it"), none, json CapInput, json UsageCapWriteResponse, 201,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(
+                Manage,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Provider),
+                    Identity(I::System),
+                ],
+                Target::Resolved("cap_subjects"),
+            ),
+            Facet::required(
+                Read,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                ],
+                Target::ResolvedCollection("named_nodes"),
+            ),
+            Facet::response_content(
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Provider),
+                    Identity(I::System),
+                ],
+                Target::Resolved("cap_subjects"),
+            ),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("cap_groups")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("usage_names")),
+        ]));
     /// Changes a cap.
-    UsageCapUpdate: PATCH "/usage/caps/{id}", Rule("as for making it"), none, json UsageCapUpdateBody, json UsageCap, 200;
+    UsageCapUpdate: PATCH "/usage/caps/{id}", Rule("as for making it"), none, json UsageCapUpdateBody, json UsageCapWriteResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(
+                Manage,
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Provider),
+                    Identity(I::System),
+                ],
+                Target::Resolved("cap_subjects"),
+            ),
+            Facet::response_content(
+                &[
+                    Object(K::Org),
+                    Object(K::Project),
+                    Object(K::Topic),
+                    Object(K::Thread),
+                    Object(K::Provider),
+                    Identity(I::System),
+                ],
+                Target::Resolved("cap_subjects"),
+            ),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("cap_groups")),
+            Facet::response_content(&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::ResolvedCollection("usage_names")),
+        ]));
     /// Removes a cap.
-    UsageCapDelete: DELETE "/usage/caps/{id}", Rule("as for making it"), none, none, none, 204;
+    UsageCapDelete: DELETE "/usage/caps/{id}", Rule("as for making it"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[
+                Object(K::Org),
+                Object(K::Project),
+                Object(K::Topic),
+                Object(K::Thread),
+                Object(K::Provider),
+                Identity(I::System),
+            ],
+            Target::Resolved("cap_subjects"),
+        );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn an_absent_token_report_is_distinct_from_a_reported_zero() {
+        assert!(RequestTokens::default().is_empty());
+        assert!(
+            !RequestTokens {
+                input_tokens: Some(0),
+                ..Default::default()
+            }
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn request_option_facts_do_not_claim_request_performance_measurements() {
+        let mut timing = RequestTiming {
+            wire_protocol: Some("openai-responses".to_owned()),
+            requested_service_tier: Some("auto".to_owned()),
+            reported_service_tier: UsageMeasurement::Empty,
+            ..Default::default()
+        };
+        assert!(timing.is_unsupported());
+        assert!(!timing.is_empty(), "metadata must survive the API envelope");
+        assert!(RequestTiming::default().is_empty());
+        timing.request_ms = UsageMeasurement::Told { value: 0 };
+        assert!(
+            !timing.is_unsupported(),
+            "a measured zero remains a real measurement"
+        );
+    }
+
+    #[test]
+    fn tier_only_request_facts_survive_the_real_usage_event_envelope() {
+        let mut event: UsageEvent = serde_json::from_value(json!({
+            "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a80",
+            "at": "2026-11-06T00:00:00Z",
+            "origin": "forwarder", "purpose": "turn", "scope": "request", "counted": true,
+            "project": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a81", "kind": "project", "name": "Project", "redacted": false },
+            "topic": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a82", "kind": "topic", "name": "Topic", "redacted": false },
+            "provider": { "id": "0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a83", "name": "Models", "kind": "api", "address": "Team", "placement": "managed", "status": "ready" },
+            "model": "model-a", "model_display": "Model A",
+            "tokens": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
+        })).unwrap();
+        assert!(
+            serde_json::to_value(&event)
+                .unwrap()
+                .get("timing")
+                .is_none()
+        );
+        event.timing = RequestTiming {
+            wire_protocol: Some("openai-responses".to_owned()),
+            requested_service_tier: Some("auto".to_owned()),
+            reported_service_tier: UsageMeasurement::Empty,
+            ..Default::default()
+        };
+        assert!(event.timing.is_unsupported());
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["timing"]["wire_protocol"], "openai-responses");
+        assert_eq!(encoded["timing"]["requested_service_tier"], "auto");
+        assert_eq!(
+            encoded["timing"]["reported_service_tier"],
+            json!({"state":"empty"})
+        );
+        assert_eq!(encoded["timing"]["outcome"], json!({"state":"unsupported"}));
+        assert_eq!(
+            encoded["timing"]["request_ms"],
+            json!({"state":"unsupported"})
+        );
+        assert!(encoded["timing"]["reported_tokens"].is_null());
+        assert_eq!(
+            serde_json::from_value::<UsageEvent>(encoded).unwrap(),
+            event
+        );
+    }
 
     fn user(n: u8) -> serde_json::Value {
         json!({

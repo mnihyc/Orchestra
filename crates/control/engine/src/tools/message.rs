@@ -28,6 +28,7 @@ struct Arguments {
     text: Option<String>,
     files: Option<Vec<String>>,
     reply_to: Option<i64>,
+    wake_idle: Option<bool>,
 }
 
 /// The existing destination handlers receive the same message and resolve its path in their own way.
@@ -36,6 +37,7 @@ pub(super) struct Message {
     pub(super) text: Option<String>,
     pub(super) files: Option<Vec<String>>,
     pub(super) reply_to: Option<i64>,
+    pub(super) wake_idle: Option<bool>,
 }
 
 impl Engine {
@@ -50,7 +52,12 @@ impl Engine {
             Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
         };
         let legacy = match arguments.target.kind {
-            Kind::Chat => "send_chat_message",
+            Kind::Chat => {
+                if arguments.wake_idle.is_some() {
+                    return Ok(Refusal::invalid("\"wake_idle\" starts an agent turn; it is only allowed when target.kind is \"thread\".").into());
+                }
+                "send_chat_message"
+            }
             Kind::Thread => {
                 if arguments.reply_to.is_some() {
                     return Ok(Refusal::invalid("\"reply_to\" answers a chat message; it is only allowed when target.kind is \"chat\".").into());
@@ -73,6 +80,7 @@ impl Engine {
             text: arguments.text,
             files: arguments.files,
             reply_to: arguments.reply_to,
+            wake_idle: arguments.wake_idle,
         };
         match arguments.target.kind {
             Kind::Chat => self.send_chat_message_call(call, thread, message).await,

@@ -6,6 +6,7 @@ heading_id.登录和恢复访问: sign-in-and-recover-access
 heading_id.设置个人资料: set-your-profile
 heading_id.保护登录: protect-sign-in
 heading_id.保留个人选择: keep-personal-choices
+summary: 管理个人资料、登录、账号恢复、会话和个人选项。
 ---
 
 # 管理账号和个人资料

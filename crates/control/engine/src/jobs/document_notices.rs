@@ -7,7 +7,7 @@ use orch_access_contract::decisions::Decision;
 use orch_access_contract::permissions::Permission;
 use orch_authz::{Caller, Policy, Principal};
 use orch_db::queries::notifications::people::NewNotification;
-use orch_db::queries::{documents, identity, jobs};
+use orch_db::queries::{admin_messages, documents, identity, jobs};
 use orch_db::{Conn, DbError};
 use orch_types::{Id, Json, Time, new_id};
 use serde::{Deserialize, Serialize};
@@ -183,37 +183,137 @@ pub async fn deliver(
 
 /// A large audience becomes a durable cancellable job in the same transaction as its comment.
 pub async fn enqueue(conn: &mut Conn, plan: &Plan) -> Result<Id, EngineError> {
+    enqueue_plan(
+        conn,
+        plan.by,
+        None,
+        &json!({"notice":plan,"processed":0}),
+        plan.at,
+    )
+    .await
+}
+
+async fn enqueue_plan(
+    conn: &mut Conn,
+    by: Id,
+    node: Option<Id>,
+    plan: &Json,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<Id, EngineError> {
     let id = new_id();
     jobs::insert(
         conn,
         &jobs::NewJob {
             id,
             kind: KIND,
-            node_id: None,
+            node_id: node,
             environment_id: None,
             provider_id: None,
-            plan: &json!({"notice":plan,"processed":0}),
+            plan,
             progress: &serde_json::to_value(initial_progress(&PHASES))?,
-            created_by: Some(plan.by),
+            created_by: Some(by),
         },
-        plan.at,
+        at,
     )
     .await?;
     Ok(id)
 }
 
+/// The same notice runner materializes the already accepted, frozen message audience.
+pub async fn enqueue_message(conn: &mut Conn, message: Id) -> Result<Id, EngineError> {
+    let row = admin_messages::lock(conn, message)
+        .await?
+        .ok_or_else(|| EngineError::unreadable("the accepted message disappeared"))?;
+    if let Some(job) = row.delivery_job_id {
+        return Ok(job);
+    }
+    let job = enqueue_plan(
+        conn,
+        row.sender_id,
+        row.org_id,
+        &json!({"admin_message":row.id,"total":row.recipient_count,"processed":0}),
+        row.created_at,
+    )
+    .await?;
+    admin_messages::attach_job(conn, row.id, job).await?;
+    orch_db::idempotency::creation::observe_with(
+        conn,
+        Some(row.sender_id),
+        "message",
+        row.id,
+        json!({"count":row.recipient_count,"job":job}),
+    )
+    .await?;
+    Ok(job)
+}
+
+enum Notice {
+    Discussion(Box<Plan>),
+    Message(Id),
+}
+
+/// Writes one mandatory Inbox record through the existing ordinary notice/outbox producer.
+async fn deliver_message(
+    conn: &mut Conn,
+    message: &admin_messages::MessageRow,
+    people: &[Id],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), EngineError> {
+    let root: Option<Id> = match message.org_id {
+        Some(org) => sqlx::query_scalar("SELECT org_id FROM nodes WHERE id=$1")
+            .bind(org)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(DbError::from)?,
+        None => None,
+    };
+    let data = json!({"message_id":message.id,"by":message.sender_id,"org_id":message.org_id,
+        "org_name":message.org_name,"path":format!("/messages/{}",message.id)});
+    let key = format!("admin_message:{}", message.id);
+    for person in people {
+        crate::notifications::tell_person_notice(
+            conn,
+            root,
+            &NewNotification {
+                user_id: *person,
+                kind: "admin_message",
+                node_id: message.org_id,
+                thread_id: None,
+                approval_id: None,
+                chat_id: None,
+                title: &message.title,
+                body: &message.body,
+                data: &data,
+                dedupe_key: &key,
+                at: message.created_at,
+            },
+        )
+        .await?;
+    }
+    admin_messages::delivered(conn, message.id, people, now).await?;
+    Ok(())
+}
+
 /// A recovered phase reads its durable cursor before taking another bounded batch.
 pub struct Delivering {
     engine: Engine,
-    plan: Plan,
+    notice: Notice,
 }
 impl Delivering {
     /// Decodes only event facts from the private job plan.
     pub fn of(engine: Engine, row: &jobs::JobRow) -> Result<Self, EngineError> {
-        Ok(Self {
-            engine,
-            plan: serde_json::from_value(row.plan["notice"].clone())?,
-        })
+        let notice = match (row.plan.get("notice"), row.plan.get("admin_message")) {
+            (Some(plan), None) => {
+                Notice::Discussion(Box::new(serde_json::from_value(plan.clone())?))
+            }
+            (None, Some(message)) => Notice::Message(serde_json::from_value(message.clone())?),
+            _ => {
+                return Err(EngineError::unreadable(
+                    "the notice job has no unique native subject",
+                ));
+            }
+        };
+        Ok(Self { engine, notice })
     }
 }
 #[async_trait]
@@ -242,8 +342,47 @@ impl Phased for Delivering {
                 return Err(Stop::Cancelled);
             }
             orch_db::queries::transaction_guard::watch_standing(&mut tx).await?;
-            let page = audience(&mut tx, &self.plan, after, job.now()).await?;
-            deliver(&mut tx, &self.plan, &page.people, job.now()).await?;
+            let (page, message) = match &self.notice {
+                Notice::Discussion(plan) => {
+                    (audience(&mut tx, plan, after, job.now()).await?, None)
+                }
+                Notice::Message(id) => {
+                    let message = admin_messages::get(&mut tx, *id).await?;
+                    if let Some(message) = &message
+                        && (message.delivery_job_id != Some(job.id())
+                            || state.created_by != Some(message.sender_id)
+                            || state.node_id != message.org_id)
+                    {
+                        return Err(EngineError::unreadable(
+                            "the notice job no longer matches its accepted message",
+                        )
+                        .into());
+                    }
+                    let mut people = if message.is_some() {
+                        admin_messages::recipient_page(
+                            &mut tx,
+                            *id,
+                            after,
+                            i64::try_from(BATCH + 1)
+                                .map_err(|error| EngineError::unreadable(error.to_string()))?,
+                        )
+                        .await?
+                    } else {
+                        Vec::new()
+                    };
+                    let more = people.len() > BATCH;
+                    people.truncate(BATCH);
+                    (Audience { people, more }, message)
+                }
+            };
+            match &self.notice {
+                Notice::Discussion(plan) => deliver(&mut tx, plan, &page.people, job.now()).await?,
+                Notice::Message(_) => {
+                    if let Some(message) = &message {
+                        deliver_message(&mut tx, message, &page.people, job.now()).await?;
+                    }
+                }
+            }
             let processed = state
                 .plan
                 .get("processed")
@@ -258,7 +397,18 @@ impl Phased for Delivering {
             )
             .await?;
             tx.commit().await.map_err(DbError::from)?;
-            job.progress(0.0, Some(&processed.to_string())).await?;
+            let fraction = state
+                .plan
+                .get("total")
+                .and_then(Json::as_u64)
+                .map_or(0.0, |total| {
+                    if total == 0 {
+                        1.0
+                    } else {
+                        (processed as f64 / total as f64).min(1.0)
+                    }
+                });
+            job.progress(fraction, Some(&processed.to_string())).await?;
             if !page.more {
                 return Ok(Done::Finished);
             }

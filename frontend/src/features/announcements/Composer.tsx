@@ -1,16 +1,18 @@
 /** Scope, category, target activity, delivery, fallback and wake choices.
  */
-import { useInfiniteQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Megaphone } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { announce, announcementsQuery, applyAnnouncements } from '@/api/announcements';
+import { settingsQuery } from '@/api/settings';
 import { useHelpOpener } from '@/features/help/open';
 import { Hint } from '@/features/help/Hint';
 import type { AnnouncementCreateBody, AnnouncementDelivery, AnnouncementFallback, Org, Project, Topic } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
+import { Checkbox } from '@/ui/Checkbox';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { Input } from '@/ui/Input';
@@ -23,7 +25,7 @@ import { AnnouncementPreview } from './Preview';
 import { AnnouncementResult, DeliveryCounts } from './Result';
 
 type Place = Org | Project | Topic;
-type AnnouncementChoice = 'notice' | 'milestone' | 'info' | 'important' | 'all' | 'active' | 'default' | 'next_turn' | 'steer' | 'interrupt' | 'yes' | 'no';
+type AnnouncementChoice = 'notice' | 'milestone' | 'info' | 'important' | 'all' | 'active' | 'default' | 'next_turn' | 'steer' | 'interrupt';
 /** The announcement contract bounds a title to one short line and its body to a brief notice. */
 const TITLE_MAX_CHARS = 120;
 const BODY_MAX_CHARS = 1500;
@@ -47,13 +49,17 @@ function Contents({ place }: { place: Place }) {
   const [targets, setTargets] = useState<'all' | 'active'>('all');
   const [delivery, setDelivery] = useState<AnnouncementDelivery | 'default'>('default');
   const [fallback, setFallback] = useState<AnnouncementFallback | 'default'>('default');
-  const [wake, setWake] = useState<'default' | 'yes' | 'no'>('default');
+  const [wake, setWake] = useState(false);
   const list = useInfiniteQuery(announcementsQuery(place.id));
   const send = useMutation({ mutationFn: (request: AnnouncementCreateBody) => announce(place.id, request), onSuccess: async (reply) => {
     await applyAnnouncements(client, place.id, reply);
-    setTitle(''); setBody('');
+    setTitle(''); setBody(''); setWake(false);
   } });
   const canSend = !place.archived && holds(place.access, `${place.kind}.interact`);
+  const settings = useQuery({ ...settingsQuery(place.id), enabled: canSend });
+  const wakeAvailable = settings.data?.find((row) => row.key === 'broadcast.wake_idle')?.value === true;
+  const wakeReason = settings.isPending ? t('placeAnnouncements.wakeLoading')
+    : settings.isError ? t('placeAnnouncements.wakeFailed') : t('placeAnnouncements.wakeUnavailable');
   const rows = list.data?.pages.flatMap((page) => page.items) ?? [];
   const choice = <Value extends AnnouncementChoice>(value: Value) => ({ value,
     name: t(`inventoryChoices.announcements.${value}.name`), description: t(`inventoryChoices.announcements.${value}.description`),
@@ -65,7 +71,7 @@ function Contents({ place }: { place: Place }) {
     <Hint id="announcements" popover className="self-start" />
     <AnnouncementPreview name={place.name} />
     {canSend && <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); send.mutate({ title: title.trim(), body, category, severity, targets,
-      ...(delivery === 'default' ? {} : { delivery }), ...(fallback === 'default' ? {} : { fallback }), ...(wake === 'default' ? {} : { wake_idle: wake === 'yes' }) }); }}>
+      ...(delivery === 'default' ? {} : { delivery }), ...(fallback === 'default' ? {} : { fallback }), wake_idle: wakeAvailable && wake }); }}>
       <Input label={t('placeAnnouncements.heading')} value={title} maxLength={TITLE_MAX_CHARS} required disabled={send.isPending} onChange={(event) => setTitle(event.target.value)} />
       <Textarea label={t('placeAnnouncements.body')} value={body} maxLength={BODY_MAX_CHARS} disabled={send.isPending} onChange={(event) => setBody(event.target.value)} />
       <Select label={t('placeAnnouncements.category')} value={category} onValueChange={setCategory} options={[choice('notice'), choice('milestone')]} />
@@ -73,13 +79,15 @@ function Contents({ place }: { place: Place }) {
       <Select label={t('placeAnnouncements.targets')} value={targets} onValueChange={setTargets} options={[choice('all'), choice('active')]} />
       <Select label={t('placeAnnouncements.delivery')} value={delivery} onValueChange={setDelivery} options={[useDefault, choice('next_turn'), choice('steer'), choice('interrupt')]} />
       <Select label={t('placeAnnouncements.fallback')} value={fallback} onValueChange={setFallback} options={[useDefault, choice('next_turn'), choice('interrupt')]} />
-      <Select label={t('placeAnnouncements.wake')} value={wake} onValueChange={setWake} options={[useDefault, choice('yes'), choice('no')]} />
+      <Checkbox label={t('placeAnnouncements.wake')} checked={wakeAvailable && wake} onCheckedChange={setWake}
+        disabled={send.isPending || !wakeAvailable} description={wakeAvailable ? t('placeAnnouncements.wakeAbout') : wakeReason} />
+      {settings.isError && <ErrorState compact error={settings.error} onRetry={() => void settings.refetch()} />}
       {send.error !== null && <ErrorAlert error={send.error} />}
       <Button type="submit" variant="primary" pending={send.isPending} disabled={title.trim() === ''}>{t('placeAnnouncements.send')}</Button>
     </form>}
     {send.data !== undefined && <AnnouncementResult reply={send.data} />}
     <h3 className="font-medium">{t('placeAnnouncements.history')}</h3>
-    {list.isPending ? <SkeletonRows rows={2} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('placeAnnouncements.empty')} /> : <ul className="flex flex-col gap-3">{rows.map((row) => <li key={row.id} className="flex flex-col gap-1 border-t border-border pt-3"><h4 className="font-medium">{row.title}</h4><p className="whitespace-pre-wrap wrap-anywhere">{row.body}</p><DeliveryCounts counts={row.delivered} /><RelativeTime at={row.created_at} /></li>)}</ul>}
+    {list.isPending ? <SkeletonRows read={list} rows={2} /> : list.isError ? <ErrorState compact error={list.error} onRetry={() => void list.refetch()} /> : rows.length === 0 ? <EmptyState compact title={t('placeAnnouncements.empty')} /> : <ul className="flex flex-col gap-3">{rows.map((row) => <li key={row.id} className="flex flex-col gap-1 border-t border-border pt-3"><h4 className="font-medium">{row.title}</h4><p className="whitespace-pre-wrap wrap-anywhere">{row.body}</p><DeliveryCounts counts={row.delivered} /><RelativeTime at={row.created_at} /></li>)}</ul>}
     {list.hasNextPage && <Button pending={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>{t('placeAnnouncements.more')}</Button>}
   </div>;
 }

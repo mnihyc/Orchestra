@@ -1,0 +1,6 @@
+# The engine's settling round: the deciding cases first.
+test -p orch-engine --test background_wake_native -- --test-threads=3
+test -p orch-engine --test usage_rows
+test -p orch-engine --test preflight
+test -p orch-engine --test forks -- a_switch_to_a_profile_whose_option_holds_back
+test -p orch-agent-contract --lib

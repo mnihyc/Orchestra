@@ -9,13 +9,25 @@ export function windowName(window: { label: string; model_family?: string | null
 /** The card's fixed reading order; every key is an ordinary facts member. */
 export const FACT_MEMBERS = ['identity', 'credential', 'credential_verified', 'plan', 'windows', 'limit_reached', 'ordinary_usage_allowed', 'balances', 'spend', 'extra_usage', 'available_resets'] as const;
 export type DetailMember = (typeof FACT_MEMBERS)[number];
-export type DetailState = NonNullable<Provider['facts_state']>[DetailMember | 'models'];
+export type DetailState = 'unsupported' | 'not_read_yet' | 'empty' | 'told';
 export type Balance = Provider['facts']['balances'][number];
 export type Spend = Provider['facts']['spend'][number];
 
 /** Only the source's explicit member state decides whether a block is supported, unread or empty. */
 export function detailState(provider: Provider, member: DetailMember | 'models'): DetailState {
-  return provider.facts_state[member];
+  return memberState(provider.facts_state[member]);
+}
+
+/** A reason qualifies unsupported; it never becomes a read-in-progress or a fabricated amount. */
+export function memberState(value: unknown): DetailState {
+  return value === 'told' || value === 'empty' || value === 'not_read_yet' ? value : 'unsupported';
+}
+
+export function unavailableReason(provider: Provider, member: DetailMember | 'models'): string | null {
+  const value: unknown = provider.facts_state[member];
+  if (typeof value !== 'object' || value === null || !('unsupported_because' in value)) return null;
+  const detail = value.unsupported_because;
+  return typeof detail === 'object' && detail !== null && 'reason' in detail && typeof detail.reason === 'string' ? detail.reason : null;
 }
 
 /** Collections accept the contract's explicit empty and nullable forms without manufacturing a zero amount. */
@@ -34,4 +46,44 @@ export function endpointsNeedNoKey(provider: Pick<Provider, 'upstreams'>): boole
 /** Decimal text stays text so that a source's precision is not rounded through a JavaScript number. */
 export function amountText(value: string | null | undefined, unit: string, unknown: string): string {
   return value === null || value === undefined ? unknown : `${value} ${unit}`;
+}
+
+/** The shared contract resolves field support; absent metadata preserves the earlier unknown display. */
+export function detailFieldVisible(provider: Provider, path: string): boolean {
+  const state = provider.facts_state.fields?.[path];
+  return state === undefined || memberState(state) !== 'unsupported';
+}
+
+/** A metric hides only when every known amount is explicitly unsupported; unresolved groups remain unknown. */
+export function creditHistoryVisible(provider:Provider):boolean {
+  const fields=provider.facts_state.fields ?? {};
+  for(const member of ['balances','spend','extra_usage'] as const){
+    if(detailState(provider,member)==='unsupported')continue;
+    const quantities=member==='balances' ? ['remaining','total','used','unlimited'] : member==='spend' ? ['used','limit','remaining'] : ['used','limit'];
+    const groups=member==='extra_usage' ? new Set(['extra_usage']) : new Set([
+      ...provider.facts[member].map((item)=>`${member}.${item.id}`),
+      ...Object.keys(fields).filter((path)=>path.startsWith(`${member}.`)).map((path)=>path.slice(0,path.lastIndexOf('.'))),
+    ]);
+    if(groups.size===0 || [...groups].some((group)=>quantities.some((quantity)=>fields[`${group}.${quantity}`]!=='unsupported')))return true;
+  }
+  return false;
+}
+
+/** Moving a decimal point keeps every reported digit. Huge scales stay explicit without unbounded padding. */
+export function scaledDecimal(value: string, places: number | null | undefined): string {
+  const scale=places ?? 0;
+  if(scale===0)return value;
+  // The amount contract permits at most forty characters. Beyond its textual precision, a power is clearer and bounded.
+  if(scale>40)return `${value} × 10^−${scale}`;
+  const negative=value.startsWith('-');
+  const [whole='',fraction='']=(negative ? value.slice(1) : value).split('.');
+  const digits=(whole+fraction).padStart(fraction.length+scale+1,'0');
+  const point=digits.length-fraction.length-scale;
+  const integer=digits.slice(0,point).replace(/^0+(?=\d)/,'');
+  const decimal=digits.slice(point).replace(/0+$/,'');
+  return `${negative ? '-' : ''}${integer}${decimal==='' ? '' : `.${decimal}`}`;
+}
+
+export function scaledAmountText(value:string | null | undefined,unit:string | null,places:number | null | undefined,unknown:string,unitUnknown:string):string {
+  return value===null || value===undefined ? unknown : `${scaledDecimal(value,places)} ${unit ?? unitUnknown}`;
 }

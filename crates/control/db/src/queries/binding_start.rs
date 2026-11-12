@@ -69,16 +69,15 @@ pub async fn reported_kinds(conn: &mut Conn, machine: Id) -> Result<Vec<String>,
         .bind(machine).fetch_all(conn).await?)
 }
 
-/// The connected machine's owner and, where they have one, their personal home; discovery never grants anybody
-/// else's access. Without a personal home an existing registration is still kept up to date, and a new one waits
-/// for the owner to choose its home.
+/// The connected machine's owner and registered home, falling back to their personal home for
+/// older registrations. A repeated discovery keeps the existing resource's chosen home.
 pub async fn discovery_owner(
     conn: &mut Conn,
     machine: Id,
 ) -> Result<Option<(Id, Option<Id>)>, DbError> {
     Ok(sqlx::query_as(
         "SELECT u.id, n.id FROM machines m JOIN users u ON u.id = m.owner_id
-         LEFT JOIN nodes n ON n.id = u.personal_org_id AND n.deleted_at IS NULL
+         LEFT JOIN nodes n ON n.id = COALESCE(m.home_id,u.personal_org_id) AND n.deleted_at IS NULL
          WHERE m.id = $1 AND m.placement = 'connected' AND m.deleted_at IS NULL AND m.status = 'active'
            AND u.status = 'active' FOR UPDATE OF m",
     ).bind(machine).fetch_optional(conn).await?)

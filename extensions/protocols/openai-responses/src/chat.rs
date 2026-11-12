@@ -25,6 +25,40 @@ impl OpenAiChat {
 }
 
 impl WireProtocol for OpenAiChat {
+    fn generation_request(
+        &self,
+        model: &str,
+        input: &orch_model_contract::generation::GenerationInput,
+        stream: bool,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        Some(crate::chat_generation::request(model, input, stream))
+    }
+
+    fn generation_request_at(
+        &self,
+        options: &orch_model_contract::endpoint::EndpointOptions,
+        model: &str,
+        input: &orch_model_contract::generation::GenerationInput,
+        stream: bool,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        Some(crate::chat_generation::request_at(
+            options, model, input, stream,
+        ))
+    }
+
+    fn generation_output(
+        &self,
+        body: &[u8],
+    ) -> Result<orch_model_contract::generation::GenerationOutput, WireError> {
+        crate::chat_generation::output(body)
+    }
+
+    fn generation_stream(
+        &self,
+    ) -> Option<Box<dyn orch_model_contract::generation::GenerationStream>> {
+        Some(Box::new(crate::chat_generation::ChatStream::default()))
+    }
+
     fn name(&self) -> &'static str {
         OPENAI_CHAT
     }
@@ -35,6 +69,14 @@ impl WireProtocol for OpenAiChat {
 
     fn model_of(&self, _: &str, body: &[u8]) -> Option<String> {
         model_in_body(body)
+    }
+
+    fn joined_headers(&self) -> &'static [&'static str] {
+        crate::JOINED_HEADERS
+    }
+
+    fn model_lists(&self) -> &'static [orch_model_contract::protocol::ModelListField] {
+        crate::MODEL_LISTS
     }
 
     fn deny(&self, status: StatusCode, code: &str, message: &str) -> Response<Bytes> {
@@ -64,9 +106,21 @@ impl WireProtocol for OpenAiChat {
         input: &str,
         max_output_tokens: i64,
     ) -> Option<(Method, &'static str, Bytes)> {
+        self.completion_request_at(&Default::default(), model, system, input, max_output_tokens)
+    }
+
+    fn completion_request_at(
+        &self,
+        options: &orch_model_contract::endpoint::EndpointOptions,
+        model: &str,
+        system: &str,
+        input: &str,
+        max_output_tokens: i64,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        let field = options.output_limit_field.unwrap_or_default().as_str();
         Some((Method::POST, "/chat/completions", Bytes::from(serde_json::json!({
             "model": model, "messages": [{"role":"system","content":system},{"role":"user","content":input}],
-            "max_tokens": max_output_tokens, "stream": false,
+            (field): max_output_tokens, "stream": false,
         }).to_string())))
     }
 
