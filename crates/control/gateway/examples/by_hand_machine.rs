@@ -197,9 +197,16 @@ async fn hold(flags: &Flags) -> Result<(), Failure> {
         Arc::clone(&clock),
     )?;
     let data_dir = dir.join("link");
+    let prober = orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+        Arc::clone(&pinned),
+        Arc::clone(&public),
+        &identity.authority,
+        Arc::clone(&clock),
+    )?;
     std::fs::create_dir_all(&data_dir)?;
     let link = MachineLink::start(
         MachineConfig {
+            gateway: Default::default(),
             hosted_endpoints: None,
             follow_system_endpoints: false,
             machine_id: identity.machine_id,
@@ -219,7 +226,7 @@ async fn hold(flags: &Flags) -> Result<(), Failure> {
             tunnels: TunnelOptions::default(),
             tunnel_gauge: None,
         },
-        Arc::new(TlsDialer::new(Some(pinned), Some(public))),
+        Arc::new(TlsDialer::new(Some(pinned), Some(public)).with_gateway_prober(Arc::new(prober))),
         Arc::clone(&clock),
     )?;
     let handler = Arc::new(ScriptedHandler::default());

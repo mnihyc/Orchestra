@@ -31,6 +31,11 @@
 //!   provider's managers (`provider.attention`) before a thread needs it. A token's end is read from the
 //!   facts, and told `providers.expiry_notice_days` ahead and when it has passed (`Engine::watch_token_ends`).
 
+mod login_authority;
+pub use login_authority::{
+    LoginAuthority, LoginCommandAuthority, login_operation, provider_login_authorized,
+};
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
@@ -40,6 +45,7 @@ use crate::leases;
 use crate::provider_runtime::RuntimeStart;
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
 use orch_db::queries::environments::thread_engine as environments;
 use orch_db::queries::jobs::JobRow;
 use orch_db::queries::resources::binding;
@@ -148,6 +154,30 @@ impl Engine {
         provider: Id,
         environment: Option<Id>,
     ) -> Result<Learning, EngineError> {
+        self.learn_descriptor_with_preparation(agent, provider, environment, None)
+            .await
+    }
+
+    /// Learn through the same native startup with the exact parent source and operation.
+    pub async fn learn_descriptor_with_preparation(
+        &self,
+        agent: Id,
+        provider: Id,
+        environment: Option<Id>,
+        preparation: Option<&crate::harnesses::preparation::Preparation>,
+    ) -> Result<Learning, EngineError> {
+        if let Some(source) = preparation {
+            source
+                .check_selection(
+                    self,
+                    crate::harnesses::preparation::Target::Descriptor {
+                        provider,
+                        agent,
+                        environment,
+                    },
+                )
+                .await?;
+        }
         let mut conn = self.inner.db.acquire().await?;
         let Some(profile) = resources::agent(&mut conn, agent)
             .await?
@@ -177,8 +207,12 @@ impl Engine {
         for (index, machine) in places.into_iter().enumerate() {
             // Learning is asked for on the way to something else: a machine that cannot be reached is
             // told as the reason, and the caller's own request says what it comes to.
-            let learned = match self.start_to_learn(&profile, provider, machine).await {
+            let learned = match self
+                .start_to_learn(&profile, provider, machine, preparation)
+                .await
+            {
                 Ok(learned) => learned,
+                Err(error) if preparation.is_some() => return Err(error),
                 Err(error) => Learning::Unknown(Unlearned::Failed(error.to_string())),
             };
             match learned {
@@ -198,6 +232,7 @@ impl Engine {
         profile: &AgentRow,
         provider: Id,
         machine: Id,
+        preparation: Option<&crate::harnesses::preparation::Preparation>,
     ) -> Result<Learning, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
         let Some(place) = resources::machine_place(&mut conn, machine).await? else {
@@ -221,6 +256,26 @@ impl Engine {
         // the machine answers a harness that runs with the descriptor it declared.
         if self.harness_is_online(key).await? {
             let mut tx = self.inner.db.begin().await?;
+            let target = crate::harnesses::preparation::Target::Harness(key);
+            let check = if let Some(source) = preparation {
+                let _ = source
+                    .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
+                    .await?;
+                harnesses::claim_lock(&mut tx, key).await?;
+                let _ = sqlx::query("SELECT provider_id FROM harnesses WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3 FOR UPDATE")
+                    .bind(provider).bind(profile.id).bind(machine).fetch_optional(&mut *tx).await.map_err(orch_db::DbError::from)?;
+                Some(
+                    source
+                        .checkpoint(&mut tx, self.inner.clock.as_ref(), target)
+                        .await?,
+                )
+            } else {
+                None
+            };
+            let deadline = check.as_ref().map(|check| check.deadline());
+            if let Some(check) = check {
+                check.check(self.inner.clock.as_ref())?;
+            }
             resources::set_harness_status(
                 &mut tx,
                 provider,
@@ -235,6 +290,9 @@ impl Engine {
                 self.inner.clock.now(),
             )
             .await?;
+            if let Some(deadline) = deadline {
+                deadline.check(self.inner.clock.as_ref())?;
+            }
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         // A new identifier each time: the machine starts a harness that runs already by answering with
@@ -242,7 +300,7 @@ impl Engine {
         let command = new_id();
         let started = tokio::time::timeout(
             self.inner.config.start_timeout,
-            self.ensure_harness(key, profile, command),
+            self.ensure_harness_with_preparation(key, profile, command, preparation),
         )
         .await;
         match started {
@@ -285,6 +343,17 @@ impl Engine {
         self.read_provider_facts(provider, false).await
     }
 
+    /// Scheduled facts and model observations preserve a deliberate stop, including queued stale reads.
+    pub async fn refresh_scheduled_provider(&self, provider: Id) -> Result<Refreshed, EngineError> {
+        let observed = self
+            .read_provider_facts_inner(provider, false, false, None, true)
+            .await;
+        if let Err(error) = self.discover_provider_models_for_read(provider, true).await {
+            tracing::debug!(%provider,%error,"a scheduled model source observation was not available");
+        }
+        observed
+    }
+
     /// A credential was changed or registered: it must be observed even just after a previous read.
     pub(crate) async fn refresh_provider_now(
         &self,
@@ -302,474 +371,565 @@ impl Engine {
             .await
     }
 
+    async fn claim_provider_read(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        force: bool,
+        now: DateTime<Utc>,
+        scheduled: bool,
+    ) -> Result<bool, EngineError> {
+        if scheduled {
+            // The due selector already applied the provider's cadence. Its minimum is one minute;
+            // the separately configured interactive Refresh bound must not lengthen that cadence.
+            Ok(orch_db::queries::provider_facts::claim_scheduled_read(
+                conn,
+                provider,
+                now,
+                crate::provider_fact_reads::PAGE_READ_INTERVAL,
+            )
+            .await?)
+        } else {
+            Ok(orch_db::queries::provider_facts::claim_read(
+                conn,
+                provider,
+                force,
+                now,
+                self.inner.config.provider_facts.page,
+            )
+            .await?)
+        }
+    }
+
     fn read_provider_facts_with_renewal(
         &self,
         provider: Id,
         force: bool,
         renew: bool,
-    ) -> impl std::future::Future<Output = Result<Refreshed, EngineError>> + Send + '_ {
+    ) -> BoxFuture<'_, Result<Refreshed, EngineError>> {
         // Requests, completed sign-ins and renewal share one observation lifetime.
-        // Construct its state before polling so supervisor callers do not embed it.
-        // Allocating here also breaks the startup/renewal future cycle.
-        Box::pin(self.read_provider_facts_inner(provider, force, renew))
+        self.read_provider_facts_inner(provider, force, renew, None, false)
     }
 
-    async fn read_provider_facts_inner(
+    fn read_provider_facts_inner(
         &self,
         provider: Id,
         force: bool,
         renew: bool,
-    ) -> Result<Refreshed, EngineError> {
-        // One observation of a provider at a time, held by a lease row: no transaction stays open while the
-        // machine answers. An ordinary reader that finds one in flight answers with the facts there
-        // are; a forced one waits for it to end (at most two of its machine waits) and observes again.
-        let name = format!("provider.facts:{provider}");
-        let holder = new_id().to_string();
-        let length = chrono::Duration::from_std(self.inner.config.start_timeout.saturating_mul(3))
-            .unwrap_or_else(|_| chrono::Duration::minutes(5));
-        let patience =
-            tokio::time::Instant::now() + self.inner.config.start_timeout.saturating_mul(2);
-        let admitted = loop {
-            let now = self.inner.clock.now();
-            let taken = {
-                let mut conn = self.inner.db.acquire().await?;
-                orch_db::queries::job_leases::take(&mut conn, &name, &holder, now, now + length)
-                    .await?
+        login: Option<LoginAuthority>,
+        scheduled: bool,
+    ) -> BoxFuture<'_, Result<Refreshed, EngineError>> {
+        Box::pin(async move {
+            // One observation of a provider at a time, held by a lease row: no transaction stays open while the
+            // machine answers. An ordinary reader that finds one in flight answers with the facts there
+            // are; a forced one waits for it to end (at most two of its machine waits) and observes again.
+            let name = format!("provider.facts:{provider}");
+            let holder = new_id().to_string();
+            let length =
+                chrono::Duration::from_std(self.inner.config.start_timeout.saturating_mul(3))
+                    .unwrap_or_else(|_| chrono::Duration::minutes(5));
+            let patience =
+                tokio::time::Instant::now() + self.inner.config.start_timeout.saturating_mul(2);
+            let admitted = loop {
+                let now = self.inner.clock.now();
+                let taken = {
+                    let mut conn = self.inner.db.acquire().await?;
+                    orch_db::queries::job_leases::take(&mut conn, &name, &holder, now, now + length)
+                        .await?
+                };
+                if taken || !force || tokio::time::Instant::now() >= patience {
+                    break taken;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             };
-            if taken || !force || tokio::time::Instant::now() >= patience {
-                break taken;
+            let observed = self
+                .observe_provider_facts(provider, force, renew, admitted, login, scheduled)
+                .await;
+            if admitted {
+                let mut conn = self.inner.db.acquire().await?;
+                orch_db::queries::job_leases::release(&mut conn, &name, &holder).await?;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        };
-        let observed = self
-            .observe_provider_facts(provider, force, renew, admitted)
-            .await;
-        if admitted {
-            let mut conn = self.inner.db.acquire().await?;
-            orch_db::queries::job_leases::release(&mut conn, &name, &holder).await?;
-        }
-        observed
+            observed
+        })
     }
 
-    async fn observe_provider_facts(
+    fn observe_provider_facts(
         &self,
         provider: Id,
         force: bool,
         renew: bool,
         admitted: bool,
-    ) -> Result<Refreshed, EngineError> {
-        let mut observing =
-            orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
-        let Some(row) = resources::provider(&mut observing, provider)
-            .await?
-            .filter(|row| row.deleted_at.is_none())
-        else {
-            return Ok(Refreshed::Gone);
-        };
-        if !admitted || row.status == "disabled" {
-            return Ok(Refreshed::Answered {
-                status: row.status,
-                reported_status: None,
-                facts: row.facts,
-            });
-        }
-        if renew
-            && !orch_settings::provider_sign_in(&mut observing, provider)
+        login: Option<LoginAuthority>,
+        scheduled: bool,
+    ) -> BoxFuture<'_, Result<Refreshed, EngineError>> {
+        Box::pin(async move {
+            if let Some(login) = &login
+                && !login
+                    .authorized(
+                        &mut *self.inner.db.acquire().await?,
+                        provider,
+                        Time::new(self.inner.clock.now()),
+                    )
+                    .await?
+            {
+                return Ok(Refreshed::Failed(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+            let mut observing =
+                orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
+            let Some(row) = resources::provider(&mut observing, provider)
                 .await?
-                .allowed
-        {
-            return Ok(Refreshed::Failed("provider.signin: the credential keeper has not permitted renewal in the selected existing harness home".into()));
-        }
-        let Some(machine) = leases::machine_of(&row) else {
-            let runtime = runtime_rows::live_runtime(&mut observing, provider).await?;
-            let stopped =
-                if let Some(runtime) = runtime.filter(|runtime| runtime.state == "stopped") {
+                .filter(|row| row.deleted_at.is_none())
+            else {
+                return Ok(Refreshed::Gone);
+            };
+            if !admitted
+                || row.status == "disabled"
+                || (scheduled
+                    && !orch_db::queries::provider_facts::scheduled_read_allowed(
+                        &mut observing,
+                        provider,
+                    )
+                    .await?)
+            {
+                return Ok(Refreshed::Answered {
+                    status: row.status,
+                    reported_status: None,
+                    facts: row.facts,
+                });
+            }
+            if renew
+                && !orch_settings::provider_sign_in(&mut observing, provider)
+                    .await?
+                    .allowed
+            {
+                return Ok(Refreshed::Failed("provider.signin: the credential keeper has not permitted renewal in the selected existing harness home".into()));
+            }
+            let Some(machine) = leases::machine_of(&row) else {
+                let runtime = runtime_rows::live_runtime(&mut observing, provider).await?;
+                let stopped = if let Some(runtime) = runtime.filter(|runtime| {
+                    matches!(runtime.state.as_str(), "stopped" | "failed")
+                        && (!scheduled || !runtime_rows::intentionally_stopped(runtime))
+                }) {
                     orch_db::queries::resources::hosting::host(&mut observing, runtime.host_id)
                         .await?
                         .is_some_and(|host| host.online && host.machine_status == "active")
                 } else {
                     false
                 };
-            if stopped {
-                let claimed_at = self.inner.clock.now();
-                let mut attempt =
-                    orch_db::queries::transaction_guard::scope(false, self.inner.db.begin())
+                if stopped && !scheduled {
+                    // Refresh is an explicit request to wake this runtime. Starting it is not a
+                    // vendor read; its ordinary post-start read still obeys the source minimum.
+                    observing.commit().await.map_err(orch_db::DbError::from)?;
+                    orch_db::queries::transaction_guard::scope(
+                        true,
+                        self.start_provider_runtime_for_read(provider, false),
+                    )
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                    return Ok(Refreshed::NoMachine);
+                }
+                if stopped {
+                    let claimed_at = self.inner.clock.now();
+                    let mut attempt =
+                        orch_db::queries::transaction_guard::scope(false, self.inner.db.begin())
+                            .await?;
+                    let due = self
+                        .claim_provider_read(&mut attempt, provider, force, claimed_at, scheduled)
                         .await?;
-                let due = orch_db::queries::provider_facts::claim_read(
-                    &mut attempt,
+                    attempt.commit().await.map_err(orch_db::DbError::from)?;
+                    observing.commit().await.map_err(orch_db::DbError::from)?;
+                    if due {
+                        let started = orch_db::queries::transaction_guard::scope(
+                            true,
+                            self.start_provider_runtime_for_read(provider, scheduled),
+                        )
+                        .await;
+                        orch_db::queries::provider_facts::discard_unread_claim(
+                            &mut *self.inner.db.acquire().await?,
+                            provider,
+                            claimed_at,
+                        )
+                        .await?;
+                        started.map_err(EngineError::unreadable)?;
+                    }
+                }
+                return Ok(Refreshed::NoMachine);
+            };
+            let place = resources::machine_place(&mut observing, machine)
+                .await?
+                .filter(|place| place.deleted_at.is_none() && place.status == "active");
+            let Some(credential_epoch) = orch_db::queries::provider_facts::credential_epoch(
+                &mut observing,
+                provider,
+                Some(row.revision),
+            )
+            .await?
+            else {
+                return Ok(Refreshed::Answered {
+                    status: row.status,
+                    reported_status: None,
+                    facts: row.facts,
+                });
+            };
+            let profile = match row.agent_id {
+                Some(agent) => resources::agent(&mut observing, agent).await?,
+                None => None,
+            };
+            let facts_source = crate::provider_sources::spec(
+                &mut observing,
+                provider,
+                &row.sources,
+                orch_provider_contract::SourceElement::Facts,
+            )
+            .await?;
+            let Some(_) = place.filter(|place| place.online) else {
+                return Ok(Refreshed::Offline);
+            };
+            // Commit the stored observation before asking the machine; no transaction stays open across that wait.
+            observing.commit().await.map_err(orch_db::DbError::from)?;
+            // Claim the attempt in its own short transaction. Refused reads keep facts_at, yet remain
+            // throttled. Release the row and authority locks before the runtime opens its transactions.
+            let mut reading =
+                orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
+            let acquired = self
+                .claim_provider_read(
+                    &mut reading,
                     provider,
                     force,
-                    claimed_at,
-                    self.inner.config.provider_facts.page,
+                    self.inner.clock.now(),
+                    scheduled,
                 )
                 .await?;
-                attempt.commit().await.map_err(orch_db::DbError::from)?;
-                observing.commit().await.map_err(orch_db::DbError::from)?;
-                if due {
-                    let started = orch_db::queries::transaction_guard::scope(
-                        true,
-                        self.start_provider_runtime(provider, None),
-                    )
-                    .await;
-                    orch_db::queries::provider_facts::discard_unread_claim(
+            reading.commit().await.map_err(orch_db::DbError::from)?;
+            if !acquired {
+                return Ok(Refreshed::Answered {
+                    status: row.status,
+                    reported_status: None,
+                    facts: row.facts,
+                });
+            }
+            if row.kind == "subscription" {
+                let Some(profile) = profile else {
+                    return Ok(Refreshed::Failed(
+                        "the profile whose harness holds the sign-in is not there".to_owned(),
+                    ));
+                };
+                let key = HarnessKey {
+                    provider,
+                    agent: profile.id,
+                    machine,
+                };
+                let command = new_id();
+                let started = tokio::time::timeout(
+                    self.inner.config.start_timeout,
+                    self.ensure_harness(key, &profile, command),
+                )
+                .await;
+                match started {
+                    Err(_elapsed) => {
+                        self.inner.commands.cancel(command).await?;
+                        return Ok(Refreshed::Failed(
+                            "the harness did not start in time".to_owned(),
+                        ));
+                    }
+                    Ok(Err(error)) => return Err(error),
+                    Ok(Ok(Started::Up)) => {}
+                    Ok(Ok(Started::Failed(outcome))) => {
+                        return Ok(Refreshed::Failed(format!(
+                            "the harness did not start: {}",
+                            failure_text(&outcome)
+                        )));
+                    }
+                }
+            } else {
+                let started = tokio::time::timeout(
+                    self.inner.config.start_timeout,
+                    self.ensure_provider_started(Id::nil(), provider),
+                )
+                .await;
+                let started = match started {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        return Ok(Refreshed::Failed(
+                            "the provider did not start in time".to_owned(),
+                        ));
+                    }
+                };
+                match started {
+                    crate::providers::Keeping::Up => {}
+                    crate::providers::Keeping::Failed(outcome) => {
+                        return Ok(Refreshed::Failed(format!(
+                            "the provider did not start: {}",
+                            failure_text(&outcome)
+                        )));
+                    }
+                    crate::providers::Keeping::Cannot(error) => {
+                        return Ok(Refreshed::Failed(error.to_string()));
+                    }
+                }
+            }
+            let id = new_id();
+            let command = Outgoing::new(
+                id,
+                machine,
+                SerialKey::Provider(provider),
+                &ProviderRefresh {
+                    provider_id: provider,
+                    retry: force.then_some(true),
+                    renew: renew.then_some(true),
+                    facts: facts_source,
+                },
+            )?;
+            let command = if let Some(login) = login {
+                if !login
+                    .authorized(
                         &mut *self.inner.db.acquire().await?,
                         provider,
-                        claimed_at,
+                        Time::new(self.inner.clock.now()),
+                    )
+                    .await?
+                {
+                    return Ok(Refreshed::Failed(
+                        "the accepted sign-in authority is no longer available".into(),
+                    ));
+                }
+                command.with_login_authority(LoginCommandAuthority::refresh(provider, login))
+            } else {
+                command
+            };
+            let asked = tokio::time::timeout(
+                self.inner.config.start_timeout,
+                crate::commands::run(self.inner.commands.as_ref(), command),
+            )
+            .await;
+            let outcome = match asked {
+                Err(_elapsed) => {
+                    self.inner.commands.cancel(id).await?;
+                    crate::provider_sources::failed(
+                        self,
+                        provider,
+                        &credential_epoch,
+                        &row.sources,
+                        orch_provider_contract::SourceElement::Facts,
+                        orch_provider_contract::SourceErrorCode::Timeout,
+                        "The keeping machine did not answer the facts source read in time.",
                     )
                     .await?;
-                    started.map_err(EngineError::unreadable)?;
-                }
-            }
-            return Ok(Refreshed::NoMachine);
-        };
-        let place = resources::machine_place(&mut observing, machine)
-            .await?
-            .filter(|place| place.deleted_at.is_none() && place.status == "active");
-        let Some(credential_epoch) = orch_db::queries::provider_facts::credential_epoch(
-            &mut observing,
-            provider,
-            Some(row.revision),
-        )
-        .await?
-        else {
-            return Ok(Refreshed::Answered {
-                status: row.status,
-                reported_status: None,
-                facts: row.facts,
-            });
-        };
-        let profile = match row.agent_id {
-            Some(agent) => resources::agent(&mut observing, agent).await?,
-            None => None,
-        };
-        let facts_source = crate::provider_sources::spec(
-            &mut observing,
-            provider,
-            &row.sources,
-            orch_provider_contract::SourceElement::Facts,
-        )
-        .await?;
-        let Some(_) = place.filter(|place| place.online) else {
-            return Ok(Refreshed::Offline);
-        };
-        // Commit the stored observation before asking the machine; no transaction stays open across that wait.
-        observing.commit().await.map_err(orch_db::DbError::from)?;
-        // Claim the attempt in its own short transaction. Refused reads keep facts_at, yet remain
-        // throttled. Release the row and authority locks before the runtime opens its transactions.
-        let mut reading =
-            orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
-        let acquired = orch_db::queries::provider_facts::claim_read(
-            &mut reading,
-            provider,
-            force,
-            self.inner.clock.now(),
-            self.inner.config.provider_facts.page,
-        )
-        .await?;
-        reading.commit().await.map_err(orch_db::DbError::from)?;
-        if !acquired {
-            return Ok(Refreshed::Answered {
-                status: row.status,
-                reported_status: None,
-                facts: row.facts,
-            });
-        }
-        if row.kind == "subscription" {
-            let Some(profile) = profile else {
-                return Ok(Refreshed::Failed(
-                    "the profile whose harness holds the sign-in is not there".to_owned(),
-                ));
-            };
-            let key = HarnessKey {
-                provider,
-                agent: profile.id,
-                machine,
-            };
-            let command = new_id();
-            let started = tokio::time::timeout(
-                self.inner.config.start_timeout,
-                self.ensure_harness(key, &profile, command),
-            )
-            .await;
-            match started {
-                Err(_elapsed) => {
-                    self.inner.commands.cancel(command).await?;
                     return Ok(Refreshed::Failed(
-                        "the harness did not start in time".to_owned(),
+                        "the machine did not answer in time".to_owned(),
                     ));
                 }
-                Ok(Err(error)) => return Err(error),
-                Ok(Ok(Started::Up)) => {}
-                Ok(Ok(Started::Failed(outcome))) => {
-                    return Ok(Refreshed::Failed(format!(
-                        "the harness did not start: {}",
-                        failure_text(&outcome)
-                    )));
-                }
-            }
-        } else {
-            let started = tokio::time::timeout(
-                self.inner.config.start_timeout,
-                self.ensure_provider_started(Id::nil(), provider),
-            )
-            .await;
-            let started = match started {
-                Ok(result) => result?,
-                Err(_) => {
-                    return Ok(Refreshed::Failed(
-                        "the provider did not start in time".to_owned(),
-                    ));
-                }
+                Ok(answered) => answered?,
             };
-            match started {
-                crate::providers::Keeping::Up => {}
-                crate::providers::Keeping::Failed(outcome) => {
-                    return Ok(Refreshed::Failed(format!(
-                        "the provider did not start: {}",
-                        failure_text(&outcome)
-                    )));
-                }
-                crate::providers::Keeping::Cannot(error) => {
-                    return Ok(Refreshed::Failed(error.to_string()));
-                }
-            }
-        }
-        let id = new_id();
-        let command = Outgoing::new(
-            id,
-            machine,
-            SerialKey::Provider(provider),
-            &ProviderRefresh {
-                provider_id: provider,
-                retry: force.then_some(true),
-                renew: renew.then_some(true),
-                facts: facts_source,
-            },
-        )?;
-        let asked = tokio::time::timeout(
-            self.inner.config.start_timeout,
-            crate::commands::run(self.inner.commands.as_ref(), command),
-        )
-        .await;
-        let outcome = match asked {
-            Err(_elapsed) => {
-                self.inner.commands.cancel(id).await?;
+            let Outcome::Succeeded(result) = outcome else {
                 crate::provider_sources::failed(
                     self,
                     provider,
                     &credential_epoch,
                     &row.sources,
                     orch_provider_contract::SourceElement::Facts,
-                    orch_provider_contract::SourceErrorCode::Timeout,
-                    "The keeping machine did not answer the facts source read in time.",
+                    orch_provider_contract::SourceErrorCode::Unavailable,
+                    "The keeping machine could not finish the facts source read.",
                 )
                 .await?;
-                return Ok(Refreshed::Failed(
-                    "the machine did not answer in time".to_owned(),
-                ));
-            }
-            Ok(answered) => answered?,
-        };
-        let Outcome::Succeeded(result) = outcome else {
-            crate::provider_sources::failed(
-                self,
-                provider,
-                &credential_epoch,
-                &row.sources,
-                orch_provider_contract::SourceElement::Facts,
-                orch_provider_contract::SourceErrorCode::Unavailable,
-                "The keeping machine could not finish the facts source read.",
-            )
-            .await?;
-            return Ok(Refreshed::Failed(failure_text(&outcome)));
-        };
-        let result: ProviderRefreshResult = serde_json::from_value(result)?;
-        let applied = self
-            .keep_refreshed(provider, &result, &credential_epoch)
-            .await?;
-        let mut conn = self.inner.db.acquire().await?;
-        Ok(match resources::provider(&mut conn, provider).await? {
-            Some(current) => Refreshed::Answered {
-                status: current.status,
-                reported_status: (applied
-                    && result.status != "not_told"
-                    && result.source.as_ref().is_none_or(|source| {
-                        source.error.is_none() || source.supported == Some(true)
-                    }))
-                .then_some(result.status),
-                facts: current.facts,
-            },
-            None => Refreshed::Gone,
+                return Ok(Refreshed::Failed(failure_text(&outcome)));
+            };
+            let result: ProviderRefreshResult = serde_json::from_value(result)?;
+            let applied = self
+                .keep_refreshed(provider, &result, &credential_epoch)
+                .await?;
+            let mut conn = self.inner.db.acquire().await?;
+            Ok(match resources::provider(&mut conn, provider).await? {
+                Some(current) => Refreshed::Answered {
+                    status: current.status,
+                    reported_status: (applied
+                        && result.status != "not_told"
+                        && result.source.as_ref().is_none_or(|source| {
+                            source.error.is_none() || source.supported == Some(true)
+                        }))
+                    .then_some(result.status),
+                    facts: current.facts,
+                },
+                None => Refreshed::Gone,
+            })
         })
     }
 
     /// Stores an observation and releases threads after a proven recovery.
-    async fn keep_refreshed(
-        &self,
+    fn keep_refreshed<'a>(
+        &'a self,
         provider: Id,
-        result: &ProviderRefreshResult,
-        epoch: &Json,
-    ) -> Result<bool, EngineError> {
-        let mut tx =
-            orch_db::queries::transaction_guard::scope(true, self.inner.db.begin()).await?;
-        if !orch_db::queries::provider_facts::lock_provider(&mut tx, provider).await?
-            || orch_db::queries::provider_facts::credential_epoch(&mut tx, provider, None)
-                .await?
-                .as_ref()
-                != Some(epoch)
-        {
-            return Ok(false);
-        }
-        let changed = self
-            .keep_provider_observation(&mut tx, provider, result, self.inner.clock.now())
-            .await?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        if changed {
-            self.reevaluate_provider(provider).await?;
-        }
-        Ok(true)
+        result: &'a ProviderRefreshResult,
+        epoch: &'a Json,
+    ) -> BoxFuture<'a, Result<bool, EngineError>> {
+        Box::pin(async move {
+            let mut tx =
+                orch_db::queries::transaction_guard::scope(true, self.inner.db.begin()).await?;
+            if !orch_db::queries::provider_facts::lock_provider(&mut tx, provider).await?
+                || orch_db::queries::provider_facts::credential_epoch(&mut tx, provider, None)
+                    .await?
+                    .as_ref()
+                    != Some(epoch)
+            {
+                return Ok(false);
+            }
+            let changed = self
+                .keep_provider_observation(&mut tx, provider, result, self.inner.clock.now())
+                .await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            if changed {
+                self.reevaluate_provider(provider).await?;
+            }
+            Ok(true)
+        })
     }
 
     /// Keeps one whole runtime observation in the caller's authority transaction.
     /// Only the vendor's authenticated answer, never an earlier cached proof or local files, lifts a refusal.
-    pub async fn keep_provider_observation(
-        &self,
-        conn: &mut orch_db::Conn,
+    pub fn keep_provider_observation<'a>(
+        &'a self,
+        conn: &'a mut orch_db::Conn,
         provider: Id,
-        result: &ProviderRefreshResult,
+        result: &'a ProviderRefreshResult,
         now: DateTime<Utc>,
-    ) -> Result<bool, EngineError> {
-        let mut previous = resources::provider(conn, provider).await?;
-        if let (Some(row), Some(source)) = (previous.as_mut(), result.source.as_ref()) {
-            crate::provider_sources::observed(
-                conn,
-                provider,
-                &row.sources,
-                orch_provider_contract::SourceElement::Facts,
-                source.descriptor.as_ref(),
-                source.error.as_ref(),
-                Time::new(now),
-            )
-            .await?;
-            if let Some(descriptor) = &source.descriptor {
-                let mut choices: orch_provider_contract::ProviderSources =
-                    serde_json::from_value(row.sources.clone())?;
-                let choice = choices.facts.get_or_insert_with(Default::default);
-                choice.descriptor = Some(descriptor.clone());
-                row.sources = serde_json::to_value(choices)?;
+    ) -> BoxFuture<'a, Result<bool, EngineError>> {
+        Box::pin(async move {
+            let mut previous = resources::provider(conn, provider).await?;
+            if let (Some(row), Some(source)) = (previous.as_mut(), result.source.as_ref()) {
+                crate::provider_sources::observed(
+                    conn,
+                    provider,
+                    &row.sources,
+                    orch_provider_contract::SourceElement::Facts,
+                    source.descriptor.as_ref(),
+                    source.error.as_ref(),
+                    Time::new(now),
+                )
+                .await?;
+                if let Some(descriptor) = &source.descriptor {
+                    let mut choices: orch_provider_contract::ProviderSources =
+                        serde_json::from_value(row.sources.clone())?;
+                    let choice = choices.facts.get_or_insert_with(Default::default);
+                    choice.descriptor = Some(descriptor.clone());
+                    row.sources = serde_json::to_value(choices)?;
+                }
             }
-        }
-        if result.status == "not_told" {
-            if let (Some(row), Some(facts)) = (previous.as_ref(), result.facts.as_ref()) {
-                let incoming = crate::provider_fact_reads::keeper_observation(
-                    crate::provider_fact_reads::normalize_observation(&serde_json::to_value(
-                        facts,
-                    )?)?,
-                );
-                let known = crate::provider_fact_reads::normalize_observation(&row.facts)?;
+            if result.status == "not_told" {
+                if let (Some(row), Some(facts)) = (previous.as_ref(), result.facts.as_ref()) {
+                    let incoming = crate::provider_fact_reads::keeper_observation(
+                        crate::provider_fact_reads::normalize_observation(&serde_json::to_value(
+                            facts,
+                        )?)?,
+                    );
+                    let known = crate::provider_fact_reads::normalize_observation(&row.facts)?;
+                    let merged = crate::provider_fact_reads::merge_observation(&known, incoming);
+                    if merged != known {
+                        keeper::set_facts(conn, provider, &merged, now).await?;
+                    }
+                }
+                return Ok(false);
+            }
+            let may_verify = previous.as_ref().is_some_and(|row| {
+                crate::provider_fact_reads::source_can_verify(&row.sources, row.agent_id.is_some())
+            });
+            // Preserve reported vendor quota as observational status, not a gate on work.
+            // A missing sign-in keeps the keeper's reported state.
+            // Balances and spend are information; neither closes a provider.
+            let observed_status = if result.status == "ready"
+                && result.facts.as_ref().is_some_and(|facts| {
+                    crate::provider_fact_reads::admission_exhausted(facts, Time::new(now))
+                }) {
+                "exhausted"
+            } else {
+                result.status.as_str()
+            };
+            if result.facts.is_some() {
+                let known = previous
+                    .as_ref()
+                    .map(|row| &row.facts)
+                    .cloned()
+                    .unwrap_or_default();
+                let known = crate::provider_fact_reads::normalize_observation(&known)?;
+                let mut incoming = crate::provider_fact_reads::normalize_observation(
+                    &serde_json::to_value(&result.facts)?,
+                )?;
+                if !may_verify && let Some(facts) = incoming.as_object_mut() {
+                    facts.remove("credential_verified");
+                    if let Some(times) = facts.get_mut("field_times").and_then(Json::as_object_mut)
+                    {
+                        times.remove("credential_verified");
+                    }
+                }
                 let merged = crate::provider_fact_reads::merge_observation(&known, incoming);
-                if merged != known {
-                    keeper::set_facts(conn, provider, &merged, now).await?;
-                }
+                keeper::set_facts(conn, provider, &merged, now).await?;
             }
-            return Ok(false);
-        }
-        let may_verify = previous.as_ref().is_some_and(|row| {
-            crate::provider_fact_reads::source_can_verify(&row.sources, row.agent_id.is_some())
-        });
-        // Admission facts may hold otherwise ready access, regardless of credential kind or role.
-        // A missing sign-in keeps the keeper's reported state.
-        // Balances and spend are information; neither closes a provider.
-        let observed_status = if result.status == "ready"
-            && result.facts.as_ref().is_some_and(|facts| {
-                crate::provider_fact_reads::admission_exhausted(facts, Time::new(now))
-            }) {
-            "exhausted"
-        } else {
-            result.status.as_str()
-        };
-        if result.facts.is_some() {
-            let known = previous
+            // Valid members of a partial report act normally; its safe note stays beside the source.
+            if result
+                .source
                 .as_ref()
-                .map(|row| &row.facts)
-                .cloned()
-                .unwrap_or_default();
-            let known = crate::provider_fact_reads::normalize_observation(&known)?;
-            let mut incoming = crate::provider_fact_reads::normalize_observation(
-                &serde_json::to_value(&result.facts)?,
-            )?;
-            if !may_verify && let Some(facts) = incoming.as_object_mut() {
-                facts.remove("credential_verified");
-                if let Some(times) = facts.get_mut("field_times").and_then(Json::as_object_mut) {
-                    times.remove("credential_verified");
-                }
+                .is_some_and(|source| source.error.is_some() && source.supported != Some(true))
+            {
+                return Ok(false);
             }
-            let merged = crate::provider_fact_reads::merge_observation(&known, incoming);
-            keeper::set_facts(conn, provider, &merged, now).await?;
-        }
-        // Valid members of a partial report act normally; its safe note stays beside the source.
-        if result
-            .source
-            .as_ref()
-            .is_some_and(|source| source.error.is_some() && source.supported != Some(true))
-        {
-            return Ok(false);
-        }
-        let verified = result
-            .facts
-            .as_ref()
-            .and_then(|facts| facts.credential_verified)
-            == Some(true)
-            && may_verify;
-        if previous
-            .as_ref()
-            .is_some_and(|row| row.status == "exhausted")
-            && observed_status == "ready"
-            && result
+            let verified = result
                 .facts
                 .as_ref()
-                .and_then(|facts| facts.ordinary_usage_allowed)
-                != Some(true)
-            && previous
+                .and_then(|facts| facts.credential_verified)
+                == Some(true)
+                && may_verify;
+            if previous
                 .as_ref()
-                .and_then(|row| row.facts.pointer("/limit_reached/resets_at"))
-                .and_then(Json::as_str)
-                .and_then(|at| at.parse::<Time>().ok())
-                .is_none_or(|at| at.get() > now)
-        {
-            return Ok(false);
-        }
-        let Some((mut to, from)) =
-            crate::providers::refreshed_transition(observed_status, verified)
-        else {
-            return Ok(false);
-        };
-        let models = binding::enabled_models(conn, provider).await?;
-        if to == "ready"
-            && models == 0
-            && previous.as_ref().is_some_and(|row| row.status == "error")
-        {
-            to = "needs_setup";
-        }
-        let detail = (to == "needs_setup").then_some(if result.status == "needs_setup" {
-            SIGNED_OUT
-        } else if models == 0 {
-            "it needs an enabled model"
-        } else {
-            SIGNED_OUT
-        });
-        let mut changed = keeper::move_status(conn, provider, from, to, detail, now).await?;
-        if to == "ready" && models > 0 {
-            changed |=
-                keeper::move_status(conn, provider, &["needs_setup"], "ready", None, now).await?;
-        }
-        if changed {
-            orch_db::queries::access::bump_epoch(conn).await?;
-            if to == "exhausted" {
-                crate::notifications::provider_exhausted(conn, provider, None, now).await?;
+                .is_some_and(|row| row.status == "exhausted")
+                && observed_status == "ready"
+                && result
+                    .facts
+                    .as_ref()
+                    .and_then(|facts| facts.ordinary_usage_allowed)
+                    != Some(true)
+                && previous
+                    .as_ref()
+                    .and_then(|row| row.facts.pointer("/limit_reached/resets_at"))
+                    .and_then(Json::as_str)
+                    .and_then(|at| at.parse::<Time>().ok())
+                    .is_none_or(|at| at.get() > now)
+            {
+                return Ok(false);
             }
-        }
-        Ok(changed)
+            let Some((mut to, from)) =
+                crate::providers::refreshed_transition(observed_status, verified)
+            else {
+                return Ok(false);
+            };
+            let models = binding::enabled_models(conn, provider).await?;
+            if to == "ready"
+                && models == 0
+                && previous.as_ref().is_some_and(|row| row.status == "error")
+            {
+                to = "needs_setup";
+            }
+            let detail = (to == "needs_setup").then_some(if result.status == "needs_setup" {
+                SIGNED_OUT
+            } else if models == 0 {
+                "it needs an enabled model"
+            } else {
+                SIGNED_OUT
+            });
+            let mut changed = keeper::move_status(conn, provider, from, to, detail, now).await?;
+            if to == "ready" && models > 0 {
+                changed |=
+                    keeper::move_status(conn, provider, &["needs_setup"], "ready", None, now)
+                        .await?;
+            }
+            if changed {
+                orch_db::queries::access::bump_epoch(conn).await?;
+                if to == "exhausted" {
+                    crate::notifications::provider_exhausted(conn, provider, None, now).await?;
+                }
+            }
+            Ok(changed)
+        })
     }
 
     /// A manager's explicit retry observes an error immediately, bypassing the ordinary page interval.
@@ -779,70 +939,127 @@ impl Engine {
 
     /// Reads the current model catalogue without changing the manager's accepted models or switches.
     /// A failed read keeps the previous list and its date; a credential change discards an obsolete answer.
-    pub async fn discover_provider_models(
+    pub fn discover_provider_models(
         &self,
         provider: Id,
-    ) -> Result<Option<Vec<orch_agent_contract::discovery::ModelSuggestion>>, EngineError> {
-        let mut conn = self.inner.db.acquire().await?;
-        let Some(row) = resources::provider(&mut conn, provider)
-            .await?
-            .filter(|row| row.deleted_at.is_none() && row.status != "disabled")
-        else {
-            return Ok(None);
-        };
-        let Some(machine) = leases::machine_of(&row) else {
-            let stopped = runtime_rows::live_runtime(&mut conn, provider)
+    ) -> BoxFuture<
+        '_,
+        Result<Option<Vec<orch_agent_contract::discovery::ModelSuggestion>>, EngineError>,
+    > {
+        self.discover_provider_models_for_read(provider, false)
+    }
+
+    fn discover_provider_models_for_read(
+        &self,
+        provider: Id,
+        scheduled: bool,
+    ) -> BoxFuture<
+        '_,
+        Result<Option<Vec<orch_agent_contract::discovery::ModelSuggestion>>, EngineError>,
+    > {
+        Box::pin(async move {
+            let mut conn = self.inner.db.acquire().await?;
+            let Some(row) = resources::provider(&mut conn, provider)
                 .await?
-                .is_some_and(|runtime| runtime.state == "stopped");
+                .filter(|row| row.deleted_at.is_none() && row.status != "disabled")
+            else {
+                return Ok(None);
+            };
+            if scheduled
+                && !orch_db::queries::provider_facts::scheduled_read_allowed(&mut conn, provider)
+                    .await?
+            {
+                return Ok(None);
+            }
+            let Some(machine) = leases::machine_of(&row) else {
+                let stopped = runtime_rows::live_runtime(&mut conn, provider)
+                    .await?
+                    .is_some_and(|runtime| {
+                        matches!(runtime.state.as_str(), "stopped" | "failed")
+                            && (!scheduled || !runtime_rows::intentionally_stopped(&runtime))
+                    });
+                drop(conn);
+                if stopped {
+                    orch_db::queries::transaction_guard::scope(
+                        true,
+                        self.start_provider_runtime_for_read(provider, scheduled),
+                    )
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                }
+                return Ok(None);
+            };
+            if !resources::machine_place(&mut conn, machine)
+                .await?
+                .is_some_and(|place| {
+                    place.online && place.status == "active" && place.deleted_at.is_none()
+                })
+            {
+                return Ok(None);
+            }
+            let epoch = orch_db::queries::provider_facts::credential_epoch(
+                &mut conn,
+                provider,
+                Some(row.revision),
+            )
+            .await?;
+            let models_source = crate::provider_sources::spec(
+                &mut conn,
+                provider,
+                &row.sources,
+                orch_provider_contract::SourceElement::Models,
+            )
+            .await?;
             drop(conn);
-            if stopped {
-                orch_db::queries::transaction_guard::scope(
-                    true,
-                    self.start_provider_runtime(provider, None),
+            let Some(epoch) = epoch else {
+                return Ok(None);
+            };
+            if row.kind == "api" {
+                match tokio::time::timeout(
+                    self.inner.config.start_timeout,
+                    self.ensure_provider_up(provider),
                 )
                 .await
-                .map_err(EngineError::unreadable)?;
-            }
-            return Ok(None);
-        };
-        if !resources::machine_place(&mut conn, machine)
-            .await?
-            .is_some_and(|place| {
-                place.online && place.status == "active" && place.deleted_at.is_none()
-            })
-        {
-            return Ok(None);
-        }
-        let epoch = orch_db::queries::provider_facts::credential_epoch(
-            &mut conn,
-            provider,
-            Some(row.revision),
-        )
-        .await?;
-        let models_source = crate::provider_sources::spec(
-            &mut conn,
-            provider,
-            &row.sources,
-            orch_provider_contract::SourceElement::Models,
-        )
-        .await?;
-        drop(conn);
-        let Some(epoch) = epoch else {
-            return Ok(None);
-        };
-        if row.kind == "api" {
-            match tokio::time::timeout(
-                self.inner.config.start_timeout,
-                self.ensure_provider_up(provider),
-            )
-            .await
-            {
-                Ok(ready) => {
-                    if ready?.is_err() {
+                {
+                    Ok(ready) => {
+                        if ready?.is_err() {
+                            return Ok(None);
+                        }
+                    }
+                    Err(_) => {
+                        crate::provider_sources::failed(
+                            self,
+                            provider,
+                            &epoch,
+                            &row.sources,
+                            orch_provider_contract::SourceElement::Models,
+                            orch_provider_contract::SourceErrorCode::Timeout,
+                            "The model reader did not become ready in time.",
+                        )
+                        .await?;
                         return Ok(None);
                     }
                 }
+            }
+            let id = new_id();
+            let command = Outgoing::new(
+                id,
+                machine,
+                SerialKey::Provider(provider),
+                &ProviderDiscoverModels {
+                    provider_id: provider,
+                    models: models_source,
+                },
+            )?;
+            let outcome = match tokio::time::timeout(
+                self.inner.config.start_timeout,
+                crate::commands::run(self.inner.commands.as_ref(), command),
+            )
+            .await
+            {
+                Ok(outcome) => outcome?,
                 Err(_) => {
+                    self.inner.commands.cancel(id).await?;
                     crate::provider_sources::failed(
                         self,
                         provider,
@@ -850,105 +1067,73 @@ impl Engine {
                         &row.sources,
                         orch_provider_contract::SourceElement::Models,
                         orch_provider_contract::SourceErrorCode::Timeout,
-                        "The model reader did not become ready in time.",
+                        "The keeping machine did not answer the models source read in time.",
                     )
                     .await?;
                     return Ok(None);
                 }
-            }
-        }
-        let id = new_id();
-        let command = Outgoing::new(
-            id,
-            machine,
-            SerialKey::Provider(provider),
-            &ProviderDiscoverModels {
-                provider_id: provider,
-                models: models_source,
-            },
-        )?;
-        let outcome = match tokio::time::timeout(
-            self.inner.config.start_timeout,
-            crate::commands::run(self.inner.commands.as_ref(), command),
-        )
-        .await
-        {
-            Ok(outcome) => outcome?,
-            Err(_) => {
-                self.inner.commands.cancel(id).await?;
+            };
+            let Outcome::Succeeded(value) = outcome else {
                 crate::provider_sources::failed(
                     self,
                     provider,
                     &epoch,
                     &row.sources,
                     orch_provider_contract::SourceElement::Models,
-                    orch_provider_contract::SourceErrorCode::Timeout,
-                    "The keeping machine did not answer the models source read in time.",
+                    orch_provider_contract::SourceErrorCode::Unavailable,
+                    "The keeping machine could not finish the models source read.",
                 )
                 .await?;
                 return Ok(None);
-            }
-        };
-        let Outcome::Succeeded(value) = outcome else {
-            crate::provider_sources::failed(
-                self,
-                provider,
-                &epoch,
-                &row.sources,
-                orch_provider_contract::SourceElement::Models,
-                orch_provider_contract::SourceErrorCode::Unavailable,
-                "The keeping machine could not finish the models source read.",
-            )
-            .await?;
-            return Ok(None);
-        };
-        let result: ProviderDiscoverModelsResult = serde_json::from_value(value)?;
-        let mut tx =
-            orch_db::queries::transaction_guard::scope(true, self.inner.db.begin()).await?;
-        if !orch_db::queries::provider_facts::lock_provider(&mut tx, provider).await?
-            || orch_db::queries::provider_facts::credential_epoch(&mut tx, provider, None)
-                .await?
-                .as_ref()
-                != Some(&epoch)
-        {
-            return Ok(None);
-        }
-        let Some(current) = resources::provider(&mut tx, provider).await? else {
-            return Ok(None);
-        };
-        let now = self.inner.clock.now();
-        if let Some(source) = &result.source {
-            crate::provider_sources::observed(
-                &mut tx,
-                provider,
-                &current.sources,
-                orch_provider_contract::SourceElement::Models,
-                source.descriptor.as_ref(),
-                source.error.as_ref(),
-                Time::new(now),
-            )
-            .await?;
-            if source.error.is_some() && source.supported != Some(true) {
-                tx.commit().await.map_err(orch_db::DbError::from)?;
+            };
+            let result: ProviderDiscoverModelsResult = serde_json::from_value(value)?;
+            let mut tx =
+                orch_db::queries::transaction_guard::scope(true, self.inner.db.begin()).await?;
+            if !orch_db::queries::provider_facts::lock_provider(&mut tx, provider).await?
+                || orch_db::queries::provider_facts::credential_epoch(&mut tx, provider, None)
+                    .await?
+                    .as_ref()
+                    != Some(&epoch)
+            {
                 return Ok(None);
             }
-        }
-        let suggestions = if result
-            .source
-            .as_ref()
-            .is_some_and(|source| source.supported == Some(false))
-        {
-            None
-        } else {
-            Some(result.suggestions)
-        };
-        let facts = crate::provider_fact_reads::merge_observation(
-            &current.facts,
-            serde_json::json!({"models":suggestions,"field_times":{"models":Time::new(now)}}),
-        );
-        keeper::set_facts(&mut tx, provider, &facts, now).await?;
-        tx.commit().await.map_err(orch_db::DbError::from)?;
-        Ok(suggestions)
+            let Some(current) = resources::provider(&mut tx, provider).await? else {
+                return Ok(None);
+            };
+            let now = self.inner.clock.now();
+            if let Some(source) = &result.source {
+                crate::provider_sources::observed(
+                    &mut tx,
+                    provider,
+                    &current.sources,
+                    orch_provider_contract::SourceElement::Models,
+                    source.descriptor.as_ref(),
+                    source.error.as_ref(),
+                    Time::new(now),
+                )
+                .await?;
+                if source.error.is_some() && source.supported != Some(true) {
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
+                    return Ok(None);
+                }
+            }
+            let suggestions = if result
+                .source
+                .as_ref()
+                .is_some_and(|source| source.supported == Some(false))
+            {
+                None
+            } else {
+                Some(result.suggestions)
+            };
+            let facts = crate::provider_fact_reads::merge_observation(
+                &current.facts,
+                serde_json::json!({"models":suggestions,"field_times":{"models":Time::new(now)}}),
+            );
+            keeper::set_facts(&mut tx, provider, &facts, now).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            Ok(suggestions)
+        })
     }
 
     /// Whether the runtime declares an authenticated vendor read, independently of whether its latest attempt succeeded.
@@ -1067,7 +1252,7 @@ impl From<&SignInValue> for Kept {
 }
 
 /// A sign-in that waits for the runtime: the method, what was given, and who began it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
     /// The adapter's own name for the way of signing in.
     pub method: String,
@@ -1080,6 +1265,17 @@ pub struct Pending {
     /// not.
     #[serde(default)]
     pub attempt: Id,
+    /// Exact accepted operation and credential, never target paths or reusable admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<orch_authz::CapturedOperation>,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("attempt", &self.attempt)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Pending {
@@ -1094,7 +1290,40 @@ impl Pending {
                 .collect(),
             by: Some(by),
             attempt: new_id(),
+            authority: None,
         }
+    }
+
+    /// Retains an operation already admitted by the shared producer.
+    pub fn with_authority(mut self, caller: &orch_authz::Caller) -> Result<Self, EngineError> {
+        // Inline creation is deferred owner work, as its Make job was before this
+        // boundary was retained. Browser As-admin is not lent to that continuation.
+        let caller = if caller.admitted_operation() == Some("ProviderCreate") {
+            caller.clone().with_admin_mode(false)
+        } else {
+            caller.clone()
+        };
+        let origin =
+            orch_authz::CapturedOperation::capture(&caller).map_err(EngineError::unreadable)?;
+        if !matches!(
+            origin.operation(),
+            "ProviderLoginStart.interactive" | "ProviderLoginStart.import" | "ProviderCreate"
+        ) || self.by != Some(origin.user())
+        {
+            return Err(EngineError::unreadable(
+                "a sign-in needs its actual start origin",
+            ));
+        }
+        self.authority = Some(origin);
+        Ok(self)
+    }
+
+    /// Private active origin, retained after the pending secret references are consumed.
+    pub fn authority_state(&self) -> Result<Option<Json>, EngineError> {
+        Ok(Some(serde_json::to_value(LoginAuthority {
+            attempt: self.attempt,
+            origin: self.authority.clone(),
+        })?))
     }
 
     /// The form it is kept in.
@@ -1200,17 +1429,27 @@ impl Engine {
 
     /// Ends a sign-in that cannot go on: what waited is forgotten with its secrets, and the state says
     /// why.
-    async fn give_up_sign_in(&self, provider: Id, why: &str) -> Result<(), EngineError> {
+    async fn give_up_sign_in(
+        &self,
+        provider: Id,
+        attempt: Option<Id>,
+        why: &str,
+    ) -> Result<(), EngineError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        let method = match runtime_rows::lock(&mut tx, provider).await? {
-            Some(state) => state
-                .login_pending
-                .as_deref()
-                .and_then(|bytes| serde_json::from_slice::<Pending>(bytes).ok())
-                .map(|pending| pending.method),
-            None => None,
-        };
+        let pending = runtime_rows::lock(&mut tx, provider)
+            .await?
+            .and_then(|state| state.login_pending)
+            .map(|bytes| serde_json::from_slice::<Pending>(&bytes))
+            .transpose()?;
+        if attempt.is_some_and(|attempt| {
+            pending
+                .as_ref()
+                .is_none_or(|pending| pending.attempt != attempt)
+        }) {
+            return Ok(());
+        }
+        let method = pending.map(|pending| pending.method);
         runtime_rows::delete_login_secrets(&mut tx, provider, runtime_rows::LOGIN_SECRET_PREFIX)
             .await?;
         runtime_rows::clear_pending(&mut tx, provider).await?;
@@ -1221,6 +1460,71 @@ impl Engine {
         runtime_rows::set_login_state(&mut tx, provider, &heard(&failed, now), now).await?;
         tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(())
+    }
+
+    async fn note_pending_login(
+        &self,
+        provider: Id,
+        pending: &Pending,
+        state: &Json,
+    ) -> Result<bool, EngineError> {
+        let mut tx = self.inner.db.begin().await?;
+        runtime_rows::lock(&mut tx, provider).await?;
+        if !login_authority::pending_current(&mut tx, provider, pending).await? {
+            return Ok(false);
+        }
+        let now = self.inner.clock.now();
+        runtime_rows::set_login_state(&mut tx, provider, &heard(state, now), now).await?;
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        Ok(true)
+    }
+
+    async fn pending_sign_in_authorized(
+        &self,
+        provider: Id,
+        pending: &Pending,
+    ) -> Result<bool, EngineError> {
+        let mut conn = self.inner.db.acquire().await?;
+        if !login_authority::pending_current(&mut conn, provider, pending).await? {
+            return Ok(false);
+        }
+        if let Some(origin) = &pending.authority {
+            let active = LoginAuthority {
+                attempt: pending.attempt,
+                origin: Some(origin.clone()),
+            };
+            return active
+                .authorized(&mut conn, provider, Time::new(self.inner.clock.now()))
+                .await;
+        }
+        Ok(true)
+    }
+
+    async fn sign_in_origins_authorized(
+        &self,
+        conn: &mut orch_db::Conn,
+        provider: Id,
+        active: Option<&LoginAuthority>,
+        input: Option<&orch_authz::CapturedOperation>,
+    ) -> Result<bool, EngineError> {
+        if !orch_settings::provider_sign_in(conn, provider)
+            .await?
+            .allowed
+        {
+            return Ok(false);
+        }
+        let now = Time::new(self.inner.clock.now());
+        if let Some(active) = active
+            && !active.authorized(conn, provider, now).await?
+        {
+            return Ok(false);
+        }
+        if let Some(input) = input
+            && !provider_login_authorized(conn, provider, input, now).await?
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Gives the sign-in that waits to the harness of the provider's profile in its runtime, starting
@@ -1242,18 +1546,26 @@ impl Engine {
         else {
             return Ok(Delivered::Nothing);
         };
+        if !self.pending_sign_in_authorized(provider, &pending).await? {
+            let why = "the accepted sign-in authority is no longer available";
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
+            return Ok(Delivered::Refused(why.into()));
+        }
         let permitted =
             orch_settings::provider_sign_in(&mut *self.inner.db.acquire().await?, provider)
                 .await?
                 .allowed;
         if !permitted {
             let why = "provider.signin: the credential keeper has not permitted changes in the selected existing harness home";
-            self.give_up_sign_in(provider, why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
             return Ok(Delivered::Refused(why.into()));
         }
         let Some(agent_id) = state.agent_id else {
             let why = "an API provider has no sign-in".to_owned();
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         };
         let Some(machine) = self.runtime_machine(&state).await? else {
@@ -1261,8 +1573,8 @@ impl Engine {
                 Ok(started) => {
                     // The sign-in has begun, though the harness is not there to be told: the page shows
                     // it as starting while the runtime comes up.
-                    self.note_login(
-                        provider,
+                    self.note_pending_login(
+                        provider, &pending,
                         &serde_json::json!({
                             "state": "starting", "method": pending.method, "shows": [], "asks": null,
                             "expires_at": null, "error": null,
@@ -1277,7 +1589,8 @@ impl Engine {
                 Err(crate::provider_runtime::RuntimeError::Internal(error)) => Err(error),
                 Err(other) => {
                     let why = other.to_string();
-                    self.give_up_sign_in(provider, &why).await?;
+                    self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                        .await?;
                     Ok(Delivered::Refused(why))
                 }
             };
@@ -1288,7 +1601,8 @@ impl Engine {
         };
         let Some(profile) = profile else {
             let why = "the profile whose harness holds the sign-in is not there".to_owned();
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         };
         let key = HarnessKey {
@@ -1306,13 +1620,15 @@ impl Engine {
         match started {
             Err(_elapsed) => {
                 let why = "the harness did not start in time".to_owned();
-                self.give_up_sign_in(provider, &why).await?;
+                self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                    .await?;
                 return Ok(Delivered::Refused(why));
             }
             Ok(Err(error)) => return Err(error),
             Ok(Ok(Started::Failed(outcome))) => {
                 let why = format!("the harness did not start: {}", failure_text(&outcome));
-                self.give_up_sign_in(provider, &why).await?;
+                self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                    .await?;
                 return Ok(Delivered::Refused(why));
             }
             Ok(Ok(Started::Up)) => {}
@@ -1324,17 +1640,29 @@ impl Engine {
                 .unwrap_or(profile)
         };
         if let Err(why) = check_pending(&profile, &pending) {
-            self.give_up_sign_in(provider, &why).await?;
+            self.give_up_sign_in(provider, Some(pending.attempt), &why)
+                .await?;
             return Ok(Delivered::Refused(why));
         }
-        self.note_login(
-            provider,
-            &serde_json::json!({
-                "state": "starting", "method": pending.method, "shows": [], "asks": null,
-                "expires_at": null, "error": null,
-            }),
-        )
-        .await?;
+        if !self.pending_sign_in_authorized(provider, &pending).await? {
+            let why = "the accepted sign-in authority is no longer available";
+            self.give_up_sign_in(provider, Some(pending.attempt), why)
+                .await?;
+            return Ok(Delivered::Refused(why.into()));
+        }
+        if !self
+            .note_pending_login(
+                provider,
+                &pending,
+                &serde_json::json!({
+                    "state": "starting", "method": pending.method, "shows": [], "asks": null,
+                    "expires_at": null, "error": null,
+                }),
+            )
+            .await?
+        {
+            return Ok(Delivered::Nothing);
+        }
         let command = Outgoing::new(
             ids::derived(
                 "provider.login.start",
@@ -1356,33 +1684,34 @@ impl Engine {
                 config: state.config.clone(),
             },
         )?;
+        let command =
+            command.with_login_authority(LoginCommandAuthority::start(provider, &pending));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
         // The harness has what it was given, or has refused it: either way nothing is kept.
         {
             let mut tx = self.inner.db.begin().await?;
+            runtime_rows::lock(&mut tx, provider).await?;
+            if !login_authority::pending_current(&mut tx, provider, &pending).await? {
+                return Ok(Delivered::Nothing);
+            }
             runtime_rows::delete_login_secrets(
                 &mut tx,
                 provider,
                 runtime_rows::LOGIN_SECRET_PREFIX,
             )
             .await?;
+            if !matches!(&outcome, Outcome::Succeeded(_)) {
+                let now = self.inner.clock.now();
+                let failed = serde_json::json!({"state":"failed", "method":pending.method,
+                    "shows":[], "asks":null, "expires_at":null, "error":failure_text(&outcome)});
+                runtime_rows::set_login_state(&mut tx, provider, &heard(&failed, now), now).await?;
+            }
             runtime_rows::clear_pending(&mut tx, provider).await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         match outcome {
             Outcome::Succeeded(_) => Ok(Delivered::Sent),
-            other => {
-                let why = failure_text(&other);
-                self.note_login(
-                    provider,
-                    &serde_json::json!({
-                        "state": "failed", "method": pending.method, "shows": [], "asks": null,
-                        "expires_at": null, "error": why,
-                    }),
-                )
-                .await?;
-                Ok(Delivered::Refused(why))
-            }
+            other => Ok(Delivered::Refused(failure_text(&other))),
         }
     }
 
@@ -1392,6 +1721,35 @@ impl Engine {
         &self,
         provider: Id,
         values: &BTreeMap<String, SignInValue>,
+    ) -> Result<Asked, EngineError> {
+        let active = LoginAuthority::load(&mut *self.inner.db.acquire().await?, provider).await?;
+        self.send_login_input_with_authority(provider, values, None, active)
+            .await
+    }
+
+    /// A request's actual Input origin stays separate from the original Start credential.
+    pub async fn send_login_input_authorized(
+        &self,
+        provider: Id,
+        values: &BTreeMap<String, SignInValue>,
+        origin: orch_authz::CapturedOperation,
+        active: Option<LoginAuthority>,
+    ) -> Result<Asked, EngineError> {
+        if origin.operation() != "ProviderLoginInput" {
+            return Ok(Asked::Refused(
+                "a sign-in answer needs its actual input origin".into(),
+            ));
+        }
+        self.send_login_input_with_authority(provider, values, Some(origin), active)
+            .await
+    }
+
+    async fn send_login_input_with_authority(
+        &self,
+        provider: Id,
+        values: &BTreeMap<String, SignInValue>,
+        origin: Option<orch_authz::CapturedOperation>,
+        active: Option<LoginAuthority>,
     ) -> Result<Asked, EngineError> {
         if !orch_settings::provider_sign_in(&mut *self.inner.db.acquire().await?, provider)
             .await?
@@ -1418,6 +1776,24 @@ impl Engine {
                 )
             })
             .collect();
+        // All target/harness waits have completed. Recheck each exact origin independently.
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            if LoginAuthority::load(&mut conn, provider).await? != active
+                || !self
+                    .sign_in_origins_authorized(
+                        &mut conn,
+                        provider,
+                        active.as_ref(),
+                        origin.as_ref(),
+                    )
+                    .await?
+            {
+                return Ok(Asked::Refused(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+        }
         let command = Outgoing::new(
             new_id(),
             machine,
@@ -1431,10 +1807,25 @@ impl Engine {
                 values: given,
             },
         )?;
+        let command = command.with_login_authority(LoginCommandAuthority::input(
+            provider,
+            active.clone(),
+            origin.clone(),
+        ));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
-        let mut conn = self.inner.db.acquire().await?;
-        runtime_rows::delete_login_secrets(&mut conn, provider, runtime_rows::LOGIN_SECRET_PREFIX)
-            .await?;
+        let mut tx = self.inner.db.begin().await?;
+        runtime_rows::lock(&mut tx, provider).await?;
+        if LoginAuthority::load(&mut tx, provider).await? == active {
+            let refs: Vec<Id> = values
+                .values()
+                .filter_map(|value| match value {
+                    SignInValue::Secret(id) => Some(*id),
+                    SignInValue::Text(_) => None,
+                })
+                .collect();
+            runtime_rows::delete_login_secret_refs(&mut tx, provider, &refs).await?;
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
         Ok(match outcome {
             Outcome::Succeeded(_) => Asked::Done,
             other => Asked::Refused(failure_text(&other)),
@@ -1443,8 +1834,40 @@ impl Engine {
 
     /// Gives a sign-in up: what waited is forgotten, and a running one is told to stop.
     pub async fn cancel_sign_in(&self, provider: Id) -> Result<Asked, EngineError> {
+        self.cancel_sign_in_with_authority(provider, None).await
+    }
+
+    pub(crate) async fn cancel_sign_in_authorized(
+        &self,
+        provider: Id,
+        origin: orch_authz::CapturedOperation,
+    ) -> Result<Asked, EngineError> {
+        self.cancel_sign_in_with_authority(provider, Some(origin))
+            .await
+    }
+
+    async fn cancel_sign_in_with_authority(
+        &self,
+        provider: Id,
+        origin: Option<orch_authz::CapturedOperation>,
+    ) -> Result<Asked, EngineError> {
         {
             let mut tx = self.inner.db.begin().await?;
+            runtime_rows::lock(&mut tx, provider).await?;
+            if let Some(origin) = &origin
+                && (origin.operation() != "ProviderLoginCancel"
+                    || !provider_login_authorized(
+                        &mut tx,
+                        provider,
+                        origin,
+                        Time::new(self.inner.clock.now()),
+                    )
+                    .await?)
+            {
+                return Ok(Asked::Refused(
+                    "the cancellation authority is no longer available".into(),
+                ));
+            }
             runtime_rows::delete_login_secrets(
                 &mut tx,
                 provider,
@@ -1452,6 +1875,7 @@ impl Engine {
             )
             .await?;
             runtime_rows::clear_pending(&mut tx, provider).await?;
+            runtime_rows::keep_login_authority(&mut tx, provider, None).await?;
             tx.commit().await.map_err(orch_db::DbError::from)?;
         }
         let (state, machine) = match self.sign_in_target(provider).await? {
@@ -1472,6 +1896,31 @@ impl Engine {
         let Some(agent_id) = state.agent_id else {
             return Ok(Asked::Done);
         };
+        {
+            let mut conn = self.inner.db.acquire().await?;
+            if LoginAuthority::load(&mut conn, provider).await?.is_some()
+                || runtime_rows::state(&mut conn, provider)
+                    .await?
+                    .is_some_and(|state| state.login_pending.is_some())
+            {
+                return Ok(Asked::Refused(
+                    "another sign-in replaced the cancelled attempt".into(),
+                ));
+            }
+            if let Some(origin) = &origin
+                && !provider_login_authorized(
+                    &mut conn,
+                    provider,
+                    origin,
+                    Time::new(self.inner.clock.now()),
+                )
+                .await?
+            {
+                return Ok(Asked::Refused(
+                    "the cancellation authority is no longer available".into(),
+                ));
+            }
+        }
         let command = Outgoing::new(
             new_id(),
             machine,
@@ -1484,6 +1933,8 @@ impl Engine {
                 agent_id,
             },
         )?;
+        let command =
+            command.with_login_authority(LoginCommandAuthority::cancel(provider, origin.clone()));
         let outcome = crate::commands::run(self.inner.commands.as_ref(), command).await?;
         Ok(match outcome {
             Outcome::Succeeded(_) => Asked::Done,
@@ -1610,6 +2061,7 @@ impl Engine {
         for provider in overdue {
             self.give_up_sign_in(
                 provider,
+                None,
                 "the sign-in waited too long for the provider's runtime and was given up",
             )
             .await?;
@@ -1633,46 +2085,74 @@ impl Engine {
     /// For each provider whose sign-in completed since the schedule last looked: the harness is asked
     /// for what it holds, which moves the provider's state; and a sign-in that waits for the person
     /// beyond its end is told that it ran out.
-    pub(crate) async fn look_after_sign_ins(&self) -> Result<(), EngineError> {
-        let now = self.inner.clock.now();
-        let (completed, overdue) = {
-            let mut conn = self.inner.db.acquire().await?;
-            (
-                runtime_rows::completed_not_looked_at(&mut conn, LOOK_BATCH).await?,
-                runtime_rows::overdue_logins(&mut conn, now, LOOK_BATCH).await?,
-            )
-        };
-        for provider in overdue {
-            let state = {
+    pub(crate) fn look_after_sign_ins(&self) -> BoxFuture<'_, Result<(), EngineError>> {
+        Box::pin(async move {
+            let now = self.inner.clock.now();
+            let (completed, overdue) = {
                 let mut conn = self.inner.db.acquire().await?;
-                runtime_rows::state(&mut conn, provider).await?
+                (
+                    runtime_rows::completed_not_looked_at(&mut conn, LOOK_BATCH).await?,
+                    runtime_rows::overdue_logins(&mut conn, now, LOOK_BATCH).await?,
+                )
             };
-            let method = state
-                .and_then(|state| state.login_state)
-                .and_then(|state| state.get("method").cloned())
-                .unwrap_or(Json::Null);
-            self.note_login(
-                provider,
-                &serde_json::json!({
-                    "state": "expired", "method": method, "shows": [], "asks": null,
-                    "expires_at": null, "error": null,
-                }),
-            )
-            .await?;
-        }
-        for provider in completed {
-            self.look_at_completed_sign_in(provider).await?;
-        }
-        Ok(())
+            for provider in overdue {
+                let state = {
+                    let mut conn = self.inner.db.acquire().await?;
+                    runtime_rows::state(&mut conn, provider).await?
+                };
+                let method = state
+                    .and_then(|state| state.login_state)
+                    .and_then(|state| state.get("method").cloned())
+                    .unwrap_or(Json::Null);
+                self.note_login(
+                    provider,
+                    &serde_json::json!({
+                        "state": "expired", "method": method, "shows": [], "asks": null,
+                        "expires_at": null, "error": null,
+                    }),
+                )
+                .await?;
+            }
+            for provider in completed {
+                self.look_at_completed_sign_in(provider).await?;
+            }
+            Ok(())
+        })
     }
 
     /// Asks the harness what it holds after a sign-in completed, and notes that it was looked at.
-    pub async fn look_at_completed_sign_in(&self, provider: Id) -> Result<Refreshed, EngineError> {
-        let looked = self.refresh_provider_now(provider).await?;
-        let now = self.inner.clock.now();
-        let mut conn = self.inner.db.acquire().await?;
-        runtime_rows::mark_looked_at(&mut conn, provider, now).await?;
-        Ok(looked)
+    pub fn look_at_completed_sign_in(
+        &self,
+        provider: Id,
+    ) -> BoxFuture<'_, Result<Refreshed, EngineError>> {
+        Box::pin(async move {
+            let active =
+                LoginAuthority::load(&mut *self.inner.db.acquire().await?, provider).await?;
+            if let Some(active) = &active
+                && !active
+                    .authorized(
+                        &mut *self.inner.db.acquire().await?,
+                        provider,
+                        Time::new(self.inner.clock.now()),
+                    )
+                    .await?
+            {
+                return Ok(Refreshed::Failed(
+                    "the accepted sign-in authority is no longer available".into(),
+                ));
+            }
+            let looked = self
+                .read_provider_facts_inner(provider, true, false, active.clone(), false)
+                .await?;
+            let now = self.inner.clock.now();
+            let mut tx = self.inner.db.begin().await?;
+            runtime_rows::lock(&mut tx, provider).await?;
+            if LoginAuthority::load(&mut tx, provider).await? == active {
+                runtime_rows::mark_looked_at(&mut tx, provider, now).await?;
+            }
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            Ok(looked)
+        })
     }
 
     /// Has the harness of a provider whose runtime was started to renew its sign-in look at it. A
@@ -1928,6 +2408,15 @@ fn check_pending(profile: &AgentRow, pending: &Pending) -> Result<(), String> {
             pending.method
         ));
     };
+    if let Some(origin) = &pending.authority {
+        let expected = match method.kind {
+            orch_agent_contract::login::LoginKind::Import => "ProviderLoginStart.import",
+            orch_agent_contract::login::LoginKind::Interactive => "ProviderLoginStart.interactive",
+        };
+        if origin.operation() != "ProviderCreate" && origin.operation() != expected {
+            return Err("the declared sign-in method changed its operation".into());
+        }
+    }
     for name in pending.values.keys() {
         if !method.fields.iter().any(|field| &field.name == name) {
             return Err(format!("{name} is not asked for by this way of signing in"));

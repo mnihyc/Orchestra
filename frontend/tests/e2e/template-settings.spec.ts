@@ -96,7 +96,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await expect(page.getByText(words.templates.spec.saved.replace('{{name}}', name), { exact: true })).toBeVisible();
     await page.getByRole('button', { name: words.environments.make.here, exact: true }).click();
     const make = page.getByRole('dialog', { name: words.environments.make.title, exact: true });
-    await expect(make.getByRole('combobox', { name: words.environments.make.template, exact: true })).toContainText(name);
+    await expect(make.getByRole('combobox', { name: words.environments.make.template, exact: true })).toHaveValue(name);
     await expect(make.getByRole('switch', { name: words.temporary.name, exact: true })).not.toBeChecked();
     await make.getByRole('switch', { name: words.temporary.name, exact: true }).click();
     await expect(make.getByRole('switch', { name: words.temporary.name, exact: true })).toBeChecked();

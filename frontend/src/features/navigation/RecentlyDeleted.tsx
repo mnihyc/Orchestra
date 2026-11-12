@@ -114,8 +114,8 @@ export function RecentlyDeleted({ place, open, onClose }: RecentlyDeletedProps) 
       description={t('trace.recentDeletedLead')}
       footer={<Button onClick={onClose}>{t('common.close')}</Button>}
     >
-      {node.isPending ? <SkeletonRows rows={2} /> : node.isError ? <ErrorState error={node.error} onRetry={() => void node.refetch()} /> : !mayManageNodes ? null : list.isPending ? (
-        <SkeletonRows rows={3} />
+      {node.isPending ? <SkeletonRows read={node} rows={2} /> : node.isError ? <ErrorState error={node.error} onRetry={() => void node.refetch()} /> : !mayManageNodes ? null : list.isPending ? (
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError && entries.length === 0 ? (
         <ErrorState compact title={t('trace.nodeReadFailure')} error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : entries.length === 0 ? null : (

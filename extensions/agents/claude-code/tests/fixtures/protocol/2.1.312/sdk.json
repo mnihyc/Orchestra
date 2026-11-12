@@ -1,0 +1,2683 @@
+{
+  "format": 1,
+  "program": "claude-code",
+  "native_version": "2.1.312",
+  "evidence": {
+    "kind": "published_protocol",
+    "package": {
+      "name": "@anthropic-ai/claude-agent-sdk",
+      "version": "0.3.312",
+      "sha256": "98a6c27b00b273fa0598b80540aa152d9fb58b6a1ac885b5993381e98469926d"
+    },
+    "references": [
+      "https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.312.tgz",
+      "https://code.claude.com/docs/en/agent-sdk/typescript"
+    ],
+    "declarations_file": {
+      "path": "package/sdk.d.ts",
+      "sha256": "bfc77ff5a6702fcc15ed9b290e6ab8ca1166501516b76e12113697dd9984d998"
+    },
+    "runtime_files": [
+      {
+        "path": "package/core-qw4t51gr.mjs",
+        "sha256": "cd0ba1465a04b950970c4d7fe956b24105936777f4a951eaf7f2226d1464f488"
+      },
+      {
+        "path": "package/core-jhgm58v5.mjs",
+        "sha256": "7855e5cbcc040da5eb20c7ad208cd04bcd5c5d19363f55e97011ae9cdbf7da23"
+      },
+      {
+        "path": "package/core-x7q9bdvq.mjs",
+        "sha256": "76e3f54508cdbf28ee2fa4ecb03e57c10a900cf2b3c077022bd86ec47c19b57e"
+      },
+      {
+        "path": "package/core.mjs",
+        "sha256": "ea521c6de70160039cff3d6cf618bf6b867dfbe88ccf3c5af13671674506de21"
+      },
+      {
+        "path": "package/sdk.mjs",
+        "sha256": "f5d668db39e357267e512a3792ebd828f6a42a23e7f8377921a924a513861181"
+      },
+      {
+        "path": "package/bridge.mjs",
+        "sha256": "92d3ebfd2592d39717c1a2b617e820ed65c23f53f5ee1491a27d28eb6e767f7d"
+      },
+      {
+        "path": "package/core-azmey26z.mjs",
+        "sha256": "49fbaa9f5d447f475c57e4bfedabd54670a1be76a614764045ef4cbff5aafdd9"
+      },
+      {
+        "path": "package/browser-sdk.js",
+        "sha256": "f42b487fb480cf8bff8c89bd62fe5a6abb56d4272f1ea1ff309b6a5beb83c72f"
+      },
+      {
+        "path": "package/extractFromBunfs.js",
+        "sha256": "9c590c0ad3f74bf47aad914a84215d2746795b302088ed731c42f6068f0960db"
+      }
+    ]
+  },
+  "declarations": {
+    "SDKAPIRetryMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "system"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "api_retry"
+          ],
+          "kind": "string"
+        },
+        "attempt": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "max_retries": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "retry_delay_ms": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "error_status": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "error": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "no_response": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "attempt",
+        "error",
+        "error_status",
+        "max_retries",
+        "no_response",
+        "retry_delay_ms",
+        "retry_wait_ms",
+        "session_id",
+        "subtype",
+        "type",
+        "uuid",
+        "waited_ms"
+      ]
+    },
+    "SDKAssistantMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "assistant"
+          ],
+          "kind": "string"
+        },
+        "message": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "parent_tool_use_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "error": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "request_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "user_message_uuid": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "user_message_uuids": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "resume_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "resumed_from_incomplete_thinking": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "supersedes": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "aborted": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "agent_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "subagent_type": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "task_description": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "timestamp": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "context_usage": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "usage_report": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        }
+      },
+      "property_names": [
+        "aborted",
+        "agent_id",
+        "context_usage",
+        "error",
+        "message",
+        "parent_tool_use_id",
+        "request_id",
+        "resume_reason",
+        "resumed_from_incomplete_thinking",
+        "session_id",
+        "subagent_type",
+        "supersedes",
+        "task_description",
+        "timestamp",
+        "type",
+        "usage_report",
+        "user_message_uuid",
+        "user_message_uuids",
+        "uuid"
+      ]
+    },
+    "SDKControlGetSettingsRequest": {
+      "fields": {
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "get_settings"
+          ],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "subtype"
+      ]
+    },
+    "SDKControlRequest": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "control_request"
+          ],
+          "kind": "string"
+        },
+        "request_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "request": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        }
+      },
+      "property_names": [
+        "request",
+        "request_id",
+        "type"
+      ]
+    },
+    "SDKControlResponse": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "control_response"
+          ],
+          "kind": "string"
+        },
+        "response": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        }
+      },
+      "property_names": [
+        "response",
+        "type"
+      ]
+    },
+    "SDKHookResponseMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "system"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "hook_response"
+          ],
+          "kind": "string"
+        },
+        "hook_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "hook_name": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "hook_event": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "output": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "stdout": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "stderr": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "exit_code": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "outcome": {
+          "optional": false,
+          "literals": [
+            "success",
+            "error",
+            "cancelled"
+          ],
+          "kind": "string"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "exit_code",
+        "hook_event",
+        "hook_id",
+        "hook_name",
+        "outcome",
+        "output",
+        "session_id",
+        "stderr",
+        "stdout",
+        "subtype",
+        "type",
+        "uuid"
+      ]
+    },
+    "SDKHookStartedMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "system"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "hook_started"
+          ],
+          "kind": "string"
+        },
+        "hook_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "hook_name": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "hook_event": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "hook_event",
+        "hook_id",
+        "hook_name",
+        "session_id",
+        "subtype",
+        "type",
+        "uuid"
+      ]
+    },
+    "SDKPartialAssistantMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "stream_event"
+          ],
+          "kind": "string"
+        },
+        "event": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "parent_tool_use_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "ttft_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "user_message_uuid": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "user_message_uuids": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "resume_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "event",
+        "parent_tool_use_id",
+        "resume_reason",
+        "session_id",
+        "ttft_ms",
+        "type",
+        "user_message_uuid",
+        "user_message_uuids",
+        "uuid"
+      ]
+    },
+    "SDKResultSuccess": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "result"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "success"
+          ],
+          "kind": "string"
+        },
+        "duration_ms": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "duration_api_ms": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "ttft_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "ttft_stream_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "time_to_request_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "user_message_uuid": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "user_message_uuids": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "resume_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "local_command": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "request_sent_wall_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_content_frame_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_stream_post_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_stream_post_ack_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_stream_post_queue_wait_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_stream_post_queued_behind": {
+          "optional": true,
+          "literals": [
+            "durable_post",
+            "ephemeral_post",
+            "retry_backoff",
+            "hold",
+            "none"
+          ],
+          "kind": "string"
+        },
+        "first_stream_post_wall_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_text_post_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_text_post_queue_wait_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "first_text_post_queued_behind": {
+          "optional": true,
+          "literals": [
+            "durable_post",
+            "ephemeral_post",
+            "retry_backoff",
+            "hold",
+            "none"
+          ],
+          "kind": "string"
+        },
+        "first_text_post_wall_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "time_to_request_from_spawn_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "warm_spare_claimed": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "time_origin_ms": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "is_error": {
+          "optional": false,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "api_error_status": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "num_turns": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "result": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "stop_reason": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "total_cost_usd": {
+          "optional": false,
+          "literals": [],
+          "kind": "number"
+        },
+        "usage": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "modelUsage": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "permission_denials": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "queued_turn_count": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "structured_output": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "deferred_tool_use": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "terminal_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "result_index": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "fast_mode_state": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "fast_mode_disabled_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "origin": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "api_error_status",
+        "deferred_tool_use",
+        "duration_api_ms",
+        "duration_ms",
+        "fast_mode_disabled_reason",
+        "fast_mode_state",
+        "first_content_frame_ms",
+        "first_stream_post_ack_ms",
+        "first_stream_post_ms",
+        "first_stream_post_queue_wait_ms",
+        "first_stream_post_queued_behind",
+        "first_stream_post_wall_ms",
+        "first_text_post_ms",
+        "first_text_post_queue_wait_ms",
+        "first_text_post_queued_behind",
+        "first_text_post_wall_ms",
+        "is_error",
+        "local_command",
+        "modelUsage",
+        "num_turns",
+        "origin",
+        "permission_denials",
+        "queued_turn_count",
+        "request_sent_wall_ms",
+        "result",
+        "result_index",
+        "resume_reason",
+        "session_id",
+        "stop_reason",
+        "structured_output",
+        "subtype",
+        "terminal_reason",
+        "time_origin_ms",
+        "time_to_request_from_spawn_ms",
+        "time_to_request_ms",
+        "total_cost_usd",
+        "ttft_ms",
+        "ttft_stream_ms",
+        "type",
+        "usage",
+        "user_message_uuid",
+        "user_message_uuids",
+        "uuid",
+        "warm_spare_claimed"
+      ]
+    },
+    "SDKSystemMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "system"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "init"
+          ],
+          "kind": "string"
+        },
+        "agents": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "apiKeySource": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "betas": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "claude_code_version": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "cwd": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "tools": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "mcp_servers": {
+          "optional": false,
+          "literals": [],
+          "kind": "object"
+        },
+        "model": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "permissionMode": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "slash_commands": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "terminal_slash_commands": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "output_style": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "skills": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "plugins": {
+          "optional": false,
+          "literals": [],
+          "kind": "object"
+        },
+        "plugin_errors": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "fast_mode_state": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "fast_mode_disabled_reason": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "effort": {
+          "optional": true,
+          "literals": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "kind": "string"
+        },
+        "view_mode": {
+          "optional": true,
+          "literals": [
+            "focus",
+            "default"
+          ],
+          "kind": "string"
+        },
+        "capabilities": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "agents",
+        "apiKeySource",
+        "betas",
+        "capabilities",
+        "claude_code_version",
+        "cwd",
+        "effort",
+        "fast_mode_disabled_reason",
+        "fast_mode_state",
+        "mcp_servers",
+        "message",
+        "model",
+        "name",
+        "output_style",
+        "path",
+        "permissionMode",
+        "plugin",
+        "plugin_errors",
+        "plugins",
+        "session_id",
+        "skills",
+        "slash_commands",
+        "source",
+        "status",
+        "subtype",
+        "terminal_slash_commands",
+        "tools",
+        "type",
+        "uuid",
+        "version",
+        "view_mode"
+      ]
+    },
+    "SDKTaskNotificationMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "system"
+          ],
+          "kind": "string"
+        },
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "task_notification"
+          ],
+          "kind": "string"
+        },
+        "task_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "run_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "tool_use_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "status": {
+          "optional": false,
+          "literals": [
+            "completed",
+            "failed",
+            "stopped"
+          ],
+          "kind": "string"
+        },
+        "reason": {
+          "optional": true,
+          "literals": [
+            "worker_restart"
+          ],
+          "kind": "string"
+        },
+        "output_file": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "summary": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "usage": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "resource_links": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "skip_transcript": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "ambient": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "uuid": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "ambient",
+        "duration_ms",
+        "output_file",
+        "reason",
+        "resource_links",
+        "run_id",
+        "session_id",
+        "skip_transcript",
+        "status",
+        "subtype",
+        "summary",
+        "task_id",
+        "tool_use_id",
+        "tool_uses",
+        "total_tokens",
+        "type",
+        "usage",
+        "uuid"
+      ]
+    },
+    "SDKUserMessage": {
+      "fields": {
+        "type": {
+          "optional": false,
+          "literals": [
+            "user"
+          ],
+          "kind": "string"
+        },
+        "message": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "parent_tool_use_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "reference"
+        },
+        "isSynthetic": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "tool_use_result": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "priority": {
+          "optional": true,
+          "literals": [
+            "now",
+            "next",
+            "later"
+          ],
+          "kind": "string"
+        },
+        "origin": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "shouldQuery": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "timestamp": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "client_composed": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "uuid": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pasted_content": {
+          "optional": true,
+          "literals": [
+            "content"
+          ],
+          "kind": "string"
+        },
+        "inline_pastes": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "session_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "agent_id": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "subagent_type": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "task_description": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "agent_id",
+        "client_composed",
+        "inline_pastes",
+        "isSynthetic",
+        "message",
+        "origin",
+        "parent_tool_use_id",
+        "pasted_content",
+        "priority",
+        "session_id",
+        "shouldQuery",
+        "subagent_type",
+        "task_description",
+        "timestamp",
+        "tool_use_result",
+        "type",
+        "uuid"
+      ]
+    },
+    "Settings": {
+      "fields": {
+        "$schema": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "apiKeyHelper": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "proxyAuthHelper": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "awsCredentialExport": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "awsAuthRefresh": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "gcpAuthRefresh": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "processWrapper": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "policyHelper": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "fileSuggestion": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "respectGitignore": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "cleanupPeriodDays": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "desktopSessionCleanupPeriodDays": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "syncClaudeAiSkills": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "syncClaudeAiPlugins": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "skillListingMaxDescChars": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "skillListingBudgetFraction": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "wslInheritsWindowsSettings": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "env": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "attribution": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "attributionProject": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "attributionProjectPolicy": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "includeCoAuthoredBy": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "includeGitInstructions": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "permissions": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "model": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "fallbackModel": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "availableModels": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "enforceAvailableModels": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "availableModelsMatch": {
+          "optional": true,
+          "literals": [
+            "prefix",
+            "exact"
+          ],
+          "kind": "string"
+        },
+        "deniedModels": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "modelOverrides": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "modelPicker": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "modelPricing": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "enableAllProjectMcpServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "enabledMcpjsonServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "disabledMcpjsonServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "disableClaudeAiConnectors": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "skillOverrides": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "disableBundledSkills": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "managedMcpServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "allowedMcpServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "deniedMcpServers": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "hooks": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "worktree": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "disableAllHooks": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableAgentView": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableRemoteControl": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableWorkflows": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableArtifact": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "enableArtifact": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "enableWorkflows": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "workflowSizeGuideline": {
+          "optional": true,
+          "literals": [
+            "unrestricted",
+            "small",
+            "medium",
+            "large"
+          ],
+          "kind": "string"
+        },
+        "workflowKeywordTriggerEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableSkillShellExecution": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "defaultShell": {
+          "optional": true,
+          "literals": [
+            "bash",
+            "powershell"
+          ],
+          "kind": "string"
+        },
+        "bashEditDiffEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "bashOutputMaxChars": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "taskOutputMaxChars": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "respondToBashCommands": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowManagedHooksOnly": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowedHttpHookUrls": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "httpHookAllowedEnvVars": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "allowManagedPermissionRulesOnly": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowManagedMcpServersOnly": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowAllClaudeAiMcps": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowClaudeInChromeWithManagedMcp": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "strictPluginOnlyCustomization": {
+          "optional": true,
+          "literals": [
+            "skills",
+            "agents",
+            "hooks",
+            "mcp"
+          ],
+          "kind": "string"
+        },
+        "statusLine": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "prUrlTemplate": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "footerLinksRegexes": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "subagentStatusLine": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "enabledPlugins": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "prependPlugins": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "appendPlugins": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "extraKnownMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "additionalMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "strictKnownMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "allowedMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "blockedMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "disableCommandPluginSources": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableSideloadFlags": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "pluginSuggestionMarketplaces": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "forceLoginMethod": {
+          "optional": true,
+          "literals": [
+            "claudeai",
+            "console",
+            "gateway"
+          ],
+          "kind": "string"
+        },
+        "forceLoginGatewayUrl": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "gatewayInternalNetworks": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "parentSettingsBehavior": {
+          "optional": true,
+          "literals": [
+            "first-wins",
+            "merge"
+          ],
+          "kind": "string"
+        },
+        "managedSourcesBehavior": {
+          "optional": true,
+          "literals": [
+            "first-wins",
+            "merge"
+          ],
+          "kind": "string"
+        },
+        "forceLoginOrgUUID": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "allowedProviders": {
+          "optional": true,
+          "literals": [
+            "anthropic",
+            "customEndpoint",
+            "bedrock",
+            "vertex",
+            "foundry",
+            "anthropicAws",
+            "mantle",
+            "gateway"
+          ],
+          "kind": "string"
+        },
+        "forceRemoteSettingsRefresh": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "otelHeadersHelper": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "outputStyle": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "viewMode": {
+          "optional": true,
+          "literals": [
+            "default",
+            "verbose",
+            "focus"
+          ],
+          "kind": "string"
+        },
+        "language": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "skipWebFetchPreflight": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "sandbox": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "feedbackSurveyRate": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "feedbackDrafts": {
+          "optional": true,
+          "literals": [
+            "notify",
+            "quiet",
+            "off"
+          ],
+          "kind": "string"
+        },
+        "spinnerTipsEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "spinnerVerbs": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "spinnerTipsOverride": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "syntaxHighlightingDisabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "maxProseWidth": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "spellcheck": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "terminalTitleFromRename": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "promptCacheTtl": {
+          "optional": true,
+          "literals": [
+            "5m",
+            "1h"
+          ],
+          "kind": "string"
+        },
+        "subagentPromptCacheTtl": {
+          "optional": true,
+          "literals": [
+            "5m",
+            "1h"
+          ],
+          "kind": "string"
+        },
+        "alwaysThinkingEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "effortLevel": {
+          "optional": true,
+          "literals": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "kind": "string"
+        },
+        "maxEffortLevel": {
+          "optional": true,
+          "literals": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "kind": "string"
+        },
+        "modelSettings": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "ultracode": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "autoCompactWindow": {
+          "optional": true,
+          "literals": [],
+          "kind": "number"
+        },
+        "advisorModel": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "fastMode": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "fastModePerSessionOptIn": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "promptSuggestionEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "emojiCompletionEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "showClearContextOnPlanAccept": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "askUserQuestionTimeout": {
+          "optional": true,
+          "literals": [
+            "60s",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "kind": "string"
+        },
+        "dialogExpiry": {
+          "optional": true,
+          "literals": [
+            "60s",
+            "5m",
+            "10m",
+            "never"
+          ],
+          "kind": "string"
+        },
+        "agent": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "companyAnnouncements": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pluginConfigs": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "remote": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "autoUpdatesChannel": {
+          "optional": true,
+          "literals": [
+            "latest",
+            "stable",
+            "rc"
+          ],
+          "kind": "string"
+        },
+        "minimumVersion": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "requiredMinimumVersion": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "requiredMaximumVersion": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "plansDirectory": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "tui": {
+          "optional": true,
+          "literals": [
+            "default",
+            "fullscreen"
+          ],
+          "kind": "string"
+        },
+        "voice": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "channelsEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "allowedChannelPlugins": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "prefersReducedMotion": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "timeFormat": {
+          "optional": true,
+          "literals": [
+            "auto",
+            "12-hour",
+            "24-hour",
+            "24-hour-utc"
+          ],
+          "kind": "string"
+        },
+        "timeZone": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "autoMemoryEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "autoMemoryDirectory": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "autoDreamEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "showThinkingSummaries": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "skipDangerousModePermissionPrompt": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "disableAutoMode": {
+          "optional": true,
+          "literals": [
+            "disable"
+          ],
+          "kind": "string"
+        },
+        "sshConfigs": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "sshHostCommands": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "claudeMd": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "claudeMdExcludes": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pluginTrustMessage": {
+          "optional": true,
+          "literals": [],
+          "kind": "string"
+        },
+        "theme": {
+          "optional": true,
+          "literals": [
+            "auto",
+            "dark",
+            "light",
+            "light-daltonized",
+            "dark-daltonized",
+            "light-ansi",
+            "dark-ansi"
+          ],
+          "kind": "string"
+        },
+        "editorMode": {
+          "optional": true,
+          "literals": [
+            "normal",
+            "vim"
+          ],
+          "kind": "string"
+        },
+        "keybindingFlavor": {
+          "optional": true,
+          "literals": [
+            "classic",
+            "readline"
+          ],
+          "kind": "string"
+        },
+        "vimInsertModeRemaps": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "verbose": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "preferredNotifChannel": {
+          "optional": true,
+          "literals": [
+            "auto",
+            "iterm2",
+            "terminal_bell",
+            "iterm2_with_bell",
+            "kitty",
+            "ghostty",
+            "notifications_disabled"
+          ],
+          "kind": "string"
+        },
+        "autoCompactEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "precomputeCompactionEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "idleCompaction": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "switchModelsOnFlag": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "autoContinueAtUsageLimit": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "autoScrollEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "wheelScrollAccelerationEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "fileCheckpointingEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "showTurnDuration": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "showMessageTimestamps": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "terminalProgressBarEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "todoFeatureEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "teammateMode": {
+          "optional": true,
+          "literals": [
+            "auto",
+            "tmux",
+            "iterm2",
+            "in-process"
+          ],
+          "kind": "string"
+        },
+        "remoteControlAtStartup": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "isolatePeerMachines": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "daemonColdStart": {
+          "optional": true,
+          "literals": [
+            "transient",
+            "ask"
+          ],
+          "kind": "string"
+        },
+        "crossSessionInbound": {
+          "optional": true,
+          "literals": [
+            "accept",
+            "hold",
+            "refuse"
+          ],
+          "kind": "string"
+        },
+        "autoUploadSessions": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "inputNeededNotifEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "agentPushNotifEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "skipAutoPermissionPrompt": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "useAutoModeDuringPlan": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "autoMode": {
+          "optional": true,
+          "literals": [],
+          "kind": "object"
+        },
+        "disableDeepLinkRegistration": {
+          "optional": true,
+          "literals": [
+            "disable"
+          ],
+          "kind": "string"
+        },
+        "voiceEnabled": {
+          "optional": true,
+          "literals": [],
+          "kind": "boolean"
+        },
+        "defaultView": {
+          "optional": true,
+          "literals": [
+            "chat",
+            "transcript"
+          ],
+          "kind": "string"
+        }
+      },
+      "property_names": [
+        "$schema",
+        "accessKeyIdVar",
+        "additionalDirectories",
+        "additionalMarketplaces",
+        "advisorModel",
+        "agent",
+        "agentPushNotifEnabled",
+        "allow",
+        "allowAllClaudeAiMcps",
+        "allowAllUnixSockets",
+        "allowAppleEvents",
+        "allowClaudeInChromeWithManagedMcp",
+        "allowLocalBinding",
+        "allowMachLookup",
+        "allowManagedDomainsOnly",
+        "allowManagedHooksOnly",
+        "allowManagedMcpServersOnly",
+        "allowManagedPermissionRulesOnly",
+        "allowManagedReadPathsOnly",
+        "allowNestedUserNamespaces",
+        "allowPlaintextInject",
+        "allowRead",
+        "allowUnixSockets",
+        "allowUnsandboxedCommands",
+        "allowWrite",
+        "allowedChannelPlugins",
+        "allowedDomains",
+        "allowedEnvVars",
+        "allowedHttpHookUrls",
+        "allowedMarketplaces",
+        "allowedMcpServers",
+        "allowedProviders",
+        "alwaysThinkingEnabled",
+        "apiKeyHelper",
+        "appendPlugins",
+        "args",
+        "ask",
+        "askUserQuestionTimeout",
+        "async",
+        "asyncRewake",
+        "attribution",
+        "attributionProject",
+        "attributionProjectPolicy",
+        "autoAllowBashIfSandboxed",
+        "autoCompactEnabled",
+        "autoCompactWindow",
+        "autoContinueAtUsageLimit",
+        "autoDreamEnabled",
+        "autoMemoryDirectory",
+        "autoMemoryEnabled",
+        "autoMode",
+        "autoScrollEnabled",
+        "autoSubmit",
+        "autoUpdate",
+        "autoUpdatesChannel",
+        "autoUploadSessions",
+        "availableModels",
+        "availableModelsMatch",
+        "awsAuthRefresh",
+        "awsCredentialExport",
+        "awsPairs",
+        "baseRef",
+        "bashEditDiffEnabled",
+        "bashOutputMaxChars",
+        "behavesAs",
+        "bgIsolation",
+        "blockReadsOutsideWorkingDirectories",
+        "blockedMarketplaces",
+        "bwrapPath",
+        "caCertPath",
+        "caKeyPath",
+        "cacheRead",
+        "cacheWrite",
+        "channelsEnabled",
+        "checker",
+        "classifyAllShell",
+        "claudeMd",
+        "claudeMdExcludes",
+        "cleanupPeriodDays",
+        "color",
+        "command",
+        "commit",
+        "companyAnnouncements",
+        "continueOnBlock",
+        "credentials",
+        "crossSessionInbound",
+        "daemonColdStart",
+        "decode",
+        "default",
+        "defaultEnvironmentId",
+        "defaultMode",
+        "defaultShell",
+        "defaultView",
+        "deniedDomains",
+        "deniedMcpServers",
+        "deniedModels",
+        "deny",
+        "denyRead",
+        "denyWrite",
+        "description",
+        "desktopSessionCleanupPeriodDays",
+        "dialogExpiry",
+        "disableAgentView",
+        "disableAllHooks",
+        "disableArtifact",
+        "disableAutoMode",
+        "disableBundledSkills",
+        "disableBypassPermissionsMode",
+        "disableClaudeAiConnectors",
+        "disableCommandPluginSources",
+        "disableDeepLinkRegistration",
+        "disableRemoteControl",
+        "disableSideloadFlags",
+        "disableSkillShellExecution",
+        "disableWorkflows",
+        "disabled",
+        "disabledMcpjsonServers",
+        "editorMode",
+        "effortLevel",
+        "email",
+        "emojiCompletionEnabled",
+        "enableAllProjectMcpServers",
+        "enableArtifact",
+        "enableWeakerNestedSandbox",
+        "enableWeakerNetworkIsolation",
+        "enableWorkflows",
+        "enabled",
+        "enabledMcpjsonServers",
+        "enabledPlugins",
+        "enforceAvailableModels",
+        "env",
+        "envVars",
+        "environment",
+        "error",
+        "excludeDefault",
+        "excludedCommands",
+        "extraKnownMarketplaces",
+        "extract",
+        "failIfUnavailable",
+        "fallbackModel",
+        "fastMode",
+        "fastModePerSessionOptIn",
+        "feedbackDrafts",
+        "feedbackSurveyRate",
+        "fileCheckpointingEnabled",
+        "fileSuggestion",
+        "files",
+        "filesystem",
+        "footerLinksRegexes",
+        "forceLoginGatewayUrl",
+        "forceLoginMethod",
+        "forceLoginOrgUUID",
+        "forceRemoteSettingsRefresh",
+        "gatewayInternalNetworks",
+        "gcpAuthRefresh",
+        "hard_deny",
+        "headers",
+        "headersHelper",
+        "hideVimModeIndicator",
+        "hooks",
+        "hostPattern",
+        "httpHookAllowedEnvVars",
+        "httpProxyPort",
+        "id",
+        "idleCompaction",
+        "if",
+        "ignoreViolations",
+        "includeCoAuthoredBy",
+        "includeGitInstructions",
+        "injectHosts",
+        "input",
+        "inputNeededNotifEnabled",
+        "installLocation",
+        "isolatePeerMachines",
+        "keybindingFlavor",
+        "label",
+        "language",
+        "location",
+        "managedMcpServers",
+        "managedSourcesBehavior",
+        "marketplace",
+        "maskClaims",
+        "maskDuplicates",
+        "matcher",
+        "maxEffortLevel",
+        "maxProseWidth",
+        "mcpServers",
+        "minimumVersion",
+        "mode",
+        "model",
+        "modelOverrides",
+        "modelPicker",
+        "modelPricing",
+        "modelSettings",
+        "multiplier",
+        "name",
+        "network",
+        "onExtractNoMatch",
+        "onFailure",
+        "once",
+        "options",
+        "otelHeadersHelper",
+        "output",
+        "outputStyle",
+        "overrides",
+        "owner",
+        "package",
+        "padding",
+        "parentSettingsBehavior",
+        "path",
+        "pathPattern",
+        "pattern",
+        "permissions",
+        "plansDirectory",
+        "plugin",
+        "pluginConfigs",
+        "pluginDigests",
+        "pluginSuggestionMarketplaces",
+        "pluginTrustMessage",
+        "plugins",
+        "policyHelper",
+        "pr",
+        "prUrlTemplate",
+        "precomputeCompactionEnabled",
+        "preferredNotifChannel",
+        "prefersReducedMotion",
+        "prependPlugins",
+        "presigned",
+        "processWrapper",
+        "prompt",
+        "promptCacheTtl",
+        "promptSuggestionEnabled",
+        "proxyAuthHelper",
+        "ref",
+        "refreshInterval",
+        "refreshIntervalMs",
+        "registry",
+        "remote",
+        "remoteControlAtStartup",
+        "replaceBuiltInOptions",
+        "repo",
+        "requiredMaximumVersion",
+        "requiredMinimumVersion",
+        "respectGitignore",
+        "respondToBashCommands",
+        "ripgrep",
+        "sandbox",
+        "secretAccessKeyVar",
+        "server",
+        "serverCommand",
+        "serverName",
+        "serverUrl",
+        "sessionTokenVar",
+        "sessionUrl",
+        "sha",
+        "sha256",
+        "shell",
+        "showClearContextOnPlanAccept",
+        "showMessageTimestamps",
+        "showThinkingSummaries",
+        "showTurnDuration",
+        "sigv4",
+        "sigv4a",
+        "skillListingBudgetFraction",
+        "skillListingMaxDescChars",
+        "skillOverrides",
+        "skipAutoPermissionPrompt",
+        "skipDangerousModePermissionPrompt",
+        "skipLfs",
+        "skipWebFetchPreflight",
+        "socatPath",
+        "socksProxyPort",
+        "soft_deny",
+        "source",
+        "sparsePaths",
+        "spellcheck",
+        "spinnerTipsEnabled",
+        "spinnerTipsOverride",
+        "spinnerVerbs",
+        "sshConfigs",
+        "sshHost",
+        "sshHostCommands",
+        "sshIdentityFile",
+        "sshPort",
+        "startDirectory",
+        "statusLine",
+        "statusMessage",
+        "streaming",
+        "strict",
+        "strictAllowlist",
+        "strictKnownMarketplaces",
+        "strictPluginOnlyCustomization",
+        "subagentPromptCacheTtl",
+        "subagentStatusLine",
+        "switchModelsOnFlag",
+        "symlinkDirectories",
+        "syncClaudeAiPlugins",
+        "syncClaudeAiSkills",
+        "syntaxHighlightingDisabled",
+        "taskOutputMaxChars",
+        "teammateMode",
+        "terminalProgressBarEnabled",
+        "terminalTitleFromRename",
+        "theme",
+        "timeFormat",
+        "timeZone",
+        "timeout",
+        "timeoutMs",
+        "tips",
+        "tipsFile",
+        "tlsTerminate",
+        "todoFeatureEnabled",
+        "tool",
+        "tui",
+        "type",
+        "ultracode",
+        "url",
+        "useAutoModeDuringPlan",
+        "verbose",
+        "verbs",
+        "version",
+        "viewMode",
+        "vimInsertModeRemaps",
+        "voice",
+        "voiceEnabled",
+        "wheelScrollAccelerationEnabled",
+        "workflowKeywordTriggerEnabled",
+        "workflowSizeGuideline",
+        "worktree",
+        "wslInheritsWindowsSettings"
+      ]
+    },
+    "ControlResponse": {
+      "fields": {
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "success"
+          ],
+          "kind": "string"
+        },
+        "request_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "response": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pending_permission_requests": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pending_user_dialog_requests": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        }
+      },
+      "property_names": [
+        "pending_permission_requests",
+        "pending_user_dialog_requests",
+        "request_id",
+        "response",
+        "subtype"
+      ]
+    },
+    "ControlErrorResponse": {
+      "fields": {
+        "subtype": {
+          "optional": false,
+          "literals": [
+            "error"
+          ],
+          "kind": "string"
+        },
+        "request_id": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "error": {
+          "optional": false,
+          "literals": [],
+          "kind": "string"
+        },
+        "pending_permission_requests": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        },
+        "pending_user_dialog_requests": {
+          "optional": true,
+          "literals": [],
+          "kind": "reference"
+        }
+      },
+      "property_names": [
+        "error",
+        "pending_permission_requests",
+        "pending_user_dialog_requests",
+        "request_id",
+        "subtype"
+      ]
+    }
+  },
+  "managed_environment_symbols": {
+    "CLAUDE_AUTO_BACKGROUND_TASKS": true,
+    "CLAUDE_CODE_ARTIFACT_AUTO_OPEN": true,
+    "CLAUDE_CODE_ARTIFACT_COMMENTS": true,
+    "CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT": true,
+    "CLAUDE_CODE_AUTO_CONNECT_IDE": true,
+    "CLAUDE_CODE_AUTO_MODE_SERVER": true,
+    "CLAUDE_CODE_DISABLE_AGENT_VIEW": true,
+    "CLAUDE_CODE_DISABLE_ARTIFACT": true,
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": true,
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": true,
+    "CLAUDE_CODE_DISABLE_CRON": true,
+    "CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY": true,
+    "CLAUDE_CODE_DISABLE_MCP_TASK_BACKGROUND": true,
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": true,
+    "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": true,
+    "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": true,
+    "CLAUDE_CODE_DISABLE_WORKFLOWS": true,
+    "CLAUDE_CODE_ENABLE_AWAY_SUMMARY": true,
+    "CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH": true,
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": true,
+    "CLAUDE_CODE_ENABLE_TELEMETRY": true,
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": true,
+    "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL": true,
+    "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": true,
+    "CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE": true,
+    "CLAUDE_CODE_PROMPT_CACHE_TTL": true,
+    "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": true,
+    "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL": true,
+    "DISABLE_AUTOUPDATER": true,
+    "DISABLE_ERROR_REPORTING": true,
+    "DISABLE_FEEDBACK_COMMAND": true,
+    "DISABLE_TELEMETRY": true,
+    "DISABLE_UPDATES": true,
+    "ENABLE_CLAUDEAI_MCP_SERVERS": true,
+    "FORCE_AUTOUPDATE_PLUGINS": true,
+    "MCP_DISCOVERY_CACHE": true
+  },
+  "runtime_setting_fields": {
+    "awaySummaryEnabled": {
+      "kind": "boolean",
+      "optional": true,
+      "literals": [],
+      "source": {
+        "path": "package/core-azmey26z.mjs",
+        "sha256": "49fbaa9f5d447f475c57e4bfedabd54670a1be76a614764045ef4cbff5aafdd9"
+      }
+    }
+  },
+  "qualification_environment_symbols": {
+    "CLAUDE_CODE_DISABLE_FEATURE_FLAGS": false
+  }
+}

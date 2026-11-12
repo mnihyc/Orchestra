@@ -96,6 +96,25 @@ pub struct Snapshot {
     pub data: Json,
 }
 
+impl Snapshot {
+    /// The actual explicit-notice writer's immutable delivery input.
+    #[must_use]
+    pub fn person_notice(id: Option<Id>, notice: &super::people::NewNotification<'_>) -> Self {
+        Self {
+            id,
+            kind: notice.kind.to_owned(),
+            at: Time::new(notice.at),
+            title: notice.title.to_owned(),
+            body: notice.body.to_owned(),
+            node_id: notice.node_id,
+            thread_id: notice.thread_id,
+            approval_id: notice.approval_id,
+            chat_id: notice.chat_id,
+            data: notice.data.clone(),
+        }
+    }
+}
+
 /// What the outbox row of a delivery to a person or to a destination holds.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Payload {
@@ -330,6 +349,33 @@ pub async fn reserve_as(
     .execute(conn)
     .await?;
     Ok(done.rows_affected() == 1)
+}
+
+/// Discards a rendered attempt whose original producer closed. Preserve actual reached
+/// devices, then let the next native attempt select only the remaining eligible notices.
+/// A late result cannot release another worker's reservation, and no unmade call is counted.
+pub async fn release_attempt(
+    conn: &mut Conn,
+    id: Id,
+    dispatch: Id,
+    now: DateTime<Utc>,
+    payload: &Json,
+    attempted: bool,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query(
+        "UPDATE outbox SET state='pending', next_attempt_at=$3, payload=$4,
+            attempts=attempts+$5, dispatch_owner=NULL, dispatch_expires_at=NULL
+         WHERE id=$1 AND dispatch_id=$2 AND state='sending'",
+    )
+    .bind(id)
+    .bind(dispatch)
+    .bind(now)
+    .bind(payload)
+    .bind(i32::from(attempted))
+    .execute(conn)
+    .await?
+    .rows_affected()
+        == 1)
 }
 
 /// Records what an attempt came to, only where the delivery is still `sending` under that very

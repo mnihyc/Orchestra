@@ -10,7 +10,9 @@ mod support;
 use chrono::Duration;
 use orch_access_contract::pages::Holder;
 use orch_access_contract::permissions::Permission;
+use orch_authz::Caller;
 use orch_authz::pages::{ChangeError, Target};
+use orch_types::Id;
 use serde_json::json;
 use support::{World, user_holder};
 
@@ -23,6 +25,24 @@ fn missing(error: ChangeError, permission: Permission) {
                 .any(|lack| lack.permissions.contains(&permission))
         ),
         other => panic!("expected a permission refusal, got {other:?}"),
+    }
+}
+
+/// The members that a refusal names as beyond what the giver's own entries allow.
+fn beyond(error: ChangeError) -> Vec<String> {
+    match error {
+        ChangeError::Invalid(faults) => faults
+            .into_iter()
+            .map(|fault| {
+                assert!(
+                    fault.message.contains("any one entry of yours"),
+                    "{}",
+                    fault.message
+                );
+                fault.path
+            })
+            .collect(),
+        other => panic!("expected the members that go beyond, got {other:?}"),
     }
 }
 
@@ -192,6 +212,364 @@ async fn narrower_models_efforts_and_arrangements_need_management_but_a_swap_or_
         )
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn a_manager_without_the_use_shortens_the_places_of_an_entry_but_lengthens_or_takes_them_away_only_by_giving()
+ {
+    let world = World::new().await;
+    let manager = world.member("manager").await;
+    let recipient = world.member("recipient").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    world
+        .grant(
+            "provider",
+            id,
+            Permission::AccessManage,
+            Holder::User { id: manager },
+        )
+        .await;
+    let mut places = Vec::new();
+    for name in ["first", "second", "third"] {
+        let environment = world
+            .thing("environment", world.maker, world.topic, name)
+            .await;
+        // The manager sees all three, so that naming them is not what is refused.
+        world
+            .grant(
+                "environment",
+                environment,
+                Permission::EnvironmentView,
+                Holder::User { id: manager },
+            )
+            .await;
+        places.push(json!({"kind": "environment", "id": environment}));
+    }
+    let before = json!({"where": [places[0], places[1]]});
+    let entry = world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: recipient },
+            before,
+        )
+        .await;
+    let update = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "update": [{
+            "entry_id": entry, "options": options
+        }]}]})
+    };
+    world
+        .change_thing(
+            manager,
+            "provider",
+            id,
+            update(json!({"where": [places[0]]})),
+        )
+        .await
+        .unwrap();
+    let page = world.read_thing(world.maker, "provider", id).await;
+    assert_eq!(
+        page.rows
+            .iter()
+            .find(|row| row.permission == Permission::ProviderUse)
+            .unwrap()
+            .entries[0]
+            .options,
+        json!({"where": [places[0]]})
+    );
+    for options in [
+        json!({"where": [places[0], places[2]]}),
+        json!({"where": [places[1]]}),
+        json!({}),
+    ] {
+        let epoch = world.epoch().await;
+        let error = world
+            .change_thing(manager, "provider", id, update(options))
+            .await
+            .unwrap_err();
+        missing(error, Permission::ProviderUse);
+        assert_eq!(world.epoch().await, epoch);
+    }
+}
+
+#[tokio::test]
+async fn a_manager_without_the_use_cannot_add_a_type_in_which_the_credential_leaves_to_an_entry() {
+    let world = World::new().await;
+    let manager = world.member("manager").await;
+    let recipient = world.member("recipient").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    world
+        .grant(
+            "provider",
+            id,
+            Permission::AccessManage,
+            Holder::User { id: manager },
+        )
+        .await;
+    // An entry that names no type allows those in which the credential stays where it is kept.
+    let entry = world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: recipient },
+            json!({"models": ["small"]}),
+        )
+        .await;
+    let update = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "update": [{
+            "entry_id": entry, "options": options
+        }]}]})
+    };
+    for options in [
+        json!({"models": ["small"], "arrangements": ["credential_shared"]}),
+        json!({"models": ["small"], "arrangements": ["separated", "handed_over"]}),
+        json!({"models": ["small"], "arrangements": ["separated", "key_separated", "credential_shared"]}),
+    ] {
+        let epoch = world.epoch().await;
+        let error = world
+            .change_thing(manager, "provider", id, update(options))
+            .await
+            .unwrap_err();
+        missing(error, Permission::ProviderUse);
+        assert_eq!(world.epoch().await, epoch);
+    }
+    // Naming a type in which it stays narrows, and needs no use.
+    world
+        .change_thing(
+            manager,
+            "provider",
+            id,
+            update(json!({"models": ["small"], "arrangements": ["separated"]})),
+        )
+        .await
+        .unwrap();
+}
+
+/// Changes the page of a provider as somebody who may share what they hold: the place lets holders
+/// share, as shipped.
+async fn share_as(
+    world: &World,
+    user: Id,
+    provider: Id,
+    change: serde_json::Value,
+) -> Result<orch_authz::pages::Outcome, ChangeError> {
+    let change: orch_access_contract::pages::PageChange =
+        serde_json::from_value(change).expect("a change that reads");
+    let principal = world.principal(Caller::session(user)).await;
+    let mut tx = world.db.pool.begin().await.unwrap();
+    let outcome = orch_authz::pages::change_resource_under(
+        &mut tx,
+        &principal,
+        orch_access_contract::decisions::ObjectRef {
+            kind: orch_access_contract::permissions::ObjectKind::Provider,
+            id: provider,
+        },
+        &change,
+        orch_authz::Policy {
+            holders_share: true,
+            ..orch_authz::Policy::default()
+        },
+        &orch_authz::usable::ResourcePolicy::default(),
+        &orch_db::audit::Origin::default(),
+    )
+    .await;
+    if outcome.is_ok() {
+        tx.commit().await.unwrap();
+    }
+    outcome
+}
+
+#[tokio::test]
+async fn somebody_who_shares_a_provider_gives_at_most_the_entry_they_hold_when_adding_as_when_editing()
+ {
+    let world = World::new().await;
+    let sharer = world.member("sharer").await;
+    let friend = world.member("friend").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: sharer },
+            json!({"models": ["small"]}),
+        )
+        .await;
+    let add = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "add": [{
+            "holder": user_holder(friend), "options": options
+        }]}]})
+    };
+    // More than the sharer holds: another model, no models named at all, or a copy. The refusal says
+    // which member goes beyond, and is not a lack of the use.
+    for (options, members) in [
+        (json!({"models": ["large"]}), vec!["options.models"]),
+        (json!({}), vec!["options.models"]),
+        (
+            json!({"models": ["small"], "arrangements": ["credential_shared"]}),
+            vec!["options.arrangements"],
+        ),
+    ] {
+        let epoch = world.epoch().await;
+        let error = share_as(&world, sharer, id, add(options))
+            .await
+            .unwrap_err();
+        assert_eq!(beyond(error), members);
+        assert_eq!(world.epoch().await, epoch);
+    }
+    // What the sharer holds, or less of it.
+    share_as(
+        &world,
+        sharer,
+        id,
+        add(json!({"models": ["small"], "arrangements": ["separated"]})),
+    )
+    .await
+    .unwrap();
+    // The entry just given is changed under the same rule: narrowed freely, never widened.
+    let page = world.read_thing(world.maker, "provider", id).await;
+    let given = page
+        .rows
+        .iter()
+        .find(|row| row.permission == Permission::ProviderUse)
+        .unwrap()
+        .entries
+        .iter()
+        .find(|entry| entry.holder == Holder::User { id: friend })
+        .unwrap()
+        .id;
+    let edit = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "update": [{
+            "entry_id": given, "options": options
+        }]}]})
+    };
+    let error = share_as(
+        &world,
+        sharer,
+        id,
+        edit(json!({"models": ["small"], "arrangements": ["separated", "handed_over"]})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(beyond(error), ["options.arrangements"]);
+}
+
+/// Names an environment of the topic that `user` can see, as a place of an entry.
+async fn visible_place(world: &World, user: Id, name: &str) -> serde_json::Value {
+    let environment = world
+        .thing("environment", world.maker, world.topic, name)
+        .await;
+    world
+        .grant(
+            "environment",
+            environment,
+            Permission::EnvironmentView,
+            Holder::User { id: user },
+        )
+        .await;
+    json!({"kind": "environment", "id": environment})
+}
+
+#[tokio::test]
+async fn somebody_who_shares_from_an_entry_limited_to_a_place_gives_no_other_place() {
+    let world = World::new().await;
+    let sharer = world.member("sharer").await;
+    let friend = world.member("friend").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    let (first, second) = (
+        visible_place(&world, sharer, "first").await,
+        visible_place(&world, sharer, "second").await,
+    );
+    world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: sharer },
+            json!({"where": [first]}),
+        )
+        .await;
+    let add = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "add": [{
+            "holder": user_holder(friend), "options": options
+        }]}]})
+    };
+    // Anywhere, another place, or the place and one more go beyond the place the sharer holds.
+    for options in [
+        json!({}),
+        json!({"where": [second]}),
+        json!({"where": [first, second]}),
+    ] {
+        let epoch = world.epoch().await;
+        let error = share_as(&world, sharer, id, add(options))
+            .await
+            .unwrap_err();
+        assert_eq!(beyond(error), ["options.where"]);
+        assert_eq!(world.epoch().await, epoch);
+    }
+    share_as(&world, sharer, id, add(json!({"where": [first]})))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn somebody_who_shares_from_two_entries_gives_what_one_of_them_allows_and_not_what_they_allow_together()
+ {
+    let world = World::new().await;
+    let sharer = world.member("sharer").await;
+    let friend = world.member("friend").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    let first = visible_place(&world, sharer, "first").await;
+    // One entry of their own allows `small` in the first environment, the one everyone has allows
+    // `big` anywhere.
+    world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: sharer },
+            json!({"models": ["small"], "where": [first]}),
+        )
+        .await;
+    world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::Everyone,
+            json!({"models": ["big"]}),
+        )
+        .await;
+    let add = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "add": [{
+            "holder": user_holder(friend), "options": options
+        }]}]})
+    };
+    for options in [
+        // Both models in the first environment: the union of the two, which no one entry allows.
+        json!({"models": ["small", "big"], "where": [first]}),
+        // `small` anywhere: the model of the first entry with the place of the second.
+        json!({"models": ["small"]}),
+    ] {
+        let epoch = world.epoch().await;
+        let error = share_as(&world, sharer, id, add(options))
+            .await
+            .unwrap_err();
+        assert!(!beyond(error).is_empty());
+        assert_eq!(world.epoch().await, epoch);
+    }
+    // What one of them allows, or less.
+    share_as(
+        &world,
+        sharer,
+        id,
+        add(json!({"models": ["small"], "where": [first]})),
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

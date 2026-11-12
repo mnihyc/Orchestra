@@ -3,19 +3,23 @@
  */
 import type { Query, QueryClient, QueryKey } from '@tanstack/react-query';
 import { client } from '@/api/client';
+import { hasDefaultsOpeningOwner } from '@/api/defaultsOpening';
 import { queryFeed } from '@/realtime/queryFeeds';
 import { fetchShellAuthority, meQuery, metaKey } from '@/api/auth';
 import { adminModeQuery } from '@/api/adminMode';
 import type { AdminMode, Me } from '@/generated/api-types';
 import { orgsKey } from '@/api/nodes';
 import { queryAuthorityAllows } from '@/api/queryAuthority';
+import { scheduledReads } from '@/api/readScheduler';
 
 /** Membership-dependent views without a complete native replacement row. */
 const PEOPLE_PROJECTIONS = new Set([
   'members', 'holdings', 'suspensions', 'outsiders', 'outside-removal', 'invitations', 'people', 'people-search', 'holder-search',
   'chat-mentions', 'document-readers', 'org-groups', 'group-members', 'first-steps', 'page-people', 'roles', 'page',
   'page-effective', 'node', 'org', 'orgs', 'shared-with-me', 'chats', 'chat-states', 'user-shares', 'preview', 'document-related',
-  'node-chat-opening',
+  'node-chat-opening', 'org-overview', 'children', 'names', 'activity', 'outside-port-openings',
+  // A private reference is an independent authorized projection; a reconnect can change its reach.
+  'reference-preview',
 ]);
 
 // These admin projections contain people, membership counts or member choices.
@@ -24,6 +28,8 @@ const ADMIN_PEOPLE_PROJECTIONS = new Set(['users', 'user-search', 'orgs', 'org-p
 
 /** Also recognizes a legacy prefix dependency, so it cannot schedule a second repair. */
 export function isPeopleProjection(key: QueryKey): boolean {
+  if (key[0] === 'away') return key[1] === 'outside-status';
+  if (key[0] === 'usage') return key[1] === 'figures';
   if (key[0] === 'admin') return key.length === 1 || typeof key[1] === 'string' && ADMIN_PEOPLE_PROJECTIONS.has(key[1]);
   return typeof key[0] === 'string' && PEOPLE_PROJECTIONS.has(key[0]);
 }
@@ -35,6 +41,7 @@ const nativeReads = new WeakMap<Query, NativePeopleRead>();
 
 /** A native hint follows its committed change; later native reads already check that change. */
 export function capturePeopleHint(cache: QueryClient): number {
+  scheduledReads.advance();
   const next = (hintCuts.get(cache) ?? 0) + 1;
   hintCuts.set(cache, next);
   return next;
@@ -50,6 +57,9 @@ export function beginPeopleRead(cache: QueryClient, queryKey: QueryKey): { accep
     cancel: () => { if (query !== undefined && nativeReads.get(query) === read) nativeReads.delete(query); },
   };
 }
+
+/** Current native membership generation; attempt history remains with its own Query. */
+export function peopleHintCut(cache: QueryClient): number { return hintCuts.get(cache) ?? 0; }
 
 function checkedAfter(query: Query, cut: number | undefined): boolean {
   const read = nativeReads.get(query);
@@ -79,7 +89,14 @@ export async function repairPeople(cache: QueryClient, supplied: readonly QueryK
   const queries = cache.getQueryCache().getAll().filter((query) =>
     isPeopleProjection(query.queryKey) && queryFeed(query.queryKey) === null
     && !checkedAfter(query, cut)
-    && !supplied.some((key) => JSON.stringify(key) === JSON.stringify(query.queryKey)));
+    && !supplied.some((key) => JSON.stringify(key) === JSON.stringify(query.queryKey))
+    // A displayed native aggregate owns its supplied projections. Rebuild that
+    // owner once; its child observers cannot race it with independent repairs.
+    && (() => {
+      const owner = scheduledReads.owner(query.queryKey);
+      return owner === undefined || !isPeopleProjection(owner) || JSON.stringify(owner) === JSON.stringify(query.queryKey)
+        || cache.getQueryCache().find({ queryKey: owner, exact: true })?.isActive() !== true;
+    })());
   await Promise.all(queries.map((query) => cache.cancelQueries({ queryKey: query.queryKey, exact: true })));
   // Cancellation yields too: a mode write started in that interval owns the
   // next reader just as one already pending when the hint arrived does.
@@ -95,7 +112,17 @@ export async function repairPeople(cache: QueryClient, supplied: readonly QueryK
       reads.push(query.queryKey);
     }
   }
-  await Promise.all(reads.map((queryKey) => current() ? cache.refetchQueries({ queryKey, exact: true }) : Promise.resolve()));
+  // Start an already-active owned aggregate before its dependent Node, even when Node was cached first.
+  const aggregates = new Map(reads.flatMap((key) => key[0] === 'node-chat-opening' && typeof key[1] === 'string'
+    && hasDefaultsOpeningOwner(cache, key) ? [[key[1], key] as const] : []));
+  const pending = new Map<QueryKey, Promise<void>>();
+  const start = (key: QueryKey) => { if (!pending.has(key)) pending.set(key, current() ? cache.refetchQueries({ queryKey: key, exact: true }) : Promise.resolve()); };
+  for (const key of reads) {
+    const aggregate = key[0] === 'node' && typeof key[1] === 'string' ? aggregates.get(key[1]) : undefined;
+    if (aggregate !== undefined) start(aggregate);
+    start(key);
+  }
+  await Promise.all(pending.values());
 }
 
 interface AuthorityBaseline { person: Me; mode: AdminMode; changed: boolean; supplied: readonly QueryKey[] }

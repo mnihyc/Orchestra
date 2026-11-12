@@ -1,4 +1,5 @@
 /** The Layout menu and command palette invoke the same scoped workspace actions. */
+import { selectContentTab } from '@/features/workbench/contentNavigation';
 import type { TFunction } from 'i18next';
 import { Grid2X2, Grid3X3, Maximize, RotateCcw, X } from 'lucide-react';
 import { useMemo } from 'react';
@@ -33,7 +34,7 @@ export function WorkspaceCommands() {
     ...spatialMainGroups(layout.main).flatMap((group) => group.tabs).map((tab): Command => ({ id: `workspace.focus.${tab.id}`, kind: 'view',
       title: (t) => named.get(tab.id)?.title ?? t(viewOf(tab.view)?.title ?? 'views.screen.title'),
       note: () => named.get(tab.id)?.path ?? '', icon: named.get(tab.id)?.icon ?? viewOf(tab.view)?.icon,
-      run: () => useWorkbench.getState().focus(tab.id),
+      run: () => selectContentTab(tab.id),
     })),
     ...(['2x4', '3x3'] as const).map((preset) => ({ id: `view.grid.${preset}`, kind: 'view' as const,
       title: (t: TFunction) => t(preset === '2x4' ? 'workbench.workspace.grid2x4' : 'workbench.workspace.grid3x3'), icon: Grid2X2,

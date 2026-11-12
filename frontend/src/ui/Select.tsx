@@ -6,18 +6,21 @@
  */
 import { Check, ChevronDown } from 'lucide-react';
 import { Select as Primitive } from 'radix-ui';
-import { type ComponentProps, type ReactNode, type SyntheticEvent, useRef, useState } from 'react';
+import { type ComponentProps, type ReactNode, type SyntheticEvent, useCallback, useRef, useState } from 'react';
 
 import { Choice, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
-import { ChoiceCard, ChoiceInspection } from '@/ui/DetailCard';
+import { ChoiceCard, ChoiceInspection, type ChoiceResource } from '@/ui/DetailCard';
 import { cx } from '@/ui/cx';
 import { Field, type FieldSlots } from '@/ui/Field';
 import { fieldBoxClasses } from '@/ui/Input';
+import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
 
 export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
+  /** The actual resource, when this is a resource option without an inspection preview. */
+  resource?: ChoiceResource;
   /** What the choice is; never empty. */
   value: Value;
   /** The complete original when a caller deliberately shortens an option label before rendering. */
@@ -74,6 +77,10 @@ export function Select<Value extends string>({
   className,
 }: SelectProps<Value>) {
   const [shown, setShown, covered] = useTransientLayer(open, onOpenChange);
+  // The list takes the room it has for the options it has now, not those it opened with.
+  const field = useRef<HTMLElement | null>(null);
+  const attachField = useCallback((node: HTMLElement | null) => { field.current = node; }, []);
+  const { place, attach: attachList } = useLayerRoom({ shown: shown && !covered, anchor: field, watch: options, gap: 4 });
   const [highlighted, setHighlighted] = useState(value);
   const lastItem = useRef<HTMLElement | null>(null);
   const hasGuides = options.some((option) => option.help !== undefined);
@@ -139,6 +146,7 @@ export function Select<Value extends string>({
         <div className="contents" onChangeCapture={keepNativeSelection}>
         <Primitive.Root value={value} onValueChange={(next) => onValueChange(next as Value)} disabled={disabled} open={shown} onOpenChange={changeOpen}>
           <Primitive.Trigger
+            ref={attachField}
             {...control}
             aria-haspopup={hasControls ? 'dialog' : 'listbox'}
             className={cx(
@@ -160,13 +168,15 @@ export function Select<Value extends string>({
           </Primitive.Trigger>
           <Primitive.Portal>
             <Primitive.Content
-              style={covered ? { display: 'none' } : undefined}
+              ref={attachList}
+              style={covered ? { display: 'none' } : placeStyle(place)}
               onCloseAutoFocus={onCloseAutoFocus}
               onPointerDownOutside={(event) => { if (isInspectionTarget(event.target)) event.preventDefault(); }}
               role={hasControls ? 'dialog' : 'listbox'}
               aria-modal={hasControls ? true : undefined}
               aria-labelledby={hasControls ? control['aria-labelledby'] : undefined}
               position="popper"
+              side={place.side}
               sideOffset={4}
               collisionPadding={8} {...floatingAttachment}
               className={cx(

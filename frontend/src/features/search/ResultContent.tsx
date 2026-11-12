@@ -72,7 +72,7 @@ export function ResultDocument({ documentId, block, tabId, shown }: { documentId
     if (availableDocument !== undefined && editor !== null) bring(block);
   }, [block, bring, availableDocument, editor]);
   if (state.ended !== null) return <EmptyState compact icon={<Lock aria-hidden />} title={t('search.beside.unavailable')} />;
-  if (doc === null) return state.error === null ? <SkeletonRows rows={6} /> : <ErrorState error={state.error} onRetry={() => reloadDocument(documentId)} />;
+  if (doc === null) return state.error === null ? <SkeletonRows read={state} rows={6} /> : <ErrorState error={state.error} onRetry={() => reloadDocument(documentId)} />;
   return <div ref={root} tabIndex={-1} className="flex h-full min-h-0 flex-col" data-result-document={documentId}>
     <header className="flex shrink-0 items-center justify-end border-b border-border p-2"><IconButton label={t('search.find.document')} icon={<Search aria-hidden />} onClick={find.show} /></header>
     {find.bar}

@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+tempfile.workspace = true # long turns use the same private ephemeral storage as history exports
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
@@ -16,6 +17,7 @@ bzip2.workspace = true  # a tar packed with bzip2 that an import reads
 chrono.workspace = true
 flate2.workspace = true  # the deflate that the zip of an archive is written with: its backend is chosen here, not by the zip crate
 futures.workspace = true
+image.workspace = true # recognize the actual accepted image bytes for common image items
 metrics.workspace = true
 globset.workspace = true
 hex.workspace = true  # the SHA-256 of a skill's files, as its manifest writes them
@@ -33,9 +35,12 @@ orch-blob-contract.workspace = true
 orch-config.workspace = true
 orch-db.workspace = true
 orch-driver-contract.workspace = true
+orch-image-backends.workspace = true
 orch-link.workspace = true
 orch-link-contract.workspace = true
 orch-model-contract.workspace = true  # the protocol whose endpoints make vectors
+orch-operation-scope.workspace = true
+orch-person-notices.workspace = true
 orch-settings.workspace = true
 orch-settings-contract.workspace = true
 orch-summarizer-contract.workspace = true
@@ -59,12 +64,18 @@ zip.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+orch-adapter-claude-code.workspace = true # continuation admission uses the isolated scripted native rig
+orch-adapter-codex.workspace = true # real separated-turn loss uses the existing pinned native adapter rig
+orch-executor-codex.workspace = true # retire the real local-program executor, not a socket stand-in
+orch-executor-contract.workspace = true
+axum.workspace = true # the shared native rig compiles its existing relay module
+reqwest.workspace = true # the shared native rig compiles its existing relay module
 orch-driver-docker.workspace = true
 orch-envhost.workspace = true # source-attempt proofs use the real Git receipts and filesystem cleanup
 orch-blob-local.workspace = true
 orch-testkit.workspace = true
-tempfile.workspace = true
 sqlx.workspace = true
+tracing-subscriber.workspace = true # bounded phase diagnostics for native reader cases
 
 [lints]
 workspace = true

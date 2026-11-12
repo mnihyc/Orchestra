@@ -25,6 +25,7 @@ use crate::verification::{TlsIdentity, crypto};
 struct Shown {
     chain: Vec<Certificate>,
     key: Arc<CertifiedKey>,
+    proof_key: LeafKey,
 }
 
 /// The identity a service shows now, which a renewal replaces in place.
@@ -55,6 +56,7 @@ impl LiveIdentity {
             shown: RwLock::new(Shown {
                 chain: identity.chain.clone(),
                 key: certified(identity)?,
+                proof_key: identity.key.duplicate()?,
             }),
         }))
     }
@@ -76,8 +78,24 @@ impl LiveIdentity {
         *self.shown.write().unwrap_or_else(PoisonError::into_inner) = Shown {
             chain: identity.chain.clone(),
             key,
+            proof_key: identity.key.duplicate()?,
         };
         Ok(())
+    }
+
+    /// Signs a domain-separated application proof and returns its matching live certificate.
+    /// The same read lock prevents renewal from mixing the certificate and signing key.
+    pub fn proof(
+        &self,
+        message: &[u8],
+    ) -> Result<(Certificate, [u8; crate::certificates::SIGNATURE_BYTES]), PkiError> {
+        let shown = self.shown.read().unwrap_or_else(PoisonError::into_inner);
+        let certificate = shown
+            .chain
+            .first()
+            .cloned()
+            .ok_or_else(|| PkiError::Certificate("the service has no certificate".into()))?;
+        Ok((certificate, shown.proof_key.sign(message)))
     }
 
     /// The certificates after the holder's in the chain shown now: the authority's, where it is sent along.

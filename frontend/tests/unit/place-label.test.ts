@@ -1,5 +1,5 @@
 /** A place's label: its name alone while no other place the reader sees has it, and with where it is, in as few words as tell them apart, once one does. */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { knownPlaces, type Placed, placeLabel, placeLabels, placedOfPath } from '@/lib/placeLabel';
 
@@ -72,4 +72,26 @@ describe('a place’s label', () => {
     expect(labels.get('p')).toBe('web · Acme');
     expect(labels.get('q')).toBe('web · Beta');
   });
+
+  it.each(['Main thread', '主线程'])('keeps same-name qualification work proportional to a large tree (%s)', (title) => {
+    const run = (count: number) => {
+      const places = Array.from({ length: count }, (_, index) => at(`thread-${index}`, title, 'Acme', `Topic ${index}`));
+      const normalize = vi.spyOn(String.prototype, 'normalize');
+      try {
+        const labels = placeLabels(places);
+        const work = normalize.mock.calls.length;
+        expect(labels.size).toBe(count);
+        for (let index = 0; index < count; index += 1) expect(labels.get(`thread-${index}`)).toBe(`${title} · Topic ${index}`);
+        return work;
+      } finally { normalize.mockRestore(); }
+    };
+    // Doubling one same-name group doubles the comparisons; a pairwise scan grows fourfold.
+    expect(run(512)).toBeLessThanOrEqual(run(256) * 2);
+  });
+
+  it('keeps indistinguishable siblings honest without adding a hidden identifier', () => {
+    const places = [at('one', 'Main thread', 'Acme', 'Topic'), at('two', 'Main thread', 'Acme', 'Topic')];
+    expect([...placeLabels(places).values()]).toEqual(['Main thread · Topic · Acme', 'Main thread · Topic · Acme']);
+  });
+
 });

@@ -3,6 +3,41 @@
 use orch_types::Json;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+
+/// Whether a specific failure reason is part of the existing model-access family.
+#[must_use]
+pub fn is_access_reason(reason: Option<&str>) -> bool {
+    matches!(reason, Some("access" | "credit_program"))
+}
+
+#[derive(Deserialize)]
+struct DeclaredFailure {
+    #[serde(default)]
+    classify: bool,
+    codes: Vec<String>,
+    #[serde(rename = "expected")]
+    kind: String,
+    reason: Option<String>,
+}
+
+/// Only cases explicitly declared for dispatch are rules; the other cases remain regression inputs.
+fn declared_code(code: &str) -> Option<Classification> {
+    static CASES: OnceLock<Vec<DeclaredFailure>> = OnceLock::new();
+    CASES
+        .get_or_init(|| {
+            serde_json::from_str(include_str!("failure_cases.json")).unwrap_or_default()
+        })
+        .iter()
+        .find(|case| {
+            case.classify
+                && case
+                    .codes
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(code))
+        })
+        .map(|case| result(&case.kind, case.reason.as_deref(), Evidence::Structured))
+}
 
 /// The evidence that decided a classification, strongest first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -37,7 +72,12 @@ impl Classification {
     pub fn retryable(&self) -> bool {
         matches!(
             self.code.as_str(),
-            "provider_busy" | "provider_unreachable" | "model_refused"
+            "provider_busy"
+                | "rate_limited"
+                | "overloaded"
+                | "stream_interrupted"
+                | "provider_unreachable"
+                | "model_refused"
         )
     }
 
@@ -46,12 +86,13 @@ impl Classification {
     pub fn row(&self) -> &'static str {
         match self.code.as_str() {
             "model_refused" => "model_refused",
-            "model_unavailable" if self.reason.as_deref() == Some("access") => "model_access",
+            "model_unavailable" if is_access_reason(self.reason.as_deref()) => "model_access",
             "model_unavailable" => "model_not_found",
             "context_overflow" => "context_window",
             "provider_exhausted" => "plan_limit",
             "provider_unauthorized" => "credential_refused",
-            "provider_busy" => "busy",
+            "provider_busy" | "rate_limited" | "overloaded" => "busy",
+            "stream_interrupted" => "out_of_reach",
             "provider_unreachable" => "out_of_reach",
             _ => "unknown",
         }
@@ -318,21 +359,28 @@ fn words(text: &str) -> Option<Classification> {
     if has(
         text,
         &[
-            "overload",
-            "at capacity",
-            "capacity reached",
             "rate limit",
             "rate_limit",
             "too many requests",
             "throttl",
+            "temporarily limiting",
+        ],
+    ) {
+        return Some(result("rate_limited", None, Evidence::Words));
+    }
+    if has(
+        text,
+        &[
+            "overload",
+            "at capacity",
+            "capacity reached",
             "server busy",
             "service busy",
-            "temporarily limiting",
             "server error",
             "server_error",
         ],
     ) {
-        return Some(result("provider_busy", None, Evidence::Words));
+        return Some(result("overloaded", None, Evidence::Words));
     }
     if has(
         text,
@@ -390,6 +438,9 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
     let mut server_wrapper = false;
     for code in &input.codes {
         let code = code.to_ascii_lowercase();
+        if let Some(declared) = declared_code(&code) {
+            return declared;
+        }
         let explicit = match code.as_str() {
             "model_access_denied"
             | "access_not_granted"
@@ -436,13 +487,15 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
             | "invalid_credential_header"
             | "oauth_org_not_allowed"
             | "cloud_credential_error" => Some(("provider_unauthorized", None)),
+            "rate_limited" => Some(("rate_limited", None)),
+            "stream_interrupted" => Some(("stream_interrupted", None)),
             "serveroverloaded"
             | "internalservererror"
             | "flexunavailable"
             | "overloaded_error"
             | "server_is_overloaded"
             | "service_unavailable_error"
-            | "overloaded" => Some(("provider_busy", None)),
+            | "overloaded" => Some(("overloaded", None)),
             "server_error" | "api_error" => {
                 server_wrapper = true;
                 None
@@ -455,7 +508,7 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
             | "rate_limit_exceeded"
             | "rate_limit"
             | "slow_down" => {
-                generic = Some("provider_busy");
+                generic = Some("rate_limited");
                 None
             }
             "permission_error" => {
@@ -474,7 +527,11 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         && let Some(found) = by_words.as_ref()
         && !matches!(
             found.code.as_str(),
-            "provider_busy" | "provider_unreachable"
+            "provider_busy"
+                | "rate_limited"
+                | "overloaded"
+                | "stream_interrupted"
+                | "provider_unreachable"
         )
     {
         return found.clone();
@@ -486,7 +543,8 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         Some(404) if text.contains("model") => Some("model_unavailable"),
         Some(408 | 504) => Some("provider_unreachable"),
         Some(413) => Some("context_overflow"),
-        Some(429 | 500..=599) => Some("provider_busy"),
+        Some(429) => Some("rate_limited"),
+        Some(500..=599) => Some("overloaded"),
         _ => None,
     };
     if let Some(kind) = status_kind {
@@ -506,7 +564,7 @@ pub fn classify(input: &FailureInput<'_>) -> Classification {
         return result("provider_unreachable", None, Evidence::Transport);
     }
     if server_wrapper {
-        return result("provider_busy", None, Evidence::Structured);
+        return result("overloaded", None, Evidence::Structured);
     }
     // Retry advice alone names no cause and cannot make an unknown failure transient.
     result("harness_error", None, Evidence::Unknown)
@@ -622,6 +680,29 @@ mod tests {
         expected: String,
         reason: Option<String>,
         why: String,
+    }
+
+    #[test]
+    fn declared_credit_access_codes_keep_their_cause_above_quota_or_key_advice() {
+        let cases: Vec<DeclaredFailure> =
+            serde_json::from_str(include_str!("failure_cases.json")).unwrap();
+        let case = cases
+            .iter()
+            .find(|case| case.classify && case.reason.as_deref() == Some("credit_program"))
+            .unwrap();
+        for code in &case.codes {
+            let found = classify(&FailureInput {
+                codes: vec![code, "invalid_request_error"],
+                status: Some(400),
+                message: "Quota, invalid API key, please retry later",
+                transport: false,
+            });
+            assert_eq!(found.code, "model_unavailable");
+            assert_eq!(found.reason.as_deref(), Some("credit_program"));
+            assert_eq!(found.evidence, Evidence::Structured);
+            assert_eq!(found.row(), "model_access");
+            assert!(!found.retryable());
+        }
     }
 
     #[test]

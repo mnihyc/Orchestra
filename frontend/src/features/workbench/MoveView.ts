@@ -11,6 +11,7 @@ import {
   type CollisionDetection,
   type KeyboardCoordinateGetter,
   pointerWithin,
+  type Announcements,
 } from '@dnd-kit/core';
 import type { TFunction } from 'i18next';
 
@@ -35,6 +36,28 @@ export const DRAG_STARTS_AFTER_PX = 6;
 export interface DropSpot {
   target: Target;
   label: string;
+}
+
+/** Picking up does not yet move a view; keep that announcement until its measured position changes. */
+export function viewDragAnnouncements(layout: Layout, t: TFunction): Announcements {
+  const spotOf = (data: unknown): DropSpot | null => (data as DropSpot | undefined) ?? null;
+  return {
+    onDragStart: ({ active }) => t('workbench.drag.pickedUp', { title: (active.data.current as { title: string }).title }),
+    onDragOver: ({ active, over }) => {
+      const { initial, translated } = active.rect.current;
+      if (initial !== null && translated !== null && initial.left === translated.left && initial.top === translated.top) return undefined;
+      const spot = spotOf(over?.data.current);
+      if (spot === null) return t('workbench.drag.nowhere');
+      const from = findTab(layout, String(active.id));
+      if (from !== null && over?.id === spotId({ to: 'group', group: from.group.id, index: from.index })) return undefined;
+      return t('workbench.drag.over', { spot: spot.label });
+    },
+    onDragEnd: ({ over }) => {
+      const spot = spotOf(over?.data.current);
+      return spot === null ? t('workbench.drag.putBack') : t('workbench.drag.dropped', { spot: spot.label });
+    },
+    onDragCancel: () => t('workbench.drag.putBack'),
+  };
 }
 
 /** A name for a drop spot that is the same for the same target, however often it is drawn. */

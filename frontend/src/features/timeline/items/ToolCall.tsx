@@ -160,7 +160,7 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
     return null;
   });
   // Every tool starts as one row, including the most recent edit and failed command.
-  const open = ui.steps.get(item.id) ?? false;
+  const open = ui.steps.get(item.id) ?? (context.liveTools === true && running);
   const raw = ui.raw.has(item.id);
   const tookMs = running ? Math.max(0, now - Date.parse(item.payload.started_at)) : item.payload.duration_ms;
   const took = tookMs === null || tookMs < 1000 ? null : formatSpan(tookMs, format);
@@ -192,14 +192,17 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
           aria-expanded={open}
           onClick={() => timelineUi.setStep(read, item.id, !open)}
           className={cx(
-            'flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-bg-muted',
+            'flex min-h-8 min-w-0 flex-1 gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-bg-muted',
+            tool.kind === 'subagent' ? 'items-start' : 'items-center',
             failed && 'text-danger-text',
           )}
         >
-          {open ? <ChevronDown className="text-text-subtle" aria-hidden /> : <ChevronRight className="text-text-subtle" aria-hidden />}
-          <Icon className={failed ? 'text-danger' : 'text-text-muted'} aria-hidden />
+          <span className="inline-flex h-5 shrink-0 items-center gap-2">
+            {open ? <ChevronDown className="text-text-subtle" aria-hidden /> : <ChevronRight className="text-text-subtle" aria-hidden />}
+            <Icon className={failed ? 'text-danger' : 'text-text-muted'} aria-hidden />
+          </span>
             <span data-user-content={['command', 'mcp', 'file_read', 'file_search', 'file_change', 'web_search', 'web_fetch'].includes(tool.kind) || undefined}
-              data-overflow-text={tool.kind === 'command' ? title.command ? `$${tool.command}` : tool.command : tool.kind === 'mcp' ? title.hint ?? title.text : title.text} className={cx('min-w-0 flex-1 truncate', title.command && 'font-mono', !failed && 'text-text')}>
+              data-overflow-text={tool.kind === 'command' ? title.command ? `$${tool.command}` : tool.command : tool.kind === 'mcp' ? title.hint ?? title.text : title.text} className={cx('min-w-0 flex-1', tool.kind === 'subagent' ? 'whitespace-normal wrap-anywhere' : 'truncate', title.command && 'font-mono', !failed && 'text-text')}>
               {title.command && <span aria-hidden className="mr-1 text-text-subtle">$</span>}
               {title.text}
             </span>
@@ -214,11 +217,11 @@ function ToolCallRowView({ item }: { item: ToolItem }) {
               {result}
             </span>
           )}
-          <State item={item} failed={failed} took={took} recorded={recorded} />
+          <span className="inline-flex h-5 shrink-0 items-center"><State item={item} failed={failed} took={took} recorded={recorded} /></span>
         </button>
         {open && <IconButton size="sm" icon={<Braces aria-hidden />} label={raw ? t('timeline.step.showDisplay') : t('timeline.step.showRaw')} pressed={raw}
           onClick={() => timelineUi.toggleRaw(read, item.id)} />}
-        {open && tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')}
+        {open && tool.kind === 'subagent' && context.inspection === undefined && <IconButton size="sm" icon={<PanelRightOpen aria-hidden />} label={t('timeline.subagent.openPanel')} blocked={tool.child_stream === ''} reason={tool.child_stream === '' ? t('timeline.subagent.unavailable') : undefined}
           onClick={() => revealView('subagent', { thread: context.threadId, item: item.id,
             ...(continuation === undefined ? {} : { continuation }) })} />}
         {open && singleFile !== undefined && singleFile.change !== 'delete' && path !== null && environmentId !== undefined && <IconButton size="sm" icon={<FileText aria-hidden />} label={t('files.link.open', { path })}

@@ -1,10 +1,16 @@
 ---
+group: settings
 title: References and access
 screens: /thread/$threadId, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /org/$slug/messages, /search, /shared, /documents/$nodeId, /document-folder/$folderId, /inbox, /approvals
 keywords: reference, preview, chip, copy reference, link, block, turn, message, file, line, description, read_shared, edit_document, locked, deleted, request access, quick grant, expiry, history
+summary: Preview and follow references, request access and describe documents without expanding sharing.
 ---
 
 # References and access
+
+## Installation addresses
+
+Links from this installation's public address or declared alternate addresses open on the address you are using. **Copy link** uses the public address when configured. An alternate IP and its port are recognized only when declared; look-alike hosts and other websites with the same paths stay external links. A link never grants access. See [Ask's address handling](ask.md#installation-addresses).
 
 ## Preview and open
 
@@ -91,8 +97,8 @@ Write a description below a document's title to help people and agents choose
 what to read. Its first line appears in shared listings and previews. With no
 description, Orch uses the first line of the first paragraph.
 
-Agents may describe a document through `edit_document`; a configured automation
-can maintain it where the place permits. A description helps discovery and
+Agents may explicitly describe a document through `edit_document`. A description
+appears only after someone writes it. It helps discovery and
 does not replace the document or expand its sharing.
 
 ## Sharing with an agent
@@ -106,3 +112,5 @@ Agents do not request access themselves.
 An agent's **Where you are** message gives its own conversation path. It can
 read earlier turns, search that path, or download the whole conversation for
 its own tools, including turns from before its context was shortened.
+
+For the viewing choice offered when sending a copied reference, see [Copy links and share viewing when sending](link-sharing.md).

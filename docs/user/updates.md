@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Update Orch and its machines
 screens: /resources/machines, /resources/machines/$id, /resources/hosts, /resources/hosts/$id, /resources/environments, /resources/environments/$id, /admin/$section
 keywords: Update now, update available, updating, version, release, upgrade, node, connector, update.auto, orch-node update, orch-connector update, server, SSH
+summary: Compare running and recommended builds, then update machines, nodes or managed units.
 ---
 
 # Update Orch and its machines

@@ -1,5 +1,5 @@
 /** The same announcement controls and inherited tag limit are visible on orgs, projects and topics. */
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
 import { announce } from '@/api/announcements';
@@ -8,6 +8,7 @@ import { PlaceAnnouncements } from '@/features/announcements/Composer';
 import { TagPicker } from '@/features/topic/TagPicker';
 import type { Announcement, Node, Project, Tag, Topic } from '@/generated/api-types';
 import { roleSubject } from '@/api/access';
+import { i18n } from '@/i18n';
 import { org, me, userRef } from '../doubles/fixtures';
 import { show } from './support';
 
@@ -15,7 +16,8 @@ vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 
 vi.mock('@/api/announcements', async (load) => ({ ...await load<typeof AnnouncementsApi>(), announce: vi.fn(), announcementsQuery: (id: string) => ({ queryKey: ['announcements', id], initialPageParam: null,
   queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined }) }));
-vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: 1 }]) }) }));
+const settingsState = vi.hoisted(() => ({ wake: true }));
+vi.mock('@/api/settings', () => ({ settingsQuery: (id: string) => ({ queryKey: ['settings', id], queryFn: () => Promise.resolve([{ key: 'tags.max_per_place', value: 1 }, { key: 'broadcast.wake_idle', value: settingsState.wake }]) }) }));
 vi.mock('@/api/nodes', () => ({ tagsQuery: (id: string) => ({ queryKey: ['tags', id], queryFn: () => Promise.resolve(labels) }),
   nodeQuery: (id: string) => ({ queryKey: ['node', id], queryFn: () => Promise.resolve(root) }), setNodeTags: vi.fn() }));
 vi.mock('@/api/day100', () => ({ createPickerTag: vi.fn() }));
@@ -31,7 +33,7 @@ const delivered: Announcement = { id: 'announcement', topic_id: topic.id, group_
   from: { user: root.owner }, targets: 'all', files: [], delivery: 'steer', fallback: 'next_turn', wake_idle: false,
   delivered: { interrupted: 0, steered: 0, queued: 1, deferred: 0 }, created_at: '2026-10-15T05:00:00.000Z', topic_seq: 1 };
 
-beforeEach(() => { vi.clearAllMocks(); vi.mocked(announce).mockResolvedValue({ group_id: 'group', announcements: [delivered], topics_skipped: 2 }); });
+beforeEach(async () => { await i18n.changeLanguage('en'); settingsState.wake = true; vi.clearAllMocks(); vi.mocked(announce).mockResolvedValue({ group_id: 'group', announcements: [delivered], topics_skipped: 2 }); });
 
 it.each([root, project, topic])('shows and sends the same scoped announcement controls in $kind', async (place) => {
   const user = userEvent.setup();
@@ -48,7 +50,38 @@ it.each([root, project, topic])('shows and sends the same scoped announcement co
   const result = sent.closest('[role="status"]');
   expect(result).toHaveTextContent('2 topics skipped.');
   expect(result).toHaveTextContent('1 queued');
-  expect(announce).toHaveBeenCalledWith(place.id, { title: 'A release', body: 'Ship it', category: 'notice', severity: 'info', targets: 'all' });
+  expect(announce).toHaveBeenCalledWith(place.id, { title: 'A release', body: 'Ship it', category: 'notice', severity: 'info', targets: 'all', wake_idle: false });
+});
+
+it.each(['en', 'zh-CN'])('makes wake an unticked per-send choice in %s', async (language) => {
+  await i18n.changeLanguage(language);
+  const user = userEvent.setup();
+  show(<PlaceAnnouncements place={topic} />);
+  await user.click(screen.getByRole('button', { name: i18n.t('placeAnnouncements.title') }));
+  const wake = screen.getByRole('checkbox', { name: i18n.t('placeAnnouncements.wake') });
+  await waitFor(() => expect(wake).toBeEnabled());
+  expect(wake).not.toBeChecked();
+  await user.click(wake);
+  await user.type(screen.getByRole('textbox', { name: i18n.t('placeAnnouncements.heading') }), 'A release');
+  await user.click(screen.getByRole('button', { name: i18n.t('placeAnnouncements.send') }));
+  await waitFor(() => expect(announce).toHaveBeenCalledWith(topic.id, expect.objectContaining({ wake_idle: true })));
+  await waitFor(() => expect(wake).not.toBeChecked());
+});
+
+it.each(['en', 'zh-CN'])('explains unavailable wake and still sends without it in %s', async (language) => {
+  settingsState.wake = false;
+  await i18n.changeLanguage(language);
+  const user = userEvent.setup();
+  show(<PlaceAnnouncements place={topic} />);
+  await user.click(screen.getByRole('button', { name: i18n.t('placeAnnouncements.title') }));
+  const wake = screen.getByRole('checkbox', { name: i18n.t('placeAnnouncements.wake') });
+  await screen.findByText(i18n.t('placeAnnouncements.wakeUnavailable'));
+  expect(wake).toBeDisabled();
+  expect(wake).not.toBeChecked();
+  expect(wake).toHaveAccessibleDescription(i18n.t('placeAnnouncements.wakeUnavailable'));
+  await user.type(screen.getByRole('textbox', { name: i18n.t('placeAnnouncements.heading') }), 'A release');
+  await user.click(screen.getByRole('button', { name: i18n.t('placeAnnouncements.send') }));
+  await waitFor(() => expect(announce).toHaveBeenCalledWith(topic.id, expect.objectContaining({ wake_idle: false })));
 });
 
 it('lets a reader inspect announcements while archived and offers no sending form', async () => {

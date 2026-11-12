@@ -138,7 +138,8 @@ async fn a_ticket_names_the_lease_but_the_next_turn_of_the_thread_is_served_unde
         .bearer(grant.token.expose());
         client.send(request)
     };
-    assert_eq!(call().await.unwrap().status, 200);
+    let first_reply = call().await.unwrap();
+    assert_eq!(first_reply.status, 200, "{}", first_reply.text());
     p.close_lease(first).await;
     assert_eq!(
         call().await.unwrap().status,

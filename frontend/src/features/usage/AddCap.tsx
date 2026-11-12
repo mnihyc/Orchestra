@@ -24,6 +24,8 @@ export interface CapRequest {
   provider?: Pick<ProviderRef, 'id'> & Partial<Pick<ProviderRef, 'name'>>;
   /** Models by name, families (`gpt-6*`) and groups (`@frontier`) it covers to begin with; none is every model. */
   models?: readonly string[];
+  services?: readonly string[];
+  purposes?: readonly string[];
   /** The speeds, by id, it covers to begin with; none is any speed. */
   tiers?: readonly string[];
   /** A cap to change instead of one to make. */
