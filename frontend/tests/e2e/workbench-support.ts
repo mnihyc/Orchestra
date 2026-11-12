@@ -1,8 +1,16 @@
 /** Opens a real workbench view through the same contextual chooser a person uses. */
-import { expect, type Page } from '@playwright/test';
+import { expect, type Locator, type Page } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
+
+/** Each view's own title in both languages (views.<id>.title), so a case may name a view the way its locale shows it. */
+const TITLED: Readonly<Record<string, string>> = Object.fromEntries([english, chinese].flatMap((catalogue) =>
+  Object.entries((catalogue as { views?: Record<string, { title?: unknown } | null> }).views ?? {})
+    .flatMap(([id, view]) => typeof view?.title === 'string' ? [[view.title, id] as const] : [])));
 
 const VIEWS: Readonly<Record<string, string>> = {
-  Outline: 'outline', History: 'history', Chat: 'chat', Documents: 'documents', People: 'people',
+  ...TITLED,
+  Outline: 'outline', History: 'history', Chat: 'chat', Documents: 'documents', People: 'people', Schedules: 'schedules',
   Changes: 'changes', Files: 'files', Git: 'git', Environment: 'environment', Processes: 'processes', Resources: 'resources',
   Ports: 'ports', Browsers: 'browsers', Displays: 'displays', Terminal: 'terminal', Parameters: 'parameters', Usage: 'usage',
   Knowledge: 'knowledge', 'Given to the agent': 'given', Given: 'given', Diagnostics: 'diagnostics', Browser: 'browser', VNC: 'vnc', Help: 'help', Comments: 'comments', Links: 'links',
@@ -22,4 +30,14 @@ export async function showWorkbenchView(page: Page, name: string | RegExp): Prom
   await expect(chooser).toBeVisible();
   await chooser.locator(`[role="option"][data-value="commands:view.open.${id}"]`).click();
   await expect(chooser).toHaveCount(0);
+}
+
+/** Read the retained identity after the normal workbench save completes. */
+export async function waitForSavedTabId(page: Page, tab: Locator): Promise<string> {
+  const elementId = await tab.getAttribute('id');
+  if (elementId === null) throw new Error('The workbench tab has no id');
+  const id = elementId.replace(/^(?:mobile-)?tab-/, '');
+  await expect.poll(() => page.evaluate((tabId) => Object.keys(localStorage).some((key) =>
+    key.endsWith('.workbench.workspace') && localStorage.getItem(key)?.includes(JSON.stringify(tabId))), id)).toBe(true);
+  return id;
 }

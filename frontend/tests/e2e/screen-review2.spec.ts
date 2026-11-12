@@ -1,24 +1,33 @@
 /** Actual browser geometry for marked names, org marks, and complete words on the sign-in tiles. */
 import { expect, test } from '@playwright/test';
-import type { Machine, Org } from '../../src/generated/api-types.ts';
+import type { EverythingRowPage, Machine, MeBootstrapReply, Org } from '../../src/generated/api-types.ts';
 import { scenario, signIn } from './support.ts';
+import { signInForManagement } from './admin-mode-support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
 test('a marked machine keeps its whole short name at 1440 and 400 pixels', async ({ page }) => {
   // These are presentation projections of full fixture rows, not a second authority evaluator.
-  await page.route('**/api/v1/me/admin-mode', (route) => route.fulfill({ json: { available: true, as_admin: true } }));
+  const marked = (machine: Machine): Machine => ({ ...machine, name: 'alice-laptop', access: { ...machine.access!,
+    permissions: machine.access?.permissions ?? [], administers: machine.access?.administers ?? false, admin_only: [], participating: false, admin_access: { place: 'system', private: false } } });
+  // Resource lists now read the native inventory; direct reads retain the same presentation fixture.
+  await page.route(/\/api\/v1\/everything(?:\?|$)/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as EverythingRowPage;
+    const first = body.items.find((row) => row.resource?.kind === 'machine');
+    if (first === undefined) throw new Error('The scenario needs a complete machine fixture');
+    await route.fulfill({ response, json: { ...body, items: body.items.map((row) => row.id === first.id && row.resource?.kind === 'machine'
+      ? { ...row, name: 'alice-laptop', resource: { kind: 'machine', value: marked(row.resource.value) } } : row) } });
+  });
   await page.route(/\/api\/v1\/machines(?:\?|$)/, async (route) => {
     const response = await route.fetch();
     const body: unknown = await response.json();
     if (!Array.isArray(body)) throw new Error('Expected the complete machines list');
     const machine = (body as Machine[])[0];
     if (machine === undefined) throw new Error('The scenario needs a complete machine fixture');
-    const admin_access = { place: 'system' as const, private: false };
-    await route.fulfill({ json: [{ ...machine, name: 'alice-laptop', access: { ...machine.access,
-      permissions: machine.access?.permissions ?? [], admin_only: [], participating: false, admin_access } }] });
+    await route.fulfill({ json: [marked(machine)] });
   });
-  await signIn(page);
+  await signInForManagement(page);
   await page.goto('/resources/machines');
   const name = page.getByRole('link', { name: 'alice-laptop', exact: true });
   for (const width of [1440, 400]) {
@@ -32,18 +41,26 @@ test('a marked machine keeps its whole short name at 1440 and 400 pixels', async
 });
 
 test('the actual org rail distinguishes a team from a personal space with the same initials and colour', async ({ page }) => {
+  const names = (rows: Org[]): Org[] => {
+    const own = rows.find((org) => org.org_kind === 'personal');
+    const team = rows.find((org) => org.org_kind !== 'personal');
+    if (own === undefined || team === undefined) throw new Error('The scenario needs a personal space and a team');
+    return [{ ...own, name: 'Ben Barker', color: 4 }, { ...team, name: 'Beta', color: 4 }];
+  };
+  // The shell receives its orgs in the joined bootstrap rather than a second org-list request.
+  await page.route(/\/api\/v1\/me\/bootstrap(?:\?|$)/, async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as MeBootstrapReply;
+    await route.fulfill({ response, json: { ...body, orgs: names(body.orgs) } });
+  });
   await page.route(/\/api\/v1\/orgs(?:\?|$)/, async (route) => {
     const response = await route.fetch();
     const body: unknown = await response.json();
     if (!Array.isArray(body)) throw new Error('Expected the complete org list');
-    const rows = body as Org[];
-    const own = rows.find((org) => org.org_kind === 'personal');
-    const team = rows.find((org) => org.org_kind !== 'personal');
-    if (own === undefined || team === undefined) throw new Error('The scenario needs a personal space and a team');
-    await route.fulfill({ json: [{ ...own, name: 'Ben Barker', color: 4 }, { ...team, name: 'Beta', color: 4 }] });
+    await route.fulfill({ json: names(body as Org[]) });
   });
   await signIn(page);
-  const rail = page.getByRole('navigation', { name: 'Navigation', exact: true });
+  const rail = page.getByRole('navigation', { name: 'Orgs and your own places', exact: true });
   await expect(rail.getByRole('link', { name: /Ben Barker/ })).toContainText('Bn');
   await expect(rail.getByRole('link', { name: 'Beta', exact: true })).toContainText('Bt');
 });

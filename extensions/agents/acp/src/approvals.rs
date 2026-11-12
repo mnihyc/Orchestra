@@ -79,8 +79,12 @@ fn options_of(params: &Json) -> (Vec<ApprovalOption>, Vec<OfferedOption>) {
         let kind = option
             .get("kind")
             .and_then(Json::as_str)
-            .unwrap_or("allow_once");
-        let allows = kind.starts_with("allow");
+            .unwrap_or_default();
+        let allows = match kind {
+            "allow_once" | "allow_always" => true,
+            "reject_once" | "reject_always" => false,
+            _ => continue,
+        };
         shown.push(ApprovalOption {
             id: id.to_owned(),
             label: option
@@ -166,14 +170,19 @@ pub fn permission(view: &ToolView, params: &Json, place: &Place<'_>) -> Permissi
             ),
         }
     };
-    PermissionRequest {
-        style: Style::Protocol,
-        title,
-        request: HarnessRequest {
+    let request = if options.is_empty() {
+        orch_agent_contract::observations::generic_approval(title.clone(), params.clone(), options)
+    } else {
+        HarnessRequest {
             request_kind,
             options,
             detail,
-        },
+        }
+    };
+    PermissionRequest {
+        style: Style::Protocol,
+        title,
+        request,
         offered,
         tool_call_id: view.id.clone(),
     }
@@ -236,6 +245,12 @@ pub fn permission_answer(
             "a request to be allowed something is answered by one of its options",
         ));
     };
+    if pending.style == Style::Protocol
+        && pending.offered.is_empty()
+        && option_id == orch_agent_contract::observations::CANCEL_UNRECOGNIZED_APPROVAL
+    {
+        return Ok(permission_cancelled());
+    }
     if !pending
         .offered
         .iter()

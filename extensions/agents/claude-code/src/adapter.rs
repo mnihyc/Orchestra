@@ -143,10 +143,12 @@ impl ClaudeCodeAdapter {
         program: &str,
         environment: &BTreeMap<String, String>,
     ) -> Result<String, AdapterError> {
+        let mut environment = environment.clone();
+        sessions::clear_cache_ttl_environment(&mut environment);
         let spec = LaunchSpec {
             program: program.to_owned(),
             args: vec!["--version".to_owned()],
-            env: environment.clone(),
+            env: environment,
             cwd: std::env::temp_dir(),
             label: "version".to_owned(),
         };
@@ -186,12 +188,7 @@ impl ClaudeCodeAdapter {
 
     /// The home whose files are read: the one given, or the harness's own default of whoever runs it.
     fn files_home(setup: &HarnessSetup) -> Option<PathBuf> {
-        setup.home.clone().or_else(|| {
-            setup
-                .inherited
-                .get("HOME")
-                .map(|person| PathBuf::from(person).join(".claude"))
-        })
+        setup.files_home()
     }
 
     fn current_token(&self) -> Option<String> {
@@ -220,6 +217,14 @@ impl ClaudeCodeAdapter {
 
     fn turn_settings(spec: &SessionSpec) -> TurnSettings {
         TurnSettings {
+            cache_lifetimes: sessions::native_cache_lifetimes(
+                spec.settings.native_model.as_deref(),
+                &spec.settings.model,
+            ),
+            page_fetch: sessions::native_page_fetch(
+                spec.settings.native_model.as_deref(),
+                &spec.settings.model,
+            ),
             model: spec.settings.model.clone(),
             effort: spec.settings.effort.clone(),
             approval_mode: spec.settings.approval_mode,
@@ -227,6 +232,19 @@ impl ClaudeCodeAdapter {
             params: spec.settings.params.clone(),
             plan: false,
         }
+    }
+
+    /// Initialize an already validated native session for read-only observation, without model input.
+    /// Logical opening stays lazy; this uses the same warm command as native fork preparation.
+    pub async fn warm_session(&self, thread: ThreadId) -> Result<(), AdapterError> {
+        let session = self.session(thread)?;
+        session
+            .handle
+            .ask(|reply| Command::Warm {
+                turn: Box::new(Self::turn_settings(&session.spec)),
+                reply,
+            })
+            .await?
     }
 }
 
@@ -255,9 +273,20 @@ impl AgentAdapter for ClaudeCodeAdapter {
         KIND
     }
 
+    fn output_directory(&self) -> Option<PathBuf> {
+        self.started
+            .as_ref()
+            .and_then(|started| started.setup.outputs_directory())
+    }
+
     fn native_check(&self) -> orch_agent_contract::conformance::NativeCheck {
         use orch_agent_contract::conformance::{ModelPaths, NativeCheck};
         NativeCheck {
+            auto_review: Some(
+                orch_agent_contract::conformance::NativeAutoReview::Classifier(
+                    crate::native_review::recipe(),
+                ),
+            ),
             approval_mode: orch_agent_contract::descriptor::ApprovalMode::Ask,
             // A failing case ends soon: the harness retries its model request once.
             profile_env: std::collections::BTreeMap::from([(
@@ -274,6 +303,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 exact: vec!["/api/oauth/usage".to_owned()],
             },
         }
+    }
+
+    fn verify_native_classifier(
+        &self,
+        evidence: &orch_agent_contract::conformance::NativeClassifierEvidence<'_>,
+    ) -> Result<(), String> {
+        crate::native_review::verify(evidence)
     }
 
     fn verify_quiet_start(
@@ -303,6 +339,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
         start: AgentStart,
         sink: EventSink,
     ) -> Result<AgentStarted, AdapterError> {
+        sessions::validate_profile_environment(&start.profile.env)?;
         let attach = start.profile.attach.clone();
         let program = start
             .binary
@@ -382,10 +419,13 @@ impl AgentAdapter for ClaudeCodeAdapter {
     async fn stop(&mut self) -> Result<(), AdapterError> {
         self.prefix_sources.clear();
         self.history_inventory = None;
+        // Together: each close may wait for what its sub-agents made to be reported and for its program to
+        // exit, and one after another they would add up.
         let sessions: Vec<_> = self.sessions.drain().collect();
-        for (_, session) in sessions {
+        futures::future::join_all(sessions.into_iter().map(|(_, session)| async move {
             let _ = session.handle.ask(|reply| Command::Close { reply }).await;
-        }
+        }))
+        .await;
         self.status_event(HarnessState::Offline, None).await;
         self.started = None;
         Ok(())
@@ -525,10 +565,11 @@ impl AgentAdapter for ClaudeCodeAdapter {
         source: orch_agent_contract::history::NativePrefixSource,
         replace_segment_id: Option<orch_types::Id>,
     ) -> Result<SessionOpened, AdapterError> {
-        if self.started()?.version != "2.1.296" {
-            return Err(AdapterError::Unsupported(
-                "Exact continuation resume requires Claude Code 2.1.296.".into(),
-            ));
+        if !crate::config::input_prefix_supported(&self.started()?.version) {
+            return Err(AdapterError::Unsupported(format!(
+                "Exact continuation resume requires a checked Claude Code build: {}.",
+                crate::config::INPUT_PREFIX_VERSIONS.join(", ")
+            )));
         }
         if spec.settings.mode != SessionMode::Resume
             || spec.settings.thread_id != source.thread_id
@@ -796,6 +837,28 @@ impl AgentAdapter for ClaudeCodeAdapter {
             .await?
     }
 
+    async fn background_commands(
+        &mut self,
+        thread: ThreadId,
+    ) -> Result<orch_agent_contract::background::NativeBackground, AdapterError> {
+        self.session(thread)?
+            .handle
+            .ask(|reply| Command::Background { reply })
+            .await
+    }
+
+    async fn end_background_command(
+        &mut self,
+        thread: ThreadId,
+        command: &str,
+    ) -> Result<orch_agent_contract::background::NativeBackgroundEnd, AdapterError> {
+        let id = command.to_owned();
+        self.session(thread)?
+            .handle
+            .ask(|reply| Command::EndBackground { id, reply })
+            .await
+    }
+
     async fn export_session(
         &mut self,
         thread: ThreadId,
@@ -859,6 +922,7 @@ impl AgentAdapter for ClaudeCodeAdapter {
             started.sink.clone(),
             thread,
             spec.settings.segment_id,
+            Some(home.join("outputs")),
         )
         .await
         .map_err(|error| AdapterError::Internal(error.to_string()))
@@ -889,14 +953,19 @@ impl AgentAdapter for ClaudeCodeAdapter {
         // Where the connector takes the record from; it removes the file once it is up.
         let into =
             std::env::temp_dir().join(format!("orch-claude-record-{}", orch_types::new_id()));
-        history::read_record_async(&transcript, &session, write, &into, clock)
-            .await
-            .map_err(|error| match error {
-                history::HistoryError::OtherVersion(_) => {
-                    AdapterError::Unsupported(error.to_string())
-                }
-                other => AdapterError::HarnessError(other.to_string()),
-            })
+        history::read_record_async(
+            &transcript,
+            &session,
+            write,
+            &into,
+            clock,
+            Some(home.join("outputs")),
+        )
+        .await
+        .map_err(|error| match error {
+            history::HistoryError::OtherVersion(_) => AdapterError::Unsupported(error.to_string()),
+            other => AdapterError::HarnessError(other.to_string()),
+        })
     }
 
     async fn discover_mcp(&mut self, search: McpSearch) -> Result<Vec<McpFound>, AdapterError> {

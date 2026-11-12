@@ -342,6 +342,7 @@ mod tests {
     async fn a_user_group_reports_actual_support_and_holds_its_started_commands_to_one_kernel_ceiling()
      {
         let controls = UserGroup::probe().await;
+        eprintln!("envhost detected process controls: {controls:?}");
         let support = controls.support();
         assert_eq!(support.disk, ResourceLimits::Reported);
         if !controls.memory {
@@ -357,11 +358,15 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let memory_limit = std::fs::read_to_string(group.cgroup().join("memory.max")).unwrap();
+        eprintln!("envhost initial memory.max={}", memory_limit.trim());
+        assert_eq!(memory_limit.trim(), "67108864");
+        let swap_limit = std::fs::read_to_string(group.cgroup().join("memory.swap.max")).unwrap();
+        eprintln!("envhost initial memory.swap.max={}", swap_limit.trim());
         assert_eq!(
-            std::fs::read_to_string(group.cgroup().join("memory.max"))
-                .unwrap()
-                .trim(),
-            "67108864"
+            swap_limit.trim(),
+            "0",
+            "the absent combined limit permits no swap beyond the memory ceiling"
         );
         let launcher = group.launcher();
         for _ in 0..2 {
@@ -372,6 +377,10 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(output.status.success());
+            eprintln!(
+                "envhost child aggregate membership: {:?}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
             assert!(
                 String::from_utf8(output.stdout)
                     .unwrap()
@@ -391,14 +400,36 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        eprintln!("envhost over-limit allocation status: {}", output.status);
         assert!(!output.status.success());
         assert!(!String::from_utf8_lossy(&output.stdout).contains("escaped"));
-        group.update(&Resources::default(), controls).await.unwrap();
+        group
+            .update(
+                &Resources {
+                    memory_swap_mb: Some(128),
+                    ..resources
+                },
+                controls,
+            )
+            .await
+            .unwrap();
+        let swap_limit = std::fs::read_to_string(group.cgroup().join("memory.swap.max")).unwrap();
+        eprintln!("envhost combined memory.swap.max={}", swap_limit.trim());
         assert_eq!(
-            std::fs::read_to_string(group.cgroup().join("memory.max"))
-                .unwrap()
-                .trim(),
-            "max"
+            swap_limit.trim(),
+            "67108864",
+            "a combined 128 MiB limit with 64 MiB memory allows 64 MiB swap"
+        );
+        group.update(&Resources::default(), controls).await.unwrap();
+        let memory_limit = std::fs::read_to_string(group.cgroup().join("memory.max")).unwrap();
+        eprintln!("envhost reset memory.max={}", memory_limit.trim());
+        assert_eq!(memory_limit.trim(), "max");
+        let swap_limit = std::fs::read_to_string(group.cgroup().join("memory.swap.max")).unwrap();
+        eprintln!("envhost reset memory.swap.max={}", swap_limit.trim());
+        assert_eq!(
+            swap_limit.trim(),
+            "max",
+            "clearing the memory ceiling clears its swap ceiling too"
         );
         group.close().await;
     }

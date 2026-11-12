@@ -43,17 +43,17 @@ import { Input } from '@/ui/Input';
 import { SettingRow as SettingRowLayout } from '@/ui/SettingRow';
 import { SettingChanges } from '@/ui/SettingChanges';
 import { ValueSummary } from '@/ui/ValueSummary';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { toast } from '@/ui/Toast';
 
 import { TEMPLATE_TABS, type TemplateTab } from '@/features/resources/tabs';
 
 export { TEMPLATE_TABS, type TemplateTab };
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -74,9 +74,9 @@ function Overview({ template }: { template: Template }) {
   const confinementWords = useConfinementWords();
   const words = useAmountWords();
   const driverTitle = drivers.data?.find((driver) => driver.name === template.driver)?.title;
-  const hosts = useQuery(hostsQuery(null));
   // The runtime the template starts under, as the hosts that report its driver declare it.
   const runtimeName = templateRuntime(template.spec);
+  const hosts = useQuery({ ...hostsQuery(null), enabled: runtimeName !== null });
   const runtime = classNamed(classesOfDriver(hosts.data ?? [], template.driver), runtimeName);
   const limits = runtime === undefined ? [] : limitsTouching(runtime.limits, templateSubjects(template.spec, true));
   const unavailable = Object.fromEntries(Object.entries(runtime?.unavailable ?? {}).filter(([key]) => templateSubjects(template.spec).includes(key)));
@@ -246,7 +246,7 @@ function SpecForm({ template, manage }: { template: Template; manage: boolean })
       <TemplateGuideLink />
       <div className="flex min-w-0 flex-col gap-3">
         {!manage && <ReadOnlySettingsNotice owner={template.owner} />}
-        {drivers.isPending ? <SkeletonRows rows={3} /> : drivers.isError ? <ErrorState compact error={drivers.error} onRetry={() => void drivers.refetch()} /> : schema === null ? <>{metadata('')}<InlineAlert tone="warning">{t('templates.editor.schemaMissing')}</InlineAlert>{!manage && <ValueSummary value={template.spec} />}</>
+        {drivers.isPending ? <SkeletonRows read={drivers} rows={3} /> : drivers.isError ? <ErrorState compact error={drivers.error} onRetry={() => void drivers.refetch()} /> : schema === null ? <>{metadata('')}<InlineAlert tone="warning">{t('templates.editor.schemaMissing')}</InlineAlert>{!manage && <ValueSummary value={template.spec} />}</>
           : <TemplateEditor key={attempt} compact schema={schema} driver={template.driver} kind={template.kind} leading={metadata} text={spec}
               savedProblems={faults.filter((fault) => fault.path.startsWith('spec')).map((fault) => ({ pointer: fault.path.slice(4), message: fault.message }))}
               onChange={(next) => { setSpec(next); if (!stale) save.reset(); }} onValidityChange={setValidDraft} disabled={save.isPending} readOnly={!manage} />}
@@ -325,7 +325,7 @@ export function TemplateScreen({ templateId, tab, onTab }: TemplateScreenProps) 
   const acts = useTemplateActs({ onTab: (_template, next) => onTab(next), afterDelete: () => void navigate({ to: '/resources/templates' }) });
 
   const refused = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status);
-  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons />;
+  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons read={query} />;
   const template = query.data;
   const manage = holds(template.access, 'template.manage');
   const { edit, primary, menu } = acts.page(template);

@@ -82,8 +82,14 @@ it('routes the list Edit to named settings and keeps Rename as a name-only dialo
 it('keeps the served manage gate on list editing', async () => {
   const user = userEvent.setup(); draw(<Row host={{ ...detailHost, access: { ...detailHost.access, permissions: ['host.view'] } }} />);
   await user.click(screen.getByRole('button', { name: i18n.t('resources.act.menuOf', { name: detailHost.name }) }));
-  expect(screen.queryByRole('menuitem', { name: i18n.t('resources.act.edit') })).not.toBeInTheDocument();
-  expect(screen.queryByRole('menuitem', { name: i18n.t('resources.act.rename') })).not.toBeInTheDocument(); expect(calls.navigate).not.toHaveBeenCalled();
+  const edit = screen.getByRole('menuitem', { name: i18n.t('resources.act.edit') });
+  const rename = screen.getByRole('menuitem', { name: i18n.t('resources.act.rename') });
+  expect(edit).toHaveAttribute('aria-disabled', 'true'); expect(rename).toHaveAttribute('aria-disabled', 'true');
+  expect(edit).toHaveTextContent(i18n.t('resources.act.manageRequired'));
+  expect(rename).toHaveTextContent(i18n.t('resources.act.manageRequired'));
+  await user.click(edit); await user.click(rename);
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument(); expect(calls.navigate).not.toHaveBeenCalled();
+  expect(updateHost).not.toHaveBeenCalled();
 });
 
 it('keeps a newer observed host when the older save answer arrives', async () => {

@@ -32,6 +32,8 @@ export interface PageHeaderProps {
   /** The mark of the place: its avatar or its icon. */
   mark?: ReactNode;
   title: ReactNode;
+  /** Help for the screen belongs beside its title, separate from field/action rows. */
+  help?: ReactNode;
   headingId?: string;
   /** A surrounding tab or scope already supplies this heading. Its facts and acts remain visible. */
   titleInContext?: boolean;
@@ -49,10 +51,10 @@ export interface PageHeaderProps {
   opening?: { kind: string; id: string };
 }
 
-export function PageHeader({ mark, title, headingId, titleInContext = false, lead, facts = [], actions, back, adminAccess, private: privatePage = false, ownership, opening }: PageHeaderProps) {
+export function PageHeader({ mark, title, help, headingId, titleInContext = false, lead, facts = [], actions, back, adminAccess, private: privatePage = false, ownership, opening }: PageHeaderProps) {
   const { t } = useTranslation();
   useAdminOpening(opening?.kind ?? '', opening?.id, adminAccess !== null && adminAccess !== undefined);
-  if (titleInContext && mark === undefined && back === undefined && (adminAccess === null || adminAccess === undefined) && !privatePage && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
+  if (titleInContext && mark === undefined && back === undefined && help === undefined && (adminAccess === null || adminAccess === undefined) && !privatePage && ownership === undefined && (lead === null || lead === undefined) && facts.length === 0 && actions === undefined) return null;
   return (
     <header className="flex flex-wrap items-start gap-x-4 gap-y-3">
       <div className="flex min-w-0 flex-1 basis-[min(100%,14rem)] items-start gap-4">
@@ -67,7 +69,10 @@ export function PageHeader({ mark, title, headingId, titleInContext = false, lea
         )}
         {mark !== undefined && <div className="flex h-[1.875rem] shrink-0 items-center">{mark}</div>}
         <div className="flex min-w-0 flex-1 flex-col gap-1">
-          {!titleInContext && <h1 id={headingId} className="text-2xl leading-[1.875rem] font-semibold wrap-anywhere text-text">{title}</h1>}
+          {(!titleInContext || help !== undefined) && <div className="flex min-w-0 items-start gap-1">
+            {!titleInContext && <h1 id={headingId} className="min-w-0 text-2xl leading-[1.875rem] font-semibold wrap-anywhere text-text">{title}</h1>}
+            {help !== undefined && <span className="flex h-[1.875rem] shrink-0 items-center">{help}</span>}
+          </div>}
           <AsAdminMark of={adminAccess?.place} sentence private={privatePage || privateAdminAccess(adminAccess)} />
           {ownership !== undefined && <div className="flex items-center gap-2 text-sm text-text-muted"><span className="shrink-0">{t('resources.listOwner')}</span><ResourceOwner {...ownership} /></div>}
           {lead !== undefined && lead !== null && <div className="max-w-prose text-base wrap-anywhere text-text-muted">{lead}</div>}

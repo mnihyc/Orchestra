@@ -22,7 +22,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::BTreeMap, time::Duration};
 
+/// The original confirmation identity at the native parent's later Host control boundaries.
+pub mod authority;
 mod custody;
+pub mod reviewed;
 
 /// The durable parent is outside its children's batch, so even a parallel limit of one can progress.
 pub const KIND: &str = "host_delete";
@@ -137,7 +140,11 @@ impl Deleting {
         conn: &mut orch_db::Conn,
     ) -> Result<orch_authz::Principal, Stop> {
         let row = job.row().await?;
-        if row.plan.get("identity").is_some() {
+        if authority::present(&row) {
+            authority::principal(conn, &row, job.engine().inner.clock.as_ref())
+                .await
+                .map_err(|error| Stop::Failed(Failure::new("access.denied", error.to_string())))
+        } else if row.plan.get("identity").is_some() {
             super::retained::requester(conn, &row, job.now()).await
         } else {
             super::source::load_principal(conn, job, self.recipe.by, self.recipe.token).await
@@ -291,6 +298,7 @@ impl Deleting {
                     {
                         Ok(child) => cleanup.push(child.id),
                         Err(super::runner::MakeError::Running(child)) => cleanup.push(child.id),
+                        Err(super::runner::MakeError::Internal(error)) => return Err(error.into()),
                         Err(error) => {
                             return Err(Failure::new("cascade_failed", error.to_string()).into());
                         }

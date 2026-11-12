@@ -16,8 +16,8 @@ describe('the returned invitation target',() => {
     expect(acceptedDestination({...empty,node:node('thread')})).toEqual({to:'/thread/$threadId',params:{threadId:'returned'}});
   });
   it('opens the permitted chat without reading or guessing its private org',() => {
-    expect(acceptedDestination({...empty,chat:{id:'chat',kind:'group',org_id:'returned-root-id',node:null,name:'Crew'}})).toEqual({to:'/org/$slug/messages',params:{slug:'returned-root-id'},search:{chat:'chat'}});
-    expect(acceptedDestination({...empty,node:{...node('topic'),name:null,redacted:true},chat:{id:'chat-only',kind:'node',org_id:'root',node:{...node('topic'),name:null,redacted:true},name:null}})).toEqual({to:'/org/$slug/messages',params:{slug:'root'},search:{chat:'chat-only'}});
+    expect(acceptedDestination({...empty,chat:{id:'chat',kind:'group',visibility:'private',org_id:'returned-root-id',node:null,name:'Crew'}})).toEqual({to:'/org/$slug/messages',params:{slug:'returned-root-id'},search:{chat:'chat'}});
+    expect(acceptedDestination({...empty,node:{...node('topic'),name:null,redacted:true},chat:{id:'chat-only',kind:'node',visibility:'public',org_id:'root',node:{...node('topic'),name:null,redacted:true},name:null}})).toEqual({to:'/org/$slug/messages',params:{slug:'root'},search:{chat:'chat-only'}});
   });
   it('keeps a joined org’s returned address and never derives a missing target from a preview',() => {
     const joined=org('org','research','Research',userRef(me(1,'ada','Ada')),{address:'acme.research'});

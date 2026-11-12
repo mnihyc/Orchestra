@@ -17,7 +17,7 @@ export const harnessSessionsQuery = (providerId: string, agentId: string) =>
 /** What adopting the session into the topic would do: where it would stand, the model, the history it brings. */
 export const adoptionPlanQuery = (topicId: string, body: ThreadAdoptBody) =>
   queryOptions({
-    queryKey: ['adoption-plan', topicId, body.provider_id, body.agent_id, body.native_session_ref] as const,
+    queryKey: ['adoption-plan', topicId, body] as const,
     queryFn: ({ signal }): Promise<AdoptPlan> =>
       ok(api.POST('/topics/{id}/threads/adopt/preview', { params: { path: { id: topicId } }, body, signal })),
     staleTime: 0,
@@ -30,8 +30,10 @@ export function adoptSession(topicId: string, body: ThreadAdoptBody, key: string
 }
 
 /** Reads a failed adoption's earlier record again, without an agent input or turn. */
-export function retryAdoptedHistory(threadId: string, key: string): Promise<Thread> {
-  return ok(api.POST('/threads/{id}/adopt/retry-history', { params: { path: { id: threadId } }, ...repeatable(key) }));
+export async function retryAdoptedHistory(threadId: string, key: string): Promise<Thread> {
+  const result = await ok(api.POST('/threads/{id}/adopt/retry-history', { params: { path: { id: threadId } }, ...repeatable(key) }));
+  if ('projection' in result) throw new Error('The history retry completed, but its content is no longer available.');
+  return result;
 }
 
 /** The band reads only stored history and present machine facts; opening it asks no harness or model. */

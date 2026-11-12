@@ -55,8 +55,21 @@ export function ranWithParts(params: unknown, defs: readonly ParamDef[], model: 
   return [parts.speed, parts.access, parts.context].filter((part): part is string => part !== undefined);
 }
 
+/** A model is effective only when the native turn explicitly supplied that fact. */
+export function effectiveTurnModel(turn: Pick<Turn,'model'> & Partial<Pick<Turn,'usage_detail'>>): string {
+  const reported=turn.usage_detail?.effective_model;
+  return typeof reported==='string' && reported.trim()!=='' ? reported : turn.model;
+}
+
+/** Keep the provider's display name where known, and the native name otherwise. */
+export function effectiveTurnModelName(turn: Pick<Turn,'model'|'model_display'> & Partial<Pick<Turn,'usage_detail'>>): string {
+  if (effectiveTurnModel(turn) === turn.model) return turn.model_display;
+  const display = turn.usage_detail?.effective_model_display;
+  return display === '' ? effectiveTurnModel(turn) : display ?? effectiveTurnModel(turn);
+}
+
 /** Recorded non-default options, as a named list. Nothing where the turn recorded none. */
-export function RanWith({ threadId, turn }: { threadId: string; turn: Pick<Turn, 'model' | 'params'> }) {
+export function RanWith({ threadId, turn }: { threadId: string; turn: Pick<Turn, 'model' | 'params'> & Partial<Pick<Turn,'usage_detail'>> }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const agent = useThreadPart(threadId, (view) => view.thread?.binding?.agent.id ?? null);
@@ -68,7 +81,7 @@ export function RanWith({ threadId, turn }: { threadId: string; turn: Pick<Turn,
     const read = readDef(view.def);
     return read === null ? [] : [read];
   })];
-  const parts = ranWithParts(turn.params, defs, turn.model, parameters.data?.model.options ?? [], locale);
+  const parts = ranWithParts(turn.params, defs, effectiveTurnModel(turn), parameters.data?.model.options ?? [], locale);
   if (parts.length === 0) return null;
   return <span>{t('timeline.footer.options',{choices:new Intl.ListFormat(locale).format(parts)})}</span>;
 }

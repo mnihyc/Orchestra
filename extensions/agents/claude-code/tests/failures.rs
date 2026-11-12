@@ -30,7 +30,7 @@ use std::path::PathBuf;
 use common::Rig;
 use orch_adapter_claude_code::events::FROM_HARNESS;
 use orch_agent_contract::adapter::AgentAdapter;
-use orch_agent_contract::events::{SessionEvent, TurnError, TurnOutcome};
+use orch_agent_contract::events::{SessionEvent, TurnError, TurnOutcome, TurnPhase, TurnPhaseKind};
 use orch_agent_contract::login::{LoginRequest, LoginStateKind, LoginValues};
 use orch_agent_contract::session::{ProviderAccess, SessionMode};
 use orch_types::new_id;
@@ -158,6 +158,7 @@ struct Seen {
     outcome: TurnOutcome,
     error: Option<TurnError>,
     frames: Vec<Value>,
+    phases: Vec<TurnPhase>,
 }
 
 /// The fault as the model server is told it: a limit's end is a moment in seconds since the epoch, counted from now.
@@ -218,6 +219,13 @@ async fn run(row: &Row) -> Option<Seen> {
             _ => None,
         })
         .collect();
+    let phases = events
+        .iter()
+        .filter_map(|event| match event {
+            SessionEvent::TurnPhase(phase) => Some(phase.clone()),
+            _ => None,
+        })
+        .collect();
     let (outcome, error) = events
         .iter()
         .find_map(|event| match event {
@@ -231,13 +239,41 @@ async fn run(row: &Row) -> Option<Seen> {
         outcome,
         error,
         frames,
+        phases,
     })
+}
+
+/// The same native canary also verifies every actual main retry reaches the live phase.
+fn transition_changes(seen: &Seen) -> Vec<String> {
+    let expected: std::collections::BTreeSet<_> = seen
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame["type"] == "system"
+                && frame["subtype"] == "api_retry"
+                && frame.get("parent_tool_use_id").is_none_or(Value::is_null)
+        })
+        .map(|frame| frame["attempt"].as_i64().filter(|n| *n > 0))
+        .collect();
+    let observed: std::collections::BTreeSet<_> = seen
+        .phases
+        .iter()
+        .filter(|phase| phase.kind == TurnPhaseKind::Retrying)
+        .map(|phase| phase.retry_attempt)
+        .collect();
+    if observed == expected {
+        Vec::new()
+    } else {
+        vec![format!(
+            "native retry attempts {expected:?} differ from live phase attempts {observed:?}"
+        )]
+    }
 }
 
 /// What differs between the fixture's expectation and what was seen, in words; nothing when the row holds.
 fn changes(row: &Row, seen: &Seen) -> Vec<String> {
     let expect = &fixture(row.name)["expect"];
-    let mut changed = Vec::new();
+    let mut changed = transition_changes(seen);
     match expect["outcome"].as_str().unwrap() {
         "completed" => {
             if seen.outcome != TurnOutcome::Completed {
@@ -328,6 +364,7 @@ fn record(row: &Row, seen: &Seen) {
         "observed": {
             "outcome": format!("{:?}", seen.outcome),
             "error": seen.error,
+            "phases": seen.phases,
         },
     });
     std::fs::write(

@@ -1,3 +1,8 @@
+---
+group: getting-started
+summary: Find task guides for setup, agent work, sharing and managing Orch.
+---
+
 # User guide
 
 Start with one person working beside an agent and a colleague joining that
@@ -38,6 +43,7 @@ hint that links to an article or a heading that is not here.
 - [Zero in settings](numeric-settings.md): Off, immediate actions and numeric zero values.
 - [Settings and usage](settings-and-usage.md): inherited settings, personal controls, notifications, consumption and limits.
 - [Finding things](finding-things.md): finder, word and semantic search, filters, result order and Show more.
+- [Ask about your work](ask.md): read-only questions, cited sources, one organization per conversation, history, floating windows and retention.
 - [Semantic search](semantic-search.md): ordinary embeddings providers, index states, disk limits and model changes.
 - [Related items](related-items.md): documents, chats and threads by meaning, place and references, for people and agents.
 - [Document links](document-links.md): what refers to a document with the line around each mention, what it refers to, the graph, and the tabs a document shows.
@@ -61,10 +67,26 @@ so the Help index lists each task once. Translated headings retain the same help
 
 When adding a screen, name its exact router path in an article's `screens` front matter,
 including detail pages and redirects. Give the article a title and search keywords, and
-connect the screen's question card to the relevant heading. Keep both editions together
+connect the screen's question card to the relevant heading. Add a plain, short `summary`
+in both editions' front matter; this text ships with the article and uses no model.
+Keep both editions together
 when behavior changes. The help checks report missing routes, translations and destinations.
 
 - [Pause, switch and remove](pause-and-switch.md): immediate pause, waiting messages, separate switching and removal.
 
 A translated heading can keep its original section address with front matter such as
 `heading_id.索引状态: index-states`. The reader still sees the authored translated heading.
+
+- [Accept organization terms](organization-terms.md)
+- [Messages from admins](messages-from-admins.md)
+- [Give a group chat a home](group-chats.md)
+- [Organize resources by home and origin](resource-groups.md)
+- [Follow a running thread](running-thread-views.md)
+- [Restore files to before a message](restore-files-before-a-message.md)
+- [Import and switch on MCP servers](mcp-import-and-use.md)
+- [Switch a thread or move an environment](switch-and-move-environments.md)
+- [Inspect stored data, sessions and tokens](admin-inspection.md)
+- [Provider web search](provider-web-search.md)
+- [Copy links and share viewing when sending](link-sharing.md)
+- [Let the agent schedule future work](agent-schedules.md)
+- [Read and refresh summaries](summaries.md): resource paragraphs, chat catch-up, independent titles, usage and Ask drafts.

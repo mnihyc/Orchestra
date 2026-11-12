@@ -179,13 +179,24 @@ impl Continuing {
             ));
         }
         if !undo {
-            let principal = super::source::load_principal(
+            let principal = match crate::continuations::operation::principal(
                 conn,
-                job,
-                recipe.actor_id,
-                recipe.authorization_token,
+                job.engine().inner.clock.as_ref(),
+                recipe,
             )
-            .await?;
+            .await?
+            {
+                Some(principal) => principal,
+                None => {
+                    super::source::load_principal(
+                        conn,
+                        job,
+                        recipe.actor_id,
+                        recipe.authorization_token,
+                    )
+                    .await?
+                }
+            };
             admission::require_view(conn, &principal, recipe.thread_id)
                 .await
                 .map_err(internal)?;
@@ -233,7 +244,11 @@ impl Continuing {
                 }
             }
             let mut callers = vec![principal.caller().clone()];
-            if let Some(scope) = &recipe.authorization_scope {
+            if let Some(scope) = recipe
+                .authorization_scope
+                .as_ref()
+                .filter(|_| recipe.operation_origin.is_none())
+            {
                 callers.push(Caller::token(
                     recipe.actor_id,
                     TokenGrant::from_stored(&scope.scopes, scope.subtree).map_err(internal)?,
@@ -250,6 +265,12 @@ impl Continuing {
                         .check_content(&mut unit, &caller, content)
                         .await
                         .map_err(internal)?;
+                }
+                if !caller.key_deadline_allows(job.engine().inner.clock.as_ref()) {
+                    return Err(failed(
+                        "auth.invalid_token",
+                        "The accepted continuation credential has ended.",
+                    ));
                 }
             }
         }
@@ -396,7 +417,7 @@ impl Continuing {
                 ));
             }
             if saved.id == id {
-                let saved = lifecycle::retain_command(&mut tx, saved, job.now(), false).await?;
+                let saved = lifecycle::retain_command(&mut tx, saved, job, false).await?;
                 tx.commit().await.map_err(orch_db::DbError::from)?;
                 return Ok(saved);
             }
@@ -404,7 +425,22 @@ impl Continuing {
         let mut outgoing = Outgoing::new(id, machine, SerialKey::Thread(body_thread(&row)?), body)
             .map_err(internal)?;
         outgoing.deadline = deadline;
-        let outgoing = lifecycle::retain_command(&mut tx, outgoing, job.now(), true).await?;
+        if recipe.operation_origin.is_some() {
+            let end = deadline.unwrap_or_else(|| {
+                Time::new(
+                    job.now() + chrono::Duration::seconds(i64::from(outgoing.kind.deadline_secs())),
+                )
+            });
+            outgoing.deadline = Some(end);
+            let authority = crate::continuations::command::Authority::capture(
+                &recipe, slot, &outgoing, end, &row.plan,
+            )
+            .map_err(internal)?;
+            outgoing = outgoing.with_authority(crate::commands::CommandAuthority::Continuation(
+                Box::new(authority),
+            ));
+        }
+        let outgoing = lifecycle::retain_command(&mut tx, outgoing, job, true).await?;
         let mut wire = row.plan.get("wire").cloned().unwrap_or_else(|| json!({}));
         wire[slot] = serde_json::to_value(&outgoing).map_err(internal)?;
         jobs::merge_plan(&mut tx, job.id(), &json!({"wire":wire}), job.now()).await?;

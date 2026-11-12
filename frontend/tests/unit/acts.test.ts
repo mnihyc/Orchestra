@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 // @vitest-environment node
 /// <reference types="node" />
 /** Every act of the application is in the registry of acts, with what it changes; a change reaches exactly the queries it
@@ -10,14 +11,20 @@ import { QueryClient, QueryObserver, type QueryKey } from '@tanstack/react-query
 import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 
-import { ACTS, applyChanges, type Change, covers, findAct, followWith, resourceChanges, treeChanges, userEventChanges } from '@/api/acts';
+import { ACTS, applyChanges, type Change, covers, findAct, followWith, resourceChanges, threadRowChanges, treeChanges, userEventChanges } from '@/api/acts';
 import { browsersQuery } from '@/api/browsers';
-import { createApiClient } from '@/api/client';
+import { createApiClient, client } from '@/api/client';
 import { displaysQuery } from '@/api/displays';
+import { duplicateObjects } from '@/api/duplicates';
+import { inputScheduleQuery, inputScheduleRunsQuery, topicSchedulesQuery } from '@/api/inputSchedules';
 import { documentLinksQuery } from '@/api/links';
+import { moveOutPath, supportsMoveOut } from '@/api/moveOut';
 import { portsKey } from '@/api/ports';
-import type { DocumentLinks, TreeNode } from '@/generated/api-types';
+import { documentSummaryOptionsKey, resourceSummaryKey } from '@/api/summaries';
+import type { DocumentLinks, MachinePrograms, TreeNode } from '@/generated/api-types';
+import type { HomeMoveKind } from '@/features/duplicate/move';
 import { me, org, userRef } from '../doubles/fixtures';
+import { inputSchedule } from '../doubles/input-schedules';
 
 const sourceRoot = resolve(import.meta.dirname, '../../src');
 /** Parsing all source once takes seconds on the shared builder; this bounds the scan. */
@@ -25,6 +32,120 @@ const SCAN_BUDGET_MS = 20_000;
 /** What a parameter of a path stands for when a request written in the code is looked up: any one segment. */
 const ANY = 'x';
 const WRITES = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const moveFamilies: Record<HomeMoveKind, unknown> = { ...duplicateObjects, host: null, machine: null };
+// Run the real finite builder over every declared family and draft state. Unported
+// families remain rejected by its own predicate; every returned path must have an act.
+const movePaths = [...new Set((Object.keys(moveFamilies) as HomeMoveKind[])
+  .filter(supportsMoveOut)
+  .flatMap((kind) => [false, true].map((draft) => moveOutPath({ kind, id: ANY, draft }))))];
+
+it.each(['PUT', 'DELETE'])('repairs visible native parameters omitted by a %s setting receipt without reading another thread', async (method) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const before = { parameters: [{ key: 'web_search', value: null }] };
+  const after = { parameters: [{ key: 'web_search', value: method === 'PUT' ? 'service' : null }] };
+  const key = ['thread-parameters', 'edited-thread'], other = ['thread-parameters', 'other-thread'];
+  const read = vi.fn(() => Promise.resolve(after)), otherRead = vi.fn(() => Promise.resolve(before));
+  cache.setQueryData(key, before); cache.setQueryData(other, before); cache.setQueryData(['settings', 'edited-thread'], []);
+  const stops = [
+    new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined),
+    new QueryObserver(cache, { queryKey: other, queryFn: otherRead, staleTime: Infinity }).subscribe(() => undefined),
+  ];
+  const answer = { key: 'agent.params', value: method === 'PUT' ? { web_search: 'service' } : {}, source: { scope: 'thread', node: null }, own: null, locked_by: null, writable: true, parts: [] };
+  try {
+    const act = findAct(method, '/nodes/edited-thread/settings/agent.params', { answer });
+    expect(act).not.toBeNull();
+    await applyChanges(act?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toEqual(after);
+    expect(cache.getQueryData(other)).toEqual(before);
+    expect(cache.getQueryData(['settings', 'edited-thread'])).toEqual([answer]);
+    expect(read).toHaveBeenCalledTimes(1); expect(otherRead).not.toHaveBeenCalled();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
+it.each(['PUT', 'DELETE'])('expires hidden native parameters after a %s setting receipt without reading them', async (method) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['thread-parameters', 'hidden-thread'];
+  const read = vi.fn(() => Promise.resolve({ parameters: [] }));
+  cache.setQueryDefaults(key, { queryFn: read });
+  cache.setQueryData(key, { parameters: [{ key: 'web_search', value: null }] });
+  try {
+    const act = findAct(method, '/nodes/hidden-thread/settings/agent.params', { answer: { key: 'agent.params', value: {} } });
+    expect(act).not.toBeNull();
+    await applyChanges(act?.changes ?? [], cache);
+    expect(cache.getQueryState(key)).toBeUndefined(); expect(read).not.toHaveBeenCalled();
+  } finally { cache.clear(); }
+});
+
+it('keeps a personal webhook in its own channel list through creation, editing and removal without another read', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['notification-channels'];
+  const read = vi.fn(() => Promise.resolve([]));
+  const other = { id: 'org-channel', kind: 'webhook', name: 'Team room', owner: { org: { id: 'org' } } };
+  cache.setQueryData(key, []);
+  cache.setQueryData(['channels', 'org'], [other]);
+  cache.setQueryData(['channels', 'system'], []);
+  const stop = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  const channel = { id: 'my-channel', kind: 'webhook', name: 'My room', owner: 'me', route: { enabled: false } };
+  try {
+    await applyChanges(findAct('POST', '/me/notification-channels', { answer: channel })?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toEqual([channel]);
+    const edited = { ...channel, name: 'Our room' };
+    await applyChanges(findAct('PATCH', '/notification-channels/my-channel', { answer: edited })?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toEqual([edited]);
+    await applyChanges(findAct('DELETE', '/notification-channels/my-channel')?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toEqual([]);
+    expect(cache.getQueryData(['channels', 'org'])).toEqual([other]);
+    expect(cache.getQueryData(['channels', 'system'])).toEqual([]);
+    expect(read).not.toHaveBeenCalled();
+  } finally { stop(); cache.clear(); }
+});
+
+it('keeps an initial personal channel read running until its complete native baseline arrives', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['notification-channels'];
+  const channel = { id: 'my-channel', kind: 'webhook', name: 'My room', owner: 'me', route: { enabled: false } };
+  const existing = { id: 'mail', kind: 'email', name: 'Mail', owner: 'system' };
+  let deliver!: (rows: unknown[]) => void;
+  const pending = new Promise<unknown[]>((resolve) => { deliver = resolve; });
+  const read = vi.fn(() => pending);
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const stop = observer.subscribe(() => undefined);
+  const completed = cache.getQueryCache().find({ queryKey: key, exact: true })?.promise?.then(() => undefined, () => undefined);
+  try {
+    expect(completed).toBeDefined();
+    await applyChanges(findAct('POST', '/me/notification-channels', { answer: channel })?.changes ?? [], cache);
+    expect(observer.getCurrentResult().isFetching).toBe(true);
+    deliver([existing, channel]); await completed;
+    expect(cache.getQueryData(key)).toEqual([existing, channel]);
+    expect(read).toHaveBeenCalledTimes(1);
+  } finally { deliver([]); stop(); cache.clear(); }
+});
+
+it('repairs both visible projections of a live thread choice without reading the row again', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const keys = [
+    ['settings', 'changed-thread'],
+    ['thread-parameters', 'changed-thread'],
+    ['thread', 'changed-thread'],
+    ['node', 'changed-thread'],
+    ['settings', 'other-thread'],
+  ];
+  const reads = keys.map(() => vi.fn(() => Promise.resolve('fresh')));
+  const stops = keys.map((queryKey, index) => {
+    cache.setQueryData(queryKey, 'held');
+    const queryFn = reads[index];
+    if (queryFn === undefined) throw new Error('Each fixture key has a reader');
+    return new QueryObserver(cache, { queryKey, queryFn, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  try {
+    await applyChanges(threadRowChanges('changed-thread'), cache);
+    expect(keys.map((key) => cache.getQueryData(key))).toEqual(['fresh', 'fresh', 'held', 'held', 'held']);
+    expect(reads.map((read) => read.mock.calls.length)).toEqual([1, 1, 0, 0, 0]);
+  } finally {
+    stops.forEach((stop) => stop());
+    cache.clear();
+  }
+});
 
 it('applies the accepted document tabs to their captured document without reading either pane again', async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -44,6 +165,42 @@ it('applies the accepted document tabs to their captured document without readin
     expect(cache.getQueryData(edited.queryKey)).toEqual(accepted);
     expect(cache.getQueryData(other.queryKey)).toEqual(before);
     expect(editedRead).not.toHaveBeenCalled(); expect(otherRead).not.toHaveBeenCalled();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
+it.each([
+  { method: 'PUT', path: '/documents/summary-document/summary-options', options: true, kind: 'document', range: undefined },
+  { method: 'POST', path: '/summaries/document/summary-document/refresh', options: false, kind: 'document', range: undefined },
+  { method: 'POST', path: '/summaries/chat/summary-document/refresh', options: false, kind: 'chat', range: { after: 10, through: 20 } },
+])('repairs only the selected summary views after $method $path, without projecting its receipt', async ({ method, path, options, kind, range }) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const id = 'summary-document';
+  const entries = [
+    { key: documentSummaryOptionsKey(id), changed: options },
+    { key: resourceSummaryKey({ kind: 'document', id }), changed: kind === 'document' },
+    { key: resourceSummaryKey({ kind: 'chat', id }, { after: 10, through: 20 }), changed: kind === 'chat' },
+    { key: resourceSummaryKey({ kind: 'chat', id }, { after: 20, through: 30 }), changed: false },
+    { key: resourceSummaryKey({ kind: 'chat', id }), changed: false },
+    { key: resourceSummaryKey({ kind: 'document', id: 'other-document' }), changed: false },
+    { key: documentSummaryOptionsKey('other-document'), changed: false },
+    // The inventory counter shares this head, but is not a subject summary.
+    { key: ['resource-summary', id] as const, changed: false },
+  ];
+  const reads = entries.map((_, index) => vi.fn(() => Promise.resolve({ view: `fresh-${index}` })));
+  const stops = entries.map(({ key }, index) => {
+    const read = reads[index]; if (read === undefined) throw new Error('A summary view has its read');
+    cache.setQueryData(key, { view: `old-${index}` });
+    return new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  const receipt = { projection: 'receipt', target: { kind, id }, revision: 9 };
+  try {
+    const act = findAct(method, path, { answer: receipt, input: range === undefined ? {} : { range } });
+    expect(act).not.toBeNull(); await applyChanges(act?.changes ?? [], cache);
+    entries.forEach(({ key, changed }, index) => {
+      expect(reads[index], JSON.stringify(key)).toHaveBeenCalledTimes(changed ? 1 : 0);
+      expect(cache.getQueryData(key)).toEqual({ view: `${changed ? 'fresh' : 'old'}-${index}` });
+      expect(cache.getQueryData(key)).not.toEqual(receipt);
+    });
   } finally { stops.forEach((stop) => stop()); cache.clear(); }
 });
 
@@ -81,6 +238,140 @@ it.each([
   } finally { stops.forEach((stop) => stop()); cache.clear(); }
 });
 
+// The server answers a role write with the role and its place; the row case below must hold with that answer too.
+const roleAnswer = { id: 'role', role: 'developer', node: { id: 'org' } };
+it.each([
+  { act: 'PATCH', path: '/roles/role', answer: undefined },
+  { act: 'PATCH', path: '/roles/role', answer: roleAnswer },
+  { act: 'POST', path: '/nodes/org/roles', answer: undefined },
+  { act: 'POST', path: '/nodes/org/roles', answer: roleAnswer },
+  { act: 'DELETE', path: '/roles/role', answer: undefined },
+])('reads the members list shown again after $act $path, so a role changed shows in its row at once', async ({ act, path, answer }) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const shown = ['members', 'org', { direct: false, q: '' }] as const;
+  const read = vi.fn(() => Promise.resolve([{ name: 'Vera', role: 'developer' }]));
+  cache.setQueryData(shown, [{ name: 'Vera', role: 'viewer' }]);
+  cache.setQueryData(['members', 'hidden'], ['old hidden view']);
+  const stop = new QueryObserver(cache, { queryKey: shown, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  try {
+    expect(findAct(act, path, { answer })).not.toBeNull();
+    await applyChanges(findAct(act, path, { answer })?.changes ?? [], cache);
+    expect(read).toHaveBeenCalledOnce();
+    expect(cache.getQueryData(shown)).toEqual([{ name: 'Vera', role: 'developer' }]);
+    expect(cache.getQueryData(['members', 'hidden'])).toBeUndefined();
+  } finally { stop(); cache.clear(); }
+});
+
+// A role written changes what the lists of its holder say, and none of them but the roles' own is in its answer: each is read once where it is shown.
+describe('what a role written or taken away leaves of the lists of its holder', () => {
+  const held = { id: 'role', role: 'developer', node: { id: 'web', kind: 'project', name: 'Web', redacted: false }, subject: { kind: 'user', id: 'vera', user: { id: 'vera' } }, revision: 2, domain: false, outside: true };
+  const page = (items: unknown[]) => ({ pages: [{ items, next_cursor: null }], pageParams: [null] });
+  const lists: { key: QueryKey; seed: unknown }[] = [
+    { key: ['members', 'org', { direct: false, q: '' }], seed: page([{ user: { id: 'vera' }, role: 'viewer', also: 0 }]) },
+    { key: ['outsiders', 'org', ''], seed: page([{ user: { id: 'vera' }, sources: [] }]) },
+    { key: ['document-readers', 'doc1'], seed: [] },
+    { key: ['activity', 'web', [], 'summary'], seed: page([{ id: 'a1' }]) },
+  ];
+  const plain = { rows: [], admins: { of: [], count: 2 }, reaches: null };
+  const watch = (cache: QueryClient, reads: Map<string, number>, list: { key: QueryKey; seed: unknown }[]) => list.map(({ key, seed }) => {
+    cache.setQueryData(key, seed);
+    return new QueryObserver(cache, { queryKey: key, queryFn: () => { reads.set(JSON.stringify(key), (reads.get(JSON.stringify(key)) ?? 0) + 1); return Promise.resolve(JSON.parse(JSON.stringify(seed)) as unknown); }, staleTime: Infinity }).subscribe(() => undefined);
+  });
+  const count = (reads: Map<string, number>, key: QueryKey) => reads.get(JSON.stringify(key)) ?? 0;
+
+  it.each([
+    { act: 'POST', path: '/nodes/web/roles', answer: held },
+    { act: 'PATCH', path: '/roles/role', answer: held },
+    { act: 'DELETE', path: '/roles/role', answer: undefined },
+  ])('reads each list of its holder once where it is shown, and the lists of roles and a page that counts nothing it changes not at all, after $act $path', async ({ act, path, answer }) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const reads = new Map<string, number>();
+    const roles = { owners: [], own: [held], above: [], can_give: ['viewer'] };
+    const everything = [...lists, { key: ['roles', 'web'] as QueryKey, seed: roles }, { key: ['roles', 'topic'] as QueryKey, seed: { ...roles, own: [], above: [held] } }, { key: ['page', 'nodes', 'web'] as QueryKey, seed: plain }];
+    const stops = watch(cache, reads, everything);
+    try {
+      await applyChanges(findAct(act, path, { answer })?.changes ?? [], cache);
+      for (const { key } of lists) expect(count(reads, key), JSON.stringify(key)).toBe(1);
+      expect(count(reads, ['roles', 'web'])).toBe(0);
+      expect(count(reads, ['roles', 'topic'])).toBe(0);
+      expect(count(reads, ['page', 'nodes', 'web'])).toBe(0);
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('reads a page of access again only where the role can have changed a count on it', async () => {
+    const entry = { id: 'e1', holder: { kind: 'role', role: 'developer', at: null, count: 3 } };
+    const cases: { name: string; role: string; page: unknown; expected: number }[] = [
+      { name: 'a role the page counts nothing of', role: 'developer', page: plain, expected: 0 },
+      { name: 'the admins above the page', role: 'admin', page: plain, expected: 1 },
+      { name: 'a holder that is that role', role: 'developer', page: { ...plain, rows: [{ permission: 'x', entries: [entry] }] }, expected: 1 },
+      { name: 'a holder that is another role', role: 'viewer', page: { ...plain, rows: [{ permission: 'x', entries: [entry] }] }, expected: 0 },
+      { name: 'the people who reach a thread\'s environment', role: 'viewer', page: { ...plain, reaches: { environment: { id: 'env' }, people: 4 } }, expected: 1 },
+    ];
+    for (const { name, role, page: data, expected } of cases) {
+      const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const reads = new Map<string, number>();
+      const stops = watch(cache, reads, [{ key: ['page', 'nodes', 'web'], seed: data }]);
+      try {
+        await applyChanges(findAct('PATCH', '/roles/role', { answer: { ...held, role } })?.changes ?? [], cache);
+        expect(count(reads, ['page', 'nodes', 'web']), name).toBe(expected);
+      } finally { stops.forEach((stop) => stop()); cache.clear(); }
+    }
+  });
+
+  it('reads the people behind a holder that is a role, and what a person may do, only where the role or the person is the one changed', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const reads = new Map<string, number>();
+    const views = [
+      { key: ['page-people', 'nodes', 'web', 'role:org:developer'] as QueryKey, seed: [] },
+      { key: ['page-people', 'nodes', 'web', 'role:org:viewer'] as QueryKey, seed: [] },
+      { key: ['page-effective', 'nodes', 'web', 'vera'] as QueryKey, seed: {} },
+      { key: ['page-effective', 'nodes', 'web', 'grace'] as QueryKey, seed: {} },
+    ];
+    const stops = watch(cache, reads, views);
+    try {
+      await applyChanges(findAct('PATCH', '/roles/role', { answer: held })?.changes ?? [], cache);
+      expect(views.map(({ key }) => count(reads, key))).toEqual([1, 0, 1, 0]);
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('reads the rows the reader holds again when the role is the reader\'s own or a group\'s, and not when it is another person\'s', async () => {
+    const reader = ['node', 'web'] as const;
+    for (const { subject, expected } of [{ subject: { kind: 'user', id: 'vera' }, expected: 0 }, { subject: { kind: 'user', id: 'me' }, expected: 1 }, { subject: { kind: 'group', id: 'team' }, expected: 1 }]) {
+      const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const reads = new Map<string, number>();
+      const stops = watch(cache, reads, [{ key: reader, seed: { id: 'web', access: { permissions: [] } } }]);
+      client.session.setState({ userId: 'me' });
+      try {
+        await applyChanges(findAct('PATCH', '/roles/role', { answer: { ...held, subject } })?.changes ?? [], cache);
+        expect(count(reads, reader), JSON.stringify(subject)).toBe(expected);
+      } finally { stops.forEach((stop) => stop()); cache.clear(); client.session.setState({ userId: null }); }
+    }
+  });
+});
+
+it('reads the list of deleted things where a place lay again once it is brought back, so it leaves that list at once', async () => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const shown = ['deleted', 'project'] as const;
+  const other = ['deleted', 'elsewhere'] as const;
+  const read = vi.fn(() => Promise.resolve({ pages: [{ items: [] }], pageParams: [null] }));
+  const unrelated = vi.fn(() => Promise.resolve({ pages: [{ items: [] }], pageParams: [null] }));
+  const before = { pages: [{ items: [{ node: { id: 'topic' } }] }], pageParams: [null] };
+  cache.setQueryData(shown, before);
+  cache.setQueryData(other, before);
+  const stops = [
+    new QueryObserver(cache, { queryKey: shown, queryFn: read, staleTime: Infinity }).subscribe(() => undefined),
+    new QueryObserver(cache, { queryKey: other, queryFn: unrelated, staleTime: Infinity }).subscribe(() => undefined),
+  ];
+  try {
+    const act = findAct('POST', '/nodes/topic/restore', { answer: { id: 'topic', kind: 'topic', name: 'Topic', parent_id: 'project', archived: true } });
+    expect(act).not.toBeNull();
+    await applyChanges(act?.changes ?? [], cache);
+    expect(read).toHaveBeenCalledOnce();
+    expect(cache.getQueryData(shown)).toEqual({ pages: [{ items: [] }], pageParams: [null] });
+    expect(unrelated).not.toHaveBeenCalled();
+  } finally { stops.forEach((stop) => stop()); cache.clear(); }
+});
+
 it('retains a service-account projection outside the membership repair owner', async () => {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const entries = [
@@ -107,15 +398,17 @@ const files = (directory: string): string[] =>
     return /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') && entry.name !== 'routeTree.gen.ts' ? [path] : [];
   });
 
-/** The paths an expression of the code can be: a string, a template whose parts are parameters, a helper of the same file that makes a path, or either side of a choice. */
-function pathsOf(node: ts.Expression, helpers: ReadonlyMap<string, ts.Expression>, depth = 0): string[] {
+/** A helper is a source expression or the concrete outputs of a finite native path builder. */
+type PathHelper = { expression: ts.Expression } | { paths: readonly string[] };
+/** Resolve literals, templates, local helpers and both branches without exempting an unresolved request. */
+function pathsOf(node: ts.Expression, helpers: ReadonlyMap<string, PathHelper>, depth = 0): string[] {
   if (depth > 4) return [ANY];
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isSatisfiesExpression(node) || ts.isNonNullExpression(node)) return pathsOf(node.expression, helpers, depth + 1);
   if (ts.isConditionalExpression(node)) return [...pathsOf(node.whenTrue, helpers, depth + 1), ...pathsOf(node.whenFalse, helpers, depth + 1)];
   if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
     const helper = helpers.get(node.expression.text);
-    return helper === undefined ? [ANY] : pathsOf(helper, helpers, depth + 1);
+    return helper === undefined ? [ANY] : 'paths' in helper ? [...helper.paths] : pathsOf(helper.expression, helpers, depth + 1);
   }
   if (ts.isTemplateExpression(node)) {
     let paths = [node.head.text];
@@ -143,10 +436,13 @@ function writeRequests(): Request[] {
   for (const file of files(sourceRoot)) {
     if (file.endsWith('/api/acts.ts')) continue;
     const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    const helpers = new Map<string, ts.Expression>();
+    const helpers = new Map<string, PathHelper>();
     const collect = (node: ts.Node) => {
       if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined && ts.isArrowFunction(node.initializer) && !ts.isBlock(node.initializer.body)) {
-        helpers.set(node.name.text, node.initializer.body);
+        helpers.set(node.name.text, { expression: node.initializer.body });
+      }
+      if (relative(sourceRoot, file) === 'api/moveOut.ts' && ts.isFunctionDeclaration(node) && node.name?.text === 'moveOutPath') {
+        helpers.set(node.name.text, { paths: movePaths });
       }
       ts.forEachChild(node, collect);
     };
@@ -180,7 +476,7 @@ function writeRequests(): Request[] {
 function namedHeads(): Set<string> {
   const heads = new Set<string>();
   const add = (changes: readonly Change[]) => {
-    for (const change of changes) if ('key' in change && change.key[0] !== undefined) heads.add(change.key[0]);
+    for (const change of changes) if ('key' in change) heads.add(change.key[0]);
   };
   for (const entry of Object.values(ACTS)) add(entry(() => ANY));
   for (const what of ['approvals', 'route', 'notification_prefs', 'notifications_read', 'favorites', 'state', 'org_creation', 'machines', 'resources', 'connected']) {
@@ -190,11 +486,183 @@ function namedHeads(): Set<string> {
   return heads;
 }
 
+/** The lists and pages a screen shows that an act changes and whose answer does not carry the change. */
+describe('what a person sees after an act that its answer does not carry', () => {
+  const ORG = 'org1', PROJECT = 'project1', TOPIC = 'topic1', GROUP = 'group1';
+  const page = (items: unknown[]) => ({ pages: [{ items, next_cursor: null }], pageParams: [null] });
+  const row = (id: string, kind: string, extra: Record<string, unknown> = {}) => ({ id, kind, name: `Name of ${id}`, parent_id: PROJECT, org_id: ORG, archived: false, revision: 2, path: [], access: { permissions: ['x.view'] }, ...extra });
+  interface Shown { key: QueryKey; seed: unknown }
+  interface Case { name: string; method: string; path: string; answer?: unknown; shown: Shown[] }
+  const cases: Case[] = [
+    { name: 'a place renamed is a line of its Activity and of the Activity above it', method: 'PATCH', path: `/nodes/${TOPIC}`, answer: row(TOPIC, 'topic', { name: 'Renamed' }),
+      shown: [{ key: ['activity', TOPIC, [], 'summary'], seed: page([{ id: 'a1' }]) }, { key: ['activity', PROJECT, [], 'summary'], seed: page([{ id: 'a1' }]) }] },
+    { name: 'a place archived is a line of its Activity and leaves what the place above holds', method: 'POST', path: `/nodes/${TOPIC}/archive`, answer: { node: row(TOPIC, 'topic', { archived: true }), undo: null },
+      shown: [{ key: ['activity', TOPIC, [], 'summary'], seed: page([{ id: 'a1' }]) }, { key: ['children', PROJECT, 'exclude', false], seed: page([row(TOPIC, 'topic')]) }] },
+    { name: 'a project made in an org enters what the org holds, and its overview', method: 'POST', path: `/orgs/${ORG}/projects`, answer: row('project2', 'project', { parent_id: ORG }),
+      shown: [{ key: ['children', ORG, 'exclude', false], seed: page([row(PROJECT, 'project', { parent_id: ORG })]) }, { key: ['activity', ORG, [], 'summary'], seed: page([{ id: 'a1' }]) }, { key: ['org-overview', ORG], seed: {} }] },
+    { name: 'a place deleted leaves what the place above holds, its Activity and what is deleted in it', method: 'DELETE', path: `/nodes/${TOPIC}`, answer: { deletion_id: 'd1' },
+      shown: [{ key: ['children', PROJECT, 'exclude', false], seed: page([row(TOPIC, 'topic')]) }, { key: ['activity', PROJECT, [], 'summary'], seed: page([{ id: 'a1' }]) }, { key: ['deleted', PROJECT], seed: page([]) }] },
+    { name: 'somebody put in a group or taken out is counted in the list of the groups', method: 'PUT', path: `/groups/${GROUP}/holders`,
+      shown: [{ key: ['groups', ORG, false], seed: [{ id: GROUP, member_count: 0 }] }, { key: ['org-groups', ORG], seed: [{ id: GROUP, member_count: 0 }] }] },
+    { name: 'a change of who holds a place is read in what a person may do on its page and in its history', method: 'PATCH', path: `/nodes/${TOPIC}/permissions`, answer: { rows: [], depends: [], revision: 3 },
+      shown: [{ key: ['page-effective', 'nodes', TOPIC, 'user1'], seed: {} }, { key: ['page-history', 'nodes', TOPIC, 'summary', null], seed: page([]) }] },
+    { name: 'a thing moved to another home is read in the people behind the holders of its page, its rights, its history and what it shares with agents', method: 'PUT', path: '/documents/doc1/home', answer: { projection: 'receipt', kind: 'document', id: 'doc1', revision: 3 },
+      shown: [{ key: ['page-people', 'documents', 'doc1', 'members:org'], seed: [] }, { key: ['page-effective', 'documents', 'doc1', 'user1'], seed: {} }, { key: ['page-history', 'documents', 'doc1', 'summary', null], seed: page([]) }, { key: ['agent-shares', 'documents', 'doc1', 'source'], seed: [] }] },
+    { name: 'a request decided leaves the requests that wait on a place', method: 'POST', path: '/approvals/ap1/decision', answer: { approval: { id: 'ap1', state: 'approved', name: 'x' } },
+      shown: [{ key: ['access-requests', 'waiting', TOPIC], seed: [{ id: 'ap1' }] }] },
+    { name: 'a tag renamed is read in the lists of topics that show it', method: 'PATCH', path: '/tags/tag1', answer: { id: 'tag1', name: 'renamed', color: 1, node: { id: ORG, kind: 'org', name: 'Acme', redacted: false } },
+      shown: [{ key: ['topics', PROJECT, {}, 50], seed: page([row(TOPIC, 'topic')]) }] },
+    { name: 'an org moved is read in the members of the org it went to', method: 'POST', path: `/orgs/${ORG}/move`, answer: row(ORG, 'org', { parent_id: 'orgB', org_kind: 'team' }),
+      shown: [{ key: ['members', 'orgB', { direct: false, q: '' }], seed: page([]) }, { key: ['members', ORG, { direct: false, q: '' }], seed: page([]) }] },
+    { name: 'a service account deleted leaves the members', method: 'DELETE', path: '/service-accounts/sa1',
+      shown: [{ key: ['members', ORG, { direct: false, q: '' }], seed: page([{ user: { id: 'sa1' } }]) }, { key: ['service-accounts', ORG], seed: [{ id: 'sa1', user: { id: 'sa1' } }] }] },
+  ];
+
+  it('reads the defaults and pages of the places inside an org when the defaults of the org change, and not again the view the answer carries', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const reads = new Map<string, number>();
+    const views: Shown[] = [
+      { key: ['defaults', ORG], seed: { rows: [], revision: 1 } },
+      { key: ['defaults', PROJECT], seed: { rows: [], revision: 1 } },
+      { key: ['page', 'nodes', PROJECT], seed: { rows: [] } },
+    ];
+    const stops = views.map(({ key, seed }) => {
+      cache.setQueryData(key, seed);
+      return new QueryObserver(cache, { queryKey: key, queryFn: () => { reads.set(JSON.stringify(key), (reads.get(JSON.stringify(key)) ?? 0) + 1); return Promise.resolve(seed); }, staleTime: Infinity }).subscribe(() => undefined);
+    });
+    const count = (key: QueryKey) => reads.get(JSON.stringify(key)) ?? 0;
+    try {
+      await applyChanges(findAct('PATCH', `/nodes/${ORG}/defaults`, { answer: { rows: [], depends: [], revision: 2 } })?.changes ?? [], cache);
+      expect(count(['defaults', PROJECT])).toBe(1);
+      expect(count(['page', 'nodes', PROJECT])).toBe(1);
+      expect(count(['defaults', ORG])).toBe(0);
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it.each(cases)('$name', async ({ method, path, answer, shown }) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const reads = new Map<string, number>();
+    const stops = shown.map(({ key, seed }) => {
+      cache.setQueryData(key, seed);
+      return new QueryObserver(cache, { queryKey: key, queryFn: () => { reads.set(JSON.stringify(key), (reads.get(JSON.stringify(key)) ?? 0) + 1); return Promise.resolve(JSON.parse(JSON.stringify(seed)) as unknown); }, staleTime: Infinity }).subscribe(() => undefined);
+    });
+    const before = shown.map(({ key }) => JSON.stringify(cache.getQueryData(key)));
+    try {
+      const found = findAct(method, path, { answer });
+      expect(found).not.toBeNull();
+      await applyChanges(found?.changes ?? [], cache);
+      shown.forEach(({ key }, index) => {
+        // Each list that is shown was read again or patched by the answer; none is left as it was.
+        const read = (reads.get(JSON.stringify(key)) ?? 0) > 0 || JSON.stringify(cache.getQueryData(key)) !== before[index];
+        expect(read, JSON.stringify(key)).toBe(true);
+      });
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('reads again, and does not only patch, the topics of the project a place comes back to, whatever their filter says of the row', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ['topics', PROJECT, { status: 'done' }, 50] as const;
+    const read = vi.fn(() => Promise.resolve(page([row(TOPIC, 'topic')])));
+    cache.setQueryData(key, page([]));
+    const stop = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+    try {
+      await applyChanges(findAct('POST', `/nodes/${TOPIC}/restore`, { answer: row(TOPIC, 'topic', { archived: false }) })?.changes ?? [], cache);
+      expect(read).toHaveBeenCalledOnce();
+    } finally { stop(); cache.clear(); }
+  });
+
+  it('does not read the people behind a holder, or what the page shares with agents, after a change of who holds the page', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const keys: QueryKey[] = [['page-people', 'nodes', TOPIC, 'group:team'], ['agent-shares', 'nodes', TOPIC, 'source']];
+    const reads = vi.fn(() => Promise.resolve([]));
+    const stops = keys.map((key) => { cache.setQueryData(key, []); return new QueryObserver(cache, { queryKey: key, queryFn: reads, staleTime: Infinity }).subscribe(() => undefined); });
+    try {
+      await applyChanges(findAct('PATCH', `/nodes/${TOPIC}/permissions`, { answer: { rows: [], depends: [], revision: 3 } })?.changes ?? [], cache);
+      expect(reads).not.toHaveBeenCalled();
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('drops a list held without being shown, so that it is not shown stale when its screen comes back', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const key = ['activity', PROJECT, [], 'summary'] as const;
+    cache.setQueryData(key, page([{ id: 'a1' }]));
+    await applyChanges(findAct('PATCH', `/nodes/${TOPIC}`, { answer: row(TOPIC, 'topic', { name: 'Renamed' }) })?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toBeUndefined();
+    cache.clear();
+  });
+});
+
 describe('the registry of acts', () => {
+  it('repairs a cancelled schedule without removing its history or reading another schedule or topic', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const before = inputSchedule();
+    const topicId = before.topic?.id;
+    if (topicId === undefined) throw new Error('The schedule fixture needs a readable topic.');
+    const after = inputSchedule({ state: 'deleted', next_run_at: null, revision: before.revision + 1 });
+    const other = inputSchedule({ id: 'other-schedule' });
+    const history = { pages: [{ items: [], next_cursor: null }], pageParams: [null] };
+    const selected = inputScheduleQuery(before.id).queryKey;
+    const otherKey = inputScheduleQuery(other.id).queryKey;
+    const topic = topicSchedulesQuery(topicId).queryKey;
+    const runs = inputScheduleRunsQuery(before.id).queryKey;
+    const selectedRead = vi.fn(() => Promise.resolve(after));
+    const otherRead = vi.fn(() => Promise.resolve(other));
+    const topicRead = vi.fn(() => Promise.resolve([after]));
+    const runsRead = vi.fn(() => Promise.resolve(history));
+    const entries = [
+      { key: selected, data: before, read: selectedRead },
+      { key: otherKey, data: other, read: otherRead },
+      { key: topic, data: [before], read: topicRead },
+      { key: runs, data: history, read: runsRead },
+    ];
+    for (const entry of entries) cache.setQueryData(entry.key, entry.data);
+    const stops = entries.map((entry) => new QueryObserver<unknown>(cache, {
+      queryKey: entry.key, queryFn: () => entry.read(), staleTime: Infinity,
+    }).subscribe(() => undefined));
+    try {
+      const act = findAct('DELETE', `/input-schedules/${before.id}`);
+      expect(act).not.toBeNull();
+      await applyChanges(act?.changes ?? [], cache);
+      expect(selectedRead).toHaveBeenCalledOnce();
+      expect(cache.getQueryData(selected)).toEqual(after);
+      expect(otherRead).not.toHaveBeenCalled();
+      expect(topicRead).not.toHaveBeenCalled();
+      expect(runsRead).not.toHaveBeenCalled();
+      expect(cache.getQueryData(otherKey)).toEqual(other);
+      expect(cache.getQueryData(topic)).toEqual([before]);
+      expect(cache.getQueryData(runs)).toEqual(history);
+    } finally {
+      stops.forEach((stop) => stop());
+      cache.clear();
+    }
+  });
+
+  it.each(['messages', 'stop', 'keep'])('repairs the changed Ask conversation and its visible history independently after %s', async (operation) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const here = ['ask', 'viewer', 1, 'conversation', false], other = ['ask', 'viewer', 1, 'other', false];
+    const history = ['ask-history', 'viewer', 1, 'root', false];
+    const changed = vi.fn(() => Promise.resolve({ seq: 2 })), unrelated = vi.fn(() => Promise.resolve({ seq: 1 })), listed = vi.fn(() => Promise.resolve({ pages: ['fresh history'] }));
+    const stops = [{ key: here, read: changed }, { key: other, read: unrelated }, { key: history, read: listed }].map(({ key, read }) => {
+      cache.setQueryData(key, { seq: 1 });
+      return new QueryObserver(cache, { queryKey: key, queryFn: async (): Promise<unknown> => read(), staleTime: Infinity }).subscribe(() => undefined);
+    });
+    try {
+      const found = findAct('POST', `/ask/conversations/conversation/${operation}`, { answer: { conversation_id: 'conversation', seq: 2, turn_id: null } });
+      expect(found).not.toBeNull(); await applyChanges(found?.changes ?? [], cache);
+      expect(changed).toHaveBeenCalledOnce(); expect(listed).toHaveBeenCalledOnce(); expect(unrelated).not.toHaveBeenCalled();
+      expect(cache.getQueryData(here)).toEqual({ seq: 2 }); expect(cache.getQueryData(other)).toEqual({ seq: 1 });
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
+  it('registers Ask creation as a missing history projection without inventing a conversation snapshot from its receipt', () => {
+    expect(findAct('POST', '/ask/conversations', { answer: { conversation_id: 'new-conversation', seq: 1, turn_id: null } })?.changes)
+      .toEqual([{ missing: [{ key: ['ask-history'] }], cancelPending: true }]);
+  });
+
   it('has an entry for every request of the application that changes something', () => {
     const requests = writeRequests();
     // The two requests of the session are the client's own and change nothing a screen reads by themselves.
-    const acts = requests.filter((request) => !['/auth/refresh', '/auth/logout'].includes(request.path));
+    const acts = requests.filter((request) => !['/auth/session', '/auth/refresh', '/auth/logout'].includes(request.path));
     expect(acts.length).toBeGreaterThan(300);
     const missing = acts.filter((request) => findAct(request.method, asked(request.path)) === null).map((request) => `${request.where}: ${request.method} ${request.path}`);
     expect(missing).toEqual([]);
@@ -276,6 +744,27 @@ describe('the registry of acts', () => {
   });
 });
 
+describe('a change of password', () => {
+  it('asks again for the list of sessions the server has just ended, and for nothing else of its kind', async () => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const listed = [{ id: 'this', current: true }, { id: 'other', current: false }], ended = [{ id: 'this', current: true }];
+    const read = vi.fn(() => Promise.resolve(ended)), otherRead = vi.fn(() => Promise.resolve(listed));
+    cache.setQueryData(['sessions'], listed); cache.setQueryData(['admin-credentials', 'sessions', 'somebody'], listed);
+    const stops = [
+      new QueryObserver(cache, { queryKey: ['sessions'], queryFn: read, staleTime: Infinity }).subscribe(() => undefined),
+      new QueryObserver(cache, { queryKey: ['admin-credentials', 'sessions', 'somebody'], queryFn: otherRead, staleTime: Infinity }).subscribe(() => undefined),
+    ];
+    try {
+      const act = findAct('POST', '/me/password');
+      expect(act).not.toBeNull();
+      await applyChanges(act?.changes ?? [], cache);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(cache.getQueryData(['sessions'])).toEqual(ended);
+      expect(otherRead).not.toHaveBeenCalled();
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+});
+
 describe('a change', () => {
   it('covers the queries that begin with its key and name its identifier anywhere in them', () => {
     expect(covers({ key: ['page'], id: 'a' }, ['page', 'nodes', 'a'])).toBe(true);
@@ -304,24 +793,7 @@ describe('a change', () => {
   });
 });
 
-const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => ({
-  address: kind === 'org' ? id : null,
-  id,
-  kind,
-  parent_id: parent,
-  name: id,
-  color: null,
-  participating: true,
-  archived: false,
-  restricted: false,
-  deleted: false,
-  tree_seq: seq,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  thread: null,
-  chat: { id: `chat-${id}`, seq: 0 },
-  docs: 0,
-  ...more,
-});
+const row = (id: string, parent: string | null, kind: TreeNode['kind'], seq: number, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, address: kind === 'org' ? id : null, tree_seq: seq, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 describe('what the live tree says', () => {
   const held = new Map<string, TreeNode>(
@@ -389,6 +861,54 @@ describe('the client tells of every act that succeeded', () => {
 });
 
 describe('what the person is told', () => {
+  it.each([
+    ['POST', '/me/push-subscriptions'],
+    ['DELETE', '/me/push-subscriptions'],
+    ['DELETE', '/me/push-subscriptions/device'],
+  ])('refreshes the device roster after %s %s while preference data is also visible', async (method, path) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const prefs = vi.fn(() => Promise.resolve({ revision: 2 }));
+    const devices = vi.fn(() => Promise.resolve([{ id: 'device' }]));
+    cache.setQueryData(['notification-prefs'], { revision: 1 });
+    cache.setQueryData(['away', 'devices'], []);
+    const stopPrefs = new QueryObserver(cache, { queryKey: ['notification-prefs'], queryFn: prefs, staleTime: Infinity }).subscribe(() => undefined);
+    const stopDevices = new QueryObserver(cache, { queryKey: ['away', 'devices'], queryFn: devices, staleTime: Infinity }).subscribe(() => undefined);
+    try {
+      await applyChanges(findAct(method, path)?.changes ?? [], cache);
+      expect(devices).toHaveBeenCalledTimes(1);
+      expect(prefs).not.toHaveBeenCalled();
+      expect(cache.getQueryData(['away', 'devices'])).toEqual([{ id: 'device' }]);
+    } finally { stopPrefs(); stopDevices(); cache.clear(); }
+  });
+
+  it.each([
+    { trigger: 'preference write', changes: () => findAct('PUT', '/me/notification-prefs', { answer: { revision: 2, pause_until: '2099-01-01T12:30:00Z' } })?.changes ?? [] },
+    { trigger: 'route write', changes: () => findAct('PUT', '/me/notification-routes/mail', { answer: { id: 'route', channel_id: 'mail', enabled: true } })?.changes ?? [] },
+    { trigger: 'preference hint', changes: () => userEventChanges('notification_prefs', {}) },
+    { trigger: 'route hint', changes: () => userEventChanges('route', { channel_id: 'mail' }) },
+    { trigger: 'preference snapshot', changes: () => userEventChanges('notification_prefs', { notification_prefs: { revision: 2, pause_until: '2099-01-01T12:30:00Z' } }) },
+  ])('repairs visible outward status after $trigger without reading hidden places or devices', async ({ changes }) => {
+    const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const entries = [
+      { key: ['away', 'outside-status', 'thread'] as const, active: true, changed: true },
+      { key: ['away', 'outside-status', 'org'] as const, active: true, changed: true },
+      { key: ['away', 'outside-status', 'closed'] as const, active: false, changed: false },
+      { key: ['away', 'devices'] as const, active: true, changed: false },
+    ];
+    const reads = entries.map((_, index) => vi.fn(() => Promise.resolve({ observed: `fresh-${index}` })));
+    const stops = entries.flatMap(({ key, active }, index) => {
+      cache.setQueryData(key, { observed: `old-${index}` });
+      return active ? [new QueryObserver(cache, { queryKey: key, queryFn: reads[index], staleTime: Infinity }).subscribe(() => undefined)] : [];
+    });
+    try {
+      await applyChanges(changes(), cache);
+      entries.forEach(({ key, active, changed }, index) => {
+        expect(reads[index], JSON.stringify(key)).toHaveBeenCalledTimes(changed ? 1 : 0);
+        expect(cache.getQueryData(key)).toEqual(!active ? undefined : { observed: `${changed ? 'fresh' : 'old'}-${index}` });
+      });
+    } finally { stops.forEach((stop) => stop()); cache.clear(); }
+  });
+
   it('carries a decided approval row, and does not treat a reconnect as a list change', () => {
     const approval = { id: 'a1', state: 'approved' };
     expect(userEventChanges('approvals', { approval })).toEqual([{ row: { kind: 'approval', id: 'a1', value: approval, insert: true } }]);
@@ -406,12 +926,14 @@ it('applies program acknowledgements and live machine registry changes without a
   const cache=new QueryClient();
   const key=['machine-programs','machine'];
   cache.setQueryData(key,{entries:[],capabilities:[],config_file:null,can_manage:true});
-  const answer={entries:[{kind:'agent',name:'new-agent',ready:true}],capabilities:[],config_file:'/data/config.toml',can_manage:true};
+  const answer:MachinePrograms={entries:[{kind:'agent',name:'new-agent',command:['new-agent'],origin:'orch',ready:true,version:'1.0.0',
+    descriptor:{kind:'new-agent',harness:{name:'New agent'},sandbox_modes:['open'],approval_modes:['on_request']},models:null,detail:null}],
+    capabilities:[],config_file:'/data/config.toml',can_manage:true};
   const acknowledged=findAct('POST','/machines/machine/programs',{answer,input:{action:'reload'}});
   expect(acknowledged?.changes).toEqual([{value:{key,data:answer}}]);
   await applyChanges(acknowledged?.changes ?? [],cache);
   expect(cache.getQueryData(key)).toEqual(answer);
-  const report={...answer,entries:[{kind:'agent',name:'new-agent',ready:false,detail:'The program exited.'}]};
+  const report:MachinePrograms={...answer,entries:answer.entries.map((entry)=>({...entry,ready:false,detail:'The program exited.'}))};
   await applyChanges([{row:{kind:'machine',id:'machine',value:{id:'machine',access:{permissions:['machine.view']},facts:{programs:report}}}}],cache);
   expect(cache.getQueryData(key)).toEqual({...report,can_manage:false});
   await applyChanges([{row:{kind:'machine',id:'machine',value:null}}],cache);

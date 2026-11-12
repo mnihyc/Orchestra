@@ -8,11 +8,13 @@
 mod support;
 
 use orch_access_contract::decisions::ObjectRef;
+use orch_access_contract::pages::Holder;
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_access_contract::roles::Role;
 use orch_authz::pages::ChangeError;
 use orch_authz::requests::{
-    Ask, AskError, Asked, Giving, GrantError, Sent, Whom, grant, is_held, plan,
+    Ask, AskError, Asked, AskedOptions, Giving, GrantError, Sent, Whom, givers_for, grant, is_held,
+    plan,
 };
 use orch_authz::usable::ResourcePolicy;
 use orch_authz::{Caller, Policy};
@@ -65,7 +67,18 @@ async fn granted_under(
     giving: &Giving,
     policy: &ResourcePolicy,
 ) -> Result<Vec<Permission>, GrantError> {
-    let principal = w.principal(Caller::session(approver)).await;
+    granted_as(w, Caller::session(approver), requester, ask, giving, policy).await
+}
+
+async fn granted_as(
+    w: &World,
+    approver: Caller,
+    requester: Id,
+    ask: &Ask,
+    giving: &Giving,
+    policy: &ResourcePolicy,
+) -> Result<Vec<Permission>, GrantError> {
+    let principal = w.principal(approver).await;
     let asked = Asked::of(ask, "please");
     let mut tx = w.db.pool.begin().await.unwrap();
     let outcome = grant(
@@ -352,4 +365,230 @@ async fn somebody_from_outside_is_named_by_a_decision_only_as_the_approver_may_n
         .await
         .unwrap();
     assert!(w.can(olga, w.thread, Permission::ThreadView).await);
+}
+
+/// Asks for the use of a provider with the models named, or with any when none is.
+fn provider_ask(provider: Id, models: Option<&[&str]>) -> Ask {
+    Ask {
+        label: None,
+        object: ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+        permissions: vec![Permission::ProviderUse],
+        options: models.map(|models| AskedOptions {
+            models: Some(models.iter().map(|model| (*model).to_owned()).collect()),
+            ..AskedOptions::default()
+        }),
+        whom: Whom::Requester,
+    }
+}
+
+/// A provider with people who each manage its page and use it through one entry of their own.
+async fn givers_with(w: &World, entries: &[(&str, serde_json::Value)]) -> (Id, Vec<Id>) {
+    let provider = w.provider(w.maker, w.root, "Shared key").await;
+    let mut people = Vec::new();
+    for (name, options) in entries {
+        let person = w.member(name).await;
+        w.grant(
+            "provider",
+            provider,
+            Permission::AccessManage,
+            Holder::User { id: person },
+        )
+        .await;
+        w.put(
+            "provider",
+            provider,
+            Permission::ProviderUse,
+            Holder::User { id: person },
+            options.clone(),
+        )
+        .await;
+        people.push(person);
+    }
+    (provider, people)
+}
+
+#[tokio::test]
+async fn the_givers_of_a_request_for_a_provider_are_those_who_could_write_the_entry_it_asks_for() {
+    let w = World::new().await;
+    let rae = w.member("rae").await;
+    let first = w.thing("environment", w.maker, w.topic, "first").await;
+    let (provider, people) = givers_with(
+        &w,
+        &[
+            ("plain", json!({})),
+            ("both_models", json!({"models": ["small", "big"]})),
+            ("big_only", json!({"models": ["big"]})),
+            (
+                "placed",
+                json!({"where": [{"kind": "environment", "id": first}]}),
+            ),
+            ("copy_only", json!({"arrangements": ["credential_shared"]})),
+        ],
+    )
+    .await;
+    // The entry that a request writes names the models asked for and no type and no place.
+    let principal = w.principal(Caller::session(rae)).await;
+    let who_gives = |models: Option<Vec<String>>| {
+        let principal = &principal;
+        let w = &w;
+        async move {
+            let options = models.map(|models| orch_access_contract::decisions::MissingOptions {
+                models: Some(models),
+                ..Default::default()
+            });
+            let given = givers_for(
+                &mut *w.conn().await,
+                principal,
+                ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id: provider,
+                },
+                &[Permission::ProviderUse],
+                options.as_ref(),
+                &rules(),
+            )
+            .await
+            .unwrap();
+            given
+                .nearest
+                .into_iter()
+                .chain(given.further)
+                .collect::<Vec<Id>>()
+        }
+    };
+    let listed = who_gives(Some(vec!["small".to_owned()])).await;
+    assert!(
+        listed.contains(&people[0]),
+        "an entry that names nothing can give it"
+    );
+    assert!(
+        listed.contains(&people[1]),
+        "an entry that names the model can give it"
+    );
+    assert!(
+        !listed.contains(&people[2]),
+        "an entry for another model cannot"
+    );
+    assert!(
+        !listed.contains(&people[3]),
+        "an entry limited to a place cannot"
+    );
+    assert!(
+        !listed.contains(&people[4]),
+        "an entry that names only a copy cannot"
+    );
+    // Asking for every model is given only by an entry that names none.
+    let listed = who_gives(None).await;
+    assert!(listed.contains(&people[0]));
+    assert!(!listed.contains(&people[1]));
+}
+
+#[tokio::test]
+async fn an_approver_who_holds_less_than_the_request_asks_is_told_which_member_goes_beyond() {
+    let w = World::new().await;
+    let rae = w.member("rae").await;
+    let (provider, people) = givers_with(
+        &w,
+        &[
+            ("fewer", json!({"models": ["small"]})),
+            ("plain", json!({})),
+        ],
+    )
+    .await;
+    let (fewer, plain) = (people[0], people[1]);
+    let ask = provider_ask(provider, None);
+    let refused = granted(&w, fewer, rae, &ask, &Giving::default())
+        .await
+        .unwrap_err();
+    match refused {
+        GrantError::Change(error) => match *error {
+            ChangeError::Invalid(faults) => {
+                assert_eq!(faults.len(), 1);
+                assert!(
+                    faults[0].path.starts_with("rows[")
+                        && faults[0].path.ends_with(".options.models"),
+                    "{}",
+                    faults[0].path
+                );
+            }
+            other => panic!("the members that go beyond were expected: {other:?}"),
+        },
+        other => panic!("the change was refused: {other:?}"),
+    }
+    // Narrowing what was asked to what the approver holds is theirs to give, and so is the whole
+    // of it by the approver whose entry names nothing.
+    granted(
+        &w,
+        fewer,
+        rae,
+        &ask,
+        &Giving {
+            options: Some(json!({"models": ["small"]})),
+            ..Giving::default()
+        },
+    )
+    .await
+    .unwrap();
+    let other = w.member("other").await;
+    granted(&w, plain, other, &ask, &Giving::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_administrator_with_a_narrow_entry_is_listed_for_a_request_beyond_it_and_a_plain_holder_is_not()
+ {
+    let w = World::new().await;
+    let rae = w.member("rae").await;
+    let (provider, people) = givers_with(
+        &w,
+        &[
+            ("plain", json!({"models": ["big"]})),
+            ("admin", json!({"models": ["big"]})),
+        ],
+    )
+    .await;
+    let (plain, admin) = (people[0], people[1]);
+    // Admin of the org the provider lies in, as the approval's check of owning or administering reads.
+    w.give(w.root, admin, Role::Admin).await;
+    let principal = w.principal(Caller::session(rae)).await;
+    let given = givers_for(
+        &mut *w.conn().await,
+        &principal,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+        &[Permission::ProviderUse],
+        Some(&orch_access_contract::decisions::MissingOptions {
+            models: Some(vec!["small".to_owned()]),
+            ..Default::default()
+        }),
+        &rules(),
+    )
+    .await
+    .unwrap();
+    let listed: Vec<Id> = given.nearest.into_iter().chain(given.further).collect();
+    assert!(
+        listed.contains(&admin),
+        "the administrator gives what they like, as the approval lets them"
+    );
+    assert!(
+        !listed.contains(&plain),
+        "a plain holder of the narrow entry cannot give a request beyond it"
+    );
+    // The approval agrees with the list: the administrator, acting as one, gives what they like.
+    granted_as(
+        &w,
+        Caller::session(admin).with_admin_mode(true),
+        rae,
+        &provider_ask(provider, Some(&["small"])),
+        &Giving::default(),
+        &rules(),
+    )
+    .await
+    .unwrap();
 }

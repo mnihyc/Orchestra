@@ -13,16 +13,18 @@ chrono.workspace = true
 orch-access-contract.workspace = true
 orch-agent-contract.workspace = true
 orch-db.workspace = true
+orch-settings.workspace = true
 orch-types.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 orch-testkit.workspace = true
 rand.workspace = true
-sqlx.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

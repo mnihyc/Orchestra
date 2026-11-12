@@ -25,14 +25,33 @@ use orch_executor_contract::executor::{Executor, ExecutorEndpoint};
 use orch_plugin_contract::Secret;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_util::sync::CancellationToken;
 
 /// The token the stand-ins present or ask for.
 pub const TOKEN: &str = "stand-in-token";
 
 /// An executor of a harness's own protocol (kind `echo-exec`).
 pub fn echo_socket() -> ExecutorFactory {
-    Arc::new(|| Box::new(EchoSocket { task: None }))
+    Arc::new(|| {
+        Box::new(EchoSocket {
+            task: None,
+            stop: CancellationToken::new(),
+            local: false,
+        })
+    })
+}
+
+/// The same native socket attributed to a policy-confirmed controlled harness program.
+pub fn local_echo_socket() -> ExecutorFactory {
+    Arc::new(|| {
+        Box::new(EchoSocket {
+            task: None,
+            stop: CancellationToken::new(),
+            local: true,
+        })
+    })
 }
 
 /// An executor that offers MCP (kind `orch-exec`, tool set `plain`), whose answer to a request is the
@@ -75,6 +94,17 @@ fn check_the_token(
 
 struct EchoSocket {
     task: Option<tokio::task::JoinHandle<()>>,
+    stop: CancellationToken,
+    local: bool,
+}
+
+impl Drop for EchoSocket {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
 }
 
 #[async_trait]
@@ -84,10 +114,13 @@ impl Executor for EchoSocket {
     }
 
     fn describe(&self) -> ExecutorDescriptor {
-        serde_json::from_value(json!({
+        let mut descriptor = json!({
             "kind": "echo-exec", "title": "Echo", "protocol": "harness", "sandbox_modes": ["open"]
-        }))
-        .unwrap()
+        });
+        if self.local {
+            descriptor["program"] = json!("fake");
+        }
+        serde_json::from_value(descriptor).unwrap()
     }
 
     async fn available(&self, _: &EnvironmentContext) -> ExecutorAvailability {
@@ -97,33 +130,38 @@ impl Executor for EchoSocket {
     async fn start(&mut self, _: &EnvironmentContext) -> Result<ExecutorEndpoint, AdapterError> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        self.stop = CancellationToken::new();
+        let stop = self.stop.clone();
         self.task = Some(tokio::spawn(async move {
+            let mut connections = JoinSet::new();
             loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(async move {
-                    let Ok(mut socket) =
-                        tokio_tungstenite::accept_hdr_async(stream, check_the_token).await
-                    else {
-                        return;
-                    };
-                    while let Some(Ok(message)) = socket.next().await {
-                        let answer = match message {
-                            Message::Text(text) => Message::text(format!("echo {text}")),
-                            Message::Binary(bytes) => {
-                                let mut echoed = b"echo ".to_vec();
-                                echoed.extend_from_slice(&bytes);
-                                Message::binary(echoed)
+                tokio::select! {
+                    () = stop.cancelled() => break,
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break; };
+                        connections.spawn(async move {
+                            let Ok(mut socket) =
+                                tokio_tungstenite::accept_hdr_async(stream, check_the_token).await
+                            else { return; };
+                            while let Some(Ok(message)) = socket.next().await {
+                                let answer = match message {
+                                    Message::Text(text) => Message::text(format!("echo {text}")),
+                                    Message::Binary(bytes) => {
+                                        let mut echoed = b"echo ".to_vec();
+                                        echoed.extend_from_slice(&bytes);
+                                        Message::binary(echoed)
+                                    }
+                                    _ => continue,
+                                };
+                                if socket.send(answer).await.is_err() { return; }
                             }
-                            _ => continue,
-                        };
-                        if socket.send(answer).await.is_err() {
-                            return;
-                        }
-                    }
-                });
+                        });
+                    },
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
             }
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         }));
         Ok(ExecutorEndpoint {
             address: format!("ws://127.0.0.1:{port}"),
@@ -135,8 +173,9 @@ impl Executor for EchoSocket {
     }
 
     async fn stop(&mut self) -> Result<(), AdapterError> {
+        self.stop.cancel();
         if let Some(task) = self.task.take() {
-            task.abort();
+            let _ = task.await;
         }
         Ok(())
     }

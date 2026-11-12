@@ -2,7 +2,7 @@
 import { expect, type Page, test } from '@playwright/test';
 import { showWorkbenchView } from './workbench-support';
 
-import { id } from '../doubles/fixtures.ts';
+import { id, MADE_AT } from '../doubles/fixtures.ts';
 import { SOL_A, SOL_B } from '../doubles/model.ts';
 import { ADA, GRACE } from '../doubles/thread-scenes.ts';
 import { marker, turn } from '../doubles/thread-rows.ts';
@@ -47,21 +47,34 @@ test('Parameters uses the same speed, access and context choices and reports wha
   await showWorkbenchView(page, 'Parameters');
   const panel = page.getByTestId('parameters-panel');
   await expect(panel).toBeVisible();
-  await panel.getByRole('region', { name: 'Speed', exact: true }).getByRole('radio', { name: 'Fast', exact: true }).click();
-  await panel.getByRole('region', { name: 'Access', exact: true }).getByRole('combobox').click();
+  const current = panel.getByRole('region', { name: 'Current choices', exact: true });
+  // The inspector reports the current choices. The message box owns the controls.
+  await expect(current.getByText('Change in the message box', { exact: true })).toBeVisible();
+  await openControl(page, 'GPT Sol \\(A\\)');
+  const picker = card(page);
+  await picker.getByRole('region', { name: 'Speed', exact: true }).getByRole('radio', { name: 'Fast', exact: true }).click();
+  await picker.getByRole('region', { name: 'Access', exact: true }).getByRole('combobox').click();
   await page.getByRole('option', { name: 'Daybreak Blue', exact: true }).click();
   await expect.poll(async () => ((await asAda('GET', `/nodes/${MAIN}/settings`)) as { key: string; own: { value: unknown } | null }[]).find((setting) => setting.key === 'agent.params')?.own?.value).toEqual({ service_tier: 'fast', cyber_access_program: 'Daybreak Blue' });
-  await panel.getByRole('region', { name: 'Context', exact: true }).getByLabel('Another size, in tokens').fill('300000');
-  await expect(panel.getByRole('region', { name: 'Context', exact: true }).getByLabel('Another size, in tokens')).toHaveValue('300000');
-  await expect(panel.getByRole('region', { name: 'Context', exact: true }).getByRole('button', { name: 'Set', exact: true })).toBeEnabled();
-  await panel.getByRole('region', { name: 'Context', exact: true }).getByLabel('Another size, in tokens').press('Enter');
-  await expect(panel.locator('[data-runs-with="context"]')).toHaveText('300K · chosen for this thread');
-  await panel.getByRole('combobox', { name: 'Model', exact: true }).click();
-  await page.getByRole('option', { name: 'GPT Mini', exact: true }).click();
-  await expect(page.getByRole('status').filter({ hasText: 'Left behind with the change of model' })).toContainText('GPT Mini has no Fast speed switched on');
-  await expect(panel.getByRole('region', { name: 'Speed', exact: true })).toHaveCount(0);
-  await expect(panel.getByRole('region', { name: 'Access', exact: true })).toHaveCount(0);
-  await expect(panel.getByRole('region', { name: 'Context', exact: true })).toHaveCount(0);
+  const context = picker.getByRole('region', { name: 'Context', exact: true });
+  await context.getByLabel('Another size, in tokens').fill('300000');
+  await expect(context.getByLabel('Another size, in tokens')).toHaveValue('300000');
+  await expect(context.getByRole('button', { name: 'Set', exact: true })).toBeEnabled();
+  await context.getByLabel('Another size, in tokens').press('Enter');
+  await expect(context.locator('[data-runs-with="context"]')).toHaveText('300K · chosen for this thread');
+  await page.keyboard.press('Escape');
+  await expect(picker).toHaveCount(0);
+  await expect(current.locator('[data-runs-with="speed"]')).toHaveText('Fast · chosen for this thread');
+  await expect(current.locator('[data-runs-with="access"]')).toHaveText('Daybreak Blue · chosen for this thread');
+  await expect(current.locator('[data-runs-with="context"]')).toHaveText('300K · chosen for this thread');
+  await openControl(page, 'GPT Sol \\(A\\)');
+  await picker.getByRole('menuitemradio', { name: 'GPT Mini', exact: true }).click();
+  // The state line of the open card; the page also announces it in its own polite live region, which the card's query leaves out.
+  await expect(picker.getByRole('status').filter({ hasText: 'Left behind with the change of model' })).toContainText('GPT Mini has no Fast speed switched on');
+  await expect(current.getByText('GPT Mini', { exact: true })).toBeVisible();
+  for (const name of ['Speed', 'Access', 'Context']) {
+    await expect(current.getByRole('heading', { name, exact: true })).toHaveCount(0);
+  }
   await expect.poll(async () => ((await asAda('GET', `/nodes/${MAIN}/settings`)) as { key: string; own: { value: unknown } | null }[]).find((setting) => setting.key === 'agent.params')?.own).toBeNull();
 });
 
@@ -89,22 +102,32 @@ test("the editor of a model has its speeds, programs and context off until a man
   const dialog = editor(page);
 
   const speeds = dialog.getByRole('group', { name: 'Speeds' });
-  await expect(speeds.getByRole('switch', { name: 'Fast' })).not.toBeChecked();
-  await expect(speeds.getByText('Offered by Codex for this model')).toBeVisible();
+  const fast = speeds.getByRole('switch', { name: 'Fast', exact: true });
+  await expect(fast).not.toBeChecked();
+  // The compact switches reveal their source in the tooltip.
+  await fast.hover();
+  await expect(page.locator('[data-tooltip-content]').filter({ hasText: 'Offered by Codex for this model' })).toBeVisible();
   // What a thread starts with is asked only of what is switched on.
-  await expect(speeds.getByRole('combobox', { name: 'Threads start with' })).toHaveCount(0);
+  await expect(speeds.getByRole('combobox', { name: 'Starting speed' })).toHaveCount(0);
 
   const programs = dialog.getByRole('group', { name: 'Access programs' });
   await expect(programs.getByRole('switch', { name: 'Daybreak Blue' })).not.toBeChecked();
   await expect(programs.getByRole('switch', { name: 'Daybreak Red' })).not.toBeChecked();
-  await expect(programs.getByText('Offered by this plan')).toHaveCount(2);
+  const heading = dialog.getByRole('heading', { name: 'What this model can be run with here', exact: true });
+  for (const name of ['Daybreak Blue', 'Daybreak Red']) {
+    const program = programs.getByRole('switch', { name, exact: true });
+    await heading.click();
+    await expect(page.locator('[data-tooltip-content]:visible')).toHaveCount(0);
+    await program.hover();
+    await expect(page.locator('[data-tooltip-content]').filter({ hasText: 'Offered by this plan' })).toBeVisible();
+  }
 
   const context = dialog.getByRole('group', { name: 'Context' });
   await expect(context.getByLabel('Its own window, in tokens')).toHaveValue('272000');
   // The largest is empty until a manager fills it, with what was offered beside it.
   await expect(context.getByLabel('Largest, in tokens')).toHaveValue('');
   await expect(context.getByText('Up to 1M · offered by Codex for this model')).toBeVisible();
-  await expect(context.getByRole('radiogroup', { name: 'Threads start with' })).toHaveCount(0);
+  await expect(context.getByRole('radiogroup', { name: 'Starting context' })).toHaveCount(0);
   await expect(context.getByText('The conversation is shortened before it reaches the context, with room kept for the answer. That point is worked out; nobody sets it.')).toBeVisible();
   await expect(dialog.getByText('Switched on, the people who may use this model here can choose it for their turns.')).toBeVisible();
 });
@@ -116,9 +139,11 @@ test('what a manager switches on is what the list says and what a thread on the 
 
   const speeds = dialog.getByRole('group', { name: 'Speeds' });
   await speeds.getByRole('switch', { name: 'Fast' }).click();
-  await speeds.getByRole('combobox', { name: 'Threads start with' }).click();
+  await speeds.getByRole('combobox', { name: 'Starting speed' }).click();
   // Standard is where a thread starts unless a manager says otherwise.
-  await expect(page.getByRole('option', { name: 'Standard' })).toBeVisible();
+  const defaultSpeed = page.getByRole('option', { name: 'Default', exact: true });
+  await expect(defaultSpeed).toBeVisible();
+  await expect(defaultSpeed).toHaveAccessibleDescription('Standard');
   await page.getByRole('option', { name: 'Fast' }).click();
   await dialog.getByRole('group', { name: 'Access programs' }).getByRole('switch', { name: 'Daybreak Blue' }).click();
 
@@ -141,7 +166,7 @@ test('what a manager switches on is what the list says and what a thread on the 
   await openEditor(page, 'GPT-5.5 Codex');
   const again = editor(page);
   await expect(again.getByRole('group', { name: 'Speeds' }).getByRole('switch', { name: 'Fast' })).toBeChecked();
-  await expect(again.getByRole('group', { name: 'Speeds' }).getByRole('combobox', { name: 'Threads start with' })).toContainText('Fast');
+  await expect(again.getByRole('group', { name: 'Speeds' }).getByRole('combobox', { name: 'Starting speed' })).toContainText('Fast');
   await expect(again.getByRole('group', { name: 'Context' }).getByRole('radio', { name: 'Model window · 272K', exact: true })).toBeChecked();
 });
 
@@ -244,12 +269,27 @@ test('the limits that cover a model are listed by its name, its family and its g
   await limits.getByRole('button', { name: 'Add a limit…' }).click();
   const add = page.getByRole('dialog', { name: 'Add a limit', exact: true });
   await expect(add).toBeVisible();
-  await expect(add.getByRole('button', { name: 'Take gpt-5.5-codex out', exact: true })).toBeVisible();
+  await expect(add.getByRole('button', { name: 'Remove gpt-5.5-codex', exact: true })).toBeVisible();
   await add.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(add).toHaveCount(0);
 });
 
 test('a suggestion that lists a faster speed, a program and a larger context is added with all of it offered and none of it on', async ({ page }) => {
+  await control('/resources/model-observation', {
+    provider_id: CODEX,
+    at: MADE_AT,
+    models: [{
+      model_name: 'gpt-6-sol',
+      display_name: 'GPT-6 Sol (A)',
+      listed: true,
+      parameters: {
+        context_window: 272_000,
+        context_max: 1_000_000,
+        service_tiers: [{ id: 'fast', label: 'Fast' }],
+        access_programs: ['Daybreak Blue'],
+      },
+    }],
+  });
   await openModels(page, CODEX);
   const suggestion = page.getByRole('checkbox', { name: /GPT-6 Sol \(A\)/ });
   await expect(suggestion).toBeVisible();
@@ -284,10 +324,15 @@ test('the editor is worked by the keyboard alone: opened from a row, a switch tu
   await expect(fast).toBeChecked();
   // What a thread starts with is the next stop, and is chosen with the arrow keys.
   await page.keyboard.press('Tab');
-  const starts = dialog.getByRole('group', { name: 'Speeds' }).getByRole('combobox', { name: 'Threads start with' });
+  const starts = dialog.getByRole('group', { name: 'Speeds' }).getByRole('combobox', { name: 'Starting speed' });
   await expect(starts).toBeFocused();
   await page.keyboard.press('Enter');
+  // The list is open with the current choice under the focus before the arrow moves on: a press made earlier moves nothing.
+  await expect(page.getByRole('listbox')).toBeVisible();
+  await expect(page.getByRole('option', { name: /^Default/ })).toBeFocused();
   await page.keyboard.press('ArrowDown');
+  // The next choice is under the focus before Enter chooses it, as a person sees it.
+  await expect(page.getByRole('option', { name: /^Fast/ })).toBeFocused();
   await page.keyboard.press('Enter');
   await expect(starts).toContainText('Fast');
   // On to the last button of the dialog, which saves.
@@ -297,6 +342,26 @@ test('the editor is worked by the keyboard alone: opened from a row, a switch tu
   await page.keyboard.press('Enter');
   await expect(page.getByText('GPT-5.5 Codex was saved', { exact: true })).toBeVisible();
   await expect(page.getByRole('row', { name: /GPT-5\.5 Codex/ })).toContainText('Speeds Fast');
+});
+
+test('a Down and an Enter that reach the page together choose the option the Down moved to, not the one the list had', async ({ page }) => {
+  await openModels(page, CODEX);
+  await openEditor(page, 'GPT-5.5 Codex');
+  const dialog = editor(page);
+  await dialog.getByRole('switch', { name: 'Fast' }).click();
+  await expect(dialog.getByRole('switch', { name: 'Fast' })).toBeChecked();
+  const starts = dialog.getByRole('group', { name: 'Speeds' }).getByRole('combobox', { name: 'Starting speed' });
+  await starts.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('option', { name: /^Default/ })).toBeFocused();
+  // A page that was busy while the person pressed both keys takes them in one task.
+  await page.evaluate(() => {
+    // Each key goes to whatever holds the focus when it comes, as a pressed key does.
+    for (const key of ['ArrowDown', 'Enter']) document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+  });
+  await expect(starts).toContainText('Fast');
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await expect(starts).toBeFocused();
 });
 
 // ---------------------------------------------------------------- the thread's model control
@@ -341,12 +406,30 @@ for (const width of [400, 1440]) {
     await expect(chosenModel.locator('[data-choice-name]')).toHaveText('GPT Sol (A)');
     await expect(chosenEffort.locator('[data-choice-name]')).toHaveText('Medium');
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    // The model list and its settings must be reachable through the same popup viewport.
+    const scrollAreas = await menu.evaluate((list) => {
+      const popup = list.closest('[role="dialog"]');
+      const areas: boolean[] = [];
+      for (let element: Element | null = list; element !== null; element = element.parentElement) {
+        const { overflowY } = getComputedStyle(element);
+        if ((overflowY === 'auto' || overflowY === 'scroll') && element.scrollHeight > element.clientHeight) {
+          areas.push(element === popup);
+        }
+        if (element === popup) break;
+      }
+      return areas;
+    });
+    expect(scrollAreas).toEqual([true]);
+    const customContext = card(page).getByRole('textbox', { name: 'Another size, in tokens', exact: true });
+    await customContext.scrollIntoViewIfNeeded();
+    await expect(customContext).toBeInViewport();
   });
 }
 
 test('a model picker without effort choices has one Model question and no absent control’s help', async ({ page }) => {
-  for (const [model_name, display_name] of [['gpt-sol', 'GPT Sol (A)'], ['gpt-sol-b', 'GPT Sol (B)'], ['gpt-mini', 'GPT Mini']]) {
-    await control('/model/entry', { model_name, display_name, parameters: { context_window: 200_000, efforts: [] } });
+  const models = await asAda('GET', `/providers/${OPENAI}/models`) as { model_name: string }[];
+  for (const { model_name } of models) {
+    await control('/model/entry', { provider_id: OPENAI, model_name, parameters: { context_window: 200_000, efforts: [] } });
   }
   await openThread(page);
   await openControl(page, 'GPT Sol \\(A\\)');
@@ -376,8 +459,44 @@ test('the real Parameters panel keeps one approvals guide beside its approval co
   await expect(page.getByRole('heading', { name: 'Approval mode', exact: true })).toBeVisible();
 });
 
+/** What a page notes of a switch to a model that another page made: when the thread's frame naming the model reached it, and when its model control showed the model. */
+interface SwitchSeen { frame: number | null; shown: number | null }
+
+/**
+ * Watches from inside the page, as the page's own clock reads it, so that nothing the test does to find an element, and nothing the
+ * first page does, is counted: the frame of the thread that names the model arrives (the socket's message), and the card of the model
+ * control, open on it, shows that model checked. It runs before the page opens.
+ */
+function watchSwitchTo({ feed, model, name }: { feed: string; model: string; name: string }): void {
+  const seen: SwitchSeen = { frame: null, shown: null };
+  (window as unknown as { __switchSeen: SwitchSeen }).__switchSeen = seen;
+  const now = () => performance.timeOrigin + performance.now();
+  const Native = window.WebSocket;
+  const Watching = function (this: unknown, ...args: ConstructorParameters<typeof WebSocket>) {
+    const socket = new Native(...args);
+    socket.addEventListener('message', (event) => {
+      if (seen.frame !== null || typeof event.data !== 'string' || !event.data.includes(model)) return;
+      try {
+        const frame = JSON.parse(event.data) as { feed?: string; data?: { thread?: { model?: string } } };
+        if (frame.feed === feed && frame.data?.thread?.model === model) seen.frame = now();
+      } catch { /* a frame that is not JSON is not the one */ }
+    });
+    return socket;
+  } as unknown as typeof WebSocket;
+  Watching.prototype = Native.prototype;
+  for (const key of ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'] as const) Object.defineProperty(Watching, key, { value: Native[key] });
+  window.WebSocket = Watching;
+  const look = () => {
+    if (seen.frame === null || seen.shown !== null) return;
+    const row = Array.from(document.querySelectorAll('[role="menuitemradio"][aria-checked="true"]')).find((element) => element.textContent.startsWith(name));
+    if (row !== undefined) seen.shown = now();
+  };
+  new MutationObserver(look).observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+}
+
 for (const hadTurns of [false, true]) {
   test(`a model switch reaches another open page within a second ${hadTurns ? 'after a turn' : 'before the first turn'}`, async ({ page, context }) => {
+    await context.addInitScript(watchSwitchTo, { feed: `thread:${MAIN}`, model: 'gpt-mini', name: 'GPT Mini' });
     await configureThread(MAIN, { reset: true });
     await emit(MAIN, { thread: { state: 'idle', model: 'gpt-sol', model_display: 'GPT Sol (A)', effort: 'medium' }, ...(hadTurns ? { turns: [turn('earlier', { ordinal: 1, state: 'completed', inputId: 'earlier-input' })] } : {}) });
     const before = await asAda('GET', `/threads/${MAIN}/sync`) as { turns: unknown[] };
@@ -395,7 +514,15 @@ for (const hadTurns of [false, true]) {
     await card(page).getByRole('menuitemradio', { name: /^GPT Mini/ }).click();
     const body: unknown = (await bodySent(await changed));
     expect(body).toMatchObject({ value: 'gpt-mini', expected_revision: 0 });
-    await expect(card(other).getByRole('menuitemradio', { name: /^GPT Mini/, checked: true })).toBeVisible({ timeout: 1_000 });
+    // The promise is the other page's: from the frame that tells it to the model on its screen, one second. What the first page does
+    // before the frame, and what the test does to look, is not in it, and the page is not asked while it works.
+    await other.waitForFunction(() => (window as unknown as { __switchSeen: SwitchSeen }).__switchSeen.shown !== null, undefined, { timeout: 15_000 });
+    const seen = await other.evaluate(() => (window as unknown as { __switchSeen: SwitchSeen }).__switchSeen);
+    if (seen.frame === null || seen.shown === null) throw new Error('The other page did not note the frame and the model it showed');
+    const seconds = seen.shown - seen.frame;
+    test.info().annotations.push({ type: 'frame to screen', description: `${Math.round(seconds)} ms` });
+    expect(seconds, `the model reached the other page ${Math.round(seconds)} ms after its frame`).toBeLessThanOrEqual(1_000);
+    await expect(card(other).getByRole('menuitemradio', { name: /^GPT Mini/, checked: true })).toBeVisible();
     expect(settingsReads).toBeGreaterThan(reads);
     await expect(trigger(other, 'GPT Mini')).toHaveCount(1);
     await other.close();
@@ -433,9 +560,9 @@ test('the control opens on what the model starts with, and says where each comes
   const speed = card(page).getByRole('region', { name: 'Speed' });
   await expect(speed.getByRole('radio', { name: 'Fast' })).toBeChecked();
   await expect(speed.locator('[data-runs-with="speed"]')).toHaveText('Fast · as this model starts');
-  // A thread cannot ask for Standard where its managers made Fast the start, and the control says so.
-  await expect(speed.getByRole('radio', { name: 'Standard' })).toBeDisabled();
-  await expect(speed.getByText('Threads on this model start with Fast, as its managers chose; a thread cannot go back to Standard.')).toBeVisible();
+  // A model's starting choice leaves the other available speeds selectable.
+  await expect(speed.getByRole('radio', { name: 'Standard' })).toBeEnabled();
+  await expect(speed.getByText('Threads on this model start with Fast, as its managers chose.', { exact: true })).toBeVisible();
   const context = card(page).getByRole('region', { name: 'Context' });
   await expect(context.locator('[data-runs-with="context"]')).toHaveText('200K · as this model starts');
   await expect(context.getByRole('radio', { name: '200K' })).toBeChecked();
@@ -445,12 +572,13 @@ test('the control opens on what the model starts with, and says where each comes
 
 test('a speed, an access program and a context are chosen for the thread, each saying who chose it, and the control shows what the thread runs with', async ({ page }) => {
   await openThread(page);
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · 1M\\. Change')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, 1M\\)\\. Change')).toHaveCount(1);
   await openControl(page, 'GPT Sol \\(A\\)');
   const speed = card(page).getByRole('region', { name: 'Speed' });
   // What the model starts with: the ordinary speed, no program, all of the largest context. Fast is a choice and no more.
   await expect(speed.locator('[data-runs-with="speed"]')).toHaveText('Standard · as this model starts');
-  await expect(speed.getByText('Fast: quicker answers, counted at twice the rate here')).toBeVisible();
+  await speed.getByRole('radio', { name: 'Fast', exact: true }).hover();
+  await expect(page.locator('[data-tooltip-content]').filter({ hasText: 'Fast: quicker answers, counted at twice the rate here' })).toBeVisible();
   await expect(speed.getByText('Takes effect from the next turn.')).toBeVisible();
   const access = card(page).getByRole('region', { name: 'Access' });
   await expect(access.locator('[data-runs-with="access"]')).toHaveText('None · as this model starts');
@@ -462,12 +590,12 @@ test('a speed, an access program and a context are chosen for the thread, each s
 
   await speed.getByRole('radio', { name: 'Fast' }).click();
   await expect(speed.locator('[data-runs-with="speed"]')).toHaveText('Fast · chosen for this thread');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · 1M\\. Change')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, 1M\\)\\. Change')).toHaveCount(1);
 
   await access.getByRole('combobox', { name: 'Access' }).click();
   await page.getByRole('option', { name: 'Daybreak Blue' }).click();
   await expect(access.locator('[data-runs-with="access"]')).toHaveText('Daybreak Blue · chosen for this thread');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · Daybreak Blue · 1M\\. Change')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, Daybreak Blue, 1M\\)\\. Change')).toHaveCount(1);
 
   await context.getByRole('radio', { name: /^400K/ }).click();
   await expect(context.locator('[data-runs-with="context"]')).toHaveText('400K · chosen for this thread');
@@ -482,7 +610,7 @@ test('a speed, an access program and a context are chosen for the thread, each s
   await context.getByLabel('Another size, in tokens').fill('750000');
   await context.getByLabel('Another size, in tokens').press('Enter');
   await expect(context.locator('[data-runs-with="context"]')).toHaveText('750K · chosen for this thread');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · Daybreak Blue · 750K\\. Change')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, Daybreak Blue, 750K\\)\\. Change')).toHaveCount(1);
 
   // What was chosen is the thread's own, written as one object, and choosing what the model starts with takes it back.
   await expect.poll(async () => ((await asAda('GET', `/nodes/${MAIN}/settings`)) as { key: string; own: { value: unknown } | null }[]).find((setting) => setting.key === 'agent.params')?.own?.value).toEqual({ service_tier: 'fast', cyber_access_program: 'Daybreak Blue', context: 750_000 });
@@ -495,7 +623,8 @@ test('a context that crosses a step of the rate says so', async ({ page }) => {
   await openThread(page);
   await openControl(page, 'GPT Sol \\(A\\)');
   const context = card(page).getByRole('region', { name: 'Context' });
-  await expect(context.getByText('Prompts above 272K are counted at a higher rate.', { exact: true })).toHaveCount(0);
+  // Not shown beside the sizes: the words are each size's hidden accessible description, which hover or focus shows.
+  await expect(context.getByText('Prompts above 272K are counted at a higher rate.', { exact: true }).filter({ visible: true })).toHaveCount(0);
   const high = context.getByRole('radio', { name: '1M · higher rate', exact: true });
   await high.hover();
   await expect(page.getByRole('tooltip')).toHaveText('Prompts above 272K are counted at a higher rate.');
@@ -505,7 +634,7 @@ test('a context that crosses a step of the rate says so', async ({ page }) => {
   await context.getByRole('radio', { name: '272K', exact: true }).click();
   await expect(context.locator('[data-runs-with="context"]')).toHaveText('272K · chosen for this thread');
   // Chosen, the model's own window is still one that crosses nothing: the line is about what is on offer.
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · 272K\\. Change')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, 272K\\)\\. Change')).toHaveCount(1);
 });
 
 test('Access is absent where the place has not switched access programs on', async ({ page }) => {
@@ -525,7 +654,7 @@ test('Access is absent where the place has not switched access programs on', asy
 test("a change of model drops a choice that the new model does not have, with a line saying so, and keeps one that fits", async ({ page }) => {
   await control('/thread/set', { thread: MAIN, params: { service_tier: 'fast', cyber_access_program: 'Daybreak Blue', context: 300_000 } });
   await openThread(page);
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · Daybreak Blue · 300K')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, Daybreak Blue, 300K\\)')).toHaveCount(1);
   await openControl(page, 'GPT Sol \\(A\\)');
 
   // GPT Sol (B) opens Fast and up to 400K, and no program: the program goes, and the context of 300K fits.
@@ -535,7 +664,7 @@ test("a change of model drops a choice that the new model does not have, with a 
   await expect(notice).toContainText('GPT Sol (B) has not switched Daybreak Blue on, so this thread uses no access program.');
   await expect(notice).not.toContainText('Fast');
   await expect(notice).not.toContainText('300K');
-  await expect(trigger(page, 'GPT Sol \\(B\\) · medium · Fast · 300K')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(B\\) \\(Medium, Fast, 300K\\)')).toHaveCount(1);
   await expect(card(page).getByRole('region', { name: 'Access' })).toHaveCount(0);
   await expect.poll(async () => ((await asAda('GET', `/nodes/${MAIN}/settings`)) as { key: string; own: { value: unknown } | null }[]).find((setting) => setting.key === 'agent.params')?.own?.value).toEqual({ service_tier: 'fast', context: 300_000 });
 
@@ -602,7 +731,7 @@ test('the model control is worked by the keyboard alone', async ({ page }) => {
   await expect(card(page).getByRole('radio', { name: 'Fast' })).toBeFocused();
   await page.keyboard.press('Space');
   await expect(card(page).getByRole('radio', { name: 'Fast' })).toBeChecked();
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · 1M')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, 1M\\)')).toHaveCount(1);
   await page.keyboard.press('Escape');
   await expect(card(page)).toHaveCount(0);
   await expect(trigger(page, 'GPT Sol \\(A\\)')).toBeFocused();
@@ -616,8 +745,8 @@ test('/speed, /access and /context are in the box where the model has them, open
   await openThread(page);
   await composer(page).fill('/');
   const list = page.getByRole('listbox', { name: 'Commands' });
-  await expect(list.getByRole('option')).toHaveCount(7);
-  for (const name of ['/model', '/effort', '/speed', '/access', '/context', '/file', '/document']) await expect(list.getByRole('option', { name })).toBeVisible();
+  await expect(list.getByRole('option')).toHaveCount(8);
+  for (const name of ['/model', '/effort', '/speed', '/access', '/context', '/goal', '/file', '/document']) await expect(list.getByRole('option', { name })).toBeVisible();
   // One begins with what was typed; Enter runs it, and the control opens on its choice.
   await composer(page).fill('/sp');
   await expect(list.getByRole('option')).toHaveCount(1);
@@ -631,16 +760,16 @@ test('/speed, /access and /context are in the box where the model has them, open
   await composer(page).fill('/speed fast');
   await composer(page).press('Enter');
   await expect(composer(page)).toHaveValue('');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · 1M')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, 1M\\)')).toHaveCount(1);
   await composer(page).fill('/context 400k');
   await composer(page).press('Enter');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · 400K')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, 400K\\)')).toHaveCount(1);
   await composer(page).fill('/access daybreak blue');
   await composer(page).press('Enter');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Fast · Daybreak Blue · 400K')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Fast, Daybreak Blue, 400K\\)')).toHaveCount(1);
   await composer(page).fill('/speed standard');
   await composer(page).press('Enter');
-  await expect(trigger(page, 'GPT Sol \\(A\\) · medium · Daybreak Blue · 400K')).toHaveCount(1);
+  await expect(trigger(page, 'GPT Sol \\(A\\) \\(Medium, Daybreak Blue, 400K\\)')).toHaveCount(1);
 
   // What is not open for this model is said, and nothing is sent.
   await composer(page).fill('/speed turbo');
@@ -661,8 +790,11 @@ test('the commands of a model that has none of the three leave them out, and a r
   await openThread(page, PEOPLE.dora);
   await composer(page).fill('/');
   const list = page.getByRole('listbox', { name: 'Commands' });
-  await expect(list.getByRole('option')).toHaveCount(4);
+  await expect(list.getByRole('option')).toHaveCount(5);
   await expect(list.getByRole('option', { name: /^\/speed/ })).toHaveCount(0);
+  await expect(list.getByRole('option', { name: /^\/access/ })).toHaveCount(0);
+  await expect(list.getByRole('option', { name: /^\/context/ })).toHaveCount(0);
+  await expect(list.getByRole('option', { name: /^\/goal/ })).toBeVisible();
   await expect(list.getByRole('option', { name: /^\/model/ })).toHaveAttribute('aria-disabled', 'true');
   await expect(list.getByText('Changing the model is for whoever manages this thread: Ada Lovelace').first()).toBeVisible();
   await composer(page).press('Enter');
@@ -679,15 +811,15 @@ test('the footer of a turn says what the turn ran with: its speed, its access pr
   await ran({ service_tier: 'fast', cyber_access_program: 'Daybreak Blue', context: 400_000, context_window: 272_000 });
   await openThread(page);
   const footer = page.locator('[data-footer="t2"]');
-  await expect(footer).toContainText('GPT Sol (A) · medium');
-  await expect(footer).toContainText('Fast · Daybreak Blue · 400K');
+  await expect(footer).toContainText('GPT Sol (A) (Medium)');
+  await expect(footer).toContainText('Options: Fast, Daybreak Blue, and 400K');
   // A turn at the ordinary speed and with no program says nothing of them, and the context it ran with.
   await ran({ context: 1_000_000, context_window: 272_000 });
-  await expect(footer).toContainText('GPT Sol (A) · medium');
+  await expect(footer).toContainText('GPT Sol (A) (Medium)');
   await expect(footer).toContainText('1M');
   await expect(footer).not.toContainText('Fast');
   // A turn that recorded nothing says nothing.
   await ran({});
-  await expect(footer).toContainText('GPT Sol (A) · medium');
+  await expect(footer).toContainText('GPT Sol (A) (Medium)');
   await expect(footer).not.toContainText('1M');
 });

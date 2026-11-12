@@ -9,6 +9,8 @@
  * also holds references, binding, model and effort, native approval mode and context. Before a message
  * goes past a limit, the limit is read first.
  */
+import { LinkSharing, useLinkSharing } from '@/features/sharing/LinkSharing';
+import { captureThreadRead, isCurrentThreadRead } from '@/api/threadRead';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useQuery } from '@tanstack/react-query';
@@ -25,16 +27,18 @@ import { DropTarget } from '@/features/composer/DropTarget';
 import { droppedReference, insertAtSelection } from '@/lib/drop';
 import { useFileDrops } from '@/features/composer/FileDrops';
 import { useViewShown } from '@/features/workbench/viewOpening';
-import { type DeliveryState, whyNot } from '@/features/composer/DeliveryMenu';
+import { type DeliveryState, inputUnavailable, whyNot } from '@/features/composer/DeliveryMenu';
 import { DeliveryControl } from '@/features/composer/DeliveryControl';
 import { DraftMark } from '@/features/composer/DraftMark';
-import { ComposerControls, ReadOnlyComposerControls } from '@/features/composer/Controls';
+import { ComposerControls } from '@/features/composer/Controls';
 import { ReferencePicker, type ReferenceKind } from '@/features/composer/Mentions';
 import { addToMessage } from '@/features/files/AddToMessage';
 import { useAskOnSide } from '@/features/side-threads/ask';
 import { sideReadingAvailable, sideRefusal } from '@/features/side-threads/availability';
-import { composerWriter, submitInput, useAttachmentParts, useBox, useComposerStore, useDraftSync } from '@/features/composer/Draft';
+import { composerWriter, steerRefusedFor, submitInput, useAttachmentParts, useBox, useComposerStore, useDraftSync } from '@/features/composer/Draft';
 import { ModelEffort } from '@/features/composer/ModelEffort';
+import { ViewerAccessLine } from '@/features/composer/ViewerAccessLine';
+import { needsPlanDefault, planningFor } from '@/features/composer/planning';
 import { PlanSwitch } from '@/features/composer/PlanSwitch';
 import type { Kind } from '@/features/composer/modelState';
 import { contextStart, statesOf } from '@/features/composer/modelState';
@@ -49,22 +53,31 @@ import { estimateTokenCounts, modelTokenEstimate } from '@/lib/tokenEstimate';
 import { usePastedText } from '@/features/composer/usePastedText';
 import { useUploads } from '@/lib/useUploads';
 import { useSocketStatus } from '@/realtime/live';
-import { runningTurn, turnsRevision, useThreadPart } from '@/realtime/stores/thread';
+import { currentTurnOver, runningTurn, turnsRevision, useThreadPart } from '@/realtime/stores/thread';
 import { cx } from '@/ui/cx';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { LimitPrompt } from '@/ui/LimitPrompt';
 import { Textarea } from '@/ui/Textarea';
 import { Button } from '@/ui/Button';
 import { programNameIn } from '@/features/resources/programNames';
+import { useScheduleComposer } from '@/features/schedules/ComposerSchedule';
+import { ComposerFrame } from './ComposerFrame';
+import { AskComposer, type AskComposerProps } from './AskComposer';
+import { ProgramComposer } from './ProgramComposer';
 
 /** At this share of the input limit a counter appears. */
 const COUNTER_FROM = 0.9;
 /** The box is never taller than this many lines of text. */
 const MOST_LINES = 12;
 
-export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => void }) {
+export function Composer(props: { thread: Thread; onSent?: () => void } | { ask: AskComposerProps }) {
+  return 'ask' in props ? <AskComposer {...props.ask} /> : props.thread.program?.id === 'orch' ? <ProgramComposer {...props} /> : <ThreadComposer {...props} />;
+}
+
+function ThreadComposer({ thread, onSent }: { thread: Thread; onSent?: () => void }) {
   const { t, i18n } = useTranslation();
   const threadId = thread.id;
+  const agentId = thread.binding?.agent.id ?? null;
   const shown = useViewShown();
   const read = useThreadReadRef(threadId);
   const instance = useViewInstance();
@@ -88,12 +101,14 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
   });
   const composing = useRef(false);
   const [prompt, setPrompt] = useState<Delivery | null>(null);
+  const [blockedSend, setBlockedSend] = useState<Delivery | null>(null);
   const [reference, setReference] = useState<{ kind: ReferenceKind; query: string } | null>(null);
   // The model control, opened by a command of the box on the choice it names.
   const [control, setControl] = useState<{ open: boolean; section: Kind | null }>({ open: false, section: null });
 
   const turn = useThreadPart(threadId, runningTurn);
-  const active = turn !== null || thread.state === 'running' || thread.state === 'waiting_approval';
+  const over = useThreadPart(threadId, currentTurnOver);
+  const active = turn !== null || !over && (thread.state === 'running' || thread.state === 'waiting_approval');
   const starting = thread.state === 'starting';
   const mayDrive = holds(thread.access, 'thread.interact');
   const parametersState = useQuery({ ...parametersQuery(threadId), enabled: mayDrive && shown });
@@ -104,8 +119,8 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
   const featureReason = (feature: string) => program === undefined || program === null ? undefined : t('programVersions.featureOff', { feature: t(`programVersions.features.${feature}`, { defaultValue: t('programVersions.disabledFeatures.other') }), name: programNameIn(thread.binding?.agent, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown'), version: program.version });
   const imagesUnsupported = parts.some((part) => 'type' in part && part.type === 'image') && (buildOff.includes('input_images') || parameters?.model.options.find((option) => option.model_name === model)?.parameters.input_images === false);
   const agent = thread.binding?.agent.name ?? '';
-  const agentId = thread.binding?.agent.id ?? '';
-  const noSteer = useComposerStore((held) => held.cannotSteer[agentId] === true) || buildOff.includes('steer');
+  const activeTurnId = turn?.id ?? thread.current_turn_id ?? null;
+  const noSteer = useComposerStore((held) => steerRefusedFor(held, threadId, activeTurnId)) || buildOff.includes('steer');
   const meta = useQuery({ ...metaQuery, enabled: shown }).data;
   const maxChars = meta?.limits.max_input_chars ?? null;
 
@@ -125,7 +140,7 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
   const context = contextState.data;
   const pasteFactsReady = settings.isSuccess && (inlineShare === 0 || inlineShare === 100 || parametersState.isSuccess && contextState.isSuccess);
   const pasteFactsError = hasPastedText ? parametersState.error ?? settings.error ?? contextState.error : null;
-  const attachmentsWaiting = uploads.blocked || pastes.blocked || fileDrops.blocked || needsPasteFacts && !pasteFactsReady || buildOff.includes('input_images') && imagesUnsupported;
+  const attachmentsWaiting = uploads.blocked || pastes.blocked || fileDrops.blocked || needsPasteFacts && !pasteFactsReady;
   const pasteUsage = useMemo(() => pasteContext(thread.usage, context?.fill), [thread.usage, context?.fill]);
   const pasteDelivery = useMemo(() => {
     const modes = new Map<object, boolean>();
@@ -140,17 +155,18 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
     return modes;
   }, [parts, pasteUsage, pasteEstimate, inlineShare, pasteWindow, pasteFactsReady]);
   const preferred: Delivery = configured === 'steer' || configured === 'interrupt' ? configured : 'queue';
-  const state: DeliveryState = { active, starting, live, cannotSteer: noSteer, agent, ...(buildOff.includes('steer') ? { steerUnavailable: featureReason('steer') } : {}) };
-  // The usual way, unless it cannot be used now.
-  const main: Delivery = active && whyNot(preferred, state, t) === false ? preferred : 'queue';
-
   // The Plan switch: where the person set it, or on for a thread's first message where the place plans first.
   const planOffered = thread.binding?.plan_mode === true;
   const planUnavailable = program?.build?.check?.off.includes('plan_mode') === true
     ? featureReason('plan_mode') : undefined;
-  const planFirst = settings.data?.find((setting) => setting.key === 'thread.plan_first')?.value === true;
   const chosenPlan = useComposerStore((held) => held.planning[threadId]);
-  const planning = planOffered && (chosenPlan ?? (planFirst && thread.usage === null && thread.current_turn_id === null));
+  const planning = planningFor(thread, chosenPlan, settings.data);
+  const planPending = needsPlanDefault(thread, chosenPlan) && !settings.isSuccess;
+
+  const state: DeliveryState = { active, starting, live, ...(planPending ? { inputReason: t('composer.plan.checking') } : {}), cannotSteer: noSteer, agent, ...(buildOff.includes('steer') ? { steerUnavailable: featureReason('steer') } : {}) };
+  // The usual way, unless it cannot be used now.
+  const main: Delivery = active && whyNot(preferred, state, t) === false ? preferred : 'queue';
+
 
   const limits = useQuery({ ...limitsQuery(threadId), enabled: mayDrive && shown });
   const stop = useStop(threadId, turn?.id ?? null, live);
@@ -190,30 +206,50 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
 
   const tooLong = maxChars !== null && text.length > maxChars;
   const empty = text.trim() === '' && parts.length === 0;
-  const reached = limits.data !== undefined && limits.data.reached.length > 0;
+  const reached = limits.data?.reached.some((limit) => !(limit.cap === null && limit.provider_limit !== null)) === true;
+  const inputReason = inputUnavailable(state, { mayDrive, empty, tooLong, attachmentsWaiting }, t);
+  const blockedReason = blockedSend === null || empty ? false : inputReason || whyNot(blockedSend, state, t);
+  const schedule = useScheduleComposer(thread, mayDrive && shown, inputUnavailable({ ...state, inputReason: undefined }, { mayDrive, empty, tooLong, attachmentsWaiting }, t));
 
-  const send = (delivery: Delivery) => {
-    if (empty || tooLong || !mayDrive || attachmentsWaiting) return;
-    if (whyNot(delivery, state, t) !== false) return;
-    // A person who already said that the next message may go past what is in its way is not asked again.
-    const letPass = useComposerStore.getState().passNext[threadId];
-    if (reached && letPass === undefined) {
-      setPrompt(delivery);
+  const sharing = useLinkSharing({ origin: { kind: 'thread_input', thread_id: threadId }, placeId: threadId, sender: null,
+    agent: { id: threadId, kind: 'thread', name: thread.name, redacted: false }, version: JSON.stringify([read.key, agentId, planning]) },
+  [...(text === '' ? [] : [{ type: 'text' as const, text }]), ...parts], mayDrive && shown);
+
+  const sendInput = (delivery: Delivery, bypass: Parameters<typeof submitInput>[3]) => {
+    if (inputReason !== false || whyNot(delivery, state, t) !== false) {
+      setBlockedSend(delivery);
       return;
     }
-    const words = text;
-    const content = [...(words === '' ? [] : [{ type: 'text' as const, text: words }]), ...parts];
-    setText('');
-    composerWriter.setParts(threadId, []);
-    composerWriter.letNextPass(threadId, undefined);
-    submitInput(read, content, delivery, letPass, undefined, planning);
-    onSent?.();
+    if (sharing.blocked) return;
+    setBlockedSend(null);
+    let captured: ReturnType<typeof captureThreadRead>;
+    try { captured = captureThreadRead(read); } catch (error) { sharing.fail(error); return; }
+    const content = [...(text === '' ? [] : [{ type: 'text' as const, text }]), ...parts];
+    void sharing.send(() => {
+      setText(''); composerWriter.setParts(threadId, []); composerWriter.letNextPass(threadId, undefined);
+      submitInput(read, content, delivery, bypass, undefined, planning); onSent?.();
+    }, () => isCurrentThreadRead(captured));
+  };
+
+  const send = (delivery: Delivery) => {
+    if (inputReason !== false || whyNot(delivery, state, t) !== false) {
+      setBlockedSend(delivery);
+      return;
+    }
+    if (sharing.blocked) return;
+    setBlockedSend(null);
+    // A person who already said that the next message may go past what is in its way is not asked again.
+    const requestedPass = useComposerStore.getState().passNext[threadId];
+    const letPass = requestedPass?.caps !== undefined && requestedPass.caps !== null && requestedPass.caps.length > 0 ? { caps: requestedPass.caps } : undefined;
+    if (reached && letPass === undefined) { setPrompt(delivery); return; }
+    sendInput(delivery, letPass);
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (!mayDrive) return;
     // A command of the box takes its keys first, unless a composition is under way: Enter then confirms what is composed.
     if (!composing.current && !isComposing(event.nativeEvent) && slash.onKeyDown(event)) return;
-    if (event.key === '@' && mayDrive && !composing.current && !isComposing(event.nativeEvent)
+    if (event.key === '@' && !composing.current && !isComposing(event.nativeEvent)
       && !event.ctrlKey && !event.metaKey && /(?:^|\s)$/.test(text.slice(0, event.currentTarget.selectionStart))) {
       event.preventDefault();
       setReference({ kind: 'file', query: '' });
@@ -255,48 +291,46 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
     requestAnimationFrame(() => { box.current?.focus(); box.current?.setSelectionRange(next.caret, next.caret); });
   };
 
-  if (!mayDrive) return <div className="flex flex-col gap-2"><ReadOnlyComposerControls />{fileDrops.progress}<UploadChips queue={{ ...uploads, retryReason: t('composer.row.readOnly') }} /><UploadChips queue={{ ...pastes.queue, paste: undefined, retryReason: t('composer.row.readOnly'), rows: pastes.queue.rows.map(({ replaces: _replaces, ...row }) => row), remove: (uploadId) => {
+  const pasteQueue = mayDrive ? pastes.queue : { ...pastes.queue, paste: undefined, retryReason: t('composer.row.readOnly'), rows: pastes.queue.rows.map(({ replaces: _replaces, ...row }) => row), remove: (uploadId: string) => {
     const pending = pastes.queue.rows.find((row) => row.id === uploadId);
     const index = pending?.replaces === undefined ? -1 : parts.findIndex((part) => part.type === 'pasted_text' && pasteKey(part) === pending.replaces);
     if (index >= 0) removePart(index);
     void pastes.queue.remove(uploadId);
-  } }} /></div>;
+  } };
   return (
     <div className="relative flex flex-col gap-2" data-composer>
-      {slash.list}
-      <input ref={fileInput} type="file" multiple hidden aria-label={t('uploads.choose')} onChange={(event) => { if (event.target.files !== null) uploads.add(event.target.files); event.target.value = ''; }} />
-      <UploadChips queue={uploads} />
+      {mayDrive && slash.list}
+      <input ref={fileInput} type="file" multiple hidden disabled={!mayDrive} aria-label={t('uploads.choose')} onChange={(event) => { if (mayDrive && event.target.files !== null) uploads.add(Array.from(event.target.files)); event.target.value = ''; }} />
+      <UploadChips queue={mayDrive ? uploads : { ...uploads, retryReason: t('composer.row.readOnly') }} />
       {fileDrops.progress}
-      <UploadChips queue={pastes.queue} />
-      {needsPasteFacts && !pasteFactsReady && (pasteFactsError === null ? <span role="status" className="text-sm text-text-muted">{t('uploads.readingPasteDelivery')}</span> : <ErrorAlert error={pasteFactsError} action={<Button size="sm" onClick={() => { void Promise.all([parametersState.refetch(), settings.refetch(), contextState.refetch()]); }}>{t('common.tryAgain')}</Button>} />)}
-      <AttachmentChips parts={parts} onRemove={removePart} imageIncompatible={imagesUnsupported} imageReason={buildOff.includes('input_images') ? featureReason('input_images') : undefined} onChangeModel={buildOff.includes('input_images') ? undefined : () => setControl({ open: true, section: null })}
+      <UploadChips queue={pasteQueue} />
+      {mayDrive && needsPasteFacts && !pasteFactsReady && (pasteFactsError === null ? <span role="status" className="text-sm text-text-muted">{t('uploads.readingPasteDelivery')}</span> : <ErrorAlert error={pasteFactsError} action={<Button size="sm" onClick={() => { void Promise.all([parametersState.refetch(), settings.refetch(), contextState.refetch()]); }}>{t('common.tryAgain')}</Button>} />)}
+      {mayDrive ? <AttachmentChips parts={parts} onRemove={removePart} imageIncompatible={imagesUnsupported} imageReason={buildOff.includes('input_images') ? featureReason('input_images') : undefined} onChangeModel={buildOff.includes('input_images') ? undefined : () => setControl({ open: true, section: null })}
         readPaste={pastes.read} pastedIdentity={pastes.identity} onPasteAsText={pastes.asText} onPasteDirty={pastes.markDirty} editText={pastes.editText} editing={pastes.editing} pasteQueue={pastes.queue} onPasteDelivery={pastes.delivery}
         onEditPaste={(index, words) => { const part = parts[index]; if (part?.type === 'pasted_text') pastes.edit(part, words); }}
         pasteMode={(part) => part.delivery !== undefined && part.delivery !== null || pasteFactsReady && (pasteEstimateKnown || inlineShare === 0 || inlineShare === 100) ? pasteDelivery.get(part) : undefined} pasteTokens={(part) => pastedPartTokens(part, pasteEstimate)}
-        destination={(part) => part.type === 'pasted_text' && pasteDelivery.get(part) !== false ? null : part.type === 'pasted_text' || part.type === 'file' ? `→ ${part.path}${part.type === 'file' && part.blob === null ? '' : ` · ${t('uploads.whenSent')}`}` : part.type === 'image' ? `→ .orch/attachments/${part.name} · ${t('uploads.whenSent')}` : null} />
-      <DropTarget label={t('uploads.target.thread')} countLabel={(values) => t('uploads.target.threadCount', values)} onDrop={(data) => {
+        destination={(part) => part.type === 'pasted_text' && pasteDelivery.get(part) !== false ? null : part.type === 'pasted_text' || part.type === 'file' ? `→ ${part.path}${part.type === 'file' && part.blob === null ? '' : ` · ${t('uploads.whenSent')}`}` : part.type === 'image' ? `→ .orch/attachments/${part.name} · ${t('uploads.whenSent')}` : null} /> : <AttachmentChips parts={parts} />}
+      <DropTarget disabled={!mayDrive} label={t('uploads.target.thread')} countLabel={(values) => t('uploads.target.threadCount', values)} onDrop={(data) => {
         const reference = droppedReference(data);
         if (reference !== null) insertReference(reference);
         else if (carriesFiles(data)) fileDrops.read(data, t('uploads.target.thread'), (files) => uploads.add(files));
       }}>
-      <div
-        data-control-boundary
-        className="flex flex-col gap-1 rounded-lg border border-control-border bg-surface p-2 focus-within:border-control-selected"
-      >
+      <ComposerFrame>
         <Textarea
           ref={box}
           label={t('composer.label')}
           hideLabel
           rows={1}
-          placeholder={t('composer.placeholder', { agent: agent === '' ? t('composer.theAgent') : agent })}
+          placeholder={mayDrive ? t('composer.placeholder', { agent: agent === '' ? t('composer.theAgent') : agent }) : t('thread.watching.title')}
           value={text}
-          disabled={!mayDrive}
-          onChange={(event) => setText(event.target.value)}
+          disabled={!mayDrive || sharing.busy}
+          onChange={(event) => { if (mayDrive) setText(event.target.value); }}
           onKeyDown={onKeyDown}
           {...slash.boxProps}
           onCompositionStart={() => (composing.current = true)}
           onCompositionEnd={() => (composing.current = false)}
           onPaste={(event) => {
+            if (!mayDrive) { event.preventDefault(); return; }
             if (carriesFiles(event.clipboardData)) {
               event.preventDefault();
               fileDrops.read(event.clipboardData, t('uploads.target.thread'), (files) => uploads.add(files));
@@ -305,15 +339,16 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
           className="max-h-(--composer-max-height) resize-none border-0 bg-transparent px-2 py-1 shadow-none focus-visible:outline-none"
           fieldClassName="w-full"
         />
-        <ComposerControls thread={thread} readOnly={!mayDrive}
-          notices={<DraftMark status={draft} />}
+        <ComposerControls thread={thread}
+          notices={mayDrive ? <DraftMark status={draft} /> : undefined}
+          access={mayDrive ? undefined : <ViewerAccessLine thread={thread} />}
           attachment={<AttachButton onPress={() => fileInput.current?.click()} disabled={!mayDrive} onFile={() => setReference({ kind: 'file', query: '' })} onDocument={() => setReference({ kind: 'document', query: '' })} fileReason={fileReason} />}
-          model={<ModelEffort thread={thread} variant="composer" compact readOnly={!mayDrive} open={control.open} onOpenChange={(open) => setControl((held) => ({ open, section: open ? held.section : null }))} section={control.section} />}
-          delivery={<DeliveryControl state={state} stop={stop} turnId={turn?.id ?? null} mayDrive={mayDrive} empty={empty} tooLong={tooLong} attachmentsWaiting={attachmentsWaiting} onSend={send} onAskOnSide={thread.side_of === null && sideReadingAvailable(thread) ? askOnSide : undefined} sideUnavailable={asideRefusal} />}
-          plan={planOffered || planUnavailable !== undefined ? <PlanSwitch on={planning} onChange={(on) => composerWriter.setPlanning(threadId, on)} unavailable={planUnavailable} /> : undefined}
+          model={thread.program?.id === 'orch' ? undefined : <ModelEffort thread={thread} variant="composer" compact readOnly={!mayDrive} open={control.open} onOpenChange={(open) => setControl((held) => ({ open, section: open ? held.section : null }))} section={control.section} />}
+          delivery={<DeliveryControl state={state} stop={stop} turnId={turn?.id ?? null} mayDrive={mayDrive} empty={empty} tooLong={tooLong} attachmentsWaiting={attachmentsWaiting || sharing.blocked} onSend={send} onSchedule={schedule.open} scheduleUnavailable={schedule.reason} onAskOnSide={thread.side_of === null && sideReadingAvailable(thread) ? askOnSide : undefined} sideUnavailable={asideRefusal} />}
+          plan={planOffered || planUnavailable !== undefined ? <PlanSwitch on={planning} defaulted={needsPlanDefault(thread, chosenPlan) && settings.isSuccess} onChange={(on) => composerWriter.setPlanning(threadId, on)} unavailable={!mayDrive ? t('composer.row.readOnly') : planUnavailable ?? (planPending ? t('composer.plan.checking') : undefined)} /> : undefined}
         />
-        {active && live && <p className="px-2 text-xs text-text-muted" data-delivery-hint>{t(noSteer ? 'composer.runningQueueHint' : isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint')}</p>}
-        {((maxChars !== null && text.length >= maxChars * COUNTER_FROM) || stop.armed || stop.stop.error !== null) && <div className="flex flex-wrap items-center gap-2" aria-live="polite">
+        {mayDrive && active && live && <p className="px-2 text-xs text-text-muted" data-delivery-hint>{t(noSteer ? 'composer.runningQueueHint' : isApplePlatform() ? 'composer.runningHintMac' : 'composer.runningHint')}</p>}
+        {mayDrive && ((maxChars !== null && text.length >= maxChars * COUNTER_FROM) || stop.armed || stop.stop.error !== null) && <div className="flex flex-wrap items-center gap-2" aria-live="polite">
           {maxChars !== null && text.length >= maxChars * COUNTER_FROM && (
             <span className={cx('text-xs tabular-nums', tooLong ? 'text-danger-text' : 'text-text-muted')} role="status">
               {t('composer.counter', { count: text.length, max: maxChars })}
@@ -321,15 +356,19 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
           )}
           <StopFeedback stop={stop} />
         </div>}
-      </div>
+      </ComposerFrame>
       </DropTarget>
-      {slash.problem}
-      {refusal !== undefined && refusal !== null && <ErrorAlert error={refusal} />}
-      {asideWaiting ? <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted"><p className="min-w-0 flex-1" role="status">{t('side.ask.unconfirmedDraft')}</p><Button size="sm" pending={aside.isPending} onClick={() => { if (aside.variables !== undefined && !aside.isPending) aside.mutate(aside.variables); }}>{t('side.ask.retry')}</Button></div> : aside.isPending ? <p role="status" className="text-xs text-text-muted">{t('side.ask.sending')}</p> : aside.error !== null && <ErrorAlert error={aside.error} />}
-      {reference !== null && <ReferencePicker thread={thread} initialKind={reference.kind} initialQuery={reference.query}
+      {schedule.dialog}
+      {mayDrive && <LinkSharing sharing={sharing} />}
+      {mayDrive && slash.problem}
+      {mayDrive && blockedReason !== false && <p role="status" className="text-sm text-text-muted">{blockedReason}</p>}
+      {mayDrive && planPending && settings.error !== null && <ErrorAlert error={settings.error} action={<Button size="sm" onClick={() => void settings.refetch()}>{t('common.tryAgain')}</Button>} />}
+      {mayDrive && refusal !== undefined && refusal !== null && <ErrorAlert error={refusal} />}
+      {mayDrive && (asideWaiting ? <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted"><p className="min-w-0 flex-1" role="status">{t('side.ask.unconfirmedDraft')}</p><Button size="sm" pending={aside.isPending} onClick={() => { if (aside.variables !== undefined && !aside.isPending) aside.mutate(aside.variables); }}>{t('side.ask.retry')}</Button></div> : aside.isPending ? <p role="status" className="text-xs text-text-muted">{t('side.ask.sending')}</p> : aside.error !== null && <ErrorAlert error={aside.error} />)}
+      {mayDrive && reference !== null && <ReferencePicker thread={thread} initialKind={reference.kind} initialQuery={reference.query}
         onFile={(path) => addToMessage(threadId, { kind: 'file', path })} onDocument={(file) => uploads.add([file])}
         onClose={() => { setReference(null); box.current?.focus(); }} />}
-      {limits.data !== undefined && prompt !== null && (
+      {mayDrive && limits.data !== undefined && prompt !== null && (
         <LimitPrompt
           threadId={threadId}
           open
@@ -339,13 +378,7 @@ export function Composer({ thread, onSent }: { thread: Thread; onSent?: () => vo
           onSend={(bypass) => {
             const delivery = prompt;
             setPrompt(null);
-            if (empty || attachmentsWaiting) return;
-            const words = text;
-            const content = [...(words === '' ? [] : [{ type: 'text' as const, text: words }]), ...parts];
-            setText('');
-            composerWriter.setParts(threadId, []);
-            submitInput(threadId, content, delivery, bypass, undefined, planning);
-            onSent?.();
+            sendInput(delivery, bypass);
           }}
         />
       )}

@@ -54,7 +54,7 @@ export function ProviderPerformance({ providerId }: { providerId: string }) {
   const daily = query.data?.series.map((point) => { const speed = point.figures.performance?.speed_milli; return speed === undefined || speed === null ? null : speed / 1000; }) ?? [];
   return <section aria-label={t('usagePerf.providerPerformance')} className={`${boxClasses} flex min-w-0 flex-col gap-3 p-4`}>
     <h2 className="text-base font-semibold">{t('usagePerf.providerPerformance')}</h2>
-    {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.isPending ? <SkeletonRows rows={3} /> : <><PerformanceFigures current={query.data.totals.performance} /><Sparkline className="h-12!" label={t('usagePerf.dailySpeed')} series={[{ values: daily }]} /></>}
+    {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : query.isPending ? <SkeletonRows read={query} rows={3} /> : <><PerformanceFigures current={query.data.totals.performance} /><Sparkline className="h-12!" label={t('usagePerf.dailySpeed')} series={[{ values: daily }]} /></>}
     <Link to="/usage" search={{ scope: `provider:${providerId}`, view: 'performance', range: '7d' }} className="self-start text-sm text-accent-text hover:underline">{t('usagePerf.openPerformance')}</Link>
   </section>;
 }

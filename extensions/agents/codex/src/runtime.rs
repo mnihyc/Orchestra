@@ -112,7 +112,11 @@ pub struct Asked {
 #[derive(Default)]
 struct State {
     sessions: BTreeMap<ThreadId, SessionRecord>,
+    image_sources: BTreeMap<ThreadId, crate::viewed_images::Sources>,
     by_native: HashMap<String, ThreadId>,
+    unscoped_mcp: HashMap<String, Json>,
+    unexpectedly_closed:
+        std::collections::HashSet<orch_agent_contract::history::NativePrefixSource>,
 }
 
 /// The sessions that want their raw frames reported, by the harness's thread id.
@@ -142,6 +146,7 @@ pub struct Shared {
     dead: AtomicBool,
     stopping: AtomicBool,
     version: String,
+    background_control: bool,
     /// Names this process in the references of its requests (see `reference_of`).
     run: String,
     exit: Arc<watch::Sender<Option<String>>>,
@@ -231,6 +236,8 @@ pub fn raw_tap(sink: EventSink, table: RawTable) -> FrameTap {
 
 /// What a harness process that answered `initialize` is made of, for [`Shared::new`].
 pub struct ProcessParts {
+    /// Both terminal-control methods are declared by this exact verified native build's schema.
+    pub background_control: bool,
     /// Where the adapter reports.
     pub sink: EventSink,
     /// Where the time comes from.
@@ -298,6 +305,7 @@ impl Shared {
     #[must_use]
     pub fn new(parts: ProcessParts) -> Arc<Self> {
         let ProcessParts {
+            background_control,
             sink,
             clock,
             outputs,
@@ -322,6 +330,7 @@ impl Shared {
             stopping: AtomicBool::new(false),
             version,
             run: process_token(),
+            background_control,
             exit,
             windows: Mutex::new(None),
             ended_commands: Mutex::new(std::collections::HashSet::new()),
@@ -340,6 +349,10 @@ impl Shared {
     #[must_use]
     pub fn clock(&self) -> &Arc<dyn Clock> {
         &self.clock
+    }
+
+    pub(crate) fn background_control(&self) -> bool {
+        self.background_control
     }
 
     /// Where long outputs are kept.
@@ -413,9 +426,31 @@ impl Shared {
     }
     /// Maps and delivers one bounded operation outside the state lock.
     pub async fn register(&self, record: SessionRecord, raw_events: bool, opened: SessionEvent) {
+        self.register_with_images(
+            record,
+            raw_events,
+            opened,
+            crate::viewed_images::Sources::default(),
+        )
+        .await;
+    }
+    pub(crate) async fn register_with_images(
+        &self,
+        record: SessionRecord,
+        raw_events: bool,
+        opened: SessionEvent,
+        sources: crate::viewed_images::Sources,
+    ) {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
+        let thread = record.mapper.thread_id();
         self.stage_register(record, raw_events, opened);
+        lock(&self.state).image_sources.insert(thread, sources);
+        if !self.is_dead() {
+            self.stage_event(AdapterEvent::Status(
+                self.status(HarnessState::Online, None),
+            ));
+        }
         self.flush_events().await;
     }
     /// Maps and delivers one bounded operation outside the state lock.
@@ -423,6 +458,11 @@ impl Shared {
         let _gate = self.event_gate.lock().await;
         self.flush_events().await;
         let result = self.stage_remove(thread);
+        if result.is_some() && !self.is_dead() {
+            self.stage_event(AdapterEvent::Status(
+                self.status(HarnessState::Online, None),
+            ));
+        }
         self.flush_events().await;
         result
     }
@@ -463,9 +503,216 @@ impl Shared {
                 self.flush_events().await;
             }
         } else {
+            if method == "turn/completed" {
+                Box::pin(self.finish_viewed_images(params)).await;
+                Box::pin(self.finish_web_results(params)).await;
+            }
             self.stage_on_notification(method, params);
             self.flush_events().await;
         }
+    }
+
+    /// The same cancellable exact-result worker serves image retention and native web proof.
+    async fn native_result_work<R: Send + 'static>(
+        &self,
+        thread: ThreadId,
+        segment: orch_types::Id,
+        native: &str,
+        mut keys: Vec<crate::viewed_images::Key>,
+        prepare: impl FnOnce(
+            &mut crate::viewed_images::Sources,
+            &[crate::viewed_images::Key],
+            &OutputStore,
+        ) -> R
+        + Send
+        + 'static,
+    ) -> Result<R, &'static str> {
+        let work = {
+            let mut state = lock(&self.state);
+            let Some(record) = state.sessions.get(&thread).filter(|record| {
+                record.mapper.segment_id() == segment && record.mapper.native_thread() == native
+            }) else {
+                return Err("native_result_session_changed");
+            };
+            keys.retain(|key| record.mapper.follows(&key.native_thread));
+            state.image_sources.entry(thread).or_default().take_work()
+        };
+        let mut cancelled = crate::native_history::CancelOnDrop(Some(work.cancellation()));
+        let outputs = self.outputs.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut work = work;
+            let values = prepare(&mut work, &keys, &outputs);
+            (work, values)
+        })
+        .await;
+        cancelled.disarm();
+        match result {
+            Ok((work, values)) => {
+                let mut state = lock(&self.state);
+                if state.sessions.get(&thread).is_some_and(|record| {
+                    record.mapper.segment_id() == segment && record.mapper.native_thread() == native
+                }) && let Some(sources) = state.image_sources.get_mut(&thread)
+                {
+                    sources.finish_work(work);
+                }
+                Ok(values)
+            }
+            Err(_) => Err("native_result_worker_unavailable"),
+        }
+    }
+
+    async fn image_results_owned(
+        &self,
+        thread: ThreadId,
+        segment: orch_types::Id,
+        native: &str,
+        keys: Vec<crate::viewed_images::Key>,
+    ) -> BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared> {
+        if keys.is_empty() {
+            return BTreeMap::new();
+        }
+        Box::pin(self.native_result_work(
+            thread,
+            segment,
+            native,
+            keys.clone(),
+            |source, keys, outputs| source.prepare(keys, outputs),
+        ))
+        .await
+        .unwrap_or_else(|reason| keys.into_iter().map(|key| (key, Err(reason))).collect())
+    }
+
+    pub(crate) async fn web_results(
+        &self,
+        thread: ThreadId,
+        segment: orch_types::Id,
+        native: &str,
+        keys: Vec<crate::viewed_images::Key>,
+        reported: BTreeMap<crate::viewed_images::Key, Json>,
+    ) -> BTreeMap<crate::viewed_images::Key, crate::native_web::Proof> {
+        if keys.is_empty() {
+            return BTreeMap::new();
+        }
+        let _gate = self.event_gate.lock().await;
+        Box::pin(self.native_result_work(
+            thread,
+            segment,
+            native,
+            keys.clone(),
+            move |source, keys, outputs| source.prepare_web_inputs(keys, &reported, outputs),
+        ))
+        .await
+        .unwrap_or_else(|reason| {
+            keys.into_iter()
+                .map(|key| (key, crate::native_web::Proof::unavailable(reason)))
+                .collect()
+        })
+    }
+
+    async fn finish_web_results(&self, params: &Json) {
+        let Some(native) = thread_of(params) else {
+            return;
+        };
+        let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
+            return;
+        };
+        let pending = {
+            let state = lock(&self.state);
+            let Some(owner) = state.by_native.get(native).copied() else {
+                return;
+            };
+            let Some(record) = state.sessions.get(&owner) else {
+                return;
+            };
+            (
+                owner,
+                record.mapper.segment_id(),
+                record.mapper.native_thread().to_owned(),
+                record.mapper.pending_web_results(native, turn),
+            )
+        };
+        let (owner, segment, root, snapshots) = pending;
+        if snapshots.is_empty() {
+            return;
+        }
+        let keys: Vec<_> = snapshots.keys().cloned().collect();
+        let missed = keys.clone();
+        let values = Box::pin(self.native_result_work(
+            owner,
+            segment,
+            &root,
+            keys,
+            move |source, keys, outputs| {
+                crate::native_web::checked_results(source, keys, &snapshots, outputs)
+            },
+        ))
+        .await
+        .unwrap_or_else(|reason| {
+            missed
+                .into_iter()
+                .map(|key| (key, (crate::native_web::Proof::unavailable(reason), None)))
+                .collect()
+        });
+        {
+            let mut state = lock(&self.state);
+            if let Some(record) = state.sessions.get_mut(&owner).filter(|record| {
+                record.mapper.segment_id() == segment && record.mapper.native_thread() == root
+            }) {
+                let events = record.mapper.complete_web_results(values);
+                self.emit_mapped(&mut record.mapper, events);
+            }
+        }
+        self.flush_events().await;
+    }
+
+    pub(crate) async fn image_results(
+        &self,
+        thread: ThreadId,
+        segment: orch_types::Id,
+        native: &str,
+        keys: Vec<crate::viewed_images::Key>,
+    ) -> BTreeMap<crate::viewed_images::Key, crate::viewed_images::Prepared> {
+        let _gate = self.event_gate.lock().await;
+        Box::pin(self.image_results_owned(thread, segment, native, keys)).await
+    }
+
+    async fn finish_viewed_images(&self, params: &Json) {
+        let Some(native) = thread_of(params) else {
+            return;
+        };
+        let Some(turn) = params.pointer("/turn/id").and_then(Json::as_str) else {
+            return;
+        };
+        let pending = {
+            let state = lock(&self.state);
+            let Some(owner) = state.by_native.get(native).copied() else {
+                return;
+            };
+            let Some(record) = state.sessions.get(&owner) else {
+                return;
+            };
+            (
+                owner,
+                record.mapper.segment_id(),
+                record.mapper.native_thread().to_owned(),
+                record.mapper.pending_view_keys(native, turn),
+            )
+        };
+        let (owner, segment, root, keys) = pending;
+        let values = Box::pin(self.image_results_owned(owner, segment, &root, keys)).await;
+        if values.is_empty() {
+            return;
+        }
+        {
+            let mut state = lock(&self.state);
+            if let Some(record) = state.sessions.get_mut(&owner).filter(|record| {
+                record.mapper.segment_id() == segment && record.mapper.native_thread() == root
+            }) {
+                let events = record.mapper.complete_view_results(values);
+                self.emit_mapped(&mut record.mapper, events);
+            }
+        }
+        self.flush_events().await;
     }
 
     /// Maps and delivers one bounded operation outside the state lock.
@@ -474,6 +721,53 @@ impl Shared {
         self.flush_events().await;
         self.stage_on_request(id, method, params);
         self.flush_events().await;
+    }
+
+    /// Invalid stdout is process-scoped: retain its text only when exactly one session owns this process.
+    pub async fn on_malformed(&self, text: &str) {
+        let _gate = self.event_gate.lock().await;
+        self.flush_events().await;
+        let sole = {
+            let state = lock(&self.state);
+            (state.sessions.len() == 1)
+                .then(|| state.sessions.keys().next().copied())
+                .flatten()
+        };
+        let mut after = None;
+        loop {
+            let next = {
+                let mut state = lock(&self.state);
+                let next = state
+                    .sessions
+                    .keys()
+                    .copied()
+                    .find(|id| after.is_none_or(|last| *id > last));
+                if let Some(id) = next
+                    && let Some(record) = state.sessions.get_mut(&id)
+                {
+                    let event = record
+                        .mapper
+                        .malformed_frame((sole == Some(id)).then_some(text));
+                    self.emit_session(&record.mapper, event);
+                }
+                next
+            };
+            let Some(id) = next else { break };
+            after = Some(id);
+            self.flush_events().await;
+        }
+        if after.is_none() {
+            self.stage_event(AdapterEvent::Status(
+                self.status(
+                    HarnessState::Online,
+                    Some(
+                        "Codex emitted a malformed protocol frame before any session was opened."
+                            .into(),
+                    ),
+                ),
+            ));
+            self.flush_events().await;
+        }
     }
     /// Maps and delivers one bounded operation outside the state lock.
     pub async fn report_facts(&self, facts: ProviderFacts) {
@@ -605,11 +899,12 @@ impl Shared {
     }
 
     /// Adds a session to those the process serves, and reports that it is open.
-    fn stage_register(&self, record: SessionRecord, raw_events: bool, opened: SessionEvent) {
+    fn stage_register(&self, mut record: SessionRecord, raw_events: bool, opened: SessionEvent) {
         let thread = record.mapper.thread_id();
         let segment = record.mapper.segment_id();
         let native = record.mapper.native_thread().to_owned();
         let mut state = lock(&self.state);
+        state.image_sources.remove(&thread);
         if let Some(earlier) = state.sessions.remove(&thread) {
             state.by_native.retain(|_, owner| *owner != thread);
             lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
@@ -618,13 +913,25 @@ impl Shared {
         state.by_native.insert(native.clone(), thread);
         lock(&self.loaded).insert(native.clone());
         if raw_events {
-            lock(&self.raw).insert(native, (thread, segment));
+            lock(&self.raw).insert(native.clone(), (thread, segment));
         }
+        let resumed = matches!(&opened,SessionEvent::SessionOpened(opened) if opened.resumed)
+            && state.unexpectedly_closed.remove(
+                &orch_agent_contract::history::NativePrefixSource {
+                    thread_id: thread,
+                    segment_id: segment,
+                    native_session_ref: native.clone(),
+                },
+            );
         self.stage_event(AdapterEvent::Session {
             thread_id: thread,
             segment_id: segment,
             event: opened,
         });
+        if resumed {
+            let events = record.mapper.resumed_after_close(self.clock.time());
+            self.emit_mapped(&mut record.mapper, events);
+        }
         state.sessions.insert(thread, record);
     }
 
@@ -632,6 +939,7 @@ impl Shared {
     fn stage_remove(&self, thread: ThreadId) -> Option<SessionRecord> {
         let mut state = lock(&self.state);
         let mut record = state.sessions.remove(&thread)?;
+        state.image_sources.remove(&thread);
         state.by_native.retain(|_, owner| *owner != thread);
         lock(&self.raw).retain(|_, (owner, _)| *owner != thread);
         for (reference, asked) in record.approvals.drain() {
@@ -640,6 +948,17 @@ impl Shared {
             }
         }
         Some(record)
+    }
+
+    /// Current native ownership is private to this process, including after catalogue partitioning.
+    pub(crate) fn owns_native(&self, native: &str) -> bool {
+        lock(&self.state).by_native.contains_key(native)
+    }
+
+    /// An acknowledged unload with no session retains no process-owned native work.
+    pub(crate) fn quiescent(&self) -> bool {
+        let empty = lock(&self.state).sessions.is_empty();
+        empty && lock(&self.loaded).is_empty()
     }
 
     /// Runs `f` on a session.
@@ -669,16 +988,65 @@ impl Shared {
     /// Handles a notification of the harness.
     fn stage_on_notification(self: &Arc<Self>, method: &str, params: &Json) {
         if method == "thread/closed" {
-            if let Some(native) = thread_of(params)
-                && let Some(waiters) = lock(&self.unloads).remove(native)
-            {
-                for waiter in waiters {
-                    let _ = waiter.send(());
+            if let Some(native) = thread_of(params) {
+                lock(&self.loaded).remove(native);
+                if let Some(waiters) = lock(&self.unloads).remove(native) {
+                    for waiter in waiters {
+                        let _ = waiter.send(());
+                    }
+                    return;
+                }
+                let source = {
+                    let state = lock(&self.state);
+                    state
+                        .by_native
+                        .get(native)
+                        .and_then(|owner| state.sessions.get(owner))
+                        .filter(|record| record.mapper.native_thread() == native)
+                        .map(|record| orch_agent_contract::history::NativePrefixSource {
+                            thread_id: record.mapper.thread_id(),
+                            segment_id: record.mapper.segment_id(),
+                            native_session_ref: native.into(),
+                        })
+                };
+                self.route(method, params);
+                if let Some(source) = source {
+                    lock(&self.state).unexpectedly_closed.insert(source.clone());
+                    // Reuse ordinary missing-session repair rather than dispatch into an unloaded thread.
+                    self.stage_remove(source.thread_id);
                 }
             }
             return;
         }
         match method {
+            "mcpServer/startupStatus/updated" if thread_of(params).is_none() => {
+                let Some(name) = params
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .filter(|name| !name.is_empty())
+                else {
+                    return;
+                };
+                let Some(status) = params.get("status").and_then(Json::as_str) else {
+                    return;
+                };
+                let words = params.get("error").and_then(Json::as_str);
+                let value = serde_json::json!({"status":status,"error":words,"failure_reason":params.get("failureReason").and_then(Json::as_str)});
+                let changed = lock(&self.state)
+                    .unscoped_mcp
+                    .insert(name.into(), value.clone())
+                    .as_ref()
+                    != Some(&value);
+                if changed {
+                    self.stage_event(AdapterEvent::Status(self.status(
+                        HarnessState::Online,
+                        Some(format!(
+                            "Codex MCP server {name}: {status}{}",
+                            words.map(|words| format!(". {words}")).unwrap_or_default()
+                        )),
+                    )));
+                }
+            }
             "account/rateLimits/updated" | "account/updated" => {
                 if method == "account/rateLimits/updated"
                     && let Some(limits) =
@@ -754,6 +1122,8 @@ impl Shared {
         let active = record.mapper.running_turn();
         let native_thread = record.mapper.native_thread().to_owned();
         let events = record.mapper.handle(method, params, &ctx);
+        let image_source = (method == "thread/started" && record.mapper.follows(thread))
+            .then(|| serde_json::json!({"id":thread,"path":params.pointer("/thread/path")}));
         let rejected = events.iter().any(|event| matches!(event,
             SessionEvent::TurnCompleted(end) if end.status == TurnOutcome::Failed
                 && end.error.as_ref().is_some_and(|error| error.code == turn_error::PROVIDER_UNAUTHORIZED)));
@@ -765,6 +1135,11 @@ impl Shared {
         let children: Vec<String> = record.mapper.child_threads().map(str::to_owned).collect();
         let raw_target = (record.mapper.thread_id(), record.mapper.segment_id());
         self.emit_mapped(&mut record.mapper, events);
+        if let Some(metadata) = image_source
+            && let Some(source) = state.image_sources.get_mut(&owner)
+        {
+            source.observe(&metadata);
+        }
         if adopted {
             state.by_native.insert(thread.to_owned(), owner);
             let mut raw = lock(&self.raw);
@@ -805,17 +1180,22 @@ impl Shared {
         let pending = self
             .with_session(thread, |record| record.mapper.open_commands(turn))
             .unwrap_or_default();
-        let ended = tokio::time::timeout(
-            TERMINAL_CLEANUP_WAIT,
-            self.terminate_terminals(thread, turn, native),
-        )
-        .await;
-        let result = match ended {
-            Ok(Ok(result)) => result,
-            _ => orch_agent_contract::background::CommandCleanup {
-                unknown: pending,
-                ..Default::default()
-            },
+        let result = if pending == 0 {
+            // No reported command belongs to this turn; a list cannot authorize an unknown one.
+            orch_agent_contract::background::CommandCleanup::default()
+        } else {
+            match tokio::time::timeout(
+                TERMINAL_CLEANUP_WAIT,
+                self.terminate_terminals(thread, turn, native),
+            )
+            .await
+            {
+                Ok(Ok(result)) => result,
+                _ => orch_agent_contract::background::CommandCleanup {
+                    unknown: pending,
+                    ..Default::default()
+                },
+            }
         };
         if result.unknown > 0 || result.still_running > 0 {
             tracing::warn!(%thread, "the harness could not confirm Stop's terminal cleanup; commands may still run");
@@ -855,6 +1235,11 @@ impl Shared {
                 },
             )
         })?;
+        if !self.background_control {
+            return Ok(NativeBackground::unsupported(
+                crate::native_schema::END_UNAVAILABLE,
+            ));
+        }
         let (terminals, complete) = match self.background_terminals(&native).await {
             Ok(observed) => observed,
             Err(RpcError::Remote { code, .. }) if code == METHOD_NOT_FOUND => {
@@ -915,6 +1300,13 @@ impl Shared {
         use orch_agent_contract::background::{BackgroundEndState, NativeBackgroundEnd};
         let native =
             self.with_session(thread, |record| record.mapper.native_thread().to_owned())?;
+        if !self.background_control {
+            return Ok(NativeBackgroundEnd {
+                id: id.to_owned(),
+                state: BackgroundEndState::Unknown,
+                reason: Some(crate::native_schema::END_UNAVAILABLE.into()),
+            });
+        }
         if lock(&self.ended_commands).contains(id) {
             return Ok(NativeBackgroundEnd {
                 id: id.to_owned(),
@@ -962,6 +1354,14 @@ impl Shared {
         native: &str,
     ) -> Result<(Vec<BackgroundTerminal>, bool), RpcError> {
         let method = "thread/backgroundTerminals/list";
+        if !self.background_control {
+            return Err(RpcError::Remote {
+                method: method.into(),
+                code: METHOD_NOT_FOUND,
+                message: crate::native_schema::END_UNAVAILABLE.into(),
+                data: None,
+            });
+        }
         let mut items = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen = std::collections::HashSet::new();
@@ -998,6 +1398,14 @@ impl Shared {
         native: &str,
     ) -> Result<orch_agent_contract::background::CommandCleanup, RpcError> {
         let method = "thread/backgroundTerminals/list";
+        if !self.background_control {
+            return Err(RpcError::Remote {
+                method: method.into(),
+                code: METHOD_NOT_FOUND,
+                message: crate::native_schema::END_UNAVAILABLE.into(),
+                data: None,
+            });
+        }
         let mut terminals = Vec::new();
         let mut cursor: Option<String> = None;
         let mut seen = std::collections::HashSet::new();
@@ -1113,13 +1521,22 @@ impl Shared {
             .map(|item| record.mapper.file_changes_of(item))
             .unwrap_or_default();
         let Some(translated) = approvals::translate(method, params, changes) else {
+            let windows = lock(&self.windows).clone();
+            let ctx = Context {
+                clock: self.clock.as_ref(),
+                outputs: &self.outputs,
+                windows: windows.as_ref(),
+            };
+            for event in record.mapper.unrecognized(method, params, &ctx) {
+                self.emit_session(&record.mapper, event);
+            }
             drop(state);
             self.refuse_unknown(&id, method, params);
             return;
         };
         let Some((turn_id, native_turn)) = record.mapper.running_turn() else {
             // Nobody is waiting on a turn of Orch for this: it cannot be shown, so it is refused.
-            let _ = self.queue_reply(&id, approvals::refusal(&translated.pending.kind));
+            let _ = self.queue_refusal(&id, &translated.pending.kind);
             return;
         };
         if params
@@ -1128,7 +1545,7 @@ impl Shared {
             .is_some_and(|turn| turn != native_turn.as_str())
         {
             // Native requests belong to their originating turn, even after this session starts another.
-            let _ = self.queue_reply(&id, approvals::refusal(&translated.pending.kind));
+            let _ = self.queue_refusal(&id, &translated.pending.kind);
             return;
         }
         if record.approval_mode == orch_agent_contract::descriptor::ApprovalMode::Bypass
@@ -1172,13 +1589,25 @@ impl Shared {
     }
 
     fn refuse(&self, asked: &Asked, reference: &str, mapper: &Mapper) {
-        let _ = self.queue_reply(&asked.id, approvals::refusal(&asked.pending.kind));
+        let _ = self.queue_refusal(&asked.id, &asked.pending.kind);
         self.emit_session(
             mapper,
             SessionEvent::ApprovalClosed(ApprovalClosed {
                 request_ref: reference.to_owned(),
             }),
         );
+    }
+
+    fn queue_refusal(&self, id: &RequestId, kind: &PendingKind) -> Result<(), RpcError> {
+        if matches!(kind, PendingKind::UnrecognizedRequest) {
+            self.queue_rejection(
+                id,
+                METHOD_NOT_FOUND,
+                "this client cannot answer an unrecognized approval",
+            )
+        } else {
+            self.queue_reply(id, approvals::refusal(kind))
+        }
     }
 
     fn refuse_unknown(&self, id: &RequestId, method: &str, params: &Json) {
@@ -1255,12 +1684,16 @@ impl Shared {
             )));
         }
         let result = approvals::answer(&asked.pending, decision)?;
-        self.queue_reply(&asked.id, result.clone())
-            .map_err(|error| {
-                AdapterError::HarnessUnavailable(format!(
-                    "the answer could not be given to the harness: {error}"
-                ))
-            })?;
+        let sent = if matches!(asked.pending.kind, PendingKind::UnrecognizedRequest) {
+            self.queue_refusal(&asked.id, &asked.pending.kind)
+        } else {
+            self.queue_reply(&asked.id, result.clone())
+        };
+        sent.map_err(|error| {
+            AdapterError::HarnessUnavailable(format!(
+                "the answer could not be given to the harness: {error}"
+            ))
+        })?;
         asked.pending.answered = true;
         if matches!(asked.pending.kind, PendingKind::UserInput(_))
             && let Some(item) = &asked.pending.item
@@ -1289,6 +1722,7 @@ impl Shared {
             }
         }
         lock(&self.state).by_native.clear();
+        lock(&self.state).image_sources.clear();
         lock(&self.raw).clear();
         self.stage_event(AdapterEvent::Status(HarnessStatus {
             status: if stopping {
@@ -1389,6 +1823,7 @@ pub async fn pump(
                 match message {
                     Some(Incoming::Notification { method, params }) => shared.on_notification(&method, &params).await,
                     Some(Incoming::Request { id, method, params }) => shared.on_request(id, &method, &params).await,
+                    Some(Incoming::Malformed { text }) => shared.on_malformed(&text).await,
                     Some(Incoming::Closed { reason: closed }) => {
                         let ended = match reason { Some(reason) => reason, None => shared.exit_message(EXIT_GRACE).await.unwrap_or(closed) };
                         shared.on_closed(&ended).await;

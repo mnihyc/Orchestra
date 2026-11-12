@@ -16,6 +16,87 @@ use orch_link_contract::commands::{
 use orch_types::{Json, Time};
 
 #[tokio::test]
+async fn a_trust_answer_checks_the_opaque_first_effect_once_after_native_preparation() {
+    use orch_engine::{EngineError, approvals::ApprovalError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let world = World::new().await;
+    let harness = "fixture-harness";
+    orch_db::queries::trust::ask(
+        &mut world.pool.acquire().await.unwrap(),
+        world.environment,
+        harness,
+        "native-question-v1",
+        &["fixture-config/settings.json".to_owned()],
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let checks = AtomicUsize::new(0);
+    for allow in [false, true] {
+        let mut tx = world.pool.begin().await.unwrap();
+        orch_db::queries::environments::hosting::lock_environment(&mut tx, world.environment)
+            .await
+            .unwrap()
+            .unwrap();
+        let principal = Principal::load(
+            &mut tx,
+            Caller::session(world.ada),
+            Time::new(world.clock.now()),
+        )
+        .await
+        .unwrap();
+        let result = world
+            .engine()
+            .set_config_trust_fenced(
+                tx,
+                principal,
+                world.environment,
+                harness,
+                ConfigTrustAnswer::KeepOut,
+                || {
+                    checks.fetch_add(1, Ordering::SeqCst);
+                    if allow {
+                        Ok(())
+                    } else {
+                        Err(EngineError::BeforeEffect(Box::new(std::io::Error::other(
+                            "closed at first effect",
+                        ))))
+                    }
+                },
+            )
+            .await;
+        if allow {
+            result.unwrap();
+        } else {
+            assert!(matches!(
+                result,
+                Err(ApprovalError::Internal(EngineError::BeforeEffect(_)))
+            ));
+        }
+        let question = orch_db::queries::trust::of_harness(
+            &mut world.pool.acquire().await.unwrap(),
+            world.environment,
+            harness,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(question.answer.as_deref(), allow.then_some("keep_out"));
+        assert_eq!(question.files, "native-question-v1");
+    }
+    assert_eq!(
+        checks.load(Ordering::SeqCst),
+        2,
+        "one check per native attempt"
+    );
+    assert_eq!(world.count(
+        "SELECT count(*) FROM audit_log WHERE environment_id=$1 AND action='approval.decided'",
+        world.environment,
+    ).await, 1, "the refused first effect writes no audit and the accepted answer writes once");
+}
+
+#[tokio::test]
 async fn a_workspace_configuration_is_asked_about_once_and_the_answer_reaches_every_session_after_it()
  {
     let world = World::new().await;

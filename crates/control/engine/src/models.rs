@@ -127,6 +127,7 @@ mod tests {
             model_name: "openai/gpt-6-sol".to_owned(),
             display_name: display.to_owned(),
             parameters: Json::Null,
+            option_layers: Json::Null,
             groups: Vec::new(),
             enabled,
         }

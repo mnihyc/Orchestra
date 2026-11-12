@@ -36,7 +36,7 @@ export function Recovery() {
   );
 
   if (meta === undefined) return <AuthCard title={t('auth.recover.title')} foot={back}>
-    {system.isError ? <ErrorState compact error={system.error} onRetry={() => void system.refetch()} /> : <SkeletonRows rows={2} />}
+    {system.isError ? <ErrorState compact error={system.error} onRetry={() => void system.refetch()} /> : <SkeletonRows read={system} rows={2} />}
   </AuthCard>;
 
   if (!meta.mail) {

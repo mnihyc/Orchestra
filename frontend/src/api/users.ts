@@ -8,16 +8,19 @@
 import { queryOptions } from '@tanstack/react-query';
 
 import { meQuery } from '@/api/auth';
-import { api, done, ok, repeatable } from '@/api/client';
+import { accepted, api, client, done, ok, repeatable } from '@/api/client';
 import { queryClient } from '@/api/query';
 import type {
   ApiTokenCreateBody,
-  TokenCreated,
+  ApiTokenActivityPage,
+  ApiTokenActivityQuery,
+  TokenCreateResponse,
+  Operation,
   ApiTokenInfo,
   Invitation,
   InvitationAcceptReply,
   InvitationCreateBody,
-  InvitationCreateReply,
+  InvitationCreateResponse,
   InvitationPreview,
   Me,
   MeTotpSetupReply,
@@ -42,8 +45,9 @@ export const invitationQuery = (token: string) =>
   });
 
 /** Takes what an invitation carries, for the person signed in. */
-export function acceptInvitation(token: string): Promise<InvitationAcceptReply> {
-  return ok(api.POST('/invitations/accept', { body: { token } }));
+export function acceptInvitation(token: string, acceptedTermsHash?: string): Promise<InvitationAcceptReply> {
+  const body = { token, ...(acceptedTermsHash === undefined ? {} : { accepted_terms_hash: acceptedTermsHash }) };
+  return ok(api.POST('/invitations/accept', { body }));
 }
 
 export const invitationsKey = (orgId: string) => ['invitations', orgId] as const;
@@ -60,8 +64,8 @@ export const invitationsQuery = (orgId: string) =>
  * Makes an invitation. With an address it is a personal link, for that address alone; without one,
  * a shared link. The answer holds the link, which is shown once.
  */
-export function createInvitation(body: InvitationCreateBody, key: string): Promise<InvitationCreateReply> {
-  return ok(api.POST('/invitations', { body, ...repeatable(key) }));
+export function createInvitation(body: InvitationCreateBody, key: string): Promise<InvitationCreateResponse> {
+  return accepted(api.POST('/invitations', { body, ...repeatable(key) }));
 }
 
 /** Takes an invitation back: its link stops being good. */
@@ -78,8 +82,13 @@ async function refreshMe(): Promise<Me> {
 }
 
 /** Changes the password; every other session of the person ends with it. */
-export function changePassword(currentPassword: string, newPassword: string): Promise<void> {
-  return done(api.POST('/me/password', { body: { current_password: currentPassword, new_password: newPassword } }));
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const { userId, readerVersion } = client.session.getState();
+  await done(api.POST('/me/password', { body: { current_password: currentPassword, new_password: newPassword } }));
+  const current = client.session.getState();
+  if (current.userId !== userId || current.readerVersion !== readerVersion) return;
+  // Success ends every other session; this known postcondition needs no second list read.
+  queryClient.setQueryData<SessionInfo[]>(sessionsKey, (before) => before?.filter((session) => session.current));
 }
 
 /**
@@ -177,6 +186,21 @@ export function revokeOtherSessions(): Promise<SessionInfo[]> {
 
 export const tokensKey = ['tokens'] as const;
 
+/** One explicit page of this account's retained key activity; callers mount it only while shown. */
+export function tokenActivityQuery(id: string, query: ApiTokenActivityQuery) {
+  return queryOptions<ApiTokenActivityPage>({
+    queryKey: ['token-activity', 'personal', id, query.limit ?? null, query.cursor ?? null] as const,
+    queryFn: ({ signal }): Promise<ApiTokenActivityPage> => ok(api.GET('/me/tokens/{id}/activity', { params: { path: { id }, query }, signal })),
+    staleTime: 0, retry: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
+  });
+}
+
+/** The shared operation catalogue; only an opened scoped-key editor reads it. */
+export const tokenOperationsQuery = queryOptions({
+  queryKey: ['token-operations'] as const,
+  queryFn: ({ signal }): Promise<Operation[]> => ok(api.GET('/me/token-operations', { signal })),
+});
+
 /** The API tokens the person has made, with what each may do. Their secrets were shown once and are not kept. */
 export const tokensQuery = queryOptions({
   queryKey: tokensKey,
@@ -184,8 +208,12 @@ export const tokensQuery = queryOptions({
 });
 
 /** Makes an API token. The answer holds its secret, which is never given again. */
-export function createToken(body: ApiTokenCreateBody, key: string): Promise<TokenCreated> {
-  return ok(api.POST('/me/tokens', { body, ...repeatable(key) }));
+export async function createToken(body: ApiTokenCreateBody, key: string): Promise<TokenCreateResponse> {
+  const answer = await api.POST('/me/tokens', { body, ...repeatable(key) });
+  // This dedicated one-time-secret consumer understands both genuine success projections.
+  // It never sends the secret through a generic acknowledged-error presentation.
+  if (answer.response.ok && answer.data !== undefined) return answer.data;
+  return ok(Promise.resolve(answer));
 }
 
 /** Ends a token for good. */

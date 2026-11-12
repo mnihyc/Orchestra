@@ -145,12 +145,15 @@ pub fn capabilities() -> Capabilities {
         // A message written while a turn runs is taken in at the next model request of that turn.
         steer: true,
         interrupt: true,
-        background_commands: false,
+        background_commands: true,
+        prompt_cache_ttl: true,
+        turn_changes_require_restart: true,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
             HarnessRequestKind::Permissions,
             HarnessRequestKind::UserInput,
+            HarnessRequestKind::McpElicitation,
         ],
         subagents: true,
         subagent_limits: vec![
@@ -167,6 +170,7 @@ pub fn capabilities() -> Capabilities {
         }),
         reasoning_summary: true,
         input_images: true,
+        image_generation: false,
         // Changed between turns without a restart; a harness that refuses is restarted.
         effort: EffortSupport::Turn,
         mcp_discovery: true,
@@ -193,6 +197,24 @@ pub fn capabilities() -> Capabilities {
         // Compaction is announced when it begins and when it ends.
         phases: true,
         provider_facts: crate::provider::fact_kinds(),
+        provider_fact_fields: orch_provider_contract::credit_fields::normalize_reports(
+            [(
+                "extra_usage".to_owned(),
+                [
+                    "enabled",
+                    "used",
+                    "limit",
+                    "used_percent",
+                    "unit",
+                    "decimal_places",
+                    "disabled_reason",
+                    "limit_reached",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            )]
+            .into(),
+        ),
         model_discovery: true,
         // In this mode the harness reports no title of its own.
         title: false,
@@ -210,6 +232,7 @@ pub fn capabilities() -> Capabilities {
         approval_reviewer: Some(ApprovalReviewerSupport {
             model: crate::review::CLAUDE_REVIEW_MODEL.to_owned(),
             settable: true,
+            session_model_paths: Vec::new(),
         }),
     }
 }
@@ -259,6 +282,11 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
         (
             "parameters.service_tier.description",
             "程序的快速模式，适用于有此模式的模型：回答更快，每个令牌的价格更高。使用订阅时，它消耗用量额度，而不是套餐。只在提供方的管理者为该模型启用时可用。",
+        ),
+        ("parameters.web_search.title", "网络搜索"),
+        (
+            "parameters.web_search.description",
+            "选择原生网络搜索，或在可用时选择已启用的托管提供方服务。搜索可能另行计费。",
         ),
         ("parameters.context.title", "上下文"),
         (
@@ -374,14 +402,17 @@ pub fn descriptor(version: &str, as_root: bool) -> AgentDescriptor {
         side_thread_modes: Vec::new(),
         capabilities: {
             let mut declared = capabilities();
-            if version != "2.1.296" {
+            if !crate::config::input_prefix_supported(version) {
                 declared.native_input_prefix = None;
             }
             declared
         },
         parameters: definitions(),
         text: text(),
-        extensions: Default::default(),
+        extensions: serde_json::from_value(serde_json::json!({
+            "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
+            (orch_agent_contract::turn_end_delays::EXTENSION): crate::config::turn_end_delays(),
+        })).unwrap_or_default(),
     }
 }
 
@@ -396,6 +427,50 @@ fn entry(kind: ArrangementType) -> ArrangementEntry {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_options_that_hold_back_a_turns_end_are_declared_and_no_override_removes_them() {
+        use orch_agent_contract::turn_end_delays::{EXTENSION, TurnEndDelays};
+        let actual = super::descriptor("2.1.319", false);
+        let declared = actual
+            .extensions
+            .get(EXTENSION)
+            .expect("the descriptor declares what holds back a turn's end");
+        let delays: TurnEndDelays = serde_json::from_value(declared.clone()).unwrap();
+        assert_eq!(
+            delays
+                .delays
+                .iter()
+                .map(|each| each.pointer.as_str())
+                .collect::<Vec<_>>(),
+            ["/child_usage_wait_ms"]
+        );
+        let read: orch_agent_contract::descriptor::AgentDescriptor =
+            serde_json::from_value(serde_json::to_value(&actual).unwrap()).unwrap();
+        let overridden = read
+            .with_overrides(&serde_json::json!({ (EXTENSION): null }))
+            .unwrap();
+        assert_eq!(overridden.extensions.get(EXTENSION), Some(declared));
+    }
+
+    #[test]
+    fn exact_input_prefix_support_is_a_closed_recorded_set() {
+        for version in crate::config::INPUT_PREFIX_VERSIONS {
+            assert!(
+                super::descriptor(version, false)
+                    .capabilities
+                    .native_input_prefix
+                    .is_some()
+            );
+        }
+        for version in ["2.1.296", "2.1.318", "2.1.320"] {
+            assert!(
+                super::descriptor(version, false)
+                    .capabilities
+                    .native_input_prefix
+                    .is_none()
+            );
+        }
+    }
     use super::*;
 
     #[test]
@@ -408,11 +483,11 @@ mod tests {
     fn the_harness_stands_against_the_range_as_the_contract_says() {
         assert_eq!(support_of("2.1.285"), HarnessSupport::Unsupported);
         assert_eq!(support_of("2.1.296"), HarnessSupport::Unsupported);
-        assert_eq!(support_of("2.1.312"), HarnessSupport::Supported);
+        assert_eq!(support_of("2.1.319"), HarnessSupport::Supported);
         assert_eq!(support_of("2.2.0"), HarnessSupport::Untested);
         assert_eq!(support_of("2.1.284"), HarnessSupport::Unsupported);
         assert_eq!(
-            descriptor("2.1.312", false).harness.status,
+            descriptor("2.1.319", false).harness.status,
             HarnessSupport::Supported
         );
     }
@@ -521,6 +596,14 @@ mod tests {
             descriptor("2.1.296", false).sandbox_modes,
             [SandboxMode::Workspace, SandboxMode::Open]
         );
+    }
+
+    #[test]
+    fn the_descriptor_reads_and_writes_as_json_without_loss() {
+        let declared = descriptor("2.1.296", false);
+        let written = serde_json::to_value(&declared).unwrap();
+        let read: AgentDescriptor = serde_json::from_value(written).unwrap();
+        assert_eq!(read, declared);
     }
 
     #[test]

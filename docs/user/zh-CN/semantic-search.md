@@ -10,6 +10,7 @@ heading_id.提供方暂停: provider-paused
 heading_id.磁盘限制: disk-limit
 heading_id.切换模型: change-models
 heading_id.索引与排序: indexing-and-ranking
+summary: 选择嵌入模型、查看索引状态，并在变更期间继续使用文字搜索。
 ---
 
 # 语义搜索
