@@ -58,7 +58,7 @@ test('a difference opens as a tab from the menu of a change, and can be added to
   await expect(page.getByRole('tab', { name: /app\.ts \(changes\)/ })).toBeVisible();
   await expect(page.getByRole('table', { name: /Difference in web\/src\/app\.ts/ })).toBeVisible();
   await page.getByRole('button', { name: 'Add to message' }).click();
-  await page.getByRole('tab', { name: 'Main thread · Fix login', exact: true }).click();
+  await page.getByRole('tab', { name: 'Idle Main thread · Fix login', exact: true }).click();
   await expect(page.getByRole('textbox', { name: 'Message to the agent' })).toHaveValue(/```diff/);
 });
 
@@ -361,7 +361,7 @@ test('the parameters show the model with where it comes from, change one that is
   await expect(verbosity).toHaveValue('Normal');
   await verbosity.click();
   await page.getByRole('option', { name: 'Terse', exact: true }).click();
-  await expect(panel.getByRole('status')).toHaveText('Saved');
+  await expect(panel.getByTestId('parameter-row').getByRole('status')).toHaveText('Saved');
   await deny('ada', ['thread.manage']);
   await page.reload();
   await showView(page, /^Parameters/);

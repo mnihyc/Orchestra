@@ -1,0 +1,4 @@
+# The engine's settling round with the main conversation's own requests in the statement: the real-harness program.
+test -p orch-engine --test background_wake_native -- --test-threads=3
+test -p orch-engine --test usage_rows
+test -p orch-adapter-claude-code --test child_usage

@@ -28,7 +28,7 @@ sentence does (the class of the error and its status, the `terminal_reason` of t
 and of a sentence only what is stable in it; whatever no row knows is `harness_error` with the harness's words. The error carries those words (`said`, with how
 often the harness tried again by itself), the moment a limit of the plan ends (from the event's epoch, else from the sentence, in the zone it names or the
 runtime's) and whether an answer was cut short. A limit of the whole plan is `provider_exhausted`, one of a family of models or of spending the same but retryable,
-a vendor that is busy or cannot be reached is `provider_busy` or `provider_unreachable`. A process that is killed, ends by itself, prints half a line or refuses to
+rate limiting is `rate_limited`, server overload is `overloaded`, and an unreachable vendor is `provider_unreachable`; other busy states retain `provider_busy`. A process that is killed, ends by itself, prints half a line or refuses to
 start ends its turn with what was last seen, and the next turn starts a fresh process; one that goes silent past `silence_secs`, or goes on trying again past
 `retry_patience_secs`, is stopped and its turn ends. Each kind of failure is a fixture recorded from Claude Code 2.1.296 (`tests/fixtures/failures`) and a test that
 replays it without a container (`recorded_failures`); `tests/failures.rs` runs the same faults against the real program, and

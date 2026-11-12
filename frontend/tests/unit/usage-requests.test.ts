@@ -4,6 +4,7 @@ import { emptyLog, matchesRequest, newestRequests, requestLog } from '@/features
 import { filtersOf, patchSearch, readSearch } from '@/features/usage/search';
 import { filterValue, isRest, keyLabel } from '@/features/usage/keys';
 import { i18n } from '@/i18n';
+import { timingFixture } from '../doubles/performance';
 import { requestRow } from '../doubles/request-row';
 
 describe('a paused request log', () => {
@@ -45,17 +46,27 @@ describe('a paused request log', () => {
   });
 });
 
-it('filters requests by person, place, provider, harness, model, effort, tier, programme and running outcome', () => {
+it('filters requests by person, place, provider, harness, model, effort, tier, program and running outcome', () => {
   const row = requestRow({ running: true });
   expect(matchesRequest(row, { user_id: row.user?.id, project_id: row.project.id, topic_id: row.topic.id, thread_id: row.thread?.id, provider_id: row.provider.id, harness_kind: 'codex', environment_kind: 'managed', model: 'model-a', tier: 'fast', effort: 'high', program: 'research', outcome: 'running' })).toBe(true);
   for (const filters of [{ model: 'model-b' }, { program: 'none' }, { tier: 'none' }, { effort: 'low' }, { provider_id: 'other' }, { user_id: 'other' }, { outcome: 'done' }] as const) expect(matchesRequest(row, filters)).toBe(false);
 });
 
-it('retains view and programme filters in a shared usage address and distinguishes no programme', () => {
+it('retains view and program filters in a shared usage address and distinguishes no program', () => {
   const search = readSearch({ view: 'requests', program: 'research', effort: 'high', outcome: 'running' });
   expect(filtersOf(search)).toMatchObject({ program: 'research', effort: 'high', outcome: 'running' });
   expect(patchSearch(search, { view: 'performance' }).program).toBe('research');
   expect(isRest({ program: null })).toBe(false);
   expect(filterValue('program', { program: null })).toBe('none');
-  expect(keyLabel('program', { program: null }, i18n.t)).toBe('No programme');
+  expect(keyLabel('program', { program: null }, i18n.t)).toBe('No program');
+});
+
+
+for(const outcome of ['rate_limited','overloaded','stream_interrupted'] as const)it(`retains and matches the ${outcome} address filter`,()=>{
+  const search=readSearch({view:'requests',outcome});
+  expect(search.outcome).toBe(outcome);
+  const timing=timingFixture({outcome:{state:'told',value:outcome}});
+  const row=requestRow({timing});
+  expect(matchesRequest(row,{outcome})).toBe(true);
+  expect(matchesRequest(row,{outcome:'done'})).toBe(false);
 });

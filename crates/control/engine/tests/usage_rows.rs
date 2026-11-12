@@ -9,10 +9,13 @@ mod common;
 
 use chrono::Utc;
 use common::{MODEL, World, meanwhile, turn_ended};
+use orch_agent_contract::requests::{RequestTokens, UsageRequest};
+use orch_api_contract::context::TurnUsageReport;
+use orch_api_contract::threads::TokenUsage;
 use orch_db::usage::ledger::Tokens;
 use orch_engine::caps;
 use orch_engine::turns::{OwnPurpose, OwnUse};
-use orch_link_contract::events::{Event, LeaseUsage, TurnOutcome, UsageUpdated};
+use orch_link_contract::events::{Event, LeaseUsage, ModelRequest, TurnOutcome, UsageUpdated};
 use orch_types::{Id, new_id};
 use serde_json::json;
 use std::time::Duration;
@@ -298,6 +301,7 @@ fn forwarder_says(lease: Id, input: i64, output: i64, named: &str) -> Event {
         }))
         .unwrap(),
         request_ref: Some(named.to_owned()),
+        timing: None,
     })
 }
 
@@ -385,8 +389,9 @@ async fn what_orch_asks_of_a_model_for_itself_is_one_row_that_counts_for_the_sha
         thread: Some(thread),
         provider: world.provider,
         entry: None,
-        person: Some(bob),
+        person: None,
         model: MODEL,
+        protocol: None,
         tokens: Tokens {
             input: 400,
             cached_input: 0,
@@ -417,7 +422,7 @@ async fn what_orch_asks_of_a_model_for_itself_is_one_row_that_counts_for_the_sha
             "summary".to_owned(),
             "request".to_owned(),
             true,
-            Some(bob),
+            None,
             None,
             Some(thread)
         )
@@ -504,4 +509,565 @@ async fn what_orch_asks_of_a_model_for_itself_is_one_row_that_counts_for_the_sha
             .await
             .unwrap()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_owned_reroute_keeps_the_choice_and_moves_request_and_context_facts_to_the_actual_model()
+{
+    let world = World::new().await;
+    let thread = world.thread("Native effective model").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    let actual = "native-effective";
+    sqlx::query("INSERT INTO provider_models(id,provider_id,model_name,display_name,parameters,enabled,source,created_by) VALUES($1,$2,$3,'Effective model','{}',true,'manual',$4)")
+        .bind(new_id()).bind(world.provider).bind(actual).bind(world.ada).execute(world.pool.pool()).await.unwrap();
+    let mut first = harness_says(start.turn_id, 10, 1);
+    if let Event::UsageUpdated(usage) = &mut first {
+        usage.context_window = Some(200_000);
+        usage.context_used = Some(10);
+    }
+    world.say(thread, first).await;
+    common::eventually("initial context window", || async {
+        world
+            .scalar::<bool>(
+                "SELECT COALESCE(usage->>'context_window'='200000',false) FROM threads WHERE node_id=$1",
+                thread,
+            )
+            .await
+    })
+    .await;
+    let before: serde_json::Value = world
+        .scalar(
+            "SELECT jsonb_build_object('model',model,'params',params) FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    let started=Event::decode("item.started",json!({"turn_id":start.turn_id,"native_ref":"native-reroute","stream":"main","kind":"error","payload":{"code":"model_rerouted","message":"The native program chose its effective model.","retryable":false}})).unwrap();
+    world.say(thread, started).await;
+    world.say(thread,Event::decode("item.completed",json!({"native_ref":"native-reroute","status":"completed","payload":{"code":"model_rerouted","message":"The native program chose its effective model.","retryable":false,"details":{"turn_id":start.turn_id,"from_model":MODEL,"to_model":actual}}})).unwrap()).await;
+    common::eventually("owned actual model",||async {world.scalar::<bool>("SELECT COALESCE(usage_detail->>'effective_model'='native-effective',false) FROM turns WHERE id=$1",start.turn_id).await}).await;
+    let pending: serde_json::Value = world
+        .scalar("SELECT usage FROM threads WHERE node_id=$1", thread)
+        .await;
+    assert!(
+        pending["context_window"].is_null(),
+        "the old model window is not the new model's window"
+    );
+    let after: serde_json::Value = world
+        .scalar(
+            "SELECT jsonb_build_object('model',model,'params',params) FROM turns WHERE id=$1",
+            start.turn_id,
+        )
+        .await;
+    assert_eq!(
+        before, after,
+        "native observation never replaces the person's chosen model/parameters"
+    );
+    let mut next = harness_says(start.turn_id, 100, 20);
+    if let Event::UsageUpdated(usage) = &mut next {
+        usage.context_window = Some(100_000);
+        usage.context_used = Some(100);
+    }
+    world.say(thread, next).await;
+    common::eventually("effective model context",||async {world.scalar::<bool>("SELECT COALESCE(usage->>'context_window'='100000' AND usage->>'context_model'='native-effective',false) FROM threads WHERE node_id=$1",thread).await}).await;
+    let mut request = orch_agent_contract::requests::UsageRequest {
+        id: "effective-request".into(),
+        ..Default::default()
+    };
+    request.tokens.input_tokens = Some(100);
+    request.tokens.output_tokens = Some(20);
+    request.finish("done", None, None);
+    world
+        .say(
+            thread,
+            Event::ModelRequest(orch_link_contract::events::ModelRequest {
+                turn_id: start.turn_id,
+                request,
+            }),
+        )
+        .await;
+    common::eventually("effective model request",||async {world.scalar::<bool>("SELECT EXISTS(SELECT 1 FROM usage_events WHERE turn_id=$1 AND request_ref='effective-request' AND model='native-effective')",start.turn_id).await}).await;
+    let sync = world.sync(thread).await;
+    let turn = sync
+        .turns
+        .iter()
+        .find(|turn| turn.id == start.turn_id)
+        .unwrap();
+    assert_eq!(
+        turn.usage_detail
+            .as_ref()
+            .unwrap()
+            .effective_model
+            .as_deref(),
+        Some(actual)
+    );
+    assert_eq!(
+        turn.usage_detail
+            .as_ref()
+            .unwrap()
+            .effective_model_display
+            .as_deref(),
+        Some("Effective model")
+    );
+    assert!(sync.items.iter().any(|item| {
+        serde_json::to_value(&item.payload)
+            .unwrap()
+            .pointer("/payload/details/to_display")
+            == Some(&json!("Effective model"))
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issued_summaries_use_the_issuers_summary_week_and_automatic_work_has_no_person() {
+    use orch_engine::caps::OwnCapAsk;
+    use orch_types::{Clock, ManualClock};
+    use std::sync::Arc;
+    let clock = Arc::new(ManualClock::new("2026-11-02T12:00:00Z".parse().unwrap()));
+    let world = World::with_clock(clock.clone()).await;
+    let thread = world.thread("Personal summary allowance").await;
+    let bob = world.person("bob").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    sqlx::query("UPDATE provider_models SET parameters=parameters || jsonb_build_object('rate',$1::jsonb) WHERE provider_id=$2 AND model_name=$3")
+        .bind(json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"2"}))
+        .bind(world.provider).bind(MODEL).execute(&mut *conn).await.unwrap();
+    let cap_id = new_id();
+    sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,purposes,warn_percent,created_by) VALUES($1,$2,'members',$3,'each','credits','week',0.001,ARRAY['summary'],50,$4)")
+        .bind(cap_id).bind(world.project).bind(world.root).bind(world.ada).execute(&mut *conn).await.unwrap();
+    let engine = world.engine();
+    let request = OwnCapAsk {
+        place: thread,
+        provider: world.provider,
+        model: MODEL,
+        tier: None,
+        purpose: "summary",
+        person: Some(world.ada),
+    };
+    assert!(engine.room_for_own_use(&mut conn, &request).await.unwrap());
+    let own = OwnUse {
+        purpose: OwnPurpose::Summary,
+        timing: None,
+        id: new_id(),
+        at: clock.now(),
+        topic: world.topic,
+        thread: Some(thread),
+        provider: world.provider,
+        entry: None,
+        person: Some(world.ada),
+        model: MODEL,
+        protocol: None,
+        tokens: Tokens {
+            input: 1000,
+            total: 1000,
+            ..Default::default()
+        },
+        request_ref: Some("issued-summary"),
+    };
+    assert!(engine.count_own_use(&mut conn, &own).await.unwrap());
+    assert!(
+        !engine.count_own_use(&mut conn, &own).await.unwrap(),
+        "replay is the same native ledger row"
+    );
+    assert!(!engine.room_for_own_use(&mut conn, &request).await.unwrap());
+    assert!(
+        engine
+            .room_for_own_use(
+                &mut conn,
+                &OwnCapAsk {
+                    person: Some(bob),
+                    ..request
+                }
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        engine
+            .room_for_own_use(
+                &mut conn,
+                &OwnCapAsk {
+                    person: None,
+                    ..request
+                }
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        engine
+            .room_for_own_use(
+                &mut conn,
+                &OwnCapAsk {
+                    purpose: "turn",
+                    ..request
+                }
+            )
+            .await
+            .unwrap(),
+        "a summary cap does not bound ordinary generation"
+    );
+    let cap = orch_db::usage::caps::get(&mut conn, cap_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        caps::standing(&mut conn, &cap, Some(world.ada), clock.now())
+            .await
+            .unwrap()
+            .used
+            .text(),
+        "0.001"
+    );
+    assert_eq!(
+        caps::standing(&mut conn, &cap, Some(bob), clock.now())
+            .await
+            .unwrap()
+            .used
+            .text(),
+        "0"
+    );
+    let automatic = OwnUse {
+        id: new_id(),
+        person: None,
+        request_ref: Some("automatic-summary"),
+        ..own.clone()
+    };
+    assert!(engine.count_own_use(&mut conn, &automatic).await.unwrap());
+    let row: (Option<Id>, String, Option<String>) =
+        sqlx::query_as("SELECT user_id,purpose,credits::text FROM usage_events WHERE id=$1")
+            .bind(automatic.id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(row, (None, "summary".into(), Some("0.001000".into())));
+    assert_eq!(
+        caps::standing(&mut conn, &cap, Some(world.ada), clock.now())
+            .await
+            .unwrap()
+            .used
+            .text(),
+        "0.001"
+    );
+    let reached: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action='usage_cap.reached' AND object_id=$1",
+    )
+    .bind(cap_id)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(
+        reached, 1,
+        "the original cap audit producer runs once for the real issuer"
+    );
+    clock.advance(chrono::Duration::days(7));
+    assert!(
+        engine.room_for_own_use(&mut conn, &request).await.unwrap(),
+        "the existing UTC week starts a fresh allowance"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_owned_questions_cap_and_notice_use_its_governing_org_instead_of_thread_storage() {
+    let world = World::new().await;
+    let thread = world.thread("Stored elsewhere").await;
+    let (start, _) = world.running_turn(thread, "An actual retained turn").await;
+    let mut tx = world.pool.begin().await.unwrap();
+    let native = orch_db::usage::ledger::attribution_of_turn(&mut tx, start.turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let governing = new_id();
+    orch_db::queries::hierarchy::testing::insert_node(
+        &mut tx,
+        governing,
+        "org",
+        None,
+        "Knowledge boundary",
+        world.ada,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters=parameters || jsonb_build_object('rate',$1::jsonb) WHERE provider_id=$2 AND model_name=$3")
+        .bind(json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"2"})).bind(world.provider).bind(MODEL).execute(&mut *tx).await.unwrap();
+    let cap_id = new_id();
+    sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,meter,period,amount,purposes,created_by) VALUES($1,$2,'user',$3,'credits','week',0.001,ARRAY['ask'],$3)")
+        .bind(cap_id).bind(governing).bind(world.ada).execute(&mut *tx).await.unwrap();
+    let own = OwnUse {
+        purpose: OwnPurpose::Ask,
+        timing: None,
+        id: new_id(),
+        at: world.clock.now(),
+        topic: governing,
+        thread: Some(thread),
+        provider: world.provider,
+        entry: None,
+        person: Some(world.ada),
+        model: MODEL,
+        protocol: None,
+        tokens: Tokens {
+            input: 1000,
+            total: 1000,
+            ..Default::default()
+        },
+        request_ref: Some("governed-question"),
+    };
+    let engine = world.engine();
+    assert!(
+        engine
+            .count_own_use_context(&mut tx, &own, Some((start.turn_id, native.segment_id)))
+            .await
+            .unwrap()
+    );
+    let cap = orch_db::usage::caps::get(&mut tx, cap_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        caps::standing(&mut tx, &cap, Some(world.ada), world.clock.now())
+            .await
+            .unwrap()
+            .used
+            .text(),
+        "0.001"
+    );
+    let people = orch_db::usage::caps::users_of(&mut tx, &cap, None, world.clock.now())
+        .await
+        .unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].user_id, world.ada);
+    let place = orch_db::usage::rollup::place_of(&mut tx, governing)
+        .await
+        .unwrap()
+        .unwrap();
+    let filter = orch_db::usage::rollup::Filter {
+        node: Some(place),
+        purpose: Some("ask".into()),
+        ..Default::default()
+    };
+    let cells = orch_db::usage::rollup::read(
+        &mut tx,
+        &orch_db::usage::rollup::Read {
+            from: world.clock.now().date_naive(),
+            to: world.clock.now().date_naive(),
+            filter: &filter,
+            bucket: None,
+            by: None,
+            under: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(cells.len(), 1);
+    assert_eq!(cells[0].figures.credits, "0.001000");
+    let audits: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_log WHERE action='usage_cap.reached' AND object_id=$1",
+    )
+    .bind(cap_id)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    assert_eq!(
+        audits, 1,
+        "notice coverage also uses the retained governing root"
+    );
+    tx.commit().await.unwrap();
+}
+
+// ---- a turn is closed as its use less what its rows carry, whenever the rows come
+
+fn tokens(input: i64, output: i64) -> TokenUsage {
+    serde_json::from_value(json!({
+        "input_tokens": input, "cached_input_tokens": 0, "output_tokens": output,
+        "reasoning_tokens": 0, "total_tokens": input + output
+    }))
+    .unwrap()
+}
+
+/// A use said with the statement of what its rows carry (`None`: nothing stated).
+fn says_carried(turn: Id, used: (i64, i64), carried: Option<(i64, i64)>) -> Event {
+    Event::UsageUpdated(UsageUpdated {
+        turn_id: turn,
+        turn: tokens(used.0, used.1),
+        thread: tokens(used.0, used.1),
+        context_window: None,
+        context_used: None,
+        report: Some(TurnUsageReport {
+            carried_by_rows: carried.map(|(input, output)| tokens(input, output)),
+            ..TurnUsageReport::default()
+        }),
+    })
+}
+
+fn a_row(turn: Id, name: &str, input: i64, output: i64) -> Event {
+    let mut request = UsageRequest {
+        id: name.to_owned(),
+        model: Some(MODEL.to_owned()),
+        tokens: RequestTokens {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            ..RequestTokens::default()
+        },
+        ..UsageRequest::default()
+    };
+    request.finish("done", None, None);
+    Event::ModelRequest(ModelRequest {
+        turn_id: turn,
+        request,
+    })
+}
+
+/// What the ledger counts for the turn, by part, and how many rows hold it.
+async fn counted_of(world: &World, turn: Id) -> (i64, i64, usize) {
+    let rows = world.ledger_of(turn).await;
+    let counted: Vec<_> = rows.iter().filter(|row| row.counted).collect();
+    (
+        counted.iter().map(|row| row.input_tokens).sum(),
+        counted.iter().map(|row| row.output_tokens).sum(),
+        counted.len(),
+    )
+}
+
+/// Which way the rows come, against the completion of the turn and the follow-up that closes its use.
+#[derive(Clone, Copy, Debug)]
+enum Rows {
+    BeforeTheCompletion,
+    RightAfterTheCompletion,
+    AfterTheFollowUp,
+}
+
+async fn a_turn_with_a_row(
+    way: Rows,
+    used: (i64, i64),
+    carried: Option<(i64, i64)>,
+    row: (i64, i64),
+) -> (i64, i64, usize) {
+    let world = World::new().await;
+    let thread = world.thread("Carried").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    let turn = start.turn_id;
+    world.say(thread, says_carried(turn, used, None)).await;
+    world.say(thread, says_carried(turn, used, carried)).await;
+    match way {
+        Rows::BeforeTheCompletion => {
+            world.say(thread, a_row(turn, "child-1", row.0, row.1)).await;
+            world
+                .say(thread, turn_ended(turn, TurnOutcome::Completed))
+                .await;
+            world.wait_turn(turn, "completed").await;
+        }
+        Rows::RightAfterTheCompletion => {
+            world
+                .say(thread, turn_ended(turn, TurnOutcome::Completed))
+                .await;
+            world.say(thread, a_row(turn, "child-1", row.0, row.1)).await;
+            world.wait_turn(turn, "completed").await;
+        }
+        Rows::AfterTheFollowUp => {
+            world
+                .say(thread, turn_ended(turn, TurnOutcome::Completed))
+                .await;
+            world.wait_turn(turn, "completed").await;
+            world.wait_ledger(turn, 1).await;
+            meanwhile(Duration::from_millis(200)).await;
+            world.say(thread, a_row(turn, "child-1", row.0, row.1)).await;
+        }
+    }
+    common::eventually("the rows of the turn are all in the ledger", || async {
+        counted_of(&world, turn).await.2 >= 2
+    })
+    .await;
+    meanwhile(Duration::from_millis(300)).await;
+    counted_of(&world, turn).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_turn_whose_use_is_stated_to_be_carried_in_part_by_its_rows_counts_the_same_whenever_the_rows_come()
+ {
+    // A use of 500 / 50 whose row of 300 / 30 is inside it: 200 / 20 are the turn's own, in whichever order.
+    let mut outcomes = Vec::new();
+    for way in [
+        Rows::BeforeTheCompletion,
+        Rows::RightAfterTheCompletion,
+        Rows::AfterTheFollowUp,
+    ] {
+        let counted = a_turn_with_a_row(way, (500, 50), Some((300, 30)), (300, 30)).await;
+        outcomes.push((way, counted));
+    }
+    for (way, counted) in &outcomes {
+        assert_eq!(
+            *counted,
+            (500, 50, 2),
+            "the rows came {way:?}: the turn's own 200 / 20 and the row's 300 / 30, once each"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_row_the_use_does_not_hold_is_added_to_it_and_not_taken_from_it_whenever_it_comes() {
+    // A use of 200 / 30 that holds none of the row of 5 000 / 400 (stated: nothing carried): both count whole,
+    // though the row is larger than the use, which the turn shows as the larger of the two.
+    for way in [
+        Rows::BeforeTheCompletion,
+        Rows::RightAfterTheCompletion,
+        Rows::AfterTheFollowUp,
+    ] {
+        let counted = a_turn_with_a_row(way, (200, 30), Some((0, 0)), (5_000, 400)).await;
+        assert_eq!(counted, (5_200, 430, 2), "the rows came {way:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_statement_is_not_waited_for_its_rows_and_a_use_said_without_one_is_closed_by_the_rows_it_has() {
+    // Stated, and the row never comes: the turn is closed as 500 / 50 less the 300 / 30 stated, and no more.
+    let world = World::new().await;
+    let thread = world.thread("Stated").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world
+        .say(thread, says_carried(start.turn_id, (500, 50), Some((300, 30))))
+        .await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.wait_ledger(start.turn_id, 1).await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(counted_of(&world, start.turn_id).await, (200, 20, 1));
+    // Nothing stated: the engine's own rule, the use less the rows it has when it closes the turn.
+    let thread = world.thread("Not stated").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world
+        .say(thread, says_carried(start.turn_id, (500, 50), None))
+        .await;
+    world
+        .say(thread, a_row(start.turn_id, "child-1", 300, 30))
+        .await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.wait_ledger(start.turn_id, 2).await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(counted_of(&world, start.turn_id).await, (500, 50, 2));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_statement_belongs_to_the_use_it_came_with() {
+    // The use is said again, larger, without a statement: the earlier statement does not stand for it.
+    let world = World::new().await;
+    let thread = world.thread("Said again").await;
+    let (start, _) = world.running_turn(thread, "Go").await;
+    world
+        .say(thread, says_carried(start.turn_id, (500, 50), Some((300, 30))))
+        .await;
+    world
+        .say(thread, says_carried(start.turn_id, (900, 90), None))
+        .await;
+    world
+        .say(thread, a_row(start.turn_id, "child-1", 300, 30))
+        .await;
+    world
+        .say(thread, turn_ended(start.turn_id, TurnOutcome::Completed))
+        .await;
+    world.wait_turn(start.turn_id, "completed").await;
+    world.wait_ledger(start.turn_id, 2).await;
+    meanwhile(Duration::from_millis(300)).await;
+    assert_eq!(counted_of(&world, start.turn_id).await, (900, 90, 2));
 }

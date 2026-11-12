@@ -1,6 +1,6 @@
 /** One inspection card for names and highlighted choices, transient on hover or focus and kept on request. */
 import { HoverCard, Popover } from 'radix-ui';
-import { cloneElement, createContext, isValidElement, type ReactNode, type Ref, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { cloneElement, createContext, isValidElement, type ReactNode, type Ref, type RefObject, useCallback, useContext, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal, flushSync } from 'react-dom';
 import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -9,11 +9,16 @@ import { cx } from '@/ui/cx';
 import { revealFloatingFocus } from '@/ui/floating';
 import { cardClasses, floatingAttachment, floatingClasses } from '@/ui/Popover';
 import { usePromptCovered } from '@/ui/PromptScope';
-import { isInspectionTarget } from '@/ui/inspection';
+import { isInspectionTarget, useCardPointerReopen } from '@/ui/inspection';
 import { IconButton } from '@/ui/IconButton';
 import { useCardChildren, useChildCard, useKeepParentCard } from '@/ui/CardNesting';
 
+/** Display metadata of the same native resource the inspection card names. */
+export interface ChoiceResource { kind: string; id: string; data?: unknown }
+
 export interface CardPreview {
+  /** Lets complete resource choices use the common grouped picker. Never grants an act. */
+  resource?: ChoiceResource;
   /** The full permitted name of the thing being inspected. */
   label: string;
   /** Called only while a card is visible; detail readers belong here. */
@@ -53,6 +58,32 @@ export interface CardController { keep: () => void }
 const CARD_WIDTH_REM = 20;
 const CARD_GAP_PX = 6;
 const CARD_EDGE_PX = 8;
+
+/** Late native facts can grow a card before the popper's asynchronous resize placement runs. */
+function useCardViewport(cardRef: RefObject<HTMLDivElement | null>) {
+  const release = useRef<(() => void) | undefined>(undefined);
+  return useCallback((element: HTMLDivElement | null) => {
+    cardRef.current = element;
+    release.current?.();
+    release.current = undefined;
+    const frame = element?.parentElement;
+    if (element === null || frame === null || frame === undefined) return;
+    const place = () => {
+      const box = frame.getBoundingClientRect();
+      element.style.setProperty('--inspection-left', `${box.left}px`);
+      element.style.setProperty('--inspection-top', `${box.top}px`);
+    };
+    place();
+    const moves = new MutationObserver(place);
+    moves.observe(frame, { attributes: true, attributeFilter: ['style'] });
+    release.current = () => moves.disconnect();
+  }, [cardRef]);
+}
+
+// Percentages follow the card's own size immediately, including growth between resize callbacks.
+const viewportShift = {
+  translate: `clamp(calc(${CARD_EDGE_PX}px - var(--inspection-left, ${CARD_EDGE_PX}px)), 0px, calc(100dvw - ${CARD_EDGE_PX}px - var(--inspection-left, ${CARD_EDGE_PX}px) - 100%)) clamp(calc(${CARD_EDGE_PX}px - var(--inspection-top, ${CARD_EDGE_PX}px)), 0px, calc(100dvh - ${CARD_EDGE_PX}px - var(--inspection-top, ${CARD_EDGE_PX}px) - 100%))`,
+};
 
 interface InspectionPair { anchor: HTMLElement; control: HTMLButtonElement }
 interface InspectionScope {
@@ -119,6 +150,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
   const keepParent = useKeepParentCard();
   const nested = useCardChildren(() => setChildKept(true));
   const [dismissed, setDismissed] = useState(false);
+  const pointer = useCardPointerReopen();
   const [lastActive, setLastActive] = useState(active);
   const [choiceSide, setChoiceSide] = useState<'right' | 'top' | 'bottom'>('right');
   const [choiceGap, setChoiceGap] = useState(CARD_GAP_PX);
@@ -139,7 +171,11 @@ export function DetailCard({ label, content, passingContent, children, asChild =
   // A narrow picker keeps its options available. Its explicit inspection control and Right Arrow still open the card.
   const visible = kept || !dismissed && (!choice || previewFits) && (shown || active || nested.open || childKept);
   const announceParent = useChildCard(visible);
-  const passing = visible && !kept;
+  // A form above this card hides it. A card nobody can see is not a layer to take the key: it opens again by a new entry, not by the form's leaving.
+  const passing = visible && !kept && !covered;
+  if (covered && shown) setShown(false);
+  const passingViewport = useCardViewport(passingCard);
+  const keptViewport = useCardViewport(card);
   const link = asChild && isValidElement<{ href?: unknown; to?: unknown }>(children) && (children.props.href !== undefined || children.props.to !== undefined);
   const trigger = asChild ? choice && inspection !== null && isValidElement<{ className?: string }>(children)
     ? cloneElement(children, { className: cx(children.props.className, 'pr-[calc(var(--control-sm)+0.5rem)]') }) : children
@@ -187,7 +223,7 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     view.addEventListener('scroll', place, true);
     return () => { sizes?.disconnect(); moves?.disconnect(); if (frame !== undefined) view.cancelAnimationFrame(frame); view.removeEventListener('resize', resized); view.removeEventListener('scroll', place, true); };
   }, [choice, visible, avoidChoiceList]);
-  const close = () => { setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
+  const close = () => { pointer.dismiss(); setChildKept(false); setKept(false); setShown(false); setDismissed(true); };
   const closePassing = () => {
     if (!choice) { close(); return; }
     flushSync(close);
@@ -195,7 +231,8 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     // removing that layer, so an inspection never adds an extra dismissal step to a choice.
     queueMicrotask(() => {
       const triggerNode = anchor.current;
-      if (triggerNode?.isConnected === true && triggerNode.closest('[role="listbox"],[role="menu"]') !== null) {
+      // An option can be owned with aria-owns so its row actions remain outside the listbox.
+      if (triggerNode?.isConnected === true && triggerNode.closest('[role="option"],[role="listbox"],[role="menu"]') !== null) {
         triggerNode.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
       }
     });
@@ -210,39 +247,44 @@ export function DetailCard({ label, content, passingContent, children, asChild =
     onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
     onPointerUp={(event) => event.stopPropagation()}
     onClick={(event) => { event.preventDefault(); event.stopPropagation(); keep(); }} />;
-  return <Popover.Root open={kept} onOpenChange={(next) => { if (next) keepParent?.(); else setChildKept(false); setKept(next); setShown(false); setDismissed(!next); }}>
+  return <Popover.Root open={kept} onOpenChange={(next) => { if (!next) { close(); return; } keepParent?.(); setKept(true); setShown(false); setDismissed(false); }}>
       <HoverCard.Root open={passing} onOpenChange={(next) => {
         const node = passingCard.current;
         if (!next && passingContent !== undefined && node?.contains(node.ownerDocument.activeElement)) return;
         if (mounted.current && !kept) setShown(next);
       }}>
-      <HoverCard.Trigger asChild onPointerEnter={() => setDismissed(false)}
+      <HoverCard.Trigger asChild onPointerEnter={(event) => {
+        if (!pointer.allowed.current || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) { event.preventDefault(); return; }
+        setDismissed(false);
+      }} onPointerLeave={pointer.leave}
         // Options keep their primitive's focus handling; plain names need no delayed opening.
-        onFocus={(event) => { const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (!(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+        onFocus={(event) => { if (!event.currentTarget.contains(event.target)) { event.preventDefault(); return; } const target = event.currentTarget; revealFloatingFocus(target); requestAnimationFrame(() => { if (target.isConnected && document.activeElement === target) revealFloatingFocus(target); }); if (!choice) event.preventDefault(); if (!restoringFocus.current) { announceParent(true); setDismissed(false); if (!choice) setShown(true); } restoringFocus.current = false; }} onBlur={(event) => { if (event.currentTarget.contains(event.target) && !(event.relatedTarget instanceof Node && passingCard.current?.contains(event.relatedTarget))) setShown(false); }} onKeyDown={(event) => {
+          if (event.defaultPrevented || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
           if (choice && event.key === 'ArrowRight') { event.preventDefault(); event.stopPropagation(); keep(); }
           if (!choice && passingContent !== undefined && passing && (event.key === 'ArrowDown' || event.key === 'Tab' && !event.shiftKey)) {
-            const first = passingCard.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]');
+            const first = passingCard.current?.querySelector<HTMLElement>('[data-card-entry]:not([disabled])')
+              ?? passingCard.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex="0"]');
             if (first !== null && first !== undefined) { event.preventDefault(); first.focus(); }
           }
           if (event.key === 'Escape' && visible) { if (!choice || kept) { event.preventDefault(); event.stopPropagation(); } close(); }
         }}>
         {control}
       </HoverCard.Trigger>
-      <HoverCard.Portal><HoverCard.Content ref={passingCard} side={choice ? choiceSide : side} align="start" sideOffset={choice ? choiceGap : CARD_GAP_PX} collisionPadding={CARD_EDGE_PX} {...floatingAttachment}
-        style={covered ? { display: 'none' } : undefined}
+      <HoverCard.Portal><HoverCard.Content ref={passingViewport} side={choice ? choiceSide : side} align="start" sideOffset={choice ? choiceGap : CARD_GAP_PX} collisionPadding={CARD_EDGE_PX} {...floatingAttachment}
+        style={covered ? { ...viewportShift, display: 'none' } : viewportShift}
         data-inspection-card className={cx(classes, 'pointer-events-auto')}
         data-choice-preview={owner}
         onFocusCapture={() => setShown(true)}
         onBlurCapture={(event) => { if (!(event.relatedTarget instanceof Node && (passingCard.current?.contains(event.relatedTarget) || anchor.current?.contains(event.relatedTarget)))) setShown(false); }}
         aria-label={label} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); closePassing(); }}>
-        {visible && nested.wrap((passingContent ?? content)())}
+        {passing && nested.wrap((passingContent ?? content)())}
       </HoverCard.Content></HoverCard.Portal>
     </HoverCard.Root>
     {choice && (inspection === null ? renderInspect?.(inspector) ?? inspector : inspection.target === null ? null : createPortal(inspector, inspection.target))}
     <Popover.Portal><Popover.Content side={choice ? choiceSide : side} align="start" sideOffset={choice ? choiceGap : CARD_GAP_PX} collisionPadding={CARD_EDGE_PX} {...floatingAttachment}
-      style={covered ? { display: 'none' } : undefined}
+      style={covered ? { ...viewportShift, display: 'none' } : viewportShift}
       data-inspection-card
-      ref={card} tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); card.current?.focus(); }}
+      ref={keptViewport} tabIndex={-1} onOpenAutoFocus={(event) => { event.preventDefault(); card.current?.focus(); }}
       data-choice-preview={owner}
       onInteractOutside={(event) => { if (covered || isInspectionTarget(event.target)) event.preventDefault(); }}
       aria-label={label} className={classes} onClick={(event) => event.stopPropagation()} onEscapeKeyDown={(event) => { event.stopPropagation(); close(); }}

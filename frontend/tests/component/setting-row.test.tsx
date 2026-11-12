@@ -7,12 +7,38 @@ import { i18n, setLocale } from '@/i18n';
 import { SettingRow } from '@/ui/SettingRow';
 import { SettingEditor } from '@/ui/SettingEditor';
 import { Input } from '@/ui/Input';
+import { IconButton } from '@/ui/IconButton';
 import { Switch } from '@/ui/Switch';
 import { HelpHint } from '@/ui/HelpHint';
 import { show } from './support';
 
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
 afterEach(async () => { await setLocale('en'); });
+
+it('keeps an empty description out of the keyboard path', async () => {
+  show(<ul><SettingRow name="Image" description="" value={<button>Change image</button>} /></ul>);
+  await userEvent.tab();
+  expect(screen.getByRole('button', { name: 'Change image' })).toHaveFocus();
+  expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+});
+
+it.each(['en', 'zh-CN'] as const)('reveals its own complete description on hover and keyboard focus in %s', async (locale) => {
+  await setLocale(locale);
+  const description = locale === 'en' ? 'Keep the image fixed even if its tag changes. Leave unset to follow the image reference.' : '即使镜像标签改变也固定使用该镜像。留空则跟随镜像引用。';
+  const user = userEvent.setup();
+  show(<ul><SettingRow name="Image" value="Current image" description={description} /></ul>);
+  const line = screen.getByText(description);
+  await user.hover(line);
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(description);
+  await user.unhover(line);
+  await waitFor(() => expect(screen.queryByRole('tooltip')).not.toBeInTheDocument());
+  await user.tab();
+  expect(line).toHaveFocus();
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(description);
+  await user.keyboard('{Escape}');
+  expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+  expect(line).toHaveFocus();
+});
 
 it.each(['en', 'zh-CN'] as const)('shows one description line and reserves its question for supplementary information in %s', async (locale) => {
   await setLocale(locale);
@@ -93,4 +119,22 @@ it('begins an inline edit in its value, and repeated Escape restores the summary
     expect(pencil, opening).toHaveAttribute('aria-expanded', 'false');
     expect(pencil, opening).toHaveAccessibleDescription('safe: On');
   }
+});
+
+it('focuses an inline action quietly while deliberate keyboard focus still reveals its hint', async () => {
+  const user = userEvent.setup();
+  show(<ul><SettingEditor name="Model list" placement="inline" summary="Two models" label="Edit models">
+    <button type="button" disabled>Model unavailable</button>
+    <IconButton label="Move model down" />
+    <button type="button">Next control</button>
+  </SettingEditor></ul>);
+  await user.click(screen.getByRole('button', { name: 'Edit models' }));
+  const action = screen.getByRole('button', { name: 'Move model down' });
+  expect(action).toHaveFocus();
+  await waitFor(() => expect(screen.queryByRole('tooltip', { name: 'Move model down' })).not.toBeInTheDocument());
+  await user.tab();
+  expect(screen.getByRole('button', { name: 'Next control' })).toHaveFocus();
+  await user.keyboard('{Shift>}{Tab}{/Shift}');
+  expect(action).toHaveFocus();
+  expect(await screen.findByRole('tooltip', { name: 'Move model down' })).toBeVisible();
 });

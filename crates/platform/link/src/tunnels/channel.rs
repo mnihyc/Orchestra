@@ -249,11 +249,14 @@ struct RecvSide {
 
 /// The state of one channel.
 pub(crate) struct Channel {
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
     cid: Id,
     kind: TunnelKind,
     service: String,
     opener: bool,
     ticket: Option<String>,
+    retention: Option<orch_link_contract::gateways::TunnelRetention>,
+    resume_epoch: u64,
     number: Option<u32>,
     wire: Option<Arc<dyn Wire>>,
     options: ChannelOptions,
@@ -361,11 +364,14 @@ impl Channel {
         events: mpsc::UnboundedSender<TunnelEvent>,
     ) -> Self {
         Self {
+            admission: None,
             cid,
             kind,
             service,
             opener,
             ticket: None,
+            retention: None,
+            resume_epoch: 0,
             number: None,
             wire: None,
             options,
@@ -620,6 +626,7 @@ impl Channel {
             let _ = wire.control(number, ChannelFrame::Close { code, detail });
         }
         self.phase = Phase::Closed;
+        self.admission.take();
         self.ended = Some(how);
         self.wire = None;
         let held = self.send.buffer.len();
@@ -665,7 +672,11 @@ impl Channel {
         wire: Arc<dyn Wire>,
         number: u32,
         peer_received: u64,
+        grace: Duration,
     ) -> Result<u64, Ended> {
+        if matches!(self.phase,Phase::Suspended(since) if since.elapsed()>=grace) {
+            return Err(Ended::Reset);
+        }
         let window = self.options.window_bytes;
         let from = self
             .send
@@ -1077,6 +1088,8 @@ pub enum OpenError {
 
 /// A tunnel that another machine, or the system, asks to open here.
 pub struct IncomingTunnel {
+    retention: Option<orch_link_contract::gateways::TunnelRetention>,
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
     /// What the tunnel carries.
     pub kind: TunnelKind,
     /// The service it is to end at.
@@ -1126,6 +1139,8 @@ impl IncomingTunnel {
             &self.service,
             self.claims.port.clone(),
             None,
+            self.admission.take(),
+            self.retention.take(),
         )
     }
 
@@ -1139,6 +1154,8 @@ impl IncomingTunnel {
             &self.service,
             self.claims.port.clone(),
             Some(inside),
+            self.admission.take(),
+            self.retention.take(),
         )
     }
 
@@ -1172,6 +1189,9 @@ pub struct IncomingTunnels {
 }
 
 impl IncomingTunnels {
+    pub(crate) fn from_receiver(rx: mpsc::UnboundedReceiver<IncomingTunnel>) -> Self {
+        Self { rx }
+    }
     /// The next tunnel that is asked for.
     pub async fn next(&mut self) -> Option<IncomingTunnel> {
         self.rx.recv().await
@@ -1202,6 +1222,9 @@ struct PendingOpen {
 }
 
 struct HubState {
+    gateway: Option<String>,
+    retained_supported: bool,
+    admissions_paused: bool,
     port_available: bool,
     udp_budgets: HashMap<Id, Weak<UdpBudget>>,
     session: Option<(SessionSender, Arc<dyn Wire>)>,
@@ -1214,11 +1237,23 @@ struct HubState {
 }
 
 pub(crate) struct HubShared {
+    admission: Option<Arc<tokio::sync::Semaphore>>,
     port_control: tokio::sync::watch::Sender<bool>,
     options: TunnelOptions,
     gauge: Option<Arc<Gauge>>,
     state: Mutex<HubState>,
     weak: Weak<HubShared>,
+}
+
+/// A bounded metadata snapshot for a channel whose native socket is still retained.
+#[derive(Clone)]
+pub(crate) struct RetainedChannel {
+    pub cid: Id,
+    pub retention: orch_link_contract::gateways::TunnelRetention,
+    pub opener: bool,
+    pub suspended: Option<Instant>,
+    pub grace: Duration,
+    pub port: bool,
 }
 
 /// A machine's tunnels.
@@ -1264,12 +1299,33 @@ impl TunnelHub {
     /// A hub with other options, and a gauge of the bytes its tunnels hold.
     #[must_use]
     pub fn with_options(options: TunnelOptions, gauge: Option<Arc<Gauge>>) -> Self {
+        Self::with_admission(options, gauge, None)
+    }
+
+    /// All physical-machine carriers share the same existing channel-count allowance.
+    pub(crate) fn with_shared_budget(
+        options: TunnelOptions,
+        gauge: Option<Arc<Gauge>>,
+        admission: Arc<tokio::sync::Semaphore>,
+    ) -> Self {
+        Self::with_admission(options, gauge, Some(admission))
+    }
+
+    fn with_admission(
+        options: TunnelOptions,
+        gauge: Option<Arc<Gauge>>,
+        admission: Option<Arc<tokio::sync::Semaphore>>,
+    ) -> Self {
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
         let shared = Arc::new_cyclic(|weak| HubShared {
+            admission,
             port_control: tokio::sync::watch::channel(false).0,
             options,
             gauge,
             state: Mutex::new(HubState {
+                gateway: None,
+                retained_supported: false,
+                admissions_paused: false,
                 port_available: false,
                 udp_budgets: HashMap::new(),
                 session: None,
@@ -1297,6 +1353,252 @@ impl TunnelHub {
         Self { shared }
     }
 
+    /// Suspended and pending channels still own their bytes and protect an auxiliary.
+    pub(crate) fn has_live_channels(&self) -> bool {
+        let state = lock(&self.shared.state);
+        !state.pending.is_empty()
+            || state
+                .tunnels
+                .values()
+                .any(|channel| lock(channel).phase != Phase::Closed)
+    }
+
+    /// Stop new admissions atomically only when no channel would be interrupted by a primary move.
+    pub(crate) fn pause_if_idle(&self) -> bool {
+        let mut state = lock(&self.shared.state);
+        if !state.pending.is_empty()
+            || state
+                .channels
+                .values()
+                .chain(state.tunnels.values())
+                .any(|channel| lock(channel).phase != Phase::Closed)
+        {
+            return false;
+        }
+        state.admissions_paused = true;
+        true
+    }
+
+    pub(crate) fn admissions_paused(&self) -> bool {
+        lock(&self.shared.state).admissions_paused
+    }
+
+    pub(crate) fn unpause_admissions(&self) {
+        lock(&self.shared.state).admissions_paused = false;
+    }
+
+    /// Metadata stays with live channel objects, not in an unbounded history or a second routing table.
+    pub(crate) fn retained_channels(&self) -> Vec<RetainedChannel> {
+        let state = lock(&self.shared.state);
+        state
+            .tunnels
+            .values()
+            .filter_map(|channel| {
+                Self::retained_snapshot(&lock(channel), self.shared.options.grace)
+            })
+            .collect()
+    }
+
+    pub(crate) fn retained_channel(&self, cid: Id) -> Option<RetainedChannel> {
+        let state = lock(&self.shared.state);
+        let channel = state.tunnels.get(&cid)?;
+        let inner = lock(channel);
+        Self::retained_snapshot(&inner, self.shared.options.grace)
+    }
+
+    fn retained_snapshot(channel: &Channel, grace: Duration) -> Option<RetainedChannel> {
+        if channel.phase == Phase::Closed || !channel.options.resumable {
+            return None;
+        }
+        let retained = channel.retention.as_ref()?;
+        retained.route.as_ref()?;
+        Some(RetainedChannel {
+            cid: channel.cid,
+            retention: retained.clone(),
+            opener: channel.opener,
+            suspended: if let Phase::Suspended(at) = channel.phase {
+                Some(at)
+            } else {
+                None
+            },
+            grace,
+            port: channel.port.is_some(),
+        })
+    }
+
+    /// Move the same retained channel and shared admission permit; replay/receive buffers are never copied.
+    pub(crate) fn transfer_retained(
+        &self,
+        target: &Self,
+        cid: Id,
+        gateway: &str,
+        proof: Option<&Resume>,
+    ) -> bool {
+        if Arc::ptr_eq(&self.shared, &target.shared) {
+            return lock(&self.shared.state).tunnels.contains_key(&cid);
+        }
+        fn transfer(
+            old: &mut HubState,
+            new: &mut HubState,
+            cid: Id,
+            gateway: &str,
+            proof: Option<&Resume>,
+            grace: Duration,
+        ) -> bool {
+            let Some(channel) = old.tunnels.get(&cid).cloned() else {
+                return false;
+            };
+            let mut inner = lock(&channel);
+            let Some(retained) = inner.retention.as_ref() else {
+                return false;
+            };
+            let Some(plan) = retained.route.as_ref() else {
+                return false;
+            };
+            if !inner.options.resumable
+                || !plan.gateways().any(|candidate| candidate.id == gateway)
+                || inner.phase == Phase::Closed
+                || new.admissions_paused
+                || new.session.is_none()
+                || (inner.port.is_some() && !new.port_available)
+            {
+                return false;
+            }
+            if let Some(proof) = proof {
+                if inner.opener
+                    || retained.ticket != proof.ticket
+                    || retained.host_peer != proof.host_peer
+                    || proof.epoch < inner.resume_epoch
+                {
+                    return false;
+                }
+                if new
+                    .channels
+                    .get(&proof.channel)
+                    .is_some_and(|other| !Arc::ptr_eq(other, &channel))
+                {
+                    return false;
+                }
+            } else if !matches!(inner.phase, Phase::Suspended(_)) {
+                return false;
+            }
+            if let Phase::Suspended(since) = inner.phase
+                && since.elapsed() >= grace
+            {
+                return false;
+            }
+            let limit = new
+                .session
+                .as_ref()
+                .map_or(0, |(session, _)| session.limits().max_channels as usize);
+            if new.channels.len() >= limit || new.tunnels.contains_key(&cid) {
+                return false;
+            }
+            if let Some(proof) = proof {
+                inner.resume_epoch = proof.epoch;
+            }
+            inner.suspend(Instant::now());
+            if !matches!(inner.phase, Phase::Suspended(_)) {
+                return false;
+            }
+            old.channels.retain(|_, held| !Arc::ptr_eq(held, &channel));
+            old.tunnels.remove(&cid);
+            drop(inner);
+            new.tunnels.insert(cid, channel);
+            true
+        }
+        // Both directions use one total lock order, including a peer resume racing local recovery.
+        if (Arc::as_ptr(&self.shared) as usize) < (Arc::as_ptr(&target.shared) as usize) {
+            transfer(
+                &mut lock(&self.shared.state),
+                &mut lock(&target.shared.state),
+                cid,
+                gateway,
+                proof,
+                self.shared.options.grace,
+            )
+        } else {
+            let mut new = lock(&target.shared.state);
+            let mut old = lock(&self.shared.state);
+            transfer(
+                &mut old,
+                &mut new,
+                cid,
+                gateway,
+                proof,
+                self.shared.options.grace,
+            )
+        }
+    }
+
+    pub(crate) fn resume_retained(&self, cid: Id) {
+        let request = {
+            let mut state = lock(&self.shared.state);
+            let Some((sender, _)) = state.session.clone() else {
+                return;
+            };
+            let Some(channel) = state.tunnels.get(&cid).cloned() else {
+                return;
+            };
+            let mut inner = lock(&channel);
+            if !inner.opener || !matches!(inner.phase, Phase::Suspended(_)) {
+                return;
+            }
+            let Some(ticket) = inner.ticket.clone() else {
+                return;
+            };
+            let mut number = state.next_number;
+            while number == 0 || state.channels.contains_key(&number) {
+                number = Side::Machine.next(number);
+            }
+            state.next_number = Side::Machine.next(number);
+            state.channels.insert(number, channel.clone());
+            inner.resume_epoch = inner.resume_epoch.saturating_add(1);
+            (
+                sender,
+                Resume {
+                    epoch: inner.resume_epoch,
+                    recovering: false,
+                    host_peer: inner
+                        .retention
+                        .as_ref()
+                        .and_then(|retained| retained.host_peer.clone()),
+                    channel: number,
+                    ticket,
+                    jti_channel: cid,
+                    recv: inner.recv.window.received(),
+                },
+            )
+        };
+        let _ = request.0.send(Frame::Resume(request.1));
+    }
+
+    /// Observe the actual resume acknowledgement without consuming application data or replacing its waker.
+    pub(crate) async fn wait_resumed(&self, cid: Id) -> bool {
+        let mut tick = tokio::time::interval(TICK);
+        loop {
+            let phase = {
+                let state = lock(&self.shared.state);
+                state.tunnels.get(&cid).map(|channel| lock(channel).phase)
+            };
+            match phase {
+                Some(Phase::Open) => return true,
+                Some(Phase::Suspended(_)) => {}
+                _ => return false,
+            }
+            tick.tick().await;
+        }
+    }
+
+    /// Explicit transport retirement resets its channels; they never move between gateways.
+    pub(crate) fn reset_all(&self) {
+        let mut state = lock(&self.shared.state);
+        for channel in state.channels.values().chain(state.tunnels.values()) {
+            lock(channel).close_with(Ended::Reset, true);
+        }
+        state.pending.clear();
+    }
+
     /// The tunnels others open to this machine. Taken once.
     #[must_use]
     pub fn incoming(&self) -> IncomingTunnels {
@@ -1310,7 +1612,21 @@ impl TunnelHub {
     /// A session stands: tunnels that waited are asked to be taken up
     /// again.
     pub fn session_up(&self, sender: SessionSender) {
-        self.shared.session_up(sender);
+        self.shared.session_up(sender, None, false);
+    }
+
+    pub(crate) fn session_up_at(
+        &self,
+        sender: SessionSender,
+        gateway: &str,
+        retained_supported: bool,
+    ) {
+        self.shared
+            .session_up(sender, Some(gateway), retained_supported);
+    }
+
+    pub(crate) fn retained_supported(&self) -> bool {
+        lock(&self.shared.state).retained_supported
     }
 
     /// The session is gone.
@@ -1353,7 +1669,7 @@ impl TunnelHub {
 
     /// Opens a tunnel with a ticket the system signed.
     pub async fn open(&self, ticket: &str) -> Result<Tunnel, OpenError> {
-        self.open_with_host_peer(ticket, None).await
+        self.open_with_host_peer(ticket, None, None).await
     }
 
     /// Opens one raw host socket under the node's signed, transport-specific publication template.
@@ -1362,7 +1678,7 @@ impl TunnelHub {
         ticket: &str,
         peer: orch_link_contract::ports::HostPortPeer,
     ) -> Result<Tunnel, OpenError> {
-        self.open_with_host_peer(ticket, Some(peer)).await
+        self.open_with_host_peer(ticket, Some(peer), None).await
     }
 
     /// Current negotiated environment bounds, or the shipped bounds before a session stands.
@@ -1383,10 +1699,21 @@ impl TunnelHub {
         })
     }
 
+    pub(crate) async fn open_routed(
+        &self,
+        ticket: &str,
+        route: &orch_link_contract::gateways::TunnelPlan,
+        host_peer: Option<orch_link_contract::ports::HostPortPeer>,
+    ) -> Result<Tunnel, OpenError> {
+        self.open_with_host_peer(ticket, host_peer, Some(route))
+            .await
+    }
+
     async fn open_with_host_peer(
         &self,
         ticket: &str,
         host_peer: Option<orch_link_contract::ports::HostPortPeer>,
+        route: Option<&orch_link_contract::gateways::TunnelPlan>,
     ) -> Result<Tunnel, OpenError> {
         // The signature is for the gateway to check; the claims say what the
         // tunnel is.
@@ -1397,11 +1724,20 @@ impl TunnelHub {
             })?
             .claims()
             .clone();
+        if route.is_some_and(|route| {
+            claims.src != TicketSource::Machine(route.src) || claims.dst != route.dst
+        }) {
+            return Err(OpenError::Refused {
+                code: OpenErrorCode::BadTicket,
+                detail: "the placement is not the signed ticket's pair".into(),
+            });
+        }
         let (answer_tx, answer_rx) = oneshot::channel();
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (number, channel, wire) = {
             let mut state = lock(&self.shared.state);
-            if claims.kind == TunnelKind::Port && !state.port_available {
+            if state.admissions_paused || (claims.kind == TunnelKind::Port && !state.port_available)
+            {
                 return Err(OpenError::NoSession);
             }
             let Some((session, wire)) = state.session.clone() else {
@@ -1434,7 +1770,20 @@ impl TunnelHub {
                 self.shared.gauge.clone(),
                 events_tx,
             );
+            channel.admission = match &self.shared.admission {
+                Some(budget) => Some(
+                    Arc::clone(budget)
+                        .try_acquire_owned()
+                        .map_err(|_| OpenError::TooMany)?,
+                ),
+                None => None,
+            };
             channel.ticket = Some(ticket.to_owned());
+            channel.retention = Some(orch_link_contract::gateways::TunnelRetention {
+                ticket: ticket.to_owned(),
+                host_peer: host_peer.clone(),
+                route: route.map(orch_link_contract::gateways::TunnelPlan::retained),
+            });
             let budget = HubShared::udp_budget(&mut state, claims.port.as_ref());
             channel.configure_port(claims.port.clone(), None, budget);
             channel.number = Some(number);
@@ -1458,6 +1807,7 @@ impl TunnelHub {
         };
         if wire
             .send(Frame::Open(Open::Request(OpenRequest {
+                route: route.map(|route| Box::new(route.retained())),
                 channel: number,
                 ticket: ticket.to_owned(),
                 host_peer,
@@ -1567,11 +1917,14 @@ impl HubShared {
         state.pending.remove(&number);
     }
 
-    fn session_up(&self, sender: SessionSender) {
+    fn session_up(&self, sender: SessionSender, gateway: Option<&str>, retained_supported: bool) {
         let wire: Arc<dyn Wire> = Arc::new(SessionWire(sender.clone()));
         let mut resumes = Vec::new();
         {
             let mut state = lock(&self.state);
+            state.gateway = gateway.map(str::to_owned);
+            state.retained_supported = retained_supported;
+            state.admissions_paused = false;
             state.session = Some((sender.clone(), Arc::clone(&wire)));
             state.channels.clear();
             state.next_number = Side::Machine.first();
@@ -1581,7 +1934,19 @@ impl HubShared {
                     let inner = lock(&channel);
                     (inner.opener, matches!(inner.phase, Phase::Suspended(_)))
                 };
-                if opener && suspended {
+                let in_plan = {
+                    let inner = lock(&channel);
+                    inner
+                        .retention
+                        .as_ref()
+                        .and_then(|retained| retained.route.as_ref())
+                        .is_none_or(|plan| {
+                            gateway.is_some_and(|gateway| {
+                                plan.gateways().any(|candidate| candidate.id == gateway)
+                            })
+                        })
+                };
+                if opener && suspended && in_plan {
                     let number = state.next_number;
                     state.next_number = Side::Machine.next(number);
                     state.channels.insert(number, Arc::clone(&channel));
@@ -1590,9 +1955,16 @@ impl HubShared {
             }
         }
         for (number, channel) in resumes {
-            let inner = lock(&channel);
+            let mut inner = lock(&channel);
             if let Some(ticket) = inner.ticket.clone() {
+                inner.resume_epoch = inner.resume_epoch.saturating_add(1);
                 let _ = sender.send(Frame::Resume(Resume {
+                    epoch: inner.resume_epoch,
+                    recovering: false,
+                    host_peer: inner
+                        .retention
+                        .as_ref()
+                        .and_then(|retained| retained.host_peer.clone()),
                     channel: number,
                     ticket,
                     jti_channel: inner.cid,
@@ -1699,7 +2071,7 @@ impl HubShared {
                 });
             }
             Frame::Resume(resume) => self.on_resume(&resume),
-            Frame::ResumeOk(ResumeOk { channel, recv }) => self.on_resume_ok(channel, recv),
+            Frame::ResumeOk(ResumeOk { channel, recv, .. }) => self.on_resume_ok(channel, recv),
             _ => {}
         }
     }
@@ -1732,7 +2104,23 @@ impl HubShared {
             );
             return;
         };
+        let admission = match &self.admission {
+            Some(budget) => match Arc::clone(budget).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    self.refuse(
+                        offer.channel,
+                        OpenErrorCode::TooManyChannels,
+                        "the machine's shared channel allowance is full",
+                    );
+                    return;
+                }
+            },
+            None => None,
+        };
         let tunnel = IncomingTunnel {
+            retention: offer.retention,
+            admission,
             kind: offer.kind,
             service: offer.service,
             from: offer.from,
@@ -1752,6 +2140,10 @@ impl HubShared {
         }
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one native acceptance keeps its original admission and exact retained ticket together"
+    )]
     fn accept(
         &self,
         number: u32,
@@ -1759,17 +2151,25 @@ impl HubShared {
         service: &str,
         port: Option<PortTicketClaims>,
         inside: Option<PortConnectionInside>,
+        admission: Option<tokio::sync::OwnedSemaphorePermit>,
+        retention: Option<orch_link_contract::gateways::TunnelRetention>,
     ) -> Result<Tunnel, OpenError> {
-        if kind == TunnelKind::Port
-            && (inside.is_none() || port.is_none() || !lock(&self.state).port_available)
+        let mut state = lock(&self.state);
+        if state.admissions_paused {
+            drop(state);
+            self.refuse(
+                number,
+                OpenErrorCode::PeerOffline,
+                "the primary attachment is moving",
+            );
+            return Err(OpenError::NoSession);
+        }
+        if kind == TunnelKind::Port && (inside.is_none() || port.is_none() || !state.port_available)
         {
             return Err(OpenError::NoSession);
         }
         let (events_tx, events_rx) = mpsc::unbounded_channel();
-        let (sender, wire) = lock(&self.state)
-            .session
-            .clone()
-            .ok_or(OpenError::NoSession)?;
+        let (sender, wire) = state.session.clone().ok_or(OpenError::NoSession)?;
         let limits = sender.limits();
         let options = ChannelOptions {
             window_bytes: u64::from(limits.tunnel_window_bytes),
@@ -1790,20 +2190,17 @@ impl HubShared {
             self.gauge.clone(),
             events_tx,
         );
+        channel.admission = admission;
+        channel.retention = retention;
         channel.number = Some(number);
         channel.wire = Some(Arc::clone(&wire));
         channel.phase = Phase::Open;
-        let budget = {
-            let mut state = lock(&self.state);
-            Self::udp_budget(&mut state, port.as_ref())
-        };
+        let budget = Self::udp_budget(&mut state, port.as_ref());
         channel.configure_port(port, inside.clone(), budget);
         let channel = Arc::new(Mutex::new(channel));
-        {
-            let mut state = lock(&self.state);
-            state.channels.insert(number, Arc::clone(&channel));
-            state.tunnels.insert(cid, Arc::clone(&channel));
-        }
+        state.channels.insert(number, Arc::clone(&channel));
+        state.tunnels.insert(cid, Arc::clone(&channel));
+        drop(state);
         sender
             .send(Frame::OpenOk(OpenOk {
                 channel: number,
@@ -1824,57 +2221,89 @@ impl HubShared {
         }
     }
 
-    /// The other end asks to carry a tunnel on over this session.
+    /// The other end asks to carry its existing socket on over this session.
     fn on_resume(&self, resume: &Resume) {
-        let (sender, wire, channel) = {
-            let state = lock(&self.state);
-            let Some((sender, wire)) = state.session.clone() else {
-                return;
-            };
-            (
-                sender,
-                wire,
-                state.tunnels.get(&resume.jti_channel).cloned(),
-            )
+        // Ownership, epoch, wire and maps commit together against a concurrent carrier transfer.
+        let mut state = lock(&self.state);
+        let Some((sender, wire)) = state.session.clone() else {
+            return;
         };
-        let Some(channel) = channel else {
+        let Some(channel) = state.tunnels.get(&resume.jti_channel).cloned() else {
+            drop(state);
             let _ = sender.send(Frame::Close(Close {
                 channel: resume.channel,
                 code: CloseCode::Reset,
-                detail: "no such tunnel".to_owned(),
+                detail: "no such tunnel".into(),
             }));
             return;
         };
-        let outcome = {
-            let mut inner = lock(&channel);
-            if inner.phase == Phase::Closed {
-                Err(Ended::Reset)
-            } else {
-                // The old number, if the session did not change, is replaced.
-                inner.resume(Arc::clone(&wire), resume.channel, resume.recv)
-            }
+        if state
+            .channels
+            .get(&resume.channel)
+            .is_some_and(|other| !Arc::ptr_eq(other, &channel))
+        {
+            drop(state);
+            let _ = sender.send(Frame::Close(Close {
+                channel: resume.channel,
+                code: CloseCode::Reset,
+                detail: "the retained channel number is in use".into(),
+            }));
+            return;
+        }
+        let mut inner = lock(&channel);
+        let permitted = inner
+            .retention
+            .as_ref()
+            .map_or(!resume.recovering, |retained| {
+                retained.ticket == resume.ticket
+                    && retained.host_peer == resume.host_peer
+                    && resume.epoch >= inner.resume_epoch
+                    && retained.route.as_ref().is_none_or(|plan| {
+                        state.gateway.as_deref().is_some_and(|gateway| {
+                            plan.gateways().any(|candidate| candidate.id == gateway)
+                        })
+                    })
+            });
+        if !permitted {
+            drop(inner);
+            drop(state);
+            let _ = sender.send(Frame::Close(Close {
+                channel: resume.channel,
+                code: CloseCode::Reset,
+                detail: "the ticket is not the retained channel's".into(),
+            }));
+            return;
+        }
+        let outcome = if inner.phase == Phase::Closed {
+            Err(Ended::Reset)
+        } else {
+            inner.resume_epoch = resume.epoch;
+            inner.resume(wire, resume.channel, resume.recv, self.options.grace)
         };
         match outcome {
             Ok(have) => {
-                {
-                    let mut state = lock(&self.state);
-                    state
-                        .channels
-                        .retain(|_, held| !Arc::ptr_eq(held, &channel));
-                    state.channels.insert(resume.channel, Arc::clone(&channel));
-                }
+                let inside = inner.inside.clone();
+                state
+                    .channels
+                    .retain(|_, held| !Arc::ptr_eq(held, &channel));
+                state.channels.insert(resume.channel, channel.clone());
+                drop(inner);
+                drop(state);
                 let _ = sender.send(Frame::ResumeOk(ResumeOk {
+                    inside,
                     channel: resume.channel,
                     recv: have,
                 }));
                 lock(&channel).start_pumping_after_resume();
             }
             Err(_) => {
-                lock(&channel).close_with(Ended::Reset, false);
+                inner.close_with(Ended::Reset, false);
+                drop(inner);
+                drop(state);
                 let _ = sender.send(Frame::Close(Close {
                     channel: resume.channel,
                     code: CloseCode::Reset,
-                    detail: "the bytes needed are no longer held".to_owned(),
+                    detail: "the bytes needed are no longer held".into(),
                 }));
             }
         }
@@ -1882,21 +2311,21 @@ impl HubShared {
 
     /// The destination answered a request to carry a tunnel on.
     fn on_resume_ok(&self, number: u32, peer_received: u64) {
-        let (wire, channel) = {
-            let state = lock(&self.state);
-            let Some((_, wire)) = state.session.clone() else {
-                return;
-            };
-            (wire, state.channels.get(&number).cloned())
+        let state = lock(&self.state);
+        let Some((_, wire)) = state.session.clone() else {
+            return;
         };
-        let Some(channel) = channel else {
+        let Some(channel) = state.channels.get(&number).cloned() else {
             return;
         };
         let mut inner = lock(&channel);
         if !matches!(inner.phase, Phase::Suspended(_)) {
             return;
         }
-        match inner.resume(wire, number, peer_received) {
+        let outcome = inner.resume(wire, number, peer_received, self.options.grace);
+        // Once committed under its owner lock, a later local transfer sees this accepted wire.
+        drop(state);
+        match outcome {
             Ok(_) => inner.start_pumping_after_resume(),
             Err(_) => inner.close_with(Ended::Reset, true),
         }

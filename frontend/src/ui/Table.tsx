@@ -15,6 +15,9 @@ import { cx } from '@/ui/cx';
 import type { MenuEntry } from '@/ui/Menu';
 import { ScrollRegion } from '@/ui/ScrollRegion';
 
+/** A shared first-line band matches small controls without changing chips outside the table. */
+const cellFrame = 'flex min-h-(--control-sm) items-center leading-(--control-sm) [&_.resource-chip]:min-h-(--control-sm) [&_[data-status-chip]]:min-h-(--control-sm)';
+
 /** How wide the room round the table is, in pixels, when each step of `from` begins to show a column. */
 const ROOM = { sm: 480, md: 640, lg: 800, xl: 1000 } as const;
 
@@ -41,11 +44,15 @@ export interface Column<Row> {
   className?: string;
 }
 
+export interface TableSection<Row> { id: string; heading: ReactNode; rows: readonly Row[] }
+
 export interface TableProps<Row> {
   /** What the table is of, for a screen reader. */
   label: string;
   columns: readonly Column<Row>[];
   rows: readonly Row[];
+  /** Group headers share this same table and virtual scrolling surface. */
+  sections?: readonly TableSection<Row>[];
   rowKey: (row: Row) => string;
   /** Named resource lists bound identities and disclose full values on hover/focus; wide data tables retain intrinsic sizing. */
   boundedIdentity?: boolean;
@@ -70,6 +77,37 @@ function RowEntries<Row>({ row, entries }: { row: Row; entries: (row: Row) => re
   return <ContextEntries entries={entries(row)} />;
 }
 
+/** Row measurement is attached by React when the native row commits. */
+function TableRowFrame<Row>({ row, rowClassName, rowMenu, index, measure, children }: Pick<TableProps<Row>, 'rowClassName' | 'rowMenu'> & {
+  row: Row;
+  index?: number | undefined;
+  measure?: ((element: HTMLTableRowElement | null) => void) | undefined;
+  children: ReactNode;
+}) {
+  const content = <tr ref={measure} data-index={index} aria-rowindex={index === undefined ? undefined : index + 2}
+    onKeyDown={rowMenu?.keys === undefined ? undefined : (event) => {
+      const target = event.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
+      const act = rowMenu.keys?.(row)[event.key];
+      if (act === undefined || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      event.preventDefault(); act();
+    }}
+    className={cx('group h-(--table-row-height) border-b border-border last:border-b-0 hover:bg-bg-subtle focus-within:bg-bg-subtle', rowClassName?.(row))}>
+    {children}
+  </tr>;
+  return rowMenu === undefined ? content : <ContextMenu label={rowMenu.label(row)} content={rowMenu.content === undefined ? <RowEntries row={row} entries={rowMenu.entries} /> : rowMenu.content(row)}>{content}</ContextMenu>;
+}
+
+function TableHeadingFrame({ heading, index, measure, columns }: {
+  heading: ReactNode;
+  index?: number | undefined;
+  measure?: ((element: HTMLTableRowElement | null) => void) | undefined;
+  columns: number;
+}) {
+  return <tr ref={measure} data-index={index} aria-rowindex={index === undefined ? undefined : index + 2}
+    className="border-b border-border bg-bg-subtle"><th scope="rowgroup" colSpan={columns} className="px-2 text-left font-normal">{heading}</th></tr>;
+}
+
 /** The width of the room an element lies in, kept as it changes. */
 function useRoom(): [(element: HTMLDivElement | null) => void, number, HTMLDivElement | null] {
   const [element, setElement] = useState<HTMLDivElement | null>(null);
@@ -87,7 +125,7 @@ function useRoom(): [(element: HTMLDivElement | null) => void, number, HTMLDivEl
   return [attach, width, element];
 }
 
-export function Table<Row>({ label, columns, rows, rowKey, rowClassName, rowMenu, className, boundedIdentity = false, virtual = false }: TableProps<Row>) {
+export function Table<Row>({ label, columns, rows, sections, rowKey, rowClassName, rowMenu, className, boundedIdentity = false, virtual = false }: TableProps<Row>) {
   const [ref, room, scroller] = useRoom();
   const shown = columns.filter((column) => column.from === undefined || room >= ROOM[column.from]);
   const shownIds = new Set(shown.map((column) => column.id));
@@ -100,52 +138,30 @@ export function Table<Row>({ label, columns, rows, rowKey, rowClassName, rowMenu
     if (column !== growing) return 'w-px whitespace-nowrap';
     return boundedIdentity ? 'w-auto min-w-[12ch] whitespace-normal' : 'w-auto whitespace-normal';
   };
-  const line = (row: Row, index?: number, measure?: (element: HTMLTableRowElement | null) => void) => {
-    const content = (
-      <tr
-        ref={measure}
-        data-index={index}
-        aria-rowindex={index === undefined ? undefined : index + 2}
-        onKeyDown={
-          rowMenu?.keys === undefined
-            ? undefined
-            : (event) => {
-                const target = event.target;
-                if (target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))) return;
-                const act = rowMenu.keys?.(row)[event.key];
-                if (act === undefined || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-                event.preventDefault();
-                act();
-              }
-        }
-        className={cx(
-          'group h-(--table-row-height) border-b border-border last:border-b-0 hover:bg-bg-subtle focus-within:bg-bg-subtle',
-          rowClassName?.(row),
-        )}
-      >
-        {shown.map((column) => (
-          <td
-            key={column.id}
-            data-table-column={column.id}
-            data-table-grow={column === growing ? true : undefined}
-            className={cx('px-3 py-1 align-middle', sizing(column), column.align === 'end' && 'text-right', column.className)}
-          >
-            {boundedIdentity && column === growing ? <div className="w-0 min-w-full">{column.cell(row, shownIds)}</div> : column.cell(row, shownIds)}
-          </td>
-        ))}
-      </tr>
-    );
-    return rowMenu === undefined ? content : (
-      <ContextMenu label={rowMenu.label(row)} content={rowMenu.content === undefined ? <RowEntries row={row} entries={rowMenu.entries} /> : rowMenu.content(row)}>
-        {content}
-      </ContextMenu>
-    );
-  };
+  const cells = (row: Row) => shown.map((column) => (
+    <td
+      key={column.id}
+      data-table-column={column.id}
+      data-table-grow={column === growing ? true : undefined}
+      className={cx('px-3 py-1 align-top', sizing(column), column.align === 'end' && 'text-right', column.className)}
+    >
+      <div className={cx(cellFrame, column.align === 'end' && 'justify-end')}>
+        <div className={cx('first-line:leading-(--control-sm)', boundedIdentity && column === growing ? 'w-0 min-w-full' : 'min-w-0')}>{column.cell(row, shownIds)}</div>
+      </div>
+    </td>
+  ));
+  type Item = { kind: 'row'; id: string; row: Row } | { kind: 'heading'; id: string; heading: ReactNode };
+  const items: Item[] = sections === undefined ? rows.map((row) => ({kind:'row',id:rowKey(row),row}))
+    : sections.flatMap((section): Item[] => [{kind:'heading',id:`heading:${section.id}`,heading:section.heading},
+        ...section.rows.map((row): Item => ({kind:'row',id:`${section.id}:${rowKey(row)}`,row}))]);
+  const draw = (item: Item, index?: number, measure?: (element: HTMLTableRowElement | null) => void) => item.kind === 'row'
+    ? <TableRowFrame row={item.row} rowClassName={rowClassName} rowMenu={rowMenu} index={index} measure={measure}>{cells(item.row)}</TableRowFrame>
+    : <TableHeadingFrame heading={item.heading} index={index} measure={measure} columns={shown.length} />;
   // One page of 50 remains a native table; additional pages need a separate scroll window.
-  const windowed = virtual && rows.length > 50;
+  const windowed = virtual && items.length > 50;
   return (
     <ScrollRegion ref={ref} kind="table" label={label} className={cx('rounded-lg border border-border bg-surface', virtual && 'max-h-96 overflow-y-auto', className)}>
-      <table aria-label={label} aria-rowcount={windowed ? rows.length + 1 : undefined} className="w-full table-auto border-collapse text-left text-base">
+      <table aria-label={label} aria-rowcount={windowed ? items.length + 1 : undefined} className="w-full table-auto border-collapse text-left text-base">
         <thead className="sticky top-0 z-(--layer-sticky)">
           <tr aria-rowindex={windowed ? 1 : undefined} className="border-b border-border bg-bg-subtle text-sm font-medium text-text-muted">
             {shown.map((column) => (
@@ -156,13 +172,13 @@ export function Table<Row>({ label, columns, rows, rowKey, rowClassName, rowMenu
                 data-table-grow={column === growing ? true : undefined}
                 className={cx('h-(--table-row-height) bg-bg-subtle px-3 font-medium', sizing(column), column.align === 'end' && 'text-right', column.className)}
               >
-                <span className={cx(column.hideHeader === true && 'sr-only')}>{column.header}</span>
+                <div className={cx(cellFrame, column.align === 'end' && 'justify-end')}><div className={cx(column.hideHeader === true && 'sr-only')}>{column.header}</div></div>
               </th>
             ))}
           </tr>
         </thead>
-        {windowed ? <VirtualBody rows={rows} rowKey={rowKey} scroller={scroller} columns={shown.length} line={line} />
-          : <tbody>{rows.map((row) => <Fragment key={rowKey(row)}>{line(row)}</Fragment>)}</tbody>}
+        {windowed ? <VirtualBody rows={items} rowKey={(item) => item.id} scroller={scroller} columns={shown.length} line={draw} />
+          : <tbody>{items.map((item) => <Fragment key={item.id}>{draw(item)}</Fragment>)}</tbody>}
       </table>
     </ScrollRegion>
   );

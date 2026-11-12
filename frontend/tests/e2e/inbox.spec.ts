@@ -22,14 +22,17 @@ test('an Inbox request names its thread and person, opens the exact old item, an
     object: { id: MAIN, kind: 'thread', name: 'Main thread', owner: null }, permissions: ['thread.interact'], reason: 'Please review the release.' });
   // Put the target beyond the normal approvals first page; the Inbox must not choose a different card.
   for (let index = 0; index < 21; index += 1) await askAccess({ title: `Another request ${index}` });
-  await notify({ kind: 'access.requested', title: 'Old stored subject', thread_id: MAIN, node: MAIN, approval_id: request.id, url: '/approvals' });
+  const notified = await notify({ kind: 'access.requested', title: 'Old stored subject', thread_id: MAIN, node: MAIN, approval_id: request.id, url: '/approvals' });
   await signIn(page);
   await openInbox(page);
-  const notice = page.locator('li[data-kind="access.requested"]');
+  const notice = page.locator(`[data-notification-id="${notified.id}"]`);
   await expect(notice.locator('[data-inbox-title]')).toContainText('Main thread');
-  await expect(notice.locator('[data-inbox-event]')).toHaveText('Grace Hopper requested access');
+  await expect(notice.locator('[data-inbox-event]')).toMatchAriaSnapshot(`
+    - button "Grace Hopper"
+    - text: requested access
+  `);
   const lists: string[] = [];
-  page.on('request', (request) => { const url = new URL(request.url()); if (request.method() === 'GET' && url.pathname.endsWith('/api/approvals')) lists.push(url.pathname); });
+  page.on('request', (request) => { const url = new URL(request.url()); if (request.method() === 'GET' && url.pathname === '/api/v1/approvals') lists.push(url.pathname); });
   await notice.getByRole('link').click();
   await expect(page).toHaveURL(new RegExp(`/approvals\\?approval=${request.id}$`));
   const exact = page.locator(`[data-focused-approval="${request.id}"]`);
@@ -38,8 +41,9 @@ test('an Inbox request names its thread and person, opens the exact old item, an
   const before = (await inboxHeld()).summary.approvals_pending;
   const summaries: string[] = [];
   page.on('request', (request) => { if (request.method() === 'GET' && new URL(request.url()).pathname.endsWith('/notifications/summary')) summaries.push(request.url()); });
-  await exact.getByRole('button', { name: 'Approve as asked' }).click();
-  await expect(exact).toContainText('Approved by Ada Lovelace');
+  await exact.getByRole('button', { name: 'Other…', exact: true }).click();
+  await exact.getByRole('button', { name: /^Approve\b/ }).click();
+  await expect(exact.getByRole('status').filter({ hasText: 'Given' }).getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
   await expect.poll(async () => (await inboxHeld()).summary.approvals_pending).toBe(before - 1);
   await expect(rail(page).getByRole('link', { name: new RegExp(`Approvals.*${before - 1}`) })).toBeVisible();
   expect(summaries).toEqual([]);
@@ -49,11 +53,14 @@ test('an open Inbox replaces a request with its actual decider on the same row, 
   const request = await askAccess({ requester: 'grace', title: 'Review the release', thread_id: MAIN,
     node: { id: MAIN, kind: 'thread', name: 'Main thread', redacted: false },
     object: { id: MAIN, kind: 'thread', name: 'Main thread', owner: null }, permissions: ['thread.interact'], reason: 'Please review the release.' });
-  await notify({ kind: 'access.requested', title: 'Old stored subject', thread_id: MAIN, node: MAIN, approval_id: request.id, url: '/approvals' });
+  const notified = await notify({ kind: 'access.requested', title: 'Old stored subject', thread_id: MAIN, node: MAIN, approval_id: request.id, url: '/approvals' });
   await signIn(page); await openInbox(page);
-  const notice = page.locator('li[data-kind="access.requested"]');
+  const notice = page.locator(`[data-notification-id="${notified.id}"]`);
   await expect(notice.locator('[data-inbox-title]')).toContainText('Main thread');
-  await expect(notice.locator('[data-inbox-event]')).toHaveText('Grace Hopper requested access');
+  await expect(notice.locator('[data-inbox-event]')).toMatchAriaSnapshot(`
+    - button "Grace Hopper"
+    - text: requested access
+  `);
   const reads: string[] = [];
   page.on('request', (request) => {
     const path = new URL(request.url()).pathname;
@@ -64,9 +71,11 @@ test('an open Inbox replaces a request with its actual decider on the same row, 
     await decision.goto(`/approvals?approval=${request.id}`);
     const exact = decision.locator(`[data-focused-approval="${request.id}"]`);
     await expect(exact).toContainText('Please review the release.');
-    await exact.getByRole('button', { name: 'Approve as asked' }).click();
-    await expect(exact).toContainText('Approved by Ada Lovelace');
-    await expect(notice.locator('[data-inbox-event]')).toHaveText('Allowed by Ada Lovelace');
+    await exact.getByRole('button', { name: 'Other…', exact: true }).click();
+    await exact.getByRole('button', { name: /^Approve\b/ }).click();
+    await expect(exact.getByRole('status').filter({ hasText: 'Given' }).getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
+    // A settled request now has one actual outcome line rather than a second event caption.
+    await expect(notice.getByRole('status').filter({ hasText: 'Given' }).getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
     await expect(notice).toHaveAttribute('data-unread', 'false');
     await expect(notice).not.toContainText('Grace Hopper requested access');
     await expect(notice).not.toContainText('Waiting for you');
@@ -256,10 +265,11 @@ test('a frame that was lost is repaired by the next one: both rows are there and
   await signIn(page);
   await openInbox(page);
   await expect(page.getByText('Nothing here yet')).toBeVisible();
-  await notify({ kind: 'turn.completed', title: 'The row nobody was told of', thread_id: MAIN, node: MAIN, lose: true });
-  await notify({ kind: 'turn.failed', title: 'The row that came after it', thread_id: REPRO, node: REPRO });
-  await expect(page.getByRole('link', { name: /The row that came after it/ })).toBeVisible();
-  await expect(page.getByRole('link', { name: /The row nobody was told of/ })).toBeVisible();
+  const lost = await notify({ kind: 'turn.completed', title: 'The row nobody was told of', thread_id: MAIN, node: MAIN, lose: true });
+  const next = await notify({ kind: 'turn.failed', title: 'The row that came after it', thread_id: REPRO, node: REPRO });
+  // Thread notices now use their readable thread identity; keep both exact notices in the gap-repair proof.
+  await expect(page.locator(`[data-notification-id="${next.id}"] [data-inbox-title]`)).toContainText('Repro');
+  await expect(page.locator(`[data-notification-id="${lost.id}"] [data-inbox-title]`)).toContainText('Main thread');
   await expect(rail(page).getByRole('link', { name: 'Inbox, 2 unread' })).toBeVisible();
 });
 

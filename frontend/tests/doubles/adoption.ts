@@ -82,6 +82,8 @@ export class AdoptionWorld implements Part {
       turns: entry.turns.length,
       history_missing: null,
       adopted_thread_id: entry.session.adopted_thread_id,
+      // What the new thread's agent may be given, as the server offers it for any new thread: here only Nothing.
+      agent_access: { preset: { where: 'nothing', parts: {} }, choices: [{ where: 'nothing', parts: {} }] },
     };
   }
 

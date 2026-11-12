@@ -9,7 +9,7 @@ mod common;
 
 use common::{World, eventually, meanwhile, queued, turn_ended};
 use orch_api_contract::threads::{ContentPart, LimitBypassRequest};
-use orch_authz::Caller;
+use orch_authz::{Caller, CapturedCaller};
 use orch_engine::inputs::InputError;
 use orch_link_contract::commands::CommandKind;
 use orch_link_contract::events::TurnOutcome;
@@ -208,14 +208,6 @@ const CASES: &[Case] = &[
         cause: Cause::Sql(
             "UPDATE providers SET status = 'needs_setup'",
             "UPDATE providers SET status = 'ready'",
-        ),
-    },
-    Case {
-        name: "the provider's allowance is used up",
-        reason: "provider_exhausted",
-        cause: Cause::Sql(
-            "UPDATE providers SET status = 'exhausted', status_detail = 'this month is used'",
-            "UPDATE providers SET status = 'ready', status_detail = NULL",
         ),
     },
     Case {
@@ -797,11 +789,11 @@ async fn a_usage_cap_that_covers_the_turn_blocks_it_and_caps_that_do_not_cover_i
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_input_let_past_the_providers_limit_by_someone_who_may_runs_while_the_limit_is_reached()
-{
-    let world = World::new().await;
-    let thread = world.thread("Past the limit").await;
+async fn cached_vendor_quota_needs_no_bypass_and_the_legacy_flag_creates_no_bypass_authority() {
+    let world = World::observed().await;
+    let thread = world.thread("Vendor decides each request").await;
     let ada = Caller::session(world.ada);
+    world.access.refuse_bypass(world.ada);
     world
         .exec("UPDATE providers SET status = 'exhausted', status_detail = 'used up'")
         .await;
@@ -811,42 +803,39 @@ async fn an_input_let_past_the_providers_limit_by_someone_who_may_runs_while_the
         .submit_input(&ada, thread, queued("Plain"))
         .await
         .unwrap();
-    world.wait_blocked(thread, "provider_exhausted").await;
+    assert!(plain.input.limit_bypass.is_empty());
+    let first = world.turn_start(thread, 0).await;
+    assert_eq!(common::words_after_where(&first.text), "Plain");
+    let observed: String = world
+        .scalar("SELECT status FROM providers WHERE id=$1", world.provider)
+        .await;
+    assert_eq!(
+        observed, "exhausted",
+        "the vendor observation remains visible"
+    );
+    world.run_turn(thread, 0, "The ordinary request ran.").await;
+    world.wait_state(thread, "idle").await;
 
     let mut request = queued("Regardless");
     request.bypass = Some(LimitBypassRequest {
         caps: None,
         provider_limit: Some(true),
     });
-    // The input that waits is first, and it stays blocked; the one let past goes ahead of it only
-    // when it is first in the queue, so the first is removed.
-    world
-        .engine()
-        .cancel_input(&ada, thread, plain.input.id)
-        .await
-        .unwrap();
+    // Old clients can still send this member. It grants nothing and needs no
+    // provider-bypass privilege; named configured-cap bypasses remain separate.
     let passed = world
         .engine()
         .submit_input(&ada, thread, request)
         .await
         .unwrap();
-    assert_eq!(
-        passed.input.limit_bypass.len(),
-        1,
-        "the record says who let it past"
-    );
-    let start = world.turn_start(thread, 0).await;
+    assert!(passed.input.limit_bypass.is_empty());
+    let start = world.turn_start(thread, 1).await;
     assert_eq!(common::words_after_where(&start.text), "Regardless");
-
-    // Somebody who does not hold the right cannot let an input past.
-    world.access.refuse_bypass(world.ada);
-    let mut again = queued("Again");
-    again.bypass = Some(LimitBypassRequest {
-        caps: None,
-        provider_limit: Some(true),
-    });
-    let refused = world.engine().submit_input(&ada, thread, again).await;
-    assert!(matches!(refused, Err(InputError::Denied(_))), "{refused:?}");
+    world
+        .run_turn(thread, 1, "The legacy member was ignored.")
+        .await;
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    world.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1186,8 +1175,9 @@ async fn run_it_keeps_the_approvers_token_boundary_after_restart_and_does_not_re
     assert_eq!(approved.author_id, Some(world.ada));
     assert_eq!(approved.run_as, Some(world.ada));
     assert_eq!(
-        approved.run_as_authority.as_ref().unwrap()["credentials"][0]["token_id"],
-        runner_id.to_string()
+        approved.run_as_authority,
+        Some(json!({"boundaries": [CapturedCaller::capture(&runner)]})),
+        "Run it retains exactly the approver's complete accepted credential boundary"
     );
     sqlx::query("UPDATE api_tokens SET scopes=ARRAY['thread.view','thread.interact'] WHERE id=$1")
         .bind(runner_id)
@@ -1636,5 +1626,156 @@ async fn removing_an_author_reference_never_turns_scoped_words_into_an_authorles
             ("cancelled".into(), Some("author_lost_access".into()))
         );
         assert_eq!(world.turn_starts(thread).len(), 0);
+    }
+}
+
+// ---- the options of a profile that hold back the end of a turn
+
+/// The agent's program declares the option the way the Claude Code adapter does: it waits for the reports of its
+/// sub-agents for the option at the most, and 8 seconds besides for its process to end.
+const DECLARES_A_WAIT: &str = r#"UPDATE agents SET descriptor = descriptor || '{"x_turn_end_delays":{"version":1,"delays":[{"pointer":"/child_usage_wait_ms","also_ms":8000,"default_ms":1000}]}}'::jsonb"#;
+
+fn profile_config(config: &str) -> String {
+    format!("UPDATE agents SET profile = jsonb_set(profile, '{{config}}', '{config}'::jsonb)")
+}
+
+async fn blocked_words(world: &World, thread: Id) -> String {
+    world
+        .scalar::<Option<String>>("SELECT blocked_detail FROM threads WHERE node_id = $1", thread)
+        .await
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_option_that_holds_back_a_turns_end_past_the_time_given_an_interrupt_blocks_the_thread_naming_both_and_the_value_that_fits_runs()
+ {
+    let world = World::tuned(|waits| waits.interrupt_force = Duration::from_secs(30)).await;
+    world.exec(DECLARES_A_WAIT).await;
+    world
+        .exec(&profile_config(r#"{"child_usage_wait_ms": 22001}"#))
+        .await;
+    let thread = world.thread("A wait too long").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    world.wait_blocked(thread, "binding_invalid").await;
+    let words = blocked_words(&world, thread).await;
+    assert!(
+        words.contains("child_usage_wait_ms")
+            && words.contains("interrupt_force_secs")
+            && words.contains("30000"),
+        "{words}"
+    );
+    assert!(world.turn_starts(thread).is_empty());
+    // The value itself is kept or refused, never shortened: the most that fits runs as it was written.
+    world
+        .exec(&profile_config(r#"{"child_usage_wait_ms": 22000}"#))
+        .await;
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(common::words_after_where(&start.text), "Go");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn where_the_engines_time_is_all_the_program_waits_for_its_process_no_value_of_the_option_is_refused() {
+    // Five seconds is less than the eight the program is given to end: whatever the profile sets, or leaves out,
+    // there is no value that would fit, so none is at fault.
+    let world = World::tuned(|waits| waits.interrupt_force = Duration::from_secs(5)).await;
+    world.exec(DECLARES_A_WAIT).await;
+    for (n, config) in [
+        r"{}",
+        r#"{"child_usage_wait_ms": 0}"#,
+        r#"{"child_usage_wait_ms": 1000}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        world.exec(&profile_config(config)).await;
+        let thread = world.thread(&format!("Small bound {n}")).await;
+        world
+            .engine()
+            .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+            .await
+            .unwrap();
+        let start = world.turn_start(thread, 0).await;
+        assert_eq!(common::words_after_where(&start.text), "Go", "{config}");
+        assert_ne!(world.state(thread).await.0, "blocked", "{config}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_existing_profile_that_sets_nothing_runs_at_a_small_time_and_its_program_is_started_with_the_least_the_time_leaves()
+ {
+    // 8.5 seconds leaves 500 ms after the program's own 8: the default of 1 000 ms is more than that.
+    let world = World::tuned(|waits| waits.interrupt_force = Duration::from_millis(8_500)).await;
+    world.exec(DECLARES_A_WAIT).await;
+    let thread = world.thread("A profile that sets nothing").await;
+    world
+        .engine()
+        .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    let start = world.turn_start(thread, 0).await;
+    assert_eq!(common::words_after_where(&start.text), "Go");
+    let starts = world.seen.of_kind(CommandKind::AgentStart);
+    let body = starts.last().expect("the program was started").body().unwrap();
+    assert_eq!(
+        body["profile"]["config"]["child_usage_wait_ms"],
+        json!(500),
+        "{body}"
+    );
+    // The number it comes to, written out, is accepted as it is.
+    let written = World::tuned(|waits| waits.interrupt_force = Duration::from_millis(8_500)).await;
+    written.exec(DECLARES_A_WAIT).await;
+    written
+        .exec(&profile_config(r#"{"child_usage_wait_ms": 500}"#))
+        .await;
+    let thread = written.thread("The number written out").await;
+    written
+        .engine()
+        .submit_input(&Caller::session(written.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    written.turn_start(thread, 0).await;
+    // And one more than it comes to is refused.
+    let over = World::tuned(|waits| waits.interrupt_force = Duration::from_millis(8_500)).await;
+    over.exec(DECLARES_A_WAIT).await;
+    over.exec(&profile_config(r#"{"child_usage_wait_ms": 501}"#))
+        .await;
+    let thread = over.thread("One more").await;
+    over.engine()
+        .submit_input(&Caller::session(over.ada), thread, queued("Go"))
+        .await
+        .unwrap();
+    over.wait_blocked(thread, "binding_invalid").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_declaration_that_cannot_be_read_or_is_of_another_version_declares_nothing_and_refuses_no_profile() {
+    let world = World::tuned(|waits| waits.interrupt_force = Duration::from_secs(10)).await;
+    for (n, declaration) in [
+        r#"{"version":2,"delays":[{"pointer":"/child_usage_wait_ms","also_ms":8000,"default_ms":1000}]}"#,
+        r#"{"version":1,"delays":7}"#,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        sqlx::query("UPDATE agents SET descriptor = descriptor || $1")
+            .bind(json!({ "x_turn_end_delays": serde_json::from_str::<serde_json::Value>(declaration).unwrap() }))
+            .execute(world.pool.pool())
+            .await
+            .unwrap();
+        world
+            .exec(&profile_config(r#"{"child_usage_wait_ms": 60000}"#))
+            .await;
+        let thread = world.thread(&format!("Unread {n}")).await;
+        world
+            .engine()
+            .submit_input(&Caller::session(world.ada), thread, queued("Go"))
+            .await
+            .unwrap();
+        let start = world.turn_start(thread, 0).await;
+        assert_eq!(common::words_after_where(&start.text), "Go", "{declaration}");
     }
 }

@@ -5,6 +5,7 @@ keywords: 挂载, 复制, 同步副本, 自有数据, 共享存储, 指纹, 内�
 heading_id.选择哪些数据跟随: choose-what-follows
 heading_id.内容检查: content-check
 heading_id.同时检查工具服务器: review-tool-servers-too
+summary: 在变更计划中选择挂载处理方式，并在移动数据前比较副本。
 ---
 
 # 选择和检查挂载副本

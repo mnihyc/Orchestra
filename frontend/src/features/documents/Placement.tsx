@@ -68,7 +68,7 @@ export function PrivateDialog({ doc, open, onOpenChange }: DialogProps) {
     >
       <div className="flex flex-col gap-2">
         <p>{t(whole === 'private' ? 'documents.private.about' : 'documents.open.about', { place: doc.node.name ?? '' })}</p>
-        {preview.isPending ? <SkeletonRows rows={1} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : <Preview preview={preview.data} />}
+        {preview.isPending ? <SkeletonRows read={preview} rows={1} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : <Preview preview={preview.data} />}
       </div>
     </ConfirmDialog>
   );
@@ -171,7 +171,7 @@ export function MoveDialog({ doc, open, onOpenChange }: DialogProps) {
             ))}
           </div>
         </div>
-        {target !== null && (preview.isPending ? <SkeletonRows rows={1} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : <Preview preview={preview.data} />)}
+        {target !== null && (preview.isPending ? <SkeletonRows read={preview} rows={1} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} /> : <Preview preview={preview.data} />)}
         {move.isError && <ErrorAlert error={move.error} />}
       </div>
     </Dialog>

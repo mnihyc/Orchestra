@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** The left bar as its rules can be told without a browser: a finished topic that keeps its place, what is unread and what a row that hides it carries, documents and chats in the tree, where the tree begins and what folds away, what the bar keeps for a person and what the device keeps, the colour of an icon, the way to a thing past a place its reader may not see, the marks of the orgs, the kinds of resource with their things, and the numbers on Messages. */
 import { describe, expect, it } from 'vitest';
 
@@ -55,24 +56,7 @@ import { display } from '../doubles/thread-display';
 
 const t = i18n.t.bind(i18n);
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 type ThreadPart = NonNullable<TreeNode['thread']>;
 const thread = (id: string, parent: string, more: Partial<ThreadPart> = {}, row: Partial<TreeNode> = {}): TreeNode =>
@@ -131,7 +115,97 @@ const names = (made: TreeRow<NavItem>[]) => made.map((row) => `${'  '.repeat(row
 const lay = (tree: OrgTree, open: string[], view: TreeView = {}) => buildRows(tree, 'acme', new Set(open), 'en', view);
 const item = (tree: OrgTree, open: string[], id: string, view: TreeView = {}) => nodeItem(lay(tree, open, view).find((row) => row.id === id));
 
-const chatState = (read: number, more: Partial<ChatState> = {}): ChatState => ({ chat_id: '', last_read_seq: read, read_revision: 0, effective_level: 'all', level: null, hidden: false, engaged: true, mentions_unread: 0, ...more });
+const chatState = (read: number, more: Partial<ChatState> = {}): ChatState => ({ chat_id: '', org_id: 'acme', last_message_seq: 0, last_read_seq: read, read_revision: 0, effective_level: 'all', level: null, hidden: false, engaged: true, mentions_unread: 0, ...more });
+
+describe('a change in one branch of a large tree', () => {
+  it('keeps parent captions current from the same readable tree', () => {
+    const memory = newLayoutMemory();
+    const open = new Set(['web']);
+    const before = buildRows(acme, 'acme', open, 'en', {}, memory);
+    const alpha = before.find((row) => row.id === 'alpha');
+    expect(nodeItem(alpha).parentName).toBe('web');
+    const renamed = changed(node('web', 'project', 'acme', { name: 'Renamed project' }));
+    const after = buildRows(renamed, 'acme', open, 'en', {}, memory);
+    expect(nodeItem(after.find((row) => row.id === 'alpha')).parentName).toBe('Renamed project');
+    expect(after.find((row) => row.id === 'alpha')?.item).not.toBe(alpha?.item);
+    const nodes = new Map(renamed.nodes);
+    nodes.delete('web');
+    const withoutParent = buildRows({ ...renamed, nodes }, 'web', open, 'en', {}, memory);
+    expect(nodeItem(withoutParent.find((row) => row.id === 'alpha')).parentName).toBeNull();
+  });
+
+  it('keeps the other branch intact without reading its threads again, while updating open and closed ancestors', () => {
+    const quiet = thread('delta-main', 'delta');
+    let reads = 0;
+    const other = { ...quiet, get thread() { reads += 1; return quiet.thread; } };
+    const initial = changed(other);
+    const memory = newLayoutMemory();
+    const open = new Set(['web', 'infra', 'delta']);
+    const before = buildRows(initial, 'acme', open, 'en', {}, memory);
+    const ranges = memory.layout?.branches;
+    reads = 0;
+    const next = { ...initial, nodes: new Map(initial.nodes).set('gamma-main', thread('gamma-main', 'gamma', { state: 'waiting_approval', pending_approvals: 2 })) };
+    const after = buildRows(next, 'acme', open, 'en', {}, memory);
+
+    expect(reads).toBe(0);
+    expect(memory.layout?.branches).toBe(ranges);
+    for (const id of ['infra', 'delta', 'delta-main']) expect(after.find((row) => row.id === id)).toBe(before.find((row) => row.id === id));
+    expect(nodeItem(after.find((row) => row.id === 'web'))).toMatchObject({ urgent: 'waiting_approval', waiting: 0 });
+    expect(nodeItem(after.find((row) => row.id === 'gamma'))).toMatchObject({ urgent: 'waiting_approval', waiting: 2 });
+    const closed = buildRows(next, 'acme', new Set(), 'en', {}, memory);
+    expect(nodeItem(closed.find((row) => row.id === 'web'))).toMatchObject({ urgent: 'waiting_approval', waiting: 2 });
+  });
+
+  it('updates branch ranges when hidden topics exchange places with the same total row count', () => {
+    const memory = newLayoutMemory();
+    const open = new Set(['web', 'infra', 'alpha', 'beta']);
+    const view: TreeView = { hideDone: true };
+    const before = buildRows(acme, 'acme', open, 'en', view, memory);
+    const ranges = memory.layout?.branches;
+    const alphaDone = node('alpha', 'topic', 'web', { topic: { status: 'done', tag_ids: [] } });
+    const next = changed(alphaDone, thread('beta-main', 'beta', { state: 'waiting_approval', pending_approvals: 1 }));
+    const after = buildRows(next, 'acme', open, 'en', view, memory);
+    expect(after).toHaveLength(before.length);
+    expect(after).toEqual(buildRows(next, 'acme', open, 'en', view));
+    expect(after.some((row) => row.id === 'alpha')).toBe(false);
+    expect(after.some((row) => row.id === 'beta-main')).toBe(true);
+    expect(memory.layout?.branches).not.toBe(ranges);
+    const replacement = memory.layout?.branches;
+    const again = changed(alphaDone, thread('beta-main', 'beta', { state: 'waiting_approval', pending_approvals: 2 }));
+    const rows = buildRows(again, 'acme', open, 'en', view, memory);
+    expect(rows).toEqual(buildRows(again, 'acme', open, 'en', view));
+    expect(memory.layout?.branches).toBe(replacement);
+    expect(nodeItem(rows.find((row) => row.id === 'beta')).waiting).toBe(0);
+  });
+
+  it('follows changed visibility, ancestry and reader choices after reusing a branch', () => {
+    const memory = newLayoutMemory();
+    const open = new Set(['web', 'infra', 'delta', 'alpha', 'gamma']);
+    let tree = acme;
+    const draw = (view: TreeView = {}, root = 'acme', locale = 'en', expanded = open) => {
+      const rows = buildRows(tree, root, expanded, locale, view, memory);
+      expect(rows).toEqual(buildRows(tree, root, expanded, locale, view));
+      return rows;
+    };
+    draw();
+    tree = changed(thread('gamma-main', 'gamma', { state: 'running' }));
+    draw();
+    tree = changed(thread('gamma-main', 'gamma', { state: 'running' }), node('alpha', 'topic', 'infra'));
+    expect(draw().find((row) => row.id === 'alpha')?.parentId).toBe('infra');
+    const nodes = new Map(tree.nodes);
+    nodes.delete('delta-main');
+    tree = { ...tree, nodes };
+    expect(draw().some((row) => row.id === 'delta-main')).toBe(false);
+    draw({ threads: false });
+    draw({ hideDone: true });
+    draw({ filter: 'gamma' });
+    draw({ participating: true });
+    draw({ attention: attention({ 'gamma-main': 1 }) });
+    draw({}, 'infra');
+    draw({}, 'acme', 'zh-CN', new Set(['infra']));
+    draw({ order: { by: 'newest' } });
+  });
+});
 
 describe('a topic that is done', () => {
   it('stands where it stood: nothing in the tree moves when a topic is marked done or opened again', () => {
@@ -256,7 +330,7 @@ const docsOf = (entries: Record<string, Partial<NodeDocs>>): Map<string, NodeDoc
   new Map(Object.entries(entries).map(([id, known]) => [id, { docs: [], more: false, state: 'ready', loadingMore: false, ...known }]));
 
 describe('documents in the tree', () => {
-  const withDocs = changed(node('web', 'project', 'acme', { docs: 1 }), node('alpha', 'topic', 'web', { docs: 2 }), thread('alpha-main', 'alpha', {}, { docs: 1 }));
+  const withDocs = changed(node('web', 'project', 'acme', { docs: 1, docs_seq: 1 }), node('alpha', 'topic', 'web', { docs: 2, docs_seq: 1 }), thread('alpha-main', 'alpha', {}, { docs: 1, docs_seq: 1 }));
   const known = docsOf({
     web: { docs: [doc('d-road', 'Roadmap')] },
     alpha: { docs: [doc('d-plan', 'Plan'), doc('d-notes', 'canary notes')] },
@@ -302,12 +376,17 @@ describe('documents in the tree', () => {
   });
 
   it('are read again when their place is stamped though their number stays: one of them was renamed', () => {
-    const renamed = changed(node('alpha', 'topic', 'web', { docs: 2, tree_seq: 7 }));
+    const renamed = changed(node('alpha', 'topic', 'web', { docs: 2, docs_seq: 7 }));
     expect(placesWithDocs(renamed, 'acme', new Set(['alpha']))).toBe('alpha:2:7');
   });
 
+  it('keeps the document read when only its place was renamed', () => {
+    const renamed = changed(node('alpha', 'topic', 'web', { name: 'New topic name', docs: 2, tree_seq: 7, docs_seq: 1 }));
+    expect(placesWithDocs(renamed, 'acme', new Set(['alpha']))).toBe('alpha:2:1');
+  });
+
   it('of the root org stand at the tree\'s own level, after everything else: the root is no row that could be opened', () => {
-    const rooted = changed(node('acme', 'org', null, { docs: 1 }));
+    const rooted = changed(node('acme', 'org', null, { docs: 1, docs_seq: 1 }));
     const handbook = docsOf({ acme: { docs: [doc('d-hand', 'Handbook')] } });
 
     expect(placesWithDocs(rooted, 'acme', new Set())).toBe('acme:1:1');
@@ -480,55 +559,57 @@ describe('the way to the screen in view', () => {
 });
 
 describe('how many of a person\'s chats are unread', () => {
-  const state = (chat: string, read: number, more: Partial<ChatState> = {}): ChatState => ({ chat_id: chat, last_read_seq: read, read_revision: 0, effective_level: 'all', level: null, hidden: false, engaged: true, mentions_unread: 0, ...more });
-  const chat = (id: string, seq: number, my: ChatState | null = null) => ({ id, last_message_seq: seq, my });
+  const state = (chat: string, read: number, seq: number, more: Partial<ChatState> = {}): ChatState => ({ chat_id: chat, org_id: 'acme', last_message_seq: seq, last_read_seq: read, read_revision: 0, effective_level: 'all', level: null, hidden: false, engaged: true, mentions_unread: 0, ...more });
+  const states = (...list: ChatState[]) => new Map(list.map((one) => [one.chat_id, one]));
 
-  it('are those they follow whose newest message is beyond what they read', () => {
-    const chats = [chat('a', 5, state('a', 5)), chat('b', 9, state('b', 4)), chat('c', 3, state('c', 1, { effective_level: 'off' })), chat('d', 2)];
-
-    expect(unreadChats(chats, new Map(), new Map())).toBe(1);
+  it('counts from personal states alone, restricted to the root org and followed chats', () => {
+    const standing = states(state('a', 5, 5), state('b', 4, 9), state('c', 1, 3, { effective_level: 'off' }), state('other', 0, 2, { org_id: 'beta' }));
+    expect(unreadChats('acme', standing, new Map())).toBe(1);
+    expect(unreadChats('beta', standing, new Map())).toBe(1);
+    expect(unreadChats(null, standing, new Map())).toBe(0);
   });
 
-  it('follow what the person\'s feed said since the list was read: a message that came, and a chat that was read', () => {
-    const chats = [chat('a', 5, state('a', 5)), chat('b', 9, state('b', 4))];
-
-    expect(unreadChats(chats, new Map(), new Map([['a', { seq: 6 }]]))).toBe(2);
-    expect(unreadChats(chats, new Map([['b', state('b', 9)]]), new Map())).toBe(0);
+  it('uses the newest known message even without a list or when an older activity hint arrives', () => {
+    const standing = states(state('a', 5, 5), state('b', 4, 9));
+    expect(unreadChats('acme', standing, new Map([['a', { seq: 6 }], ['b', { seq: 3 }]]))).toBe(2);
+    expect(unreadChats('acme', states(state('a', 5, 5), state('b', 9, 9)), new Map())).toBe(0);
   });
 
-  it('never count a chat the person hid', () => {
-    const chats = [chat('b', 9, state('b', 4))];
-
-    expect(unreadChats(chats, new Map([['b', state('b', 4, { hidden: true })]]), new Map())).toBe(0);
-    expect(unreadChats([chat('b', 9, state('b', 4, { hidden: true }))], new Map(), new Map())).toBe(0);
+  it('never counts hidden chats, including a new state frame with a newer message', () => {
+    expect(unreadChats('acme', states(state('b', 4, 9, { hidden: true })), new Map([['b', { seq: 10 }]]))).toBe(0);
+    expect(unreadChats('acme', states(state('new', 0, 1)), new Map())).toBe(1);
   });
 });
 
 describe('the menu of a document in the tree', () => {
   const nothing = (): void => undefined;
-  const acts: DocMenuActions = { open: nothing, openInTab: nothing, rename: nothing, move: nothing, share: nothing, export: nothing, requestExport: nothing, copyLink: nothing, remove: nothing };
+  const acts: DocMenuActions = { open: nothing, openInTab: nothing, rename: nothing, move: nothing, share: nothing, export: nothing, requestExport: nothing, copyLink: nothing, copyReference: nothing, remove: nothing };
   const ada = { display_name: 'Ada Lovelace' };
   const ids = (entries: readonly MenuEntry[]) => entries.flatMap((entry) => ('id' in entry && entry.type !== 'separator' ? [entry.id] : []));
-  const menu = (permissions: string[] | undefined, archived = false) =>
-    ids(docMenuEntries({ archived, owner: ada }, permissions === undefined ? undefined : { access: { permissions } as never }, acts, t));
+  const entries = (permissions: string[] | undefined, archived = false) =>
+    docMenuEntries({ archived, owner: ada }, permissions === undefined ? undefined : { access: { permissions } as never }, acts, t);
+  const menu = (permissions: string[] | undefined, archived = false) => ids(entries(permissions, archived));
 
   it('begins with what a press on the row does, and ends, apart, with what destroys', () => {
     const all = menu(['doc.view', 'doc.edit', 'doc.manage', 'doc.export']);
 
     expect(all[0]).toBe('open');
     expect(all.at(-1)).toBe('delete');
-    expect(all).toEqual(['open', 'open-tab', 'rename', 'move', 'share', 'export', 'copy-link', 'delete']);
+    expect(all).toEqual(['open', 'open-tab', 'rename', 'move', 'share', 'export', 'copy-reference', 'copy-link', 'delete']);
   });
 
-  it('leaves out what the reader may not do', () => {
-    expect(menu(['doc.view'])).toEqual(['open', 'open-tab', 'share', 'copy-link']);
-    expect(menu(['doc.view', 'doc.edit'])).toEqual(['open', 'open-tab', 'rename', 'share', 'copy-link']);
+  it('keeps protected writes gated and names the current Export refusal with its access request', () => {
+    expect(menu(['doc.view'])).toEqual(['open', 'open-tab', 'share', 'export', 'export-request', 'copy-reference', 'copy-link']);
+    expect(menu(['doc.view', 'doc.edit'])).toEqual(['open', 'open-tab', 'rename', 'share', 'export', 'export-request', 'copy-reference', 'copy-link']);
+    expect(entries(['doc.view']).find((entry) => entry.id === 'export')).toMatchObject({ disabled: t('export.menu.notAllowed', { name: ada.display_name }) });
     // Beside an archived place a document is read and not written: its title stays as it is.
     expect(menu(['doc.view', 'doc.edit', 'doc.manage'], true)).not.toContain('rename');
   });
 
-  it('says that it is still asking while what the reader holds has not arrived, and offers only what needs nothing', () => {
-    expect(menu(undefined)).toEqual(['open', 'open-tab', 'copy-link', 'checking']);
+  it('keeps Export checking without a premature access request while current rights have not arrived', () => {
+    expect(menu(undefined)).toEqual(['open', 'open-tab', 'export', 'copy-reference', 'copy-link', 'checking']);
+    expect(entries(undefined).find((entry) => entry.id === 'export')).toMatchObject({ disabled: t('export.menu.checking') });
+    expect(menu(undefined)).not.toContain('export-request');
   });
 });
 

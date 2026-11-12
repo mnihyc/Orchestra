@@ -13,7 +13,7 @@
  */
 import { queryOptions } from '@tanstack/react-query';
 
-import { ApiError, api, client, done, ok, repeatable } from '@/api/client';
+import { ApiError, api, client, done, ok, accepted, repeatable } from '@/api/client';
 import { liveValue } from '@/api/liveValue';
 import { queryClient } from '@/api/query';
 import type { UploadWork } from '@/lib/useUploads';
@@ -52,7 +52,7 @@ const pathOf = (door: Door) => ({ id: door.environmentId });
 export const workspaceKeys = {
   environment: (id: string) => ['environment', id] as const,
   stat: (door: Door, path: string) => ['workspace-stat', door.environmentId, path] as const,
-  changes: (door: Door, all: boolean) => ['workspace-changes', door.environmentId, door.threadId, all] as const,
+  changes: (door: Door, all: boolean, turnId?: string, itemId?: string) => ['workspace-changes', door.environmentId, door.threadId, all, turnId ?? null, itemId ?? null] as const,
   git: (door: Door) => ['workspace-git', door.environmentId, door.threadId] as const,
   gitDiff: (door: Door, staged: boolean) => ['workspace-git-diff', door.environmentId, door.threadId, staged] as const,
   archive: (door: Door, path: string, inside: string) => ['workspace-archive', door.environmentId, path, inside] as const,
@@ -257,8 +257,8 @@ export function currentOf(error: unknown): FileStat | null {
   return typeof current === 'object' && current !== null ? (current as FileStat) : null;
 }
 
-export function makeDirectory(door: Door, path: string): Promise<FileStat> {
-  return ok(api.POST('/environments/{id}/files/mkdir', { params: { path: pathOf(door), query: through(door) }, body: { path } }));
+export async function makeDirectory(door: Door, path: string, key: string): Promise<void> {
+  await accepted(api.POST('/environments/{id}/files/mkdir', { params: { path: pathOf(door), query: through(door) }, body: { path }, ...repeatable(key) }));
 }
 
 /** Moves a file or a directory; it is also how one is renamed. */
@@ -333,7 +333,7 @@ export function searchContent(door: Door, text: string, options: ContentSearchOp
 
 /** What an archive holds, read where the file lies and without unpacking it. */
 export const archiveQuery = (door: Door, path: string, inside: string) =>
-  queryOptions({
+  queryOptions<ArchiveListing>({
     queryKey: workspaceKeys.archive(door, path, inside),
     queryFn: ({ signal }): Promise<ArchiveListing> =>
       ok(
@@ -359,13 +359,13 @@ export async function readArchiveEntry(door: Door, path: string, entry: string, 
 // ---------------------------------------------------------------- what changed
 
 /** The files the threads' tool calls changed, the latest change of each path, newest first: this thread's, or every thread's of the environment. */
-export const changesQuery = (door: Door, all: boolean) =>
+export const changesQuery = (door: Door, all: boolean, turnId?: string, itemId?: string) =>
   queryOptions({
-    queryKey: workspaceKeys.changes(door, all),
+    queryKey: workspaceKeys.changes(door, all, turnId, itemId),
     queryFn: async ({ signal }): Promise<EnvironmentChange[]> => {
       const reply = await ok(
         api.GET('/environments/{id}/changes', {
-          params: { path: pathOf(door), query: { ...through(door), ...(all ? { all: true } : {}) } },
+          params: { path: pathOf(door), query: { ...through(door), ...(all ? { all: true } : {}), ...(turnId === undefined ? {} : { turn_id: turnId }), ...(itemId === undefined ? {} : { item_id: itemId }) } },
           signal,
         }),
       );

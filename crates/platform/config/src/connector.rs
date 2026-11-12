@@ -101,6 +101,8 @@ section! {
 section! {
     /// `[connector]`
     Machine {
+        /// Locally persisted primary-gateway choice; never rewritten by advertisements.
+        gateway: orch_link_contract::gateways::GatewayChoice = Default::default(),
         /// What this machine is called in the system; empty takes the name of the host.
         name: String = String::new(),
         /// Local declaration that this machine is dedicated to Orch; never a delegated policy key.
@@ -453,6 +455,31 @@ impl Validate for ConnectorConfig {
                     "each needs an address and a trust of pinned or public",
                 ));
             }
+        }
+        let gateway = &self.connector.gateway;
+        match gateway.selection {
+            orch_link_contract::gateways::GatewaySelection::Selected
+                if gateway.gateway_id.as_deref().is_none_or(|id| {
+                    id.is_empty()
+                        || !id
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+                }) =>
+            {
+                return Err(invalid(
+                    "connector.gateway",
+                    "selected needs a valid gateway_id",
+                ));
+            }
+            orch_link_contract::gateways::GatewaySelection::Automatic
+                if gateway.gateway_id.is_some() =>
+            {
+                return Err(invalid(
+                    "connector.gateway",
+                    "automatic has no fixed gateway_id",
+                ));
+            }
+            _ => {}
         }
         if !SANDBOX_MODES.contains(&self.agent.max_sandbox.as_str()) {
             return Err(invalid(

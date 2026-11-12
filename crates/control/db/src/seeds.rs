@@ -557,36 +557,29 @@ pub fn local_embeddings_template_spec() -> Json {
 /// addresses each vendor documents for the formats Orch relays. A place
 /// adds to them, replaces one or hides one with `null`.
 #[must_use]
+#[expect(
+    clippy::expect_used,
+    reason = "shipped declaration JSON is validated by catalogue tests"
+)]
 pub fn provider_presets() -> Json {
-    // Wire format names are the model contract's protocol identifiers.
-    const RESPONSES: &str = "openai-responses";
-    const MESSAGES: &str = "anthropic-messages";
-    const CHAT: &str = "openai-chat";
     use local_embeddings_template as local;
-    json!({
-        "Local embeddings": {
-            "upstreams": [{"protocol": "openai-embeddings", "base_url": local::ENDPOINT, "options": {"auth": "none"}}],
-            "template": {"name": "Local embeddings", "home_id": null, "kind": "provider", "driver": "docker", "spec": local_embeddings_template_spec()},
-            "model": {"model_name": local::MODEL, "display_name": "EmbeddingGemma 2"},
-            "dimensions": local::DIMENSIONS
-        },
-        "OpenAI": {
-            "upstreams": [ { "protocol": RESPONSES, "base_url": "https://api.openai.com/v1" } ]
-        },
-        "Anthropic": {
-            "upstreams": [ { "protocol": MESSAGES, "base_url": "https://api.anthropic.com" } ]
-        },
-        "OpenRouter": {
-            "upstreams": [ { "protocol": CHAT, "base_url": "https://openrouter.ai/api/v1" } ]
-        },
-        "DeepSeek": {
-            "note": "Serves both formats on the same key.",
-            "upstreams": [
-                { "protocol": RESPONSES, "base_url": "https://api.deepseek.com" },
-                { "protocol": MESSAGES, "base_url": "https://api.deepseek.com/anthropic" }
-            ]
-        }
-    })
+    let mut presets = serde_json::Map::new();
+    presets.insert("Local embeddings".into(), json!({
+        "upstreams": [{"protocol":"openai-embeddings","base_url":local::ENDPOINT,"options":{"auth":"none"}}],
+        "template":{"name":"Local embeddings","home_id":null,"kind":"provider","driver":"docker","spec":local_embeddings_template_spec()},
+        "model":{"model_name":local::MODEL,"display_name":"EmbeddingGemma 2"},"dimensions":local::DIMENSIONS
+    }));
+    let declarations: Json = serde_json::from_str(include_str!(
+        "../../../../extensions/providers/builtins/presets.json"
+    ))
+    .expect("shipped provider presets");
+    presets.extend(
+        declarations
+            .as_object()
+            .expect("provider presets are an object")
+            .clone(),
+    );
+    Json::Object(presets)
 }
 
 /// Makes what is missing of the built-in capability definitions, the two
@@ -1733,6 +1726,14 @@ mod tests {
         assert_eq!(
             presets["OpenRouter"]["upstreams"][0]["base_url"],
             "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            presets["OpenRouter"]["upstreams"][1]["protocol"],
+            "anthropic-messages"
+        );
+        assert_eq!(
+            presets["OpenRouter"]["upstreams"][1]["base_url"],
+            "https://openrouter.ai/api"
         );
         assert_eq!(
             presets["DeepSeek"]["upstreams"].as_array().unwrap().len(),

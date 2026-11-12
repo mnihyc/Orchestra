@@ -1,5 +1,6 @@
 /** Cut values remain readable by pointer and keyboard, including content inserted after startup. */
 import { fireEvent } from '@testing-library/dom';
+import { restoreFocusQuietly } from '@/ui/focus';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hasOwnTooltip, installOverflowTooltips, overflowText, OVERFLOW_REST_MS, textOverflows } from '@/ui/overflowTooltips';
 
@@ -23,6 +24,13 @@ function label(text = 'The whole value, including its last word') {
 }
 function install() { const release = installOverflowTooltips(document); releases.push(release); return release; }
 const tip = () => document.querySelector('[data-overflow-tooltip]');
+
+/** The unit DOM has no pointer hit testing; provide its current hover fact explicitly. */
+function nativeHover(element: HTMLElement) {
+  const state = { hovered: true }, matches = element.matches.bind(element);
+  vi.spyOn(element, 'matches').mockImplementation((selector) => selector === ':hover' ? state.hovered : matches(selector));
+  return state;
+}
 
 function reportResize(element: HTMLElement): void {
   if (resize === undefined || observer === undefined) throw new Error('The overflow reader did not observe sizes.');
@@ -53,6 +61,22 @@ afterEach(() => {
 });
 
 describe('lost text, rather than a clipping class', () => {
+  it('recognizes a complete ellipsis keyword at either edge without matching quoted or longer words', () => {
+    const { element } = label();
+    let textOverflow = 'ellipsis';
+    vi.spyOn(window, 'getComputedStyle').mockImplementation(() => ({
+      textOverflow, display: 'block', visibility: 'visible', getPropertyValue: () => '',
+    }) as unknown as CSSStyleDeclaration);
+    for (const value of ['ellipsis', 'ellipsis clip', 'clip ellipsis', 'clip\tellipsis']) {
+      textOverflow = value;
+      expect(textOverflows(element)).toBe(true);
+    }
+    for (const value of ['clip', 'myellipsis', 'ellipsis-more', '"ellipsis"']) {
+      textOverflow = value;
+      expect(textOverflows(element)).toBe(false);
+    }
+  });
+
   it('requires a real loss of space and ignores an ordinary horizontal scroller', () => {
     const { element, size } = label();
     size.contentWidth = 100;
@@ -81,6 +105,57 @@ describe('lost text, rather than a clipping class', () => {
 });
 
 describe('the single delegated reader', () => {
+  it('does not read styles for a text-free icon mutation and still discovers later text', async () => {
+    const root = document.createElement('section');
+    root.append(document.createElementNS('http://www.w3.org/2000/svg', 'svg'));
+    document.body.append(root);
+    const unrelated = label();
+    const styles = vi.spyOn(window, 'getComputedStyle').mockImplementation((element) => {
+      if (!(element instanceof HTMLElement)) throw new Error('Expected an HTML value.');
+      return element.style;
+    });
+    install();
+    styles.mockClear();
+    const connections = vi.spyOn(unrelated.element, 'isConnected', 'get');
+    root.replaceChildren(document.createElementNS('http://www.w3.org/2000/svg', 'svg'));
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    expect(styles.mock.calls.filter(([element]) => element === root || root.contains(element))).toHaveLength(0);
+    expect(connections).not.toHaveBeenCalled();
+    const inserted = label();
+    root.append(inserted.element);
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    expect(inserted.element).toHaveAttribute('tabindex', '0');
+  });
+
+  it('retires removed values while retaining values moved within the document', async () => {
+    const kept = label(), removed = label();
+    const branch = document.createElement('section');
+    const container = document.createElement('div');
+    document.body.append(container);
+    container.append(branch);
+    branch.append(removed.element);
+    install();
+    branch.remove();
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    expect(unobserveSizes).toHaveBeenCalledExactlyOnceWith(removed.element);
+    expect(removed.element).not.toHaveAttribute('tabindex');
+    const other = document.createElement('section');
+    document.body.append(other);
+    other.append(kept.element);
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    expect(unobserveSizes).toHaveBeenCalledTimes(1);
+    expect(kept.element).toHaveAttribute('tabindex', '0');
+    container.append(branch);
+    await Promise.resolve();
+    vi.advanceTimersByTime(20);
+    expect(removed.element).toHaveAttribute('tabindex', '0');
+    expect(observeSizes).toHaveBeenCalledTimes(3);
+  });
+
   it('reads text only for candidates through a deep tree and retires candidates that stop clipping', async () => {
     const root = document.createElement('section');
     let parent = root;
@@ -173,6 +248,46 @@ describe('the single delegated reader', () => {
     link.focus();
     expect(tip()).toHaveTextContent(overflowText(element));
     expect(link).toHaveAttribute('aria-describedby', tip()?.id);
+  });
+  it.each(['viewport', 'scroll frame'] as const)('keeps a focused value readable through focus scrolling and detaches outside its %s', (boundary) => {
+    const { element, size } = label();
+    const frame = document.createElement('div');
+    frame.style.overflowX = frame.style.overflowY = boundary === 'scroll frame' ? 'auto' : 'visible';
+    frame.getBoundingClientRect = () => new DOMRect(10, 10, 200, 100);
+    document.body.append(frame); frame.append(element);
+    let top = 20;
+    element.getBoundingClientRect = () => new DOMRect(20, top, size.width, size.height);
+    install();
+    fireEvent.pointerOver(element, { pointerType: 'mouse' }); vi.advanceTimersByTime(OVERFLOW_REST_MS);
+    expect(tip()).toHaveTextContent(overflowText(element));
+    element.focus();
+    top += size.height;
+    fireEvent.scroll(frame);
+    expect(element).toHaveFocus();
+    expect(tip()).toHaveTextContent(overflowText(element));
+    top = boundary === 'scroll frame' ? frame.getBoundingClientRect().bottom + size.height : window.innerHeight + size.height;
+    fireEvent.scroll(frame);
+    expect(tip()).toBeNull();
+  });
+  it.each(['scroll', 'resize'] as const)('continues a pending hover after %s while the same label remains under the pointer', (change) => {
+    const { element } = label(); nativeHover(element);
+    element.getBoundingClientRect = () => new DOMRect(10, 10, 100, 20);
+    install(); fireEvent.pointerOver(element, { pointerType: 'mouse' });
+    vi.advanceTimersByTime(OVERFLOW_REST_MS / 2);
+    if (change === 'scroll') fireEvent.scroll(document); else fireEvent.resize(window);
+    expect(tip()).toBeNull();
+    vi.advanceTimersByTime(OVERFLOW_REST_MS / 2 - 1);
+    expect(tip()).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(tip()).toHaveTextContent(overflowText(element));
+  });
+  it('dismisses a pointer hint when scrolling moves the label away from the pointer', () => {
+    const { element } = label(), hover = nativeHover(element); install();
+    fireEvent.pointerOver(element, { pointerType: 'mouse' }); vi.advanceTimersByTime(OVERFLOW_REST_MS);
+    expect(tip()).not.toBeNull();
+    hover.hovered = false;
+    fireEvent.scroll(document);
+    expect(tip()).toBeNull();
   });
   it('does not mistake a focusable pane for the keyboard owner of every value inside it', () => {
     const { element } = label(); const pane = document.createElement('section'); pane.tabIndex = 0;
@@ -302,4 +417,31 @@ describe('the single delegated reader', () => {
     fireEvent.pointerOver(element); vi.advanceTimersByTime(OVERFLOW_REST_MS);
     expect(tip()).toBeNull();
   });
+});
+
+for (const value of ['This device (Asia/Singapore, UTC+08:00)', '此设备（Asia/Singapore，UTC+08:00）']) {
+  it(`reveals a clipped committed combobox value without treating fields that fit as shortened: ${value}`, () => {
+    const field = document.createElement('input');
+    field.type = 'text'; field.setAttribute('role', 'combobox'); field.value = value;
+    field.style.cssText = 'text-overflow:ellipsis;overflow:hidden;white-space:nowrap';
+    let width = 120;
+    Object.defineProperties(field, {
+      clientWidth: { get: () => width }, scrollWidth: { get: () => 300 },
+      clientHeight: { get: () => 32 }, scrollHeight: { get: () => 32 },
+    });
+    document.body.append(field); install();
+    fireEvent.pointerOver(field, { pointerType: 'mouse' }); vi.advanceTimersByTime(OVERFLOW_REST_MS);
+    expect(tip()).toHaveTextContent(value);
+    field.focus(); expect(tip()).toHaveTextContent(value);
+    expect(field).not.toHaveAttribute('tabindex');
+    width = 320; reportResize(field);
+    expect(tip()).toBeNull();
+    expect(textOverflows(field)).toBe(false);
+  });
+}
+
+it('keeps an automatically restored overflow hint quiet but still reveals the same value on later keyboard focus', () => {
+  const { element } = label(); install();
+  restoreFocusQuietly(element); expect(element).toHaveFocus(); expect(tip()).toBeNull();
+  element.blur(); element.focus(); expect(tip()).toHaveTextContent(overflowText(element));
 });

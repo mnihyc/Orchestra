@@ -5,7 +5,7 @@ import { marker, userMessage } from '../doubles/thread-rows.ts';
 import { ADA } from '../doubles/thread-scenes.ts';
 import { ACME, configureThread, emit, scenario, signIn } from './support.ts';
 import { asAdmin } from './admin-mode-support.ts';
-import { HISTORY_KEY, historyBuilds, historySetting, programExitProvider } from './agent-history-support.ts';
+import { HISTORY_BUILDS_PATH, HISTORY_KEY, historyBuilds, historySetting, programExitProvider } from './agent-history-support.ts';
 
 const BASELINE = process.env.ORCH_HISTORY_BASELINE_URL;
 const IDLE_MS = 60_000;
@@ -44,12 +44,12 @@ async function observe(browser: Browser, address: string, width: number, surface
     const writes = surface === 'setting' ? await historySetting(page) : [];
     if (surface === 'check') await historyBuilds(page);
     const provider = surface === 'provider' ? await programExitProvider() : undefined;
-    const path = surface === 'timeline' ? `/thread/${ACME.mainThread}` : surface === 'setting' ? '/org/acme.research/settings/policies' : surface === 'provider' && provider !== undefined ? provider.path : '/admin/harnesses';
+    const path = surface === 'timeline' ? `/thread/${ACME.mainThread}` : surface === 'setting' ? '/org/acme.research/settings/defaults' : surface === 'provider' && provider !== undefined ? provider.path : HISTORY_BUILDS_PATH;
     const ready = async () => {
       if (surface === 'timeline') await expect(page.locator('[data-item="existing-person"]')).toBeVisible();
       else if (surface === 'setting') await expect(page.locator(`[data-setting="${HISTORY_KEY}"]`).getByRole('spinbutton')).toHaveValue('7');
       else if (surface === 'provider') await expect(page.getByRole('tab', { name: english.providers.tabs.settings, exact: true })).toHaveAttribute('aria-selected', 'true');
-      else await expect(page.getByRole('button', { name: english.admin.harnesses.status.checked, exact: true }).first()).toBeVisible();
+      else await expect(page.getByRole('button', { name: new RegExp(english.agentHistory.nativeDelete) }).first()).toBeVisible();
       await settled(page);
     };
     await page.goto(path); await ready();
@@ -70,7 +70,7 @@ async function observe(browser: Browser, address: string, width: number, surface
       await field.fill('0'); await field.press('Control+Enter');
       await expect.poll(() => writes).toEqual([{ value: 0, expected_revision: 0 }]);
     } else if (surface === 'check') {
-      await page.getByRole('button', { name: english.admin.harnesses.status.checked, exact: true }).first().click();
+      await page.getByRole('button', { name: new RegExp(english.agentHistory.nativeDelete) }).first().click();
       await expect(page.getByRole('dialog', { name: english.admin.harnesses.checkResults, exact: true })).toBeVisible();
     } else {
       await page.getByRole('tab', { name: english.providers.tabs.overview, exact: true }).click();

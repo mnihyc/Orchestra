@@ -48,5 +48,11 @@ export const filesPanel = (page: Page) => page.getByTestId('files-panel');
 export const fileTree = (page: Page) => page.getByRole('tree', { name: /^Files of/ });
 export const row = (page: Page, name: string | RegExp) => fileTree(page).getByRole('treeitem', { name });
 
+/** Directory navigation belongs to the tree's native menu, beside its search control. */
+export async function chooseFileTreeAction(page: Page, name: string): Promise<void> {
+  await filesPanel(page).getByRole('button', { name: 'Menu of the tree', exact: true }).click();
+  await page.getByRole('menuitem', { name, exact: true }).click();
+}
+
 /** The editor of the file in front: its text, read from the page. */
 export const editor = (page: Page) => page.locator('.cm-content');

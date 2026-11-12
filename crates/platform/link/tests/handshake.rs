@@ -45,6 +45,8 @@ impl SessionAuthority for Registry {
             std::future::pending::<()>().await;
         }
         let refuse = |code| AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -60,6 +62,8 @@ impl SessionAuthority for Registry {
             return refuse(RejectCode::Revoked);
         }
         AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: known
                 .update_idle
@@ -125,6 +129,8 @@ fn fixture(silent: bool) -> Fixture {
 impl Fixture {
     fn client(&self, version: &str, key: Option<LeafKey>) -> ClientIdentity {
         ClientIdentity {
+            purpose: Default::default(),
+            gateway_id: None,
             hosted_endpoints: None,
             endpoints: None,
             machine_id: self.identity.machine_id,
@@ -155,6 +161,7 @@ impl Fixture {
                 ..PeerInfo::default()
             },
             PeerInfo {
+                purpose: Default::default(),
                 remote_ip: Some("192.0.2.7".parse().unwrap()),
                 host: Some(gateway_host.to_owned()),
                 client_certificate: shown,
@@ -216,6 +223,92 @@ async fn a_machine_known_by_its_certificate_gets_a_session_with_the_cursors_of_i
     assert_eq!(established.ready.limits, Limits::default());
     assert_eq!(accepted.fingerprint, f.identity.certificate.fingerprint());
     assert_eq!(accepted.remote_ip, Some("192.0.2.7".parse().unwrap()));
+}
+
+#[tokio::test]
+async fn a_selected_gateway_is_checked_before_machine_authentication() {
+    let f = fixture(false);
+    let mut client = f.client("0.1.0", None);
+    client.gateway_id = Some("another-gateway".into());
+    let (accepted, connected) = f.run(None, &client, &f.clock, (HOST, HOST)).await;
+    assert!(
+        accepted.is_err(),
+        "a different gateway must receive no machine authentication"
+    );
+    assert!(matches!(connected, Err(HandshakeError::Malformed(_))));
+}
+
+#[tokio::test]
+async fn an_old_gateway_gets_no_auxiliary_authentication() {
+    let f = fixture(false);
+    let mut identity = f.client("0.1.0", None);
+    identity.purpose = orch_link_contract::gateways::SessionPurpose::Tunnel;
+    let (machine, mut old_gateway) = f.pair(None, HOST, HOST);
+    let hello = orch_link_contract::session::Hello {
+        capabilities: Vec::new(),
+        protocol: orch_link_contract::version::ProtocolRange { min: 1, max: 1 },
+        nonce: orch_link_contract::session::encode_nonce(&[1; 32]),
+        server_time: f.clock.time(),
+        gateway_id: "gw".into(),
+        tls: orch_link_contract::session::TlsMode::Server,
+    };
+    old_gateway
+        .sink
+        .send(Message::Text(
+            frames::encode(&Frame::Hello(hello), 262_144).unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        connect(machine, &identity, &f.clock).await,
+        Err(HandshakeError::Malformed(_))
+    ));
+    assert_eq!(
+        old_gateway.source.recv().await.unwrap(),
+        None,
+        "no auth that an old gateway could mistake for a primary"
+    );
+}
+
+#[tokio::test]
+async fn an_auxiliary_has_a_separate_proof_domain_and_no_primary_receipts() {
+    let f = fixture(false);
+    let mut identity = f.client("0.1.0", None);
+    identity.purpose = orch_link_contract::gateways::SessionPurpose::Tunnel;
+    let (machine, mut gateway) = f.pair(None, HOST, HOST);
+    gateway.peer.purpose = orch_link_contract::gateways::SessionPurpose::Tunnel;
+    let (accepted, connected) = tokio::join!(
+        accept(gateway, &f.gateway, f.registry.as_ref(), &f.clock),
+        connect(machine, &identity, &f.clock),
+    );
+    let accepted = accepted.unwrap();
+    let connected = connected.unwrap();
+    assert_eq!(
+        accepted.auth.purpose,
+        orch_link_contract::gateways::SessionPurpose::Tunnel
+    );
+    assert!(accepted.session_token.is_empty());
+    assert!(accepted.cursors.is_empty());
+    assert!(connected.ready.session_token.is_empty());
+    assert!(connected.ready.cursors.is_empty());
+    assert!(connected.ready.endpoints.is_none());
+    assert!(connected.ready.gateways.is_empty());
+    let primary = orch_link_contract::session::auth_signing_input(
+        "nonce",
+        f.identity.machine_id,
+        HOST,
+        f.clock.time(),
+    );
+    let tunnel = orch_link_contract::session::auth_signing_input_for(
+        identity.purpose,
+        "nonce",
+        f.identity.machine_id,
+        HOST,
+        f.clock.time(),
+    );
+    assert_ne!(primary, tunnel);
+    accepted.sender.end();
+    connected.sender.end();
 }
 
 #[tokio::test]
@@ -291,6 +384,8 @@ async fn answer_hello(
 fn proof_auth(f: &Fixture, nonce: &str, sent_at: Time) -> Auth {
     let signed = auth_signing_input(nonce, f.identity.machine_id, HOST, sent_at);
     Auth {
+        purpose: Default::default(),
+        capabilities: Vec::new(),
         endpoints: None,
         hosted_endpoints: None,
         machine_id: f.identity.machine_id,

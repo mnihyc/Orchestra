@@ -47,7 +47,8 @@ export function Checkbox({ label, checked, onCheckedChange, disabled = false, na
         {...(descriptionId === undefined ? {} : { 'aria-describedby': descriptionId })}
         onCheckedChange={(value) => onCheckedChange(value === true)}
         className={cx(
-          'choice-toggle mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-sm border transition-colors',
+          // Centre on the inherited first line rather than assuming a fixed text size.
+          'choice-toggle mt-[calc((1lh_-_var(--spacing-4))_/_2)] inline-flex size-4 shrink-0 items-center justify-center rounded-sm border transition-colors',
           'border-control-border bg-surface',
           'data-[state=checked]:border-control-selected data-[state=checked]:bg-control-selected data-[state=checked]:text-control-on-selected',
           'data-[state=indeterminate]:border-control-selected data-[state=indeterminate]:bg-control-selected data-[state=indeterminate]:text-control-on-selected',

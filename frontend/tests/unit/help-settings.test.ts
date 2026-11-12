@@ -40,11 +40,11 @@ describe('settings and the decision guides', () => {
   it('links to the exact key at its visible source and makes no hidden-place link', () => {
     const source: SettingSource = { scope: 'project', node: { id: 'project-1', kind: 'project', name: 'Web', redacted: false } };
     const def = { key: 'requests.expiry_hours', class: 'policy' as const };
-    expect(sourceSettingHref(source, def)).toBe('/project/project-1/settings?section=policies&setting=requests.expiry_hours');
+    expect(sourceSettingHref(source, def)).toBe('/project/project-1/settings?section=defaults&setting=requests.expiry_hours');
     expect(sourceSettingHref({ ...source, node: { ...source.node!, redacted: true, name: null } }, def)).toBeNull();
     expect(sourceSettingHref({ scope: 'system', node: null }, def)).toBe('/admin/settings?setting=requests.expiry_hours');
     expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def)).toBeNull();
-    expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def, undefined, 'team/web')).toBe('/org/team%2Fweb/settings/policies?setting=requests.expiry_hours');
+    expect(sourceSettingHref({ scope: 'org', node: { ...source.node!, kind: 'org' } }, def, undefined, 'team/web')).toBe('/org/team%2Fweb/settings/defaults?setting=requests.expiry_hours');
     expect(sourceSettingHref({ scope: 'provider_own', node: null }, def, { kind: 'provider', id: 'provider-1' })).toBe('/resources/providers/provider-1?tab=settings&setting=requests.expiry_hours');
   });
 });

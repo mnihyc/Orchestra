@@ -11,14 +11,13 @@ import { Plugin, Selection } from '@tiptap/pm/state';
 import { Decoration, DecorationSet } from '@tiptap/pm/view';
 import { Dropcursor, Gapcursor, UndoRedo } from '@tiptap/extensions';
 import { EditorContent, useEditor } from '@tiptap/react';
-import { useInfiniteQuery } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X } from 'lucide-react';
 
 import { InlineAlert } from '@/ui/InlineAlert';
 
-import { convertText, documentsOfNodeQuery } from '@/api/documents';
+import { convertText } from '@/api/documents';
 import { documentReadersQuery } from '@/api/people';
 import { queryClient } from '@/api/query';
 import { buildTree } from '@/features/documents/blocks';
@@ -41,7 +40,7 @@ import {
   splitBlock,
   type Command,
 } from '@/features/documents/commands';
-import { Habits, SuggestMenu, Suggestions, sources } from '@/features/documents/BlockMenu';
+import { Habits, SuggestMenu, Suggestions } from '@/features/documents/BlockMenu';
 import { Hint } from '@/features/help/Hint';
 import { CodeColours } from '@/features/documents/codeColours';
 import { columnViews, KeepColumns } from '@/features/documents/Columns';
@@ -58,10 +57,14 @@ import { commentOnSelection, TextBar, linkFieldOf } from '@/features/documents/T
 import { togetherExtension } from '@/features/documents/Together';
 import type { Document, DocumentBlock } from '@/generated/api-types';
 import { documentStateNow, useDocumentState } from '@/realtime/stores/document';
-import { useOrgTree } from '@/realtime/stores/tree';
+import { referenceChoices, type ReferenceContext } from '@/features/documents/referenceChoices';
+
 import { ContextMenu } from '@/ui/ContextMenu';
 
 import './editor.css';
+
+/** The committed reader belongs to the live editor instance and retires with it. */
+const referenceContexts = new WeakMap<Editor, ReferenceContext>();
 
 /** How many blocks a page has before it is laid out where it is looked at, and not all at once. */
 const LARGE_PAGE = 300;
@@ -182,7 +185,8 @@ function LoadedEditor({ document: doc, editable, fixed, inspection = false, onRe
       UndoRedo,
       Dropcursor.configure({ width: 2, class: 'ProseMirror-dropcursor' }),
       Gapcursor,
-      Suggestions.configure({people:async (query, cursor) => await queryClient.query({...documentReadersQuery(doc.id,query,cursor),staleTime:0})}),
+      Suggestions.configure({ people: async (query, cursor) => await queryClient.query({ ...documentReadersQuery(doc.id, query, cursor), staleTime: 0 }),
+        places: (query, editor) => referenceChoices(() => referenceContexts.get(editor), query) }),
       Habits,
       PasteMarkdown.configure({ report: setPasteNotice, convert: (format, text) => convertText(doc.id, format, text) }),
       ...(inspection ? [] : [Keys]),
@@ -245,9 +249,13 @@ function LoadedEditor({ document: doc, editable, fixed, inspection = false, onRe
 function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, editor, pasteNotice, reportPaste, dismissPaste }: BlockEditorProps & {
   editor: Editor; pasteNotice: PasteNotice | null; reportPaste: (notice: PasteNotice | null) => void; dismissPaste: () => void;
 }) {
-  const shown = useViewShown();
   const marks = useDocumentMarksStore();
   const { t } = useTranslation();
+  const shown = useViewShown();
+  useLayoutEffect(() => {
+    referenceContexts.set(editor, { document: doc, enabled: editable && !inspection && shown });
+    return () => { referenceContexts.delete(editor); };
+  }, [editor, doc, editable, inspection, shown]);
   useEffect(() => bindEditorMarks(editor, marks), [editor, marks]);
 
   const fileInput = useRef<HTMLInputElement>(null);
@@ -266,7 +274,7 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
       handlePaste: (view, event) => {
         const files = event.clipboardData?.files;
         if (!view.editable || files === undefined || files.length === 0) return false;
-        event.preventDefault(); putFiles(files); return true;
+        event.preventDefault(); putFiles(Array.from(files)); return true;
       },
       handleDrop: (view, event) => {
         if (!view.editable || event.dataTransfer === null || !carriesFiles(event.dataTransfer) && !carriesReference(event.dataTransfer)) return false;
@@ -298,7 +306,6 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editor, doc.id, fixed]);
 
-  useSuggestSources(doc, editable && !inspection && shown);
 
   return (
     <div className="relative" data-document={doc.id}>
@@ -307,7 +314,7 @@ function ReadyEditor({ document: doc, editable, fixed, inspection, onReady, edit
         {pasteNotice.text}
       </InlineAlert>}
       {(editable || uploads.blocked || fileDrops.blocked) && <div className="mb-2 flex flex-col gap-2">
-        <input ref={fileInput} type="file" multiple hidden data-document-files aria-label={t('uploads.choose')} onChange={(event) => { if (event.target.files !== null) putFiles(event.target.files); event.target.value = ''; }} />
+        <input ref={fileInput} type="file" multiple hidden data-document-files aria-label={t('uploads.choose')} onChange={(event) => { if (event.target.files !== null) putFiles(Array.from(event.target.files)); event.target.value = ''; }} />
         {editable && <span className="inline-flex items-center gap-1"><AttachButton help="documents" label={t('documents.files.attachTo', { name: doc.title || t('documents.page.untitled') })} onPress={() => { if (fileInput.current !== null) { fileInput.current.accept = ''; fileInput.current.click(); } }} /><Hint id="people-mentions" popover /></span>}
         <UploadChips queue={uploads} />
         {fileDrops.progress}
@@ -367,21 +374,6 @@ function BelowTheLast({ editor }: { editor: Editor }) {
       }}
     />
   );
-}
-
-/** Tells the lists that open at the caret whom and what a line can name. */
-function useSuggestSources(doc: Document, enabled: boolean) {
-  const root = doc.path[0]?.id ?? null;
-  const tree = useOrgTree(root);
-  const documents = useInfiniteQuery({ ...documentsOfNodeQuery(doc.node.id, { under: true }), enabled: enabled && !doc.node.redacted });
-  useEffect(() => {
-    if (!enabled) return;
-    const nodes = [...tree.nodes.values()]
-      .filter((node) => !node.deleted && node.kind !== 'org')
-      .map((node) => ({ id: node.id, kind: 'node' as const, name: node.name, hint: node.kind, ...(node.kind === 'thread' ? { threadId: node.id } : {}) }));
-    const written = (documents.data?.pages.flatMap((page) => page.items) ?? []).filter((one) => one.id !== doc.id).map((one) => ({ id: one.id, kind: 'document' as const, name: one.title, hint: 'document' }));
-    sources.places = [...written, ...nodes];
-  }, [enabled, tree.nodes, documents.data, doc.id]);
 }
 
 export { askAddress, containerAt };
