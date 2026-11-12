@@ -66,12 +66,27 @@ pub fn text(status: StatusCode, message: &str) -> Response<Body> {
 /// What a session was given to reach other machines: the tickets that open its tunnels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Tickets {
+    /// Carrier plans beside the unchanged exec/llm/MCP signed strings.
+    pub routes: BTreeMap<String, orch_link_contract::gateways::TunnelPlan>,
+    /// Existing binding lifetimes retain/release the corresponding shared transports.
+    pub route_leases: BTreeMap<String, Arc<orch_link::gateways::TunnelLease>>,
     /// For the model calls of a forwarded session.
     pub llm: Option<String>,
     /// For the connection to the executor.
     pub exec: Option<String>,
     /// For each tool server of the environment, by name.
     pub mcp: BTreeMap<String, String>,
+}
+
+/// Atomic MCP replacement and rollback, including its adjacent carrier metadata.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct McpRoutes {
+    /// Signed strings keyed by the existing MCP server name.
+    pub tickets: BTreeMap<String, String>,
+    /// Frozen plans keyed by that same server name.
+    pub routes: BTreeMap<String, orch_link_contract::gateways::TunnelPlan>,
+    /// Shared lifetime for each server's plan.
+    pub leases: BTreeMap<String, Arc<orch_link::gateways::TunnelLease>>,
 }
 
 /// A session as the listener knows it.
@@ -270,10 +285,69 @@ impl Loopback {
         session_key: &str,
         tickets: BTreeMap<String, String>,
     ) -> Option<BTreeMap<String, String>> {
+        self.replace_mcp_routed(
+            session_key,
+            McpRoutes {
+                tickets,
+                ..McpRoutes::default()
+            },
+        )
+        .map(|previous| previous.tickets)
+    }
+
+    /// Replace signed tickets and plans together; in-flight callers retain their old binding.
+    pub fn replace_mcp_routed(
+        &self,
+        session_key: &str,
+        replacement: McpRoutes,
+    ) -> Option<McpRoutes> {
         let mut state = self.shared.state();
         let current = state.sessions.get(session_key)?.as_ref().clone();
         let mut changed = current;
-        let previous = std::mem::replace(&mut changed.tickets.mcp, tickets);
+        let previous_tickets = std::mem::replace(&mut changed.tickets.mcp, replacement.tickets);
+        let mut previous = McpRoutes {
+            tickets: previous_tickets,
+            ..McpRoutes::default()
+        };
+        let keys = changed
+            .tickets
+            .routes
+            .keys()
+            .filter_map(|key| key.strip_prefix("mcp/").map(str::to_owned))
+            .collect::<Vec<_>>();
+        for name in keys {
+            let key = format!("mcp/{name}");
+            if let Some(route) = changed.tickets.routes.remove(&key) {
+                previous.routes.insert(name.clone(), route);
+            }
+            if let Some(lease) = changed.tickets.route_leases.remove(&key) {
+                previous.leases.insert(name, lease);
+            }
+        }
+        changed.tickets.routes.extend(
+            replacement
+                .routes
+                .into_iter()
+                .map(|(name, route)| (format!("mcp/{name}"), route)),
+        );
+        changed.tickets.route_leases.extend(
+            replacement
+                .leases
+                .into_iter()
+                .map(|(name, lease)| (format!("mcp/{name}"), lease)),
+        );
+        state
+            .sessions
+            .insert(session_key.to_owned(), Arc::new(changed));
+        Some(previous)
+    }
+
+    /// Rotate the admitted model lease without changing the native process's addresses.
+    /// In-flight calls retain their captured binding until their response finishes.
+    pub fn replace_llm(&self, session_key: &str, ticket: Option<String>) -> Option<Option<String>> {
+        let mut state = self.shared.state();
+        let mut changed = state.sessions.get(session_key)?.as_ref().clone();
+        let previous = std::mem::replace(&mut changed.tickets.llm, ticket);
         state
             .sessions
             .insert(session_key.to_owned(), Arc::new(changed));

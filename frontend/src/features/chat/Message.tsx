@@ -6,6 +6,7 @@
  * right mouse button and on the keyboard's menu key. A group's events, a message being sent and one
  * that was not sent are drawn here too.
  */
+import { messageReferenceNumber } from '@/features/chat/messageReference';
 import { CornerUpLeft, EllipsisVertical, Pin, Reply } from 'lucide-react';
 import { memo, type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -96,6 +97,9 @@ export function messageEntries(
   }
   if (power.copy) entries.push({ id: 'copy-text', label: t('chat.actions.copyText'), onSelect: () => acts.copyText(message) });
   entries.push({ id: 'copy-link', label: t('chat.actions.copyLink'), onSelect: () => acts.copyLink(message) });
+  entries.push({ id: 'copy-reference', label: t('people.reference.copy'),
+    disabled: messageReferenceNumber(message) === null || acts.copyReference === undefined ? t('linkActions.referenceUnavailable') : false,
+    onSelect: () => acts.copyReference?.(message) });
   if (power.remove) {
     entries.push({ type: 'separator', id: 'before-delete' });
     entries.push({ id: 'delete', label: t('chat.actions.delete'), danger: true, onSelect: () => acts.remove(message) });
@@ -142,9 +146,9 @@ function Parts({ message }: { message: ChatMessage }): ReactNode {
           case 'pasted_text':
             return <AttachmentChips key={index} parts={[part]} readPaste={(paste) => readPastedText('chat', chat.id, paste)} />;
           case 'image':
-            return <ImageThumb key={index} chatId={chat.id} blob={part.blob} name={part.name} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
+            return <ImageThumb key={index} chatId={chat.id} messageId={message.id} blob={part.blob} name={part.name} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
           case 'attachment':
-            return <FileChip key={index} chatId={chat.id} blob={part.blob} name={part.name} size={part.size} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
+            return <FileChip key={index} chatId={chat.id} messageId={message.id} blob={part.blob} name={part.name} size={part.size} mediaType={part.media_type} owner={message.author ?? undefined} updatedAt={message.created_at} />;
           case 'item_ref':
             return <QuotedItem key={index} threadId={part.thread_id} itemId={part.item_id} />;
         }
@@ -222,7 +226,7 @@ export const Message = memo(function Message({ message, head }: MessageProps) {
 
   const author = message.author;
   const power = messagePowers(chat, message, me);
-  const entries = messageEntries(t as (key: string) => string, chat, message, me, acts);
+  const entries = messageEntries(t, chat, message, me, acts);
   const isEditing = editing === message.id;
   const picked = selection.has(message.id);
   const agent = author !== null && 'agent' in author ? author : null;
@@ -240,7 +244,7 @@ export const Message = memo(function Message({ message, head }: MessageProps) {
           if (selection.active && !(event.target as HTMLElement).closest('a,button')) selection.toggle(message.id, event.shiftKey);
         }}
         className={cx(
-          'group relative flex gap-3 px-4 py-1 transition-colors hover:bg-bg-subtle focus-within:bg-bg-subtle',
+          'group group/chat-message relative flex gap-3 px-4 py-1 transition-colors hover:bg-bg-subtle focus-within:bg-bg-subtle',
           head && 'mt-(--message-gap) first:mt-0',
           lit === message.id && 'bg-accent-subtle hover:bg-accent-subtle',
           picked && 'bg-accent-subtle hover:bg-accent-subtle',
@@ -267,7 +271,7 @@ export const Message = memo(function Message({ message, head }: MessageProps) {
               <AgentAvatar />
             ) : null
           ) : (
-            <span className="pt-1 text-xs whitespace-nowrap text-text-muted opacity-0 group-hover:opacity-100 group-focus-within:opacity-100" aria-hidden>
+            <span className="pt-1 text-xs whitespace-nowrap text-text-muted opacity-0 group-hover/chat-message:opacity-100 group-focus-within/chat-message:opacity-100" aria-hidden>
               {gutterTime(message.created_at, locale, timeZone)}
             </span>
           )}
@@ -292,10 +296,11 @@ export const Message = memo(function Message({ message, head }: MessageProps) {
             </span>
           )}
           {replied !== null && (
-            <div className="mb-1 flex min-h-(--control-sm) max-w-full items-center gap-1 border-l-2 border-border-strong pl-2 text-sm text-text-muted">
+            <div className={cx('mb-1 flex min-h-(--control-sm) max-w-full items-center gap-1 border-l-2 border-border-strong pl-2 text-sm text-text-muted',
+              !head && 'pr-[calc(3*var(--control-sm)+var(--spacing-3))]')}>
               <CornerUpLeft size={16} aria-hidden className="shrink-0" />
               {replied.author !== null && 'id' in replied.author && <UserChip user={replied.author} size={24} />}
-              <button type="button" onClick={() => acts.jump(replied.id)} aria-label={[t('chat.reply.open'), replied.author === null ? '' : 'id' in replied.author ? replied.author.display_name : replied.author.agent, replied.deleted ? t('chat.deleted') : mentionNames(replied.excerpt, people.values())].filter(Boolean).join(' · ')} className="focus-inset flex min-w-0 items-center gap-1 rounded-md text-left hover:text-text">
+              <button type="button" onClick={() => acts.jump(replied.id)} aria-label={[t('chat.reply.open'), replied.author === null ? '' : 'id' in replied.author ? replied.author.display_name : replied.author.agent, replied.deleted ? t('chat.deleted') : mentionNames(replied.excerpt, people.values())].filter(Boolean).join(' · ')} className="focus-inset flex min-w-(--control-sm) items-center gap-1 rounded-md text-left hover:text-text">
                 {replied.author !== null && 'agent' in replied.author && <span className="truncate font-medium">{`${replied.author.agent}${replied.author.thread.redacted || replied.author.thread.name === null ? '' : ` · ${replied.author.thread.name}`}`}</span>}
                 <span data-overflow-text={replied.deleted ? t('chat.deleted') : mentionNames(replied.excerpt, people.values())} className="truncate">{replied.deleted ? t('chat.deleted') : mentionNames(firstLine([{ type: 'text', text: replied.excerpt }], REPLY_EXCERPT_CHARS), people.values())}</span>
               </button>
@@ -324,7 +329,7 @@ export const Message = memo(function Message({ message, head }: MessageProps) {
           <div
             className={cx(
               'absolute -top-3 right-4 flex items-center rounded-md border border-border bg-surface-raised p-1 shadow-sm',
-              'opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100',
+              'pointer-events-none opacity-0 transition-opacity group-hover/chat-message:pointer-events-auto group-hover/chat-message:opacity-100 group-focus-within/chat-message:pointer-events-auto group-focus-within/chat-message:opacity-100',
             )}
           >
             {power.react && <ReactButton onPick={(emoji) => acts.react(message, emoji)} />}

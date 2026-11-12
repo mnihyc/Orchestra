@@ -53,7 +53,9 @@ for (const theme of ['light', 'dark'] as const) test(`unsent comments survive de
   await expect(field).toHaveValue('Unsent words stay with this document');
   await page.reload(); await expect(field).toHaveValue('Unsent words stay with this document');
   expect(await field.evaluate((element: HTMLTextAreaElement) => [element.selectionStart, element.selectionEnd, element.selectionDirection])).toEqual(selection);
-  await expect(page).toHaveURL(new RegExp(`/doc/${DOCS.plan}$`)); expect(writes).toEqual([]);
+  // Document History keeps its list choices in the address.
+  await expect(page).toHaveURL(new RegExp(`/doc/${DOCS.plan}(?:\\?(?:_list=true&list=[^&]*|list=[^&]*&_list=true))?$`));
+  expect(writes).toEqual([]);
   await page.screenshot({ path: info.outputPath(`comments-recovered-${theme}.png`), animations: 'disabled' });
   await comments(page).getByRole('button', { name: 'Send', exact: true }).click();
   await expect(comments(page).getByRole('region', { name: 'Discussion', exact: true })).toContainText('Unsent words stay with this document');

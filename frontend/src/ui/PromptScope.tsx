@@ -8,6 +8,55 @@ const usePrompts = create<Prompts>(() => ({ entries: [], version: 0 }));
 const Parent = createContext<string | null>(null);
 let nextOpening = 0;
 
+/** Radix owns modal visibility; its covered body surfaces must also reject native input. */
+const backgroundReaders = new WeakMap<Document, { users: number; dispose: () => void }>();
+function isolatePromptBackground(doc: Document): () => void {
+  const existing = backgroundReaders.get(doc);
+  if (existing !== undefined) {
+    existing.users += 1;
+    return () => releaseBackground(doc, existing);
+  }
+  const changed = new Map<HTMLElement, string | null>();
+  const refresh = () => {
+    const modal = usePrompts.getState().entries.some((entry) => entry.kind === 'prompt');
+    // With no prompt open and nothing to give back, a change of the page asks nothing of it.
+    if (!modal && changed.size === 0) return;
+    // Radix hides the body's other children, and inside them the siblings of what it keeps announced (every
+    // aria-live region of a form's fields): each covered part rejects input, not only the outermost ones.
+    const parts = modal ? new Set<Element>([...Array.from(doc.body.children), ...Array.from(doc.body.querySelectorAll('[data-aria-hidden="true"]'))]) : new Set<Element>();
+    for (const child of parts) {
+      if (!(child instanceof HTMLElement) || child.hasAttribute('data-radix-focus-guard')) continue;
+      const covered = modal && child.getAttribute('aria-hidden') === 'true';
+      if (covered && !changed.has(child) && !child.hasAttribute('inert')) {
+        changed.set(child, child.getAttribute('inert'));
+        child.setAttribute('inert', '');
+      }
+    }
+    for (const [child, original] of changed) if (!modal || !child.isConnected || child.getAttribute('aria-hidden') !== 'true') {
+      if (original === null) child.removeAttribute('inert'); else child.setAttribute('inert', original);
+      changed.delete(child);
+    }
+  };
+  const observer = new MutationObserver(refresh);
+  observer.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-hidden'] });
+  const unsubscribe = usePrompts.subscribe(refresh);
+  refresh();
+  const reader = { users: 1, dispose: () => {
+    observer.disconnect(); unsubscribe();
+    for (const [child, original] of changed) {
+      if (original === null) child.removeAttribute('inert'); else child.setAttribute('inert', original);
+    }
+  } };
+  backgroundReaders.set(doc, reader);
+  return () => releaseBackground(doc, reader);
+}
+
+function releaseBackground(doc: Document, reader: { users: number; dispose: () => void }) {
+  reader.users -= 1;
+  if (reader.users !== 0) return;
+  reader.dispose(); backgroundReaders.delete(doc);
+}
+
 function ancestor(id: string, entry: Entry, entries: readonly Entry[]): boolean {
   const seen = new Set<string>();
   let parent = entry.parent;
@@ -52,6 +101,7 @@ export function usePrompt(open: boolean, kind: Entry['kind'] = 'prompt', request
 }
 
 export function PromptScope({ layer, children }: { layer: ReturnType<typeof usePrompt>; children: ReactNode }) {
+  useLayoutEffect(() => isolatePromptBackground(document), []);
   return <Parent.Provider value={layer.owner}><Activity mode={layer.visible ? 'visible' : 'hidden'}>{children}</Activity></Parent.Provider>;
 }
 
@@ -87,6 +137,36 @@ export function useTransientLayer(supplied?: boolean, onChange?: (open: boolean)
 export function currentPrompt(): HTMLElement | null {
   return Array.from(document.querySelectorAll<HTMLElement>('[data-prompt-current="true"]')).find((element) =>
     element.isConnected && element.closest('[style*="display: none"], [hidden], [inert], [aria-hidden="true"]') === null && getComputedStyle(element).visibility !== 'hidden') ?? null;
+}
+
+/** Where each open prompt will give the keyboard back, by prompt: the holders register as the prompt is drawn. */
+const returnTargets = new Map<string, { current: Element | null }>();
+
+/** Registers where a prompt gives the keyboard back; what it returns unregisters it. */
+export function registerReturnTarget(id: string, target: { current: Element | null }): () => void {
+  returnTargets.set(id, target);
+  return () => { if (returnTargets.get(id) === target) returnTargets.delete(id); };
+}
+
+/**
+ * A menu whose choice opened a form cannot take the keyboard back to its button: the form covers the
+ * page, so the button cannot hold it. The oldest open form which does not hold the button and has no
+ * lasting place to return to (it began at the menu's retired entry) gives the keyboard back there when
+ * it closes; a second form opened meanwhile has its own place already. Returns whether one took it.
+ */
+export function handReturnTargetToPrompt(trigger: HTMLElement): boolean {
+  for (const entry of usePrompts.getState().entries) {
+    const held = entry.kind === 'prompt' ? returnTargets.get(entry.id) : undefined;
+    if (held === undefined) continue;
+    const content = Array.from(document.querySelectorAll('[data-prompt-id]')).find((element) => element.getAttribute('data-prompt-id') === entry.id);
+    if (content === undefined || content.contains(trigger)) continue;
+    const remembered = held.current;
+    const lasting = remembered !== null && remembered.isConnected && remembered !== document.body && remembered.closest('[role="menu"]') === null;
+    if (lasting) continue;
+    held.current = trigger;
+    return true;
+  }
+  return false;
 }
 
 export function restorePromptFocus(element: HTMLElement): boolean {

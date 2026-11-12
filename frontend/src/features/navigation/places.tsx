@@ -15,6 +15,9 @@ import { type ComponentProps, type ReactNode, useMemo } from 'react';
 
 import type { Favorite, Node, NodeKind, NodeRef, TopicStatus, TreeNode, UserRef } from '@/generated/api-types';
 import { type OrgTree, pathTo, useTreeStore } from '@/realtime/stores/tree';
+import { useNameTrees } from '@/features/navigation/placeLabels';
+
+import { linkTo } from '@/lib/links';
 
 import { ACTIONS } from '@/ui/actions';
 
@@ -79,27 +82,10 @@ export function kindWord(place: Pick<PlaceRef, 'kind' | 'folder'>): KindWord {
 
 /** Where a place's screen is, as a path inside the application. */
 export function placePath(place: Pick<PlaceRef, 'id' | 'kind'>): string {
-  switch (place.kind) {
-    case 'org':
-      return `/org/${place.id}`;
-    case 'project':
-      return `/project/${place.id}`;
-    case 'topic':
-      return `/topic/${place.id}`;
-    case 'thread':
-      return `/thread/${place.id}`;
-  }
+  return new URL(linkTo(place)).pathname;
 }
 
-/** The full address of a place's screen, for a link that is passed on. */
-export function placeUrl(place: Pick<PlaceRef, 'id' | 'kind'>): string {
-  return new URL(placePath(place), location.origin).href;
-}
-
-/**
- * The glyph of each kind of place, bare: a folder has the folder, and a project a glyph of its own that is no folder.
- * Where a place's icon is drawn it is `NodeIcon`, which gives the glyph its colour; this is for what takes a glyph alone.
- */
+/** Glyphs for each place kind; NodeIcon adds the place's own colour. */
 export const PLACE_ICONS: Record<KindWord, LucideIcon> = {
   org: ACTIONS.openOrg.Icon,
   project: ACTIONS.openProject.Icon,
@@ -108,8 +94,8 @@ export const PLACE_ICONS: Record<KindWord, LucideIcon> = {
   thread: ACTIONS.openThread.Icon,
 };
 
-/** Where a document's page is, as a path inside the application. */
-export const documentPath = (id: string): string => `/doc/${id}`;
+/** The screen address is shared with copied links. */
+export const documentPath = (id: string): string => new URL(linkTo({ kind: 'document', id })).pathname;
 
 /** A document as the left bar's menus and dialogs need it, whatever named it: a row of the tree, or a name the person went to lately. */
 export interface DocPlace {
@@ -298,7 +284,7 @@ export interface PlaceLookup {
 
 /** Reads folders and places on the way from the trees that are held, for texts that name a place by its id alone. */
 export function usePlaceLookup(): PlaceLookup {
-  const byOrg = useTreeStore((state) => state.byOrg);
+  const byOrg = useNameTrees();
   return useMemo(() => {
     const rowOf = (id: string): { row: TreeNode; tree: OrgTree } | null => {
       for (const tree of byOrg.values()) {

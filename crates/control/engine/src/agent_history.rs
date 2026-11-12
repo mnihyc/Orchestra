@@ -52,7 +52,7 @@ pub fn idle_due(last_turn: DateTime<Utc>, now: DateTime<Utc>, days: i64) -> bool
 impl Engine {
     /// Schedules one cache worker; a full pass also covers every pending close observation.
     pub(crate) fn schedule_agent_history(&self, full: bool) {
-        if self.is_stopped() {
+        if self.is_stopped() || !self.inner.config.agent_history_sweeps {
             return;
         }
         let mut memory = lock(&self.inner.agent_history);
@@ -363,10 +363,14 @@ impl Engine {
                 let Some(_) = threads::lock(&mut tx, row.thread_id).await? else {
                     continue;
                 };
-                let days = setting::<i64>(
-                    &mut tx,
-                    Place::Node(row.thread_id),
-                    keys::RETENTION_AGENT_HISTORY_IDLE_DAYS,
+                // A recently deleted thread keeps its place's retention policy until purge.
+                let days = orch_db::queries::trace::read_scope(
+                    &[row.thread_id],
+                    setting::<i64>(
+                        &mut tx,
+                        Place::Node(row.thread_id),
+                        keys::RETENTION_AGENT_HISTORY_IDLE_DAYS,
+                    ),
                 )
                 .await?
                 .unwrap_or(DEFAULT_IDLE_DAYS);
@@ -560,15 +564,19 @@ impl Engine {
                             .name
                     })
                     .unwrap_or_else(|| "Agent".into());
-                Self::agent_history_marker(
-                    &mut unit,
-                    row.thread_id,
-                    row.id,
-                    current.as_ref(),
-                    row.id,
-                    &program,
-                    None,
-                    &format!("history-removed:{command}"),
+                // This retained lifecycle line keeps the exact thread's redaction settings.
+                orch_db::queries::trace::read_scope(
+                    &[row.thread_id],
+                    Self::agent_history_marker(
+                        &mut unit,
+                        row.thread_id,
+                        row.id,
+                        current.as_ref(),
+                        row.id,
+                        &program,
+                        None,
+                        &format!("history-removed:{command}"),
+                    ),
                 )
                 .await?;
             }

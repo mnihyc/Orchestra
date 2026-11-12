@@ -10,10 +10,14 @@ import { ThreadStatusParts } from '@/features/workbench/StatusParts';
 import { useWorkbench } from '@/features/workbench/store';
 import { makeGroup } from '@/features/workbench/layout';
 import { contentThreadRead } from '@/realtime/threadScope';
-import type { Thread } from '@/generated/api-types';
+import type { CapStatus, Thread } from '@/generated/api-types';
+import { placeLimitsQuery } from '@/api/usage';
+import { capTitle } from '@/features/usage/words';
+import { i18n, setLocale } from '@/i18n';
 import { threadWriter } from '@/realtime/stores/thread';
 import { ACME } from '../doubles/fixtures';
 import { World } from '../doubles/world';
+import { choiceCap } from '../unit/resource-facts-fixtures';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ read: vi.fn((): Promise<never> => Promise.reject(new Error('A closed panel must not read'))) }));
@@ -48,7 +52,39 @@ vi.mock('@/api/terminals', async (load) => {
   return { ...actual, shellsQuery: (...args: Parameters<typeof Terminals.shellsQuery>) => ({ ...actual.shellsQuery(...args), queryFn: calls.read }) };
 });
 
-afterEach(() => { threadWriter.evict(ACME.mainThread); threadWriter.evict(read); useWorkbench.setState(previousWorkbench); calls.read.mockClear(); vi.useRealTimers(); });
+afterEach(async () => { threadWriter.evict(ACME.mainThread); threadWriter.evict(read); useWorkbench.setState(previousWorkbench); calls.read.mockClear(); vi.useRealTimers(); await setLocale('en'); });
+
+function showBlockedStatus(blocked: Thread['blocked'], caps: CapStatus[] = []) {
+  const world = new World(), person = world.people.get('ada'), row = world.places.rowOf(ACME.mainThread);
+  if (person === undefined || row === undefined) throw new Error('The status fixture needs its native thread');
+  native = { ...world.threads.thread(person, row), state: 'blocked', blocked };
+  threadWriter.reset(read, { thread: native }, false);
+  useWorkbench.setState({ layout: { ...useWorkbench.getState().layout, main: makeGroup([{ id: owner, view: 'page', of: { href: `/thread/${native.id}` } }]) }, activeContent: owner });
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryData(placeLimitsQuery(native.id).queryKey, { caps });
+  return show(<QueryClientProvider client={cache}><ThreadStatusParts /></QueryClientProvider>);
+}
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it.each([null, 'The vendor asks us to wait for the weekly reset'])('keeps a provider limit distinct from a cap without cap facts in '+locale+' (%s)', async (detail) => {
+    await setLocale(locale);
+    showBlockedStatus({ reason: 'provider_exhausted', detail });
+    const title = i18n.t('workbench.status.providerLimit');
+    expect(screen.getByRole('button', { name: detail === null ? title : `${title} · ${detail}` })).toBeVisible();
+    expect(screen.queryByText(i18n.t('workbench.status.limitReached', { name: i18n.t('providerPlan.limits') }), { exact: true })).not.toBeInTheDocument();
+    expect(calls.read).not.toHaveBeenCalled();
+  });
+
+  it.each(['warning', 'reached'] as const)('uses the measured cap name and %s state when the server supplies it in '+locale, async (state) => {
+    await setLocale(locale);
+    const cap = choiceCap({ state });
+    showBlockedStatus({ reason: 'provider_exhausted', detail: 'Vendor notice' }, [cap]);
+    const label = i18n.t(state === 'reached' ? 'workbench.status.limitReached' : 'workbench.status.limitNear', { name: capTitle(cap.cap, i18n.t) });
+    expect(screen.getByRole('button', { name: label })).toBeVisible();
+    expect(screen.queryByText(i18n.t('workbench.status.providerLimit'), { exact: true })).not.toBeInTheDocument();
+    expect(calls.read).not.toHaveBeenCalled();
+  });
+}
 
 it('renders the native environment without fetching hidden limits, health, Git, changes or terminals, even after invalidation and idle', async () => {
   const world = new World(), person = world.people.get('ada'), row = world.places.rowOf(ACME.mainThread);

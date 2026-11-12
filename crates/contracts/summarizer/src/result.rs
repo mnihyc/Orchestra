@@ -88,6 +88,23 @@ impl SummaryResult {
     ) -> Conformed {
         let usage = self.usage;
         match field {
+            SummaryField::Summary => {
+                let paragraph = self
+                    .text
+                    .as_deref()
+                    .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|text| !text.is_empty())
+                    .map(|text| cut(&text, limits.max_chars).trim_end().to_owned())
+                    .filter(|text| !text.is_empty());
+                Conformed {
+                    discarded: paragraph.is_none(),
+                    result: SummaryResult {
+                        text: paragraph,
+                        tags: None,
+                        usage,
+                    },
+                }
+            }
             SummaryField::Title | SummaryField::Description | SummaryField::Rollup => {
                 let line = self
                     .text
@@ -159,6 +176,32 @@ mod tests {
     use super::*;
     use crate::summarizer::{DESCRIPTION_MAX_CHARS, TITLE_MAX_CHARS};
     use serde_json::json;
+
+    #[test]
+    fn a_summary_is_one_paragraph_and_its_requested_size_can_exceed_the_default() {
+        let text = format!("{}\n\nNext step.", "Reviewed work. ".repeat(60));
+        let limits = SummaryLimits {
+            max_chars: 1200,
+            max_tags: 0,
+        };
+        let made = SummaryResult::text(&text).conform(SummaryField::Summary, &limits, &[]);
+        let paragraph = made.result.text.unwrap();
+        assert!(!made.discarded && !paragraph.contains('\n'));
+        assert!(
+            paragraph.chars().count() > usize::try_from(crate::summarizer::SUMMARY_CHARS).unwrap()
+        );
+        assert!(paragraph.ends_with("Next step."));
+        let smaller = SummaryResult::text(&paragraph).conform(
+            SummaryField::Summary,
+            &SummaryLimits {
+                max_chars: 24,
+                max_tags: 0,
+            },
+            &[],
+        );
+        let kept = smaller.result.text.unwrap();
+        assert!(!kept.is_empty() && kept.chars().count() <= 24);
+    }
 
     fn limits(field: SummaryField) -> SummaryLimits {
         SummaryLimits::for_field(field, 3)

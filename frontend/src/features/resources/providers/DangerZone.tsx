@@ -50,7 +50,7 @@ export function DisableProviderDialog({ provider, open, onClose }: { provider: P
       disabled={impact.isPending||impact.isError}
       onConfirm={() => disable.mutate()}
     >
-      <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={note} onChange={(event)=>setNote(event.target.value)} disabled={disable.isPending} /><ArticleGuideLink article="pause-and-switch" heading="disable" title={t('resourceImpact.guide')} /></div>
+      <div className="flex flex-col gap-3">{impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="disable" />}<Input label={t('resourceImpact.note')} optional value={note} onChange={(event)=>setNote(event.target.value)} disabled={disable.isPending} /><ArticleGuideLink article="pause-and-switch" heading="disable" title={t('resourceImpact.guide')} /></div>
     </ConfirmDialog>
   );
 }
@@ -81,7 +81,7 @@ export function DeleteProviderDialog({ provider, open, onClose, afterDelete }: {
       onConfirm={() => remove.mutate()}
     >
       <span className="flex flex-col gap-2">
-        {impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="delete" />}
+        {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind="delete" />}
         <span>{t('resourceImpact.deleteKeeps')}</span>
         <span>{provider.kind === 'subscription' ? t('providers.danger.deleteToken') : t('providers.danger.deleteKey')}</span>
         <Button variant="ghost" size="sm" onClick={()=>{onClose();openChange({kind:'provider',id:provider.id,name:provider.name},{kind:'switch'});}}>{t('resourceImpact.switchFirst')}</Button>

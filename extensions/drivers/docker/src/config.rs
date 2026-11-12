@@ -51,7 +51,7 @@ pub const DEFAULT_GIT_SCHEMES: [&str; 3] = ["https", "http", "git"];
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 // SHA-256 image content IDs have 256 bits written in hexadecimal.
-const IMAGE_DIGEST_HEX_BYTES: usize = 64;
+pub(crate) const IMAGE_DIGEST_HEX_BYTES: usize = 64;
 
 fn default_socket() -> String {
     DEFAULT_SOCKET.to_owned()
@@ -242,6 +242,12 @@ fn default_network_prefix() -> u8 {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EgressConfig {
+    /// The trusted node's parent HTTP proxy for restricted connections; no template may choose it.
+    #[serde(default)]
+    pub parent_proxy: Option<String>,
+    /// The node's configured Orch transport used by the same parent reachability probe.
+    #[serde(default)]
+    pub parent_probe: Option<String>,
     /// The operator's trusted sidecar image. Never taken from a runtime's requested image; none refuses restriction.
     #[serde(default)]
     pub proxy_image: Option<String>,

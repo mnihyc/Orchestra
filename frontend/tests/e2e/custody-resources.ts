@@ -1,7 +1,8 @@
 /** Real resource pages share one bounded fixture for their lifecycle confirmations. */
 import tokenDensity from '../../../crates/control/engine/data/token-density.json' with {type:'json'};
 import { expect, type Page } from '@playwright/test';
-import type { Agent, Environment, FactTarget, Provider, ProviderModel } from '../../src/generated/api-types';
+import type { Agent, Environment, FactTarget, HiddenItem, Provider, ProviderModel } from '../../src/generated/api-types';
+import { resourceRows } from '../../src/api/listed';
 
 export type Kind = 'provider' | 'model' | 'agent' | 'environment';
 export interface Fixture {
@@ -33,7 +34,7 @@ export async function resourceFixture(page: Page, kind: Kind, headers: Record<st
   }
   if (kind === 'agent') {
     const listed=await page.request.get('/api/v1/agents',{headers});expect(listed.ok()).toBe(true);
-    const base=(await listed.json() as {items:Agent[]}).items.find((row)=>row.access.permissions.includes('agent.manage'));
+    const base=resourceRows<Agent>(await listed.json() as (Agent|HiddenItem)[]).find((row)=>row.access.permissions.includes('agent.manage'));
     if(base===undefined)throw new Error('The disposable person needs a profile they manage');
     const full=await page.request.get(`/api/v1/agents/${base.id}`,{headers});expect(full.ok()).toBe(true);
     let row={...await full.json() as Agent,disabled:!available};
@@ -41,7 +42,7 @@ export async function resourceFixture(page: Page, kind: Kind, headers: Record<st
       mutation:`/api/v1/agents/${row.id}`,method:'PATCH',body:{expected_revision:row.revision,disabled:false},read:()=>row,enable:()=>{row={...row,disabled:false,revision:row.revision+1};}};
   }
   const listed=await page.request.get('/api/v1/environments',{headers});expect(listed.ok()).toBe(true);
-  const base=(await listed.json() as {items:Environment[]}).items.find((row)=>row.access.permissions.includes('environment.manage'));
+  const base=resourceRows<Environment>(await listed.json() as (Environment|HiddenItem)[]).find((row)=>row.access.permissions.includes('environment.manage'));
   if(base===undefined)throw new Error('The disposable person needs an environment they manage');
   const full=await page.request.get(`/api/v1/environments/${base.id}`,{headers});expect(full.ok()).toBe(true);
   let row:Environment={...await full.json() as Environment,status:available?'stopped':'disabled'};
@@ -68,7 +69,9 @@ export async function resourceLive(page:Page,source:Fixture) {
     return Object.fromEntries(Object.entries(row).map(([key,next])=>[key,mirror(next)]));
   };
   const list=source.resourcePath.slice(0,source.resourcePath.lastIndexOf('/'));
-  for(const route of [/\/api\/v1\/orgs\/[^/]+\/tree(?:\?|$)/u,new RegExp(`${list}(?:\\?|$)`,'u')]){
+  const reads = [/\/api\/v1\/orgs\/[^/]+\/tree(?:\?|$)/u, new RegExp(`${list}(?:\\?|$)`,'u')];
+  if (source.target.object.kind === 'environment') reads.push(new RegExp(`${source.resourcePath}/sync(?:\\?|$)`,'u'));
+  for(const route of reads){
     await page.route(route,async(intercept)=>{
       const response=await intercept.fetch();
       if(!response.ok()){await intercept.fulfill({response});return;}

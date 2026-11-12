@@ -18,11 +18,11 @@ use orch_agent_contract::session::SessionMode;
 use orch_types::new_id;
 use serde_json::json;
 
-fn completed(events: &[SessionEvent]) -> BTreeMap<String, serde_json::Value> {
+fn native_completed(events: &[SessionEvent]) -> BTreeMap<String, serde_json::Value> {
     events
         .iter()
         .filter_map(|event| match event {
-            SessionEvent::ItemCompleted(done) => {
+            SessionEvent::ItemCompleted(done) if done.payload["marker"] != "harness_changed" => {
                 Some((done.native_ref.clone(), done.payload.clone()))
             }
             _ => None,
@@ -69,12 +69,22 @@ async fn re_reading_the_transcript_gives_back_the_items_and_the_turns_that_were_
             _ => None,
         })
         .expect("the live second turn reports its use");
-    let mut lived = completed(&live);
-    lived.extend(completed(&second));
+    // Live observations belong to Orch's history; the program's own transcript stores its
+    // messages and tool results. Pending live observations may also arrive alongside resync.
+    let mut lived = native_completed(&live);
+    lived.extend(native_completed(&second));
 
     let items = rig.adapter.resync_session(rig.thread).await.unwrap();
     let replayed = rig.drain(500).await;
-    let again = completed(&replayed);
+    let again = native_completed(&replayed);
+    assert!(
+        live.iter()
+            .chain(&second)
+            .chain(&replayed)
+            .any(|event| matches!(event,SessionEvent::ItemCompleted(item)
+                if item.payload["marker"]=="harness_changed")),
+        "live native observations remain present independently of the program's transcript"
+    );
     assert_eq!(u32::try_from(again.len()).unwrap(), items);
     assert_eq!(
         again.keys().collect::<Vec<_>>(),
@@ -192,7 +202,7 @@ async fn the_servers_the_homes_own_configuration_names_are_listed_and_read_with_
         json!({
             "mcpServers": { "docs": { "command": "npx", "args": ["-y", "docs-server"],
                                       "env": { "DOCS_TOKEN": "s3cr3t-value", "MODE": "fast" } } },
-            "projects": { directory.clone(): { "mcpServers": { "remote": { "type": "http", "url": "https://mcp.example.test/mcp" } } } }
+            "projects": { directory.clone(): { "mcpServers": { "remote": { "type": "http", "url": "https://mcp.example.test/mcp", "headers":{"Authorization":"Bearer header-private-value","X-Workspace":"${WORKSPACE:-default}"} } } } }
         })
         .to_string(),
     )
@@ -224,7 +234,9 @@ async fn the_servers_the_homes_own_configuration_names_are_listed_and_read_with_
     );
     let listed = serde_json::to_string(&found).unwrap();
     assert!(
-        !listed.contains("s3cr3t-value") && !listed.contains("npx"),
+        !listed.contains("s3cr3t-value")
+            && !listed.contains("header-private-value")
+            && !listed.contains("npx"),
         "the list reveals no definition"
     );
 
@@ -241,10 +253,52 @@ async fn the_servers_the_homes_own_configuration_names_are_listed_and_read_with_
         .unwrap();
     assert_eq!(definition.spec.secret_env, ["DOCS_TOKEN"]);
     assert_eq!(definition.secrets["DOCS_TOKEN"].expose(), "s3cr3t-value");
+    assert_eq!(
+        found
+            .iter()
+            .find(|server| server.name == "docs")
+            .unwrap()
+            .digest,
+        definition.imported(None).digest
+    );
     assert!(
         !serde_json::to_string(&definition.spec)
             .unwrap()
             .contains("s3cr3t-value")
     );
+    let remote = rig
+        .adapter
+        .read_mcp(McpImportRequest {
+            server_id: new_id(),
+            source: "claude-code".into(),
+            scope: McpScope::Directory,
+            name: "remote".into(),
+            directory: Some(directory),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        found
+            .iter()
+            .find(|server| server.name == "remote")
+            .unwrap()
+            .digest,
+        remote.imported(None).digest
+    );
+    let credentials = remote.http_credentials.as_ref().unwrap();
+    assert_eq!(
+        credentials.headers["Authorization"].expose(),
+        "Bearer header-private-value"
+    );
+    assert_eq!(
+        credentials.headers["X-Workspace"].expose(),
+        "${WORKSPACE:-default}"
+    );
+    assert!(
+        !serde_json::to_string(&remote.imported(None))
+            .unwrap()
+            .contains("header-private-value")
+    );
+    assert!(!format!("{remote:?}").contains("header-private-value"));
     rig.adapter.stop().await.unwrap();
 }

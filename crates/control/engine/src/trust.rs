@@ -152,7 +152,7 @@ pub(crate) async fn ask(
 impl Engine {
     /// Whether a caller may answer for the workspace's own configuration of an environment: a person, never an
     /// agent or a service, who holds Manage on the environment.
-    async fn may_answer(
+    pub async fn may_answer_config_trust(
         &self,
         conn: &mut Conn,
         principal: &Principal,
@@ -196,17 +196,32 @@ impl Engine {
     /// open with another answer are opened anew at their next turn. A harness nobody was asked about is not found.
     pub async fn set_config_trust_guarded(
         &self,
-        mut tx: orch_db::Tx,
+        tx: orch_db::Tx,
         principal: Principal,
         environment: Id,
         harness_kind: &str,
         answer: ConfigTrustAnswer,
     ) -> Result<(), ApprovalError> {
+        self.set_config_trust_fenced(tx, principal, environment, harness_kind, answer, || Ok(()))
+            .await
+    }
+
+    /// The same native trust writer with the transport's opaque once-only first-effect check.
+    /// Its caller serializes the Environment before its final current-authority checkpoint.
+    pub async fn set_config_trust_fenced(
+        &self,
+        mut tx: orch_db::Tx,
+        principal: Principal,
+        environment: Id,
+        harness_kind: &str,
+        answer: ConfigTrustAnswer,
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<(), ApprovalError> {
         let now = principal.now().get();
         let by = principal.caller().user();
         let word = answer_word(answer);
         let (finished, reopen) = {
-            let mut unit = Unit::new(&mut tx, now);
+            let mut unit = Unit::with_first_effect(&mut tx, now, before_effect);
             if orch_db::queries::environments::thread_engine::environment(
                 &mut *unit.conn,
                 environment,
@@ -218,16 +233,26 @@ impl Engine {
                 return Err(ApprovalError::NotFound);
             }
             if let Err(refusal) = self
-                .may_answer(&mut *unit.conn, &principal, environment)
+                .may_answer_config_trust(&mut *unit.conn, &principal, environment)
                 .await?
             {
                 return Err(ApprovalError::Denied(refusal));
             }
-            let Some(before) =
-                rows::answer(&mut *unit.conn, environment, harness_kind, word, by, now).await?
+            let Some(before) = rows::of_harness(&mut *unit.conn, environment, harness_kind).await?
             else {
                 return Err(ApprovalError::NotFound);
             };
+            unit.before_effect()?;
+            rows::write_answer(
+                &mut *unit.conn,
+                environment,
+                harness_kind,
+                word,
+                by,
+                now,
+                &before,
+            )
+            .await?;
             let mut entry = Entry::new(
                 Actor::User(by),
                 AuditAction::ApprovalDecided.as_str(),

@@ -37,7 +37,10 @@ for (const width of [400, 768, 1100, 1440]) {
           expect(Math.abs(await tab.evaluate((node) => node.getBoundingClientRect().height) - ordinaryHeight)).toBeLessThanOrEqual(1);
         }
         await expect(page).toHaveURL(/range=7d/);
-        await expect(page.getByRole('radio', { name: '7 days', exact: true })).toHaveAttribute('aria-checked', 'true');
+        // The same period choice uses a combobox when its pane has less room.
+        const span = page.getByRole('combobox', { name: 'Span', exact: true });
+        if (await span.isVisible()) await expect(span).toHaveText('7 days');
+        else await expect(page.getByRole('radio', { name: '7 days', exact: true })).toHaveAttribute('aria-checked', 'true');
         await expect(page.getByText('Days use UTC',{exact:true})).toHaveCount(1);
         await expect(page.getByRole('button', { name: 'Speed, first output and errors', exact: true })).toHaveCount(1);
         await expect(page.getByText(/^Seen by /)).toHaveCount(0);

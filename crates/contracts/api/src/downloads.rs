@@ -8,6 +8,8 @@
 //! connector carries its version and its BLAKE3 hash in two headers, which
 //! the installers compare with the manifest.
 
+use crate::operations::OperationSpec as Op;
+
 use crate::routes::Access::Public;
 
 /// The operating systems a connector is built for, as the `{os}` of its path.
@@ -21,17 +23,23 @@ pub const BLAKE3_HEADER: &str = "x-orch-blake3";
 
 crate::endpoints! {
     /// Serves the connector binary for an operating system and a processor, with its version and its BLAKE3 hash in headers.
-    DownloadConnectorGet: GET "/downloads/connector/{os}/{arch}", Public, none, none, raw, 200;
+    DownloadConnectorGet: GET "/downloads/connector/{os}/{arch}", Public, none, none, raw, 200,
+        operation Op::public();
     /// Serves the POSIX installer.
-    DownloadInstallShGet: GET "/downloads/install.sh", Public, none, none, raw, 200;
+    DownloadInstallShGet: GET "/downloads/install.sh", Public, none, none, raw, 200,
+        operation Op::public();
     /// Serves the PowerShell installer.
-    DownloadInstallPs1Get: GET "/downloads/install.ps1", Public, none, none, raw, 200;
+    DownloadInstallPs1Get: GET "/downloads/install.ps1", Public, none, none, raw, 200,
+        operation Op::public();
     /// Serves the installer of a host's node, which a host's enrollment command runs.
-    DownloadInstallNodeShGet: GET "/downloads/install-node.sh", Public, none, none, raw, 200;
+    DownloadInstallNodeShGet: GET "/downloads/install-node.sh", Public, none, none, raw, 200,
+        operation Op::public();
     /// Serves the node of a host, built for Linux, for a processor, with its version and its BLAKE3 hash in headers.
-    DownloadNodeGet: GET "/downloads/node/{arch}", Public, none, none, raw, 200;
+    DownloadNodeGet: GET "/downloads/node/{arch}", Public, none, none, raw, 200,
+        operation Op::public();
     /// Serves the release manifest, as the release wrote it.
-    DownloadVersionGet: GET "/downloads/version.json", Public, none, none, raw, 200;
+    DownloadVersionGet: GET "/downloads/version.json", Public, none, none, raw, 200,
+        operation Op::public();
 }
 
 #[cfg(test)]

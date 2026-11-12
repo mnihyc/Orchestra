@@ -19,6 +19,8 @@ import { useSocketStatus } from '@/realtime/live';
 import { Banner } from '@/ui/Banner';
 import { Button } from '@/ui/Button';
 import { useFrameReady } from '@/shell/FrameReadiness';
+import { AdminExitNotice } from '@/shell/AdminExitNotice';
+import { useViewChoice } from '@/lib/viewChoices';
 
 /** Whether the connection has been gone for longer than a moment. */
 function useLongLost(lostAt: number | null): boolean {
@@ -45,13 +47,15 @@ export function Banners() {
   const me = useQuery({ ...meQuery, enabled: ready }).data;
   const setupNeeded = me !== undefined && me.second_step_required && !me.totp_enabled && !me.email_code_second_step;
   const requiring = (me?.second_step_sources ?? []).map((source) => (typeof source === 'string' ? t('secondStep.system') : (source.name ?? t('secondStep.system')))).join(', ');
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  const noticeKey = notice === null ? null : `${notice.level}:${notice.text}`;
+  // A notice has no separate id: its complete server payload identifies this exact announcement.
+  const noticeKey = notice === null ? '' : JSON.stringify([notice.level, notice.text, notice.until]);
+  const [dismissed, setDismissed] = useViewChoice<boolean>('global', 'system-notice-dismissed', false, noticeKey);
 
   return (
     <>
-      {notice !== null && noticeKey !== dismissed && (
-        <Banner tone={notice.level} onDismiss={() => setDismissed(noticeKey)}>
+      <AdminExitNotice />
+      {notice !== null && !dismissed && (
+        <Banner tone={notice.level} onDismiss={() => setDismissed(true)}>
           {notice.text}
         </Banner>
       )}

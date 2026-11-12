@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Navigation and tabs
 screens: /org/$slug, /project/$projectId, /topic/$topicId, /thread/$threadId, /doc/$documentId, /everything, /workbench
 keywords: navigation, tree, recent, opened, active, Everything, sidebar, bars, tabs, pin, layout, density, compact
+summary: Use Tree, Recent and Everything, then arrange bars and keep useful tabs pinned.
 ---
 
 # Navigation and tabs

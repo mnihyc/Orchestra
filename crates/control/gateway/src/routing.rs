@@ -21,6 +21,12 @@ use std::sync::atomic::Ordering;
 pub(crate) fn from_machine(gateway: &Gateway, machine: Id, session: Id, frame: Frame) {
     match frame {
         frame @ (Frame::Ev(_)
+        | Frame::TunnelRouteAsk(_)
+        | Frame::TunnelPrepareAsk(_)
+        | Frame::TunnelAttachResult(_)
+        | Frame::TunnelRelease(_)
+        | Frame::TunnelSelected(_)
+        | Frame::TunnelFailed(_)
         | Frame::Evb(_)
         | Frame::Eph(_)
         | Frame::Reset(_)
@@ -31,6 +37,7 @@ pub(crate) fn from_machine(gateway: &Gateway, machine: Id, session: Id, frame: F
         | Frame::PortConnectionsReply(_)) => {
             if let Ok(frame) = UpFrame::try_from(frame) {
                 gateway.inner.backplane.send(BackplaneFrame::Up(Up {
+                    purpose: orch_link_contract::gateways::SessionPurpose::Primary,
                     machine_id: machine,
                     session_id: session,
                     frame,
@@ -73,7 +80,7 @@ pub(crate) fn data_from_machine(gateway: &Gateway, machine: Id, session: Id, dat
 /// A frame the system sent for a machine. A machine that has no session here
 /// is not told: the system sends again when it has.
 pub(crate) fn to_machine(gateway: &Gateway, down: Down) {
-    let Some(sender) = gateway.inner.sessions.sender_of(down.machine_id) else {
+    let Some(sender) = gateway.inner.sessions.primary_sender_of(down.machine_id) else {
         return;
     };
     let _ = sender.send(Frame::from(down.frame));

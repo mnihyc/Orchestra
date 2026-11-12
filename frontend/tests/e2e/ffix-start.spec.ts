@@ -1,16 +1,42 @@
 /** Starting work as one act: typing in a topic or a project where the defaults are whole, what is said and asked where one is missing, a harness that has not reported yet, and the dialog for whoever wants to choose, where what is shown as chosen is what is sent and a way that cannot be had is shown off with the server's reason. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { RUNS_ON } from '../doubles/fixtures.ts';
+import { id, KIND, RUNS_ON } from '../doubles/fixtures.ts';
 import { agentMessage } from '../doubles/thread-rows.ts';
-import { ACME, deny, emit, PEOPLE, scenario, signIn } from './support.ts';
+import type { BindingOptions, Place, PlaceHost } from '../../src/generated/api-types';
+import { tabTo } from './change-support';
+import { DOUBLE, ACME, deny, emit, PEOPLE, scenario, signIn } from './support.ts';
 import { agentReports, bareEnvironment, mayNotMake, openedThread, requests, requestsOf, serveOptions, setDefaults, starter, starterBox, startDialog } from './start-support.ts';
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }) => {
   await scenario();
+  // The minimal binding double omits hosts. Reuse this reader's native placement judgements.
+  await page.route('**/api/v1/nodes/*/binding/options**', async (route) => {
+    const response = await route.fetch();
+    if (!response.ok()) { await route.fulfill({ response }); return; }
+    const options = await response.json() as BindingOptions;
+    if (options.can_create.allowed && options.hosts.length === 0) {
+      const node = /\/nodes\/([^/]+)\/binding\/options/.exec(new URL(route.request().url()).pathname)?.[1];
+      if (node === undefined) throw new Error('The native binding place is required');
+      const placements = await route.fetch({ url: new URL(`/api/v1/nodes/${node}/places`, route.request().url()).href });
+      expect(placements.ok()).toBe(true);
+      const hosts = (await placements.json() as Place[]).filter((place): place is PlaceHost => !('environment' in place) && 'host' in place && place.usable);
+      await route.fulfill({ response, json: { ...options, hosts } });
+    } else await route.fulfill({ response, json: options });
+  });
 });
 
 const MODEL = 'gpt-5.4';
+
+async function expectStartSummary(page: Page, environment: string, effort = 'High'): Promise<void> {
+  const values = { agent: 'Codex', provider: 'OpenAI key', model: 'GPT-5.4', effort, environment };
+  // The starter now names each chosen value beside its origin instead of combining them into prose.
+  for (const [field, name] of Object.entries(values)) {
+    if (field === 'environment' && environment === 'a new environment') {
+      await expect(starter(page).getByRole('listitem').filter({ hasText: /^in a new environment$/ })).toBeVisible();
+    } else await expect(starter(page).locator(`[data-runs-on] [data-start-value="${field}"]`).getByText(name, { exact: true })).toBeVisible();
+  }
+}
 
 /** Opens the dialog that makes a thread, from the button of the topic's threads. */
 async function openDialog(page: Page, person: { login: string; password: string } = PEOPLE.ada): Promise<void> {
@@ -28,7 +54,7 @@ test('typing in a topic whose defaults are whole starts a thread with one Enter,
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
   // The line under the box says what will happen.
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in Workspace')).toBeVisible();
+  await expectStartSummary(page, 'Workspace');
 
   const text = 'Why does the login page send people to the wrong place?';
   await starterBox(page).fill(text);
@@ -61,7 +87,7 @@ test('a topic starter remembers its successful environment without changing the 
   await page.getByTestId('main').getByRole('button', { name: 'New topic', exact: true }).click();
   await page.getByRole('dialog', { name: 'New topic in Web' }).getByRole('button', { name: 'Create topic', exact: true }).click();
   await expect(page).toHaveURL(/\/topic\//);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in a new environment')).toBeVisible();
+  await expectStartSummary(page, 'a new environment');
 
   await starterBox(page).fill('Move the session cookie into its own module');
   await starterBox(page).press('Enter');
@@ -82,7 +108,7 @@ test('a topic starter remembers its successful environment without changing the 
 
   // This person's last successful setup can reuse its environment; the topic default remains untouched.
   await page.goto(`/topic/${topic}`);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (High), in Main')).toBeVisible();
+  await expectStartSummary(page, 'Main');
   await starterBox(page).fill('And the same for the logout page');
   await starterBox(page).press('Enter');
   expect(await openedThread(page)).not.toBe(first);
@@ -104,7 +130,7 @@ test('the project header makes a topic and its thread dialog keeps the first mes
   await dialog.getByRole('button', { name: 'Options', exact: true }).click();
   await expect(dialog.getByRole('textbox', { name: 'First message' })).toHaveValue('Look at the cookie handling');
   // Where the topic has no environment yet, a new one is what is ticked, as the place's own rule says.
-  await expect(dialog.getByRole('combobox', { name: 'Where it runs' })).toContainText('New');
+  await expect(dialog.getByRole('radio', { name: 'Create new', exact: true })).toBeChecked();
   await dialog.getByRole('button', { name: 'Create thread' }).click();
   await openedThread(page);
   const steps = (await requests())
@@ -120,7 +146,7 @@ test('a second topic started in a project is not refused for the name its enviro
     await page.goto(`/project/${ACME.web}`);
     await page.getByTestId('main').getByRole('button', { name: 'New topic', exact: true }).click();
     await page.getByRole('dialog', { name: 'New topic in Web' }).getByRole('button', { name: 'Create topic', exact: true }).click();
-    await expect(starter(page).getByText('in a new environment')).toBeVisible();
+    await expectStartSummary(page, 'a new environment');
     await starterBox(page).fill(text);
     await starterBox(page).press('Enter');
     await openedThread(page);
@@ -186,6 +212,14 @@ test('a successful custom setup is remembered after a reload without writing pla
 });
 
 test('a person who cannot set place defaults can still start with one Enter and reuse their environment', async ({ page }) => {
+  const login = await fetch(`${DOUBLE}/api/v1/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(PEOPLE.dora) });
+  expect(login.ok).toBe(true);
+  const { access_token: token } = await login.json() as { access_token: string };
+  const made = await fetch(`${DOUBLE}/api/v1/environments`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ name: 'Main', home_node_id: ACME.idleStop, template_id: RUNS_ON.defaultTemplate, host_id: id(KIND.host, 1) }) });
+  expect(made.ok).toBe(true);
+  const own = await made.json() as { id: string };
+  await setDefaults(ACME.idleStop, { 'env.default_id': own.id, 'env.thread_default': 'shared' });
+  const prepared = (await requestsOf('POST', /\/environments$/)).length;
   await deny('dora', ['topic.manage']);
   await signIn(page, PEOPLE.dora);
   await page.goto(`/topic/${ACME.idleStop}`);
@@ -200,7 +234,9 @@ test('a person who cannot set place defaults can still start with one Enter and 
   await openedThread(page);
   expect(await requestsOf('PUT', /\/settings\//)).toHaveLength(0);
   expect(await requestsOf('PUT', /\/default-environment$/)).toHaveLength(0);
-  expect(await requestsOf('POST', /\/environments$/)).toHaveLength(0);
+  // Only the fixture's owned environment was made; both starts reuse it.
+  expect(await requestsOf('POST', /\/environments$/)).toHaveLength(prepared);
+  for (const request of await requestsOf('POST', /\/topics\/[^/]+\/threads$/)) expect(request.body).toMatchObject({ environment: { use: own.id } });
 });
 
 test('where no harness has reported what it can do, the starter says so, offers nothing that cannot run, and comes alive when the report arrives', async ({ page }) => {
@@ -210,7 +246,7 @@ test('where no harness has reported what it can do, the starter says so, offers 
   await signIn(page);
   await page.goto(`/topic/${ACME.idleStop}`);
   const panel = starter(page).getByRole('group', { name: 'What is missing' });
-  await expect(panel).toContainText('The machine has not reported what Codex can do yet.');
+  await expect(panel).toContainText('Codex has not reported its capabilities');
   // Nothing that could not run is offered: no choice to make, and sending waits.
   await expect(panel.getByRole('combobox')).toHaveCount(0);
   await starterBox(page).fill('Look at the idle stop');
@@ -231,7 +267,7 @@ test('where no harness has reported what it can do, the starter says so, offers 
   // The machine reports once, and the starter comes alive by itself.
   await agentReports('Codex', true);
   await expect(starter(page).locator('[data-missing-default]')).toHaveCount(0);
-  await expect(starter(page).getByText('Codex on OpenAI key, GPT-5.4 (Medium), in a new environment')).toBeVisible();
+  await expectStartSummary(page, 'a new environment', 'Medium');
   await expect(starterBox(page)).toHaveValue('Look at the idle stop');
   await starterBox(page).press('Enter');
   await openedThread(page);
@@ -243,13 +279,13 @@ test('a profile that has not reported is waited for, and one that has is offered
   await signIn(page);
   await page.goto(`/topic/${ACME.idleStop}`);
   const panel = starter(page).getByRole('group', { name: 'What is missing' });
-  await expect(panel).toContainText('The machine has not reported what Codex can do yet.');
+  await expect(panel).toContainText('Codex has not reported its capabilities');
   // What can run is offered, and what cannot is not among it.
   await panel.getByRole('combobox', { name: 'Agent' }).click();
   await expect(page.getByRole('option', { name: 'Scripted agent', exact: true })).toBeVisible();
   await expect(page.getByRole('option', { name: 'Codex', exact: true })).toHaveCount(0);
   await page.getByRole('option', { name: 'Scripted agent', exact: true }).click();
-  await expect(starter(page).getByText(/^Scripted agent on OpenAI key, GPT-5\.4/)).toBeVisible();
+  for (const [field, name] of Object.entries({ agent: 'Scripted agent', provider: 'OpenAI key', model: 'GPT-5.4' })) await expect(starter(page).locator(`[data-start-value="${field}"]`).getByText(name, { exact: true })).toBeVisible();
 });
 
 test('the dialog shows as chosen what the server would take, and sends it', async ({ page }) => {
@@ -260,7 +296,7 @@ test('the dialog shows as chosen what the server would take, and sends it', asyn
   const rows = arrangements(page).getByRole('radio');
   await expect(rows.nth(0)).toHaveAccessibleName(/Forward model calls/);
   await expect(rows.nth(0)).toBeChecked();
-  await expect(arrangements(page).getByText('Default')).toHaveCount(1);
+  // Compact arrangements no longer carry a Default badge; checked state and the admitted value prove the default.
   await expect(rows.nth(1)).toHaveAccessibleName(/Run with provider/);
 
   await startDialog(page).getByRole('button', { name: 'Create thread' }).click();
@@ -302,12 +338,14 @@ test('a way that cannot be had is off with the server’s reason, and a refusal 
   await openDialog(page);
   const shared = arrangements(page).getByRole('radio', { name: /Copy sign-in access/ });
   await expect(shared).toBeDisabled();
-  await expect(arrangements(page).getByText('Ada Lovelace does not allow this provider to be used this way.')).toBeVisible();
+  await shared.hover();
+  await expect(page.getByRole('tooltip')).toContainText('Ada Lovelace does not allow this provider to be used this way.');
+  await page.mouse.move(0, 0);
 
   // A model that the provider lists and the person may not use is there too, off, with why.
   await startDialog(page).getByRole('combobox', { name: 'Model' }).click();
   const closedModel = page.getByRole('option', { name: 'GPT-4.1', exact: true });
-  await expect(closedModel).toHaveAttribute('data-disabled', '');
+  await expect(closedModel).toBeDisabled();
   await expect(closedModel).toContainText('it is switched off');
   await page.keyboard.press('Escape');
 
@@ -331,8 +369,8 @@ test('a new environment is made from the dialog, chosen, and the thread is start
   // A host that takes none from the template is there and cannot be chosen, with why.
   await make.getByRole('combobox', { name: 'Host' }).click();
   const closed = page.getByRole('option', { name: /build-host/ });
-  await expect(closed).toHaveAttribute('data-disabled', '');
-  await expect(closed).toContainText('takes no new environments');
+  await expect(closed).toBeDisabled();
+  await expect(closed).toContainText('Not accepting new units');
   await page.keyboard.press('Escape');
 
   await make.getByRole('textbox', { name: 'Name' }).fill('Scratch');
@@ -340,7 +378,7 @@ test('a new environment is made from the dialog, chosen, and the thread is start
   // Back in the dialog that started it, with the new environment chosen.
   await expect(make).toBeHidden();
   const made = startDialog(page).getByRole('combobox', { name: 'Where it runs' });
-  await expect(made).toContainText('Scratch');
+  await expect(made).toHaveValue('Scratch');
   expect(((await requestsOf('POST', /\/environments$/))[0]?.body as { home_node_id?: string }).home_node_id).toBe(ACME.fixLogin);
 
   await startDialog(page).getByRole('button', { name: 'Create thread' }).click();
@@ -353,7 +391,7 @@ test('a new environment is made from the dialog, chosen, and the thread is start
 test('a new environment that cannot be made says why and keeps the dialog as it was, and one that is cancelled changes nothing', async ({ page }) => {
   await openDialog(page);
   const chosen = startDialog(page).getByRole('combobox', { name: 'Where it runs' });
-  await expect(chosen).toContainText('Workspace');
+  await expect(chosen).toHaveValue('Workspace');
 
   await startDialog(page).getByRole('button', { name: 'New environment…' }).click();
   const make = page.getByRole('dialog', { name: 'Add environment' });
@@ -365,7 +403,7 @@ test('a new environment that cannot be made says why and keeps the dialog as it 
 
   await make.getByRole('button', { name: 'Cancel' }).click();
   await expect(make).toBeHidden();
-  await expect(chosen).toContainText('Workspace');
+  await expect(chosen).toHaveValue('Workspace');
   await chosen.click();
   await expect(page.getByRole('option', { name: /Workspace/ })).toHaveCount(1);
   await page.keyboard.press('Escape');
@@ -377,7 +415,7 @@ test('where a person may not make an environment the dialog does not offer one, 
   await expect(startDialog(page).getByRole('button', { name: 'New environment…' })).toHaveCount(0);
   await expect(startDialog(page).getByRole('combobox', { name: 'Where it runs' })).toHaveCount(0);
   await expect(page.getByRole('option', { name: 'New', exact: true })).toHaveCount(0);
-  await startDialog(page).getByText('You may not make an environment here').click();
+  await startDialog(page).locator('summary').filter({ hasText: /^You may not make an environment here$/ }).click();
   await expect(startDialog(page).getByRole('button', { name: /Send|Request/ })).toBeVisible();
 });
 
@@ -395,7 +433,7 @@ test('the starter and the dialog are used by keyboard alone', async ({ page }) =
   // The way on to the dialog is two Tabs away, and Escape gives the keyboard back to where it came from.
   await page.keyboard.press('Tab');
   await expect(starter(page).getByRole('button', { name: 'Start thread' })).toBeFocused();
-  await page.keyboard.press('Tab');
+  await tabTo(page, 'Thread setup');
   const change = starter(page).getByRole('button', { name: 'Thread setup' });
   await expect(change).toBeFocused();
   await page.keyboard.press('Enter');
@@ -421,7 +459,7 @@ test('the starter and the dialog are used by keyboard alone', async ({ page }) =
   await page.keyboard.press('ArrowDown', { delay: 80 });
   await expect(arrangements(page).getByRole('radio', { name: /Forward model calls/ })).toBeChecked();
   const create = dialog.getByRole('button', { name: 'Create thread' });
-  for (let presses = 0; presses < 60 && !(await create.evaluate((element) => element === document.activeElement)); presses += 1) await page.keyboard.press('Tab');
+  await tabTo(page, 'Create thread');
   await expect(create).toBeFocused();
   await page.keyboard.press('Enter');
   await openedThread(page);
