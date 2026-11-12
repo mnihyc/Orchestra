@@ -1,5 +1,11 @@
 # Web application
 
+Translation keys are checked before `tsc`: `npm run typecheck` runs [build/check-translation-keys.ts](build/check-translation-keys.ts), then the ordinary compiler. The gate parses authored source without a TypeScript program, rejects missing English or Chinese literals (including `<Trans>`, `defaultValue` and finite local key choices), and prints each dynamic template family. A family must match at least one catalogue key through all its fixed parts. Comments and unrelated strings do not count. `TranslationKey` still checks authored metadata against a finite key union; i18next's per-call resources stay untyped so every call does not instantiate the full catalogue.
+
+The Node project also checks browser helpers imported by Playwright. Its roots include the browser app's router registration and local declarations, and its libraries include `DOM.Iterable`. Keep those roots when changing the tooling configuration so route definitions and browser APIs retain the same types as the app project.
+
+The deciding missing-key canaries and scoped development-bundle rules are in [translation-keys.test.ts](tests/unit/translation-keys.test.ts). Existing catalogue parity, placeholder, nested-alias and native-registry tests remain required. Server/plugin keys retain their existing guarded runtime fallback and finite registry controls.
+
 The lint rule in [build/utility-classes.ts](build/utility-classes.ts) reads the application's
 actual stylesheet with its installed Tailwind design system. A static utility candidate that
 produces no CSS fails lint; semantic marker classes remain allowed. The explicit spacing scale

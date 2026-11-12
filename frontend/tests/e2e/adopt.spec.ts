@@ -19,7 +19,8 @@ async function openSessions(page: Page) {
 test('a session is adopted after its plan is read, and its row then leads to the thread with its history', async ({ page }) => {
   const sessions = await openSessions(page);
   await expect(sessions.getByText('Fix the login button')).toBeVisible();
-  await expect(sessions.getByText('/home/ada/work/main/web')).toBeVisible();
+  // A long path is shortened to its last parts, with the whole one copied by its button.
+  await expect(sessions.getByText('…/main/web')).toBeVisible();
   await sessions.getByRole('button', { name: 'Adopt “Fix the login button”…' }).click();
 
   const dialog = page.getByRole('dialog');
@@ -48,6 +49,6 @@ test('a session whose folder none of the person’s environments holds names the
   await dialog.getByRole('combobox', { name: 'Topic' }).fill('Fix login');
   await page.getByRole('option', { name: /Fix login/ }).first().click();
   await expect(dialog.getByText('None of your environments on that machine holds /srv/other.')).toBeVisible();
-  await expect(dialog.getByText(/The harness does not say which model/)).toBeVisible();
+  await expect(dialog.getByText(/has not reported the session’s model/)).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Adopt', exact: true })).toBeDisabled();
 });

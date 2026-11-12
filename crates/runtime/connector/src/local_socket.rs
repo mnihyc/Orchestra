@@ -41,6 +41,13 @@ const ACTIVITY_KEPT: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
+    /// Labelled primary choices and their latest verified measurements.
+    Gateways,
+    /// The local operator explicitly selected a primary and requests reconnect.
+    SelectGateway {
+        /// Exact local choice; advertisements cannot submit this operation.
+        choice: orch_link_contract::gateways::GatewayChoice,
+    },
     /// Adopts a same-machine replacement identity after its token has been checked and files saved.
     ReloadIdentity,
     /// The session and who this machine is.
@@ -57,10 +64,13 @@ pub enum Request {
         from: Option<String>,
         /// The console's selected place; the command uses the name and harness alone.
         place: Option<String>,
+        /// An explicit valid resource name; the original native name is retained as origin.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        as_name: Option<String>,
     },
-    /// Deletes the copy of the tool server called `name`, from the harness `from` where several have one.
+    /// Forgets the recorded imported resource and its copy, using the current machine owner's authority.
     McpForget {
-        /// The server's name in the harness's configuration.
+        /// Its resource alias, original configured name, or exact identifier.
         name: String,
         /// The harness kind.
         from: Option<String>,
@@ -134,6 +144,15 @@ pub struct ActivityRow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 pub enum Reply {
+    /// Installation metadata and local primary choice, with no credential material.
+    Gateways {
+        /// Current local choice.
+        choice: orch_link_contract::gateways::GatewayChoice,
+        /// The actual standing primary, if connected.
+        gateway_id: Option<String>,
+        /// Automatic plus operator-advertised logical gateways.
+        options: Vec<crate::gateway_selector::GatewayOption>,
+    },
     /// The session.
     Status(Status),
     /// The environments.
@@ -290,6 +309,8 @@ pub struct LocalState {
 impl LocalState {
     async fn answer(&self, request: Request) -> Reply {
         match request {
+            Request::Gateways => self.gateways(),
+            Request::SelectGateway { choice } => self.select_gateway(choice),
             Request::ReloadIdentity => self.reload_identity(),
             Request::Status => Reply::Status(self.status()),
             Request::Environments => Reply::Environments {
@@ -311,13 +332,85 @@ impl LocalState {
             Request::McpList => Reply::Mcp {
                 servers: self.servers().await,
             },
-            Request::McpImport { name, from, place } => {
-                self.import(&name, from.as_deref(), place.as_deref()).await
+            Request::McpImport {
+                name,
+                from,
+                place,
+                as_name,
+            } => {
+                self.import(&name, from.as_deref(), place.as_deref(), as_name)
+                    .await
             }
             Request::McpForget { name, from } => self.forget(&name, from.as_deref()).await,
             Request::Activity { limit } => Reply::Activity {
                 rows: self.activity.latest(limit.unwrap_or(ACTIVITY_KEPT)),
             },
+        }
+    }
+
+    fn gateways(&self) -> Reply {
+        let result = (|| -> Result<_, crate::enrollment::EnrollError> {
+            let data = DataDir::open(&self.data_dir)?;
+            let choice = data.config(|_| None)?.connector.gateway;
+            let record = data.record()?;
+            let measured = self.link.gateway_measurements();
+            let measurements = if measured.is_empty() {
+                &record.gateway_measurements
+            } else {
+                &measured
+            };
+            let mut options = crate::gateway_selector::options(&record.gateways, measurements);
+            crate::gateway_selector::retain_current(&mut options, &choice);
+            Ok((choice, options))
+        })();
+        match result {
+            Ok((choice, options)) => Reply::Gateways {
+                choice,
+                gateway_id: self.link.gateway_id(),
+                options,
+            },
+            Err(error) => Reply::Error {
+                message: error.to_string(),
+            },
+        }
+    }
+
+    fn select_gateway(&self, choice: orch_link_contract::gateways::GatewayChoice) -> Reply {
+        use orch_config::loader::Validate as _;
+        let result = (|| -> Result<bool, String> {
+            let data = DataDir::open(&self.data_dir).map_err(|error| error.to_string())?;
+            let mut config = data.config(|_| None).map_err(|error| error.to_string())?;
+            let current = config.connector.gateway.clone();
+            if choice == current {
+                return Ok(false);
+            }
+            config.connector.gateway = choice.clone();
+            config.validate().map_err(|error| error.to_string())?;
+            if choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
+                && choice != current
+            {
+                let record = data.record().map_err(|error| error.to_string())?;
+                if !record
+                    .gateways
+                    .iter()
+                    .any(|gateway| Some(gateway.id.as_str()) == choice.gateway_id.as_deref())
+                {
+                    return Err("the selected gateway is no longer advertised".into());
+                }
+            }
+            data.update_config(|config| config.connector.gateway = choice.clone())
+                .map_err(|error| error.to_string())?;
+            self.link.select_gateway(choice);
+            Ok(true)
+        })();
+        match result {
+            Ok(true) => Reply::Done {
+                said: "Primary gateway choice saved; reconnecting.".into(),
+            },
+            Ok(false) => Reply::Done {
+                said: "Primary gateway choice unchanged.".into(),
+            },
+            Err(message) => Reply::Error { message },
         }
     }
 
@@ -423,7 +516,13 @@ impl LocalState {
             .collect()
     }
 
-    async fn import(&self, name: &str, from: Option<&str>, place: Option<&str>) -> Reply {
+    async fn import(
+        &self,
+        name: &str,
+        from: Option<&str>,
+        place: Option<&str>,
+        as_name: Option<String>,
+    ) -> Reply {
         let Some(role) = &self.environments else {
             return Reply::Error {
                 message:
@@ -468,6 +567,7 @@ impl LocalState {
                 }
             },
             directory: found.directory,
+            as_name,
         };
         match self.link.import_mcp(request).await {
             Ok(answer) if answer.code.is_none() && answer.server_id.is_some() => Reply::Done {
@@ -487,42 +587,27 @@ impl LocalState {
     }
 
     async fn forget(&self, name: &str, from: Option<&str>) -> Reply {
-        let Some(role) = &self.environments else {
-            return Reply::Error {
-                message: "this machine plays no environment role, so it keeps no tool servers"
-                    .to_owned(),
-            };
+        let request = orch_link_contract::mcp_import::McpForgetAsk {
+            request_id: orch_types::new_id(),
+            forget: orch_link_contract::mcp_import::McpForgetSelection {
+                name: name.to_owned(),
+                from: from.map(str::to_owned),
+            },
         };
-        let roots: Vec<String> = role
-            .host()
-            .environments()
-            .iter()
-            .map(|environment| environment.facts().workspace_root)
-            .collect();
-        let found: Vec<_> = role
-            .imports()
-            .found(&roots)
-            .await
-            .into_iter()
-            .filter(|found| found.name == name && from.is_none_or(|from| found.source == from))
-            .collect();
-        let copies = copies(&self.data_dir);
-        let mut forgotten = 0;
-        for server in &found {
-            for (id, digest) in &copies {
-                if *digest == server.digest && role.host().mcp_forget(*id).is_ok() {
-                    forgotten += 1;
-                }
-            }
-        }
-        if forgotten == 0 {
-            Reply::Error {
-                message: format!("no copy of a tool server called {name} is kept here"),
-            }
-        } else {
-            Reply::Done {
-                said: format!("The copy of {name} is forgotten; Orch no longer starts it here."),
-            }
+        match self.link.import_mcp(request).await {
+            Ok(answer) if answer.code.is_none() && answer.server_id.is_some() => Reply::Done {
+                said: answer.detail,
+            },
+            Ok(answer) => Reply::Error {
+                message: format!(
+                    "{}: {}",
+                    answer.code.as_deref().unwrap_or("unconfirmed"),
+                    answer.detail
+                ),
+            },
+            Err(error) => Reply::Error {
+                message: error.to_string(),
+            },
         }
     }
 }
@@ -715,7 +800,10 @@ where
 
 /// Asks the connector running on `data_dir` one thing.
 pub async fn ask(data_dir: &Path, request: &Request) -> Result<Reply, LocalError> {
-    let limit = if matches!(request, Request::McpImport { .. }) {
+    let limit = if matches!(
+        request,
+        Request::McpImport { .. } | Request::McpForget { .. }
+    ) {
         Duration::from_secs(orch_link_contract::mcp_import::ANSWER_WITHIN_SECS) + ANSWER_LIMIT
     } else {
         ANSWER_LIMIT
@@ -826,6 +914,21 @@ mod tests {
 
     #[test]
     fn requests_and_answers_are_one_line_of_json_each() {
+        let older: Request = serde_json::from_str(
+            r#"{"op":"mcp_import","name":"native:name","from":null,"place":null}"#,
+        )
+        .unwrap();
+        assert!(matches!(older, Request::McpImport { as_name: None, .. }));
+        let named = Request::McpImport {
+            name: "native:name".into(),
+            from: None,
+            place: None,
+            as_name: Some("valid-name".into()),
+        };
+        assert_eq!(
+            serde_json::from_str::<Request>(&serde_json::to_string(&named).unwrap()).unwrap(),
+            named
+        );
         let request = Request::McpForget {
             name: "files".to_owned(),
             from: Some("codex".to_owned()),

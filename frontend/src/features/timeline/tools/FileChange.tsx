@@ -12,18 +12,21 @@ import type { FileChange, Item } from '@/generated/api-types';
 import { useTimelineContext } from '@/features/timeline/context';
 import { useRecordedItem } from '@/features/timeline/historical';
 import { FileLink, FilePathAttachment } from '@/features/files/FileLink';
-import { DiffView } from '@/ui/DiffView';
+import { DiffView, type DiffViewProps } from '@/ui/DiffView';
+import { ReviewableDiff } from '@/features/source/Review';
 
 const ICONS = { add: FilePlus, modify: FilePen, delete: FileMinus, rename: FileSymlink } as const;
 
 /** The changes of one step, one difference after the other. `writing`: the step is still under way. */
-export function FileChanges({ changes, writing = false, showCounts = true, showHeadings = true }: { changes: readonly FileChange[]; writing?: boolean; showCounts?: boolean; showHeadings?: boolean }) {
+export function FileChanges({ changes, writing = false, showCounts = true, showHeadings = true, itemId }: { changes: readonly FileChange[]; writing?: boolean; showCounts?: boolean; showHeadings?: boolean; itemId?: string }) {
   const { t } = useTranslation();
-  const { layout, setLayout } = useTimelineContext();
+  const { threadId, layout, setLayout, inspection, readOnly, canInteract } = useTimelineContext();
   return (
     <div className="flex flex-col gap-3">
       {changes.map((change, index) => {
         const Icon = ICONS[change.change];
+        const props: DiffViewProps = { diff: change.diff, change: change.change, binary: change.binary, truncated: change.truncated, writing,
+          layout, onLayout: setLayout, label: t('timeline.change.label', { path: change.path }), showCounts, showToolbar: showHeadings };
         return (
           <section key={`${change.path}.${index}`} aria-label={change.path} className="flex flex-col gap-1">
             {showHeadings && <p className="flex flex-wrap items-center gap-2 text-sm">
@@ -40,18 +43,7 @@ export function FileChanges({ changes, writing = false, showCounts = true, showH
               )}
             </p>}
             {change.binary && change.change !== 'delete' && <FilePathAttachment path={change.path} />}
-            <DiffView
-              diff={change.diff}
-              change={change.change}
-              binary={change.binary}
-              truncated={change.truncated}
-              writing={writing}
-              layout={layout}
-              onLayout={setLayout}
-              label={t('timeline.change.label', { path: change.path })}
-              showCounts={showCounts}
-              showToolbar={showHeadings}
-            />
+            {itemId === undefined ? <DiffView {...props} /> : <ReviewableDiff {...props} threadId={threadId} path={change.path} itemId={itemId} mayComment={inspection === undefined && readOnly !== true && canInteract} />}
           </section>
         );
       })}
@@ -66,5 +58,5 @@ export function FileChangeDisplay({ item }: { item: ChangeItem }) {
   const recorded = useRecordedItem(threadId, item);
   const tool = item.payload.tool;
   if (tool.kind !== 'file_change') return null;
-  return <FileChanges changes={tool.changes} writing={item.status === 'in_progress' && !recorded} showCounts={false} showHeadings={tool.changes.length !== 1} />;
+  return <FileChanges changes={tool.changes} itemId={item.id} writing={item.status === 'in_progress' && !recorded} showCounts={false} showHeadings={tool.changes.length !== 1} />;
 }

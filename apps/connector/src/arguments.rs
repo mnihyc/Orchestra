@@ -119,6 +119,9 @@ pub struct Proxy {
 /// `enroll`.
 #[derive(Debug, ClapArgs)]
 pub struct Enroll {
+    /// Primary gateway: automatic or an advertised gateway ID. A selected gateway never changes itself.
+    #[arg(long, value_name = "automatic|ID")]
+    pub gateway: Option<String>,
     /// The roles to offer: environment, agent, provider, separated by commas.
     #[arg(long, value_name = "ROLES")]
     pub roles: Option<String>,
@@ -229,18 +232,24 @@ pub enum Env {
 pub enum Mcp {
     /// List the servers the harnesses have configured.
     List,
-    /// Keep a copy of one of them for Orch.
+    /// Import one and switch it on in its environment.
     Import {
         /// The server's name.
         name: String,
         /// The harness whose configuration names it.
         #[arg(long, value_name = "HARNESS")]
         from: Option<String>,
+        /// Its name in Orch, when the native name is not a valid server name.
+        #[arg(long = "as", value_name = "NAME")]
+        as_name: Option<String>,
     },
-    /// Forget a copy.
+    /// Forget the imported resource and remove its copy.
     Forget {
-        /// The server's name.
+        /// The resource's name, original configured name, or exact identifier.
         name: String,
+        /// The harness whose imported definition is meant.
+        #[arg(long, value_name = "HARNESS")]
+        from: Option<String>,
     },
 }
 
@@ -359,6 +368,27 @@ pub struct PortForward {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn enrollment_accepts_automatic_or_an_exact_gateway_id() {
+        for gateway in ["automatic", "asia"] {
+            let arguments = Args::try_parse_from([
+                "orch-connector",
+                "enroll",
+                "--url",
+                "https://orch.test",
+                "--token",
+                "oenr_fixture",
+                "--gateway",
+                gateway,
+            ])
+            .unwrap();
+            let Some(Command::Enroll(enrollment)) = arguments.command else {
+                panic!("not enrollment");
+            };
+            assert_eq!(enrollment.gateway.as_deref(), Some(gateway));
+        }
+    }
 
     #[test]
     fn port_forward_takes_its_credential_from_standard_input_and_one_kind_of_it() {
@@ -482,7 +512,9 @@ mod tests {
             &["doctor"],
             &["update"],
             &["mcp", "list"],
+            &["mcp", "import", "native:name", "--as", "valid-name"],
             &["mcp", "forget", "files"],
+            &["mcp", "forget", "file-tools", "--from", "fake"],
             &["provider", "set-key", "--provider", "p"],
         ] {
             assert!(parse(words).command.is_some(), "{words:?}");

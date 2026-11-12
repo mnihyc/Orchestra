@@ -66,6 +66,16 @@ async fn read_changes(
     }))
 }
 
+enum ResourcePlan {
+    Absent,
+    Unchanged,
+    Apply {
+        runtime: Id,
+        machine: Id,
+        limits: Json,
+    },
+}
+
 impl Engine {
     /// Stored limits, supported changes and pending reason on the caller's connection, without a host request.
     pub async fn runtime_changes_from(
@@ -133,70 +143,149 @@ impl Engine {
         Ok(())
     }
 
+    async fn prepare_runtime_resources(
+        &self,
+        conn: &mut Conn,
+        target: Target,
+    ) -> Result<ResourcePlan, EngineError> {
+        let runtime = match target {
+            Target::Environment(id) => environments::live_runtime(conn, id).await?,
+            Target::Provider(id) => providers::live_runtime(conn, id).await?,
+        };
+        let Some(runtime) = runtime else {
+            return Ok(ResourcePlan::Absent);
+        };
+        if !matches!(runtime.state.as_str(), "running" | "stopped") {
+            return Ok(ResourcePlan::Absent);
+        }
+        let held = match target {
+            Target::Environment(id) => changes::environment_hold(conn, id).await?,
+            Target::Provider(id) => changes::provider_hold(conn, id).await?,
+        };
+        if held.is_some() {
+            return Ok(ResourcePlan::Absent);
+        }
+        let Some(host) = hosts::host(conn, runtime.host_id).await? else {
+            return Ok(ResourcePlan::Absent);
+        };
+        let Some(recorded) = changes::definition(conn, runtime.id).await? else {
+            return Ok(ResourcePlan::Absent);
+        };
+        if crate::isolation::unit_driver(&host.drivers, &runtime.driver, Some(&recorded))
+            .as_ref()
+            .and_then(|driver| driver.pointer("/live_changes/resources"))
+            .and_then(Json::as_bool)
+            != Some(true)
+        {
+            return Ok(ResourcePlan::Absent);
+        }
+        let key = match target {
+            Target::Environment(_) => keys::ENV_RESOURCES,
+            Target::Provider(_) => keys::RUNTIME_RESOURCES,
+        };
+        let own: Option<Json> = get(conn, target.place(), key).await?;
+        let definition = recorded.get("spec").unwrap_or(&Json::Null).clone();
+        let limits = crate::places::limits_of(&definition, own.as_ref());
+        let before = recorded
+            .get("resources")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if before == limits {
+            return Ok(ResourcePlan::Unchanged);
+        }
+        if before.get("disk_gb") != limits.get("disk_gb") {
+            return Ok(ResourcePlan::Absent);
+        }
+        Ok(ResourcePlan::Apply {
+            runtime: runtime.id,
+            machine: host.machine_id,
+            limits,
+        })
+    }
+
     async fn apply_runtime_resources(&self, target: Target) -> Result<bool, EngineError> {
+        self.apply_runtime_resources_origin(target, None).await
+    }
+    pub(crate) async fn apply_runtime_resources_for_setting(
+        &self,
+        target: Target,
+        origin: &orch_authz::CapturedOperation,
+        change: &crate::setting_operations::Change,
+    ) -> Result<bool, EngineError> {
+        self.apply_runtime_resources_origin(target, Some((origin, change)))
+            .await
+    }
+    async fn apply_runtime_resources_origin(
+        &self,
+        target: Target,
+        application: Option<(
+            &orch_authz::CapturedOperation,
+            &crate::setting_operations::Change,
+        )>,
+    ) -> Result<bool, EngineError> {
         let serial = self.mount_serial(target.id());
         let _held = serial.lock().await;
-        let (runtime, machine, limits) = {
-            let mut conn = self.db().acquire().await?;
-            let runtime = match target {
-                Target::Environment(id) => environments::live_runtime(&mut conn, id).await?,
-                Target::Provider(id) => providers::live_runtime(&mut conn, id).await?,
-            };
-            let Some(runtime) = runtime else {
-                return Ok(false);
-            };
-            if !matches!(runtime.state.as_str(), "running" | "stopped") {
-                return Ok(false);
-            }
-            let held = match target {
-                Target::Environment(id) => changes::environment_hold(&mut conn, id).await?,
-                Target::Provider(id) => changes::provider_hold(&mut conn, id).await?,
-            };
-            if held.is_some() {
-                return Ok(false);
-            }
-            let Some(host) = hosts::host(&mut conn, runtime.host_id).await? else {
-                return Ok(false);
-            };
-            let Some(recorded) = changes::definition(&mut conn, runtime.id).await? else {
-                return Ok(false);
-            };
-            if crate::isolation::unit_driver(&host.drivers, &runtime.driver, Some(&recorded))
-                .as_ref()
-                .and_then(|driver| driver.pointer("/live_changes/resources"))
-                .and_then(Json::as_bool)
-                != Some(true)
-            {
-                return Ok(false);
-            }
-            let key = match target {
-                Target::Environment(_) => keys::ENV_RESOURCES,
-                Target::Provider(_) => keys::RUNTIME_RESOURCES,
-            };
-            let own: Option<Json> = get(&mut conn, target.place(), key).await?;
-            let definition = recorded.get("spec").unwrap_or(&Json::Null).clone();
-            let limits = crate::places::limits_of(&definition, own.as_ref());
-            let before = recorded
-                .get("resources")
-                .cloned()
-                .unwrap_or_else(|| serde_json::json!({}));
-            if before == limits {
-                return Ok(true);
-            }
-            if before.get("disk_gb") != limits.get("disk_gb") {
-                return Ok(false);
-            }
-            (runtime, host.machine_id, limits)
+        let target_work = match target {
+            Target::Environment(id) => crate::setting_operations::TargetWork::Environment(id),
+            Target::Provider(id) => crate::setting_operations::TargetWork::Provider(id),
         };
-        let command = Outgoing::new(
+        let mut tx = self.db().begin().await?;
+        let ready = if let Some((origin, change)) = application {
+            Some(
+                crate::setting_operations::prepare_work(
+                    &mut tx,
+                    self.inner.clock.as_ref(),
+                    origin,
+                    crate::setting_operations::Work {
+                        change: change.clone(),
+                        target: target_work,
+                    },
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
+        let (runtime, machine, limits) =
+            match self.prepare_runtime_resources(&mut tx, target).await? {
+                ResourcePlan::Absent => {
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
+                    return Ok(false);
+                }
+                ResourcePlan::Unchanged => {
+                    tx.commit().await.map_err(orch_db::DbError::from)?;
+                    return Ok(true);
+                }
+                ResourcePlan::Apply {
+                    runtime,
+                    machine,
+                    limits,
+                } => (runtime, machine, limits),
+            };
+        if ready.as_ref().is_some_and(|ready| {
+            !ready
+                .value
+                .runtime
+                .is_some_and(|(id, _, recipient)| id == runtime && recipient == machine)
+        }) {
+            return Err(EngineError::unreadable(
+                "the prepared setting runtime changed before resource application",
+            ));
+        }
+        tx.commit().await.map_err(orch_db::DbError::from)?;
+        let mut command = Outgoing::new(
             orch_types::new_id(),
             machine,
-            SerialKey::Runtime(runtime.id),
+            SerialKey::Runtime(runtime),
             &NodeResourcesApply {
-                runtime_id: runtime.id,
+                runtime_id: runtime,
                 resources: limits,
             },
         )?;
+        if let Some((origin, change)) = application {
+            command =
+                crate::setting_operations::command(origin, change, target_work, runtime, command)?;
+        }
         let outcome = self.ask_bounded(command).await?;
         let applied = matches!(&outcome, Some(Outcome::Succeeded(_)));
         let pending = if applied {
@@ -213,7 +302,7 @@ impl Engine {
         };
         {
             let mut conn = self.db().acquire().await?;
-            sqlx::query("UPDATE runtimes SET state_detail=$2 WHERE id=$1 AND (state_detail IS NULL OR state_detail LIKE 'resource changes pending:%')").bind(runtime.id).bind(pending).execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
+            sqlx::query("UPDATE runtimes SET state_detail=$2 WHERE id=$1 AND (state_detail IS NULL OR state_detail LIKE 'resource changes pending:%')").bind(runtime).bind(pending).execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
         }
         if applied {
             let mut conn = self.db().acquire().await?;

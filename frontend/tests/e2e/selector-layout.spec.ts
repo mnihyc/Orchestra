@@ -23,6 +23,8 @@ for (const locale of ['en', 'zh-CN'] as const) test(`selector geometry, selected
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
     for (const width of [1440, 400]) {
       await page.setViewportSize({ width, height: 900 });
+      // Resource criteria now live in the shared Filter popover at both widths.
+      await page.getByRole('button', { name: catalogue.resources.controls.filter, exact: true }).click();
       const registered = catalogue.choiceCatalog.environmentFilter.machine.name;
       const group = page.getByRole('radiogroup').filter({ has: page.getByRole('radio', { name: registered, exact: true }) });
       const all = group.getByRole('radio', { name: catalogue.choiceCatalog.environmentFilter.all.name, exact: true });
@@ -57,19 +59,25 @@ for (const locale of ['en', 'zh-CN'] as const) test(`selector geometry, selected
       await expect.poll(async () => {
         const frame = await group.evaluate((element) => {
           const style = getComputedStyle(element);
-          return { border: style.borderTopColor, width: Number.parseFloat(style.borderTopWidth), fill: style.backgroundColor };
+          return { width: Number.parseFloat(style.borderTopWidth) };
         });
         const colours = await group.getByRole('radio').evaluateAll((options) => options.map((option) => {
           const style = getComputedStyle(option);
           const background = getComputedStyle(option.closest('[role="group"], [role="radiogroup"]') ?? option.parentElement ?? option).backgroundColor;
-          return { border: style.borderTopColor, width: Number.parseFloat(style.borderTopWidth), background, fill: style.backgroundColor, ink: style.color, selected: option.getAttribute('aria-checked') === 'true' };
+          const label = option.querySelector('[data-choice-name]') ?? option;
+          return { background, fill: style.backgroundColor, ink: style.color, shadow: style.boxShadow,
+            weight: Number.parseFloat(getComputedStyle(label).fontWeight), selected: option.getAttribute('aria-checked') === 'true' };
         }));
-        // The group owns the one boundary; an unselected segment deliberately has no filled box.
-        return frame.width >= 1 && contrast(frame.border, frame.fill) >= 3
-          && colours.every((colour) => !colour.selected || contrast(colour.fill, colour.background) >= 3 && contrast(colour.ink, colour.fill) >= 4.5);
+        // Segments now use a borderless neutral track with a raised, semibold choice. The shared
+        // selector contrast contract requires readable text and 1.4:1 ground separation in dark mode.
+        return frame.width === 0 && colours.every((colour) => !colour.selected || colour.weight >= 600
+          && contrast(colour.ink, colour.fill) >= 4.5 && (theme === 'dark' ? contrast(colour.fill, colour.background) >= 1.4 : colour.shadow !== 'none'));
       }).toBe(true);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-      await page.getByRole('button', { name: catalogue.shell.account.label, exact: true }).click();
+      await page.keyboard.press('Escape');
+      await expect(page.locator('[data-resource-filter-panel]')).toBeHidden();
+      // The phone's bottom navigation names this same account menu Me.
+      await page.getByRole('button', { name: width < 600 ? catalogue.shell.small.me : catalogue.shell.account.label, exact: true }).click();
       const chosen = page.getByRole('menuitemradio', { name: catalogue.choiceCatalog.theme[theme].name, exact: true });
       await page.getByRole('menuitemradio', { name: catalogue.choiceCatalog.theme[theme === 'light' ? 'dark' : 'light'].name, exact: true }).focus();
       await expect(chosen).toBeChecked();
@@ -104,6 +112,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   await page.getByRole('menuitemradio', { name: catalogue.choiceCatalog.theme[theme].name, exact: true }).click();
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   await page.getByRole('button', { name: catalogue.resourceCreation.environments, exact: true }).click();
+  await page.getByRole('menuitem', { name: catalogue.environments.list.makeFromTemplate, exact: true }).click();
   const dialog = page.getByRole('dialog', { name: catalogue.environments.make.title });
   const group = dialog.getByRole('radiogroup', { name: catalogue.resources.access.label });
   const own = group.getByRole('radio', { name: catalogue.choiceCatalog.resourceAccess.only_me.name, exact: true });
@@ -131,6 +140,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await own.hover();
     await expect(page.getByRole('tooltip')).toContainText(catalogue.resources.access.gives.only_me.replaceAll('{{home}}', catalogue.environments.make.yourPlace));
     await page.mouse.move(0, 0);
+    // The restored keyboard focus can retain the explanation after pointer exit; Escape dismisses it explicitly.
+    await page.keyboard.press('Escape');
     await expect(page.getByRole('tooltip')).toHaveCount(0);
     await expect(dialog).toBeInViewport();
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

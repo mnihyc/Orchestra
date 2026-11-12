@@ -3,6 +3,8 @@ import { QueryClient, QueryClientProvider, useQuery, useInfiniteQuery } from '@t
 import { screen } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
 import { settingsKey, settingsQuery } from '@/api/settings';
+import { threadGatewayQuery } from '@/api/gateways';
+import { pendingAgentSchedulesQuery, type ThreadPendingAgentSchedules } from '@/api/inputSchedules';
 import { draftQuery, hydrateThreadOpening, limitsQuery, outlineQuery, parametersQuery, threadKeys } from '@/api/threads';
 import { nodeKey } from '@/api/nodes';
 import { ACME } from '../doubles/fixtures';
@@ -10,13 +12,15 @@ import { threadOpening } from '../doubles/thread-opening';
 import { World } from '../doubles/world';
 import { show } from './support';
 
-it('shows the supplied thread, model, draft, limits, settings and outline without six follow-up reads', async () => {
+it('shows the supplied thread, model, draft, limits, settings, outline and carrier without follow-up reads', async () => {
   const world = new World();
   const person = world.people.get('ada');
   if (person === undefined) throw new Error('The opening needs its native reader');
   const opening = await threadOpening(world, person, ACME.mainThread, 200);
   const parameters = opening.parameters, limits = opening.limits;
   if (parameters === null || limits === null) throw new Error('Ada can read the thread controls');
+  if (opening.gateway?.status !== 'ready') throw new Error('The opening needs its native carrier observation');
+  const gateway = opening.gateway.data;
   const reads = {
     draft: vi.fn(() => Promise.resolve(opening.draft)),
     parameters: vi.fn(() => Promise.resolve(parameters)),
@@ -24,9 +28,13 @@ it('shows the supplied thread, model, draft, limits, settings and outline withou
     settings: vi.fn(() => Promise.resolve(opening.settings)),
     outline: vi.fn(() => Promise.resolve(opening.outline)),
     node: vi.fn(() => Promise.resolve(opening.sync.thread)),
+    gateway: vi.fn(() => Promise.resolve(gateway)),
+    pending: vi.fn(() => Promise.resolve({ seq: 0, items: [] })),
   };
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   hydrateThreadOpening(cache, opening);
+  const pending = cache.getQueryData<ThreadPendingAgentSchedules>(pendingAgentSchedulesQuery(ACME.mainThread, opening.sync.thread.topic_id).queryKey);
+  if (pending === undefined) throw new Error('The current opening needs its pending schedule projection');
   function Screen() {
     const draft = useQuery({ ...draftQuery(ACME.mainThread), queryFn: reads.draft });
     const model = useQuery({ ...parametersQuery(ACME.mainThread), queryFn: reads.parameters });
@@ -34,10 +42,12 @@ it('shows the supplied thread, model, draft, limits, settings and outline withou
     const settings = useQuery({ ...settingsQuery(ACME.mainThread), queryFn: reads.settings });
     const outline = useInfiniteQuery({ ...outlineQuery(ACME.mainThread), queryFn: reads.outline });
     const node = useQuery({ queryKey: nodeKey(ACME.mainThread), queryFn: reads.node, staleTime: Infinity });
+    const carrier = useQuery({ ...threadGatewayQuery(ACME.mainThread, opening.sync.thread.execution_revision), queryFn: reads.gateway, staleTime: Infinity });
+    const scheduled = useQuery({ ...pendingAgentSchedulesQuery(ACME.mainThread, opening.sync.thread.topic_id), queryFn: reads.pending });
     return <main><h1>{node.data?.name}</h1><output aria-label="Model">{model.data?.model.value ?? 'Not set'}</output>
       <output aria-label="Draft">{draft.data === null ? 'Empty' : draft.data?.delivery}</output>
       <output aria-label="Limits">{reached.data?.reached.length}</output>
-      <output aria-label="Settings">{settings.data?.length}</output><output aria-label="Outline">{outline.data?.pages.flatMap((page) => page.entries).length}</output></main>;
+      <output aria-label="Settings">{settings.data?.length}</output><output aria-label="Outline">{outline.data?.pages.flatMap((page) => page.entries).length}</output><output aria-label="Carrier">{carrier.data?.state}</output><output aria-label="Pending schedules">{scheduled.data?.items.length}</output></main>;
   }
   const view = show(<QueryClientProvider client={cache}><Screen /></QueryClientProvider>);
   try {
@@ -47,6 +57,8 @@ it('shows the supplied thread, model, draft, limits, settings and outline withou
     expect(screen.getByLabelText('Limits')).toHaveTextContent(String(limits.reached.length));
     expect(screen.getByLabelText('Settings')).toHaveTextContent(String(opening.settings.length));
     expect(screen.getByLabelText('Outline')).toHaveTextContent(String(opening.outline.entries.length));
+    expect(screen.getByLabelText('Carrier')).toHaveTextContent(gateway.state);
+    expect(screen.getByLabelText('Pending schedules')).toHaveTextContent(String(pending.items.length));
     expect(cache.getQueryData(nodeKey(ACME.mainThread))).toEqual(opening.sync.thread);
     expect(cache.getQueryData(settingsKey(ACME.mainThread))).toEqual(opening.settings);
     for (const read of Object.values(reads)) expect(read).not.toHaveBeenCalled();

@@ -606,6 +606,137 @@ async fn while_the_far_side_answers_the_delivery_is_reserved_and_nothing_of_the_
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_route_result_and_the_next_admission_follow_one_lock_order() {
+    use orch_db::queries::notifications::{people, routes};
+    use orch_notifier_contract::delivery::{Config, Delivery};
+    use orch_notifier_contract::descriptor::NotifierDescriptor;
+    use orch_notifier_contract::notifier::Notifier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::sync::Notify;
+
+    // The same bounded lock-observation headroom as other worker database regressions.
+    const HEADROOM: std::time::Duration = std::time::Duration::from_secs(10);
+    struct Gated {
+        inner: Arc<Scripted>,
+        started: Notify,
+        resume: Notify,
+        first: AtomicBool,
+    }
+    #[async_trait::async_trait]
+    impl Notifier for Gated {
+        fn describe(&self) -> NotifierDescriptor {
+            self.inner.describe()
+        }
+        async fn check(&self, config: &Config) -> Result<orch_types::Json, DeliverError> {
+            self.inner.check(config).await
+        }
+        async fn deliver(&self, delivery: Delivery) -> Result<(), DeliverError> {
+            if self.first.swap(false, Ordering::SeqCst) {
+                self.started.notify_one();
+                self.resume.notified().await;
+            }
+            self.inner.deliver(delivery).await
+        }
+    }
+    let notifier = Arc::new(Gated {
+        inner: Scripted::new("chat", Reaches::Channel),
+        started: Notify::new(),
+        resume: Notify::new(),
+        first: AtomicBool::new(true),
+    });
+    let mut notifiers = Notifiers::new();
+    notifiers.register(notifier.clone()).unwrap();
+    let world = World::new(notifiers).await;
+    let channel = world.channel(Of::System, "chat", json!({}), &[]).await;
+    let ada = world.person("ada").await;
+    let route = world.route_on(ada, &channel).await;
+    let first = world
+        .queue_for_route(&route, "chat", &[world.snapshot("turn.completed", "One")])
+        .await;
+    let outbox = world.outbox();
+    let delivery = outbox.clone();
+    let running = tokio::spawn(async move { delivery.deliver_next().await });
+    tokio::time::timeout(HEADROOM, notifier.started.notified())
+        .await
+        .expect("the first attempt reaches the notifier with its reservation committed");
+    let second = world
+        .queue_for_route(&route, "chat", &[world.snapshot("turn.completed", "Two")])
+        .await;
+
+    // Hold the first lock of another valid admission while the native answer returns.
+    let mut admission = world.test.pool.begin().await.unwrap();
+    let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *admission)
+        .await
+        .unwrap();
+    tokio::time::timeout(HEADROOM, async {
+        channels::lock_channel_shared(&mut admission, channel.id)
+            .await
+            .unwrap()
+            .unwrap();
+        people::lock_prefs_shared(&mut admission, ada)
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("the notifier runs without holding the channel or preferences");
+    notifier.resume.notify_one();
+    tokio::time::timeout(HEADROOM, async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                  WHERE datname=current_database() AND wait_event_type='Lock'
+                    AND query LIKE '%notification_channels%'
+                    AND pg_blocking_pids(pid) @> ARRAY[$1]::integer[])",
+            )
+            .bind(blocker)
+            .fetch_one(&world.test.pool)
+            .await
+            .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the real result waits for the competing admission's channel lock");
+
+    // A result must still be waiting at the channel, without holding this route or envelope.
+    let admitted = tokio::time::timeout(HEADROOM, async {
+        let locked = routes::lock_route(&mut admission, route.id).await?;
+        assert_eq!(locked.unwrap().id, route.id);
+        let row = db_outbox::take_due(&mut admission, second, world.now()).await?;
+        assert_eq!(row.unwrap().id, second);
+        Ok::<_, orch_db::DbError>(())
+    })
+    .await
+    .expect("the two database transactions finish without a lock cycle");
+    if admitted.is_ok() {
+        admission.commit().await.unwrap();
+    } else {
+        admission.rollback().await.unwrap();
+    }
+    let done = tokio::time::timeout(HEADROOM, running)
+        .await
+        .expect("the native result finishes after admission commits")
+        .unwrap();
+    admitted.expect("the next admission never waits for a result that is waiting for its channel");
+    assert_eq!(done.unwrap().unwrap().sent, 1);
+    assert_eq!(outbox.deliver_next().await.unwrap().unwrap().sent, 1);
+    for id in [first, second] {
+        let row = world.row(id).await;
+        assert_eq!((row.state.as_str(), row.attempts), ("sent", 1));
+    }
+    let delivered = notifier.inner.delivered();
+    assert_eq!(
+        delivered.iter().map(|each| each.id).collect::<Vec<_>>(),
+        [first, second]
+    );
+    assert!(delivered.iter().all(|each| each.notifications.len() == 1));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_attempt_whose_worker_ended_goes_back_to_its_retries_after_its_deadline_and_counts() {
     let notifier = Scripted::new("email", Reaches::Email);
     let world = World::new(only(&notifier)).await;

@@ -315,7 +315,7 @@ export function IdentityProviders() {
         </Button>
       </div>
       {providers.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={providers} rows={2} />
       ) : providers.isError ? (
         <ErrorState compact error={providers.error} retrying={providers.isRefetching} onRetry={() => void providers.refetch()} />
       ) : providers.data.length === 0 ? (

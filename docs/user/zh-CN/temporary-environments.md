@@ -7,6 +7,7 @@ heading_id.创建失败时: if-setup-fails
 heading_id.2-查看删除时间: when-it-is-deleted
 heading_id.3-需要留下时保留需要副本时导出: keep-or-export
 heading_id.4-知道哪些数据会被删除: what-is-deleted
+summary: 创建临时环境，并在删除前保留或导出其中的工作。
 ---
 
 # 临时环境

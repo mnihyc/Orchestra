@@ -3,7 +3,7 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import type { UsageAnalytics } from '../../src/generated/api-types.ts';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import { scenario, signIn } from './support.ts';
+import { scenario, signIn, arrived } from './support.ts';
 
 interface Paint {
   text: string;
@@ -125,11 +125,11 @@ for (const mode of modes) test.describe(`${mode.locale}/${mode.theme}/DPR ${mode
       const url = new URL(request.url());
       if (url.pathname.startsWith('/api/v1/usage')) calls.push({ method: request.method(), path: url.pathname, query: url.search });
     });
-    const answer = (bucket: 'day' | 'hour', day?: string) => page.waitForResponse((response) => {
+    const answer = (bucket: 'day' | 'hour', day?: string) => arrived(page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.pathname === '/api/v1/usage' && url.searchParams.get('scope') === 'me'
         && url.searchParams.get('bucket') === bucket && (day === undefined || url.searchParams.get('from') === day && url.searchParams.get('to') === day);
-    });
+    }));
     let releaseFont: () => void = () => undefined;
     const fontGate = new Promise<void>((resolve) => { releaseFont = resolve; });
     let heldFonts = 0;

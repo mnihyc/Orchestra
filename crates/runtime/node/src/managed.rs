@@ -134,7 +134,8 @@ pub fn check(spec: &RuntimeSpec, tools: &ToolCache) -> Result<Checked, CommandEr
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use orch_driver_contract::runtime::RuntimeKind;

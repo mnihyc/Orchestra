@@ -72,6 +72,20 @@
 //! `compacted` (the `compacted` marker, with no duration), and `crash` (the harness process dies: the
 //! adapter reports `harness.status` `error`, every session is gone, and the turn ends without a word).
 //!
+//! # Upgrade controls
+//!
+//! The same script accepts `tool <ToolPayload JSON>` for neutral read/search/web/other completions,
+//! `request <HarnessRequest JSON>` for every approval/form family, `observe <JSON>` for passive
+//! native hook/MCP/settings reports, `unknown <event>` for counted compatibility markers,
+//! `diverged <managed pin>` for a nonterminal `harness_diverged`, `reroute <model>` for an actual
+//! reported model change, and `fault <TurnError JSON>` for native retry/status/reset/partial metadata.
+//! These go through the same interruptible request wait, item persistence and model-request emitter.
+//! Unknown request kinds get the existing generic card; when no answer is offered only native
+//! cancellation is available. Fault cannot turn nonterminal divergence/reroute observations into
+//! a terminal failure. A malformed directive is rejected before any earlier script action runs.
+//! The Rust driver uses `observe_idle` for actual idle callbacks and the real lifecycle methods
+//! for start/resume/fork/close, rather than forging a new session inside an active turn.
+//!
 //! # Sessions
 //!
 //! A session is a file of the harness's home, `sessions/<native session ref>.json` (`fake-v1`), written
@@ -262,6 +276,11 @@ impl std::fmt::Debug for FakeAdapter {
 }
 
 impl FakeAdapter {
+    /// A native passive callback while no turn is working, using the same observation shape as `observe`.
+    pub async fn observe_idle(&self, thread: ThreadId, report: Json) -> Result<(), AdapterError> {
+        script::compatibility::idle(self.shared()?, thread, report).await
+    }
+
     /// A fake adapter that reads the time from `clock`.
     #[must_use]
     pub fn new(clock: Arc<dyn Clock>) -> Self {
@@ -312,6 +331,12 @@ impl FakeAdapter {
 impl AgentAdapter for FakeAdapter {
     fn kind(&self) -> &'static str {
         self.program.kind
+    }
+
+    fn output_directory(&self) -> Option<PathBuf> {
+        self.running
+            .as_ref()
+            .map(|running| running.shared.home.root().join("outputs"))
     }
 
     async fn start(
@@ -974,6 +999,7 @@ async fn scripted_background_end(
 
 fn definition_of(server: &descriptor::ConfiguredServer) -> McpDefinition {
     McpDefinition {
+        http_credentials: None,
         spec: McpServerSpec {
             transport: server.transport(),
             command: server.command.clone(),

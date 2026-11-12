@@ -178,7 +178,7 @@ export function ActivityFeed({ nodeId, preview, chips = false, className }: Acti
         />
       )}
       {feed.isPending ? (
-        <SkeletonGroup className="flex flex-col gap-3 py-1">
+        <SkeletonGroup read={feed} className="flex flex-col gap-3 py-1">
           {[0, 1, 2].map((row) => (
             <div key={row} className="flex items-center gap-3">
               <Skeleton className="size-(--avatar-28) rounded-full" />

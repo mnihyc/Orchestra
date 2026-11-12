@@ -4,6 +4,7 @@ import { act, cleanup, render } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { useReadWhenOpened } from '@/features/inbox/Counters';
 import { useUserStore } from '@/realtime/stores/user';
+import { FrameReadiness } from '@/shell/FrameReadiness';
 
 const mark = vi.hoisted(() => vi.fn(() => Promise.resolve()));
 vi.mock('@/features/inbox/read', () => ({ markNotificationsRead: mark }));
@@ -22,6 +23,26 @@ it('keeps notifications unread behind Chat and reads them when the actual conver
   view.rerender(<Frame shown />);
   expect(mark).toHaveBeenCalledWith({ place: 'visible-thread' }, { ask: true });
   view.rerender(<Frame shown={false} />); mark.mockClear();
+  await act(async () => { useUserStore.setState({ rows: new Map() }); document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); });
+  expect(mark).not.toHaveBeenCalled();
+});
+
+it('reads a visible thread with an admitted summary before the Inbox inventory is loaded', () => {
+  useUserStore.setState({ loaded: false, rows: new Map(), counters: { unread: 2, approvalsPending: 0 }, reachedEnd: false });
+  render(<Frame shown />);
+  expect(mark).toHaveBeenCalledWith({ place: 'visible-thread' }, { ask: true });
+  expect(useUserStore.getState().loaded).toBe(false);
+  expect(useUserStore.getState().rows.size).toBe(0);
+});
+
+it('waits for frame admission and stops reading when that admission is lost', async () => {
+  useUserStore.setState({ loaded: false, rows: new Map(), counters: { unread: 2, approvalsPending: 0 }, reachedEnd: false });
+  const view = render(<FrameReadiness.Provider value={{ ready: false, pending: null }}><Frame shown /></FrameReadiness.Provider>);
+  expect(mark).not.toHaveBeenCalled();
+  view.rerender(<FrameReadiness.Provider value={{ ready: true, pending: null }}><Frame shown /></FrameReadiness.Provider>);
+  expect(mark).toHaveBeenCalledWith({ place: 'visible-thread' }, { ask: true });
+  view.rerender(<FrameReadiness.Provider value={{ ready: false, pending: null }}><Frame shown /></FrameReadiness.Provider>);
+  mark.mockClear();
   await act(async () => { useUserStore.setState({ rows: new Map() }); document.dispatchEvent(new Event('visibilitychange')); await Promise.resolve(); });
   expect(mark).not.toHaveBeenCalled();
 });

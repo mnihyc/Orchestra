@@ -182,6 +182,16 @@ pub fn usage_close(lease: Id) -> Id {
     derived("usage.close", &[lease.as_bytes().as_slice()])
 }
 
+/// Another factual residual of the same atomic lease cut. The caller serializes the
+/// fixed-field factual group key, so response ordering never changes this native identity.
+#[must_use]
+pub fn usage_close_group(lease: Id, factual_key: &[u8]) -> Id {
+    derived(
+        "usage.close.group",
+        &[lease.as_bytes().as_slice(), factual_key],
+    )
+}
+
 /// The row of the usage ledger for one model request of a lease that the upstream named: a request that is
 /// reported twice makes one row.
 #[must_use]
