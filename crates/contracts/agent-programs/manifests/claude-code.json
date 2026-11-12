@@ -158,6 +158,12 @@
       }
     ],
     "tool_names": {
+      "command": {
+        "name": "Bash",
+        "arguments": {
+          "command": "command"
+        }
+      },
       "read_file": {
         "name": "Read",
         "arguments": {

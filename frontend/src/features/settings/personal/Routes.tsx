@@ -473,7 +473,7 @@ export function OutsideOrch() {
   return (
     <div className="flex flex-col gap-3">
       {list === undefined && channels.isPending ? (
-        <SkeletonGroup className="flex flex-col gap-3">
+        <SkeletonGroup read={channels} className="flex flex-col gap-3">
           {[0, 1].map((index) => (
             <div key={index} className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-4 py-3">
               <Skeleton className="h-5 w-1/3" />

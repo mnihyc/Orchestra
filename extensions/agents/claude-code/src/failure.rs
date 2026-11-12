@@ -240,6 +240,9 @@ fn neutral_code(code: &str) -> &'static str {
         "model_refused" => turn_error::MODEL_REFUSED,
         "context_overflow" => turn_error::CONTEXT_OVERFLOW,
         "provider_busy" => turn_error::PROVIDER_BUSY,
+        "rate_limited" => turn_error::RATE_LIMITED,
+        "overloaded" => turn_error::OVERLOADED,
+        "stream_interrupted" => turn_error::STREAM_INTERRUPTED,
         "provider_unreachable" => turn_error::PROVIDER_UNREACHABLE,
         _ => turn_error::HARNESS_ERROR,
     }
@@ -811,7 +814,7 @@ mod tests {
             result(json!({ "api_error_status": 500, "result": "You've hit your session limit" }));
         assert_eq!(
             classify(&frame, &Notes::default(), utc("2026-10-12T10:00:00Z"), &Utc).code,
-            "provider_busy"
+            "overloaded"
         );
     }
 
@@ -844,7 +847,7 @@ mod tests {
             "result": "API Error: Server is temporarily limiting requests (not your usage limit) · too many"
         }));
         let error = classify(&frame, &notes, utc("2026-10-12T10:00:00Z"), &Utc);
-        assert_eq!(error.code, "provider_busy");
+        assert_eq!(error.code, "rate_limited");
         assert!(error.retryable);
         assert_eq!(error.resets_at, None);
         let said = error.said.unwrap();
@@ -885,7 +888,7 @@ mod tests {
         let error = classify(&frame, &cut, utc("2026-10-12T10:00:00Z"), &Utc);
         assert_eq!(
             (error.code.as_str(), error.incomplete),
-            ("provider_unreachable", true)
+            ("stream_interrupted", true)
         );
         let frame =
             result(json!({ "api_error": "max_output_tokens", "result": "The answer was cut" }));
@@ -908,7 +911,7 @@ mod stopped_retries {
     #[test]
     fn native_retry_exhaustion_retains_structured_cause_and_status() {
         for (native, status, kind, reason) in [
-            ("overloaded_error", 503, "provider_busy", None),
+            ("overloaded_error", 503, "overloaded", None),
             ("server_error", 504, "provider_unreachable", None),
             ("content_filter", 403, "model_refused", Some("safety")),
             (

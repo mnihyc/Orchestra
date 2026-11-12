@@ -3,7 +3,9 @@
 CREATE TABLE chats (
     id uuid NOT NULL,
     kind text NOT NULL,
+    visibility text DEFAULT 'private' NOT NULL,
     node_id uuid,
+    home_id uuid,
     org_id uuid NOT NULL,
     direct_key text,
     name text,
@@ -13,6 +15,9 @@ CREATE TABLE chats (
     last_message_seq bigint DEFAULT 0 NOT NULL,
     last_message_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT chats_visibility_check CHECK (visibility IN ('private', 'public')),
+    CONSTRAINT chats_home_check CHECK (home_id IS NULL OR kind = 'group'),
+    CONSTRAINT chats_home_id_fkey FOREIGN KEY (home_id) REFERENCES nodes(id) ON DELETE CASCADE,
     CONSTRAINT chats_check CHECK (((kind = 'node'::text) = (node_id IS NOT NULL))),
     CONSTRAINT chats_check1 CHECK (((kind = 'direct'::text) = (direct_key IS NOT NULL))),
     CONSTRAINT chats_check2 CHECK (((kind = 'group'::text) OR (name IS NULL))),
@@ -26,11 +31,19 @@ CREATE TABLE chats (
     CONSTRAINT chats_org_id_fkey FOREIGN KEY (org_id) REFERENCES nodes(id) ON DELETE CASCADE
 );
 
-CREATE INDEX chats_everything_parent_idx ON chats USING btree (((COALESCE(node_id, org_id))::text), id);
+CREATE INDEX chats_everything_parent_idx ON chats USING btree (((COALESCE(node_id, home_id, org_id))::text), id);
+
+CREATE INDEX chats_group_home_idx ON chats (home_id, id) WHERE kind = 'group';
+
+CREATE INDEX chats_summary_source_idx ON chats (id)
+    WHERE (kind = 'node' OR (kind = 'group' AND visibility = 'public')) AND last_message_seq > 0;
 
 CREATE INDEX chats_org_idx ON chats USING btree (org_id, last_message_at DESC) WHERE (kind <> 'node'::text);
 
 CREATE INDEX related_chats_recent_idx ON chats USING btree (COALESCE(last_message_at, created_at) DESC, id);
+
+CREATE INDEX chats_summary_activity_idx ON chats (COALESCE(last_message_at, created_at) DESC, id DESC)
+    WHERE (kind = 'node' OR (kind = 'group' AND visibility = 'public')) AND last_message_seq > 0;
 
 ALTER TABLE invitations ADD CONSTRAINT invitations_chat_fk FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE;
 
@@ -53,6 +66,7 @@ CREATE TABLE chat_members (
     joined_at timestamp with time zone DEFAULT now() NOT NULL,
     left_at timestamp with time zone,
     guest boolean DEFAULT false NOT NULL,
+    manager boolean DEFAULT false NOT NULL,
     seq_updated bigint NOT NULL,
     expires_at timestamp with time zone,
     CONSTRAINT chat_members_pkey PRIMARY KEY (chat_id, user_id),

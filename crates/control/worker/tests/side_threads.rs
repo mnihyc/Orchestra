@@ -187,7 +187,9 @@ async fn a_run_that_finds_another_run_at_the_job_does_nothing_and_the_job_is_one
         "another run holds the lock"
     );
     assert!(!closed(&world, forgotten).await);
-    drop(holding);
+    // Transaction drop schedules rollback; acknowledge release before the
+    // competing connection tries the nonblocking scheduling latch again.
+    holding.rollback().await.unwrap();
     assert_eq!(
         side_threads::close_idle(&world.db(), &world.clock)
             .await

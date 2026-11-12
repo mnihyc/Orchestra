@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Resource library
 screens: /resources/providers, /resources/agents, /resources/skills, /resources/mcp, /resources/templates, /resources/environments, /resources/mounts, /resources/hosts, /resources/machines, /everything, /project/$projectId, /topic/$topicId, /documents/$nodeId, /inbox, /approvals, /search, /usage, /trace/$nodeId, /resources/providers/$id, /resources/agents/$id, /resources/skills/$id, /resources/mcp/$id, /resources/templates/$id, /resources/environments/$id, /resources/mounts/$id, /resources/hosts/$id, /thread/$threadId, /doc/$documentId
 keywords: library, resources, given, used, popular, use, mine, manage, view, sort, filters, previous state, device
+summary: Choose a resource view, inspect sharing and usage, and return to your previous list.
 ---
 
 # Resource library

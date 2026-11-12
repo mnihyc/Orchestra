@@ -5,7 +5,7 @@
  * on Escape and on a press beside it, and gives the focus back.
  */
 import { Popover as Primitive } from 'radix-ui';
-import { useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 
 import { cx } from '@/ui/cx';
 import { ChoicePicker } from '@/ui/Choice';
@@ -13,6 +13,7 @@ import { ContentBoundary } from '@/ui/ContentBoundary';
 import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
 import { floatingAttachment, floatingClasses, FLOATING_GAP, FLOATING_EDGE } from '@/ui/floating';
+import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 
 export interface PopoverProps {
   /** The one control that opens it. */
@@ -78,15 +79,20 @@ export function Popover({
   onCloseAutoFocus,
 }: PopoverProps) {
   const [shown, changeOpen, covered] = useTransientLayer(open, onOpenChange);
+  // The card takes the room it has for the content it has now, not the content it opened with.
+  const opener = useRef<HTMLElement | null>(null);
+  const attachOpener = useCallback((node: HTMLElement | null) => { opener.current = node; }, []);
+  const { place, attach } = useLayerRoom({ shown: shown && !covered, anchor: opener, side, watch: children, gap: FLOATING_GAP });
   return (
     <Primitive.Root open={shown} onOpenChange={changeOpen}>
-      {anchor ? <Primitive.Anchor data-floating-anchor asChild>{trigger}</Primitive.Anchor> : <Primitive.Trigger asChild>{trigger}</Primitive.Trigger>}
+      {anchor ? <Primitive.Anchor data-floating-anchor asChild ref={attachOpener}>{trigger}</Primitive.Anchor> : <Primitive.Trigger asChild ref={attachOpener}>{trigger}</Primitive.Trigger>}
       <Primitive.Portal>
         <Primitive.Content
-          style={covered ? { display: 'none' } : undefined}
+          ref={attach}
+          style={covered ? { display: 'none' } : placeStyle(place)}
           onInteractOutside={(event) => { if (covered || isInspectionTarget(event.target)) event.preventDefault(); }}
           aria-label={label}
-          side={side}
+          side={place.side}
           align={align}
           sideOffset={FLOATING_GAP}
           collisionPadding={FLOATING_EDGE}

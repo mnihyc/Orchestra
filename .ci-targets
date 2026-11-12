@@ -1,0 +1,4 @@
+# The assembled tree: the frontend's types, lint and unit suite.
+web typecheck
+web lint
+web test

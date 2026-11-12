@@ -21,6 +21,7 @@ import { formatSpan, useRunningClock } from '@/lib/time';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { cx } from '@/ui/cx';
+import { webAction } from './tools/webAction';
 
 /** What a turn's work came to, by kind of step. */
 export interface WorkSummary {
@@ -63,9 +64,15 @@ export function summarize(items: readonly (Item | undefined)[]): WorkSummary {
         summary.edits += tool.changes.length;
         break;
       case 'file_search':
-      case 'web_search':
         summary.searches += 1;
         break;
+      case 'web_search': {
+        const action = webAction(tool);
+        if (action.type === 'open_page') summary.fetches += 1;
+        else if (action.type === 'other') summary.tools += 1;
+        else summary.searches += 1;
+        break;
+      }
       case 'web_fetch':
         summary.fetches += 1;
         break;
@@ -96,7 +103,7 @@ export function describeWork(summary: WorkSummary, t: TFunction): string {
 function WorkFoldView({ turnId, ids, open }: { turnId: string; ids: readonly string[]; open: boolean }) {
   const { t } = useTranslation();
   const format = useFormatContext();
-  const { threadId, readOnly } = useTimelineContext();
+  const { threadId, readOnly, detail } = useTimelineContext();
   const read = useThreadReadRef(threadId);
   const items = useThreadPart(threadId, useShallow((view) => ids.map((id) => view.items.get(id))));
   const turn = useThreadPart(threadId, (view) => view.turns.get(turnId));
@@ -106,10 +113,14 @@ function WorkFoldView({ turnId, ids, open }: { turnId: string; ids: readonly str
   const now = useRunningClock(active);
   const durationMs = turn === undefined ? summary.stepMs : turnActiveMs(turn, now) ?? summary.stepMs;
   const current = summary.current;
-  const line =
-    active && current !== null
+  const toolCalls = items.filter(isTool);
+  const changedFiles = new Set(toolCalls.flatMap((item) => item.payload.tool.kind === 'file_change' ? item.payload.tool.changes.map((change) => change.path) : []));
+  const work = describeWork(summary, t) || t('timeline.work.nothing');
+  const line = detail === 'summary' ? [t('thread.viewModes.toolCalls', { count: toolCalls.length }), durationMs > 0 ? formatSpan(durationMs, format) : null,
+    t('thread.viewModes.files', { count: changedFiles.size })].filter((part) => part !== null).join(' · ')
+    : active && current !== null
       ? `${describeStep(current, t).text} (${formatSpan(durationMs, format)})`
-      : `${describeWork(summary, t)}${durationMs > 0 ? ` (${formatSpan(durationMs, format)})` : ''}`;
+      : `${work}${durationMs > 0 ? ` (${formatSpan(durationMs, format)})` : ''}`;
   return (
     <button
       type="button"

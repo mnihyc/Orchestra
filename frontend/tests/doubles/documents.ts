@@ -6,12 +6,18 @@
  * A test plays the other people with the requests under `/__double/documents`.
  */
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 
 import { readMarkdown, type Piece } from './markdown-reader.ts';
 import { readHtml } from '../../src/features/people/html.ts';
 
 import type {
   Author,
+  CopyDestinationCause,
+  CopyDestinationJudgement,
+  CopyDestinationOutcome,
+  CopyDestinationsResponse,
+  DuplicateDestination,
   Document,
   DocumentBlock,
   DocumentChanges,
@@ -26,8 +32,13 @@ import type {
   DocumentTreeRead,
   DocumentTreePage,
   DocumentTreeReceipt,
+  DocumentTreeMembership,
+  DocumentTreeConfirmation,
+  DocumentTreePlan,
   Inline,
   NodeRef,
+  Node,
+  Problem,
   RelatedItems,
   DocumentLinks,
   GraphNode,
@@ -38,6 +49,7 @@ import type {
   TableRow,
   TreeNode,
   UserRef,
+  SummaryTargetOptions,
 } from '../../src/generated/api-types.ts';
 import { ACME, MADE_AT, id as fixtureId, userRef } from './fixtures.ts';
 import { type Answer, type Part, type Person, Refusal, type Subscriber, type World } from './world.ts';
@@ -48,6 +60,8 @@ const DEFAULT_LIMITS = { bytes: 2 * 1024 * 1024, blocks: 5_000, file_bytes: 8 * 
 const OPS_MAX = 500;
 /** The compact list's shipped count; weighted ranking itself is verified against the real API. */
 const RELATED_ITEMS_DEFAULT = 8;
+/** The native destination reader accepts one explicit page of at most one hundred candidates. */
+const COPY_DESTINATIONS_MAX = 100;
 /** The tabs of the Links section, in the order it shows them. */
 const LINK_TABS: LinksTab[] = ['referenced_by', 'references', 'related', 'graph'];
 const BLOCK_TYPES = new Set([
@@ -81,9 +95,8 @@ export interface Doc {
   id: string;
   nodeId: string;
   title: string;
-  /** What it is about, and who keeps that: a person or an agent that wrote it, or automation. */
+  /** What a person or an agent deliberately wrote about it. */
   description: string;
-  descriptionSource: 'user' | 'auto';
   owner: string;
   createdBy: Author;
   seq: number;
@@ -131,18 +144,40 @@ const wordsOf = (block: DocumentBlock): string =>
 export class Documents implements Part {
   readonly world: World;
   docs = new Map<string, Doc>();
+  private deletionConfirmations = new Map<string, { reader: string; stamp: DocumentTreeMembership }>();
   private relatedAnswers = new Map<string, Answer>();
   /** What each document's owner chose to show of the Links section; none follows the place. */
   private linkTabs = new Map<string, LinksTab[]>();
+  /** Transport state for the summary-options screen; native authority/CAS cases use the Rust API. */
+  private summaryOptions = new Map<string, { own: SummaryTargetOptions | null; revision: number }>();
   /** Documents whose tabs a lock above fixes at the place's setting. */
   private linkLocks = new Set<string>();
   private watchers: Watcher[] = [];
   private counter = 0;
+  private directoryVersions = new Map<string, { fingerprint: string; seq: number }>();
   /** Frames to withhold from live connections, to look at what a gap does. */
   private lose = false;
 
   constructor(world: World) {
     this.world = world;
+  }
+
+  /** Stable namespace observations, shared by tree summaries and native directory pages. */
+  directorySequences(): ReadonlyMap<string, number> {
+    const groups = new Map<string, unknown[][]>();
+    for (const doc of this.docs.values()) {
+      const rows = groups.get(doc.nodeId) ?? [];
+      rows.push([doc.id, doc.title, doc.page, doc.deleted]);
+      groups.set(doc.nodeId, rows);
+    }
+    for (const node of new Set([...groups.keys(), ...this.directoryVersions.keys()])) {
+      const rows = groups.get(node) ?? [];
+      rows.sort((one, other) => String(one[0]).localeCompare(String(other[0])));
+      const fingerprint = JSON.stringify(rows);
+      const before = this.directoryVersions.get(node);
+      if (before?.fingerprint !== fingerprint) this.directoryVersions.set(node, { fingerprint, seq: (before?.seq ?? 0) + 1 });
+    }
+    return new Map([...this.directoryVersions].map(([node, value]) => [node, value.seq]));
   }
 
   // ---------------------------------------------------------------- who holds what
@@ -354,7 +389,6 @@ export class Documents implements Part {
       id: doc.id,
       title: doc.title,
       description: doc.description,
-      description_source: doc.descriptionSource,
       description_line: this.lineOf(doc),
       node: this.nodeRef(doc.nodeId),
       owner: this.userOf(doc.owner),
@@ -394,6 +428,7 @@ export class Documents implements Part {
     const participating = ordinary.permissions.includes('doc.view');
     return {
       ...this.ref(person, doc),
+      link_settings: doc.deleted ? null : this.linksOf(person, doc),
       path: this.path(doc.nodeId),
       location: { parent: { kind: 'node_docs', id: doc.nodeId }, basename, ancestors: [] },
       files: clone(doc.files),
@@ -447,6 +482,19 @@ export class Documents implements Part {
         write: value.access.permissions.includes('doc.edit'), manage: value.access.permissions.includes('doc.manage') } };
   }
 
+  private deletionMembership(person: Person, doc: Doc): DocumentTreeMembership {
+    return { entries: [this.treeRow(person, doc).entry], authority_epoch: 1, authority_fingerprint: String(doc.seq), authority_until: null };
+  }
+
+  /** A fixture's protected preview retains its actual reader and complete native observations. */
+  protectDeletionPlan(person: Person, documentId: string): DocumentTreeConfirmation {
+    const doc = this.find(person, documentId);
+    this.need(person, doc, 'doc.manage');
+    const confirmation = randomUUID();
+    this.deletionConfirmations.set(confirmation, { reader: person.me.id, stamp: this.deletionMembership(person, doc) });
+    return { confirmation };
+  }
+
   private treeHandle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
     const item = /^\/document-tree\/entries\/([^/]+)$/.exec(path);
     if (method === 'GET' && item !== null && query.get('kind') === 'document') {
@@ -461,7 +509,7 @@ export class Documents implements Part {
       const page: DocumentTreePage = { items: listed.items.map((row) => this.treeRow(person, this.find(person, row.id, row.deleted))),
         ancestors: [], next_cursor: listed.next_cursor, feed: `fixture-root-documents:${node.id}`,
         directory: { at: { kind: 'node_docs', id: node.id }, node: this.nodeRef(node.id), path: node.path, folder: null,
-          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: node.revision } };
+          ancestors: [], can_create: !node.archived && node.access.permissions.includes('doc.create'), inspection: null, membership_seq: this.directorySequences().get(node.id) ?? 0 } };
       return { status: 200, body: page };
     }
     if (method !== 'POST' || path !== '/document-tree/operations' && path !== '/document-tree/delete/preview') return null;
@@ -472,11 +520,16 @@ export class Documents implements Part {
     const row = this.treeRow(person, doc);
     // The fixed promise is scenario data, as in the retained-content browser fixture.
     const until = '2026-11-11T12:00:00.000Z';
-    if (path.endsWith('/preview')) return { status: 200, body: { gaining: 0, losing: 0, restore_until: until,
-      stamp: { entries: [row.entry], authority_epoch: 1, authority_fingerprint: String(doc.seq), authority_until: null } } };
+    if (path.endsWith('/preview')) {
+      const plan: DocumentTreePlan = { gaining: 0, losing: 0, restore_until: until, stamp: this.deletionMembership(person, doc) };
+      return { status: 200, body: plan };
+    }
     let current = doc;
     if (request.command === 'delete') {
-      if (request.deletion_plan?.entries[0]?.revision !== doc.seq) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
+      const supplied = request.deletion_plan;
+      const kept = supplied !== null && 'confirmation' in supplied ? this.deletionConfirmations.get(supplied.confirmation) : undefined;
+      const stamp = supplied !== null && 'entries' in supplied ? supplied : kept?.reader === person.me.id ? kept.stamp : undefined;
+      if (!isDeepStrictEqual(stamp, this.deletionMembership(person, doc))) throw new Refusal(409, 'conflict.stale_revision', 'read the changed deletion preview again');
       const snapshot = this.sync(person, doc, null);
       this.handle(person, 'DELETE', `/documents/${doc.id}`, query, {}); doc.updatedAt = now();
       this.world.trace.retained.set(doc.id, { kind: 'document', name: doc.title, home: doc.nodeId, state: 'deleted', document: snapshot,
@@ -539,7 +592,6 @@ export class Documents implements Part {
       nodeId,
       title,
       description: '',
-      descriptionSource: 'auto',
       owner: person.me.username,
       createdBy: author,
       seq: 1,
@@ -1119,11 +1171,56 @@ export class Documents implements Part {
   // ---------------------------------------------------------------- the requests
 
   /** Answers a request about documents, or `null` when it is not one. */
+  /** Observe the same source and destination doors as the native reader, without performing a move. */
+  private copyDestinations(person: Person, documentId: string, body: Record<string, unknown>): CopyDestinationsResponse {
+    if (!Array.isArray(body.destinations) || body.destinations.length > COPY_DESTINATIONS_MAX) this.invalid('destinations', 'give at most one hundred explicit destinations');
+    if (body.intent !== 'move' && body.intent !== 'duplicate') this.invalid('intent', 'choose move or duplicate');
+    const intent = body.intent;
+    const requested = body.destinations.map((value: unknown): DuplicateDestination => {
+      if (typeof value === 'object' && value !== null && 'kind' in value) {
+        if (value.kind === 'system') return { kind: 'system' };
+        if (value.kind === 'node' && 'id' in value && typeof value.id === 'string') return { kind: 'node', id: value.id };
+      }
+      return this.invalid('destinations', 'give an explicit node or system destination');
+    });
+    const doc = this.find(person, documentId), held = this.holdings(person, doc);
+    const root = this.path(doc.nodeId)[0]?.id;
+    const blocked = (cause: CopyDestinationCause, status: number, detail: string): CopyDestinationOutcome => ({
+      state: 'blocked', cause, problem: new Refusal(status, status === 404 ? 'not_found' : 'authz.denied', detail).answer.body as Problem,
+    });
+    const destinations = requested.map((destination): CopyDestinationJudgement => {
+      let target: Node | null = null;
+      if (destination.kind === 'node') {
+        try { target = this.world.places.node(person, destination.id); }
+        catch (error) {
+          if (!(error instanceof Refusal)) throw error;
+          return { destination, cross_root: false, outcome: blocked('not_available', 404, 'The destination is unavailable') };
+        }
+      }
+      const cross_root = target === null || target.org_id !== root;
+      let outcome: CopyDestinationOutcome;
+      // Identity-preserving moves are observations; the existing native move still requires Manage.
+      if (intent === 'move' && !cross_root) outcome = { state: 'needs_choice', choice: 'in_org_move' };
+      else if (intent === 'move' && !held.owns) outcome = blocked('owners_only', 403, 'Only an actual owner can move into another organization');
+      else if (this.world.exports.barred(person, doc.id)) outcome = blocked('source_policy', 403, 'The source does not allow copying out');
+      else if (!held.permissions.includes('doc.export')) outcome = blocked('export_permission', 403, 'Export permission is required on the source');
+      else if (target === null || target.archived || !target.access.permissions.includes('doc.create')) outcome = blocked('destination_creation', 403, 'Choose a place where documents may be created');
+      else outcome = intent === 'move' ? { state: 'needs_choice', choice: 'delete_preview' } : { state: 'allowed' };
+      return { destination, cross_root, outcome };
+    });
+    return { subject: { kind: 'document', id: doc.id }, intent, source_owned: held.owns, destinations };
+  }
+
   handle(person: Person, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Answer | null {
     const tree = this.treeHandle(person, method, path, query, body);
     if (tree !== null) return tree;
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
+
+    const subject = body.subject;
+    if (route === 'POST /copy-destinations/judge' && typeof subject === 'object' && subject !== null && 'kind' in subject && subject.kind === 'document') {
+      return { status: 200, body: this.copyDestinations(person, 'id' in subject ? asText(subject.id) : '', body) };
+    }
 
     if ((found = /^GET \/nodes\/([^/]+)\/documents$/.exec(route))) return { status: 200, body: this.list(person, found[1] ?? '', query) };
     if ((found = /^POST \/nodes\/([^/]+)\/documents$/.exec(route))) {
@@ -1153,6 +1250,26 @@ export class Documents implements Part {
     const doc = this.find(person, id, restoring);
 
     switch (`${method} ${tail}`) {
+      case 'GET /summary-options': {
+        const stored = this.summaryOptions.get(doc.id);
+        return { status: 200, body: {
+          target: { kind: 'document', id: doc.id }, options: stored?.own ?? { automatic: false },
+          min_interval_secs: stored?.own?.min_interval_secs ?? 300,
+          own: stored?.own ?? null, revision: stored?.revision ?? 0,
+          writable: !this.isArchived(doc) && this.holdings(person, doc).permissions.includes('doc.edit'), locked: false,
+        } };
+      }
+      case 'PUT /summary-options': {
+        this.need(person, doc, 'doc.edit');
+        if (this.isArchived(doc)) throw new Refusal(409, 'node.archived', 'the place is archived');
+        const before = this.summaryOptions.get(doc.id) ?? { own: null, revision: 0 };
+        if (body.expected_revision !== before.revision) throw new Refusal(409, 'conflict.stale_revision', 'the document summary options changed meanwhile');
+        if (body.options !== null && (typeof body.options !== 'object' || Array.isArray(body.options))) this.invalid('options', 'is an object or null');
+        const own = body.options as SummaryTargetOptions | null;
+        const revision = isDeepStrictEqual(own, before.own) ? before.revision : before.revision + 1;
+        this.summaryOptions.set(doc.id, { own: clone(own), revision });
+        return { status: 200, body: { projection: 'receipt', target: { kind: 'document', id: doc.id }, revision } };
+      }
       case 'GET /links':
         return { status: 200, body: this.linksOf(person, doc) };
       case 'PUT /links': {
@@ -1185,7 +1302,10 @@ export class Documents implements Part {
         return { status: 200, body: this.full(person, doc) };
       case 'GET /sync': {
         const since = query.get('since');
-        return { status: 200, body: this.sync(person, doc, since === null ? null : Number(since)) };
+        const body = this.sync(person, doc, since === null ? null : Number(since));
+        const summary = since === null && query.get('summary') === 'true' && query.get('inspect_deleted') !== 'true' && !doc.deleted
+          ? this.world.summaries.openingView(person, { kind: 'document', id: doc.id }) : undefined;
+        return { status: 200, body: summary === undefined ? body : { ...body, summary } };
       }
       case 'PATCH ': {
         this.need(person, doc, 'doc.edit', true);
@@ -1197,7 +1317,6 @@ export class Documents implements Part {
         doc.title = title;
         if (body.description !== undefined) {
           doc.description = asText(body.description);
-          doc.descriptionSource = 'user';
         }
         doc.seq += 1;
         doc.updatedAt = now();

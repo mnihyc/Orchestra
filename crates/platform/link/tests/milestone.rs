@@ -11,7 +11,7 @@ use orch_link_contract::events::{Event, SessionTitle};
 use orch_link_contract::session::Role;
 use orch_link_contract::streams::Stream;
 use orch_testkit::doubles::controller::ScriptedController;
-use orch_testkit::doubles::link::{Hub, TestPki};
+use orch_testkit::doubles::link::{Direction, Hub, TestPki};
 use orch_testkit::doubles::machine::{MachineSpec, ScriptedMachine};
 use orch_types::{Clock, ManualClock, new_id};
 use std::sync::Arc;
@@ -47,6 +47,10 @@ async fn a_thousand_events_published_while_the_connection_is_cut_three_times_arr
         thread_id: new_id(),
         segment_id: new_id(),
     };
+    // Each cut belongs to an actual event frame; publication speed cannot merge cuts while offline.
+    for seq in [251, 501, 751] {
+        hub.faults().cut_at_event(Direction::Up, &stream, seq);
+    }
     for i in 0..1_000 {
         machine
             .publish(
@@ -56,9 +60,6 @@ async fn a_thousand_events_published_while_the_connection_is_cut_three_times_arr
                 }),
             )
             .await;
-        if matches!(i, 250 | 500 | 750) {
-            hub.faults().sever_now();
-        }
         if i % 50 == 49 {
             tokio::task::yield_now().await;
         }
@@ -86,6 +87,7 @@ async fn a_thousand_events_published_while_the_connection_is_cut_three_times_arr
         hub.faults().connections() >= 4,
         "the machine had to come back three times"
     );
+    assert_eq!(hub.faults().fired(), 3, "every event cut fired once");
 }
 
 #[tokio::test]

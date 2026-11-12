@@ -46,7 +46,7 @@ export function ProviderLink({ provider, label = provider.name }: { provider: Pi
   return (
     <span className="flex min-w-0 flex-col gap-0.5"><ResourceName subject={{ kind: 'provider', provider }} asChild><Link to="/resources/providers/$id" params={{ id: provider.id }} className="min-w-0 truncate font-medium text-text hover:underline">
       {label}
-    </Link></ResourceName><ResourceHint subject={{ kind: 'provider', provider }} /></span>
+    </Link></ResourceName><ResourceHint subject={{ kind: 'provider', provider }} wrap /></span>
   );
 }
 
@@ -57,7 +57,7 @@ export function ProviderStatusText({ provider, compact = false }: { provider: Pr
   const timeZone = useAppearance((state) => state.timeZone);
   const now = useNow();
   const state = providerState(provider, t, { locale, timeZone }, now);
-  return compact ? <Tooltip content={state.text}><span tabIndex={0} className="inline-flex max-w-40 rounded-sm"><StatusDot tone={state.tone} label={state.text} showLabel className="min-w-0 [&>span:last-child]:truncate" /></span></Tooltip> : <StatusDot tone={state.tone} label={state.text} showLabel />;
+  return compact ? <Tooltip content={state.text}><span tabIndex={0} className="inline-flex w-40 max-w-full rounded-sm"><StatusDot tone={state.tone} label={state.text} showLabel className="min-w-0 whitespace-normal [&>span:last-child]:whitespace-normal" /></span></Tooltip> : <StatusDot tone={state.tone} label={state.text} showLabel />;
 }
 
 /** A unit's connector name is an implementation id; its readable host is where the provider runs. */

@@ -4,6 +4,7 @@ import { Pencil } from 'lucide-react';
 import { Button } from '@/ui/Button';
 import { IconButton } from '@/ui/IconButton';
 import { SettingRow, type SettingRowProps } from '@/ui/SettingRow';
+import { restoreFocusQuietly } from '@/ui/focus';
 
 export interface SettingEditorProps extends Omit<SettingRowProps, 'value'> {
   /** The compact value, shown instead of the editor until it is opened. */
@@ -35,10 +36,10 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
       const controls = Array.from(editor?.querySelectorAll<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button, [contenteditable="true"]') ?? [])
         .filter((control) => (control.tabIndex >= 0 || control.hasAttribute('data-autofocus')) && !control.matches(':disabled,[aria-disabled="true"],[readonly]') && control.closest('[hidden],[inert],[aria-hidden="true"]') === null);
       const first = controls.find((control) => control.hasAttribute('data-autofocus')) ?? controls[0];
-      first?.focus();
+      if (first !== undefined) restoreFocusQuietly(first);
     }
     return () => {
-      if (editor?.contains(document.activeElement) === true) opener?.focus();
+      if (editor?.contains(document.activeElement) === true && opener !== null) restoreFocusQuietly(opener);
     };
   }, [expanded, placement]);
   const [visited, setVisited] = useState(expanded);
@@ -54,15 +55,16 @@ export function SettingEditor({ summary, label, children, open, onOpenChange, di
       event.preventDefault();
       event.stopPropagation();
       change(false);
-      trigger.current?.focus();
+      if (trigger.current !== null) restoreFocusQuietly(trigger.current);
     }}>
     <Activity mode={expanded || !pauseEffects ? 'visible' : 'hidden'}>{(visited || expanded) && children}</Activity>
   </div>;
   return <SettingRow {...row}
     value={placement === 'inline' ? <div data-setting-inline-editor className="flex min-w-0 max-w-full flex-col gap-2">
       <div className="flex min-w-0 max-w-full items-start gap-2">
-        <span id={`${id}-summary`} hidden={expanded} className="min-w-0 self-center">{summary}</span>
+        <span id={`${id}-summary`} hidden={expanded} className="min-w-0">{summary}</span>
         <IconButton ref={trigger} data-setting-editor-trigger size="sm" label={label} icon={<Pencil aria-hidden />} aria-expanded={expanded} aria-controls={id}
+          className="relative top-[calc((1lh-var(--control-sm))/2)]"
           aria-describedby={`${id}-summary`} pending={disabled} onClick={() => change(!expanded)} />
       </div>
       {editor}

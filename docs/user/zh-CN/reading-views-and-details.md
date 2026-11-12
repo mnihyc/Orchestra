@@ -9,6 +9,7 @@ heading_id.数值和设置: values-and-settings
 heading_id.阅读文档和文件: reading-documents-and-files
 heading_id.查找名称和命令: finding-names-and-commands
 heading_keywords.finding-names-and-commands: 查找, 模式, 全部
+summary: 打开工作、查看卡片和菜单，并在现有权限内阅读完整数值。
 ---
 
 # 阅读视图与详情

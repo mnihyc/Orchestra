@@ -204,12 +204,14 @@ pub fn history_page_statement(after: bool) -> String {
         "$2::timestamptz IS NULL AND $3::uuid IS NULL"
     };
     format!(
-        "SELECT id, node_id, state, job_id, undo_job_id, files[1] AS first_file,
-                cardinality(files)::bigint AS file_count, actions, created_at, finished_at, undone_at
+        "SELECT {HISTORY_COLUMNS}
            FROM imports WHERE user_id = $1 AND {cursor}
           ORDER BY created_at DESC, id DESC LIMIT $4"
     )
 }
+
+const HISTORY_COLUMNS: &str = "id, node_id, state, job_id, undo_job_id, files[1] AS first_file,
+     cardinality(files)::bigint AS file_count, actions, created_at, finished_at, undone_at";
 
 /// An import as a list shows it: without what was asked, the names of its files after the first, or what did not
 /// come back.
@@ -239,6 +241,27 @@ pub struct ImportLineRow {
     pub undone_at: Option<DateTime<Utc>>,
 }
 
+/// Retained import storage facts without its request, file array, package or loss payload.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct KeptImport {
+    /// The same narrow native import identity and lifecycle metadata.
+    #[sqlx(flatten)]
+    pub row: ImportLineRow,
+    /// Its recorded creator, which can be gone.
+    pub user_id: Option<Id>,
+    /// Exact remaining source associations, emptied by the existing release path.
+    pub source_blobs: Vec<String>,
+}
+
+/// One pass over saved import custody, independent of personal-list namespaces.
+pub async fn kept(conn: &mut Conn) -> Result<Vec<KeptImport>, DbError> {
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {HISTORY_COLUMNS},user_id,source_blobs FROM imports"
+    )))
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The imports of a person as a list shows them, newest first: a page after the one shown last.
 pub async fn lines_of_user(
     conn: &mut Conn,
@@ -255,6 +278,25 @@ pub async fn lines_of_user(
             .fetch_all(conn)
             .await?,
     )
+}
+
+/// The same creator-only narrow rows for a previously selected native history result.
+/// This neither moves its page cursor nor loads full requests or source file inventories.
+pub async fn selected_lines_of_user(
+    conn: &mut Conn,
+    user: Id,
+    selected: &[Id],
+) -> Result<Vec<ImportLineRow>, DbError> {
+    if selected.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {HISTORY_COLUMNS} FROM imports WHERE user_id=$1 AND id=ANY($2)"
+    )))
+    .bind(user)
+    .bind(selected)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// The names of the files the import `id` of `user` was made from, with their places from 1, after the place
@@ -493,6 +535,25 @@ pub async fn report_rows(
             .fetch_all(conn)
             .await?,
     )
+}
+
+/// Actual persisted records from a previously selected report page, in their native order.
+pub async fn selected_report_rows(
+    conn: &mut Conn,
+    import: Id,
+    positions: &[i64],
+) -> Result<Vec<(i64, Json)>, DbError> {
+    if positions.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT position, row FROM import_report_rows
+         WHERE import_id=$1 AND position=ANY($2) ORDER BY position",
+    )
+    .bind(import)
+    .bind(positions)
+    .fetch_all(conn)
+    .await?)
 }
 
 /// How many rows of the report came to each outcome, and how many came with a warning.
@@ -1004,6 +1065,72 @@ pub async fn counts_made(conn: &mut Conn, import: Id) -> Result<Vec<(String, i64
     .bind(import)
     .fetch_all(conn)
     .await?)
+}
+
+/// Distinct real native governors of the undo summary, never all imported record bodies.
+/// Created objects and existing parents of merged history are selected from their real tables.
+pub async fn undo_subjects(conn: &mut Conn, import: Id) -> Result<Vec<(String, Id)>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT 'node'::text, n.id FROM import_origins o JOIN nodes n ON n.id=o.object_id
+           WHERE o.created_by_import=$1 AND o.kind IN ('org','project','topic','thread') AND n.deleted_at IS NULL
+         UNION
+         SELECT 'document', d.id FROM import_origins o JOIN documents d ON d.id=o.object_id
+           WHERE o.created_by_import=$1 AND o.kind='document' AND d.deleted_at IS NULL
+         UNION
+         SELECT 'folder', c.id FROM import_origins o JOIN document_containers c ON c.id=o.object_id
+           WHERE o.created_by_import=$1 AND o.kind='folder' AND c.deleted_at IS NULL
+         UNION
+         SELECT 'chat', c.id FROM import_origins o JOIN chats c ON c.id=o.parent_id
+           WHERE o.created_by_import=$1 AND o.kind='message'
+         UNION
+         SELECT 'node', n.id FROM import_origins o JOIN nodes n ON n.id=o.parent_id
+           WHERE o.created_by_import=$1 AND o.kind IN ('turn','item')
+         UNION
+         SELECT 'document', d.id FROM import_origins o JOIN documents d ON d.id=o.parent_id
+           WHERE o.created_by_import=$1 AND o.kind IN ('comment','version')",
+    ).bind(import).fetch_all(conn).await?)
+}
+
+/// Only actual live nodes created by this import may trigger native home deletion.
+pub async fn undo_created_nodes(
+    conn: &mut Conn,
+    import: Id,
+    candidates: &[Id],
+) -> Result<Vec<Id>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT n.id FROM import_origins o JOIN nodes n ON n.id=o.object_id
+        WHERE o.created_by_import=$1 AND o.kind IN ('org','project','topic','thread')
+          AND n.deleted_at IS NULL AND n.id=ANY($2)",
+    )
+    .bind(import)
+    .bind(candidates)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Check only a native undo page's original association, without rereading the entire import.
+pub async fn undo_subjects_present(
+    conn: &mut Conn,
+    import: Id,
+    nodes: &[Id],
+    documents: &[Id],
+    folders: &[Id],
+    chats: &[Id],
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT NOT EXISTS (SELECT 1 FROM unnest($2::uuid[]) AS wanted(id) WHERE NOT EXISTS
+            (SELECT 1 FROM import_origins o WHERE o.created_by_import=$1
+             AND ((o.kind IN ('org','project','topic','thread') AND o.object_id=wanted.id)
+               OR (o.kind IN ('turn','item') AND o.parent_id=wanted.id))))
+        AND NOT EXISTS (SELECT 1 FROM unnest($3::uuid[]) AS wanted(id) WHERE NOT EXISTS
+            (SELECT 1 FROM import_origins o WHERE o.created_by_import=$1
+             AND ((o.kind='document' AND o.object_id=wanted.id)
+               OR (o.kind IN ('comment','version') AND o.parent_id=wanted.id))))
+        AND NOT EXISTS (SELECT 1 FROM unnest($4::uuid[]) AS wanted(id) WHERE NOT EXISTS
+            (SELECT 1 FROM import_origins o WHERE o.created_by_import=$1 AND o.kind='folder' AND o.object_id=wanted.id))
+        AND NOT EXISTS (SELECT 1 FROM unnest($5::uuid[]) AS wanted(id) WHERE NOT EXISTS
+            (SELECT 1 FROM import_origins o WHERE o.created_by_import=$1 AND o.kind='message' AND o.parent_id=wanted.id))"
+    ).bind(import).bind(nodes).bind(documents).bind(folders).bind(chats).fetch_one(conn).await?)
 }
 
 /// A page of the chats (`kind` is `message`) or threads (`item`) that the import added things to, by identifier after `after`: where it

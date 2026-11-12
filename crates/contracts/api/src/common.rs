@@ -12,8 +12,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 pub use orch_types::{Hash, Id, Revision, Seq, Time};
 
-/// Where every route lives.
-pub const BASE_PATH: &str = "/api/v1";
+/// Browser HTTP and the existing public protocol paths.
+pub const BROWSER_BASE_PATH: &str = "/api/v1";
+/// Account-key business HTTP and origin-bound key continuations.
+pub const KEY_BASE_PATH: &str = "/openapi/v1";
+/// The existing browser/public base, retained for callback and download URL producers.
+pub const BASE_PATH: &str = BROWSER_BASE_PATH;
 /// The header every response carries, and an error repeats in its body.
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
 /// The header a request that is authenticated by a cookie alone must carry.
@@ -77,6 +81,97 @@ mod listed_tests {
             visible
         );
     }
+}
+
+/// Identifies a committed mutation acknowledgement without existing resource content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptProjection {
+    /// Identifiers, revision and safe operation outcome only.
+    Receipt,
+}
+
+// Full projections grow with their resource DTOs. Keep that branch on the heap so a
+// content-free receipt never reserves the largest projection inline. Serde and
+// JsonSchema treat Box transparently: names, untagged alternatives and JSON stay
+// unchanged. All named full-or-receipt responses use this same representation.
+macro_rules! full_or_receipt {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(#[$full_meta:meta])*
+            Full($full:ty),
+            $(#[$receipt_meta:meta])*
+            Receipt($receipt:ty),
+        }
+    ) => {
+        $crate::common::full_or_receipt! {
+            @define
+            [$(#[$meta])*] $vis enum $name {
+                $(#[$full_meta])*
+                Full(Box<$full>),
+                $(#[$receipt_meta])*
+                Receipt($receipt),
+            }
+            $full, $receipt
+        }
+    };
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $(#[$receipt_meta:meta])*
+            Receipt($receipt:ty),
+            $(#[$full_meta:meta])*
+            Full($full:ty),
+        }
+    ) => {
+        $crate::common::full_or_receipt! {
+            @define
+            [$(#[$meta])*] $vis enum $name {
+                $(#[$receipt_meta])*
+                Receipt($receipt),
+                $(#[$full_meta])*
+                Full(Box<$full>),
+            }
+            $full, $receipt
+        }
+    };
+    (
+        @define
+        [$(#[$meta:meta])*] $vis:vis enum $name:ident { $($variants:tt)* }
+        $full:ty, $receipt:ty
+    ) => {
+        $(#[$meta])*
+        #[serde(untagged)]
+        $vis enum $name { $($variants)* }
+        impl $name {
+            /// Carries the unchanged full projection without storing it inline.
+            #[must_use]
+            pub fn full(value: $full) -> Self {
+                Self::Full(Box::new(value))
+            }
+
+            /// Takes full content only when this response actually supplied it.
+            pub fn into_full(self) -> Result<$full, $receipt> {
+                match self {
+                    Self::Full(value) => Ok(*value),
+                    Self::Receipt(value) => Err(value),
+                }
+            }
+        }
+    };
+}
+pub(crate) use full_or_receipt;
+
+/// Acknowledges an actual once-only interactive ticket without returning its secret again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TicketCreateReceipt {
+    /// No bearer credential is disclosed by this acknowledgement.
+    pub projection: ReceiptProjection,
+    /// The real native memory entry accepted by the issuing transaction.
+    pub ticket_id: Id,
+    /// Its original native deadline, never extended on a repeat.
+    pub ticket_expires_at: Time,
 }
 
 /// One page of a list that can grow. The order is stated by each list and
@@ -213,11 +308,31 @@ impl<T> Listed<T> {
 #[serde(deny_unknown_fields)]
 pub struct PageQuery {
     /// How many entries, at most [`MAX_LIMIT`]; [`DEFAULT_LIMIT`] when absent.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "query_u32"
+    )]
     pub limit: Option<u32>,
     /// The `next_cursor` of the page before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+}
+
+/// Flattened URL query members arrive as strings; JSON callers retain the same numeric vocabulary.
+fn query_u32<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Number {
+        Numeric(u32),
+        Text(String),
+    }
+    Option::<Number>::deserialize(deserializer)?
+        .map(|number| match number {
+            Number::Numeric(number) => Ok(number),
+            Number::Text(number) => number.parse().map_err(serde::de::Error::custom),
+        })
+        .transpose()
 }
 
 impl PageQuery {
@@ -342,11 +457,16 @@ error_codes! {
     PortsNotListening = 409, "ports.not_listening", "No owned service is listening";
     PortsDomainMissing = 409, "ports.domain_missing", "A browser ports domain is needed";
     PortsUnavailable = 503, "ports.unavailable", "The current port service is unavailable";
+    TunnelGatewayUnreachable = 503, "tunnel.gateway_unreachable", "Gateway unreachable";
     ChatNotAllowed = 403, "chat.not_allowed", "This chat is not allowed";
+    ChatManagerRequired = 403, "chat.manager_required", "A current chat manager is needed";
+    ChatLastManager = 409, "chat.last_manager", "A chat must keep a manager";
+    ChatMoveCrossesOrg = 409, "chat.move_crosses_org", "A chat stays in its organization. Make a new chat there and share a link.";
     PolicyMcpImportDisabled = 403, "policy.mcp_import_disabled", "This machine lets no tool server be imported";
     PolicyMcpAddDisabled = 403, "policy.mcp_add_disabled", "This machine takes no tool server from here";
     DocsDisabled = 403, "docs.disabled", "Documents are switched off here";
     InvitationNotAllowed = 403, "invitation.not_allowed", "This form of invitation is not allowed";
+    InvitationTermsNotAccepted = 409, "invitation.terms_not_accepted", "Accept the current organization terms before joining";
     OrgCreationDisabled = 403, "org.creation_disabled", "Making a team org is restricted here";
     NotFound = 404, "not_found", "Not found";
     AccessLocked = 409, "access.locked", "This row is locked above";
@@ -354,6 +474,7 @@ error_codes! {
     ConflictStaleRevision = 409, "conflict.stale_revision", "It was changed meanwhile";
     ConflictExists = 409, "conflict.exists", "It exists already";
     ConflictIdempotencyMismatch = 409, "conflict.idempotency_mismatch", "The key was used for another request";
+    ConflictConfirmationRequired = 409, "conflict.confirmation_required", "Confirm before going on";
     NodeArchived = 409, "node.archived", "It is archived";
     NodeRestoreParentFirst = 409, "node.restore_parent_first", "Bring back its parent first";
     NodeWrongParent = 409, "node.wrong_parent", "It cannot be put there";
@@ -513,6 +634,136 @@ impl Problem {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn flattened_pagination_accepts_url_numeric_strings_without_changing_json_numbers_or_bounds()
+    -> Result<(), serde_json::Error> {
+        let url: crate::storage::StorageQuery =
+            serde_json::from_value(json!({"scope":"system","limit":"200"}))?;
+        assert_eq!(url.page.limit, Some(MAX_LIMIT));
+        assert_eq!(url.page.limit(), MAX_LIMIT);
+        let numeric: PageQuery = serde_json::from_value(json!({"limit":200}))?;
+        assert_eq!(numeric, url.page);
+        assert_eq!(serde_json::to_value(&numeric)?, json!({"limit":200}));
+        let absent: crate::storage::StorageQuery =
+            serde_json::from_value(json!({"scope":"system"}))?;
+        assert_eq!(absent.page.limit(), DEFAULT_LIMIT);
+        for invalid in [
+            json!("-1"),
+            json!("1.5"),
+            json!("4294967296"),
+            json!({}),
+            json!([]),
+        ] {
+            assert!(
+                serde_json::from_value::<crate::storage::StorageQuery>(
+                    json!({"scope":"system","limit":invalid})
+                )
+                .is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn flattened_pages_accept_url_numbers_and_keep_numeric_json() -> Result<(), serde_json::Error> {
+        #[derive(Deserialize)]
+        struct Query {
+            #[serde(flatten)]
+            page: PageQuery,
+        }
+        for limit in [0, 1, u32::MAX] {
+            for value in [json!(limit), json!(limit.to_string())] {
+                let query: Query = serde_json::from_value(json!({"limit":value}))?;
+                assert_eq!(query.page.limit, Some(limit));
+                assert_eq!(serde_json::to_value(query.page)?, json!({"limit":limit}));
+            }
+        }
+        for value in [
+            json!(""),
+            json!("-1"),
+            json!("4294967296"),
+            json!("1.5"),
+            json!(true),
+        ] {
+            assert!(serde_json::from_value::<Query>(json!({"limit":value})).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn full_or_receipt_keeps_wire_values_and_owned_results_without_inline_full_storage() {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct FullBody {
+            // One KiB makes storing this fixed payload inline distinguishable from its receipt.
+            payload: [[u64; 4]; 32],
+        }
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct Receipt {
+            projection: ReceiptProjection,
+            accepted: bool,
+        }
+        crate::common::full_or_receipt! {
+            #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+            enum Reply {
+                Full(FullBody),
+                Receipt(Receipt),
+            }
+        }
+        assert!(std::mem::size_of::<Reply>() < std::mem::size_of::<FullBody>());
+        let full = FullBody {
+            payload: [[7; 4]; 32],
+        };
+        let wire = serde_json::to_value(&full).unwrap();
+        assert_eq!(
+            serde_json::to_value(Reply::full(full.clone())).unwrap(),
+            wire
+        );
+        let decoded: Reply = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.into_full(), Ok(full));
+        let receipt = Receipt {
+            projection: ReceiptProjection::Receipt,
+            accepted: true,
+        };
+        let wire = json!({"projection":"receipt","accepted":true});
+        assert_eq!(
+            serde_json::to_value(Reply::Receipt(receipt.clone())).unwrap(),
+            wire
+        );
+        let decoded: Reply = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.into_full(), Err(receipt));
+    }
+
+    #[test]
+    fn receipt_first_responses_keep_the_discriminator_ahead_of_an_ambiguous_full_shape() {
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct FullBody {
+            jobs: Vec<Id>,
+        }
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+        struct Receipt {
+            projection: ReceiptProjection,
+            jobs: Vec<Id>,
+        }
+        crate::common::full_or_receipt! {
+            #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+            enum Reply {
+                Receipt(Receipt),
+                Full(FullBody),
+            }
+        }
+        let wire = json!({"projection":"receipt","jobs":[]});
+        let decoded: Reply = serde_json::from_value(wire.clone()).unwrap();
+        let receipt = decoded
+            .into_full()
+            .expect_err("the explicit receipt stays a receipt");
+        assert_eq!(serde_json::to_value(Reply::Receipt(receipt)).unwrap(), wire);
+        let full = FullBody { jobs: Vec::new() };
+        assert_eq!(
+            serde_json::to_value(Reply::full(full)).unwrap(),
+            json!({"jobs":[]})
+        );
+    }
 
     #[test]
     fn a_problem_is_written_flat_with_what_its_code_adds() {

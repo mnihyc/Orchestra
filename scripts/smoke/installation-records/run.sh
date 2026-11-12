@@ -2,13 +2,39 @@
 # Real release commands publish backup metadata while the API is running and stopped; checks never install.
 set -Eeuo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
-: "${ORCH_SMOKE_RELEASE_A:?supply the packaged candidate}"
-: "${ORCH_SMOKE_RELEASE_B:?supply a newer complete manifest for the configured-source fixture}"
-A="$ORCH_SMOKE_RELEASE_A"; B="$ORCH_SMOKE_RELEASE_B"
+A="$(release_a)"
 new_stack installation-records 41430 "$A"
 WORK="$(dirname "$STACK")"
 EVIDENCE="$SMOKE_BASE/evidence/$SMOKE_RUN/installation-records"
 mkdir -p "$EVIDENCE" "$WORK/site/latest/download"
+# What the configured source offers is a newer release's complete manifest, and only that: nothing is installed from it,
+# and no scenario step reads a file it lists. A later release that is given (ORCH_SMOKE_RELEASE_B) is used as it is;
+# otherwise the candidate's own manifest is made out as the next patch release, with its tag and the names that carry it
+# changed, the way a source would offer a release that is not there yet.
+if [ -n "${ORCH_SMOKE_RELEASE_B:-}" ]; then
+  B="$ORCH_SMOKE_RELEASE_B"
+else
+  B="$WORK/later-release"
+  mkdir -p "$B"
+  python3 - "$A/version.json" "$B/version.json" <<'PY'
+import json
+import re
+import sys
+
+source, target = sys.argv[1:]
+manifest = json.load(open(source))
+found = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-[0-9A-Za-z.-]+)?", manifest["tag"])
+if not found:
+    sys.exit("the candidate's tag is not vMAJOR.MINOR.PATCH")
+earlier, later = manifest["tag"], "v%s.%s.%d" % (found[1], found[2], int(found[3]) + 1)
+manifest["tag"], manifest["version"] = later, later[1:]
+for asset in manifest["assets"]:
+    for key in ("name", "download_url"):
+        asset[key] = asset[key].replace(earlier, later)
+with open(target, "w") as handle:
+    json.dump(manifest, handle, indent=2)
+PY
+fi
 SOURCE_PID=""
 leave_records() {
   local previous=$?
@@ -32,17 +58,23 @@ api_record() {
 }
 
 step "checks ship off; a manual lookup reports a newer release but installs nothing"
-api_record GET /admin/installation-records > "$EVIDENCE/initial.json"
-check "no scheduled release facts exist with checks disabled" jq -e '.release == null' "$EVIDENCE/initial.json"
+# Management's page itself looks the source up when it is opened (and keeps the answer for an hour, as a manual
+# check does), so what the scheduled check made of the shipped setting is looked at before the page is first read.
+check "no scheduled release facts exist with checks disabled" test "$(sql "SELECT count(*) FROM installation_records WHERE key = 'release_check'")" = 0
 refuses "the off check made no manifest request" grep -F 'GET /latest/download/version.json' "$EVIDENCE/source.log"
 BEFORE="$(edge_version)"
+api_record GET /admin/installation-records > "$EVIDENCE/initial.json"
 api_record POST /admin/releases/check > "$EVIDENCE/release.json"
 check "the configured complete manifest reports the newer offer" jq -e '.newer == true and .command != null and .error == null' "$EVIDENCE/release.json"
 expect "a check installs nothing" "$BEFORE" "$(edge_version)"
 api_record POST /admin/releases/check > "$EVIDENCE/release-again.json"
+expect "the page and both manual checks shared one lookup of the source" 1 "$(grep -cF 'GET /latest/download/version.json' "$EVIDENCE/source.log" || true)"
 NOTICES="$(compose exec -T postgres psql -U orch -d orch -At -c "SELECT count(*) FROM notifications WHERE data->>'reason'='release_available'")"
 expect "one notice for that offer" 1 "$NOTICES"
 printf 'not a manifest' > "$WORK/site/latest/download/version.json"
+# A lookup is not repeated within the hour after the last attempt, whoever asks. The hour is let pass in the
+# record of the attempt (the facts it kept keep their own date), so that the next check does ask the source.
+sql "UPDATE installation_records SET value = jsonb_set(value, '{attempted_at}', to_jsonb(to_char(((value->>'attempted_at')::timestamptz - interval '2 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))) WHERE key = 'release_check'" > /dev/null
 api_record POST /admin/releases/check > "$EVIDENCE/release-failure.json"
 check "a bad source keeps its dated successful facts" python3 - "$EVIDENCE/release.json" "$EVIDENCE/release-failure.json" <<'PY'
 import json,sys

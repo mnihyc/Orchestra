@@ -80,7 +80,7 @@ export function Departments({ org }: { org: Org }) {
       }
     >
       {list.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError && departments.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : departments.length === 0 ? (

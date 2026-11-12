@@ -12,8 +12,11 @@ WITH resources AS (
   UNION ALL SELECT 'machine', m.id, CASE WHEN h.id IS NULL THEN m.home_id ELSE h.home_id END, COALESCE(h.id,m.id)
     FROM machines m LEFT JOIN hosts h ON h.machine_id=m.id WHERE m.deleted_at IS NULL AND m.runtime_id IS NULL
 )
-SELECT r.kind, count(*)::bigint
+SELECT r.kind, count(*)::bigint AS count,
+       COALESCE(array_agg(r.id) FILTER (WHERE $2::boolean), '{}'::uuid[]) AS ids
   FROM resources r LEFT JOIN nodes n ON n.id=r.home
- WHERE COALESCE(($1::jsonb->'objects'->r.grant_id::text->>'listed')::boolean,false)
+ WHERE COALESCE((CASE WHEN r.kind='machine' AND $1::jsonb ? 'inventory_machines'
+         THEN $1::jsonb->'inventory_machines'->r.id::text
+         ELSE $1::jsonb->'objects'->r.grant_id::text END->>'listed')::boolean,false)
    AND (n.id IS NULL OR NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL))
  GROUP BY r.kind

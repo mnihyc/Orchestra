@@ -102,10 +102,11 @@ export const documentQuery = (id: string) =>
   });
 
 /** The state behind a document's live feed: all of it, or what changed after a sequence. */
-export function fetchDocumentSync(id: string, since: number | null, signal?: AbortSignal): Promise<DocumentSync> {
+export function fetchDocumentSync(id: string, since: number | null, signal?: AbortSignal, includeSummary = false): Promise<DocumentSync> {
+  const query = { ...(since === null ? {} : { since }), ...(includeSummary && since === null ? { summary: true } : {}) };
   return ok(
     api.GET('/documents/{id}/sync', {
-      params: { path: { id }, query: since === null ? {} : { since } },
+      params: { path: { id }, query },
       ...(signal === undefined ? {} : { signal }),
     }),
   );
