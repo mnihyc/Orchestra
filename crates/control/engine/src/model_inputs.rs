@@ -25,6 +25,8 @@ pub struct ModelBlock {
     pub source: &'static str,
     /// The text.
     pub text: String,
+    /// The held inputs that the text tells of: the turn that carries it marks exactly these delivered.
+    pub inputs: Vec<Id>,
 }
 
 impl ModelBlock {
@@ -35,19 +37,31 @@ impl ModelBlock {
             key: key.into(),
             source,
             text: text.into(),
+            inputs: Vec::new(),
         }
+    }
+
+    /// The same block, telling of these held inputs.
+    #[must_use]
+    pub fn telling_of(mut self, inputs: Vec<Id>) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// The block as the record keeps it.
+    fn as_json(&self) -> Json {
+        let mut value = json!({ "key": self.key, "source": self.source, "text": self.text });
+        if !self.inputs.is_empty() {
+            value["inputs"] = json!(self.inputs);
+        }
+        value
     }
 }
 
 /// The blocks as the record keeps them.
 #[must_use]
 pub fn blocks_json(blocks: &[ModelBlock]) -> Json {
-    Json::Array(
-        blocks
-            .iter()
-            .map(|block| json!({ "key": block.key, "source": block.source, "text": block.text }))
-            .collect(),
-    )
+    Json::Array(blocks.iter().map(ModelBlock::as_json).collect())
 }
 
 /// The text the blocks make together, as it is sent.
@@ -97,7 +111,7 @@ impl Engine {
     ) -> Result<Json, EngineError> {
         let mut kept = Vec::new();
         for block in blocks {
-            let mut value = json!({"key":block.key,"source":block.source,"text":block.text});
+            let mut value = block.as_json();
             if block.text.len()
                 > usize::try_from(orch_api_contract::threads::OUTPUT_INLINE_MAX_BYTES)
                     .unwrap_or(usize::MAX)
@@ -123,19 +137,19 @@ impl Engine {
         reference: &str,
         blocks: &[ModelBlock],
     ) -> Result<Id, EngineError> {
-        self.record_model_input_at(node, None, purpose, reference, blocks)
+        self.record_model_input_at(node, None, None, purpose, reference, blocks)
             .await
     }
 
-    /// Records a document's model prompt with its read protection before anything is sent.
-    pub(crate) async fn record_document_model_input(
+    /// Record the exact auxiliary prompt under its immutable native summary governors.
+    pub(crate) async fn record_summary_model_input(
         &self,
         node: Id,
-        document: Id,
+        request: Id,
         reference: &str,
         blocks: &[ModelBlock],
     ) -> Result<Id, EngineError> {
-        self.record_model_input_at(node, Some(document), "summary", reference, blocks)
+        self.record_model_input_at(node, None, Some(request), "summary", reference, blocks)
             .await
     }
 
@@ -143,6 +157,7 @@ impl Engine {
         &self,
         node: Id,
         document: Option<Id>,
+        summary: Option<Id>,
         purpose: &str,
         reference: &str,
         blocks: &[ModelBlock],
@@ -195,6 +210,28 @@ impl Engine {
             if bound != document {
                 return Err(EngineError::unreadable(
                     "the model input already belongs to another document",
+                ));
+            }
+        }
+        if let Some(request) = summary {
+            let row = orch_db::queries::summaries::request(&mut tx, request)
+                .await?
+                .ok_or_else(|| EngineError::unreadable("The summary request is gone"))?;
+            let refs = row
+                .prepared
+                .as_ref()
+                .and_then(|work| work.get("refs"))
+                .filter(|refs| refs.as_array().is_some_and(|values| !values.is_empty()))
+                .ok_or_else(|| {
+                    EngineError::unreadable("The summary prompt has no native governors")
+                })?;
+            sqlx::query("INSERT INTO resource_summary_model_inputs(model_input_id,request_id,viewer_id,source_refs) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
+                .bind(id).bind(request).bind(row.requested_by).bind(refs).execute(&mut *tx).await.map_err(orch_db::DbError::from)?;
+            let kept:(Option<Id>,Option<Id>,Json)=sqlx::query_as("SELECT request_id,viewer_id,source_refs FROM resource_summary_model_inputs WHERE model_input_id=$1")
+                .bind(id).fetch_one(&mut *tx).await.map_err(orch_db::DbError::from)?;
+            if kept != (Some(request), row.requested_by, refs.clone()) {
+                return Err(EngineError::unreadable(
+                    "The prompt belongs to another summary source",
                 ));
             }
         }

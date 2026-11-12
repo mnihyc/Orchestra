@@ -9,7 +9,7 @@
 //!
 //! | Name | Requests allowed below the upstream base | Model | Credential header, unless the endpoint says otherwise |
 //! |------|-------------------------------------------|-------|-------------------------------------------------------|
-//! | `openai-responses` | `POST /responses`, `POST /responses/compact`, `GET /models` | body member `model` | `Authorization: Bearer <key>` |
+//! | `openai-responses` | `POST /responses`, `GET /models`, endpoint-declared `POST /alpha/search` | body member `model` | `Authorization: Bearer <key>` |
 //! | `openai-chat` | `POST /chat/completions`, `GET /models` | body member `model` | `Authorization: Bearer <key>` |
 //! | `anthropic-messages` | `POST /v1/messages`, `POST /v1/messages/count_tokens`, `GET /v1/models` | body member `model` | `Authorization: Bearer <key>`; `x-api-key: <key>` where the endpoint's `auth` says so |
 //! | `openai-embeddings` | `POST /embeddings`, `GET /models` | body member `model` | `Authorization: Bearer <key>` |
@@ -32,7 +32,9 @@ use orch_types::Field;
 use url::Url;
 
 use crate::credentials::{Credential, WireError, issue_standard, standard_forms};
-use crate::endpoint::{AuthMode, AuthorizeError, EndpointOptions, authorize, standard_options};
+use crate::endpoint::{
+    AuthMode, AuthorizeError, EndpointOptions, authorize_joined, standard_options,
+};
 use crate::usage::UsageObserver;
 use orch_agent_contract::credentials::IssuedCredential;
 
@@ -47,11 +49,98 @@ pub const OPENAI_EMBEDDINGS: &str = "openai-embeddings";
 /// The protocol that makes vectors, by what it does and not by whose format it is.
 pub const EMBEDDINGS: &str = OPENAI_EMBEDDINGS;
 
+/// Every wire protocol a provider may be declared with, in the order the constraint catalogue lists them.
+pub const SUPPORTED: [&str; 4] = [
+    OPENAI_CHAT,
+    OPENAI_RESPONSES,
+    ANTHROPIC_MESSAGES,
+    OPENAI_EMBEDDINGS,
+];
+
+/// The parameter field declarations of a wire format. Generic option resolution
+/// consumes these alongside the request allowlists rather than selecting a vendor.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ParameterFormat {
+    /// Cache directive vocabulary and exact native positions, independent of user content.
+    pub cache: Option<CacheFormat>,
+    /// Tier field and its explicit ordinary value, when the format reports tiers.
+    pub tier: Option<(&'static str, &'static str)>,
+    /// Some interfaces encode ordinary inference speed only by omitting the field.
+    pub omit_ordinary_tier: bool,
+    /// Independent capacity field, ordinary request selection and ordinary reported class.
+    pub capacity_tier: Option<(&'static str, &'static str, &'static str)>,
+    /// Neutral native-search option, whose tool mapping is declared by this format.
+    pub web_search: Option<&'static str>,
+    /// Effort field and optional nested member.
+    pub effort: Option<(&'static str, Option<&'static str>)>,
+    /// Reasoning object, mode member and ordinary mode; additional modes require model enablement.
+    pub reasoning_mode: Option<(&'static str, &'static str, &'static str)>,
+    /// Program object, member and explicit ordinary value.
+    pub program: Option<(&'static str, &'static str, &'static str)>,
+    /// An ordinary program selection is represented by absence on this interface.
+    pub omit_ordinary_program: bool,
+    /// Reported tier and its pricing alias; the reverse maps a requested cap alias.
+    pub tier_aliases: &'static [(&'static str, &'static str)],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CacheFormat {
+    pub field: &'static str,
+    pub lifetime: &'static str,
+    pub ordinary: &'static str,
+    pub lifetimes: &'static [&'static str],
+    pub pointers: &'static [&'static str],
+}
+
+/// Canonical format data, independent of the vendor hosting an endpoint.
+pub(crate) fn parameter_format(protocol: &str) -> ParameterFormat {
+    match protocol {
+        OPENAI_RESPONSES => ParameterFormat {
+            web_search: Some("web_search"),
+            tier: Some(("service_tier", "default")),
+            effort: Some(("reasoning", Some("effort"))),
+            reasoning_mode: Some(("reasoning", "mode", "standard")),
+            program: Some(("access_programs", "cyber", "standard")),
+            omit_ordinary_program: true,
+            tier_aliases: &[("priority", "fast")],
+            ..Default::default()
+        },
+        OPENAI_CHAT => ParameterFormat {
+            tier: Some(("service_tier", "default")),
+            effort: Some(("reasoning_effort", None)),
+            tier_aliases: &[("priority", "fast")],
+            ..Default::default()
+        },
+        ANTHROPIC_MESSAGES => ParameterFormat {
+            cache: Some(CacheFormat {
+                field: "cache_control",
+                lifetime: "ttl",
+                ordinary: "5m",
+                lifetimes: &["5m", "1h"],
+                pointers: &[
+                    "/cache_control",
+                    "/system/*/cache_control",
+                    "/tools/*/cache_control",
+                    "/messages/*/content/*/cache_control",
+                    "/messages/*/content/*/content/*/cache_control",
+                ],
+            }),
+            web_search: Some("web_search"),
+            tier: Some(("speed", "standard")),
+            omit_ordinary_tier: true,
+            capacity_tier: Some(("service_tier", "standard_only", "standard")),
+            effort: Some(("output_config", Some("effort"))),
+            ..Default::default()
+        },
+        _ => ParameterFormat::default(),
+    }
+}
+
 /// The requests that `openai-responses` lets through, below the upstream base.
 pub const OPENAI_RESPONSES_REQUESTS: [(&str, &str); 3] = [
     ("POST", "/responses"),
-    ("POST", "/responses/compact"),
     ("GET", "/models"),
+    ("POST", "/alpha/search"),
 ];
 /// The requests that `openai-chat` lets through, below the upstream base.
 pub const OPENAI_CHAT_REQUESTS: [(&str, &str); 2] =
@@ -136,6 +225,79 @@ pub fn next_models_page(
     Ok(Some(format!("{path}?{}", query.finish())))
 }
 
+/// An interface's required header, selected from the FINAL outgoing JSON body.
+#[derive(Debug, Clone, Copy)]
+pub struct RequestHeaderRule {
+    /// JSON pointer in the actual emitted body.
+    pub pointer: &'static str,
+    /// A complete JSON literal, preserving string/number/null distinctions.
+    pub equals: &'static str,
+    /// Header owned by this interface requirement.
+    pub name: &'static str,
+    /// Required wire value.
+    pub value: &'static str,
+    /// Whether to retain the program/endpoint's existing comma-list tokens.
+    pub join: bool,
+}
+
+/// A recognized routing list, containing model names or one-field model-name objects.
+#[derive(Clone, Copy, Debug)]
+pub struct ModelListField {
+    /// JSON pointer of the optional list in the actual wire body.
+    pub pointer: &'static str,
+    /// None means strings; Some names the sole member of each routing object.
+    pub member: Option<&'static str>,
+}
+
+/// Read every declared routing name without changing the request or choosing a fallback.
+pub fn model_candidates(
+    primary: Option<String>,
+    body: &[u8],
+    lists: &[ModelListField],
+) -> Result<Vec<String>, &'static str> {
+    let mut names = Vec::new();
+    if let Some(primary) = primary {
+        if primary.trim().is_empty() {
+            return Err("the selected model name is empty");
+        }
+        names.push(primary);
+    }
+    if lists.is_empty() {
+        return Ok(names);
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "the model routing body cannot be read")?;
+    for list in lists {
+        let Some(value) = body.pointer(list.pointer) else {
+            continue;
+        };
+        let values = value
+            .as_array()
+            .ok_or("model routing candidates must be a list")?;
+        for value in values {
+            let value = if let Some(member) = list.member {
+                let object = value
+                    .as_object()
+                    .filter(|object| object.len() == 1)
+                    .ok_or("a routing candidate must contain only its model name")?;
+                object
+                    .get(member)
+                    .ok_or("a routing candidate names no model")?
+            } else {
+                value
+            };
+            let name = value
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .ok_or("every routing candidate must name a model")?;
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    Ok(names)
+}
+
 /// One implementation per wire protocol, used by the provider role.
 pub trait WireProtocol: Send + Sync + 'static {
     /// Its name, such as `openai-responses`.
@@ -146,6 +308,16 @@ pub trait WireProtocol: Send + Sync + 'static {
 
     /// The model a request names, from its path or its body.
     fn model_of(&self, path: &str, body: &[u8]) -> Option<String>;
+
+    /// Extra routing carriers recognized by this interface, without claiming endpoint support.
+    fn model_lists(&self) -> &'static [ModelListField] {
+        &[]
+    }
+
+    /// The primary and every possible alternative, in their original order.
+    fn model_candidates(&self, path: &str, body: &[u8]) -> Result<Vec<String>, &'static str> {
+        model_candidates(self.model_of(path, body), body, self.model_lists())
+    }
 
     /// What an endpoint of this protocol may configure beyond its base URL, in the shape every form uses.
     /// The built-in protocols declare [`standard_options`].
@@ -160,7 +332,7 @@ pub trait WireProtocol: Send + Sync + 'static {
 
     /// Presents the credential the way the endpoint's options say, then the endpoint's headers and secret
     /// headers; `None` for a credential is for an endpoint that takes none. Returns the query parameters
-    /// the endpoint adds to every request. See [`authorize`].
+    /// the endpoint adds to every request. See [`authorize`](crate::endpoint::authorize).
     fn authorize(
         &self,
         headers: &mut HeaderMap,
@@ -168,7 +340,56 @@ pub trait WireProtocol: Send + Sync + 'static {
         options: &EndpointOptions,
         secrets: &SecretHeaders,
     ) -> Result<Vec<(String, String)>, AuthorizeError> {
-        authorize(headers, credential, options, secrets, self.default_auth())
+        authorize_joined(
+            headers,
+            credential,
+            options,
+            secrets,
+            self.default_auth(),
+            self.joined_headers(),
+        )
+    }
+
+    /// Interface-declared header lists. Scalar/authentication headers are not guessed as lists.
+    fn joined_headers(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Required headers whose predicates describe the actual final request, not a requested default.
+    fn request_header_rules(&self) -> &'static [RequestHeaderRule] {
+        &[]
+    }
+
+    /// Apply declared requirements after final body validation and credential presentation.
+    fn finalize_request_headers(
+        &self,
+        headers: &mut HeaderMap,
+        body: &[u8],
+    ) -> Result<(), AuthorizeError> {
+        let rules = self.request_header_rules();
+        if rules.is_empty() {
+            return Ok(());
+        }
+        let Ok(body) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Ok(());
+        };
+        for rule in rules {
+            let expected: serde_json::Value = serde_json::from_str(rule.equals)
+                .map_err(|_| AuthorizeError::BadHeader(rule.name.into()))?;
+            if body.pointer(rule.pointer) != Some(&expected) {
+                continue;
+            }
+            let name = http::HeaderName::from_bytes(rule.name.as_bytes())
+                .map_err(|_| AuthorizeError::BadHeader(rule.name.into()))?;
+            let value = http::HeaderValue::from_str(rule.value)
+                .map_err(|_| AuthorizeError::BadHeader(rule.name.into()))?;
+            if rule.join {
+                crate::endpoint::append_comma_header(headers, name, value)?;
+            } else {
+                headers.insert(name, value);
+            }
+        }
+        Ok(())
     }
 
     /// An error in the protocol's own shape, for a request the forwarder refuses.
@@ -176,6 +397,17 @@ pub trait WireProtocol: Send + Sync + 'static {
 
     /// A reader of one response's usage as it streams by, best-effort.
     fn usage_observer(&self) -> Box<dyn UsageObserver>;
+
+    /// Side requests that require an endpoint binding and this turn's captured native capability.
+    /// Merely appearing in a protocol's method/path table never grants that capability.
+    fn native_capability(&self, _path: &str) -> Option<&'static str> {
+        None
+    }
+
+    /// The same byte reader may use the admitted request's operation to interpret a side reply.
+    fn usage_observer_at(&self, _path: &str, _body: &[u8]) -> Box<dyn UsageObserver> {
+        self.usage_observer()
+    }
 
     /// The request that lists the models of an endpoint, for discovery: its method and its path below the
     /// base. `None` when the protocol has none.
@@ -203,12 +435,65 @@ pub trait WireProtocol: Send + Sync + 'static {
         None
     }
 
+    /// Builds the same completion using its actual endpoint's declared wire options.
+    fn completion_request_at(
+        &self,
+        options: &EndpointOptions,
+        model: &str,
+        system: &str,
+        input: &str,
+        max_output_tokens: i64,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        let _ = options;
+        self.completion_request(model, system, input, max_output_tokens)
+    }
+
     /// Reads the text of a successful non-streaming completion, without reasoning or tool calls.
     fn completion_text(&self, body: &[u8]) -> Result<String, WireError> {
         let _ = body;
         Err(WireError::Internal(
             "this protocol cannot read a text completion".to_owned(),
         ))
+    }
+
+    /// Tool-capable dialogue generation. Protocols without generation, including
+    /// embeddings, leave this unsupported instead of pretending to be a chat model.
+    fn generation_request(
+        &self,
+        model: &str,
+        input: &crate::generation::GenerationInput,
+        stream: bool,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        let _ = (model, input, stream);
+        None
+    }
+
+    /// Builds the same dialogue using the actual endpoint's declared wire options.
+    fn generation_request_at(
+        &self,
+        options: &EndpointOptions,
+        model: &str,
+        input: &crate::generation::GenerationInput,
+        stream: bool,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        let _ = options;
+        self.generation_request(model, input, stream)
+    }
+
+    /// Reads a non-streaming dialogue answer, retaining protocol continuation blocks.
+    fn generation_output(
+        &self,
+        body: &[u8],
+    ) -> Result<crate::generation::GenerationOutput, WireError> {
+        let _ = body;
+        Err(WireError::Internal(
+            "this protocol cannot generate dialogue".to_owned(),
+        ))
+    }
+
+    /// A fresh stream reader for this generation protocol.
+    fn generation_stream(&self) -> Option<Box<dyn crate::generation::GenerationStream>> {
+        None
     }
 
     /// Builds one request that turns texts into vectors, made on the system's behalf; absent when unsupported.
@@ -300,7 +585,7 @@ mod tests {
     fn only_the_requests_a_protocol_names_pass_through_and_the_query_is_no_part_of_the_path() {
         let p = Plain;
         assert!(p.allowed(&Method::POST, "/responses"));
-        assert!(p.allowed(&Method::POST, "/responses/compact"));
+        assert!(!p.allowed(&Method::POST, "/responses/compact"));
         assert!(p.allowed(&Method::GET, "/models"));
         assert!(p.allowed(&Method::GET, "/models?limit=5"));
         assert!(!p.allowed(&Method::GET, "/responses"), "the method counts");
@@ -363,7 +648,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(headers["authorization"], "Bearer sk-1");
-        assert_eq!(p.endpoint_options().len(), 5);
+        let fields: Vec<_> = p
+            .endpoint_options()
+            .into_iter()
+            .map(|field| field.name)
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "auth",
+                "auth_header",
+                "headers",
+                "secret_headers",
+                "query",
+                "params",
+                "output_limit_field",
+                "request_options"
+            ]
+        );
     }
 
     #[test]
@@ -385,5 +687,55 @@ mod tests {
         );
         assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
         assert!(String::from_utf8_lossy(refusal.body()).contains("model_not_allowed"));
+    }
+
+    #[test]
+    fn undeclared_headers_are_never_inferred_from_a_compatible_body() {
+        let p = Plain;
+        let mut headers = HeaderMap::new();
+        p.finalize_request_headers(&mut headers, br#"{"speed":"fast"}"#)
+            .unwrap();
+        assert!(headers.is_empty());
+        assert!(p.joined_headers().is_empty());
+        assert!(p.request_header_rules().is_empty());
+    }
+
+    #[test]
+    fn declared_model_lists_preserve_names_and_refuse_per_candidate_overrides() {
+        let lists = &[
+            ModelListField {
+                pointer: "/models",
+                member: None,
+            },
+            ModelListField {
+                pointer: "/fallbacks",
+                member: Some("model"),
+            },
+        ];
+        assert_eq!(model_candidates(Some("first".into()), br#"{"models":["first","vendor/second"],"fallbacks":[{"model":"third"}],"metadata":{"model":"unrelated"}}"#, lists).unwrap(), ["first", "vendor/second", "third"]);
+        assert_eq!(
+            model_candidates(None, br#"{"models":["vendor/first","second"]}"#, lists).unwrap(),
+            ["vendor/first", "second"]
+        );
+        for body in [
+            br#"{"models":null}"#.as_slice(),
+            br#"{"models":"other"}"#,
+            br#"{"models":["first",false]}"#,
+            br#"{"models":[" "]}"#,
+            br#"{"fallbacks":[{"model":"second","speed":"fast"}]}"#,
+            br#"{"fallbacks":[{"model":null}]}"#,
+        ] {
+            assert!(model_candidates(Some("first".into()), body, lists).is_err());
+        }
+        assert!(Plain.model_lists().is_empty());
+        assert_eq!(
+            Plain
+                .model_candidates(
+                    "/responses",
+                    br#"{"model":"first","models":["an undeclared field"]}"#
+                )
+                .unwrap(),
+            ["first"]
+        );
     }
 }

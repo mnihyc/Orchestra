@@ -177,6 +177,56 @@ pub fn read(text: &str) -> Result<FrontMatter, FrontMatterFault> {
     Ok(FrontMatter { name, description })
 }
 
+/// Change only a validated top-level name, retaining other front matter and the body byte for byte.
+/// The same parser decides member boundaries, including quoted and block scalars.
+pub fn with_name(text: &str, name: &str) -> Result<String, FrontMatterFault> {
+    read(text)?;
+    if let Some(why) = name_fault(name) {
+        return Err(FrontMatterFault::Name {
+            name: name.to_owned(),
+            why,
+        });
+    }
+    let without_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut changed = String::new();
+    if without_bom.len() != text.len() {
+        changed.push('\u{feff}');
+    }
+    let mut first = true;
+    let mut active = false;
+    let mut done = false;
+    for line in without_bom.split_inclusive('\n') {
+        let content = line.trim_end_matches(['\r', '\n']);
+        if first {
+            first = false;
+            changed.push_str(line);
+            continue;
+        }
+        if content.trim_end() == "---" || content.trim_end() == "..." {
+            done = true;
+            active = false;
+        }
+        if !done
+            && !content.starts_with([' ', '\t'])
+            && !content.starts_with('#')
+            && let Some((key, _)) = split_key(content)
+        {
+            active = key == "name";
+            if active {
+                let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                changed.push_str(&format!("name: {name}{ending}"));
+                continue;
+            }
+        }
+        if active && content.starts_with([' ', '\t']) && !content.trim().is_empty() {
+            continue;
+        }
+        changed.push_str(line);
+    }
+    read(&changed)?;
+    Ok(changed)
+}
+
 /// What is wrong with `name` as the name of a skill, if anything: one to 64 lower-case letters,
 /// digits and hyphens, with no hyphen at either end and never two together.
 #[must_use]
@@ -769,5 +819,30 @@ mod tests {
             read("\u{feff}---\r\nname: win\r\ndescription: Made on Windows\r\n---\r\n").unwrap();
         assert_eq!(found.name, "win");
         assert_eq!(found.description, "Made on Windows");
+    }
+    #[test]
+    fn renaming_preserves_unknown_members_and_body_without_confusing_nested_or_multiline_name_values()
+     {
+        for scalar in ["old", "'old'", "\"old\"", ">-\n  old", "\n  old"] {
+            let original = format!(
+                "---\n# heading\nname: {scalar}\nmetadata:\n  name: nested\nlicense: Apache-2.0\ndescription: Does the work\n---\n# name: stays here\nBody\n"
+            );
+            let changed = with_name(&original, "new-copy").unwrap();
+            assert_eq!(read(&changed).unwrap().name, "new-copy");
+            assert!(changed.contains("metadata:\n  name: nested\nlicense: Apache-2.0"));
+            assert!(changed.ends_with("---\n# name: stays here\nBody\n"));
+        }
+        let windows = "\u{feff}---\r\nname: old\r\ndescription: Does the work\r\n...\r\nBody\r\n";
+        assert_eq!(
+            with_name(windows, "new-copy").unwrap(),
+            "\u{feff}---\r\nname: new-copy\r\ndescription: Does the work\r\n...\r\nBody\r\n"
+        );
+        assert!(
+            with_name(
+                "---\nname: old\nname: second\ndescription: Does the work\n---\n",
+                "new-copy"
+            )
+            .is_err()
+        );
     }
 }

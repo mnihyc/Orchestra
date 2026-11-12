@@ -24,6 +24,17 @@ describe('the request that a choice makes', () => {
     expect(requestOf({ ...choices, name: 'Ignored', page: 'private' })).toEqual(requestOf(choices));
   });
 
+  it('keeps automatic-choice explanations out of both native request forms', () => {
+    for (const result of ['new', 'replace'] as const) {
+      const choices = { ...initialChoices(result), providerId: 'target', agentId: 'keeper', model: 'model', effort: 'high' };
+      expect(requestOf({ ...choices, automaticRuns: {
+        profile: { providerId: 'target', agentId: 'keeper', by: 'keeper', previous: 'disabled' },
+        model: { providerId: 'target', model: 'model', by: 'first', replaced: true },
+        effort: { providerId: 'target', model: 'model', value: 'high', by: 'default', replaced: true },
+      } })).toEqual(requestOf(choices));
+    }
+  });
+
   it('carries in a switch the history the person chose, and leaves it to the place when they chose none', () => {
     const choices = { ...initialChoices('replace'), providerId: 'prov-2' };
     expect(requestOf(choices)).not.toHaveProperty('history');
@@ -42,6 +53,16 @@ describe('the request that a choice makes', () => {
     expect(changesSomething({ ...none, providerId: 'prov-2' })).toBe(true);
     expect(changesSomething({ ...none, where: { kind: 'use', id: 'env-2', files: { mode: 'all' } } })).toBe(true);
     expect(changesSomething({ ...none, directory: ' sub ' })).toBe(true);
+  });
+
+  it('distinguishes an untouched directory from an explicitly selected workspace root', () => {
+    const untouched = initialChoices('replace');
+    expect(requestOf(untouched)).not.toHaveProperty('directory');
+    expect(changesSomething(untouched)).toBe(false);
+    expect(requestOf({ ...untouched, directory: '' })).toEqual({ result: 'replace', directory: '' });
+    expect(changesSomething({ ...untouched, directory: '' })).toBe(true);
+    expect(requestOf({ ...untouched, directory: ' apps/project ' }).directory).toBe('apps/project');
+    expect(requestOf({ ...untouched, directory: null })).not.toHaveProperty('directory');
   });
 
   it('takes the history of a fork up to the turn of the message it was asked from, and nothing of it from before the first', () => {

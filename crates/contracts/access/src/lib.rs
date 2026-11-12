@@ -17,12 +17,15 @@
 
 pub mod audit;
 pub mod decisions;
+pub mod key_scope;
 pub mod pages;
 pub mod permissions;
 pub mod roles;
+pub mod whereabouts;
 
 pub use audit::{ActorKind, AuditAction};
 pub use decisions::{Decision, MissingAccess, Refusal, Standing, Through};
 pub use pages::{Chain, Entry, Holder, PageChange, PageOf, Row};
 pub use permissions::{Choice, Level, ObjectKind, Permission, Placement, Profile, ResourceKind};
 pub use roles::{NodeKind, PlaceKind, PlaceRef, Role, Subject};
+pub use whereabouts::{WhereKind, WhereName, Whereabouts};

@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Read resource cards and choices
 screens: /resources, /resources/providers, /resources/providers/$id, /resources/agents, /resources/agents/$id, /resources/environments, /resources/environments/$id, /resources/hosts, /resources/hosts/$id, /resources/machines, /resources/machines/$id, /resources/templates, /resources/templates/$id, /resources/mounts, /resources/mounts/$id, /resources/mcp, /resources/mcp/$id, /resources/skills, /resources/skills/$id, /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /admin/$section
 keywords: resource card, inspect, choice, provider, model, host, environment, load, speed, context, limits, unknown
+summary: Inspect resources and choices with their reported facts, sources and unavailable reasons.
 ---
 
 # Read resource cards and choices
@@ -42,3 +44,5 @@ At limit explain different reasons a choice may not start work.
 You see only facts your access permits. A visible name or card does not grant
 Use or Manage. Disabled options keep their reason. Start, Stop or Recycle in
 a card follow the same permissions and confirmation as the resource page.
+
+The sharing line says when it is still checking or when details are unavailable. Retry repeats the failed read. A restricted or read-only line does not describe a private audience as “Only me”. Share is available only when the current permission page allows it, even if the permissions catalogue could not be read.

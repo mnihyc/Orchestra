@@ -38,11 +38,32 @@ pub const NOTICE_MESSAGE: &str = "chat.message";
 /// The kind of notification that tells a person they were named.
 pub const NOTICE_MENTION: &str = "mention";
 
+/// The one native mention-preview trial, inside its existing guarded transaction.
+/// Its fixed private name is never a caller operand; no commit or writer escapes.
+pub async fn begin_mention_preview(conn: &mut Conn) -> Result<(), DbError> {
+    sqlx::query("SAVEPOINT orch_chat_mention_preview")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Remove every trial post/input/custody/outbox change before the final current Read.
+/// The outer transaction keeps only its earlier locks and authority/read bookkeeping.
+pub async fn discard_mention_preview(conn: &mut Conn) -> Result<(), DbError> {
+    sqlx::query("ROLLBACK TO SAVEPOINT orch_chat_mention_preview")
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("RELEASE SAVEPOINT orch_chat_mention_preview")
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 // ------------------------------------------------------------------ chats
 
 macro_rules! chat_columns {
     () => {
-        "id, kind, node_id, org_id, direct_key, name, created_by, next_seq, seq_state, last_message_seq, last_message_at, created_at"
+        "id, kind, visibility, node_id, home_id, org_id, direct_key, name, created_by, next_seq, seq_state, last_message_seq, last_message_at, created_at"
     };
 }
 
@@ -53,8 +74,12 @@ pub struct ChatRow {
     pub id: Id,
     /// `node`, `direct` or `group`.
     pub kind: String,
+    /// Stored discoverability of a group; node chats project their page instead.
+    pub visibility: String,
     /// The node it belongs to, for a node's chat.
     pub node_id: Option<Id>,
+    /// A group's chosen home; absence keeps its root org as home.
+    pub home_id: Option<Id>,
     /// The root org it belongs to; for a node's chat, its node's.
     pub org_id: Id,
     /// For a direct chat, the two people's identifiers, the smaller first.
@@ -76,6 +101,12 @@ pub struct ChatRow {
 }
 
 impl ChatRow {
+    /// Actual placement for authorization, key ancestry, references and inventories.
+    #[must_use]
+    pub fn home(&self) -> Id {
+        self.node_id.or(self.home_id).unwrap_or(self.org_id)
+    }
+
     /// The highest number of the chat's sequence that was given out.
     #[must_use]
     pub fn seq(&self) -> Seq {
@@ -125,6 +156,18 @@ pub async fn chat_of_node(conn: &mut Conn, node: Id) -> Result<Option<ChatRow>, 
     .await?)
 }
 
+/// Stored node-chat identities in one native read, without message contents.
+pub async fn chats_of_nodes(conn: &mut Conn, nodes: &[Id]) -> Result<Vec<ChatRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        chat_columns!(),
+        " FROM chats WHERE node_id = ANY($1)"
+    ))
+    .bind(nodes)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// The chat `id`, locked until the end of the transaction: whoever changes
 /// what a chat holds reads it this way first, so that two changes of one chat
 /// are made one after the other.
@@ -137,6 +180,26 @@ pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<ChatRow>, DbError> {
     .bind(id)
     .fetch_optional(conn)
     .await?)
+}
+
+/// Keep a personal-state source fixed while allowing the state INSERT's native foreign-key share.
+pub async fn lock_for_state(conn: &mut Conn, id: Id) -> Result<Option<ChatRow>, DbError> {
+    Ok(sqlx::query_as(concat!(
+        "SELECT ",
+        chat_columns!(),
+        " FROM chats WHERE id = $1 FOR NO KEY UPDATE"
+    ))
+    .bind(id)
+    .fetch_optional(conn)
+    .await?)
+}
+
+/// Take the native INSERT/UPDATE table mode before a personal-state prefix waits on rows.
+pub async fn lock_state_writes(conn: &mut Conn) -> Result<(), DbError> {
+    sqlx::query("LOCK TABLE chat_states IN ROW EXCLUSIVE MODE")
+        .execute(conn)
+        .await?;
+    Ok(())
 }
 
 /// The next number of a chat's sequence, taken while the chat's row is
@@ -229,9 +292,18 @@ pub struct NewChat<'a> {
 /// Makes a direct or a group chat. None where a direct chat of those two
 /// people in that org exists already.
 pub async fn insert_chat(conn: &mut Conn, new: &NewChat<'_>) -> Result<Option<ChatRow>, DbError> {
+    insert_chat_at(conn, new, None).await
+}
+
+/// The same native insertion with a group home selected by the ordinary preparer.
+pub async fn insert_chat_at(
+    conn: &mut Conn,
+    new: &NewChat<'_>,
+    home: Option<Id>,
+) -> Result<Option<ChatRow>, DbError> {
     Ok(sqlx::query_as(concat!(
-        "INSERT INTO chats (id, kind, org_id, direct_key, name, created_by, created_at) ",
-        "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (org_id, direct_key) DO NOTHING ",
+        "INSERT INTO chats (id, kind, org_id, direct_key, name, created_by, created_at, home_id) ",
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (org_id, direct_key) DO NOTHING ",
         "RETURNING ",
         chat_columns!()
     ))
@@ -242,6 +314,7 @@ pub async fn insert_chat(conn: &mut Conn, new: &NewChat<'_>) -> Result<Option<Ch
     .bind(new.name)
     .bind(new.created_by)
     .bind(new.at)
+    .bind(home)
     .fetch_optional(conn)
     .await?)
 }
@@ -269,6 +342,31 @@ pub async fn rename(conn: &mut Conn, chat: Id, name: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// Keep native group-home nodes fixed through the prepared write, in stable lock order.
+pub async fn lock_homes(conn: &mut Conn, nodes: &[Id]) -> Result<(), DbError> {
+    sqlx::query("SELECT id FROM nodes WHERE id=ANY($1) ORDER BY id FOR NO KEY UPDATE")
+        .bind(nodes)
+        .fetch_all(conn)
+        .await?;
+    Ok(())
+}
+
+/// Apply a prepared name/home patch to a group without changing its node-chat identity.
+pub async fn update_group(
+    conn: &mut Conn,
+    chat: Id,
+    name: Option<&str>,
+    home: Option<Id>,
+) -> Result<(), DbError> {
+    sqlx::query("UPDATE chats SET name=$2, home_id=$3 WHERE id=$1 AND kind='group'")
+        .bind(chat)
+        .bind(name)
+        .bind(home)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 /// Notes that a message was written: the chat's newest message moves to it.
 pub async fn note_message(
     conn: &mut Conn,
@@ -288,7 +386,7 @@ pub async fn note_message(
 
 async fn touch_place_activity(conn: &mut Conn, chat: Id, at: DateTime<Utc>) -> Result<(), DbError> {
     let place: Option<Id> =
-        sqlx::query_scalar("SELECT COALESCE(node_id,org_id) FROM chats WHERE id=$1")
+        sqlx::query_scalar("SELECT COALESCE(node_id,home_id,org_id) FROM chats WHERE id=$1")
             .bind(chat)
             .fetch_optional(&mut *conn)
             .await?;
@@ -315,6 +413,8 @@ pub struct MemberRow {
     pub left_at: Option<DateTime<Utc>>,
     /// Whether they came in through Share without being a member of the org.
     pub guest: bool,
+    /// Whether this current member manages the group.
+    pub manager: bool,
     /// The number of the chat's sequence at which this row last changed.
     pub seq_updated: i64,
     /// When a timed membership ends; null is the ordinary permanent membership.
@@ -354,7 +454,7 @@ pub fn effective_members(members: &[MemberRow], at: DateTime<Utc>) -> Vec<Member
 /// Everyone who ever was in the chat, the first to join first.
 pub async fn members(conn: &mut Conn, chat: Id) -> Result<Vec<MemberRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT chat_id, user_id, added_by, joined_at, left_at, guest, seq_updated, expires_at
+        "SELECT chat_id, user_id, added_by, joined_at, left_at, guest, manager, seq_updated, expires_at
            FROM chat_members WHERE chat_id = $1 ORDER BY joined_at, user_id",
     )
     .bind(chat)
@@ -372,11 +472,11 @@ pub async fn members_for_label(
 ) -> Result<Vec<MemberRow>, DbError> {
     Ok(sqlx::query_as(r#"
       SELECT * FROM (
-       (SELECT chat_id,user_id,added_by,joined_at,left_at,guest,seq_updated,expires_at
+       (SELECT chat_id,user_id,added_by,joined_at,left_at,guest,manager,seq_updated,expires_at
         FROM chat_members WHERE chat_id=$1 AND user_id<>$2 AND left_at IS NULL AND expires_at IS NULL
         ORDER BY expires_at,user_id LIMIT $4)
        UNION ALL
-       (SELECT chat_id,user_id,added_by,joined_at,left_at,guest,seq_updated,expires_at
+       (SELECT chat_id,user_id,added_by,joined_at,left_at,guest,manager,seq_updated,expires_at
         FROM chat_members WHERE chat_id=$1 AND user_id<>$2 AND left_at IS NULL AND expires_at>$3
         ORDER BY expires_at,user_id LIMIT $4)
       ) peers ORDER BY joined_at,user_id LIMIT $4
@@ -403,7 +503,7 @@ pub async fn expired_group_memberships(
 /// Everyone who ever was in any of the chats `chats`.
 pub async fn members_in(conn: &mut Conn, chats: &[Id]) -> Result<Vec<MemberRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT chat_id, user_id, added_by, joined_at, left_at, guest, seq_updated, expires_at
+        "SELECT chat_id, user_id, added_by, joined_at, left_at, guest, manager, seq_updated, expires_at
            FROM chat_members WHERE chat_id = ANY($1) ORDER BY chat_id, joined_at, user_id",
     )
     .bind(chats)
@@ -438,7 +538,7 @@ pub async fn add_member(conn: &mut Conn, new: &NewMember) -> Result<(), DbError>
          VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (chat_id, user_id) DO UPDATE
             SET left_at = NULL, joined_at = EXCLUDED.joined_at, added_by = EXCLUDED.added_by,
-                guest = EXCLUDED.guest, seq_updated = EXCLUDED.seq_updated, expires_at=EXCLUDED.expires_at",
+                guest = EXCLUDED.guest, manager = false, seq_updated = EXCLUDED.seq_updated, expires_at=EXCLUDED.expires_at",
     )
     .bind(new.chat_id)
     .bind(new.user_id)
@@ -450,6 +550,30 @@ pub async fn add_member(conn: &mut Conn, new: &NewMember) -> Result<(), DbError>
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Current factual manager membership; callers retain the ordinary chat authorization.
+pub async fn is_manager(
+    conn: &mut Conn,
+    chat: Id,
+    user: Id,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chat_members WHERE chat_id=$1 AND user_id=$2 AND manager AND left_at IS NULL AND (expires_at IS NULL OR expires_at>$3))")
+        .bind(chat).bind(user).bind(at).fetch_one(conn).await?)
+}
+
+/// Change the flag while the native writer holds the chat row and guards its last manager.
+pub async fn set_manager(
+    conn: &mut Conn,
+    chat: Id,
+    user: Id,
+    manager: bool,
+    seq: Seq,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    Ok(sqlx::query("UPDATE chat_members SET manager=$3, seq_updated=$4 WHERE chat_id=$1 AND user_id=$2 AND left_at IS NULL AND (expires_at IS NULL OR expires_at>$5) AND manager IS DISTINCT FROM $3")
+        .bind(chat).bind(user).bind(manager).bind(seq).bind(at).execute(conn).await?.rows_affected()>0)
 }
 
 /// Takes a person out of a chat. Says whether they were in it.
@@ -701,6 +825,35 @@ pub async fn message(conn: &mut Conn, chat: Id, id: Id) -> Result<Option<Message
     .await?)
 }
 
+/// Retained identity/recipient association for accepted work; never reloads snapshot message content.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct MessageOriginRow {
+    /// The retained message identity.
+    pub id: Id,
+    /// Its actual chat.
+    pub chat_id: Id,
+    /// Ordinary message or system event.
+    pub kind: String,
+    /// The original person, when retained.
+    pub author_id: Option<Id>,
+    /// An agent author, which cannot become a human agent ask.
+    pub author_thread_id: Option<Id>,
+    /// Actual accepted recipient/input pairs.
+    pub asked_agents: Json,
+    /// Snapshot contents may be removed without undoing accepted work.
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+/// Read only retained identity/association evidence for a message, including a deleted row.
+pub async fn message_origin(
+    conn: &mut Conn,
+    chat: Id,
+    id: Id,
+) -> Result<Option<MessageOriginRow>, DbError> {
+    Ok(sqlx::query_as("SELECT id,chat_id,kind,author_id,author_thread_id,asked_agents,deleted_at FROM chat_messages WHERE chat_id=$1 AND id=$2")
+        .bind(chat).bind(id).fetch_optional(conn).await?)
+}
+
 /// The newest ordinary message of each already authorized chat, in one query.
 /// Deleted messages stay the newest; their projection carries an empty excerpt.
 pub async fn last_messages(conn: &mut Conn, chats: &[Id]) -> Result<Vec<MessageRow>, DbError> {
@@ -798,6 +951,17 @@ pub async fn delete_message(
     conn: &mut Conn,
     id: Id,
     by: Id,
+    seq: Seq,
+    at: DateTime<Utc>,
+) -> Result<MessageRow, DbError> {
+    delete_message_by(conn, id, Some(by), seq, at).await
+}
+
+/// The same tombstone with an explicit non-person actor. Agent identity lives in the audit row.
+pub async fn delete_message_by(
+    conn: &mut Conn,
+    id: Id,
+    by: Option<Id>,
     seq: Seq,
     at: DateTime<Utc>,
 ) -> Result<MessageRow, DbError> {
@@ -1088,15 +1252,19 @@ pub async fn count_item_quotes(
 
 // ------------------------------------------------------------------ one person's state
 
+// Row-only writers and the fenced read keep their existing lock boundary. The chat context in
+// their projection is looked up by primary key without also locking the chat row.
 macro_rules! state_columns {
     () => {
-        "user_id, chat_id, level, engaged, last_read_seq, read_revision, mentions_unread, draft, draft_reply_to, hidden, updated_at"
+        "user_id, chat_id, level, engaged, last_read_seq, read_revision, mentions_unread, draft, draft_reply_to, hidden, updated_at,
+         (SELECT c.org_id FROM chats c WHERE c.id = chat_states.chat_id) AS org_id,
+         (SELECT c.last_message_seq FROM chats c WHERE c.id = chat_states.chat_id) AS last_message_seq"
     };
 }
 
 pub mod following;
 
-/// One person's own state in one chat, as it is stored.
+/// One person's stored state together with its chat's current unread-count context.
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct StateRow {
     /// The fence advanced by deliberate read and unread choices.
@@ -1105,6 +1273,10 @@ pub struct StateRow {
     pub user_id: Id,
     /// The chat.
     pub chat_id: Id,
+    /// The chat's current root organization, joined from its chat row.
+    pub org_id: Id,
+    /// The newest message in that chat, independently of this person's read position.
+    pub last_message_seq: Seq,
     /// What they set with the bell; none when they have not.
     pub level: Option<String>,
     /// Whether they posted or were mentioned here.
@@ -1125,11 +1297,10 @@ pub struct StateRow {
 
 /// The person's state in one chat.
 pub async fn state(conn: &mut Conn, user: Id, chat: Id) -> Result<Option<StateRow>, DbError> {
-    Ok(sqlx::query_as(concat!(
-        "SELECT ",
-        state_columns!(),
-        " FROM chat_states WHERE user_id = $1 AND chat_id = $2"
-    ))
+    Ok(sqlx::query_as(
+        "SELECT s.*, c.org_id, c.last_message_seq FROM chat_states s
+         JOIN chats c ON c.id = s.chat_id WHERE s.user_id = $1 AND s.chat_id = $2",
+    )
     .bind(user)
     .bind(chat)
     .fetch_optional(conn)
@@ -1138,11 +1309,10 @@ pub async fn state(conn: &mut Conn, user: Id, chat: Id) -> Result<Option<StateRo
 
 /// The person's state in some chats.
 pub async fn states_in(conn: &mut Conn, user: Id, chats: &[Id]) -> Result<Vec<StateRow>, DbError> {
-    Ok(sqlx::query_as(concat!(
-        "SELECT ",
-        state_columns!(),
-        " FROM chat_states WHERE user_id = $1 AND chat_id = ANY($2)"
-    ))
+    Ok(sqlx::query_as(
+        "SELECT s.*, c.org_id, c.last_message_seq FROM chat_states s
+         JOIN chats c ON c.id = s.chat_id WHERE s.user_id = $1 AND s.chat_id = ANY($2)",
+    )
     .bind(user)
     .bind(chats)
     .fetch_all(conn)
@@ -1151,12 +1321,27 @@ pub async fn states_in(conn: &mut Conn, user: Id, chats: &[Id]) -> Result<Vec<St
 
 /// The person's state in every chat they have one in.
 pub async fn states_of(conn: &mut Conn, user: Id) -> Result<Vec<StateRow>, DbError> {
-    Ok(sqlx::query_as(concat!(
-        "SELECT ",
-        state_columns!(),
-        " FROM chat_states WHERE user_id = $1 ORDER BY chat_id"
-    ))
+    Ok(sqlx::query_as(
+        "SELECT s.*, c.org_id, c.last_message_seq FROM chat_states s
+         JOIN chats c ON c.id = s.chat_id WHERE s.user_id = $1 ORDER BY s.chat_id",
+    )
     .bind(user)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// Stored states of a known, already authorized member audience, for one personal-event fan-out.
+pub async fn states_of_members(
+    conn: &mut Conn,
+    chat: Id,
+    users: &[Id],
+) -> Result<Vec<StateRow>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT s.*, c.org_id, c.last_message_seq FROM chat_states s
+         JOIN chats c ON c.id = s.chat_id WHERE s.chat_id = $1 AND s.user_id = ANY($2)",
+    )
+    .bind(chat)
+    .bind(users)
     .fetch_all(conn)
     .await?)
 }
@@ -1442,15 +1627,29 @@ pub async fn mine(
     after: Option<After>,
     limit: i64,
 ) -> Result<Vec<ChatRow>, DbError> {
+    mine_selected(conn, user, org, guest_only, after, limit, None).await
+}
+
+/// The same native selector restricted to retained selected identities before ordering and paging.
+pub async fn mine_selected(
+    conn: &mut Conn,
+    user: Id,
+    org: Id,
+    guest_only: bool,
+    after: Option<After>,
+    limit: i64,
+    selected: Option<&[Id]>,
+) -> Result<Vec<ChatRow>, DbError> {
     Ok(sqlx::query_as(concat!(
-        "SELECT c.id, c.kind, c.node_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
+        "SELECT c.id, c.kind, c.visibility, c.node_id, c.home_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
         "c.last_message_seq, c.last_message_at, c.created_at ",
         "FROM chats c ",
-        "JOIN chat_members m ON m.chat_id = c.id AND m.user_id = $1 AND m.left_at IS NULL ",
+        "LEFT JOIN chat_members m ON m.chat_id = c.id AND m.user_id = $1 AND m.left_at IS NULL ",
         "LEFT JOIN chat_states s ON s.chat_id = c.id AND s.user_id = $1 ",
         "WHERE c.org_id = $2 AND c.kind <> 'node' AND NOT COALESCE(s.hidden, false) ",
-        "AND (NOT $3 OR m.guest) ",
+        "AND ((m.user_id IS NOT NULL AND (NOT $3 OR m.guest)) OR (NOT $3 AND c.kind='group' AND c.visibility='public')) ",
         "AND ($4::timestamptz IS NULL OR (COALESCE(c.last_message_at, c.created_at), c.id) < ($4, $5)) ",
+        "AND ($7::uuid[] IS NULL OR c.id = ANY($7)) ",
         "ORDER BY COALESCE(c.last_message_at, c.created_at) DESC, c.id DESC LIMIT $6"
     ))
     .bind(user)
@@ -1459,6 +1658,7 @@ pub async fn mine(
     .bind(after.map(|after| after.at))
     .bind(after.map(|after| after.id))
     .bind(limit)
+    .bind(selected)
     .fetch_all(conn)
     .await?)
 }
@@ -1488,8 +1688,21 @@ pub async fn others_among(
     after: Option<After>,
     limit: i64,
 ) -> Result<Vec<ChatRow>, DbError> {
+    others_among_selected(conn, user, org, of, after, limit, None).await
+}
+
+/// The same native selector restricted to retained selected identities before ordering and paging.
+pub async fn others_among_selected(
+    conn: &mut Conn,
+    user: Id,
+    org: Id,
+    of: &[Id],
+    after: Option<After>,
+    limit: i64,
+    selected: Option<&[Id]>,
+) -> Result<Vec<ChatRow>, DbError> {
     Ok(sqlx::query_as(concat!(
-        "SELECT c.id, c.kind, c.node_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
+        "SELECT c.id, c.kind, c.visibility, c.node_id, c.home_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
         "c.last_message_seq, c.last_message_at, c.created_at ",
         "FROM chats c ",
         "WHERE c.org_id = $2 AND c.kind <> 'node' ",
@@ -1500,6 +1713,7 @@ pub async fn others_among(
         "    AND NOT EXISTS (SELECT 1 FROM org_members om JOIN nodes d ON d.id = om.domain_id ",
         "                     WHERE om.org_id = $2 AND om.user_id = m.user_id AND scope.org = ANY(d.path)))))) ",
         "AND ($4::timestamptz IS NULL OR (COALESCE(c.last_message_at, c.created_at), c.id) < ($4, $5)) ",
+        "AND ($7::uuid[] IS NULL OR c.id = ANY($7)) ",
         "ORDER BY COALESCE(c.last_message_at, c.created_at) DESC, c.id DESC LIMIT $6"
     ))
     .bind(user)
@@ -1508,6 +1722,7 @@ pub async fn others_among(
     .bind(after.map(|after| after.at))
     .bind(after.map(|after| after.id))
     .bind(limit)
+    .bind(selected)
     .fetch_all(conn)
     .await?)
 }
@@ -1520,18 +1735,31 @@ pub async fn node_chats_with_messages(
     after: Option<After>,
     limit: i64,
 ) -> Result<Vec<ChatRow>, DbError> {
+    node_chats_with_messages_selected(conn, org, after, limit, None).await
+}
+
+/// The same native selector restricted to retained selected identities before ordering and paging.
+pub async fn node_chats_with_messages_selected(
+    conn: &mut Conn,
+    org: Id,
+    after: Option<After>,
+    limit: i64,
+    selected: Option<&[Id]>,
+) -> Result<Vec<ChatRow>, DbError> {
     Ok(sqlx::query_as(concat!(
-        "SELECT c.id, c.kind, c.node_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
+        "SELECT c.id, c.kind, c.visibility, c.node_id, c.home_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
         "c.last_message_seq, c.last_message_at, c.created_at ",
         "FROM chats c JOIN nodes n ON n.id = c.node_id ",
         "WHERE c.org_id = $1 AND c.kind = 'node' AND c.last_message_seq > 0 AND n.deleted_at IS NULL ",
         "AND ($2::timestamptz IS NULL OR (c.last_message_at, c.id) < ($2, $3)) ",
+        "AND ($5::uuid[] IS NULL OR c.id = ANY($5)) ",
         "ORDER BY c.last_message_at DESC, c.id DESC LIMIT $4"
     ))
     .bind(org)
     .bind(after.map(|after| after.at))
     .bind(after.map(|after| after.id))
     .bind(limit)
+    .bind(selected)
     .fetch_all(conn)
     .await?)
 }
@@ -1546,7 +1774,7 @@ pub async fn unread_in_org(
     org: Id,
 ) -> Result<Vec<(ChatRow, Option<StateRow>)>, DbError> {
     let chats: Vec<ChatRow> = sqlx::query_as(concat!(
-        "SELECT c.id, c.kind, c.node_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
+        "SELECT c.id, c.kind, c.visibility, c.node_id, c.home_id, c.org_id, c.direct_key, c.name, c.created_by, c.next_seq, c.seq_state, ",
         "c.last_message_seq, c.last_message_at, c.created_at ",
         "FROM chats c ",
         "LEFT JOIN chat_states s ON s.chat_id = c.id AND s.user_id = $1 ",
@@ -1695,6 +1923,13 @@ pub async fn is_root_org(conn: &mut Conn, org: Id) -> Result<bool, DbError> {
     .await?)
 }
 
+/// Keep the actual opening parent from changing or disappearing before its first chat INSERT.
+pub async fn lock_opening_root(conn: &mut Conn, org: Id) -> Result<bool, DbError> {
+    Ok(sqlx::query_scalar::<_, Id>(
+        "SELECT id FROM nodes WHERE id=$1 AND kind='org' AND parent_id IS NULL AND deleted_at IS NULL FOR SHARE",
+    ).bind(org).fetch_optional(conn).await?.is_some())
+}
+
 /// The orgs of a root org's tree, the root first and the rest by how deep they
 /// lie.
 pub async fn orgs_of_tree(conn: &mut Conn, root: Id) -> Result<Vec<Id>, DbError> {
@@ -1836,12 +2071,23 @@ pub async fn message_carrying(
     chat: Id,
     hash: &orch_types::Hash,
 ) -> Result<Option<Json>, DbError> {
+    Ok(message_carrying_row(conn, chat, hash)
+        .await?
+        .map(|(_, content)| content))
+}
+
+/// The same native message selection, retaining its actual source identity before formatting.
+pub async fn message_carrying_row(
+    conn: &mut Conn,
+    chat: Id,
+    hash: &orch_types::Hash,
+) -> Result<Option<(Id, Json)>, DbError> {
     let blob = hash.to_string();
     let direct = serde_json::json!([{ "blob": blob }]);
     let images = serde_json::json!([{ "images": [{ "blob": blob }] }]);
     let attachments = serde_json::json!([{ "attachments": [{ "blob": blob }] }]);
-    Ok(sqlx::query_scalar(
-        "SELECT content FROM chat_messages
+    Ok(sqlx::query_as(
+        "SELECT id, content FROM chat_messages
           WHERE chat_id = $1 AND deleted_at IS NULL AND kind = 'message'
             AND (content @> $2 OR content @> $3 OR content @> $4)
           ORDER BY seq_created LIMIT 1",
@@ -1863,6 +2109,32 @@ pub async fn pin_blobs(conn: &mut Conn, hashes: &[Vec<u8>], delta: i32) -> Resul
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Update only a group's discoverability on its caller's existing action transaction.
+pub async fn set_visibility(conn: &mut Conn, chat: Id, visibility: &str) -> Result<(), DbError> {
+    sqlx::query("UPDATE chats SET visibility=$2 WHERE id=$1 AND kind='group'")
+        .bind(chat)
+        .bind(visibility)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
+/// Ends only a group selected by the native Move writer; its dependent history uses existing cascades.
+pub async fn end_moved_group(
+    conn: &mut Conn,
+    id: Id,
+    by: Id,
+    at: DateTime<Utc>,
+) -> Result<bool, DbError> {
+    sqlx::query("UPDATE permission_entries SET removed_at=$3,removed_by=$2,revision=revision+1 WHERE object_kind='chat' AND object_id=$1 AND removed_at IS NULL")
+        .bind(id).bind(by).bind(at).execute(&mut *conn).await?;
+    let done = sqlx::query("DELETE FROM chats WHERE id=$1 AND kind='group'")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(done.rows_affected() == 1)
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ import type { SettingDef } from '@/generated/api-types';
 import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
 const GUIDES = {
+  background: { article: 'thread-states', heading: 'background-work', chinese: '后台工作' },
   cache: { article: 'storage-cleanup', heading: 'unused-caches', chinese: '未使用缓存' },
   releases: { article: 'storage-cleanup', heading: 'unused-releases', chinese: '未使用发布' },
   kept: { article: 'storage-cleanup', heading: 'kept-data', chinese: '保留的数据' },
@@ -14,6 +15,7 @@ const GUIDES = {
 const ZERO_KEYS = new Set(['env.recycle_idle_minutes', 'capability.recreate_grace_secs', 'tags.max_per_place', 'switch.wait_minutes', 'references.preview_lines']);
 
 export function settingGuide(def: Pick<SettingDef, 'key' | 'display'>) {
+  if (def.key === 'threads.background_wake') return GUIDES.background;
   if (def.key === 'cleanup.unused_keep_days') return GUIDES.cache;
   if (def.key === 'cleanup.release_keep_count') return GUIDES.releases;
   if (def.key === 'env.removed_keep_days') return GUIDES.kept;
@@ -26,5 +28,5 @@ export function SettingGuideLink({ def, target }: { def: Pick<SettingDef, 'key' 
   const guide = settingGuide(def);
   if (guide === null) return null;
   return <ArticleGuideLink article={guide.article} heading={guide.heading}
-    title={t(guide.article === 'storage-cleanup' ? 'storageCleanup.guide' : guide.article === 'switch-threads' ? 'change.batch.guide' : 'numericSettings.guide')} {...(target === undefined ? {} : {target})} />;
+    title={t(guide.article === 'thread-states' ? 'backgroundWake.settingTitle' : guide.article === 'storage-cleanup' ? 'storageCleanup.guide' : guide.article === 'switch-threads' ? 'change.batch.guide' : 'numericSettings.guide')} {...(target === undefined ? {} : {target})} />;
 }

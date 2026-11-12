@@ -16,12 +16,22 @@ async function allTabsVisible(page: Page, overview: string) {
   const tabs = page.getByRole('tablist').filter({ has: page.getByRole('tab', { name: overview, exact: true }) });
   const choices = tabs.getByRole('tab');
   expect(await choices.count()).toBeGreaterThanOrEqual(3); expect(await choices.count()).toBeLessThanOrEqual(6);
-  for (const choice of await choices.all()) await expect(choice).toBeInViewport();
-  const bounds = await tabs.evaluate((element) => Array.from(element.querySelectorAll<HTMLElement>('[role="tab"]')).map((tab) => {
-    const rect = tab.getBoundingClientRect(); return { left: rect.left, right: rect.right, width: rect.width };
-  }));
   const width = page.viewportSize()?.width ?? 0;
-  for (const bound of bounds) { expect(bound.left).toBeGreaterThanOrEqual(0); expect(bound.width).toBeGreaterThan(0); expect(bound.right).toBeLessThanOrEqual(width + 1); }
+  // The shared single-row tab strip scrolls by design. Reveal every name without opening its lazy panel.
+  for (const choice of await choices.all()) {
+    await choice.scrollIntoViewIfNeeded(); await expect(choice).toBeInViewport();
+    const bound = await choice.boundingBox();
+    expect(bound).not.toBeNull(); expect(bound!.x).toBeGreaterThanOrEqual(0);
+    expect(bound!.width).toBeGreaterThan(0); expect(bound!.x + bound!.width).toBeLessThanOrEqual(width + 1);
+    const clipping = await choice.evaluate((element) => {
+      const own = element.getBoundingClientRect(), strip = element.closest('[role="tablist"]')!.getBoundingClientRect();
+      return Math.max(strip.left - own.left, own.right - strip.right, 0);
+    });
+    // Native scroll offsets round to CSS pixels, including at 200 percent zoom.
+    expect(clipping).toBeLessThanOrEqual(1);
+  }
+  const selected = tabs.getByRole('tab', { name: overview, exact: true });
+  await selected.scrollIntoViewIfNeeded(); await expect(selected).toHaveAttribute('aria-selected', 'true');
 }
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [1440, 400]) {
@@ -41,10 +51,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     page.on('request', (request) => { const url = new URL(request.url()); if (url.pathname.startsWith('/api/v1/')) { reads.push(`${request.method()} ${url.pathname}`); pending.add(request); } });
     page.on('requestfinished', (request) => { pending.delete(request); }); page.on('requestfailed', (request) => { pending.delete(request); });
     for (const [kind, path] of pages) {
-      reads = []; pending.clear(); await page.goto(path);
+      reads = []; pending.clear(); await page.mouse.move(0, 0); await page.goto(path);
       const heading = page.getByRole('heading', { level: 1 }); await expect(heading).toHaveCount(1); await expect(heading).toBeVisible();
       await expect(page.getByRole('button', { name: words.resourceCreation[creationKinds[kind]], exact: true })).toHaveCount(0);
-      await expect(page.locator('[data-resource-facts]')).toHaveCount(1); await allTabsVisible(page, words.resourceDetails.overview);
+      // Independent gateway/detection reports now add facts groups; each belongs to one distinct named section.
+      const facts = page.locator('[data-main-area] [data-resource-facts]:visible');
+      expect(await facts.count()).toBeGreaterThanOrEqual(1);
+      const groups = await facts.evaluateAll((elements) => elements.map((element) => element.getAttribute('aria-label')
+        ?? element.closest('section')?.getAttribute('aria-labelledby') ?? 'primary'));
+      expect(new Set(groups).size).toBe(groups.length);
+      await allTabsVisible(page, words.resourceDetails.overview);
       await expect(page.locator('[data-resource-details][open]')).toHaveCount(0);
       const height = await heading.evaluate((element) => {
         const body = element.closest('header')?.parentElement; if (body === null || body === undefined) throw new Error('The resource lost its page body');
@@ -63,5 +79,37 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await page.evaluate(() => { document.documentElement.style.zoom = '2'; }); await allTabsVisible(page, words.resourceDetails.overview);
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     }
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`keeps machine Access in its six-tab Policy group (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page);
+    expect((await page.request.post(`http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/__double/request-feeds/fixtures`)).ok()).toBe(true);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/resources/machines/${RUNS_ON.laptop}?tab=access`);
+    const navigation = page.getByRole('tablist', { name: words.machines.tabs.label, exact: true });
+    await expect(navigation.getByRole('tab')).toHaveCount(6);
+    await expect(navigation.getByRole('tab', { name: words.machines.tabs.policy, exact: true })).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('[data-resource-section="access"]')).toBeVisible();
+    const sections = page.locator('[data-section-nav]').filter({ has: page.locator('a[data-section-id="access"]') });
+    // Section navigation follows its pane's container width, including a narrow pane in a wide workbench.
+    const choice = sections.getByRole('combobox', { name: words.machines.tabs.policy, exact: true });
+    if (await choice.isVisible()) {
+      await expect(choice).toHaveValue(words.machines.tabs.access);
+      await choice.click();
+      await page.getByRole('option', { name: words.machines.tabs.policy, exact: true }).click();
+    } else await sections.getByRole('link', { name: words.machines.tabs.policy, exact: true }).click();
+    await expect(page.locator('[data-resource-section="policy"]')).toBeVisible();
+    await expect(page).toHaveURL(/tab=policy/);
   });
 }

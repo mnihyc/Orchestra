@@ -1,8 +1,10 @@
 ---
+group: settings
 title: Reading views and details
 screens: /, /workbench, /org/$slug, /org/$slug/messages, /org/$slug/settings/$section, /project/$projectId, /project/$projectId/settings, /topic/$topicId, /thread/$threadId, /doc/$documentId, /documents/$nodeId, /document-folder/$folderId, /chat/$chatId, /place-chat/$nodeId, /inbox, /approvals, /everything, /search, /shared, /usage, /u/$username, /resources/providers, /resources/providers/$id, /resources/agents, /resources/agents/$id, /resources/environments, /resources/environments/$id, /resources/hosts, /resources/hosts/$id, /resources/machines, /resources/machines/$id, /resources/templates, /resources/templates/$id, /resources/mcp, /resources/mcp/$id, /resources/mounts, /resources/mounts/$id, /resources/skills, /resources/skills/$id, /settings, /admin, /help
 keywords: views, tabs, navigation, resource details, cards, menus, keyboard, phone, long names, settings, permissions
 heading_keywords.finding-names-and-commands: finder, modes, All
+summary: Open work, inspect cards and menus, and read long values without changing access.
 ---
 
 # Reading views and details

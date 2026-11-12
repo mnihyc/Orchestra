@@ -73,11 +73,20 @@ fn rate(pricing: &Value) -> Option<Rate> {
     let input = price(pricing, "prompt")?;
     let output = price(pricing, "completion")?;
     Some(Rate {
+        web_fetch_per_call: pricing
+            .get("web_fetch")
+            .and_then(|price| decimal::plain(&price.to_string())),
+        web_search_per_call: pricing
+            .get("web_search")
+            .and_then(|price| decimal::plain(&price.to_string())),
         cached_input_per_mtok: price(pricing, "input_cache_read").unwrap_or_else(|| input.clone()),
         cache_write_per_mtok: price(pricing, "input_cache_write"),
         input_per_mtok: input,
         output_per_mtok: output,
         tiers: None,
+        cache_write_1h_per_mtok: price(pricing, "input_cache_write_1h"),
+        cache_write_12h_per_mtok: price(pricing, "input_cache_write_12h"),
+        capacity_tiers: None,
         above: None,
     })
 }
@@ -95,10 +104,60 @@ fn suggestion(entry: &Value) -> Option<ModelSuggestion> {
     let mut suggestion = ModelSuggestion::named(id, display_name);
     // An endpoint states one number, its largest. It is on offer and nothing more: a manager opens it.
     suggestion.parameters.offered = size(entry.get("context_length")).map(|largest| Offered {
+        web_search: None,
         context_max: Some(largest),
         ..Offered::default()
     });
     suggestion.parameters.rate = entry.get("pricing").and_then(rate);
+    suggestion
+        .origins
+        .insert("/model_name".into(), "vendor".into());
+    if display_name.is_some() {
+        suggestion
+            .origins
+            .insert("/display_name".into(), "vendor".into());
+    }
+    if suggestion
+        .parameters
+        .offered
+        .as_ref()
+        .and_then(|offered| offered.context_max)
+        .is_some()
+    {
+        suggestion
+            .origins
+            .insert("/parameters/offered/context_max".into(), "vendor".into());
+    }
+    if suggestion.parameters.rate.is_some()
+        && let Some(pricing) = entry.get("pricing")
+    {
+        for (member, field) in [
+            ("prompt", "input_per_mtok"),
+            ("completion", "output_per_mtok"),
+            ("input_cache_read", "cached_input_per_mtok"),
+            ("input_cache_write", "cache_write_per_mtok"),
+            ("input_cache_write_1h", "cache_write_1h_per_mtok"),
+            ("input_cache_write_12h", "cache_write_12h_per_mtok"),
+        ] {
+            if price(pricing, member).is_some() {
+                suggestion
+                    .origins
+                    .insert(format!("/parameters/rate/{field}"), "vendor".into());
+            }
+        }
+    }
+    if let Some(rate) = suggestion.parameters.rate.as_ref() {
+        for (field, value) in [
+            ("web_search_per_call", rate.web_search_per_call.as_ref()),
+            ("web_fetch_per_call", rate.web_fetch_per_call.as_ref()),
+        ] {
+            if value.is_some() {
+                suggestion
+                    .origins
+                    .insert(format!("/parameters/rate/{field}"), "vendor".into());
+            }
+        }
+    }
     Some(suggestion)
 }
 
@@ -145,6 +204,35 @@ pub fn list_response(names: &[String]) -> Response<Bytes> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_actual_reported_names_context_and_prices_are_marked_as_vendor_values() {
+        let found = parse(
+            br#"{"data":[{"id":"fixture-model","name":"Reported model","context_length":200000,
+            "pricing":{"prompt":"0.000001","completion":"0.000002"}}]}"#,
+        );
+        let model = &found[0];
+        for pointer in [
+            "/model_name",
+            "/display_name",
+            "/parameters/offered/context_max",
+            "/parameters/rate/input_per_mtok",
+            "/parameters/rate/output_per_mtok",
+        ] {
+            assert_eq!(
+                model.origins.get(pointer).map(String::as_str),
+                Some("vendor")
+            );
+        }
+        assert!(
+            !model
+                .origins
+                .contains_key("/parameters/rate/cached_input_per_mtok"),
+            "a missing cache price's existing fallback is not a reported price"
+        );
+        assert!(!model.origins.contains_key("/parameters/offered/web_search"));
+        assert!(model.parameters.web_search.is_none());
+    }
 
     /// The vendor's own list: ids and nothing to propose beyond them.
     const VENDOR: &str = r#"{"object":"list","data":[

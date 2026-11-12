@@ -51,9 +51,9 @@ INSERT INTO node_roles(id,node_id,subject_kind,subject_id,role,created_by) VALUE
  (search_probe_id('role/small'),search_probe_id('topic/0'),'user',search_probe_id('small'),'developer',search_probe_id('owner'));
 
 -- @documents
-INSERT INTO documents(id,node_id,org_id,owner_id,created_by,title,description,description_source,doc_seq,block_count,bytes,updated_by,created_at,updated_at)
+INSERT INTO documents(id,node_id,org_id,owner_id,created_by,title,description,doc_seq,block_count,bytes,updated_by,created_at,updated_at)
    SELECT search_probe_id('document/'||id),search_probe_id('topic/'||((id/2)%100)),search_probe_id('root'),search_probe_id('owner'),search_probe_id('owner'),
-     title,description,'user',1,1,octet_length(body),search_probe_id('owner'),updated_at,updated_at
+     title,description,1,1,octet_length(body),search_probe_id('owner'),updated_at,updated_at
    FROM corpus WHERE kind='document' AND id BETWEEN $1 AND $2;
 
 -- @content

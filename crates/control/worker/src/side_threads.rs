@@ -51,6 +51,35 @@ pub async fn close_idle(db: &Db, clock: &dyn Clock) -> Result<Option<usize>, Sid
             closed += 1;
         }
     }
+    // Ask uses the same small periodic lifetime pass, with immediate hard deletion
+    // at its retention boundary and no soft-delete waiting period.
+    for root in orch_db::queries::ask::roots(&mut tx).await? {
+        // A recoverably deleted governing root still owns these personal-home
+        // conversations. Resolve its retained policy for this cleanup only.
+        let (minimum, maximum) = orch_db::queries::trace::read_scope(&[root], async {
+            let minimum =
+                orch_settings::get::<i64>(&mut tx, Place::Node(root), "ask.retention_min_days")
+                    .await?
+                    .unwrap_or(1);
+            let maximum =
+                orch_settings::get::<i64>(&mut tx, Place::Node(root), "ask.retention_max_days")
+                    .await?
+                    .unwrap_or(3650);
+            Ok::<_, orch_settings::Error>((minimum, maximum))
+        })
+        .await?;
+        if minimum < 1 || minimum > maximum {
+            continue;
+        }
+        let minimum = i32::try_from(minimum).map_err(|_| orch_settings::Error::Unreadable {
+            what: "Ask retention minimum",
+        })?;
+        let maximum = i32::try_from(maximum).map_err(|_| orch_settings::Error::Unreadable {
+            what: "Ask retention maximum",
+        })?;
+        let _purged =
+            orch_db::queries::ask::purge_root(&mut tx, root, minimum, maximum, now, BATCH).await?;
+    }
     tx.commit().await.map_err(DbError::from)?;
     Ok(Some(closed))
 }

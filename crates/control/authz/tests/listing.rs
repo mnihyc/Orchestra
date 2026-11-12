@@ -406,3 +406,94 @@ async fn one_decision_takes_a_handful_of_statements_whoever_asks_and_whatever_th
         "a refusal, with who can give it, takes {refused_statements} statements"
     );
 }
+
+async fn ask_view(w: &World, supplied_rows: bool) -> bool {
+    use orch_authz::engine::{Frame, Graph};
+    let mut conn = w.conn().await;
+    let principal = orch_authz::Principal::load(&mut conn, Caller::session(w.maker), w.now)
+        .await
+        .unwrap();
+    let graph = if supplied_rows {
+        let rows = orch_db::queries::hierarchy::with_ancestors(&mut conn, &[w.thread])
+            .await
+            .unwrap();
+        let mut graph = Graph::default();
+        graph.add_rows(rows).unwrap();
+        graph
+    } else {
+        Graph::load(&mut conn, &[w.thread]).await.unwrap()
+    };
+    let site = graph.site_of(w.thread).unwrap();
+    let frame = Frame::load(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        graph,
+        std::slice::from_ref(&site),
+        &[P::ThreadView],
+    )
+    .await
+    .unwrap();
+    !frame.ways(&site, P::ThreadView).is_empty()
+}
+
+#[tokio::test]
+async fn joined_and_supplied_thread_facts_keep_the_actual_ask_root_and_retention_boundary() {
+    let w = World::new().await;
+    let governing = orch_types::new_id();
+    let mut conn = w.conn().await;
+    orch_db::queries::hierarchy::testing::insert_node(
+        &mut conn,
+        governing,
+        "org",
+        None,
+        "Knowledge",
+        w.boss,
+    )
+    .await
+    .unwrap();
+    for user in [w.boss, w.maker] {
+        orch_db::queries::access::testing::insert_member(&mut conn, governing, user, governing)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE threads SET program='orch',program_root_org_id=$2,ask_root_org_id=$2,ask_retention_days=1,ask_last_message_at=$3 WHERE node_id=$1")
+        .bind(w.thread).bind(governing).bind(w.now.get()).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    for supplied in [false, true] {
+        assert!(
+            ask_view(&w, supplied).await,
+            "the real owner may read while the distinct governing root is available"
+        );
+    }
+    sqlx::query("UPDATE threads SET ask_last_message_at=$2 WHERE node_id=$1")
+        .bind(w.thread)
+        .bind(w.now.get() - chrono::Duration::days(2))
+        .execute(&w.db.pool)
+        .await
+        .unwrap();
+    for supplied in [false, true] {
+        assert!(
+            !ask_view(&w, supplied).await,
+            "expired Ask governance cannot become an ordinary thread after a graph handoff"
+        );
+    }
+    sqlx::query("UPDATE threads SET ask_last_message_at=$2 WHERE node_id=$1")
+        .bind(w.thread)
+        .bind(w.now.get())
+        .execute(&w.db.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE nodes SET deleted_at=$2 WHERE id=$1")
+        .bind(governing)
+        .bind(w.now.get())
+        .execute(&w.db.pool)
+        .await
+        .unwrap();
+    for supplied in [false, true] {
+        assert!(
+            !ask_view(&w, supplied).await,
+            "the storage home staying live cannot replace a deleted Ask governing root"
+        );
+    }
+}

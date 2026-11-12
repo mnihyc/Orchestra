@@ -47,8 +47,10 @@ test('128 interaction rounds remain responsive with ten billion lifetime tokens 
   // Virtualized conversation rows must be fewer than the retained two-message-per-round history.
   expect(nodes).toBeLessThan(128);
   const log = main.getByRole('log', { name: 'Conversation', exact: true });
-  await expect(log).not.toHaveAttribute('aria-busy', 'true'); await log.hover(); await page.mouse.wheel(0, -3000);
-  await expect.poll(() => log.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(1000);
+  // The thread's controls and its virtual history share one scroll owner, the screen of the thread: it is what says it is busy
+  // while the end is held, and what the wheel moves away from the end.
+  await expect(main).not.toHaveAttribute('aria-busy', 'true'); await log.hover(); await page.mouse.wheel(0, -3000);
+  await expect.poll(() => main.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeGreaterThan(1000);
   await composer.fill('The long session is still editable'); await expect(composer).toHaveValue('The long session is still editable');
   const metrics = { rounds: 128, lifetimeTokens: 10_000_000_000,
     elapsedMs: Date.now() - began, renderedItems: nodes, websocketConnectionsAfterOpening: sockets - connected, receivedFrames: frames, receivedBytes: bytes, additionalSyncReads: syncs.length - initialSyncs };

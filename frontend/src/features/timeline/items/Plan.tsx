@@ -19,6 +19,8 @@ import { DecisionStatus } from '@/features/approvals/Card';
 import { composerWriter } from '@/features/composer/Draft';
 import { Body } from '@/features/chat/Body';
 import { ItemFrame } from '@/features/timeline/ItemActions';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
 import { holds } from '@/lib/permissions';
 import { threadReadState, threadWriter, useThreadPart } from '@/realtime/stores/thread';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
@@ -30,6 +32,7 @@ type PlanItem = Extract<Item, { kind: 'plan' }>;
 
 export function Plan({ item }: { item: PlanItem }) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const { steps, explanation } = item.payload;
   const done = steps.filter((step) => step.status === 'completed').length;
   const proposed = useThreadPart(item.thread_id, (view) => item.turn_id !== null && view.turns.get(item.turn_id)?.plan === true);
@@ -38,7 +41,7 @@ export function Plan({ item }: { item: PlanItem }) {
       <section aria-label={t('timeline.plan.title')} data-plan={item.id} className="flex flex-col gap-2 rounded-lg border border-border bg-surface px-3 py-2">
         <h3 className="flex items-baseline justify-between text-sm font-semibold text-text">
           {t(proposed ? 'timeline.plan.proposed' : 'timeline.plan.title')}
-          {steps.length > 0 && <span className="text-xs font-normal text-text-subtle tabular-nums">{t('timeline.plan.progress', { done, total: steps.length })}</span>}
+          {steps.length > 0 && <span className="text-xs font-normal text-text-subtle tabular-nums">{t('timeline.plan.progress', { done: formatNumber(done, locale), total: formatNumber(steps.length, locale) })}</span>}
         </h3>
         {explanation !== null && explanation !== '' && (proposed
           ? <div className="max-h-(--diff-max-height) overflow-y-auto text-sm" data-plan-text><Body text={explanation} originThread={item.thread_id}/></div>

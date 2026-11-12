@@ -145,20 +145,21 @@ async fn a_folder_only_agent_discovers_and_reuses_returned_paths_without_parent_
     )
     .await?;
     tx.commit().await?;
+    area.world
+        .set(
+            area.world.topic,
+            "threads.agent_access",
+            json!({"where":"nothing","parts":{}}),
+        )
+        .await;
     let reader = area.world.thread("A folder-only reader").await;
     let agent = orch_authz::reach::Agent::of(&mut *area.world.pool.acquire().await?, reader)
         .await?
         .ok_or("the calling agent is present")?;
     assert_ne!(
         agent.topic, area.topic,
-        "the source is outside the reader's implicit topic scope"
+        "the source is outside the reader's own topic"
     );
-    area.world
-        .set(agent.topic, "sharing.agent_reach", json!("none"))
-        .await;
-    area.world
-        .set(agent.topic, "sharing.agent_documents", json!("none"))
-        .await;
     let grant = share(
         &area.world,
         "document_container",

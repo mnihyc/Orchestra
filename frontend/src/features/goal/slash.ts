@@ -9,15 +9,14 @@ import { useTranslation } from 'react-i18next';
 
 import { setGoal } from '@/api/goals';
 import { openGoalEditor } from '@/features/goal/editor';
-import { isLive } from '@/features/goal/model';
+import { goalActionReason, isLive } from '@/features/goal/model';
 import { useGoalPlans } from '@/features/goal/plan';
 import type { SlashCommand } from '@/features/composer/SlashMenu';
 import type { Thread } from '@/generated/api-types';
-import { holds } from '@/lib/permissions';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { toast } from '@/ui/Toast';
 
-/** The `/goal` command of a thread's composer; nothing on a thread that cannot hold a goal. */
+/** The `/goal` command, with the current reason where this thread cannot hold a goal. */
 export function useGoalCommand(thread: Thread): SlashCommand[] {
   const { t } = useTranslation();
   const read = useThreadReadRef(thread.id);
@@ -31,15 +30,15 @@ export function useGoalCommand(thread: Thread): SlashCommand[] {
     }),
     onError: () => toast({ tone: 'danger', title: t('goals.act.failed') }),
   });
-  if (thread.archived || thread.side_of !== null) return [];
   const goal = thread.goal ?? null;
   const existing = goal !== null && (isLive(goal) || goal.status === 'stopped');
-  const off = !holds(thread.access, 'thread.interact') ? t('goals.act.driveOnly') : null;
+  const off = goalActionReason(thread, t);
   return [{
     name: 'goal',
     about: t('goals.slash.about'),
     off,
     run: (argument) => {
+      if (off !== null) return off;
       if (existing || argument === '') {
         openGoalEditor(thread.id);
         return null;

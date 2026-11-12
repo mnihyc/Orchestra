@@ -82,11 +82,11 @@ export function ImportDestination({ value, onChange, standing, isPackage }: {
   const path = standing.node?.path.map((part) => part.redacted ? t('ui.nameUnknown') : part.name ?? t('ui.nameUnknown')).join(' / ');
   const placeName = standing.node === undefined && standing.error !== null ? t('ui.nameUnknown') : path === undefined || path === '' ? value.place?.label ?? '' : path;
   return <div className="flex min-w-0 flex-col gap-4">
-    <NamePicker label={t('importWizard.destination.place')} kinds={['org', 'project', 'topic']} chosen={value.place === null ? null : placeName}
+    <NamePicker pickerKey="people.ImportDestination.importWizard.destination.place" label={t('importWizard.destination.place')} kinds={['org', 'project', 'topic']} chosen={value.place === null ? null : placeName}
       placeholder={t('importWizard.destination.findPlace')} nothing={t('importWizard.destination.noPlace')} accepts={(hit) => !hit.archived}
       onChoose={(hit) => onChange({ ...value, place: hit === null ? null : { id: hit.id, label: placeLabel(hit, t('ui.nameUnknown')) }, folder: null })} />
     {value.place !== null && <div className="flex min-w-0 flex-wrap items-end gap-2">
-      <div className="min-w-0 flex-1"><NamePicker label={t('importWizard.destination.folder')} kinds={['document_container']} chosen={value.folder?.label ?? null}
+      <div className="min-w-0 flex-1"><NamePicker pickerKey="people.ImportDestination.importWizard.destination.folder" label={t('importWizard.destination.folder')} kinds={['document_container']} chosen={value.folder?.label ?? null}
         anything={t('importWizard.destination.folderDefault', { place: placeName })}
         orgId={standing.node?.org_id} accepts={(hit) => !hit.archived && hit.path.at(-1)?.id === placeId}
         placeholder={t('importWizard.destination.findFolder')} nothing={t('importWizard.destination.noFolder')}

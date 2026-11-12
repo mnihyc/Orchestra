@@ -195,6 +195,86 @@ async fn narrower_models_efforts_and_arrangements_need_management_but_a_swap_or_
 }
 
 #[tokio::test]
+async fn a_manager_without_the_use_shortens_the_places_of_an_entry_but_lengthens_or_takes_them_away_only_by_giving()
+ {
+    let world = World::new().await;
+    let manager = world.member("manager").await;
+    let recipient = world.member("recipient").await;
+    let id = world.provider(world.maker, world.root, "Shared key").await;
+    world
+        .grant(
+            "provider",
+            id,
+            Permission::AccessManage,
+            Holder::User { id: manager },
+        )
+        .await;
+    let mut places = Vec::new();
+    for name in ["first", "second", "third"] {
+        let environment = world
+            .thing("environment", world.maker, world.topic, name)
+            .await;
+        // The manager sees all three, so that naming them is not what is refused.
+        world
+            .grant(
+                "environment",
+                environment,
+                Permission::EnvironmentView,
+                Holder::User { id: manager },
+            )
+            .await;
+        places.push(json!({"kind": "environment", "id": environment}));
+    }
+    let before = json!({"where": [places[0], places[1]]});
+    let entry = world
+        .put(
+            "provider",
+            id,
+            Permission::ProviderUse,
+            Holder::User { id: recipient },
+            before,
+        )
+        .await;
+    let update = |options: serde_json::Value| {
+        json!({"rows": [{"permission": "provider.use", "update": [{
+            "entry_id": entry, "options": options
+        }]}]})
+    };
+    world
+        .change_thing(
+            manager,
+            "provider",
+            id,
+            update(json!({"where": [places[0]]})),
+        )
+        .await
+        .unwrap();
+    let page = world.read_thing(world.maker, "provider", id).await;
+    assert_eq!(
+        page.rows
+            .iter()
+            .find(|row| row.permission == Permission::ProviderUse)
+            .unwrap()
+            .entries[0]
+            .options,
+        json!({"where": [places[0]]})
+    );
+    for options in [
+        json!({"where": [places[0], places[2]]}),
+        json!({"where": [places[1]]}),
+        json!({}),
+    ] {
+        let epoch = world.epoch().await;
+        let error = world
+            .change_thing(manager, "provider", id, update(options))
+            .await
+            .unwrap_err();
+        missing(error, Permission::ProviderUse);
+        assert_eq!(world.epoch().await, epoch);
+    }
+}
+
+#[tokio::test]
 async fn reducing_host_and_template_caps_is_management_and_removing_their_caps_is_giving() {
     let world = World::new().await;
     let manager = world.member("manager").await;

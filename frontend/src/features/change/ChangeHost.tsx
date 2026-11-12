@@ -5,6 +5,8 @@
  * a provider's runtime, what is idle at a host or a place, or the progress of a job that was started already.
  */
 import { type ComponentProps, Suspense } from 'react';
+import { useStore } from 'zustand';
+import { client } from '@/api/client';
 
 import type { MoveDialog as MoveDialogType } from '@/features/fleet/MoveDialog';
 import type { BatchChange as BatchChangeDialog } from '@/features/change/BatchChange';
@@ -15,6 +17,7 @@ import { useChangeHost } from '@/features/change/target';
 import { lazyPart } from '@/features/files/lazy';
 import { SideAskHost } from '@/features/side-threads/AskOnSide';
 import type { UpdateDialog as UpdatesDialog } from '@/features/fleet/UpdateDialog';
+import type { NodeMovesDialog } from '@/features/fleet/NodeMoves';
 
 // Each dialog is a part of its own, fetched the first time such a change is asked for: the frame that stands on every
 // screen carries none of them.
@@ -24,6 +27,7 @@ const EnvironmentChange = lazyPart<ComponentProps<typeof EnvironmentChangeDialog
 const MoveDialog = lazyPart<ComponentProps<typeof MoveDialogType>>(() => import('@/features/fleet/MoveDialog').then((module) => ({ default: module.MoveDialog })));
 const Recycle = lazyPart<ComponentProps<typeof RecycleDialog>>(() => import('@/features/change/Recycle').then((module) => ({ default: module.Recycle })));
 const Updates = lazyPart<ComponentProps<typeof UpdatesDialog>>(() => import('@/features/fleet/UpdateDialog').then((module) => ({ default: module.UpdateDialog })));
+const NodeMoves = lazyPart<ComponentProps<typeof NodeMovesDialog>>(() => import('@/features/fleet/NodeMoves').then((module) => ({ default: module.NodeMovesDialog })));
 
 export function ChangeHost() {
   return (
@@ -38,13 +42,18 @@ function Wizard() {
   const current = useChangeHost((state) => state.current);
   const open = useChangeHost((state) => state.open);
   const hide = useChangeHost((state) => state.hide);
+  const reader = useStore(client.session, (state) => state.readerVersion);
   if (current === null) return null;
   const { target, options, asked } = current;
   const kind = options.kind;
   if (target.kind === 'provider' && kind === 'update' && open) return <Updates key={asked} targets={{ environments: [], providers: [target.id] }} onClose={hide} />;
   if (target.kind === 'environments' && kind === 'update' && open) return <Updates key={asked} targets={{ environments: target.ids, node: target.node }} onClose={hide} />;
 
-  if ((kind === 'recover' || kind === 'move' || kind === 'progress' && options.batch !== undefined) && target.kind === 'environments') return <MoveDialog key={asked} source={{ ids: target.ids }} batch={options.batch ?? null} open={open} onClose={hide} />;
+  if (kind === 'move' && target.kind === 'environments' && open) {
+    if (target.selection !== undefined && target.selection.reader !== reader) return null;
+    return <NodeMoves key={asked} environments={target.selection?.rows ?? []} onClose={hide} />;
+  }
+  if ((kind === 'recover' || kind === 'progress' && options.batch !== undefined) && target.kind === 'environments') return <MoveDialog key={asked} source={{ ids: target.ids }} batch={options.batch ?? null} open={open} onClose={hide} />;
   if (kind === 'recover' && (target.kind === 'host' || target.kind === 'machine' || target.kind === 'environment')) return <MoveDialog key={asked} source={{ target: { type: target.kind, id: target.id } }} open={open} onClose={hide} />;
   // A thread: one fork or switch, or the progress of the job that holds it.
   if (target.kind === 'thread' && (kind === 'switch' || kind === 'fork' || kind === 'progress')) {

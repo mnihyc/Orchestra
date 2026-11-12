@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "updates/environment_scopes.rs"]
+mod environment_scopes;
 mod hosting;
 
 use common::World;
@@ -1102,7 +1104,23 @@ async fn a_replacement_preserves_the_native_session_in_the_new_segment() {
         .unwrap();
     let start = world.turn_start(thread, 0).await;
     assert!(
-        start.text.contains("The runtime was recreated"),
+        start
+            .text
+            .contains("This environment was made again (an update was applied)"),
+        "{}",
+        start.text
+    );
+    assert!(
+        start.text.contains(
+            "software you installed outside the volumes is gone; install it again, or use the Developer tools template"
+        ),
+        "{}",
+        start.text
+    );
+    assert!(
+        start
+            .text
+            .contains("Earlier processes are gone; the volumes and conversations are intact."),
         "{}",
         start.text
     );
