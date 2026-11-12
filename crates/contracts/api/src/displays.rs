@@ -1,5 +1,12 @@
 //! Displays of an environment and single-use tickets to watch or work in them.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::browsers::{BrowserOrigin, BrowserState, BrowsersOff, EnvironmentBrowsersLimit};
 use crate::environment::{EnvironmentRef, EnvironmentSupportVnc, ThroughThreadQuery};
 use crate::nodes::NodeRef;
@@ -117,17 +124,111 @@ pub struct DisplayAttachQuery {
     pub ticket: String,
 }
 
+/// The completed close without the existing display's private metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DisplayCloseReceipt {
+    /// This acknowledgement carries no existing session content.
+    pub projection: crate::common::ReceiptProjection,
+    /// The display named by this close.
+    pub display_id: Id,
+    /// The actual environment whose close operation was admitted.
+    pub environment_id: Id,
+    /// The row is closed, including an idempotent repeated close.
+    pub closed: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary full projection or this same close operation's restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum DisplayCloseResponse {
+        /// Existing content when this operation currently admits its Read facet.
+        Full(Display),
+        /// Identifiers and safe completed outcome only.
+        Receipt(DisplayCloseReceipt),
+    }
+}
+
+/// The actual accepted display without private current session metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DisplayCreateReceipt {
+    /// This acknowledgement contains no full session projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual native reservation.
+    pub display_id: Id,
+    /// The actual native environment.
+    pub environment_id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The native first/current session or its accepted identity receipt.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum DisplayCreateResponse {
+        /// Same native session metadata, under this operation's current Read.
+        Full(Display),
+        /// No session metadata is disclosed and no service is opened twice.
+        Receipt(DisplayCreateReceipt),
+    }
+}
+
+crate::common::full_or_receipt! {
+    /// A new once-only display ticket or its already accepted identity.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum DisplayTicketCreateResponse {
+        /// The unchanged first native credential.
+        Full(DisplayTicketCreateReply),
+        /// No secret is stored or returned again.
+        Receipt(crate::common::TicketCreateReceipt),
+    }
+}
+
 crate::endpoints! {
     /// Lists displays and optionally rediscovers installed programs.
     EnvironmentDisplayList: GET "/environments/{id}/displays", Permission("vnc.view"), query EnvironmentDisplayListQuery, none, json EnvironmentDisplays, 200;
     /// Opens a virtual screen for programs with windows.
-    EnvironmentDisplayCreate: POST "/environments/{id}/displays", Permission("vnc.manage"), query ThroughThreadQuery, json EnvironmentDisplayCreateBody, json Display, 201;
+    EnvironmentDisplayCreate: POST "/environments/{id}/displays", Permission("vnc.manage"), query ThroughThreadQuery, json EnvironmentDisplayCreateBody, json DisplayCreateResponse, 201,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage,&[Object(K::Environment)],Target::PermissionObject),
+            Facet::response_content(&[Object(K::Environment)],Target::PermissionObject),
+            Facet::response_content(&[Object(K::Thread)],Target::ResolvedCollection("close_threads")),
+        ]));
     /// Stops an owned virtual screen or lets go of an announced server.
-    DisplayClose: DELETE "/displays/{display_id}", Rule("vnc.manage on its environment"), none, none, json Display, 200;
+    DisplayClose: DELETE "/displays/{display_id}", Rule("vnc.manage on its environment"), none, none, json DisplayCloseResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Object(K::Environment)], Target::Resolved("session_environment")),
+            Facet::response_content(&[Object(K::Environment)], Target::Resolved("session_environment")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("close_threads")),
+        ]));
     /// Gives a ticket to watch or, with Manage, work in a display.
-    DisplayTicketCreate: POST "/displays/{display_id}/ticket", Rule("vnc.view on its environment; control also needs vnc.manage"), none, json DisplayTicketCreateBody, json DisplayTicketCreateReply, 200;
+    DisplayTicketCreate: POST "/displays/{display_id}/ticket", Rule("vnc.view on its environment; control also needs vnc.manage"), none, json DisplayTicketCreateBody, json DisplayTicketCreateResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "view",
+                selector: "control is false",
+                facets: &[Facet::required(
+                    Read,
+                    &[Object(K::Environment)],
+                    Target::Resolved("session_environment"),
+                )],
+            },
+            Variant {
+                name: "control",
+                selector: "control is true",
+                facets: &[
+                    Facet::required(
+                        Read,
+                        &[Object(K::Environment)],
+                        Target::Resolved("session_environment"),
+                    ),
+                    Facet::required(
+                        Manage,
+                        &[Object(K::Environment)],
+                        Target::Resolved("session_environment"),
+                    ),
+                ],
+            },
+        ]));
     /// Carries a display's RFB connection without a viewer password.
-    DisplayAttach: GET "/ws/displays/{display_id}", Public, query DisplayAttachQuery, none, raw, 101;
+    DisplayAttach: GET "/ws/displays/{display_id}", Public, query DisplayAttachQuery, none, raw, 101,
+        operation Op::protocol();
 }
 
 #[cfg(test)]

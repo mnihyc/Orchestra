@@ -15,6 +15,7 @@ pub mod image;
 pub mod licences;
 pub mod manifest;
 pub mod package;
+mod source;
 mod stock;
 
 use std::path::PathBuf;

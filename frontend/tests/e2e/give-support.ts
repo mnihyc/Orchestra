@@ -60,14 +60,16 @@ export async function stage(page: Page, who: string, typed: string = who.slice(0
 
 /** Opens Share from the thread's own header. */
 export async function shareThread(page: Page): Promise<void> {
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share', exact: true }).click();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Share thread', exact: true }).click();
   await expect(dialog(page)).toBeVisible();
 }
 
 /** Chooses from the control of what is shared, on a place: "<Place> and everything in it" or "Only <place> itself". */
 export async function options(page: Page): Promise<void> {
   const toggle = dialog(page).getByRole('button', { name: 'Options', exact: true });
-  if (await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+  if (await toggle.getAttribute('aria-expanded') !== 'true') {
+    await toggle.focus(); await toggle.press('Enter');
+  }
 }
 
 export async function reach(page: Page, option: string | RegExp): Promise<void> {

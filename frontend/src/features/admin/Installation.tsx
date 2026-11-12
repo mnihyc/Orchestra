@@ -112,7 +112,7 @@ export function Installation() {
   const { t } = useTranslation();
   const query = useQuery(installationRecordsQuery);
   return <section aria-label={t('installationRecords.title')} className="flex min-w-0 flex-col gap-6" aria-busy={query.isFetching}>
-    {query.isPending ? <SkeletonRows rows={5} /> : query.isError ? <div className="flex flex-col gap-2">
+    {query.isPending ? <SkeletonRows read={query} rows={5} /> : query.isError ? <div className="flex flex-col gap-2">
       {query.dataUpdatedAt > 0 && <p className="text-sm text-text-muted">{t('installationRecords.lastRead')}{' '}<RelativeTime at={new Date(query.dataUpdatedAt).toISOString()} /></p>}
       <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} action={<Button size="sm" pending={query.isRefetching} onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />
     </div> : <RecordSections records={query.data} refreshing={query.isFetching} />}

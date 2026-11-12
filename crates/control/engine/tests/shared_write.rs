@@ -205,6 +205,16 @@ async fn a_reply_is_by_the_number_of_the_message_it_answers() {
 async fn one_enabled_message_tool_routes_both_targets_without_borrowing_the_owners_reach() {
     let s = with_a_shared_chat(true).await;
     let receiver = s.world.thread("Validate").await;
+    share(
+        &s.world,
+        "node",
+        receiver,
+        "live",
+        "thread.interact",
+        "any",
+        s.agent,
+    )
+    .await;
     s.world
         .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
         .await;
@@ -296,7 +306,19 @@ async fn a_thread_target_keeps_the_refusal_of_side_threads() {
         .execute(&mut *s.world.pool.acquire().await.unwrap())
         .await
         .unwrap();
-    let answer = send(&s, json!({"target":{"kind":"thread","path":format!("id:{side}")},"text":"A side thread cannot receive this."})).await;
+    let arguments = json!({"target":{"kind":"thread","path":format!("id:{side}")},"text":"A side thread cannot receive this."});
+    let hidden = send(&s, arguments.clone()).await;
+    assert_eq!(refused(&hidden).0, "not_found");
+    // A readable document makes its directory visible without lending the side conversation.
+    let note = s
+        .world
+        .document_beside(side, "Shared side note", &["Read without sending."])
+        .await;
+    share(
+        &s.world, "document", note, "live", "doc.view", "any", s.agent,
+    )
+    .await;
+    let answer = send(&s, arguments).await;
     assert_eq!(refused(&answer).0, "wrong_kind");
     assert!(refused(&answer).1.contains("side thread"));
     assert_eq!(
@@ -327,6 +349,7 @@ async fn historical_single_destination_settings_do_not_gain_the_other_destinatio
     ] {
         let s = with_a_shared_chat(true).await;
         let receiver = s.world.thread("Validate").await;
+        share_threads_inside(&s.world, s.world.topic, s.agent, true).await;
         s.world
             .set(s.world.topic, "orch_tools.enabled", json!(["send_message"]))
             .await;
@@ -1122,15 +1145,13 @@ async fn an_agent_describes_a_document_and_list_shared_shows_its_first_line_or_e
     )
     .await);
     assert_eq!(described["created"], false);
-    let (text, source): (String, String) =
-        sqlx::query_as("SELECT description, description_source FROM documents WHERE id = $1")
-            .bind(doc)
-            .fetch_one(&mut *d.world.pool.acquire().await.unwrap())
-            .await
-            .unwrap();
+    let text: String = sqlx::query_scalar("SELECT description FROM documents WHERE id = $1")
+        .bind(doc)
+        .fetch_one(&mut *d.world.pool.acquire().await.unwrap())
+        .await
+        .unwrap();
     assert_eq!(
-        (text.as_str(), source.as_str()),
-        ("Release checklist\nfor the web", "user"),
+        text, "Release checklist\nfor the web",
         "a description an agent writes is kept as a person's is"
     );
     assert_eq!(

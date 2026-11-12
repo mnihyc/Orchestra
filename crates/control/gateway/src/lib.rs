@@ -30,11 +30,15 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "test-observers")]
+pub use orch_link::test_observers;
+
 pub mod authentication;
 pub mod backplane;
 pub mod content;
 pub mod listeners;
 pub mod liveness;
+mod probe;
 pub mod relay;
 pub mod routing;
 pub mod service_renewal;

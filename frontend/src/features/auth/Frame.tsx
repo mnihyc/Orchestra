@@ -9,7 +9,7 @@ import { Monitor, Moon, Sun } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
-import { metaQuery } from '@/api/auth';
+import { admissionMetaQuery } from '@/shell/admission';
 import type { Theme } from '@/generated/api-types';
 import { LOCALES } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
@@ -26,7 +26,7 @@ function stillUp(until: string | null): boolean {
 
 export function AuthFrame({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
-  const meta = useQuery(metaQuery).data;
+  const meta = useQuery(admissionMetaQuery).data;
   const theme = useAppearance((state) => state.theme);
   const locale = useAppearance((state) => state.locale);
   const set = useAppearance((state) => state.set);

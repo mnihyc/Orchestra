@@ -1,7 +1,7 @@
 //! Durable model-call recovery, guarded per subject and executed under the interrupted input author's authority.
 
 use crate::Engine;
-use crate::access::ProviderUse;
+use crate::access::{ProviderUse, RunsIn, thread_environment};
 use crate::error::EngineError;
 use crate::unit::Unit;
 use chrono::{DateTime, Utc};
@@ -15,6 +15,8 @@ use orch_settings_contract::registry::keys;
 use orch_types::{Id, Json, Time};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+pub mod tool_pause;
 
 /// The persisted recovery visible to a thread's readers.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -177,7 +179,7 @@ pub enum ServicePlan {
         /// Stable across process loss for this attempt.
         call: Id,
         /// An explicitly configured compatible destination, if selected.
-        candidate: Option<Candidate>,
+        candidate: Option<Box<Candidate>>,
     },
     /// No request may be sent until its stored due time or an explicit change.
     Paused,
@@ -215,16 +217,22 @@ pub async fn plan_service(
             });
         return Ok(ServicePlan::Ready {
             call: id(&row.context, "next_call").unwrap_or(call.root),
-            candidate,
+            candidate: candidate.map(Box::new),
         });
     }
     let same_choice = row.context["configured_provider"] == json!(call.provider)
         && row.context["configured_model"] == call.model;
     let policy = Policy::load(conn, call.node).await?;
-    let mut same_rule = policy
-        .rules
-        .iter()
-        .find(|rule| rule.when.matches(&match_of(&row, call.purpose)))
+    let retained = candidate_execution(&row.context, &row.context)
+        .then(|| policy.rules.iter().find(|rule| json!(rule) == row.rule))
+        .flatten();
+    let mut same_rule = retained
+        .or_else(|| {
+            policy
+                .rules
+                .iter()
+                .find(|rule| rule.when.matches(&match_of(&row, call.purpose)))
+        })
         .is_some_and(|rule| json!(rule) == row.rule);
     if same_choice
         && row.context["root_call"] == json!(call.root)
@@ -277,6 +285,10 @@ pub async fn plan_service(
     }
     let mut candidate = None;
     if let Some(Step::Failover { candidate: next }) = step(&row) {
+        if next.route.is_some() && call.purpose.capability().is_none() {
+            skip_step(conn, &row, "candidate_purpose", now).await?;
+            return Ok(ServicePlan::Paused);
+        }
         if call.purpose == Purpose::Embedding
             && !call.dimensions.is_some_and(|dimensions| {
                 orch_provider_contract::calls::compatible_embedding(&next, call.model, dimensions)
@@ -312,7 +324,7 @@ pub async fn plan_service(
         .bind(call.node).bind(call.purpose.as_str()).bind(row.context).bind(now).bind(call.root).execute(&mut *conn).await.map_err(DbError::from)?;
     Ok(ServicePlan::Ready {
         call: attempt,
-        candidate,
+        candidate: candidate.map(Box::new),
     })
 }
 
@@ -482,6 +494,24 @@ async fn history_cutoff(
     Ok(cutoff.filter(|cutoff| first.is_some_and(|first| *cutoff >= first)))
 }
 
+/// The chain's own selected destination must equal the actual failed execution, on the same call root.
+/// Capability executors retain their executed BackendRef as capability_route beside the ordinary provider.
+fn candidate_execution(previous: &Json, actual: &Json) -> bool {
+    let Some(value) = previous.get("candidate") else {
+        return false;
+    };
+    let Ok(candidate) = serde_json::from_value::<Candidate>(value.clone()) else {
+        return false;
+    };
+    if actual["provider_id"] != json!(candidate.provider_id) {
+        return false;
+    }
+    match candidate.route {
+        Some(route) => actual.get("capability_route") == Some(&json!(route)),
+        None => actual["model"] == candidate.model,
+    }
+}
+
 struct Reservation<'a> {
     node: Id,
     purpose: Purpose,
@@ -560,12 +590,23 @@ async fn reserve_row(
             .or_else(|| failure["message"].as_str())
             .unwrap_or_default(),
     };
-    let Some(rule) = policy.rules.iter().find(|rule| rule.when.matches(&matched)) else {
+    let candidate_chain = previous
+        .as_ref()
+        .filter(|row| {
+            !replan
+                && row.state == "running"
+                && row.context["root_input"] == context["root_input"]
+                && candidate_execution(&row.context, &context)
+        })
+        .and_then(|row| policy.rules.iter().find(|rule| json!(rule) == row.rule));
+    let Some(rule) =
+        candidate_chain.or_else(|| policy.rules.iter().find(|rule| rule.when.matches(&matched)))
+    else {
         return Ok(None);
     };
     let same = previous.as_ref().filter(|row| {
         row.rule == json!(rule)
-            && row.failure["code"] == failure["code"]
+            && (row.failure["code"] == failure["code"] || candidate_chain.is_some())
             && row.context["root_input"] == context["root_input"]
             && row.state == "running"
     });
@@ -611,6 +652,7 @@ async fn reserve_row(
     } else if next.is_none() {
         state = "waiting";
         due = None;
+        context["detail"] = json!("chain_exhausted");
     } else {
         if let Some((step, attempt)) = &next {
             let vendor = vendor_delay(failure, &context, now);
@@ -634,6 +676,23 @@ async fn reserve_row(
 
 fn step(row: &Recovery) -> Option<Step> {
     serde_json::from_value(row.action.as_ref()?.get("step")?.clone()).ok()
+}
+
+/// A fresh explicit input supersedes attention stops and a vendor-quota-reset
+/// wait. Other configured retry/backoff/switching work keeps its existing order.
+/// Completing this slot never changes or resubmits the failed turn/input.
+pub(crate) async fn supersede_for_input(conn: &mut Conn, thread: Id) -> Result<(), EngineError> {
+    // Compare the exact serialization of the typed step, not an error message or
+    // a reset-looking substring. One conditional write classifies the current row
+    // atomically and preserves any concurrent non-quota retry/backoff replacement.
+    let quota_wait = serde_json::to_value(Step::Wait {
+        until: Until::Reset,
+    })?;
+    sqlx::query("UPDATE model_call_recovery SET state='completed',due_at=NULL,context=context-'manual_stop'-'manual_request'
+        WHERE node_id=$1 AND purpose='agent' AND (state IN ('waiting','stopped')
+            OR (state='scheduled' AND failure->>'code'='provider_exhausted' AND action->'step'=$2::jsonb))")
+        .bind(thread).bind(quota_wait).execute(conn).await.map_err(DbError::from)?;
+    Ok(())
 }
 
 fn id(context: &Json, key: &str) -> Option<Id> {
@@ -717,7 +776,19 @@ pub async fn view(
     conn: &mut Conn,
     node: Id,
 ) -> Result<Option<orch_api_contract::calls::CallRecovery>, EngineError> {
-    view_purpose(conn, node, Purpose::Agent).await
+    view_at(conn, node, Utc::now()).await
+}
+
+/// The same recovery line includes current paused services without a per-call resume control.
+pub async fn view_at(
+    conn: &mut Conn,
+    node: Id,
+    now: DateTime<Utc>,
+) -> Result<Option<orch_api_contract::calls::CallRecovery>, EngineError> {
+    tool_pause::selected(conn, node, now)
+        .await?
+        .map(|row| presentation(&row))
+        .transpose()
 }
 
 /// Reads the presentation of one model-call purpose without internal attribution and switch bookkeeping.
@@ -739,8 +810,14 @@ pub fn presentation(row: &Recovery) -> Result<orch_api_contract::calls::CallReco
     let mut next = step(row);
     if let Some(Step::Failover { candidate }) = next.as_mut() {
         candidate.params = json!({});
+        if let Some(route) = candidate.route.as_mut() {
+            route.config = Json::Null;
+            route.offering = None;
+            route.extensions.clear();
+        }
     }
     Ok(orch_api_contract::calls::CallRecovery {
+        service: tool_pause::service(row),
         state: row.state.clone(),
         failure: serde_json::from_value(row.failure.clone())?,
         rule_id: row.rule["id"].as_str().unwrap_or_default().to_owned(),
@@ -800,7 +877,10 @@ async fn original_ready(conn: &mut Conn, original: &Json) -> Result<bool, Engine
     };
     let Some(provider) = resources::provider(conn, provider)
         .await?
-        .filter(|provider| provider.status == "ready" && provider.deleted_at.is_none())
+        .filter(|provider| {
+            crate::providers::request_status_available(&provider.status)
+                && provider.deleted_at.is_none()
+        })
     else {
         return Ok(false);
     };
@@ -1063,6 +1143,7 @@ pub(crate) async fn maybe_return_in(
     }
     params["effort"] = original["effort"].clone();
     let candidate = Candidate {
+        route: None,
         provider_id: provider,
         model: original["model"].as_str().unwrap_or_default().to_owned(),
         agent_id: id(&original, "agent_id"),
@@ -1214,16 +1295,24 @@ impl Engine {
                 "the original input or its author is unavailable",
             ));
         }
-        self.check_input_author_driving(unit, thread, origin)
+        let content = json!([{"type":"text","text":"Continue"}]);
+        let client = format!("recovery:{reference}");
+        let mut planned = origin.clone();
+        planned.content = content.clone();
+        planned.native_action = None;
+        planned.limit_bypass = None;
+        planned.delivery = "queue".into();
+        self.check_input_author_driving(unit, thread, &planned)
             .await
             .map_err(EngineError::unreadable)?;
-        let serving = crate::inputs::input_caller(unit, thread, origin)
-            .await?
-            .ok_or_else(|| {
-                EngineError::unreadable("the original submission's authority is unavailable")
-            })?;
+        let serving =
+            crate::inputs::input_caller(unit, thread, &planned, self.inner.clock.as_ref())
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable("the original submission's authority is unavailable")
+                })?;
         let allowed = if let Some(candidate) = candidate {
-            self.candidate_allowed(
+            self.input_candidate_allowed(
                 unit.conn,
                 thread.node_id,
                 &serving,
@@ -1232,7 +1321,7 @@ impl Engine {
             )
             .await?
         } else {
-            self.check_sender(unit, &serving, thread, true)
+            self.check_recovery_sender(unit, &serving, thread, true)
                 .await
                 .is_ok()
         };
@@ -1242,8 +1331,7 @@ impl Engine {
             ));
         }
         let provenance = crate::inputs::derived_input_provenance(origin, None)?;
-        let content = json!([{"type":"text","text":"Continue"}]);
-        let client = format!("recovery:{reference}");
+
         let seq = unit.stamp(thread.node_id).await?;
         let at = unit.now();
         let next = threads::insert_input_in(
@@ -1289,9 +1377,10 @@ impl Engine {
         let mut unit = Unit::new(&mut tx, self.inner.clock.now());
         self.check_sender(&mut unit, principal.caller(), &thread, false)
             .await?;
-        let row = read(unit.conn, node, Purpose::Agent)
+        let row = tool_pause::selected(unit.conn, node, self.inner.clock.now())
             .await?
             .ok_or(crate::inputs::InputError::NotFound)?;
+        let paused_service = tool_pause::service(&row).is_some();
         if !matches!(
             row.state.as_str(),
             "scheduled" | "switching" | "running" | "stopped" | "waiting"
@@ -1300,45 +1389,50 @@ impl Engine {
                 "there is no active call recovery",
             ));
         }
-        if action != orch_api_contract::calls::CallRecoveryAction::Stop
+        if !paused_service
+            && action != orch_api_contract::calls::CallRecoveryAction::Stop
             && (thread.current_turn_id.is_some() || row.state == "switching")
         {
             return Err(crate::inputs::InputError::Invalid(
                 "a running turn or switch must be stopped through its own control",
             ));
         }
-        match action {
-            orch_api_contract::calls::CallRecoveryAction::Stop => {
-                let finishing_switch =
-                    row.state == "switching" && id(&row.context, "switch_job").is_some();
-                // The accepted switch still owns its candidate and return bookkeeping. Stop forbids
-                // the follow-up input; the switch itself has its ordinary Cancel control.
-                if !finishing_switch {
-                    self.stop_recovery_in(&mut unit, &thread, &row, "stopped_by_person")
-                        .await?;
-                }
-                sqlx::query("UPDATE model_call_recovery SET context=jsonb_set(jsonb_set(context,'{manual_stop}','true'),'{detail}',to_jsonb('stopped_by_person'::text)),due_at=CASE WHEN $3 THEN $2 ELSE due_at END WHERE node_id=$1 AND purpose='agent'")
+        if paused_service {
+            tool_pause::control(unit.conn, &row, action, self.inner.clock.now()).await?;
+        } else {
+            match action {
+                orch_api_contract::calls::CallRecoveryAction::Stop => {
+                    let finishing_switch =
+                        row.state == "switching" && id(&row.context, "switch_job").is_some();
+                    // The accepted switch still owns its candidate and return bookkeeping. Stop forbids
+                    // the follow-up input; the switch itself has its ordinary Cancel control.
+                    if !finishing_switch {
+                        self.stop_recovery_in(&mut unit, &thread, &row, "stopped_by_person")
+                            .await?;
+                    }
+                    sqlx::query("UPDATE model_call_recovery SET context=jsonb_set(jsonb_set(context,'{manual_stop}','true'),'{detail}',to_jsonb('stopped_by_person'::text)),due_at=CASE WHEN $3 THEN $2 ELSE due_at END WHERE node_id=$1 AND purpose='agent'")
                     .bind(node).bind(unit.now()).bind(finishing_switch).execute(&mut *unit.conn).await.map_err(DbError::from)?;
-            }
-            action => {
-                if matches!(
-                    action,
-                    orch_api_contract::calls::CallRecoveryAction::Retry
-                        | orch_api_contract::calls::CallRecoveryAction::Continue
-                ) {
-                    sqlx::query("UPDATE model_call_recovery SET context=jsonb_set(context-'manual_stop','{effects}',$2) WHERE node_id=$1 AND purpose='agent'")
-                        .bind(node).bind(json!(action==orch_api_contract::calls::CallRecoveryAction::Continue)).execute(&mut *unit.conn).await.map_err(DbError::from)?;
                 }
-                let next = if action != orch_api_contract::calls::CallRecoveryAction::RetryNow
-                    || matches!(row.state.as_str(), "stopped" | "waiting")
-                {
-                    json!({"step":{"type":"continue","times":1},"attempt":1})
-                } else {
-                    row.action.unwrap_or(Json::Null)
-                };
-                sqlx::query("UPDATE model_call_recovery SET state='scheduled',due_at=$2,updated_at=$2,context=jsonb_set(context-'manual_stop','{manual_request}','true'),action=$3 WHERE node_id=$1 AND purpose='agent'")
+                action => {
+                    if matches!(
+                        action,
+                        orch_api_contract::calls::CallRecoveryAction::Retry
+                            | orch_api_contract::calls::CallRecoveryAction::Continue
+                    ) {
+                        sqlx::query("UPDATE model_call_recovery SET context=jsonb_set(context-'manual_stop','{effects}',$2) WHERE node_id=$1 AND purpose='agent'")
+                        .bind(node).bind(json!(action==orch_api_contract::calls::CallRecoveryAction::Continue)).execute(&mut *unit.conn).await.map_err(DbError::from)?;
+                    }
+                    let next = if action != orch_api_contract::calls::CallRecoveryAction::RetryNow
+                        || matches!(row.state.as_str(), "stopped" | "waiting")
+                    {
+                        json!({"step":{"type":"continue","times":1},"attempt":1})
+                    } else {
+                        row.action.unwrap_or(Json::Null)
+                    };
+                    sqlx::query("UPDATE model_call_recovery SET state='scheduled',due_at=$2,updated_at=$2,context=jsonb_set(context-'manual_stop','{manual_request}','true'),action=$3 WHERE node_id=$1 AND purpose='agent'")
                     .bind(node).bind(unit.now()).bind(next).execute(&mut *unit.conn).await.map_err(DbError::from)?;
-                unit.wake(node);
+                    unit.wake(node);
+                }
             }
         }
         let audit_action = orch_db::audit::action!(
@@ -1356,6 +1450,9 @@ impl Engine {
         entry.org_id = Some(thread.org_id);
         entry.details =
             json!({"action":action,"input_id":row.context["input_id"],"rule":row.rule["id"]});
+        if paused_service {
+            entry.details["service"] = json!(row.purpose);
+        }
         let at = unit.now();
         orch_db::audit::append(unit.conn, &entry, &orch_db::audit::Origin::default(), at).await?;
         let seq = unit.stamp(node).await?;
@@ -1374,7 +1471,7 @@ impl Engine {
         turn: &TurnRow,
         failure: &Json,
     ) -> Result<Option<Recovery>, EngineError> {
-        if thread.current_turn_id != Some(turn.id) {
+        if thread.current_turn_id != Some(turn.id) || turn.interrupted_by.is_some() {
             return Ok(None);
         }
         let Some(input) = threads::input(unit.conn, turn.input_id).await? else {
@@ -1383,7 +1480,9 @@ impl Engine {
         if input.native_action.is_some() {
             return Ok(None);
         }
-        let effects: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM items WHERE turn_id=$1 AND ((kind='tool_call') OR (kind='agent_message' AND length(COALESCE(payload->>'text',''))>0)))")
+        // A lost session cannot prove that unreported native effects did not happen.
+        // Preserve its history and continue; never replay its original prompt blindly.
+        let effects = failure["code"]=="session_lost" || sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM items WHERE turn_id=$1 AND ((kind='tool_call') OR (kind='agent_message' AND length(COALESCE(payload->>'text',''))>0)))")
             .bind(turn.id).fetch_one(&mut *unit.conn).await.map_err(DbError::from)?;
         let previous = read(unit.conn, thread.node_id, Purpose::Agent).await?;
         if previous
@@ -1395,6 +1494,18 @@ impl Engine {
         let mut context = json!({"input_id":input.id,"root_input":input.id,"failed_turn":turn.id,"continuation_id":input.continuation_id,
             "author_id":input.author_id,"effects":effects,"provider_id":thread.provider_id,"model":turn.model,
             "choice":choice_of(unit.conn,thread).await?});
+        if failure["code"] == "session_lost" {
+            let Some(machine) = orch_db::queries::machine_streams::segment_machine(
+                unit.conn,
+                thread.node_id,
+                turn.segment_id,
+            )
+            .await?
+            else {
+                return Ok(None);
+            };
+            context["native_machine"] = json!(machine);
+        }
         if let Some(row) = previous {
             let inherited = row.state == "running"
                 || row.state == "completed"
@@ -1427,6 +1538,28 @@ impl Engine {
         Ok(recovery)
     }
 
+    /// The existing terminal-turn recovery hold shared by native loss and model failures.
+    pub(crate) async fn hold_call_recovery_in(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: &ThreadRow,
+        recovery: &Recovery,
+    ) -> Result<(), EngineError> {
+        let seq = unit.stamp(thread.node_id).await?;
+        threads::set_state(
+            unit.conn,
+            thread.node_id,
+            &[thread_state::IDLE, thread_state::BLOCKED],
+            &threads::StateChange::blocked("error", Some("call_recovery")),
+            seq,
+        )
+        .await?;
+        if recovery.state == "stopped" {
+            notify_stop(unit, thread, recovery).await?;
+        }
+        Ok(())
+    }
+
     /// Drives due recoveries without retaining an in-memory timer or an open transaction during a switch.
     pub async fn keep_call_recoveries(&self) -> Result<(), EngineError> {
         let mut conn = self.db().acquire().await?;
@@ -1434,7 +1567,9 @@ impl Engine {
             .bind(self.inner.clock.now()).bind(self.config().sweep_batch).fetch_all(&mut *conn).await.map_err(DbError::from)?;
         drop(conn);
         for node in nodes {
-            self.drive_call_recovery(node).await?;
+            // The batch loop must not retain a complete recovery state machine,
+            // including when no recovery is due on this sweep.
+            Box::pin(self.drive_call_recovery(node)).await?;
         }
         Ok(())
     }
@@ -1537,6 +1672,22 @@ impl Engine {
             self.commit(tx, finished).await?;
             return Ok(());
         }
+        if row.failure["code"] == "session_lost"
+            && let Some(machine) = id(&row.context, "native_machine")
+        {
+            let place =
+                orch_db::queries::resources::thread_engine::machine_place(unit.conn, machine)
+                    .await?;
+            if crate::preflight::machine_unavailable(place.as_ref()).is_some() {
+                sqlx::query("UPDATE model_call_recovery SET due_at=NULL,context=jsonb_set(jsonb_set(context,'{wait_machine}',$2),'{detail}',to_jsonb('machine_offline'::text)),updated_at=$3 WHERE node_id=$1 AND purpose='agent' AND reference=$4 AND state='scheduled'")
+                        .bind(node).bind(json!(machine)).bind(unit.now()).bind(row.reference).execute(&mut *unit.conn).await.map_err(DbError::from)?;
+                let seq = unit.stamp(node).await?;
+                threads::set_seq_state(unit.conn, node, seq).await?;
+                let finished = unit.finish().await?;
+                self.commit(tx, finished).await?;
+                return Ok(());
+            }
+        }
         if row.state == "switching"
             && let Some(job) = id(&row.context, "switch_job")
         {
@@ -1588,8 +1739,12 @@ impl Engine {
             self.commit(tx, finished).await?;
             return Ok(());
         }
-        let driving = crate::inputs::input_author_caller(&mut unit, node, &input).await?;
-        let serving = crate::inputs::input_caller(&mut unit, &thread, &input).await?;
+        let driving =
+            crate::inputs::input_author_caller(&mut unit, node, &input, self.inner.clock.as_ref())
+                .await?;
+        let serving =
+            crate::inputs::input_caller(&mut unit, &thread, &input, self.inner.clock.as_ref())
+                .await?;
         let Some((caller, serving)) = driving.zip(serving) else {
             self.stop_recovery_in(&mut unit, &thread, &row, "origin_authority")
                 .await?;
@@ -1603,7 +1758,7 @@ impl Engine {
             ));
         }
         if self
-            .check_sender(&mut unit, &caller, &thread, false)
+            .check_recovery_sender(&mut unit, &caller, &thread, false)
             .await
             .is_err()
         {
@@ -1611,7 +1766,13 @@ impl Engine {
                 .await?;
         } else if let Some(Step::Failover { candidate }) = step(&row) {
             if !self
-                .candidate_allowed(&mut *unit.conn, node, &serving, &candidate, Purpose::Agent)
+                .input_candidate_allowed(
+                    &mut *unit.conn,
+                    node,
+                    &serving,
+                    &candidate,
+                    Purpose::Agent,
+                )
                 .await
                 .unwrap_or(false)
             {
@@ -1658,7 +1819,7 @@ impl Engine {
                 self.queue_recovery_in(&mut unit, &thread, &row).await?;
             }
         } else if self
-            .check_sender(&mut unit, &serving, &thread, true)
+            .check_recovery_sender(&mut unit, &serving, &thread, true)
             .await
             .is_err()
         {
@@ -1674,6 +1835,60 @@ impl Engine {
         Ok(())
     }
 
+    async fn check_recovery_sender(
+        &self,
+        unit: &mut Unit<'_>,
+        authority: &crate::inputs::InputCallers,
+        thread: &ThreadRow,
+        need_provider: bool,
+    ) -> Result<(), crate::inputs::InputError> {
+        for caller in authority.callers() {
+            self.check_sender(unit, caller, thread, need_provider)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The existing machine-return signal releases only its parked recovery, without
+    /// reserving another rule step or attempt and without retaining a polling timer.
+    pub(crate) async fn resume_session_loss_recoveries(
+        &self,
+        machine: Id,
+    ) -> Result<(), EngineError> {
+        let nodes: Vec<Id> = {
+            let mut tx = self.db().begin().await?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            let nodes=sqlx::query_scalar("UPDATE model_call_recovery SET due_at=$2,context=context-'wait_machine'-'detail',updated_at=$2 WHERE purpose='agent' AND state='scheduled' AND failure->>'code'='session_lost' AND context->>'wait_machine'=$1 RETURNING node_id")
+                .bind(machine.to_string()).bind(self.inner.clock.now()).fetch_all(&mut *tx).await.map_err(DbError::from)?;
+            tx.commit().await.map_err(DbError::from)?;
+            nodes
+        };
+        for node in nodes {
+            self.wake(node);
+        }
+        self.kick();
+        Ok(())
+    }
+
+    async fn input_candidate_allowed(
+        &self,
+        conn: &mut Conn,
+        node: Id,
+        authority: &crate::inputs::InputCallers,
+        candidate: &Candidate,
+        purpose: Purpose,
+    ) -> Result<bool, EngineError> {
+        for caller in authority.callers() {
+            if !self
+                .candidate_allowed(conn, node, caller, candidate, purpose)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Checks current provider, model and optional profile authority for the original caller.
     pub(crate) async fn candidate_allowed(
         &self,
@@ -1683,6 +1898,10 @@ impl Engine {
         candidate: &Candidate,
         purpose: Purpose,
     ) -> Result<bool, EngineError> {
+        // Route IO is admitted by its capability's existing executor, never treated as a generation model.
+        if candidate.route.is_some() {
+            return Ok(false);
+        }
         let Ok(effort) = orch_provider_contract::calls::requested_effort(&candidate.params) else {
             return Ok(false);
         };
@@ -1715,6 +1934,13 @@ impl Engine {
             }
         }
 
+        // An agent's own model call runs in its thread's environment; any other call (a summary, an
+        // embedding) runs in none.
+        let runs_in = if purpose == Purpose::Agent {
+            RunsIn::of(thread_environment(conn, node).await?)
+        } else {
+            None
+        };
         let provider = self
             .inner
             .access
@@ -1726,6 +1952,7 @@ impl Engine {
                     provider: candidate.provider_id,
                     model: Some(&candidate.model),
                     effort,
+                    runs_in,
                 },
             )
             .await?
@@ -1832,8 +2059,16 @@ impl Engine {
             }
             return Ok(());
         }
+        let effect = row.context["effects"].as_bool().unwrap_or(true);
+        let mut planned = input.clone();
+        if effect {
+            planned.content = json!([{"type":"text","text":"Continue"}]);
+            planned.native_action = None;
+            planned.limit_bypass = None;
+            planned.delivery = "queue".into();
+        }
         if self
-            .check_input_author_driving(unit, thread, &input)
+            .check_input_author_driving(unit, thread, &planned)
             .await
             .is_err()
         {
@@ -1841,7 +2076,9 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        let Some(serving) = crate::inputs::input_caller(unit, thread, &input).await? else {
+        let Some(serving) =
+            crate::inputs::input_caller(unit, thread, &planned, self.inner.clock.as_ref()).await?
+        else {
             self.stop_recovery_in(unit, thread, row, "origin_authority")
                 .await?;
             return Ok(());
@@ -1849,7 +2086,7 @@ impl Engine {
         // A newly selected overlay is not active until this input is queued. Check its real destination here.
         let allowed = if let Some(candidate) = row.context.get("candidate") {
             let candidate: Candidate = serde_json::from_value(candidate.clone())?;
-            self.candidate_allowed(
+            self.input_candidate_allowed(
                 unit.conn,
                 thread.node_id,
                 &serving,
@@ -1858,7 +2095,7 @@ impl Engine {
             )
             .await?
         } else {
-            self.check_sender(unit, &serving, thread, true)
+            self.check_recovery_sender(unit, &serving, thread, true)
                 .await
                 .is_ok()
         };
@@ -1867,7 +2104,7 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        let effect = row.context["effects"].as_bool().unwrap_or(true);
+
         let actual = if effect { "continue" } else { "retry" };
         let mut recovered_input = input.id;
         if effect {
@@ -1943,10 +2180,15 @@ impl Engine {
     async fn recovery_switch(
         &self,
         node: Id,
-        caller: Caller,
+        authority: crate::inputs::InputCallers,
         row: &Recovery,
         candidate: &Candidate,
     ) -> Result<(), EngineError> {
+        let actor = authority.user();
+        let captured = authority.captured().clone();
+        // This method crosses the earlier admission transaction. Carry only immutable
+        // origin boundaries across it, then restore and bind them again under this lock.
+        drop(authority);
         let request: orch_api_contract::forks::ForkRequest = serde_json::from_value(
             json!({"result":"replace","to":{"provider_id":candidate.provider_id,"agent_id":candidate.agent_id,"model":candidate.model,"effort":candidate.params.get("effort")},"history":{"mode":"all"}}),
         )?;
@@ -1964,28 +2206,73 @@ impl Engine {
             return Ok(());
         }
         let result = async {
-            let draft = self
-                .draft_in(
-                    &mut tx,
-                    &caller,
-                    node,
-                    &request,
-                    crate::fork_plan::Reach::Seen,
-                    None,
+            let input_id = id(&row.context, "input_id")
+                .ok_or_else(|| EngineError::unreadable("the recovery origin is unavailable"))?;
+            let input = threads::input(&mut tx, input_id)
+                .await?
+                .filter(|input| input.thread_id == node && input.author_id == Some(actor))
+                .ok_or_else(|| EngineError::unreadable("the recovery origin is unavailable"))?;
+            let current_authority = crate::inputs::saved_authority(
+                input.submission_authority.as_ref(),
+            )?
+            .ok_or_else(|| {
+                EngineError::unreadable("the recovery input's current authority is unavailable")
+            })?;
+            let captured = captured.retaining_current(actor, &current_authority)?;
+            let authority = {
+                let mut unit = Unit::new(&mut tx, self.inner.clock.now());
+                crate::inputs::input_authority_callers(
+                    &mut unit,
+                    &thread,
+                    &input,
+                    actor,
+                    &captured,
+                    self.inner.clock.as_ref(),
                 )
-                .await
-                .map_err(EngineError::unreadable)?;
-            if !draft.is_clear() {
-                return Err(EngineError::unreadable(
-                    "The configured switch has blockers",
-                ));
+                .await?
+                .ok_or_else(|| {
+                    EngineError::unreadable("the recovery origin's authority is unavailable")
+                })?
+            };
+            let mut agreed: Option<crate::fork_plan::Draft> = None;
+            for caller in authority.callers() {
+                let mut draft = self
+                    .draft_in(
+                        &mut tx,
+                        caller,
+                        node,
+                        &request,
+                        crate::fork_plan::Reach::Seen,
+                        None,
+                        None,
+                    )
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                if !draft.is_clear() {
+                    return Err(EngineError::unreadable(
+                        "The configured switch has blockers",
+                    ));
+                }
+                if let Some(previous) = &agreed {
+                    // Preview expiry is a clock observation, not a materialized business effect.
+                    draft.plan.expires_at = previous.plan.expires_at;
+                    if &draft != previous {
+                        return Err(EngineError::unreadable(
+                            "The accepted origins disagree on the configured switch",
+                        ));
+                    }
+                } else {
+                    agreed = Some(draft);
+                }
             }
-            self.start_fork_job(
+            let draft = agreed
+                .ok_or_else(|| EngineError::unreadable("the recovery has no accepted origin"))?;
+            self.start_recovery_fork_job(
                 &mut tx,
-                &caller,
+                &authority,
+                input_id,
                 &thread,
                 draft,
-                None,
                 crate::ids::derived("call.switch", &[row.reference.as_bytes()]),
             )
             .await

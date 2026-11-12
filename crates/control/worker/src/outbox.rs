@@ -34,6 +34,7 @@ use crate::channels::{
     config_of_destination, guarded,
 };
 use crate::heartbeat::Metrics;
+use crate::person_notices;
 use crate::quiet_hours;
 use crate::render::{self, Rendering};
 use crate::spans;
@@ -96,6 +97,9 @@ pub enum OutboxError {
     /// Current recipient access could not be checked.
     #[error(transparent)]
     Access(#[from] orch_authz::Error),
+    /// An original explicit-notice producer could not be checked.
+    #[error(transparent)]
+    Notice(#[from] person_notices::Error),
 }
 
 /// What a run delivered.
@@ -233,6 +237,7 @@ enum Work {
         config: Config,
         message: render::Message,
         aim: Aim,
+        sources: Vec<person_notices::Opened>,
     },
     /// A node's destination.
     Destination { destination: Id, delivery: Delivery },
@@ -260,6 +265,18 @@ enum Called {
     One(Result<(), DeliverError>),
     /// Each browser's answer: the browser, its name, and what it answered.
     Browsers(Vec<(Id, String, Result<(), DeliverError>)>),
+    /// A source closed before a further call. Only these actual completed device calls
+    /// are reconciled; the immutable message is discarded before another attempt.
+    Stopped(Vec<(Id, String, Result<(), DeliverError>)>),
+}
+
+struct BrowserResults {
+    attempted: bool,
+    accepted: bool,
+    reached: Vec<Id>,
+    worst: Option<DeliverError>,
+    waiting: usize,
+    lost: Vec<String>,
 }
 
 /// What the first step came to.
@@ -463,8 +480,9 @@ impl Outbox {
             return Ok(Step::Passed);
         };
         // The locks in their order: the channel, the person's choices, the route, the delivery.
+        // Preparation can record a channel error, so it must not upgrade a shared lock later.
         let channel = match seen.channel_id {
-            Some(channel) => rows::lock_channel_shared(conn, channel).await?,
+            Some(channel) => rows::lock_channel_for_write(conn, channel).await?,
             None => None,
         };
         people::lock_prefs_shared(conn, seen.user_id).await?;
@@ -529,7 +547,8 @@ impl Outbox {
             ));
         };
         let declared = notifier.describe();
-        let (snapshots, read) = self.still_to_tell(conn, now, route.user_id, &unit).await?;
+        let (snapshots, read, sources) =
+            self.still_to_tell(conn, now, route.user_id, &unit).await?;
         if snapshots.is_empty() {
             let reason = if read { "read" } else { "lost_access" };
             for id in &ids {
@@ -554,7 +573,7 @@ impl Outbox {
                 &declared,
                 &channel.templates,
                 Some(&person),
-                &snapshots,
+                (&snapshots, &sources),
             )
             .await?
         {
@@ -589,6 +608,13 @@ impl Outbox {
         };
         let dispatch = orch_types::new_id();
         let ends = Self::reservation_end(now);
+        for source in &sources {
+            if source.check(conn, inner.clock.as_ref()).await?.is_none() {
+                // The pure message is no longer this attempt's input. A later normal
+                // attempt can select the still-eligible notices instead of losing them.
+                return Ok(Step::Passed);
+            }
+        }
         for id in &ids {
             if !db_outbox::reserve_as(conn, *id, dispatch, inner.owner, ends, now).await? {
                 return Ok(Step::Passed);
@@ -608,6 +634,7 @@ impl Outbox {
                 config,
                 message,
                 aim,
+                sources,
             },
         };
         Ok(Step::Go(Box::new(attempt)))
@@ -622,7 +649,7 @@ impl Outbox {
         now: DateTime<Utc>,
         user: Id,
         unit: &[OutboxRow],
-    ) -> Result<(Vec<Snapshot>, bool), OutboxError> {
+    ) -> Result<(Vec<Snapshot>, bool, Vec<person_notices::Opened>), OutboxError> {
         let merged = merged_notifications(unit);
         let ids: Vec<Id> = merged.iter().filter_map(|each| each.id).collect();
         let unread: Vec<Id> = if ids.is_empty() {
@@ -637,7 +664,19 @@ impl Outbox {
         };
         let mut read = false;
         let mut snapshots = Vec::new();
+        let mut sources = Vec::new();
+        let kinds = merged
+            .iter()
+            .map(|snapshot| snapshot.kind.clone())
+            .collect::<Vec<_>>();
+        let outward = people::outward_kinds(conn, user, &kinds)
+            .await?
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
         for snapshot in merged {
+            if !outward.contains(&snapshot.kind) {
+                continue;
+            }
             // A notification the Inbox still has and that was read since is not told.
             if let Some(id) = snapshot.id
                 && known.contains(&id)
@@ -676,9 +715,14 @@ impl Outbox {
                     continue;
                 }
             }
+            match person_notices::load(conn, self.inner.clock.as_ref(), user, &snapshot).await? {
+                person_notices::Loaded::Legacy => {}
+                person_notices::Loaded::Closed => continue,
+                person_notices::Loaded::Source(source) => sources.push(*source),
+            }
             snapshots.push(snapshot);
         }
-        Ok((snapshots, read))
+        Ok((snapshots, read, sources))
     }
 
     // ----- a notification for a node -----------------------------------------------------------
@@ -742,7 +786,7 @@ impl Outbox {
                 &declared,
                 &destination.templates,
                 None,
-                &snapshots,
+                (&snapshots, &[]),
             )
             .await?
         {
@@ -905,11 +949,31 @@ impl Outbox {
 
     /// Makes the call of a reserved attempt, then records what it came to.
     async fn go(&self, attempt: Attempt) -> Result<Run, OutboxError> {
-        let called = self.call(&attempt).await;
+        let called = self.call(&attempt).await?;
         let mut tx =
             orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
         orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
         let now = self.inner.clock.now();
+        // Results use the same parent-before-delivery order as admission. A removed parent
+        // does not erase a native answer; the existing attempt comparison still decides it.
+        match &attempt.work {
+            Work::Route {
+                route,
+                channel,
+                person,
+                ..
+            } => {
+                let _ = rows::lock_channel_for_write(&mut tx, *channel).await?;
+                people::lock_prefs_shared(&mut tx, person.id).await?;
+                let _ = routes::lock_route(&mut tx, *route).await?;
+            }
+            Work::Mail { channel, .. } => {
+                let _ = rows::lock_channel_for_write(&mut tx, *channel).await?;
+            }
+            Work::Destination { destination, .. } => {
+                let _ = rows::lock_destination_for_write(&mut tx, *destination).await?;
+            }
+        }
         let done = self.conclude(&mut tx, now, &attempt, called).await?;
         tx.commit().await.map_err(DbError::from)?;
         self.count(&attempt.kind, attempt.form, done);
@@ -917,31 +981,37 @@ impl Outbox {
     }
 
     /// The remote call of an attempt. No connection and no lock is held while it runs.
-    async fn call(&self, attempt: &Attempt) -> Called {
+    async fn call(&self, attempt: &Attempt) -> Result<Called, OutboxError> {
         let attempts = attempts_of(&attempt.unit);
-        match &attempt.work {
+        Ok(match &attempt.work {
             Work::Route {
                 person,
                 config,
                 message,
                 aim,
+                sources,
                 ..
             } => match aim {
                 Aim::Nowhere(fault) => Called::One(Err(fault.clone())),
-                Aim::One(to) => Called::One(
-                    self.send(
-                        &attempt.notifier,
-                        delivery_of(
-                            attempt.unit[0].id,
-                            attempts,
-                            config.clone(),
-                            to.clone(),
-                            Some(person.as_ref()),
-                            message,
-                        ),
+                Aim::One(to) => {
+                    if !self.before_delivery(sources, None).await? {
+                        return Ok(Called::Stopped(Vec::new()));
+                    }
+                    Called::One(
+                        self.send(
+                            &attempt.notifier,
+                            delivery_of(
+                                attempt.unit[0].id,
+                                attempts,
+                                config.clone(),
+                                to.clone(),
+                                Some(person.as_ref()),
+                                message,
+                            ),
+                        )
+                        .await,
                     )
-                    .await,
-                ),
+                }
                 Aim::Browsers(browsers) => {
                     let already: Vec<Id> = attempt
                         .unit
@@ -959,6 +1029,17 @@ impl Outbox {
                             Some(person.as_ref()),
                             message,
                         );
+                        let permits = match self.before_delivery(sources, Some(browser)).await {
+                            Ok(permits) => permits,
+                            Err(error) if !answers.is_empty() => {
+                                tracing::warn!(error=%error, "a later notice source check stopped device delivery");
+                                return Ok(Called::Stopped(answers));
+                            }
+                            Err(error) => return Err(error),
+                        };
+                        if !permits {
+                            return Ok(Called::Stopped(answers));
+                        }
                         let answer = self.send(&attempt.notifier, delivery).await;
                         answers.push((
                             browser.id,
@@ -972,7 +1053,47 @@ impl Outbox {
             Work::Destination { delivery, .. } | Work::Mail { delivery, .. } => {
                 Called::One(self.send(&attempt.notifier, delivery.clone()).await)
             }
+        })
+    }
+
+    /// Original/current native source admission is a short transaction, released before
+    /// notifier IO. Its last clock cut and the notifier's first poll have no intervening await.
+    async fn before_delivery(
+        &self,
+        sources: &[person_notices::Opened],
+        device: Option<&PushSubscriptionRow>,
+    ) -> Result<bool, OutboxError> {
+        if sources.is_empty() {
+            return Ok(true);
         }
+        let mut tx =
+            orch_db::queries::transaction_guard::scope(false, self.inner.db.begin()).await?;
+        orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+        let mut callers = Vec::with_capacity(sources.len());
+        for source in sources {
+            let Some(caller) = source.check(&mut tx, self.inner.clock.as_ref()).await? else {
+                return Ok(false);
+            };
+            callers.push(caller);
+        }
+        if let Some(device) = device {
+            let Some(current) =
+                people::push_subscription(&mut tx, device.user_id, device.id).await?
+            else {
+                return Ok(false);
+            };
+            if current.endpoint != device.endpoint
+                || current.p256dh != device.p256dh
+                || current.auth != device.auth
+                || current.created_at != device.created_at
+            {
+                return Ok(false);
+            }
+        }
+        tx.commit().await.map_err(DbError::from)?;
+        Ok(callers
+            .iter()
+            .all(|source| source.check(self.inner.clock.as_ref())))
     }
 
     /// Records what an attempt came to, under the attempt it was.
@@ -985,6 +1106,10 @@ impl Outbox {
     ) -> Result<Run, OutboxError> {
         let attempts = attempts_of(&attempt.unit);
         match (&attempt.work, called) {
+            (Work::Route { route, channel, .. }, Called::Stopped(answers)) => {
+                self.conclude_stopped(conn, now, attempt, (*route, *channel), answers)
+                    .await
+            }
             (Work::Route { route, channel, .. }, Called::One(outcome)) => {
                 let next = self.next(&outcome, attempts);
                 let done = self
@@ -1050,10 +1175,51 @@ impl Outbox {
                 }
                 Ok(done)
             }
-            (Work::Destination { .. } | Work::Mail { .. }, Called::Browsers(_)) => {
-                Ok(Run::default())
-            }
+            (
+                Work::Destination { .. } | Work::Mail { .. },
+                Called::Browsers(_) | Called::Stopped(_),
+            ) => Ok(Run::default()),
         }
+    }
+
+    async fn conclude_stopped(
+        &self,
+        conn: &mut Conn,
+        now: DateTime<Utc>,
+        attempt: &Attempt,
+        (route, channel): (Id, Id),
+        answers: Vec<(Id, String, Result<(), DeliverError>)>,
+    ) -> Result<Run, OutboxError> {
+        let BrowserResults {
+            attempted,
+            accepted,
+            reached,
+            worst,
+            lost,
+            ..
+        } = self
+            .record_browser_answers(conn, now, attempt, answers)
+            .await?;
+        // Current source loss is no notifier failure. Reconcile only actual answers;
+        // unattempted devices neither failed nor received the old immutable message.
+        if accepted {
+            self.route_outcome(conn, now, (route, channel), &Ok(()), Next::Taken, &lost)
+                .await?;
+        } else if let Some(error) = worst {
+            let outcome = Err(error);
+            let next = self.next(&outcome, attempts_of(&attempt.unit));
+            self.route_outcome(conn, now, (route, channel), &outcome, next, &lost)
+                .await?;
+        }
+        for row in &attempt.unit {
+            let payload = marked_reached(&row.payload, &reached);
+            db_outbox::release_attempt(conn, row.id, attempt.dispatch, now, &payload, attempted)
+                .await?;
+        }
+        Ok(Run {
+            sent: u32::from(accepted),
+            ..Run::default()
+        })
     }
 
     /// Push: each browser's answer is kept with the browser, a browser that is gone or failed too
@@ -1069,37 +1235,15 @@ impl Outbox {
         answers: Vec<(Id, String, Result<(), DeliverError>)>,
     ) -> Result<Run, OutboxError> {
         let attempts = attempts_of(&attempt.unit);
-        let mut reached: Vec<Id> = attempt
-            .unit
-            .iter()
-            .filter_map(|row| Payload::read(&row.payload))
-            .flat_map(|payload| payload.delivered_to)
-            .collect();
-        let mut worst: Option<DeliverError> = None;
-        let mut waiting = 0_usize;
-        let mut lost: Vec<String> = Vec::new();
-        for (browser, label, answer) in answers {
-            match answer {
-                Ok(()) => {
-                    reached.push(browser);
-                    people::push_succeeded(conn, browser, now).await?;
-                }
-                Err(error) if error.gone => {
-                    people::remove_push_subscription(conn, browser).await?;
-                    lost.push(label);
-                }
-                Err(error) => {
-                    let failures = people::push_failed(conn, browser).await?;
-                    if failures.is_some_and(|count| count >= PUSH_FAILURES_BEFORE_REMOVAL) {
-                        people::remove_push_subscription(conn, browser).await?;
-                        lost.push(label);
-                    } else {
-                        waiting += 1;
-                    }
-                    worst.get_or_insert(error);
-                }
-            }
-        }
+        let BrowserResults {
+            reached,
+            worst,
+            waiting,
+            lost,
+            ..
+        } = self
+            .record_browser_answers(conn, now, attempt, answers)
+            .await?;
         let left = people::push_subscriptions_of(conn, user).await?;
         if reached.is_empty() && waiting == 0 {
             // Nothing took the message and nothing is left to try: the person has no browser
@@ -1143,6 +1287,57 @@ impl Outbox {
         self.route_outcome(conn, now, (route, channel), &result, next, &lost)
             .await?;
         Ok(done)
+    }
+
+    async fn record_browser_answers(
+        &self,
+        conn: &mut Conn,
+        now: DateTime<Utc>,
+        attempt: &Attempt,
+        answers: Vec<(Id, String, Result<(), DeliverError>)>,
+    ) -> Result<BrowserResults, OutboxError> {
+        let mut reached: Vec<Id> = attempt
+            .unit
+            .iter()
+            .filter_map(|row| Payload::read(&row.payload))
+            .flat_map(|payload| payload.delivered_to)
+            .collect();
+        let attempted = !answers.is_empty();
+        let mut accepted = false;
+        let mut worst: Option<DeliverError> = None;
+        let mut waiting = 0_usize;
+        let mut lost: Vec<String> = Vec::new();
+        for (browser, label, answer) in answers {
+            match answer {
+                Ok(()) => {
+                    accepted = true;
+                    reached.push(browser);
+                    people::push_succeeded(conn, browser, now).await?;
+                }
+                Err(error) if error.gone => {
+                    people::remove_push_subscription(conn, browser).await?;
+                    lost.push(label);
+                }
+                Err(error) => {
+                    let failures = people::push_failed(conn, browser).await?;
+                    if failures.is_some_and(|count| count >= PUSH_FAILURES_BEFORE_REMOVAL) {
+                        people::remove_push_subscription(conn, browser).await?;
+                        lost.push(label);
+                    } else {
+                        waiting += 1;
+                    }
+                    worst.get_or_insert(error);
+                }
+            }
+        }
+        Ok(BrowserResults {
+            attempted,
+            accepted,
+            reached,
+            worst,
+            waiting,
+            lost,
+        })
     }
 
     /// What a route keeps of an outcome: when its notifier accepted, or why it failed, with the
@@ -1232,12 +1427,23 @@ impl Outbox {
         declared: &NotifierDescriptor,
         own_texts: &Json,
         person: Option<&Recipient>,
-        snapshots: &[Snapshot],
+        (snapshots, sources): (&[Snapshot], &[person_notices::Opened]),
     ) -> Result<Result<render::Message, render::RenderFault>, OutboxError> {
         let surroundings = &self.inner.surroundings;
         let node_ids: Vec<Id> = snapshots.iter().filter_map(|each| each.node_id).collect();
         let places = people::places(conn, &node_ids).await?;
         let org_name = match snapshots.last() {
+            Some(newest)
+                if sources
+                    .iter()
+                    .any(|source| Some(source.inbox()) == newest.id) =>
+            {
+                sources
+                    .iter()
+                    .find(|source| Some(source.inbox()) == newest.id)
+                    .and_then(|source| source.org_name())
+                    .map(str::to_owned)
+            }
             Some(newest) => match (newest.node_id, newest.chat_id) {
                 (Some(node), _) => places
                     .iter()
@@ -1252,7 +1458,11 @@ impl Outbox {
         let language = person.map_or(render::DESTINATION_LANGUAGE, |person| {
             person.locale.as_str()
         });
-        Ok(render::render(
+        let bounds = sources
+            .iter()
+            .map(|source| (source.inbox(), source.places().to_vec()))
+            .collect();
+        Ok(render::render_with_places(
             row_id,
             &Rendering {
                 descriptor: declared,
@@ -1264,6 +1474,7 @@ impl Outbox {
                 org_name: &org_name,
                 public_url: &self.inner.surroundings.public_url,
             },
+            &bounds,
         ))
     }
 

@@ -1,0 +1,1083 @@
+{
+  "protocols": {
+    "openai-responses": {
+      "title": "OpenAI Responses",
+      "web_search": {
+        "paths": [
+          "/responses"
+        ],
+        "tool": {
+          "type": "web_search"
+        },
+        "identities": [
+          {
+            "type": "web_search"
+          },
+          {
+            "type": "web_search_2025_08_26"
+          },
+          {
+            "type": "web_search_preview"
+          },
+          {
+            "type": "web_search_preview_2025_03_11"
+          }
+        ],
+        "modes": {
+          "live": {
+            "external_web_access": true
+          },
+          "cached": {
+            "external_web_access": false
+          }
+        },
+        "options_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "search_context_size": {
+              "enum": [
+                "low",
+                "medium",
+                "high"
+              ]
+            },
+            "return_token_budget": {
+              "enum": [
+                "default",
+                "unlimited"
+              ]
+            },
+            "filters": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "allowed_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "blocked_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "maxItems": 100,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "not": {
+                "required": [
+                  "allowed_domains",
+                  "blocked_domains"
+                ]
+              }
+            },
+            "user_location": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "approximate"
+                },
+                "city": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "region": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "country": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 2,
+                  "maxLength": 2
+                },
+                "timezone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "x-orch-mode-overrides": [
+            {
+              "identity": {
+                "type": "web_search_preview"
+              },
+              "mode": "live"
+            },
+            {
+              "identity": {
+                "type": "web_search_preview_2025_03_11"
+              },
+              "mode": "live"
+            }
+          ]
+        }
+      },
+      "kind": "generation",
+      "native_tools": {
+        "web_search": {
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 10
+              }
+            },
+            "additionalProperties": false
+          },
+          "auxiliary": {
+            "prompt": {
+              "from_input": "/query"
+            },
+            "options": {
+              "web_search": "live"
+            },
+            "body": {
+              "include": [
+                "web_search_call.action.sources"
+              ]
+            }
+          },
+          "result": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "output"
+              ],
+              "properties": {
+                "output": {
+                  "type": "array"
+                }
+              }
+            },
+            "unique_by": "/url",
+            "collections": [
+              {
+                "pointer": "/output/*/action/sources/*",
+                "optional": true,
+                "item": {
+                  "title": {
+                    "from_result": [
+                      "/title",
+                      "/url"
+                    ]
+                  },
+                  "url": {
+                    "from_result": "/url"
+                  },
+                  "snippet": {
+                    "from_result": "/snippet",
+                    "optional": true
+                  },
+                  "content": {
+                    "from_result": "/content",
+                    "optional": true
+                  },
+                  "date": {
+                    "from_result": "/date",
+                    "optional": true
+                  }
+                }
+              },
+              {
+                "pointer": "/output/*/content/*/annotations/*",
+                "optional": true,
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "url"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "url_citation"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "item": {
+                  "title": {
+                    "from_result": [
+                      "/title",
+                      "/url"
+                    ]
+                  },
+                  "url": {
+                    "from_result": "/url"
+                  },
+                  "snippet": {
+                    "from_result": "/snippet",
+                    "optional": true
+                  },
+                  "content": {
+                    "from_result": "/content",
+                    "optional": true
+                  },
+                  "date": {
+                    "from_result": "/date",
+                    "optional": true
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "image_generation": {
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "prompt",
+              "native_tool"
+            ],
+            "properties": {
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "native_tool": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "size": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "quality": {
+                    "enum": [
+                      "auto",
+                      "low",
+                      "medium",
+                      "high",
+                      "xhigh",
+                      "max"
+                    ]
+                  },
+                  "background": {
+                    "enum": [
+                      "auto",
+                      "transparent",
+                      "opaque"
+                    ]
+                  },
+                  "output_format": {
+                    "enum": [
+                      "png",
+                      "jpeg",
+                      "webp"
+                    ]
+                  },
+                  "output_compression": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "action": {
+                    "enum": [
+                      "auto",
+                      "generate",
+                      "edit"
+                    ]
+                  },
+                  "partial_images": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3
+                  },
+                  "type": {
+                    "const": "image_generation"
+                  }
+                },
+                "required": [
+                  "type"
+                ]
+              },
+              "images": {
+                "type": "array"
+              }
+            },
+            "additionalProperties": false
+          },
+          "request": {
+            "paths": [
+              "/responses"
+            ],
+            "tool": {
+              "type": "image_generation"
+            },
+            "identities": [
+              {
+                "type": "image_generation"
+              }
+            ],
+            "options_schema": {
+              "type": "object",
+              "properties": {
+                "model": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "size": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "quality": {
+                  "enum": [
+                    "auto",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                },
+                "background": {
+                  "enum": [
+                    "auto",
+                    "transparent",
+                    "opaque"
+                  ]
+                },
+                "output_format": {
+                  "enum": [
+                    "png",
+                    "jpeg",
+                    "webp"
+                  ]
+                },
+                "output_compression": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "action": {
+                  "enum": [
+                    "auto",
+                    "generate",
+                    "edit"
+                  ]
+                },
+                "partial_images": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 3
+                }
+              }
+            },
+            "method": "POST",
+            "path": "/responses",
+            "body": {
+              "from_input": ""
+            }
+          },
+          "result": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "status",
+                "output"
+              ],
+              "properties": {
+                "status": {
+                  "const": "completed"
+                },
+                "error": {
+                  "type": "null"
+                },
+                "output": {
+                  "type": "array",
+                  "items": {
+                    "if": {
+                      "type": "object",
+                      "required": [
+                        "type",
+                        "status"
+                      ],
+                      "properties": {
+                        "type": {
+                          "const": "image_generation_call"
+                        },
+                        "status": {
+                          "const": "completed"
+                        }
+                      }
+                    },
+                    "then": {
+                      "type": "object",
+                      "required": [
+                        "id",
+                        "result"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "result": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "collections": [
+              {
+                "pointer": "/output/*",
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "status",
+                    "id",
+                    "result"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "image_generation_call"
+                    },
+                    "status": {
+                      "const": "completed"
+                    },
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "result": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "item": {
+                  "b64_json": {
+                    "from_result": "/result"
+                  },
+                  "native_ref": {
+                    "from_result": "/id"
+                  },
+                  "media_type": {
+                    "from_result": "/media_type",
+                    "optional": true
+                  },
+                  "revised_prompt": {
+                    "from_result": "/revised_prompt",
+                    "optional": true
+                  }
+                }
+              }
+            ],
+            "usage": {
+              "from_response": "/usage",
+              "optional": true
+            }
+          },
+          "counters": {
+            "input_tokens": {
+              "pointer": "/usage/input_tokens",
+              "unit": "token"
+            },
+            "output_tokens": {
+              "pointer": "/usage/output_tokens",
+              "unit": "token"
+            },
+            "image_input_tokens": {
+              "pointer": "/tool_usage/image_gen/input_tokens",
+              "unit": "token"
+            },
+            "image_output_tokens": {
+              "pointer": "/tool_usage/image_gen/output_tokens",
+              "unit": "token"
+            },
+            "image_generation": {
+              "unit": "image",
+              "valid_when": {
+                "required": [
+                  "status",
+                  "output"
+                ],
+                "properties": {
+                  "status": {
+                    "const": "completed"
+                  },
+                  "output": {
+                    "type": "array"
+                  }
+                }
+              },
+              "items": {
+                "pointer": "/output",
+                "only_when": {
+                  "required": [
+                    "type",
+                    "status"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "image_generation_call"
+                    },
+                    "status": {
+                      "const": "completed"
+                    }
+                  }
+                },
+                "base64": "/result"
+              }
+            }
+          },
+          "x_stream": {
+            "partial": {
+              "type": "response.image_generation_call.partial_image",
+              "bytes": "/partial_image_b64",
+              "index": "/partial_image_index",
+              "completed": false
+            },
+            "completed": {
+              "type": "response.completed",
+              "response": "/response",
+              "completed": true
+            }
+          },
+          "x_docs": "https://developers.openai.com/api/docs/guides/tools-image-generation",
+          "auxiliary": {
+            "prompt": {
+              "from_input": "/prompt"
+            },
+            "options": {},
+            "body": {
+              "tools": [
+                {
+                  "from_input": "/native_tool"
+                }
+              ],
+              "tool_choice": {
+                "type": "image_generation"
+              }
+            }
+          }
+        }
+      },
+      "generation": {
+        "tools": true,
+        "stream": true
+      }
+    },
+    "anthropic-messages": {
+      "title": "Anthropic Messages",
+      "web_search": {
+        "paths": [
+          "/v1/messages"
+        ],
+        "tool": {
+          "type": "web_search_20250305",
+          "name": "web_search"
+        },
+        "identities": [
+          {
+            "type": "web_search_20250305"
+          },
+          {
+            "type": "web_search_20260209"
+          },
+          {
+            "type": "web_search_20260318"
+          }
+        ],
+        "modes": {
+          "live": {}
+        },
+        "options_schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_uses": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "allowed_domains": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "blocked_domains": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "user_location": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "type": {
+                  "const": "approximate"
+                },
+                "city": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "region": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "country": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 2,
+                  "maxLength": 2
+                },
+                "timezone": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "not": {
+            "required": [
+              "allowed_domains",
+              "blocked_domains"
+            ]
+          }
+        }
+      },
+      "kind": "generation",
+      "native_tools": {
+        "web_search": {
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "query"
+            ],
+            "properties": {
+              "query": {
+                "type": "string",
+                "minLength": 1
+              },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "default": 10
+              }
+            },
+            "additionalProperties": false
+          },
+          "auxiliary": {
+            "prompt": {
+              "from_input": "/query"
+            },
+            "options": {
+              "web_search": "live"
+            }
+          },
+          "result": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "content"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array"
+                }
+              }
+            },
+            "unique_by": "/url",
+            "errors": [
+              {
+                "pointer": "/content/*/content",
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "web_search_tool_result_error"
+                    }
+                  }
+                }
+              },
+              {
+                "pointer": "/content/*/content/*",
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "web_search_tool_result_error"
+                    }
+                  }
+                }
+              }
+            ],
+            "collections": [
+              {
+                "pointer": "/content/*/content/*",
+                "optional": true,
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type",
+                    "url"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "web_search_result"
+                    },
+                    "url": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "item": {
+                  "title": {
+                    "from_result": [
+                      "/title",
+                      "/url"
+                    ]
+                  },
+                  "url": {
+                    "from_result": "/url"
+                  },
+                  "snippet": {
+                    "from_result": "/snippet",
+                    "optional": true
+                  },
+                  "content": {
+                    "from_result": "/content",
+                    "optional": true
+                  },
+                  "date": {
+                    "from_result": "/date",
+                    "optional": true
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "page_fetch": {
+          "input_schema": {
+            "type": "object",
+            "required": [
+              "url"
+            ],
+            "properties": {
+              "url": {
+                "type": "string",
+                "pattern": "^https?://[^/?#@]+(?:[/?#]|$)"
+              }
+            },
+            "additionalProperties": false
+          },
+          "request": {
+            "paths": [
+              "/v1/messages"
+            ],
+            "tool": {
+              "type": "web_fetch_20250910",
+              "name": "web_fetch"
+            },
+            "identities": [
+              {
+                "type": "web_fetch_20250910",
+                "name": "web_fetch"
+              },
+              {
+                "type": "web_fetch_20260209",
+                "name": "web_fetch"
+              },
+              {
+                "type": "web_fetch_20260309",
+                "name": "web_fetch"
+              },
+              {
+                "type": "web_fetch_20260318",
+                "name": "web_fetch"
+              }
+            ],
+            "modes": {
+              "on": {}
+            },
+            "options_schema": {
+              "type": "object",
+              "properties": {
+                "max_uses": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "allowed_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "blocked_domains": {
+                  "type": [
+                    "array",
+                    "null"
+                  ],
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "max_content_tokens": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "citations": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "additionalProperties": false,
+              "not": {
+                "required": [
+                  "allowed_domains",
+                  "blocked_domains"
+                ]
+              }
+            }
+          },
+          "auxiliary": {
+            "prompt": {
+              "from_input": "/url"
+            },
+            "body": {
+              "tools": [
+                {
+                  "type": "web_fetch_20250910",
+                  "name": "web_fetch"
+                }
+              ]
+            }
+          },
+          "result": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "content"
+              ],
+              "properties": {
+                "content": {
+                  "type": "array"
+                }
+              }
+            },
+            "errors": [
+              {
+                "pointer": "/content/*/content",
+                "when": {
+                  "type": "object",
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "web_fetch_tool_result_error"
+                    }
+                  }
+                }
+              }
+            ],
+            "page": {
+              "pointer": "/content/*/content",
+              "when": {
+                "type": "object",
+                "required": [
+                  "type",
+                  "url",
+                  "content"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "web_fetch_result"
+                  },
+                  "content": {
+                    "type": "object",
+                    "required": [
+                      "source"
+                    ],
+                    "properties": {
+                      "source": {
+                        "type": "object",
+                        "required": [
+                          "type",
+                          "data"
+                        ],
+                        "properties": {
+                          "type": {
+                            "const": "text"
+                          },
+                          "data": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "item": {
+                "url": {
+                  "from_result": "/url"
+                },
+                "title": {
+                  "from_result": "/content/title",
+                  "optional": true
+                },
+                "content": {
+                  "from_result": "/content/source/data"
+                },
+                "media_type": {
+                  "from_result": "/content/source/media_type",
+                  "default": "text/plain"
+                }
+              }
+            }
+          },
+          "counters": {
+            "web_fetch_requests": {
+              "pointer": "/usage/server_tool_use/web_fetch_requests",
+              "unit": "page_request",
+              "cumulative": true,
+              "optional": true
+            }
+          },
+          "prices": {
+            "page": {
+              "amount": "0",
+              "currency": "USD",
+              "unit": "page"
+            }
+          }
+        }
+      },
+      "generation": {
+        "tools": true,
+        "stream": true
+      }
+    },
+    "openai-chat": {
+      "title": "OpenAI Chat Completions",
+      "kind": "generation",
+      "generation": {
+        "tools": true,
+        "stream": true
+      }
+    },
+    "openai-embeddings": {
+      "title": "OpenAI Embeddings",
+      "kind": "embedding",
+      "generation": {
+        "tools": false,
+        "stream": false
+      }
+    }
+  },
+  "harnesses": {
+    "codex": {
+      "web_search": [
+        "cached",
+        "indexed",
+        "live"
+      ]
+    },
+    "claude-code": {
+      "web_search": [
+        "live"
+      ]
+    }
+  }
+}

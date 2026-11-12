@@ -4,7 +4,7 @@
  * keeps, how they group by day in the person's time zone (a day is the person's day, not the
  * server's), and how a row names its place.
  */
-import { MENTION_KINDS } from '@/features/inbox/kinds';
+import { KIND_LOOK, MENTION_KINDS } from '@/features/inbox/kinds';
 import type { Notification } from '@/generated/api-types';
 import { type UserState, withinPages } from '@/realtime/stores/user';
 
@@ -61,6 +61,18 @@ export function groupByDay(rows: readonly Notification[], timeZone: string | und
     else groups.push({ key, rows: [row] });
   }
   return groups;
+}
+
+/** Newest groups first; older pages join the same kind without another heading. */
+export function groupByKind(rows: readonly Notification[]): DayGroup[] {
+  const groups = new Map<string, DayGroup>();
+  for (const row of rows) {
+    const key = Object.hasOwn(KIND_LOOK, row.kind) ? row.kind : 'other';
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, { key, rows: [row] });
+    else group.rows.push(row);
+  }
+  return [...groups.values()];
 }
 
 /** A day written for a heading: "Monday, 5 October" and with the year when it is not this one. */

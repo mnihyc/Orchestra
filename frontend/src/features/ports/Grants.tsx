@@ -10,6 +10,19 @@ import { Dialog } from '@/ui/Dialog';
 import { PortFault } from './Fault';
 import { PortScope } from './Policy';
 import type { PortCapability } from '@/generated/api-types';
+import type { TFunction } from 'i18next';
+
+function unavailable(capability: PortCapability | undefined, act: 'grant' | 'revoke', t: TFunction): string {
+  const reason = act === 'grant'
+    ? capability !== undefined && 'grant_unavailable_reason' in capability ? capability.grant_unavailable_reason : undefined
+    : capability !== undefined && 'revoke_unavailable_reason' in capability ? capability.revoke_unavailable_reason : undefined;
+  const words: Record<string, string> = {
+    manage_required: 'ports.grants.reasons.manage', not_offered: 'ports.grants.reasons.notOffered',
+    policy_denied: 'ports.grants.reasons.policy', already_granted: 'ports.grants.reasons.granted',
+    no_grant: 'ports.grants.reasons.noGrant', approver_required: 'ports.grants.reasons.approver',
+  };
+  return t((typeof reason === 'string' ? words[reason] : undefined) ?? 'ports.grants.reasons.unknown');
+}
 
 /** What lets an agent open this audience now, or why it asks, or why nobody opens it. */
 export function GrantState({ capability }: { capability: PortCapability }) {
@@ -27,8 +40,10 @@ export function PortsGrants({ environmentId, capabilities, onChanged }: { enviro
   const { t } = useTranslation();
   const [chosen, setChosen] = useState<{ capability: PortCapability; act: 'grant' | 'revoke' } | null>(null);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<unknown>(null);
+  const current = capabilities.find((capability) => capability.key === chosen?.capability.key);
+  const available = chosen !== null && (chosen.act === 'grant' ? current?.can_grant === true : current?.can_revoke === true);
   const act = async () => {
-    if (chosen === null || busy) return;
+    if (chosen === null || busy || !available) return;
     setBusy(true); setError(null);
     try {
       if (chosen.act === 'grant') await grantPortCapability(environmentId, chosen.capability.key);
@@ -47,14 +62,14 @@ export function PortsGrants({ environmentId, capabilities, onChanged }: { enviro
         <p className="text-xs text-text-muted"><GrantState capability={capability} /></p>
       </div>
       <div className="flex flex-wrap gap-2">
-        {capability.can_grant && <Button size="sm" icon={<Check aria-hidden />} onClick={() => { setError(null); setChosen({ capability, act: 'grant' }); }}>{t('ports.grants.grant')}</Button>}
-        {capability.can_revoke && <Button size="sm" variant="danger-ghost" icon={<X aria-hidden />} onClick={() => { setError(null); setChosen({ capability, act: 'revoke' }); }}>{t('ports.grants.revoke')}</Button>}
+        <Button size="sm" blocked={!capability.can_grant} reason={!capability.can_grant ? unavailable(capability, 'grant', t) : undefined} icon={<Check aria-hidden />} onClick={() => { setError(null); setChosen({ capability, act: 'grant' }); }}>{t('ports.grants.grant')}</Button>
+        <Button size="sm" variant="danger-ghost" blocked={!capability.can_revoke} reason={!capability.can_revoke ? unavailable(capability, 'revoke', t) : undefined} icon={<X aria-hidden />} onClick={() => { setError(null); setChosen({ capability, act: 'revoke' }); }}>{t('ports.grants.revoke')}</Button>
       </div>
     </li>)}</ul>
     <Dialog open={chosen !== null} onOpenChange={(open) => { if (!open && !busy) setChosen(null); }} dismissible={!busy}
       title={chosen === null ? '' : t(granting ? 'ports.grants.grantTitle' : 'ports.grants.revokeTitle', { label: capabilityName(chosen.capability.key, chosen.capability.label, t) })}
       description={chosen === null ? '' : granting ? t(`ports.grants.grantAbout.${chosen.capability.kind}`) : t('ports.grants.revokeAbout')}
-      footer={<><Button onClick={() => setChosen(null)} blocked={busy}>{t('ports.cancel')}</Button><Button variant={granting ? 'primary' : 'danger'} icon={granting ? <Check aria-hidden /> : <X aria-hidden />} pending={busy} onClick={() => void act()}>{t(granting ? 'ports.grants.grant' : 'ports.grants.revoke')}</Button></>}>
+      footer={<><Button onClick={() => setChosen(null)} blocked={busy} reason={busy ? t('ui.unavailable.saving') : undefined}>{t('ports.cancel')}</Button><Button variant={granting ? 'primary' : 'danger'} icon={granting ? <Check aria-hidden /> : <X aria-hidden />} pending={busy} blocked={!available} reason={busy ? t('ui.unavailable.saving') : !available ? unavailable(current, granting ? 'grant' : 'revoke', t) : undefined} onClick={() => void act()}>{t(granting ? 'ports.grants.grant' : 'ports.grants.revoke')}</Button></>}>
       <PortFault error={error} />
     </Dialog>
   </section>;

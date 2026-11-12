@@ -1,0 +1,1 @@
+{"id":"plugin_fixture","choices":[{"message":{"role":"assistant","content":"A grounded answer.","annotations":[{"type":"url_citation","url_citation":{"url":"https://example.org/plugin","title":"Plugin result","content":"The native excerpt.","date":"2026-11-01"}}]}}],"usage":{"prompt_tokens":120,"completion_tokens":30,"cost":0.008}}

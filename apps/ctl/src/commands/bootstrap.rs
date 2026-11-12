@@ -163,6 +163,7 @@ fn make_directory(dir: &Path) -> Result<(), ComposeError> {
         path: dir.display().to_string(),
         source,
     };
+    #[cfg(unix)]
     let existed = dir.is_dir();
     std::fs::create_dir_all(dir).map_err(wrong)?;
     // A directory this made is closed to others; one that was there is a

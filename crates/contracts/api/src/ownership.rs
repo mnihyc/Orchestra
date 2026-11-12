@@ -7,6 +7,13 @@
 //! lose, gain and leave alone. What is deleted stays for a while and can be
 //! brought back; so can ownership be handed to another person.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::Manage;
+use orch_access_contract::key_scope::KeyTargetKind::Object;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Revision, Time};
@@ -15,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::access::{MissingAccess, ObjectRef, Role, RoleHeld};
 use crate::common::{Page, PageQuery};
-use crate::directory::Member;
 use crate::nodes::{Node, NodeKind, NodeOrSystem, NodeRef};
 use crate::resources::Resource;
 use crate::routes::Access::{Permission, Rule, User};
@@ -98,6 +104,63 @@ pub struct Holdings {
     pub pending: i64,
 }
 
+/// A typed object identity in the aggregate membership preview, without its metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HoldingsObjectId {
+    pub kind: String,
+    pub id: Id,
+}
+
+/// Managed-resource counts and identity, without a name or sign-in state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HoldingsResourceSummary {
+    pub object: HoldingsObjectId,
+    pub shared_with: i64,
+    pub threads: i64,
+}
+
+/// A registration's actual resource/machine association, without machine metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HoldingsRegistrationSummary {
+    pub object: HoldingsObjectId,
+    pub machine_id: Id,
+    pub threads: i64,
+}
+
+/// Current aggregate counts and IDs available through the membership inspection itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct HoldingsSummary {
+    pub projection: crate::common::ReceiptProjection,
+    pub org_id: Id,
+    pub domain_id: Id,
+    pub user_id: Id,
+    pub nodes: HoldingsNodes,
+    pub shared: i64,
+    pub shared_by_kind: HoldingsShared,
+    pub resources: Vec<HoldingsResourceSummary>,
+    pub machine_registrations: Vec<HoldingsRegistrationSummary>,
+    pub entries: i64,
+    pub pending: i64,
+}
+
+/// Ordinary full body or the credential-bounded native aggregate summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum HoldingsResponse {
+    /// Test the explicit discriminator first, including an empty holdings summary.
+    Receipt(HoldingsSummary),
+    Full(Holdings),
+}
+
+impl HoldingsResponse {
+    pub fn into_full(self) -> Result<Holdings, Box<HoldingsSummary>> {
+        match self {
+            Self::Full(full) => Ok(full),
+            Self::Receipt(summary) => Err(Box::new(summary)),
+        }
+    }
+}
+
 /// What a person reaches, counted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct MemberMoveReach {
@@ -146,6 +209,40 @@ pub struct MemberMovePlan {
     pub missing: Vec<MissingAccess>,
 }
 
+/// Counts and identities of a move preview, without the member profile or stored role content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemberMovePreviewSummary {
+    pub projection: crate::common::ReceiptProjection,
+    pub org_id: Id,
+    pub user_id: Id,
+    pub from: Id,
+    pub to: Id,
+    pub loses: MemberMoveReach,
+    pub gains: MemberMoveReach,
+    pub stays: HoldingsNodes,
+    pub resources: i64,
+    pub role_ids: Vec<Id>,
+    pub named: i64,
+    pub missing: Vec<Id>,
+}
+
+/// A pure preview keeps its native full plan or returns its explicitly bounded aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MemberMovePreviewResponse {
+    Receipt(Box<MemberMovePreviewSummary>),
+    Full(Box<MemberMovePlan>),
+}
+
+impl MemberMovePreviewResponse {
+    pub fn into_full(self) -> Result<MemberMovePlan, Box<MemberMovePreviewSummary>> {
+        match self {
+            Self::Full(plan) => Ok(*plan),
+            Self::Receipt(summary) => Err(summary),
+        }
+    }
+}
+
 /// What becomes of a resource that a leaving member owned alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -177,6 +274,33 @@ pub struct MemberMoveBody {
     /// The role to hold there; the one they hold at their domain when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+}
+
+/// Accepted membership movement without the member's stored profile, address or role.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemberMoveReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub org_id: Id,
+    pub user_id: Id,
+    pub from: Id,
+    pub to: Id,
+}
+
+/// Ordinary moved member or its truthful, content-free identity receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MemberMoveResponse {
+    Receipt(MemberMoveReceipt),
+    Full(Box<crate::directory::Member>),
+}
+
+impl MemberMoveResponse {
+    pub fn into_full(self) -> Result<crate::directory::Member, MemberMoveReceipt> {
+        match self {
+            Self::Full(member) => Ok(*member),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// What members are given when the org they were in is deleted.
@@ -273,6 +397,27 @@ pub struct NodeDeletePlan {
     pub restore_by: RestoreBy,
 }
 
+/// A newly stored review's handle and aggregate facts, without existing Node names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeDeletePreviewReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub preflight_id: Id,
+    pub expires_at: Time,
+    pub node_id: Id,
+    pub revision: Revision,
+    pub counts: NodeDeleteCounts,
+    pub purge_at: Time,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary deletion review or its new review handle and counts only.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum NodeDeletePreviewResponse {
+        Full(NodeDeletePlan),
+        Receipt(NodeDeletePreviewReceipt),
+    }
+}
+
 /// A node that was deleted directly under another and is not purged yet.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DeletedNode {
@@ -329,29 +474,234 @@ pub struct NodeRestoreBody {
     pub expected_deletion_id: Option<Id>,
 }
 
+/// The actual completed restoration, without its existing Node header or referenced content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeRestoreReceipt {
+    pub projection: crate::common::ReceiptProjection,
+    pub node_id: Id,
+    pub kind: crate::nodes::NodeKind,
+    pub deletion_id: Option<Id>,
+    pub restored_nodes: Vec<Id>,
+    pub restored_resources: Vec<Id>,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary restored Node or its content-free completed identity receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum NodeRestoreResponse {
+        Full(crate::nodes::Node),
+        Receipt(NodeRestoreReceipt),
+    }
+}
+
+/// The native accepted ownership outcome, without the thing's existing content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct OwnershipTransferReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual transferred identity.
+    pub object_id: Id,
+    /// The actual business kind.
+    pub kind: String,
+    /// The requested and accepted first owner.
+    pub owner_id: Id,
+    /// False for the native already-first-owner no-op.
+    pub changed: bool,
+}
+macro_rules! transfer_response {
+    ($name:ident, $full:ty) => {
+        #[doc = "The native full transfer response or its accepted restricted acknowledgement."]
+        #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+        #[serde(untagged)]
+        pub enum $name {
+            #[doc = "The existing native object, under this operation's current source Reads."]
+            Full(Box<$full>),
+            #[doc = "The accepted ownership facts only."]
+            Receipt(OwnershipTransferReceipt),
+        }
+        impl $name {
+            #[doc = "Keep a full object distinct from a restricted acknowledgement."]
+            pub fn into_full(self) -> Result<$full, OwnershipTransferReceipt> {
+                match self {
+                    Self::Full(value) => Ok(*value),
+                    Self::Receipt(receipt) => Err(receipt),
+                }
+            }
+        }
+    };
+}
+transfer_response!(NodeTransferResponse, Node);
+transfer_response!(ObjectTransferResponse, Resource);
+
+const NODE_TRANSFER_FACETS: &[Facet] = &[
+    Facet::required(
+        Manage,
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::Path("id"),
+    ),
+    Facet::response_content(
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+        ],
+        Target::Path("id"),
+    ),
+    Facet::response_content(
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+            Object(K::Document),
+            Object(K::DocumentContainer),
+            Object(K::Provider),
+            Object(K::Agent),
+            Object(K::Environment),
+            Object(K::Host),
+            Object(K::Machine),
+            Object(K::Template),
+            Object(K::McpServer),
+            Object(K::Mount),
+            Object(K::Skill),
+        ],
+        Target::ResolvedCollection("transfer_sources"),
+    ),
+];
+
+const OBJECT_TRANSFER_FACETS: &[Facet] = &[
+    Facet::required(
+        Manage,
+        &[
+            Object(K::Provider),
+            Object(K::Agent),
+            Object(K::Environment),
+            Object(K::Host),
+            Object(K::Machine),
+            Object(K::Template),
+            Object(K::McpServer),
+            Object(K::Mount),
+            Object(K::Skill),
+            Object(K::Document),
+            Object(K::DocumentContainer),
+        ],
+        Target::Resolved("object"),
+    ),
+    Facet::response_content(
+        &[
+            Object(K::Provider),
+            Object(K::Agent),
+            Object(K::Environment),
+            Object(K::Host),
+            Object(K::Machine),
+            Object(K::Template),
+            Object(K::McpServer),
+            Object(K::Mount),
+            Object(K::Skill),
+            Object(K::Document),
+            Object(K::DocumentContainer),
+        ],
+        Target::Resolved("transfer_read"),
+    ),
+    Facet::response_content(
+        &[
+            Object(K::Org),
+            Object(K::Project),
+            Object(K::Topic),
+            Object(K::Thread),
+            Object(K::Document),
+            Object(K::DocumentContainer),
+            Object(K::Provider),
+            Object(K::Agent),
+            Object(K::Environment),
+            Object(K::Host),
+            Object(K::Machine),
+            Object(K::Template),
+            Object(K::McpServer),
+            Object(K::Mount),
+            Object(K::Skill),
+        ],
+        Target::ResolvedCollection("transfer_sources"),
+    ),
+    Facet::response_content(
+        &[orch_access_contract::key_scope::KeyTargetKind::Identity(
+            orch_access_contract::key_scope::KeyIdentityKind::Group,
+        )],
+        Target::ResolvedCollection("transfer_groups"),
+    ),
+    Facet::response_content(
+        &[Object(K::Org)],
+        Target::ResolvedCollection("transfer_names_orgs"),
+    ),
+    Facet::response_content(
+        &[Object(K::Project)],
+        Target::ResolvedCollection("transfer_names_projects"),
+    ),
+    Facet::response_content(
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("transfer_names_topics"),
+    ),
+    Facet::response_content(
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("transfer_names_threads"),
+    ),
+    Facet::response_content(
+        &[Object(K::DocumentContainer)],
+        Target::ResolvedCollection("transfer_names_containers"),
+    ),
+];
+
 crate::endpoints! {
     /// Ends a membership of a root org, with everything that follows from it.
-    OrgMemberRemove: DELETE "/orgs/{id}/members/{user_id}", Rule("members.manage on an org that is the person's domain or lies above it, or the member themself"), none, json OrgMemberRemoveBody, none, 204;
+    OrgMemberRemove: DELETE "/orgs/{id}/members/{user_id}", Rule("members.manage on an org that is the person's domain or lies above it, or the member themself"), none, json OrgMemberRemoveBody, none, 204,
+        operation Op::variants(&[
+            Variant {
+                name: "leave",
+                selector: "membership belongs to caller",
+                facets: crate::ownership_sources::MEMBER_END_FACETS,
+            },
+            Variant {
+                name: "remove",
+                selector: "another member is removed",
+                facets: crate::ownership_sources::MEMBER_END_FACETS,
+            },
+        ]);
     /// Lists everything of a person's in a tree that ending their membership would touch.
-    OrgMemberHoldings: GET "/orgs/{id}/members/{user_id}/holdings", Rule("the same as ending the membership"), none, none, json Holdings, 200;
+    OrgMemberHoldings: GET "/orgs/{id}/members/{user_id}/holdings", Rule("the same as ending the membership"), none, none, json HoldingsResponse, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::MEMBER_HOLDINGS_FACETS));
     /// Shows what changing a member's domain would do, before anything does.
-    OrgMemberMovePreview: POST "/orgs/{id}/members/{user_id}/move/preview", Rule("the same as the move itself"), none, json MemberMoveBody, json MemberMovePlan, 200;
+    OrgMemberMovePreview: POST "/orgs/{id}/members/{user_id}/move/preview", Rule("members.manage at either end of the proposed move"), none, json MemberMoveBody, json MemberMovePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::MEMBER_MOVE_PREVIEW_FACETS));
     /// Changes a member's domain, carrying the role they held along.
-    OrgMemberMove: POST "/orgs/{id}/members/{user_id}/move", Rule("members.manage on the org that is the person's domain and on the org they move to"), none, json MemberMoveBody, json Member, 200;
+    OrgMemberMove: POST "/orgs/{id}/members/{user_id}/move", Rule("members.manage on the org that is the person's domain and on the org they move to"), none, json MemberMoveBody, json MemberMoveResponse, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::MEMBER_MOVE_FACETS));
     /// Says what deleting a node would remove, until when and by whom it can be brought back, and keeps that as a plan for the deletion to name; nothing is deleted.
-    NodeDeletePreview: POST "/nodes/{id}/delete/preview", Rule("the same as deleting the node"), none, none, json NodeDeletePlan, 200;
+    NodeDeletePreview: POST "/nodes/{id}/delete/preview", Rule("the same as deleting the node"), none, none, json NodeDeletePreviewResponse, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::DELETE_PREVIEW_FACETS));
     /// Deletes a node with everything in it, archiving it first when it is not.
-    NodeDelete: DELETE "/nodes/{id}", Rule("node manager; side thread maker, parent manager or environment manager"), none, json NodeDeleteBody, json NodeDeleted, 200;
+    NodeDelete: DELETE "/nodes/{id}", Rule("node manager; side thread maker, parent manager or environment manager"), none, json NodeDeleteBody, json NodeDeleted, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::DELETE_FACETS));
     /// Lists what was deleted directly under a node and can still be brought back.
     NodeDeletedList: GET "/nodes/{id}/deleted", Permission("node.manage"), query PageQuery, none, json Page<DeletedNode>, 200;
     /// Brings a deleted node back, archived, with everything under it.
-    NodeRestore: POST "/nodes/{id}/restore", Rule("node.manage on the deleted node's parent; for a root org, one of its owners or a system admin"), none, json NodeRestoreBody, json Node, 200;
+    NodeRestore: POST "/nodes/{id}/restore", Rule("node.manage on the deleted node's parent; for a root org, one of its owners or a system admin"), none, json NodeRestoreBody, json NodeRestoreResponse, 200,
+        operation Op::receipt(&Op::facets(crate::ownership_sources::RESTORE_FACETS));
     /// Lists the deleted team root orgs of the caller that can still be restored.
-    OrgDeletedList: GET "/orgs/deleted", User, none, none, json Vec<DeletedOrg>, 200;
+    OrgDeletedList: GET "/orgs/deleted", User, none, none, json Vec<DeletedOrg>, 200,
+        operation Op::single(Manage, &[Object(K::Org)], Target::ResolvedCollection("results"));
     /// Makes another person the first owner of a node.
-    NodeTransfer: POST "/nodes/{id}/transfer", Rule("one of the node's owners, or an admin of the place it is in"), none, json TransferBody, json Node, 200;
+    NodeTransfer: POST "/nodes/{id}/transfer", Rule("one of the node's owners, or an admin of the place it is in"), none, json TransferBody, json NodeTransferResponse, 200,
+        operation Op::receipt(&Op::facets(NODE_TRANSFER_FACETS));
     /// Makes another person the first owner of a resource or a document.
-    ObjectTransfer: POST "/{object}/{id}/transfer", Rule("one of the resource's owners, or an admin of its home"), none, json TransferBody, json Resource, 200;
+    ObjectTransfer: POST "/{object}/{id}/transfer", Rule("one of the resource's owners, or an admin of its home"), none, json TransferBody, json ObjectTransferResponse, 200,
+        operation Op::receipt(&Op::facets(OBJECT_TRANSFER_FACETS));
+
 }
 
 #[cfg(test)]

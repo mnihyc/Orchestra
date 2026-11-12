@@ -1,3 +1,8 @@
+---
+group: getting-started
+summary: 查找设置、代理协作、共享和管理 Orch 的操作指南。
+---
+
 # 任务指南
 
 这些文章与产品中的“?”连接，按操作顺序说明工作流。切换语言时，Help 使用同一篇文章的
@@ -6,7 +11,8 @@
 每篇用户指南都有与英文版同名的中文文件。文章的 `screens` 前置信息列出它说明的完整路由，
 包括详情页和跳转页。文章还需要标题和搜索关键词；屏幕上的问号应打开相关小节。
 更新功能时同时更新两种语言，保留相同的小节地址。帮助检查会列出缺少文章的路由、
-缺少的译文和失效的链接。
+缺少的译文和失效的链接。两种语言的前置信息都应包含简短、平实的 `summary`；
+这段文字随文章发布，不调用模型。
 
 - [DeepSeek Harness](deepseek-harness.md)：它是什么、提供方与密钥、可用功能与插件增加的功能、隐私默认设置和限制。
 - [连接一台机器](connect-a-machine.md)：运行账号、服务或前台、多个连接器实例以及完整移除。
@@ -35,6 +41,7 @@
 - [资源库](resource-library.md)：提供与使用统计、嵌套视图和各列表的上次状态。
 - [设置与消耗](settings-and-usage.md)：继承、锁、用量和限额。
 - [查找内容](finding-things.md)：查找器、文字与语义、筛选、结果顺序和显示更多。
+- [就工作内容提问](ask.md)：只读提问、引用来源、组织边界、历史记录、浮动窗口及保留期限。
 - [语义搜索](semantic-search.md)：嵌入提供方、索引状态、磁盘限制和切换模型。
 - [相关内容](related-items.md)：按语义、位置和引用查找相关文档、聊天和线程，供人员和智能体使用。
 - [文档链接](document-links.md)：引用本文档的内容及每处提及周围的文字、本文档引用的内容、关系图，以及文档显示的标签页。
@@ -49,3 +56,17 @@
 - [切换代理程序并延续历史](switch-agent-programs.md)：延续、摘要、不带历史及交接方案。
 - [管理账号和个人资料](account-and-profile.md)：恢复、登录、令牌和个人选择。
 - [阅读视图与详情](reading-views-and-details.md)：打开页面、卡片、菜单、长名称与紧凑设置。
+
+- [接受组织条款](organization-terms.md)
+- [管理员消息](messages-from-admins.md)
+- [为群聊选择所属位置](group-chats.md)
+- [按所属位置和来源组织资源](resource-groups.md)
+- [关注正在运行的线程](running-thread-views.md)
+- [将文件恢复到某条消息之前](restore-files-before-a-message.md)
+- [导入并启用 MCP 服务器](mcp-import-and-use.md)
+- [切换线程的环境或搬迁环境](switch-and-move-environments.md)
+- [检查存储内容、会话和令牌](admin-inspection.md)
+- [提供方网络搜索](provider-web-search.md)
+- [复制链接并在发送时共享查看权限](link-sharing.md)
+- [让代理安排未来的工作](agent-schedules.md)
+- [阅读和刷新摘要](summaries.md)：资源摘要、聊天补看、独立标题、用量和提问草稿。

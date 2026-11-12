@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** MCP setup uses ordinary fields, exact argv and write-only authentication; Advanced is optional. */
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -18,7 +19,7 @@ vi.mock('@/api/resource-tools', () => ({ createMcp: calls.create, updateMcp: cal
 vi.mock('@/features/resources/HomePicker', () => ({ HomePicker: ({ value, onChange, disabled }: { value: string; onChange: (value: string) => void; disabled?: boolean }) =>
   <Input label={i18n.t('resources.home.label')} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} /> }));
 
-const server: McpServer = { id: 'server', name: 'search-tools', description: 'Search the project', address: 'team.search-tools', org_id: 'org', owner: null,
+const server: McpServer = { ...unjudgedProvenance(), id: 'server', name: 'search-tools', description: 'Search the project', address: 'team.search-tools', org_id: 'org', owner: null,
   home: { id: 'org', kind: 'org', name: 'Workshop', redacted: false }, machine: null, environment: null, imported: null, enabled: true, revision: 7,
   access: { permissions: ['mcp.view', 'mcp.manage'], administers: false, participating: true, admin_only: [], through: [] },
   spec: { transport: 'http', url: 'https://tools.example.test/mcp', secret_env: ['TOKEN'], authentication: { kind: 'bearer', secret: 'TOKEN' },

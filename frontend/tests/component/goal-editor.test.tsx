@@ -5,13 +5,14 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import { GoalEditorHost } from '@/features/goal/GoalEditor';
 import { closeGoalEditor, openGoalEditor } from '@/features/goal/editor';
-import type { Thread, ThreadGoal } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import type { ResolvedSetting, Thread, ThreadGoal } from '@/generated/api-types';
+import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
 const goals = vi.hoisted(() => ({ setGoal: vi.fn(), updateGoal: vi.fn() }));
+const defaults = vi.hoisted(() => ({ read: vi.fn<() => Promise<ResolvedSetting[]>>() }));
 vi.mock('@/api/goals', () => goals);
-vi.mock('@/api/settings', () => ({ settingsQuery: () => ({ queryKey: ['goal-editor-settings'], queryFn: () => Promise.resolve([]) }) }));
+vi.mock('@/api/settings', () => ({ settingsQuery: () => ({ queryKey: ['goal-editor-settings'], queryFn: () => defaults.read() }) }));
 vi.mock('@/features/goal/plan', () => ({ useGoalPlans: () => false }));
 
 const BASE = {
@@ -23,8 +24,38 @@ function threadOf(goal: ThreadGoal | null): Thread {
   return { id: 'thread-goal', goal } as unknown as Thread;
 }
 
-beforeEach(() => { vi.clearAllMocks(); goals.updateGoal.mockResolvedValue(BASE); goals.setGoal.mockResolvedValue(BASE); });
-afterEach(async () => { closeGoalEditor(); await setLocale('en'); });
+beforeEach(() => { vi.clearAllMocks(); defaults.read.mockReset(); defaults.read.mockResolvedValue([]); goals.updateGoal.mockResolvedValue(BASE); goals.setGoal.mockResolvedValue(BASE); });
+afterEach(async () => { closeGoalEditor(); delete document.documentElement.dataset.theme; await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
+  it(`does not call unread inherited goal limits unlimited at ${locale}/${theme}`, async () => {
+    await setLocale(locale); document.documentElement.dataset.theme = theme;
+    let finish: ((value: ResolvedSetting[]) => void) | undefined;
+    defaults.read.mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    openGoalEditor('thread-goal'); show(<GoalEditorHost thread={threadOf(null)} />);
+    try {
+      await waitFor(() => expect(defaults.read).toHaveBeenCalledOnce());
+      expect(screen.queryByText(i18n.t('goals.editor.limitsNone'))).not.toBeInTheDocument();
+      expect(screen.getByText(i18n.t('goals.editor.limitsChecking'))).toBeVisible();
+      await userEvent.type(screen.getByLabelText(i18n.t('goals.editor.objective'), { exact: true }), 'Review the current work');
+      await userEvent.type(screen.getByLabelText(i18n.t('goals.editor.condition'), { exact: true }), 'The requested review is recorded');
+      expect(screen.getByRole('button', { name: i18n.t('goals.editor.set') })).toBeEnabled();
+      expect(goals.setGoal).not.toHaveBeenCalled();
+    } finally { finish?.([]); }
+    expect(await screen.findByText(i18n.t('goals.editor.limitsInherited'))).toBeVisible();
+  });
+  it(`shows the failed defaults read and retries it without creating a goal at ${locale}/${theme}`, async () => {
+    await setLocale(locale); document.documentElement.dataset.theme = theme;
+    defaults.read.mockRejectedValueOnce(new Error('The defaults could not be read'));
+    openGoalEditor('thread-goal'); show(<GoalEditorHost thread={threadOf(null)} />);
+    await waitFor(() => expect(defaults.read).toHaveBeenCalledOnce());
+    expect(screen.queryByText(i18n.t('goals.editor.limitsNone'))).not.toBeInTheDocument();
+    expect(await screen.findByText(i18n.t('goals.editor.limitsUnavailable'))).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
+    expect(await screen.findByText(i18n.t('goals.editor.limitsInherited'))).toBeVisible();
+    expect(defaults.read).toHaveBeenCalledTimes(2); expect(goals.setGoal).not.toHaveBeenCalled();
+  });
+}
 
 for (const status of ['active', 'paused', 'stopped'] as const) {
   it(`edits the saved ${status} goal rather than sending another create`, async () => {

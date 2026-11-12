@@ -28,6 +28,8 @@ it.each(['keyboard','tap'] as const)('opens the existing card from the result ch
   expect(calls.reference).toHaveBeenLastCalledWith({kind:'node',id:node.id});
   expect(screen.getByRole('button',{name:i18n.t('people.reference.open')})).toBeVisible();
   expect(calls.go).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-reference-card][role="dialog"]')).toHaveFocus();
+  expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
   await user.keyboard('{Escape}');
   await waitFor(()=>expect(document.querySelector('[data-reference-card]')).toBeNull());
   await user.click(screen.getByRole('link',{name:'Release checklist'}));
@@ -72,7 +74,7 @@ it('keeps a known thread without readable state facts quiet', () => {
 
 it.each(['en', 'zh-CN'] as const)('describes the matching text rather than an unnamed field in %s', async (locale) => {
   await setLocale(locale);
-  const document = {id: 'result-document', title: 'Release document', description: '', description_source: 'user', description_line: '',
+  const document = {id: 'result-document', title: 'Release document', description: '', description_line: '',
     node, owner: ADA, owners: 1, created_by: ADA, page: 'follows', seq: 1, block_count: 1, bytes: 10, files_bytes: 0,
     version: 1, open_discussions: 0, updated_at: hit.at, updated_by: ADA, discussion_level: 'involved', seen_seq: null, archived: false, deleted: false} as const;
   const thread = {...node, kind: 'thread'} as const;
@@ -83,7 +85,7 @@ it.each(['en', 'zh-CN'] as const)('describes the matching text rather than an un
     {value: {kind: 'document', document, block_id: null, by: ADA, path: [node], snippet: 'Release', matches: [[0,7]]}, en: 'In the document title', zh: '在文档标题中'},
     {value: {kind: 'document', document, block_id: 'block', by: ADA, path: [node], snippet: 'Release', matches: [[0,7]]}, en: 'In the document', zh: '在文档中'},
     {value: {kind: 'item', item: agentMessage('answer', 'Release'), thread, topic: node, project: {...node,kind:'project'}, snippet: 'Release', matches: [[0,7]]}, en: 'In what the agent answered', zh: '在智能体的回答中'},
-    {value: {kind: 'chat_message', chat: {id: 'chat',kind:'node',node,name:null,org_id:'org'}, path: [node],
+    {value: {kind: 'chat_message', chat: {id: 'chat',kind:'node',visibility:'public',node,name:null,org_id:'org'}, path: [node],
       message: {id: 'message',chat_id:'chat',kind:'message',author:ADA,created_at:hit.at,edited_at:null,deleted:false,parts:[{type:'text',text:'Release'}],reactions:[],mentions:[],mentions_all:false,mention_targets:[],asked_agents:[],pinned:null,reply_to:null,seq_created:1,seq_updated:1,system:null}, snippet:'Release',matches:[[0,7]]}, en: 'In chat messages', zh: '在聊天消息中'},
   ];
   for (const entry of cases) {

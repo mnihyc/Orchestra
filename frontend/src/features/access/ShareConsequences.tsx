@@ -4,11 +4,14 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ApiError } from '@/api/client';
 import type { AccessTarget } from '@/api/access';
 import { Account } from '@/features/access/ChangePreview';
-import { AREA_WORDS, stepWords } from '@/features/access/AgentRow';
+import { OwnerReadNotice } from './OwnerReadConfirmation';
+import { AREA_WORDS, stepWords } from '@/features/access/agentShareWords';
+import { CurrentAgentContribution, ViewerReadStanding } from './AgentContribution';
 import { AREAS, stepOf } from '@/features/access/agentShares';
 import { HolderView } from '@/features/access/holders';
 import { usePermissionName } from '@/features/access/names';
 import { optionLabel } from '@/features/access/EntryOptions';
+import { WhereNames, whereNames } from '@/features/access/WhereField';
 import { SettingReadout } from '@/features/settings/SettingReadout';
 import { offeredChoice } from '@/i18n/choices';
 import { ReviewPlace } from '@/features/project/ReviewConsequences';
@@ -18,6 +21,19 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { UserChip } from '@/ui/UserChip';
 import { ValueSummary } from '@/ui/ValueSummary';
 
+/** What an entry narrows, in words: the places by their names beside the other options, which a summary of values would give as bare identifiers. */
+export function EntryOptionFacts({ options, word }: { options: unknown; word: (text: string) => string }) {
+  const { t } = useTranslation();
+  const given = typeof options === 'object' && options !== null && !Array.isArray(options) ? options as Record<string, unknown> : null;
+  const names = whereNames(given?.where);
+  const { where: _places, ...rest } = given ?? {};
+  if (given === null || names.length === 0) return <ValueSummary value={options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />;
+  return <>
+    {Object.keys(rest).length > 0 && <ValueSummary value={rest} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />}
+    <p className="text-sm"><span className="text-text-muted">{t('access.options.where')}</span>{': '}<WhereNames names={names} /></p>
+  </>;
+}
+
 function EntryFacts({ entries, target }: { entries: readonly Entry[]; target: AccessTarget }) {
   const { t } = useTranslation();
   const word=(text:string)=>offeredChoice(t,'arrangement',text)?.name??offeredChoice(t,'effort',text)?.name??text;
@@ -26,7 +42,7 @@ function EntryFacts({ entries, target }: { entries: readonly Entry[]; target: Ac
     <p>{entry.expires_at === null ? t('shareReview.noExpiry') : <RelativeTime at={entry.expires_at} />}</p>
     {entry.note !== '' && <p className="wrap-anywhere">{entry.note}</p>}
     {entry.read_first && <p>{t('people.readFirst')}</p>}
-    {entry.options !== null && <ValueSummary value={entry.options} label={t('shareReview.options')} fieldName={(name) => optionLabel(t, name)} word={word} />}
+    {entry.options !== null && <EntryOptionFacts options={entry.options} word={word} />}
   </li>)}</ul>;
 }
 
@@ -34,6 +50,7 @@ export function ShareConsequences({ preview, target }: { preview: SharePreview; 
   const { t } = useTranslation();
   const permissionName = usePermissionName();
   return <section className="flex flex-col gap-3" aria-label={t('shareReview.consequences')}>
+    <OwnerReadNotice disclosure={preview.owner_reads} />
     <p>{preview.permissions.map(permissionName).join(', ')}</p>
     <ul className="flex flex-wrap gap-2">{preview.holders.map((holder, index) => <li key={index}><HolderView holder={holder} target={target} /></li>)}</ul>
     <Account preview={preview.effects} />
@@ -46,7 +63,11 @@ export function ShareConsequences({ preview, target }: { preview: SharePreview; 
     </li>)}</ul>
     <ul className="flex flex-col gap-2">{preview.agents.map((agent, index) => <li key={index} className="rounded border border-border p-2">
       <ReviewPlace place={agent.to} /><p>{t(agent.inside ? 'shareReview.inside' : 'shareReview.itself')}</p>
+      <p className="font-medium">{t('agentContributions.previousToProposed')}</p>
       <ul>{AREAS.map((area) => <li key={area}>{t(AREA_WORDS[area])}{': '}{stepWords(t, area, stepOf(area, agent.already_shared))}{' → '}{stepWords(t, area, stepOf(area, agent.parts))}</li>)}</ul>
+      {agent.copy === null && <CurrentAgentContribution current={agent.current} proposed />}
+      <ViewerReadStanding entries={agent.viewer_entries} />
+      {agent.viewer_entries !== undefined && agent.viewer_entries.length > 0 && <section><p className="font-medium">{t('agentContributions.viewerEntries')}</p><EntryFacts entries={agent.viewer_entries} target={target} /></section>}
       <p>{t(agent.download ? 'shareReview.download' : 'shareReview.noDownload')}</p>
       {agent.future_threads && <p>{t('shareReview.future')}</p>}
       {agent.copy !== null && <p>{t('shareReview.copy', { count: agent.copy.files, bytes: agent.copy.bytes })}</p>}

@@ -60,6 +60,19 @@ it('quotes Windows JSON values as PowerShell arguments without changing the prog
   expect(policyCommand('environment.roots',["C:\\Ada's work"],"& 'C:\\Orch\\orch-connector.exe' --data-dir 'C:\\Orch\\one' policy",true)).toBe("& 'C:\\Orch\\orch-connector.exe' --data-dir 'C:\\Orch\\one' policy set environment.roots '[\"C:\\\\Ada''s work\"]'");
 });
 
+for (const locale of ['en', 'zh-CN'] as const) it(`the MCP import help flips the current value using the reported program (${locale})`, async () => {
+  await setLocale(locale);
+  try {
+    const current = policy("'/opt/orch/bin/orch-connector' --data-dir '/srv/orch instance' policy");
+    current.keys = [entry('mcp.import', ['environment'], false)];
+    read.mockResolvedValue(current);
+    show(<MachinePolicyTab machine={{ id: 'machine' }} />);
+    const term = i18n.t('machines.policy.keys.mcp_import.title');
+    await userEvent.click(await screen.findByRole('button', { name: i18n.t('help.hint.label', { term }) }));
+    expect(screen.getByText("'/opt/orch/bin/orch-connector' --data-dir '/srv/orch instance' policy set mcp.import true")).toBeVisible();
+  } finally { await setLocale('en'); }
+});
+
 for (const locale of ['en', 'zh-CN'] as const) it(`keeps the driver draft and reports each schema fault beside it (${locale})`, async () => {
   await setLocale(locale);
   try {

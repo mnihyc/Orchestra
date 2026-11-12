@@ -248,9 +248,15 @@ impl Stand {
     /// The world's environment works through Orch's executor: its connector reports the executor, as a unit's
     /// does once attached, and its template offers it, as a template that names its offers does.
     async fn offers_its_executor(&self) {
+        self.offers_its_executor_in(self.world.environment).await;
+    }
+
+    /// As [`Stand::offers_its_executor`], for another environment: `separated` needs one, since the
+    /// harness runs where the sign-in is kept and works in the environment through Orch's executor.
+    async fn offers_its_executor_in(&self, environment: Id) {
         let pool = self.world.pool.pool();
         sqlx::query("UPDATE environments SET facts = $2 WHERE id = $1")
-            .bind(self.world.environment)
+            .bind(environment)
             .bind(hosting::facts())
             .execute(pool)
             .await
@@ -259,7 +265,7 @@ impl Stand {
             "UPDATE env_templates SET spec = spec || $2
               WHERE id = (SELECT template_id FROM environments WHERE id = $1)",
         )
-        .bind(self.world.environment)
+        .bind(environment)
         .bind(json!({ "exec": { "offers": ["plain"] } }))
         .execute(pool)
         .await
@@ -599,6 +605,276 @@ async fn selecting_a_native_runtime_elsewhere_never_invents_a_shared_form_or_aut
         assert!(s.bodies(K::LeaseOpen).is_empty());
         assert!(s.bodies(K::ProviderCredentialIssue).is_empty());
     }
+}
+
+#[tokio::test]
+async fn an_entry_that_allows_only_the_types_in_which_the_credential_stays_refuses_a_copy_by_the_entry_and_makes_none()
+ {
+    let s = stand().await;
+    s.world.access.limit_types(
+        s.world.ada,
+        &[ArrangementType::Separated, ArrangementType::KeySeparated],
+    );
+    for kind in [
+        ArrangementType::CredentialShared,
+        ArrangementType::HandedOver,
+    ] {
+        let result = s
+            .world
+            .engine()
+            .create_thread(
+                &Caller::session(s.world.ada),
+                NewThread {
+                    topic: s.world.topic,
+                    name: "No quiet copy".into(),
+                    agent: s.world.agent,
+                    provider: s.world.provider,
+                    environment: s.environment,
+                    directory: "web".into(),
+                    arrangement: Some(kind),
+                    model: Some(common::MODEL.into()),
+                    effort: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(CreateThreadError::Incompatible(
+                    Incompatible::ArrangementNotAllowed {
+                        by: NotAllowedBy::Entry
+                    }
+                ))
+            ),
+            "{kind:?}: {result:?}"
+        );
+    }
+    assert!(s.bodies(K::LeaseOpen).is_empty());
+    assert!(s.bodies(K::ProviderCredentialIssue).is_empty());
+    assert_eq!(s.holder().await, None, "nothing was handed over");
+}
+
+/// Every type the chooser considers for a new thread in `environment` through an entry that allows
+/// `entry`, each with whether it could be done, whether it is allowed, and why it is not taken.
+async fn considered(s: &Stand, environment: Id, entry: Option<Vec<ArrangementType>>) -> String {
+    use orch_engine::binding as chooser;
+    let mut conn = s.world.pool.acquire().await.unwrap();
+    let agent = orch_db::queries::resources::thread_engine::agent(&mut conn, s.world.agent)
+        .await
+        .unwrap()
+        .unwrap();
+    let provider =
+        orch_db::queries::resources::thread_engine::provider(&mut conn, s.world.provider)
+            .await
+            .unwrap()
+            .unwrap();
+    let row = orch_db::queries::environments::thread_engine::environment(&mut conn, environment)
+        .await
+        .unwrap()
+        .unwrap();
+    let descriptor = orch_engine::harnesses::descriptor_of(&agent)
+        .unwrap()
+        .unwrap();
+    let settings = orch_engine::resolved::load(&mut conn, s.world.topic)
+        .await
+        .unwrap();
+    let offers = chooser::offers_of(&mut conn, row.id).await.unwrap();
+    let colocated = chooser::colocated_of(&mut conn, &row).await.unwrap();
+    let machine = chooser::machine_arrangements_of(&mut conn, &provider)
+        .await
+        .unwrap();
+    let runtime = chooser::runtime_facts(&mut conn, &agent, &provider, &row)
+        .await
+        .unwrap();
+    let facts = chooser::Facts {
+        descriptor: &descriptor,
+        provider: &provider,
+        environment: Some(&row),
+        offers,
+        settings: &settings,
+        entry: entry.clone(),
+        colocated,
+        runtime,
+    };
+    let place = chooser::initial_place(&mut conn, &facts).await.unwrap();
+    let mut told = format!(
+        "provider: agent_id {:?}, machine_id {:?}, key_machine_id {:?}, arrangements {:?}; the environment's machine {:?}; the entry allows {entry:?}; the machine lists {machine:?}\n",
+        provider.agent_id,
+        provider.machine_id,
+        provider.key_machine_id,
+        provider.arrangements,
+        row.machine_id,
+    );
+    for option in chooser::options_placed(&facts, &place, machine) {
+        told.push_str(&format!(
+            "  {:?}: available {}, allowed {}, why not {:?}, detail {:?}\n",
+            option.kind, option.available, option.permitted, option.why_not, option.detail
+        ));
+    }
+    told
+}
+
+/// A thread made in `environment` through an entry that allows `entry`; when it cannot be made, the
+/// failure says which thread it was and what the chooser considered for it, and why it dropped each.
+async fn thread_described(
+    s: &Stand,
+    environment: Id,
+    entry: Option<Vec<ArrangementType>>,
+    name: &str,
+) -> Id {
+    let made = s
+        .world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: name.to_owned(),
+                agent: s.world.agent,
+                provider: s.world.provider,
+                environment,
+                directory: "web".to_owned(),
+                arrangement: None,
+                model: Some(common::MODEL.to_owned()),
+                effort: None,
+            },
+        )
+        .await;
+    match made {
+        Ok(made) => made.thread,
+        Err(error) => panic!(
+            "the thread `{name}` was not made: {error:?}\n{}",
+            considered(s, environment, entry).await
+        ),
+    }
+}
+
+/// The arrangement a thread was bound in.
+async fn bound_in(s: &Stand, thread: Id) -> String {
+    sqlx::query_scalar("SELECT arrangement FROM threads WHERE node_id = $1")
+        .bind(thread)
+        .fetch_one(s.world.pool.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn where_the_harness_can_run_with_the_credential_staying_the_thread_takes_that_type_by_itself()
+ {
+    let s = stand().await;
+    s.offers_its_executor().await;
+    s.offers_its_executor_in(s.environment).await;
+    // The login is with the profile that runs the harness, at the machine that keeps it.
+    sqlx::query("UPDATE providers SET key_machine_id = machine_id WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(s.world.pool.pool())
+        .await
+        .unwrap();
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    // Nothing limits the entry: the type that is preferred is a copy, and it is taken.
+    let preferred = thread_described(&s, s.environment, None, "preferred").await;
+    assert_eq!(bound_in(&s, preferred).await, "credential_shared");
+    // The entry names no type: it allows those in which the credential stays, and the thread is
+    // neither refused nor given a copy, it takes the type in which the credential stays.
+    let staying = vec![ArrangementType::Separated, ArrangementType::KeySeparated];
+    s.world.access.limit_types(s.world.ada, &staying);
+    let elsewhere = thread_described(
+        &s,
+        s.environment,
+        Some(staying.clone()),
+        "on another machine",
+    )
+    .await;
+    assert_eq!(bound_in(&s, elsewhere).await, "separated");
+    // In an environment on the provider's own machine nothing leaves anything.
+    let here = thread_described(
+        &s,
+        s.world.environment,
+        Some(staying.clone()),
+        "on its machine",
+    )
+    .await;
+    let kind = bound_in(&s, here).await;
+    assert!(
+        ["together", "separated", "key_separated"].contains(&kind.as_str()),
+        "{kind}"
+    );
+}
+
+#[tokio::test]
+async fn a_native_harness_that_needs_a_copy_of_the_login_is_not_offered_to_an_entry_that_names_no_type()
+ {
+    // The login is not at the machine that runs the harness, so `separated` would put a copy there:
+    // the entry that names no type refuses it, by the entry, and the thread is not moved elsewhere.
+    let s = stand().await;
+    s.offers_its_executor().await;
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    s.world.access.limit_types(
+        s.world.ada,
+        &[ArrangementType::Separated, ArrangementType::KeySeparated],
+    );
+    let result = s
+        .world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: "Needs a copy".into(),
+                agent: s.world.agent,
+                provider: s.world.provider,
+                environment: s.environment,
+                directory: "web".into(),
+                arrangement: None,
+                model: Some(common::MODEL.into()),
+                effort: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(CreateThreadError::Incompatible(
+                Incompatible::ArrangementNotAllowed {
+                    by: NotAllowedBy::Entry
+                }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(s.bodies(K::LeaseOpen).is_empty());
+    // Named on the entry, the copy is allowed, and is made.
+    s.world
+        .access
+        .limit_types(s.world.ada, &[ArrangementType::CredentialShared]);
+    let thread = s.thread_in(s.environment, None, "named").await;
+    assert_eq!(bound_in(&s, thread).await, "credential_shared");
+}
+
+#[tokio::test]
+async fn an_entry_that_names_the_copy_lets_it_be_made() {
+    let s = stand().await;
+    s.world
+        .access
+        .limit_types(s.world.ada, &[ArrangementType::CredentialShared]);
+    let thread = s.thread(ArrangementType::CredentialShared, "named").await;
+    s.say(thread, "hello").await;
+    s.turn_start(thread, 0).await;
+    let lease = &s.bodies(K::LeaseOpen)[0];
+    assert_eq!(lease["mode"], "shared");
+    assert_eq!(lease["recipient"]["machine_id"], json!(s.env.id));
 }
 
 #[tokio::test]
@@ -943,6 +1219,97 @@ async fn a_credential_is_brought_home_by_the_environment_giving_it_back_and_the_
         )
         .await;
     assert!(matches!(again, Err(ReturnError::NotHeld)), "{again:?}");
+}
+
+#[tokio::test]
+async fn credential_returns_preserve_exact_custody_timestamps() {
+    use orch_access_contract::decisions::ObjectRef;
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_engine::credentials::handover_authority::HandoverAuthority;
+    use orch_engine::operation_scope::{Prepared, targets};
+
+    let s = stand().await;
+    let thread = s
+        .thread(ArrangementType::HandedOver, "Precise custody")
+        .await;
+    s.say(thread, "hello").await;
+    let start = s.turn_start(thread, 0).await;
+    s.finish_turn(thread, &start).await;
+    let provider = s.world.provider;
+    let mut conn = s.world.pool.acquire().await.unwrap();
+    // Custody identity retains the database's microseconds, even within one public millisecond.
+    let since: chrono::DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE providers SET held_since=date_trunc('milliseconds',held_since)+interval '1 microsecond'
+         WHERE id=$1 RETURNING held_since",
+    )
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let target = targets::page_object(
+        &mut conn,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+    )
+    .await
+    .unwrap();
+    let mut plan = Prepared::for_selection("ProviderHandoverReturn.provider").unwrap();
+    plan.bind(0, target.object.kind, &[target]).unwrap();
+    let caller = plan.admit(&Caller::session(s.world.ada), false).unwrap();
+    let authority = HandoverAuthority::capture(
+        &mut conn,
+        &caller,
+        provider,
+        false,
+        false,
+        s.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    let authority: HandoverAuthority =
+        serde_json::from_value(serde_json::to_value(authority).unwrap()).unwrap();
+    assert!(
+        authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since + chrono::Duration::microseconds(1))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap(),
+        "a different custody in the same millisecond cannot reuse the accepted return"
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    s.world
+        .engine()
+        .return_credential(
+            provider,
+            ReturnWhy::Person {
+                by: s.world.ada,
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.holder().await, None);
+    assert_eq!(s.bodies(K::AgentCredentialReturn).len(), 1);
+    assert_eq!(s.bodies(K::ProviderCredentialAccept).len(), 1);
 }
 
 #[tokio::test]
@@ -1302,4 +1669,132 @@ async fn a_turn_whose_unit_cannot_be_started_fails_with_the_hosts_words_and_its_
         .await
         .unwrap();
     assert_eq!(turns, ["failed"]);
+}
+
+#[tokio::test]
+async fn a_thread_is_placed_in_the_types_in_which_the_credential_stays_where_no_entry_can_be_read()
+{
+    use orch_engine::binding::Replace;
+    let s = stand().await;
+    s.offers_its_executor().await;
+    sqlx::query("UPDATE providers SET key_machine_id = machine_id WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(s.world.pool.pool())
+        .await
+        .unwrap();
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    // Nothing limits the entry when the thread is made: it takes the copy, as it is preferred.
+    let thread = s.thread_in(s.environment, None, "to be placed").await;
+    assert_eq!(bound_in(&s, thread).await, "credential_shared");
+    // Then the answer about its first owner's use of the provider is a refusal that says nothing of
+    // the place: no entry names the copy, so the chooser may store only the types in which the
+    // credential stays, and never a copy that no entry names.
+    s.world.access.deny(s.world.ada);
+    let placed = s
+        .world
+        .engine()
+        .place_thread(
+            &Caller::session(s.world.ada),
+            thread,
+            Replace {
+                environment: s.world.environment,
+                directory: None,
+            },
+        )
+        .await;
+    assert!(
+        placed.is_ok(),
+        "it is placed, and not refused for the place: {placed:?}"
+    );
+    let kind = bound_in(&s, thread).await;
+    assert!(
+        ["together", "separated", "key_separated"].contains(&kind.as_str()),
+        "{kind}: {placed:?}"
+    );
+}
+
+/// A stand whose provider keeps its login where the harness runs, with a copy preferred.
+async fn copy_preferred() -> Stand {
+    let s = stand().await;
+    s.offers_its_executor().await;
+    s.offers_its_executor_in(s.environment).await;
+    sqlx::query("UPDATE providers SET key_machine_id = machine_id WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(s.world.pool.pool())
+        .await
+        .unwrap();
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    s
+}
+
+#[tokio::test]
+async fn a_turn_is_run_in_the_types_that_the_entries_allowing_its_place_name() {
+    let s = copy_preferred().await;
+    // Nothing limits the entry when the thread is made: it takes the copy, as it is preferred.
+    let thread = s.thread_in(s.environment, None, "copy").await;
+    assert_eq!(bound_in(&s, thread).await, "credential_shared");
+    // Then her own entry names the copy, but only in the other environment, and the one everyone has
+    // names nothing, anywhere: where the thread runs only the second counts, and it names no copy.
+    s.world.access.use_through(
+        s.world.ada,
+        vec![
+            json!({
+                "arrangements": ["credential_shared"],
+                "where": [{ "kind": "environment", "id": s.world.environment }]
+            }),
+            json!({}),
+        ],
+    );
+    s.say(thread, "go on").await;
+    s.world.wait_blocked(thread, "binding_invalid").await;
+}
+
+#[tokio::test]
+async fn a_thread_made_without_a_model_takes_a_type_that_every_model_chosen_later_will_find() {
+    let s = copy_preferred().await;
+    // An entry for every model in the types in which the credential stays, and one that names the
+    // copy for one model alone: with no model named, the copy is not what to store.
+    s.world.access.use_through(
+        s.world.ada,
+        vec![
+            json!({}),
+            json!({ "models": [common::MODEL], "arrangements": ["credential_shared"] }),
+        ],
+    );
+    let created = s
+        .world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: "No model asked".to_owned(),
+                agent: s.world.agent,
+                provider: s.world.provider,
+                environment: s.environment,
+                directory: "web".to_owned(),
+                arrangement: None,
+                model: None,
+                effort: None,
+            },
+        )
+        .await
+        .expect("a thread is created");
+    let kind = bound_in(&s, created.thread).await;
+    assert!(
+        ["together", "separated", "key_separated"].contains(&kind.as_str()),
+        "{kind}"
+    );
 }
