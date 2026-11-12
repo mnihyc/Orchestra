@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Carry a thread to another agent
 screens: /thread/$threadId, /admin/$section
 keywords: Carry, fork, switch, history, native import, neutral import, file handoff, Codex, harness builds, Check, unavailable
+summary: Review how a fork or switch carries the selected conversation to another agent.
 ---
 
 # Carry a thread to another agent

@@ -1,3 +1,4 @@
+import { listedTreeNode } from '../doubles/tree-node';
 /** Folders, which are projects that lie in projects: how the left bar lays them out and what it carries on a closed row, where a project, a folder or a topic can be moved to, what the cards of a project's folders say, and the words for a folder and for how deep they may go. */
 import { describe, expect, it } from 'vitest';
 
@@ -20,25 +21,7 @@ import { display } from '../doubles/thread-display';
 
 const t = i18n.t.bind(i18n);
 
-const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  id,
-  address: null,
-  kind,
-  content_hidden: false,
-  name: id,
-  parent_id: parent,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  participating: true,
-  color: null,
-  docs: 0,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const node = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => listedTreeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 const thread = (id: string, parent: string, state: NonNullable<TreeNode['thread']>['state'], approvals = 0): TreeNode =>
   node(id, 'thread', parent, { thread: { state, display: display(state === 'starting' ? 'running' : state), blocked_reason: null, pending_approvals: approvals, activity_seq: 1, last_activity_at: '2026-10-11T10:00:00.000Z', attention: { failed: false, uncommitted: null, unpushed: null, stale: true, as_of: null, reason: null } } });

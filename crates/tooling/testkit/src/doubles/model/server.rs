@@ -109,7 +109,8 @@ impl QueueFilter {
 }
 
 /// A response set ahead.
-#[derive(Debug, Clone)]
+pub type RequestMatcher = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
+#[derive(Clone)]
 pub struct Queued {
     /// What it does.
     pub segment: Segment,
@@ -117,6 +118,17 @@ pub struct Queued {
     pub filter: QueueFilter,
     /// How many more requests it answers.
     pub remaining: u64,
+    pub request_matcher: Option<RequestMatcher>,
+}
+impl std::fmt::Debug for Queued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Queued")
+            .field("segment", &self.segment)
+            .field("filter", &self.filter)
+            .field("remaining", &self.remaining)
+            .field("body_matcher", &self.request_matcher.is_some())
+            .finish()
+    }
 }
 
 /// A script that a later request may continue, by naming the response it follows.
@@ -322,7 +334,12 @@ struct Selected {
 }
 
 /// Chooses the script that answers a request to create a response.
-fn select(shared: &Shared, inbound: &Inbound, format: Format) -> Result<Selected, ScriptError> {
+fn select(
+    shared: &Shared,
+    inbound: &Inbound,
+    format: Format,
+    body: &Value,
+) -> Result<Selected, ScriptError> {
     let result = inbound.results.join("\n");
     if let Some(found) = Script::find(&inbound.driving) {
         let script = found?;
@@ -349,11 +366,13 @@ fn select(shared: &Shared, inbound: &Inbound, format: Format) -> Result<Selected
             script: Some(stored.script),
         });
     }
-    if let Some(at) = inner
-        .queue
-        .iter()
-        .position(|entry| entry.filter.matches(inbound.model.as_deref(), format))
-    {
+    if let Some(at) = inner.queue.iter().position(|entry| {
+        entry.filter.matches(inbound.model.as_deref(), format)
+            && entry
+                .request_matcher
+                .as_ref()
+                .is_none_or(|matcher| matcher(body))
+    }) {
         let entry = &mut inner.queue[at];
         let segment = entry.segment.with_result(&result);
         entry.remaining = entry.remaining.saturating_sub(1);
@@ -462,6 +481,15 @@ fn generate_body(
         return failure(format, wanted, seq, now);
     }
     let usage: Usage = usage_of(segment, inbound.chars);
+    shared.update(seq, |record| {
+        record.usage = Some(super::record::Answered {
+            input: usage.input,
+            output: usage.output,
+            cached: usage.cached,
+            reasoning: usage.reasoning,
+            cache_write: usage.cache_write,
+        });
+    });
     let ctx = Ctx {
         seq,
         model: segment
@@ -645,6 +673,7 @@ async fn serve_api(shared: Arc<Shared>, parts: http::request::Parts, bytes: Byte
             round: 0,
             status: None,
             outcome: Outcome::Pending,
+            usage: None,
         });
         seq
     };
@@ -701,7 +730,12 @@ async fn serve_api(shared: Arc<Shared>, parts: http::request::Parts, bytes: Byte
             }
             Route::Responses | Route::Messages | Route::Chat => {
                 let inbound = inbound.unwrap_or_default();
-                match select(&shared, &inbound, format) {
+                match select(
+                    &shared,
+                    &inbound,
+                    format,
+                    parsed.as_ref().unwrap_or(&Value::Null),
+                ) {
                     Ok(selected) => {
                         shared.update(seq, |record| {
                             record.script = Some(selected.source);

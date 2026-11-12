@@ -86,3 +86,25 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(error.faults()[1]).toEqual({ path: 'name', message: 'Choose a different name.' });
   });
 }
+
+
+for(const locale of ['en','zh-CN'] as const)it(`keeps a named native MCP cause and its own diagnostic distinct (${locale})`,async()=>{
+  await setLocale(locale);
+  const result=errorText({code:'mcp_server_failed',message:'raw wrapper',details:{server:'Source catalog',message:'Credentials expired'}},i18n.getFixedT(locale),{locale});
+  expect(result.message).toContain('Source catalog');expect(result.diagnostic).toBe('Credentials expired');
+  expect(result.message).not.toContain('raw wrapper');
+});
+
+
+for(const locale of ['en','zh-CN'] as const)it(`shows both reported reroute model names from structure (${locale})`,async()=>{
+  await setLocale(locale);
+  const result=errorText({code:'model_rerouted',message:'Do not parse this sentence',details:{from_model:'Chosen model',to_model:'Effective model'}},i18n.getFixedT(locale),{locale});
+  expect(result.message).toContain('Chosen model');expect(result.message).toContain('Effective model');expect(result.message).not.toContain('Do not parse');
+});
+
+for(const locale of ['en','zh-CN'] as const)it(`names provider display names from structured reroute evidence (${locale})`,async()=>{
+  await setLocale(locale);
+  const message=errorText({code:'model_rerouted',message:'native English words',details:{from_model:'requested-route',to_model:'safe-route',from_display:'Chosen model',to_display:'Safety model'}},i18n.getFixedT(locale),{locale}).message;
+  expect(message).toContain('Chosen model');expect(message).toContain('Safety model');
+  expect(message).not.toContain('native English words');expect(message).not.toContain('requested-route');
+});

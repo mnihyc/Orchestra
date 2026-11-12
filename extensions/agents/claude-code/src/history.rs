@@ -213,6 +213,7 @@ pub async fn replay_into(
     sink: orch_agent_contract::adapter::EventSink,
     thread: orch_types::Id,
     segment: orch_types::Id,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<u32, HistoryError> {
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = reader::CancelOnDrop(Arc::clone(&cancel));
@@ -221,10 +222,11 @@ pub async fn replay_into(
         orch_agent_contract::flow::channel(|event: &(SessionEvent, usize)| event.1);
     let runtime = tokio::runtime::Handle::current();
     let work = tokio::task::spawn_blocking(move || {
-        let mut replay = Replay {
-            rows: reader::Rows::new(&path, settings, clock, false, cancel)?,
-            items: 0,
-        };
+        let mut rows = reader::Rows::new(&path, settings, clock, false, cancel)?;
+        if let Some(directory) = image_outputs {
+            rows.set_image_outputs(directory);
+        }
+        let mut replay = Replay { rows, items: 0 };
         for event in replay.by_ref() {
             let event = event?;
             let value = serde_json::to_value(&event).map_err(std::io::Error::other)?;
@@ -290,7 +292,7 @@ pub fn record(
     settings: MapperSettings,
     clock: Arc<dyn Clock>,
 ) -> Result<Record, HistoryError> {
-    Record::build(transcript, Some(settings), clock, Arc::default())
+    Record::build(transcript, Some(settings), clock, Arc::default(), None)
 }
 
 /// The first working directory, skipping unrelated JSON fields without materializing their values.
@@ -335,8 +337,9 @@ fn read_record_with_cancel(
     into: &Path,
     clock: Arc<dyn Clock>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<SessionRecord, HistoryError> {
-    Record::build(transcript, None, clock, cancel)?.finish(session_id, write, into)
+    Record::build(transcript, None, clock, cancel, image_outputs)?.finish(session_id, write, into)
 }
 
 /// Streams the bounded adoption record, leaving its source transcript unchanged.
@@ -347,7 +350,15 @@ pub fn read_record(
     into: &Path,
     clock: Arc<dyn Clock>,
 ) -> Result<SessionRecord, HistoryError> {
-    read_record_with_cancel(transcript, session_id, write, into, clock, Arc::default())
+    read_record_with_cancel(
+        transcript,
+        session_id,
+        write,
+        into,
+        clock,
+        Arc::default(),
+        None,
+    )
 }
 
 /// Runs filesystem reconstruction outside the runtime and cancels it when the caller goes away.
@@ -357,6 +368,7 @@ pub async fn read_record_async(
     write: bool,
     into: &Path,
     clock: Arc<dyn Clock>,
+    image_outputs: Option<std::path::PathBuf>,
 ) -> Result<SessionRecord, HistoryError> {
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let _guard = reader::CancelOnDrop(Arc::clone(&cancel));
@@ -366,7 +378,15 @@ pub async fn read_record_async(
         into.to_path_buf(),
     );
     tokio::task::spawn_blocking(move || {
-        read_record_with_cancel(&transcript, &session, write, &into, clock, cancel)
+        read_record_with_cancel(
+            &transcript,
+            &session,
+            write,
+            &into,
+            clock,
+            cancel,
+            image_outputs,
+        )
     })
     .await
     .map_err(std::io::Error::other)?
@@ -789,6 +809,111 @@ mod tests {
         Arc::new(orch_types::ManualClock::new(
             chrono::DateTime::from_timestamp(1_791_800_000, 0).unwrap(),
         ))
+    }
+
+    #[tokio::test]
+    async fn resync_and_adopted_records_retain_native_tool_images_without_rebilling_or_source_rewrite()
+     {
+        use base64::Engine as _;
+        use futures::StreamExt;
+        use orch_agent_contract::adapter::{AdapterEvent, EventSink};
+        let home = tempfile::tempdir().unwrap();
+        let transcript = home.path().join("image-session.jsonl");
+        let data = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==";
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .unwrap();
+        let hash = orch_types::Hash::of(&bytes);
+        let frames = [
+            serde_json::json!({"type":"user","uuid":"00000000-0000-4000-8000-000000000001","version":PORTABLE_ARCHIVE_CANDIDATE,"cwd":"/work","message":{"content":"Show the camera"}}),
+            serde_json::json!({"type":"assistant","message":{"id":"m1","model":"opaque-model","content":[{"type":"tool_use","id":"camera","name":"mcp__camera__snapshot","input":{}}],"stop_reason":"tool_use"}}),
+            serde_json::json!({"type":"user","uuid":"00000000-0000-4000-8000-000000000002","message":{"content":[{"type":"tool_result","tool_use_id":"camera","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":data}}]}]}}),
+            serde_json::json!({"type":"assistant","message":{"id":"m2","model":"opaque-model","content":[{"type":"text","text":"The image is available"}],"stop_reason":"end_turn","usage":{"input_tokens":42}}}),
+        ];
+        let original = frames
+            .iter()
+            .map(|frame| format!("{frame}\n"))
+            .collect::<String>();
+        std::fs::write(&transcript, &original).unwrap();
+        let outputs = home.path().join("outputs");
+        let (sink, mut stream) = EventSink::channel();
+        replay_into(
+            &transcript,
+            MapperSettings {
+                directory: "/work".into(),
+                cwd: "/work".into(),
+                raw_events: false,
+            },
+            clock(),
+            sink,
+            orch_types::new_id(),
+            orch_types::new_id(),
+            Some(outputs.clone()),
+        )
+        .await
+        .unwrap();
+        let mut images = 0;
+        while let Some(event) = stream.next().await {
+            match event {
+                AdapterEvent::Session {
+                    event: SessionEvent::ItemCompleted(item),
+                    ..
+                } if item
+                    .payload
+                    .pointer("/tool/kind")
+                    .and_then(orch_types::Json::as_str)
+                    == Some("image") =>
+                {
+                    images += 1;
+                    assert_eq!(item.output_blob.unwrap().hash, hash);
+                }
+                AdapterEvent::ModelRequest(_)
+                | AdapterEvent::Session {
+                    event: SessionEvent::UsageUpdated(_),
+                    ..
+                } => panic!("historical images must not bill old model usage"),
+                _ => {}
+            }
+        }
+        assert_eq!(images, 1);
+        assert_eq!(
+            std::fs::read(outputs.join(hash.to_string())).unwrap(),
+            bytes
+        );
+        let archive = home.path().join("record.jsonl");
+        let record = read_record_async(
+            &transcript,
+            "image-session",
+            true,
+            &archive,
+            clock(),
+            Some(outputs.clone()),
+        )
+        .await
+        .unwrap();
+        let file = record.file.expect("the bounded native record is written");
+        let entries: Vec<RecordedEntry> = std::fs::read_to_string(&file.path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let images: Vec<_> = entries.iter().filter_map(|entry| match entry {
+            RecordedEntry::Item(item) if matches!(&item.content, orch_agent_contract::events::ItemContent::ToolCall(call) if matches!(&call.tool, orch_agent_contract::events::ToolPayload::Image { .. })) => Some(item),
+            _ => None,
+        }).collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].parent_native_ref.as_deref(), Some("camera"));
+        assert_eq!(images[0].stream, "main");
+        assert_eq!(
+            images[0].status,
+            orch_agent_contract::events::ItemStatus::Completed
+        );
+        assert_eq!(
+            std::fs::read(outputs.join(hash.to_string())).unwrap(),
+            bytes
+        );
+        assert_eq!(std::fs::read_to_string(&transcript).unwrap(), original);
+        assert_eq!(std::fs::read_dir(outputs).unwrap().count(), 1);
     }
 
     fn kind_of(entry: &RecordedEntry) -> String {

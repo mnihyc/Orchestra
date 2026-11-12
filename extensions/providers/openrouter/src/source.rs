@@ -1,16 +1,18 @@
 //! OpenRouter's key and account-credit reads through the common facts source interface.
 
-use crate::{KnownVendor, known_vendor, read_details};
+use crate::{KnownVendor, known_vendor, read_details_with_credits};
 use async_trait::async_trait;
 use orch_agent_contract::facts::normalize;
 use orch_provider_contract::builtins::{BuiltinSource, VendorClient};
-use orch_provider_contract::choice::builtin as names;
 use orch_provider_contract::facts::{ProviderFacts, Spend, SpendPeriod};
-use orch_provider_contract::source::{SourceCredential, SourceDescriptorFacts};
+use orch_provider_contract::source::{
+    ADMIN_KEY_FIELD, AdminCredential, SourceCredential, SourceDescriptorFacts,
+};
 use orch_provider_contract::{
     FactMember, FactsReport, FactsSource, SourceAsk, SourceDescriptor, SourceError, SourceErrorCode,
 };
 use orch_types::{Clock, Json};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use url::Url;
 
@@ -52,10 +54,16 @@ impl FactsSource for OpenRouter {
                     "the provider has no documented OpenRouter endpoint",
                 )
             })?;
-        let (mut facts, data) = read_details(
+        let credits_key = ask
+            .secrets
+            .get(ADMIN_KEY_FIELD)
+            .filter(|key| !key.expose().is_empty())
+            .unwrap_or(&key.key);
+        let (mut facts, data) = read_details_with_credits(
             self.client.as_ref(),
             &base,
             &key.key,
+            credits_key,
             KnownVendor::OpenRouter,
             self.clock.as_ref(),
         )
@@ -119,15 +127,13 @@ fn spend_details(facts: &mut ProviderFacts, data: &Json) {
     }
 }
 
-/// The built-in declaration, also offered by the server before a credential is read. The account's credits
-/// are told only for a management key, so balances are not declared: an ordinary key shows them as
-/// unsupported, and a balance that is told shows all the same.
+/// Account-credit availability is observed. An optional management key does not replace the model key.
 #[must_use]
 pub fn descriptor() -> SourceDescriptor {
     let mut descriptor = SourceDescriptor::new(
         "openrouter",
         "OpenRouter",
-        "Reads the key's limits with their resets, its spending, the free models' requests of the day, the account's credits for a management key, and the key's lapse.",
+        "Reads the key's limits, spending and lapse, and account credits where its ordinary or separate management key can read them.",
     );
     descriptor.facts = Some(SourceDescriptorFacts {
         reports: vec![
@@ -139,8 +145,25 @@ pub fn descriptor() -> SourceDescriptor {
         credential: SourceCredential::Key,
         ..SourceDescriptorFacts::default()
     });
+    // Ordinary keys can already return credits. The optional key is not a false prerequisite for those facts.
+    descriptor.set_admin_credential(AdminCredential {
+        labels: BTreeMap::from([
+            ("en".into(), "Management key".into()),
+            ("zh-CN".into(), "管理密钥".into()),
+        ]),
+        reports: Vec::new(),
+    });
+    descriptor.summary = "Key usage and account credits".into();
+    descriptor.summary_locales = BTreeMap::from([
+        ("en".into(), "Key usage and account credits".into()),
+        ("zh-CN".into(), "密钥用量与账户额度".into()),
+    ]);
     descriptor.docs_url =
         Some("https://openrouter.ai/docs/api/reference/api-keys/get-current-api-key".to_owned());
+    let _ = descriptor.extensions.insert(
+        "x_capability_declarations",
+        serde_json::to_value(crate::capabilities::declarations()).unwrap_or(Json::Null),
+    );
     descriptor
 }
 
@@ -157,7 +180,7 @@ fn made(client: Arc<dyn VendorClient>, clock: Arc<dyn Clock>) -> Arc<dyn FactsSo
 #[must_use]
 pub fn builtin() -> BuiltinSource {
     BuiltinSource {
-        name: names::OPENROUTER,
+        name: "openrouter",
         hosts: &["openrouter.ai"],
         descriptor,
         matches: reads,

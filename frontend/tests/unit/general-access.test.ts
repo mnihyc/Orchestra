@@ -93,6 +93,15 @@ describe('a local edit of inherited holders', () => {
     expect(changed.rows.find((row) => row.permission === 'thread.view')?.inherit).toBe(true);
   });
 
+  it('removes a direct grant without freezing inherited holders or touching another giver', () => {
+    const own = named({ kind: 'user', user: BEA }, 91);
+    const other = named(role('developer'), 92, { created_by: BEA });
+    const base = pageFor();
+    const page = { ...base, rows: base.rows.map((row) => row.permission === 'thread.view' ? { ...row, entries: [own, other] } : row) };
+    const holder = Object.values(linesOf(page, CATALOGUE, 'thread')).flat().find((entry) => entry.holder.kind === 'user' && entry.holder.user.id === BEA.id)!;
+    expect(removeHolderChange(page, holder)).toEqual({ expected_revision: 7, rows: [{ permission: 'thread.view', remove: [own.id] }] });
+  });
+
   it('changes a followed holder’s level while leaving unrelated advanced rows following', () => {
     const page = pageFor();
     const holder = linesOf(page, CATALOGUE, 'thread').interact[0]!;

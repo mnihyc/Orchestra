@@ -21,7 +21,7 @@ import { ADA, BEA, CATALOGUE, pageFor, TOPIC } from '../unit/general-access-fixt
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ search: vi.fn<(query: string, options: CandidateOptions) => void>(), people: vi.fn() }));
-const group: Holder = { kind: 'group', group: { id: 'owners', org_id: 'acme', place: 'Acme', name: 'Reviewers', description: '', member_count: 1 } };
+const group: Holder = { kind: 'group', group: { revision: 1, id: 'owners', org_id: 'acme', place: 'Acme', name: 'Reviewers', description: '', member_count: 1 } };
 const regular: UserRef = { ...BEA, id: 'regular', username: 'vera', display_name: 'Vera' };
 const place = org('acme', 'acme', 'Acme', ADA);
 const changes: Changes = { busy: false, doing: null, error: null, stale: null, forget: vi.fn(), again: () => Promise.resolve(false), run: vi.fn(() => Promise.resolve(true)) };
@@ -73,8 +73,10 @@ for (const [locale, theme] of modes) {
     show(<ShortForm target={target} page={page} catalogue={CATALOGUE} source={{ type: 'page', target }} changes={changes} ask={vi.fn()} onFull={vi.fn()} focusAdd />);
     const field = screen.getByRole('combobox', { name: i18n.t('access.add.label') });
     await waitFor(() => expect(field).toHaveFocus());
-    expect(field).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(field).toHaveAttribute('aria-expanded', 'true');
+    const list = screen.getByRole('listbox', { name: i18n.t('access.add.label') });
+    expect(within(list).getByText(i18n.t('ui.combobox.minimumQuery', { count: 1 }))).toBeVisible();
+    expect(within(list).queryByRole('option')).not.toBeInTheDocument();
     expect(screen.getByRole('group', { name: i18n.t('access.owners.label') })).toHaveTextContent(ADA.display_name);
     expect(screen.getByRole('region', { name: i18n.t('access.roster.title') })).toBeVisible();
     expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(false);
@@ -82,7 +84,8 @@ for (const [locale, theme] of modes) {
     expect(await screen.findByRole('option', { name: BEA.display_name })).toBeVisible();
     expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(true);
     await user.clear(field);
-    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(within(list).getByText(i18n.t('ui.combobox.minimumQuery', { count: 1 }))).toBeVisible();
+    expect(within(list).queryByRole('option')).not.toBeInTheDocument();
     expect(calls.search.mock.calls.filter(([, options]) => options.kinds.includes('members')).at(-1)?.[1].enabled).toBe(false);
     expect(changes.run).not.toHaveBeenCalled();
   });

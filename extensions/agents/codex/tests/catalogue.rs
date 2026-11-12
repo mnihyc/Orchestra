@@ -103,6 +103,7 @@ async fn boot(listed: Json, printed: String, code: i32) -> Booted {
         .start(
             AgentStart {
                 provider_id: new_id(),
+                provider_kind: None,
                 agent_id: new_id(),
                 harness_kind: "codex".into(),
                 profile: AgentProfile::default(),

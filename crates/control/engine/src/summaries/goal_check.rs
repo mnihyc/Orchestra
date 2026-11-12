@@ -11,7 +11,6 @@ use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::written::{self, Detail};
 use orch_db::queries::goals::{GoalRow, ReportRow};
-use orch_link_contract::commands::{CompletionPurpose, ProviderComplete};
 use orch_summarizer_model::Complete;
 use orch_summarizer_model::descriptor::Config;
 use orch_summarizer_model::prompts::material;
@@ -271,19 +270,9 @@ pub(crate) async fn ask(
         call,
         workflow: goal.id,
         task: "goal_check",
-        document: None,
+        resource: None,
     };
-    let request = ProviderComplete {
-        params: None,
-        provider_id: config.provider_id,
-        purpose: CompletionPurpose::Summary,
-        // The host replaces this with a protocol the actual provider offers.
-        protocol: String::new(),
-        model_name: config.model_name.clone(),
-        system,
-        input,
-        max_output_tokens: config.max_output_tokens.max(ANSWER_TOKENS),
-    };
+    let request = config.completion(system, input, config.max_output_tokens.max(ANSWER_TOKENS));
     let answered = match host.complete(thread, request).await {
         Ok(answer) => answer,
         Err(error) => return Ok(Checked::Unavailable(super::safe_reason(&error))),

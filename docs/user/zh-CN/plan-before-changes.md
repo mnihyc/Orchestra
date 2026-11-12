@@ -13,6 +13,7 @@ heading_id.达成与证据: met-and-the-evidence
 heading_id.限额与停止: limits-and-stopping
 heading_id.谁能设定目标: who-can-set-a-goal
 heading_id.计划与目标: plan-and-goal
+summary: 在代理修改前查看计划，并用目标引导后续工作。
 ---
 
 # 计划与目标
@@ -91,6 +92,9 @@ heading_id.计划与目标: plan-and-goal
 
 能驾驭该线程的人可以设定、暂停、编辑和清除目标。设定目标还需要你自己能使用该线程的模型，因为每一轮都用你的
 权限运行。每个操作都会记在对话和审计记录里，并写明是谁。
+
+已归档线程和旁路会话不能设定目标。`/goal` 和线程菜单仍会显示目标操作，并说明
+禁用原因。主线程需要先取消归档；缺少交互权限时会显示相应的原因。
 
 ## 计划与目标
 

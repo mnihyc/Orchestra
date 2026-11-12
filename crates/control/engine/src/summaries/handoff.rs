@@ -88,7 +88,7 @@ pub(crate) struct WrittenTranscript {
 /// What a page of turns is written as: each turn, its index line and its text.
 struct LivePage {
     preview: String,
-    text: String,
+    text: crate::history_pages::Text,
 }
 
 /// Writes a page of turns of the selected history as the written form of a conversation gives them: one turn to a
@@ -101,46 +101,36 @@ async fn render_page(
     last: i64,
     bundles: Vec<crate::history_pages::Bundle>,
 ) -> Result<Vec<LivePage>, EngineError> {
-    use crate::views::{People, item_view, turn_view};
-    use orch_api_contract::threads::{ItemPayload, ToolPayload};
+    use crate::views::People;
     use orch_db::queries::shares as rows;
-    let mut who: Vec<Id> = Vec::new();
+    use std::collections::BTreeSet;
+    let mut who = BTreeSet::new();
     for bundle in &bundles {
-        who.extend(bundle.items.iter().filter_map(|item| item.author_id));
-        who.extend(bundle.turn.interrupted_by);
+        who.extend(bundle.authors()?);
     }
     let people = People::load(conn, who.iter().copied()).await?;
-    let names: std::collections::HashMap<Id, String> = threads::people(conn, &who)
-        .await?
+    let names: std::collections::HashMap<Id, String> =
+        threads::people(conn, &who.into_iter().collect::<Vec<_>>())
+            .await?
+            .into_iter()
+            .map(|person| (person.id, person.display_name))
+            .collect();
+    let infos = bundles
+        .iter()
+        .map(|bundle| bundle.presentation(&people))
+        .collect::<Result<Vec<_>, _>>()?;
+    let approvals: Vec<Id> = infos
+        .iter()
+        .flat_map(|info| info.approvals.iter().copied())
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        .map(|person| (person.id, person.display_name))
         .collect();
-    let mut typed = Vec::with_capacity(bundles.len());
-    for bundle in &bundles {
-        typed.push((
-            turn_view(&bundle.turn, "", &people)?,
-            bundle
-                .items
-                .iter()
-                .map(|item| item_view(item, &people))
-                .collect::<Vec<_>>(),
-        ));
-    }
-    let mut approvals: Vec<Id> = Vec::new();
-    let mut streams: Vec<String> = Vec::new();
-    for (_, items) in &typed {
-        for item in items {
-            match &item.payload {
-                ItemPayload::Approval(approval) => approvals.push(approval.approval_id),
-                ItemPayload::ToolCall(call) => {
-                    if let ToolPayload::Subagent { child_stream, .. } = &call.tool {
-                        streams.push(child_stream.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
+    let streams: Vec<String> = infos
+        .iter()
+        .flat_map(|info| info.streams.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
     let mut beside = written::Beside::default();
     if !approvals.is_empty() {
         for line in rows::approval_lines(conn, &approvals).await? {
@@ -162,40 +152,27 @@ async fn render_page(
         .collect();
     let agents = rows::segment_agents(conn, &segments).await?;
     let mut out = Vec::with_capacity(bundles.len());
-    for (bundle, (turn, items)) in bundles.iter().zip(&typed) {
-        let part = written::Part {
-            turn,
-            agent: agents
-                .get(&bundle.turn.segment_id)
-                .map_or(head.agent, String::as_str),
-            items: items.iter().collect(),
-        };
-        let text = written::turn_text(&part, &beside, Detail::Full);
-        let first = bundle
-            .items
-            .iter()
-            .find(|item| item.kind == "user_message" && item.turn_id == Some(bundle.turn.id));
-        let author = first
-            .and_then(|item| item.author_id)
-            .and_then(|id| names.get(&id))
-            .map(String::as_str);
-        let asked = first
-            .map(|item| &item.payload)
-            .and_then(|payload| payload["parts"].as_array())
-            .into_iter()
-            .flatten()
-            .filter_map(|part| part.get("text").and_then(Json::as_str))
-            .collect::<Vec<_>>()
-            .join(" ");
+    for (bundle, info) in bundles.iter().zip(&infos) {
+        let agent = agents
+            .get(&bundle.turn.segment_id)
+            .map_or(head.agent, String::as_str);
+        let text = bundle.write(&people, &beside, agent, Detail::Full, info)?;
+        let prefix = written::conversation(
+            head,
+            i64::from(bundle.turn.ordinal),
+            i64::from(bundle.turn.ordinal),
+            last,
+            &[],
+        ) + "\n";
         out.push(LivePage {
-            preview: crate::fork_history::cut::preview_of(&bundle.turn, author, &asked),
-            text: written::conversation(
-                head,
-                i64::from(bundle.turn.ordinal),
-                i64::from(bundle.turn.ordinal),
-                last,
-                &[text],
+            preview: crate::fork_history::cut::preview_of(
+                &bundle.turn,
+                info.author
+                    .and_then(|id| names.get(&id))
+                    .map(String::as_str),
+                &info.asked,
             ),
+            text: text.prepend(&prefix)?,
         });
     }
     Ok(out)
@@ -255,7 +232,23 @@ pub(crate) async fn indexed_transcript_file(
         std::io::BufWriter::new(std::fs::File::create(spool.path()).map_err(files)?);
     let mut turns = 0_i64;
     let mut offset = 0_usize;
-    if low <= high {
+    if last == 0 && low <= 1 && thread_history_cuts::has_before_items(conn, thread, view).await? {
+        body_file.write_all(b"# Before Orch\n\nThese are the retained records from before Orch; no Orch turn is invented for them.\n\n```jsonl\n").map_err(files)?;
+        let mut before = thread_history_cuts::BeforeItems::new(thread, view);
+        loop {
+            let page = before.next(conn).await?;
+            if page.is_empty() {
+                break;
+            }
+            for item in page {
+                let mut line = crate::history_pages::Text::default();
+                line.push(&crate::fork_history::neutral_line(&item, 0))?;
+                crate::raw_events::mask_spooled(&redactor, &line)?.copy_to(&mut body_file)?;
+                body_file.write_all(b"\n").map_err(files)?;
+            }
+        }
+        body_file.write_all(b"```\n").map_err(files)?;
+    } else if low <= high {
         let mut reader = crate::history_pages::Forward::between(
             crate::history_pages::Source::Live { thread, view },
             conn,
@@ -269,12 +262,12 @@ pub(crate) async fn indexed_transcript_file(
                 break;
             }
             for each in render_page(conn, thread, view, &head, last, bundles).await? {
-                let text = crate::raw_events::mask_text(&redactor, each.text);
+                let text = crate::raw_events::mask_spooled(&redactor, &each.text)?;
                 let preview = crate::raw_events::mask_text(&redactor, each.preview);
                 if turns > 0 {
                     body_file.write_all(b"\n").map_err(files)?;
                 }
-                body_file.write_all(text.as_bytes()).map_err(files)?;
+                text.copy_to(&mut body_file)?;
                 writeln!(
                     index_file,
                     "{}",
@@ -282,7 +275,7 @@ pub(crate) async fn indexed_transcript_file(
                         .map_err(|error| EngineError::unreadable(error.to_string()))?
                 )
                 .map_err(files)?;
-                offset += text.lines().count() + 1;
+                offset += text.lines() + 1;
                 turns += 1;
             }
         }

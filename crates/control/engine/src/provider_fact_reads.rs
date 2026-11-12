@@ -6,25 +6,11 @@ use orch_db::queries::provider_facts as rows;
 
 /// One minute bounds interactive vendor reads even when a vendor refuses them.
 pub const PAGE_READ_INTERVAL: Duration = Duration::minutes(1);
-/// Five minutes keeps plan percentages useful before a long turn is begun.
-pub const ACTIVE_READ_INTERVAL: Duration = Duration::minutes(5);
-/// A thread that has run in the last quarter hour keeps its provider on the active cadence.
-pub const RECENT_ACTIVITY: Duration = Duration::minutes(15);
-/// An hour keeps idle credentials and available resets current with twenty-four reads a day.
-pub const IDLE_READ_INTERVAL: Duration = Duration::hours(1);
-/// Deployment-selected provider observation intervals with the shipped default reasons above.
+/// Deployment-selected interactive observation interval. Scheduled reads use provider settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadConfig {
     /// Interactive Refresh coalescing; ordinary page/list reads never observe a machine.
     pub page: Duration,
-    /// Recent-work observation interval.
-    pub active: Duration,
-    /// Recent-work grace.
-    pub recent: Duration,
-    /// Idle observation interval.
-    pub idle: Duration,
-    /// Refused-credential recovery interval.
-    pub refused: Duration,
 }
 
 impl ReadConfig {
@@ -36,19 +22,6 @@ impl ReadConfig {
         };
         Self {
             page: span(config.engine.provider_facts_page_secs, PAGE_READ_INTERVAL),
-            active: span(
-                config.engine.provider_facts_active_secs,
-                ACTIVE_READ_INTERVAL,
-            ),
-            recent: span(
-                config.engine.provider_facts_active_recent_secs,
-                RECENT_ACTIVITY,
-            ),
-            idle: span(config.engine.provider_facts_idle_secs, IDLE_READ_INTERVAL),
-            refused: span(
-                config.engine.provider_facts_refused_secs,
-                ACTIVE_READ_INTERVAL,
-            ),
         }
     }
 }
@@ -83,7 +56,9 @@ pub fn normalize_observation(value: &orch_types::Json) -> Result<orch_types::Jso
     Ok(orch_types::Json::Object(combined))
 }
 
-/// Only the contract's told admission members hold work; money and percentages do not decide it.
+/// Classifies the last reported vendor quota for observational status only.
+/// It never decides whether a later normal request may be dispatched; money and
+/// percentages remain separate observations. The name is retained for existing consumers.
 #[must_use]
 pub fn admission_exhausted(
     facts: &orch_agent_contract::facts::ProviderFacts,
@@ -173,6 +148,32 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
             .is_none_or(|(old, new)| new >= old),
         _ => true,
     };
+    // A fresh label/item does not make an explicitly older monetary observation current.
+    // These fixed quantities are optional in every credit shape; absent prior money stays absent,
+    // while required id/unit/period/enabled fields keep their existing validation and behavior.
+    let current_amounts = |group: &str, previous: Option<&Json>, incoming: &Json| {
+        let mut value = incoming.clone();
+        if let Some(object) = value.as_object_mut() {
+            for quantity in orch_provider_contract::credit_fields::known_fields(group)
+                .unwrap_or(&[])
+                .iter()
+                .filter(|field| matches!(**field, "remaining" | "total" | "used" | "limit"))
+            {
+                let clock = orch_provider_contract::credit_fields::field_time_key(group, quantity);
+                if !current(&clock) {
+                    if let Some(known) = previous.and_then(|known| known.get(*quantity)) {
+                        object.insert((*quantity).to_owned(), known.clone());
+                    } else {
+                        object.remove(*quantity);
+                    }
+                }
+            }
+        }
+        value
+    };
+    // Only actually accepted whole credit replacements can advance inherited finer evidence.
+    // Explicit incoming field clocks remain independent of a newer label/item observation.
+    let mut credit_replacements = serde_json::Map::new();
     for (key, value) in update {
         if key == "field_times" {
             continue;
@@ -193,16 +194,30 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
                 let Some(id) = window.get("id").and_then(Json::as_str) else {
                     continue;
                 };
-                if !current(&format!("{key}.{id}")) {
+                let item_key = format!("{key}.{id}");
+                if !current(&item_key) {
                     continue;
+                }
+                if matches!(key.as_str(), "balances" | "spend")
+                    && let Some(time) = supplied_times.get(&item_key)
+                {
+                    credit_replacements.insert(item_key.clone(), time.clone());
                 }
                 if let Some(index) = windows
                     .iter()
                     .position(|old| old.get("id").and_then(Json::as_str) == Some(id))
                 {
-                    windows[index] = window.clone();
+                    windows[index] = if matches!(key.as_str(), "balances" | "spend") {
+                        current_amounts(&item_key, windows.get(index), window)
+                    } else {
+                        window.clone()
+                    };
                 } else {
-                    windows.push(window.clone());
+                    windows.push(if matches!(key.as_str(), "balances" | "spend") {
+                        current_amounts(&item_key, None, window)
+                    } else {
+                        window.clone()
+                    });
                 }
             }
             merged.insert(key.clone(), Json::Array(windows));
@@ -240,13 +255,74 @@ pub fn merge_observation(known: &orch_types::Json, incoming: orch_types::Json) -
                 merged.insert(key.clone(), Json::Object(extra));
             }
         } else {
-            merged.insert(key.clone(), value.clone());
+            let replacement = if matches!(key.as_str(), "balances" | "spend") {
+                value
+                    .as_array()
+                    .map(|items| {
+                        Json::Array(
+                            items
+                                .iter()
+                                .map(|item| {
+                                    let Some(id) = item.get("id").and_then(Json::as_str) else {
+                                        return item.clone();
+                                    };
+                                    let previous =
+                                        known.get(key).and_then(Json::as_array).and_then(|items| {
+                                            items.iter().find(|item| {
+                                                item.get("id").and_then(Json::as_str) == Some(id)
+                                            })
+                                        });
+                                    current_amounts(&format!("{key}.{id}"), previous, item)
+                                })
+                                .collect(),
+                        )
+                    })
+                    .unwrap_or_else(|| value.clone())
+            } else if key == "extra_usage" {
+                current_amounts(key, known.get(key), value)
+            } else {
+                value.clone()
+            };
+            merged.insert(key.clone(), replacement);
+            if matches!(key.as_str(), "balances" | "spend" | "extra_usage")
+                && let Some(time) = supplied_times.get(key)
+            {
+                credit_replacements.insert(key.clone(), time.clone());
+                for item in value.as_array().into_iter().flatten() {
+                    if let Some(id) = item.get("id").and_then(Json::as_str) {
+                        let item_key = format!("{key}.{id}");
+                        if let Some(time) = supplied_times.get(&item_key) {
+                            credit_replacements.insert(item_key, time.clone());
+                        }
+                    }
+                }
+            }
         }
     }
     let mut times = known_times.clone();
     for (field, time) in &supplied_times {
         if current(field) {
             times.insert(field.clone(), time.clone());
+        }
+    }
+    for (field, previous) in &known_times {
+        if supplied_times.contains_key(field) {
+            continue;
+        }
+        let Some(group) = orch_provider_contract::credit_fields::field_time_group(field) else {
+            continue;
+        };
+        let member = group.split('.').next().unwrap_or(&group);
+        if let Some(replacement) = credit_replacements
+            .get(&group)
+            .or_else(|| credit_replacements.get(member))
+            && previous
+                .as_str()
+                .zip(replacement.as_str())
+                .is_some_and(|(old, new)| new >= old)
+        {
+            // Updating only existing evidence preserves Empty without making unsupported nulls Told.
+            times.insert(field.clone(), replacement.clone());
         }
     }
     // An explicit later admission ends the old limit even if this source does not repeat it as null.
@@ -342,6 +418,67 @@ pub fn source_can_verify(sources: &orch_types::Json, native_keeper: bool) -> boo
 }
 
 impl Engine {
+    /// Inspects the due batch without claiming reads or starting runtimes. All four settings for
+    /// all candidates share one ancestor/settings pass; the result limit applies after resolution.
+    pub async fn due_provider_fact_reads(
+        &self,
+        conn: &mut orch_db::Conn,
+        now: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<orch_types::Id>, EngineError> {
+        use orch_settings_contract::registry::{self, keys};
+        let candidates = rows::read_candidates(conn, now).await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        let providers: Vec<_> = candidates
+            .iter()
+            .map(|provider| orch_settings::ProviderAt {
+                id: provider.id,
+                home_id: provider.home_id,
+                runtime_config: &provider.runtime_config,
+                revision: provider.revision,
+            })
+            .collect();
+        let snapshots = orch_settings::snapshots_at_providers(
+            conn,
+            &providers,
+            &[
+                keys::PROVIDERS_FACTS_IDLE_MINUTES,
+                keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
+                keys::PROVIDERS_FACTS_RECENT_MINUTES,
+                keys::PROVIDERS_FACTS_REFUSED_MINUTES,
+            ],
+        )
+        .await?;
+        let mut schedules = Vec::with_capacity(snapshots.len());
+        for (provider_id, snapshot) in snapshots {
+            let minutes = |key| -> Result<i64, EngineError> {
+                let def = registry::get(key).ok_or_else(|| {
+                    EngineError::unreadable("a provider facts setting is missing")
+                })?;
+                snapshot
+                    .resolve(def)
+                    .value
+                    .and_then(|value| value.as_i64())
+                    .filter(|value| *value >= 1)
+                    .ok_or_else(|| {
+                        EngineError::unreadable(
+                            "a provider facts interval is not a positive number of minutes",
+                        )
+                    })
+            };
+            schedules.push(rows::ReadSchedule {
+                provider_id,
+                idle: minutes(keys::PROVIDERS_FACTS_IDLE_MINUTES)?,
+                active: minutes(keys::PROVIDERS_FACTS_ACTIVE_MINUTES)?,
+                recent: minutes(keys::PROVIDERS_FACTS_RECENT_MINUTES)?,
+                refused: minutes(keys::PROVIDERS_FACTS_REFUSED_MINUTES)?,
+            });
+        }
+        Ok(rows::due_reads(conn, now, &schedules, limit).await?)
+    }
+
     /// Runs credential-expiry upkeep on the engine's clock, including the short-token notice rule.
     pub async fn watch_provider_credential_ends(&self) -> Result<(), EngineError> {
         self.watch_token_ends().await
@@ -525,27 +662,14 @@ impl Engine {
         let now = self.inner.clock.now();
         let due = {
             let mut conn = self.inner.db.acquire().await?;
-            rows::due_reads(
-                &mut conn,
-                now,
-                rows::ReadSchedule {
-                    recent: self.inner.config.provider_facts.recent,
-                    active: self.inner.config.provider_facts.active,
-                    idle: self.inner.config.provider_facts.idle,
-                    refused: self.inner.config.provider_facts.refused,
-                },
-                READ_BATCH,
-            )
-            .await?
+            self.due_provider_fact_reads(&mut conn, now, READ_BATCH)
+                .await?
         };
         for provider in due {
             let engine = self.clone();
             tokio::spawn(async move {
-                if let Err(error) = engine.refresh_provider(provider).await {
+                if let Err(error) = engine.refresh_scheduled_provider(provider).await {
                     tracing::debug!(%provider,%error,"a scheduled provider observation was not available");
-                }
-                if let Err(error) = engine.discover_provider_models(provider).await {
-                    tracing::debug!(%provider,%error,"a scheduled model source observation was not available");
                 }
             });
         }

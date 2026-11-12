@@ -212,8 +212,8 @@ export function updateUser(id: string, body: AdminUserUpdateBody): Promise<Admin
 }
 
 /** Makes the address at which a person sets a new password. */
-export function makeResetLink(id: string, body: AdminUserResetLinkCreateBody): Promise<AdminUserResetLinkCreateReply> {
-  return ok(api.POST('/admin/users/{id}/reset-link', { params: { path: { id } }, body }));
+export function makeResetLink(id: string, body: AdminUserResetLinkCreateBody, key: string): Promise<AdminUserResetLinkCreateReply> {
+  return ok(api.POST('/admin/users/{id}/reset-link', { params: { path: { id } }, body, ...repeatable(key) }));
 }
 
 /** Gives a person one invitation to make a team org; one they hold unused stays as it was. */

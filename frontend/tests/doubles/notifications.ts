@@ -214,12 +214,12 @@ export class NotificationWorld implements Part {
   }
 
   /** News that is no row: sent to every connection that follows a person's feed (or those of some people). */
-  announce(what: string, users?: readonly string[]): void {
+  announce(what: string, users?: readonly string[], facts: Record<string, unknown> = {}): void {
     if (what === 'approvals') {
       for (const username of users ?? this.world.people.keys()) this.world.users.tellAll({ what, summary: this.summary(username) }, [username]);
       return;
     }
-    this.world.users.tellAll({ what }, users);
+    this.world.users.tellAll({ what, ...facts }, users);
   }
 
   private list(person: Person, query: URLSearchParams): Answer {
@@ -271,7 +271,7 @@ export class NotificationWorld implements Part {
     }
     if (approval.kind === 'access') {
       const record = this.world.access.requests.recordOf(approval.id);
-      return record !== undefined && this.world.access.requests.mayDecide(person, record);
+      return record !== undefined && this.world.access.requests.sentTo(person, record);
     }
     return this.deciders.get(approval.id)?.has(person.me.username) === true;
   }
@@ -425,6 +425,7 @@ export class NotificationWorld implements Part {
         : {
             ...base,
             kind: 'access',
+            ...(Array.isArray(more.quick_grant_durations) ? { quick_grant_durations: more.quick_grant_durations.filter((value): value is string => typeof value === 'string') } : {}),
             request: {
               for_thread: (more.for_thread ?? null) as AccessRequest['for_thread'],
               holder: { kind: 'user', user: requester },
@@ -561,6 +562,10 @@ export class NotificationWorld implements Part {
     if (route === 'GET /me/notification-prefs') return { status: 200, body: this.prefsOf(username) };
     if (route === 'PUT /me/notification-prefs') {
       const next = { ...this.prefsOf(username) };
+      if (body.disabled_kinds !== undefined && body.disabled_kinds !== null) {
+        if (!Array.isArray(body.disabled_kinds) || body.disabled_kinds.some((kind: unknown) => typeof kind !== 'string')) throw new Refusal(400, 'request.invalid', 'Notification kinds must be names');
+        next.disabled_kinds = (body.disabled_kinds as unknown[]).filter((kind): kind is string => typeof kind === 'string').map(noticeKind);
+      }
       if (typeof body.approvals_always === 'boolean') next.approvals_always = body.approvals_always;
       if (body.chat_node_level === 'all' || body.chat_node_level === 'mentions' || body.chat_node_level === 'off') next.chat_node_level = body.chat_node_level;
       if (body.chat_direct_level === 'all' || body.chat_direct_level === 'mentions' || body.chat_direct_level === 'off') next.chat_direct_level = body.chat_direct_level;
@@ -752,7 +757,8 @@ export class NotificationWorld implements Part {
           link: null,
           label: typeof body.label === 'string' ? body.label : '@alice_c',
         });
-        this.announce('route', [user]);
+        // The server names the channel whose route changed, as a dialog waiting for this route listens for it.
+        this.announce('route', [user], { channel_id: def.id });
         return { status: 204 };
       }
       case '/channels': {

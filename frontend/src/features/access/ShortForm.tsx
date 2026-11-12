@@ -51,9 +51,9 @@ import {
   wholeChange,
 } from './model';
 import { Owners } from './Owners';
-import { WaitingRequests } from './RequestCard';
+import { RequestReview, WaitingRequests } from './RequestCard';
 import { EnvironmentReachLine, privateWarning, ReachesLine } from './Reaches';
-import { linkOf } from './target';
+import { linkTo } from '@/lib/links';
 
 /** What a page that moved on meanwhile says: that it is shown as it is now, what was meant for it, and what can be done. */
 export function StaleNotice({ changes }: { changes: Changes }) {
@@ -205,9 +205,9 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
     });
 
 
-  const url = linkOf(target);
+  const url = linkTo(target);
   const copy = async () => {
-    if (url !== null) await copyText(url, t('common.linkCopied'));
+    await copyText(url, t('common.linkCopied'));
   };
 
   const adminPlaces = page.admins.of.map((entry: NodeOrSystem) => placeName(t, entry));
@@ -250,7 +250,7 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
         <InlineAlert tone="info">{t('access.connected.lead', { owner: page.reaches.environment.owner.display_name, name: page.reaches.environment.name, place: placeText })}</InlineAlert>
       )}
 
-      {mayChange && isNodeKind(target.kind) && <WaitingRequests nodeId={target.id} />}
+      {mayChange && isNodeKind(target.kind) && (focusAdd ? <RequestReview nodeId={target.id} /> : <WaitingRequests nodeId={target.id} />)}
 
       <Owners page={page} target={target} changes={changes} />
 
@@ -299,11 +299,9 @@ export function ShortForm({ target, page, catalogue, changes, ask, onFull, focus
         >
           {page.state === 'restricted' ? t('craftAccess.inherit', { place: placeText }) : actionName('makePrivate')}
         </Button>
-        {url !== null && (
-          <Button icon={<Copy aria-hidden />} onClick={() => void copy()}>
-            {t('access.footer.copyLink')}
-          </Button>
-        )}
+        <Button icon={<Copy aria-hidden />} onClick={() => void copy()}>
+          {t('access.footer.copyLink')}
+        </Button>
       </div>
 
       {requesting && (

@@ -18,7 +18,19 @@ async function findResultBeside(page: Page, words: string, result: string) {
   const row = finder.getByRole('option', { name: new RegExp(result) });
   await expect(row).toBeVisible();
   await row.click({ modifiers: ['Alt'] });
-  await expect(page.getByRole('region', { name: 'Search result' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Main area, group 2', exact: true })).toBeVisible();
+}
+
+/** Alt opens an ordinary workbench pane; close its tab through the native menu. */
+async function closeResult(page: Page): Promise<void> {
+  const group = page.getByRole('region', { name: 'Main area, group 2', exact: true });
+  await group.getByRole('tablist', { name: 'Main area, group 2', exact: true }).getByRole('tab', { selected: true }).press('Shift+F10');
+  await page.getByRole('menuitem', { name: 'Close', exact: true }).click();
+  await expect(group).toHaveCount(0);
+  // Ordinary tabs return focus to the selected neighbor; the composer is resumed through its normal control.
+  const tabs = page.getByRole('tablist', { name: /^Main area(?:, group 1)?$/ });
+  await expect(tabs.getByRole('tab', { selected: true })).toBeFocused();
+  await page.getByRole('textbox', { name: 'Message to the agent', exact: true }).click();
 }
 
 test('chat Find accepts two letters, steps only this chat, and returns to the same unsent draft and caret', async ({ page }) => {
@@ -50,7 +62,8 @@ test('chat Find accepts two letters, steps only this chat, and returns to the sa
   await expect(draft).toBeFocused();
   await expect(draft).toHaveValue('Keep this unsent message');
   expect(await draft.evaluate((element: HTMLTextAreaElement) => element.selectionStart)).toBe(4);
-  await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}$`));
+  await expect(page).toHaveURL((url) => url.pathname === `/topic/${ACME.fixLogin}` && (url.search === ''
+    || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list')));
 });
 
 test('document Find searches only that document, steps its blocks, and restores the editor selection', async ({ page }) => {
@@ -77,10 +90,11 @@ test('document Find searches only that document, steps its blocks, and restores 
   expect(await lineOf(page, '查找 first match').evaluate((element) => element.contains(element.ownerDocument.getSelection()?.anchorNode ?? null))).toBe(true);
   await page.keyboard.type(' kept');
   await expect(lineOf(page, '查找 first match')).toContainText('查找 first match kept');
-  await expect(page).toHaveURL(new RegExp(`/doc/${DOCS.plan}$`));
+  await expect(page).toHaveURL((url) => url.pathname === `/doc/${DOCS.plan}` && (url.search === '' || url.searchParams.size === 2 && url.searchParams.get('_list') === 'true' && url.searchParams.has('list')));
 });
 
-test('a document result opens beside a thread, can be searched there, and returns to its untouched draft', async ({ page }) => {
+test('a document result opens beside a thread, can be searched there, and returns to its untouched draft', async ({ page, context }) => {
+  await context.grantPermissions(['clipboard-read', 'clipboard-write']);
   await playScene(ACME.mainThread, 'history');
   await actAs('ada', DOCS.plan, [{ op: 'insert', block: { id: id(8, 904), type: 'paragraph', content: [{ type: 'text', text: 'unique side document words' }] }, parent_id: null, after_id: block(2) }]);
   await signIn(page);
@@ -88,18 +102,26 @@ test('a document result opens beside a thread, can be searched there, and return
   const draft = page.getByRole('textbox', { name: 'Message to the agent' });
   await draft.fill('Keep my agent question');
   await findResultBeside(page, 'unique side document', 'unique side document words');
-  await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
-  const result = page.getByRole('region', { name: 'Search result' });
+  // The finder gives the keyboard to the pane it opened, and the browser address follows the pane that has it: the document's own address,
+  // with the block that was found and no list state that nobody chose.
+  await expect(page).toHaveURL((url) => url.pathname === `/doc/${DOCS.plan}` && url.searchParams.get('block') === id(8, 904) && url.searchParams.size === 1);
+  const result = page.getByRole('region', { name: 'Main area, group 2', exact: true });
   await expect(result.getByText('unique side document words')).toBeVisible();
   await result.getByRole('button', { name: 'Find in this document' }).click();
   const bar = result.getByRole('search', { name: 'Find in this document' });
   await bar.getByRole('textbox').fill('unique');
   await expect(bar.getByRole('status')).toHaveText('1 of 1');
   await expect(draft).toHaveValue('Keep my agent question');
-  await result.getByRole('button', { name: 'Return to the conversation' }).click();
+  // The address bar is what the document tab's Copy link gives.
+  await result.getByRole('tablist', { name: 'Main area, group 2', exact: true }).getByRole('tab', { selected: true }).press('Shift+F10');
+  await page.getByRole('menuitem', { name: 'Copy link', exact: true }).click();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(page.url());
+  await closeResult(page);
   await expect(result).toHaveCount(0);
   await expect(draft).toBeFocused();
   await expect(draft).toHaveValue('Keep my agent question');
+  // The thread keeps its own address, and has it again once its pane has the keyboard.
+  await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
 });
 
 test('a node-chat result opens at the actual message beside the thread and returns without navigating', async ({ page }) => {
@@ -110,9 +132,9 @@ test('a node-chat result opens at the actual message beside the thread and retur
   const draft = page.getByRole('textbox', { name: 'Message to the agent' });
   await draft.fill('An unsent conversation');
   await findResultBeside(page, 'unique side chat', 'unique side chat words');
-  const result = page.getByRole('region', { name: 'Search result' });
+  const result = page.getByRole('region', { name: 'Main area, group 2', exact: true });
   await expect(result.locator('li[data-message]', { hasText: 'unique side chat words' })).toBeVisible();
-  await result.getByRole('button', { name: 'Return to the conversation' }).click();
+  await closeResult(page);
   await expect(draft).toBeFocused();
   await expect(draft).toHaveValue('An unsent conversation');
   await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
@@ -127,16 +149,18 @@ test('another conversation opens at the hit beside this one and returns to the s
   const draft = page.getByRole('textbox', { name: 'Message to the agent' });
   await draft.fill('Keep this main question');
   await findResultBeside(page, 'unique separate conversation', 'unique separate conversation words');
-  const result = page.getByRole('region', { name: 'Search result' });
+  const result = page.getByRole('region', { name: 'Main area, group 2', exact: true });
   await expect(result.getByRole('log', { name: 'Conversation' })).toContainText('unique separate conversation words');
   await result.getByRole('button', { name: 'Find in the conversation' }).click();
   const bar = result.getByRole('search', { name: 'Find in the conversation' });
   await bar.getByRole('textbox').fill('unique separate');
   await expect(bar.getByRole('status')).toHaveText('1 of 1');
-  await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
-  await result.getByRole('button', { name: 'Return to the conversation' }).click();
+  // Searching the focused ordinary pane owns its address; closing it restores the main route.
+  await expect(page).toHaveURL((url) => url.pathname === `/thread/${ACME.repro}` && url.searchParams.get('item') === 'side-find-thread');
+  await closeResult(page);
   await expect(draft).toBeFocused();
   await expect(draft).toHaveValue('Keep this main question');
+  await expect(page).toHaveURL(new RegExp(`/thread/${ACME.mainThread}$`));
 });
 
 test('a private document is absent from search and cannot be read by its address', async ({ page }) => {

@@ -18,7 +18,7 @@
 //! page.
 
 use orch_access_contract::decisions::{self, Giver, ObjectRef, Through};
-use orch_access_contract::pages::Holder;
+use orch_access_contract::pages::{Entry, Holder};
 use orch_access_contract::permissions::Permission;
 use orch_access_contract::roles::PlaceRef;
 use orch_db::Conn;
@@ -110,10 +110,9 @@ pub async fn any_outside(conn: &mut Conn, root: Id, holders: &[Holder]) -> Resul
 /// `sharing.external_max_days` bounds it there: the fewest days of the system and of the places on the
 /// way to it, and the place that sets that bound (`None` for the system).
 ///
-/// The bound is counted from the moment the entry is written, renewed or used: an outside entry is within
-/// it when it has an end, and that end is no later than the bound from now. So a new or renewed entry
-/// may end at most that many days on, and an entry a stricter policy or a move puts beyond the bound,
-/// or that never ends, lets nobody in until it is given a nearer end.
+/// The bound is counted from the original grant or its last explicit expiry change. Reads never move
+/// that anchor. A new or renewed end is validated from the trusted request time; an existing entry
+/// outside a stricter policy stays outside until its expiry is explicitly repaired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifeBound {
     /// The most days.
@@ -123,7 +122,7 @@ pub struct LifeBound {
 }
 
 impl LifeBound {
-    /// The latest end an outside entry may have when it is written or used at `now`.
+    /// The latest end allowed from a grant or an explicit expiry change at `now`.
     #[must_use]
     pub fn latest_end(self, now: Time) -> Time {
         chrono::Duration::try_days(self.days)
@@ -134,10 +133,16 @@ impl LifeBound {
             )
     }
 
-    /// Whether an entry that ends at `end` (never, for `None`) is within the bound at `now`.
+    /// Whether a proposed end is within the bound from its trusted grant time.
     #[must_use]
     pub fn admits(self, end: Option<Time>, now: Time) -> bool {
         end.is_some_and(|end| end <= self.latest_end(now))
+    }
+
+    /// Applies the same bound to retained entry metadata without renewing it on a read.
+    #[must_use]
+    pub fn admits_entry(self, entry: &Entry) -> bool {
+        self.admits(entry.expires_at, entry.lifetime_anchor())
     }
 }
 
@@ -255,6 +260,13 @@ pub async fn may_name(
         ask,
         ask_more,
     })
+}
+
+/// The same ordinary outside-naming condition on an already prepared giver frame.
+pub(crate) fn may_name_outside(frame: &Frame<'_>, site: &Site, policy: Policy) -> bool {
+    !frame.principal().suspension().applies(&site.orgs)
+        && (!frame.ways(site, Permission::AccessExternal).is_empty()
+            || (policy.owners_name_outsiders && frame.owns(site)))
 }
 
 /// The people who may name the holders of the row `access.external` on `object`: its admins, and

@@ -207,7 +207,7 @@ async fn the_work_in_a_place_names_no_person_so_it_lets_in_only_a_thread_there()
     };
     assert_eq!(granted.work.len(), 1);
     assert_eq!(granted.work[0].place, s.w.project);
-    assert_eq!(granted.provider(), Default::default());
+    assert_eq!(granted.named_together(), Default::default());
     // For a topic of another project it does not.
     let other_project = s.w.node("project", s.w.root, "Other").await;
     let other_topic = s.w.node("topic", other_project, "Topic").await;

@@ -163,13 +163,17 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await shot(page, `${prefix}-recent-selection`);
     await main.getByRole('button', { name: 'Select', exact: true }).click();
     for (const name of ['Kind', 'Owner']) {
+      // Each menu has left before the next is opened: a press on the button while the last is still going is no opening.
+      await expect(page.getByRole('menu')).toHaveCount(0);
       await main.getByRole('button', { name: 'Columns', exact: true }).click();
       const option = page.getByRole('menuitemcheckbox', { name, exact: true });
       await expect(option).toHaveAttribute('aria-checked', 'false');
       await option.click();
+      await expect(page.getByRole('menu')).toHaveCount(0);
       await main.getByRole('button', { name: 'Columns', exact: true }).click();
       await expect(option).toHaveAttribute('aria-checked', 'true');
       await page.keyboard.press('Escape');
+      await expect(page.getByRole('menu')).toHaveCount(0);
     }
     if (width === 1440) {
       const rail = page.locator('[data-visible-scrollbar="horizontal"]');
