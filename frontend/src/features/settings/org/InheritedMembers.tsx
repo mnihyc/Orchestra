@@ -50,7 +50,7 @@ export function InheritedMembers({ org, members, query }: { org: Org; members: r
   if (!roles.isPending && !roles.isError && !showOwner && rows.length === 0) return null;
   return <section aria-label={t('access.roster.also')} className="flex flex-col gap-2">
     <h3 className="text-sm font-medium text-text">{t('access.roster.also')}</h3>
-    {roles.isPending ? <SkeletonRows rows={2} /> : roles.isError ? <ErrorState compact error={roles.error} onRetry={() => void roles.refetch()} /> : <ul className="divide-y divide-border">
+    {roles.isPending ? <SkeletonRows read={roles} rows={2} /> : roles.isError ? <ErrorState compact error={roles.error} onRetry={() => void roles.refetch()} /> : <ul className="divide-y divide-border">
       {showOwner && <li className="flex min-w-0 items-start justify-between gap-3 py-2"><span className="font-medium text-text wrap-anywhere">{org.owner.display_name}</span><span className="text-sm text-text-muted">{t('access.roster.owner')}</span></li>}
       {rows.map((row) => <InheritedRow key={row.id} row={row} org={org} />)}
     </ul>}

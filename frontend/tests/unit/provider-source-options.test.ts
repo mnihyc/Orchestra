@@ -21,3 +21,13 @@ it('writes public booleans and maps as config, secret maps as secret text, and n
   expect(JSON.stringify(body)).not.toContain('stale-secret');
   expect(sourceChoiceSet(emptySourceDraft(),fields,[])).toEqual({by:'default'});
 });
+
+it('keeps explicit default-source overrides without filling untouched fields or declared secret defaults', () => {
+  const field=(name:string,type:Field['type'],value:unknown=null):Field => ({name,type,label:name,required:false,default:value,help:null,choices:null,max_bytes:null});
+  const fields=[field('enabled','boolean',true),field('headers','map'),field('region','text','catalogue'),field('admin_key','secret','never-from-a-declaration')];
+  expect(sourceChoiceSet({...emptySourceDraft(),fields:{enabled:false,headers:{},admin_key:'entered-admin',hidden:'stale'}},fields,[]))
+    .toEqual({by:'default',config:{enabled:false,headers:{}},secrets:{admin_key:'entered-admin'}});
+  expect(sourceChoiceSet({...emptySourceDraft(),removedSecrets:['admin_key']},fields,[]))
+    .toEqual({by:'default',secrets:{admin_key:null}});
+  expect(sourceChoiceSet(emptySourceDraft(),fields,[])).toEqual({by:'default'});
+});

@@ -93,7 +93,7 @@ impl TicketSigner {
 
     /// Makes and signs the ticket that `request` asks for.
     pub fn issue(&self, request: &TicketRequest) -> Result<String, PkiError> {
-        self.issue_with_environment(request, None)
+        self.issue_with_environment(request, None, None)
     }
 
     /// Signs a tool ticket for one environment on the destination machine.
@@ -109,13 +109,31 @@ impl TicketSigner {
                 "a tool ticket needs an environment and a nonnegative generation".to_owned(),
             ));
         }
-        self.issue_with_environment(request, Some((environment, generation)))
+        self.issue_with_environment(request, Some((environment, generation)), None)
+    }
+
+    /// Signs a channel for the exact native executor build admitted by the engine.
+    pub fn issue_for_executor(
+        &self,
+        request: &TicketRequest,
+        environment: Id,
+        generation: i64,
+        version: &str,
+    ) -> Result<String, PkiError> {
+        if generation < 0 || version.is_empty() || !matches!(request.service, Service::Exec { .. })
+        {
+            return Err(PkiError::Signature(
+                "an executor ticket needs its environment, generation and admitted build".into(),
+            ));
+        }
+        self.issue_with_environment(request, Some((environment, generation)), Some(version))
     }
 
     fn issue_with_environment(
         &self,
         request: &TicketRequest,
         environment: Option<(Id, i64)>,
+        executor_version: Option<&str>,
     ) -> Result<String, PkiError> {
         let claims = TicketClaims {
             jti: new_id(),
@@ -127,6 +145,7 @@ impl TicketSigner {
             tool_set: request.tool_set.clone(),
             tool_environment_id: environment.map(|(id, _)| id),
             tool_environment_generation: environment.map(|(_, generation)| generation),
+            tool_executor_version: executor_version.map(str::to_owned),
             port: None,
             exp: request.expires_at.unix_millis().div_euclid(SECOND_MILLIS),
         };

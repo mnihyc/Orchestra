@@ -29,16 +29,10 @@ use orch_db::queries::access::{self, EntryRow, PageKey, SYSTEM_ID, StoredRow};
 use orch_db::queries::hierarchy::{self, NodeRow};
 use orch_types::{Id, Time};
 
+use crate::holders::FrameSubject;
 use crate::{Error, Policy, Principal};
 
-/// A page outside the person's own trees, with the scope needed to bound its entries.
-struct OutsidePage {
-    page: PageRef,
-    way: Vec<Id>,
-    role_place: Option<Id>,
-    root: Id,
-    administers: bool,
-}
+mod audiences;
 
 /// A node of the hierarchy, as a decision needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +93,7 @@ impl NodeFacts {
 pub struct Graph {
     nodes: HashMap<Id, NodeFacts>,
     thread_environments: HashMap<Id, Option<Id>>,
+    ask_governance: HashMap<Id, Option<orch_db::queries::ask::Governance>>,
     environment_columns: HashMap<Id, Placement>,
     environment_sources: HashMap<Id, Option<Site>>,
     document_parents: HashMap<Id, Option<Id>>,
@@ -184,9 +179,10 @@ impl Graph {
         if missing.is_empty() {
             return Ok(());
         }
-        for row in hierarchy::with_ancestors(conn, &missing).await? {
+        for (row, governance) in hierarchy::with_ancestor_governance(conn, &missing).await? {
             if row.kind == "thread" {
                 self.thread_environments.insert(row.id, row.environment_id);
+                self.ask_governance.insert(row.id, governance);
             }
             let node = NodeFacts::from_row(row)?;
             self.nodes.insert(node.id, node);
@@ -197,6 +193,7 @@ impl Graph {
     /// Adds nodes that were read elsewhere, as they were.
     pub fn add_rows(&mut self, rows: Vec<NodeRow>) -> Result<(), Error> {
         for row in rows {
+            self.ask_governance.remove(&row.id);
             let environment = row.environment_id;
             let node = NodeFacts::from_row(row)?;
             if node.kind == NodeKind::Thread {
@@ -215,6 +212,29 @@ impl Graph {
             nodes: nodes.into_iter().map(|node| (node.id, node)).collect(),
             ..Self::default()
         }
+    }
+
+    async fn ask_rows(
+        &mut self,
+        conn: &mut Conn,
+        threads: &[Id],
+    ) -> Result<Vec<orch_db::queries::ask::Governance>, Error> {
+        let missing: Vec<_> = threads
+            .iter()
+            .copied()
+            .filter(|id| !self.ask_governance.contains_key(id))
+            .collect();
+        if !missing.is_empty() {
+            let current = orch_db::queries::ask::governance(conn, &missing).await?;
+            self.ask_governance
+                .extend(missing.into_iter().map(|id| (id, None)));
+            self.ask_governance
+                .extend(current.into_iter().map(|row| (row.thread_id, Some(row))));
+        }
+        Ok(threads
+            .iter()
+            .filter_map(|id| self.ask_governance.get(id).and_then(Clone::clone))
+            .collect())
     }
 
     /// Reads the hosting machine's delegation once for every environment needed by this frame.
@@ -535,6 +555,7 @@ pub fn entry_of(row: &EntryRow) -> Result<Entry, Error> {
         source: row.source.parse::<EntrySource>()?,
         created_by: row.created_by,
         created_at: Time::new(row.created_at),
+        renewed_at: row.renewed_at.map(Time::new),
         removed_at: row.removed_at.map(Time::new),
         revision: row.revision,
     })
@@ -635,28 +656,103 @@ impl Store {
             .filter_map(move |(profile, permission)| self.rows.get(&(page, *profile, *permission)))
     }
 
-    /// The places that role holders in the stored entries name explicitly.
-    fn role_places(&self) -> HashSet<Id> {
-        self.rows
-            .values()
-            .flat_map(|row| row.entries.iter())
-            .filter_map(|entry| match entry.holder {
-                Holder::Role { at, .. } => at,
-                _ => None,
-            })
-            .collect()
+    /// The native page chain, independent of who happens to match its holders today.
+    pub fn chain(&self, graph: &Graph, site: &Site, permission: Permission) -> Chain<'_> {
+        let profile = graph.profile(site, permission);
+        let mut chain = Chain::of(self.row(site.page(), Profile::Any, permission));
+        for id in graph.document_ancestors(site.id) {
+            chain = chain.in_document_container(
+                id,
+                self.row(
+                    PageRef::live(StoredKind::DocumentContainer, id),
+                    Profile::Any,
+                    permission,
+                ),
+            );
+        }
+        if let Some(node) = site.beside {
+            chain = chain.beside(
+                node,
+                self.row(
+                    PageRef::live(StoredKind::Node, node),
+                    Profile::Any,
+                    permission,
+                ),
+            );
+        }
+        for place in &site.chain {
+            chain = chain.under(
+                *place,
+                self.row(PageRef::defaults_of(*place), profile, permission),
+            );
+        }
+        chain
     }
+
+    fn extend(&mut self, more: Self) {
+        self.rows.extend(more.rows);
+        for (page, keys) in more.pages {
+            self.pages.entry(page).or_default().extend(keys);
+        }
+    }
+}
+
+/// Current audience and control grants of this conversation, without expanding their members.
+/// This uses the same locked/inherited chain as ordinary access and includes its Owners row.
+/// It is source metadata, never a caller, session, token or admission.
+pub async fn conversation_reader_grants(
+    conn: &mut Conn,
+    id: Id,
+    now: Time,
+) -> Result<Vec<Entry>, Error> {
+    let graph = Graph::load(conn, &[id]).await?;
+    let site = graph
+        .site_of(id)
+        .filter(|site| site.kind == ObjectKind::Thread)
+        .ok_or(Error::NotFound(id))?;
+    let mut pages = vec![site.page()];
+    pages.extend(site.chain.iter().copied().map(PageRef::defaults_of));
+    let permissions: Vec<_> = site
+        .kind
+        .permissions()
+        .filter(|permission| *permission != Permission::AccessOwn)
+        .collect();
+    let store = Store::load(conn, &pages, &permissions).await?;
+    let mut grants = Vec::new();
+    for row in access::owner_entries(conn, &[site.page().key()]).await? {
+        let entry = entry_of(&row)?;
+        if entry.counts(now) {
+            grants.push(entry);
+        }
+    }
+    for permission in permissions {
+        grants.extend(
+            store
+                .chain(&graph, &site, permission)
+                .holders(now)
+                .into_iter()
+                .map(|named| named.entry.clone()),
+        );
+    }
+    Ok(grants)
 }
 
 /// What was read to decide about some sites for one person.
 #[derive(Debug)]
-pub struct Frame<'p> {
-    principal: &'p Principal,
+pub struct Frame<'p, S = Principal> {
+    principal: &'p S,
     policy: Policy,
     graph: Graph,
     store: Store,
     owners: HashMap<Id, Vec<Entry>>,
     roles: HashMap<Id, Option<roles::Held>>,
+    /// Current ordinary View on only the sources referenced by this frame's explicit viewers holders.
+    audience_viewers: HashSet<Id>,
+    /// Current memberships for only the groups referenced by this frame.
+    audience_groups: HashSet<Id>,
+    /// Existing outside-creation conditions, admitted only from already established parent reach.
+    creation_parents: HashMap<Id, Site>,
+    admitted_creations: HashSet<Id>,
     /// The nearest real place at which this person is an Admin or owner, before system reach.
     admin_sources: HashMap<Id, PlaceRef>,
     /// The same sites under this person's ordinary pages, never the session's native reach.
@@ -664,6 +760,21 @@ pub struct Frame<'p> {
     /// Explicit ordinary assignments at this page or below, and current follows.
     /// These focus facts never confer a permission or replace ordinary View.
     participation: HashSet<PageRef>,
+    outside_bounds: crate::external::LifeBounds,
+    outside_group_roots: HashMap<Id, Id>,
+    outside_place_roots: HashMap<Id, Id>,
+    ask_boundaries: HashMap<Id, crate::ask::Boundary>,
+}
+
+impl Frame<'_, Principal> {
+    /// Current native administration role for an explicitly scoped administrative act.
+    /// This changes no Caller mode or ordinary/private resource permission decision.
+    #[must_use]
+    pub fn administration_standing(&self, site: &Site) -> bool {
+        !self.principal.suspension().applies(&site.orgs)
+            && self.principal.caller().reaches(site.path.as_deref())
+            && (self.principal.has_system_admin_standing() || self.administrative_role(site))
+    }
 }
 
 // An uncustomized thread can be projected without a real identifier. Its topic,
@@ -680,7 +791,11 @@ fn site_key(site: &Site) -> SiteKey {
     )
 }
 
-impl<'p> Frame<'p> {
+#[allow(
+    private_bounds,
+    reason = "only sealed crate account facts extend the existing default Principal frame"
+)]
+impl<'p, S: FrameSubject> Frame<'p, S> {
     /// Reads what a decision about `sites` needs, for the permissions
     /// `permissions` and the levels above them: the rows of their pages and
     /// of the defaults they follow, the Owners rows of every place on their
@@ -690,12 +805,12 @@ impl<'p> Frame<'p> {
     /// the ordinary comparison reuses the same prepared environment reports.
     pub async fn load(
         conn: &mut Conn,
-        principal: &'p Principal,
+        principal: &'p S,
         policy: Policy,
         graph: Graph,
         sites: &[Site],
         permissions: &[Permission],
-    ) -> Result<Frame<'p>, Error> {
+    ) -> Result<Self, Error> {
         Self::load_with(conn, principal, policy, graph, sites, &[], permissions).await
     }
 
@@ -703,15 +818,123 @@ impl<'p> Frame<'p> {
     /// page that belongs to no site, as the defaults of the system.
     pub async fn load_with(
         conn: &mut Conn,
-        principal: &'p Principal,
+        principal: &'p S,
         policy: Policy,
-        mut graph: Graph,
+        graph: Graph,
         sites: &[Site],
         extra: &[PageRef],
         permissions: &[Permission],
-    ) -> Result<Frame<'p>, Error> {
+    ) -> Result<Self, Error> {
+        Self::load_prepared(
+            conn,
+            principal,
+            policy,
+            graph,
+            (sites, extra, &[]),
+            permissions,
+            None,
+        )
+        .await
+    }
+
+    /// Reads the same permissions, with participation metadata needed only for `participation`.
+    /// An empty slice reads no participation. Sites omitted here retain their ordinary permissions.
+    pub async fn load_with_participation(
+        conn: &mut Conn,
+        principal: &'p S,
+        policy: Policy,
+        graph: Graph,
+        sites: &[Site],
+        permissions: &[Permission],
+        participation: &[Site],
+    ) -> Result<Self, Error> {
+        Self::load_prepared(
+            conn,
+            principal,
+            policy,
+            graph,
+            (sites, &[], &[]),
+            permissions,
+            Some(participation),
+        )
+        .await
+    }
+
+    /// Prepares only the explicitly requested holder dependencies, for membership and provenance.
+    pub(crate) async fn for_holders(
+        conn: &mut Conn,
+        principal: &'p S,
+        holders: &[Holder],
+    ) -> Result<Self, Error> {
+        Self::load_prepared(
+            conn,
+            principal,
+            Policy::default(),
+            Graph::default(),
+            (&[], &[], holders),
+            &[],
+            Some(&[]),
+        )
+        .await
+    }
+
+    async fn load_prepared(
+        conn: &mut Conn,
+        principal: &'p S,
+        policy: Policy,
+        graph: Graph,
+        targets: (&[Site], &[PageRef], &[Holder]),
+        permissions: &[Permission],
+        participation: Option<&[Site]>,
+    ) -> Result<Self, Error> {
+        // The public frame facades and giver preparation share one heap boundary.
+        Box::pin(Self::prepare_frame(
+            conn,
+            principal,
+            policy,
+            graph,
+            targets,
+            permissions,
+            participation,
+        ))
+        .await
+    }
+
+    async fn prepare_frame(
+        conn: &mut Conn,
+        principal: &'p S,
+        policy: Policy,
+        mut graph: Graph,
+        targets: (&[Site], &[PageRef], &[Holder]),
+        permissions: &[Permission],
+        participation: Option<&[Site]>,
+    ) -> Result<Self, Error> {
+        let (sites, extra, requested_holders) = targets;
+        let threads: Vec<_> = graph
+            .nodes()
+            .filter(|node| node.kind == NodeKind::Thread)
+            .map(|node| node.id)
+            .collect();
+        let ask_boundaries = if threads.is_empty() {
+            HashMap::new()
+        } else {
+            let rows = graph.ask_rows(conn, &threads).await?;
+            crate::ask::from_rows(conn, rows).await?
+        };
+        let roots: Vec<_> = ask_boundaries
+            .values()
+            .map(|boundary| boundary.root)
+            .collect();
+        graph.extend(conn, &roots).await?;
         let mut expanded = sites.to_vec();
         let mut seen: HashSet<_> = sites.iter().map(|site| (site.kind, site.id)).collect();
+        for root in roots {
+            if let Some(site) = graph.site_of(root)
+                && seen.insert((site.kind, site.id))
+            {
+                expanded.push(site);
+            }
+        }
         for site in sites {
             for id in graph.document_ancestors(site.id) {
                 if let Some(parent) = graph.document_container_site(id)
@@ -776,53 +999,36 @@ impl<'p> Frame<'p> {
                 }
             }
         }
-        let pages: Vec<PageRef> = pages.into_iter().collect();
-        let store = Store::load(conn, &pages, &wanted).await?;
-
-        let elsewhere: Vec<Id> = store.role_places().into_iter().collect();
-        graph.extend(conn, &elsewhere).await?;
-
-        let mut ownable: HashSet<PageRef> = graph
-            .nodes()
-            .map(|node| PageRef::live(StoredKind::Node, node.id))
-            .collect();
-        ownable.extend(sites.iter().map(Site::page));
-        ownable.extend(
-            sites
-                .iter()
-                .flat_map(|site| graph.document_ancestors(site.id))
-                .map(|id| PageRef::live(StoredKind::DocumentContainer, id)),
-        );
-        let ownable: Vec<PageKey> = ownable.into_iter().map(PageRef::key).collect();
-        let mut owners: HashMap<Id, Vec<Entry>> = HashMap::new();
-        for stored in access::owner_entries(conn, &ownable).await? {
-            owners
-                .entry(stored.object_id)
-                .or_default()
-                .push(entry_of(&stored)?);
-        }
-
-        let place_ids: Vec<Id> = graph
-            .nodes()
-            .filter(|node| node.is_place())
-            .map(|node| node.id)
-            .collect();
-        let mut grants: HashMap<Id, Vec<Role>> = HashMap::new();
-        for stored in access::roles_reaching(
+        let loaded_pages = pages;
+        let mut store = Store::load(
             conn,
-            &place_ids,
-            principal.user(),
-            principal.groups(),
-            principal.member_of(),
-            principal.now().get(),
+            &loaded_pages.iter().copied().collect::<Vec<_>>(),
+            &wanted,
         )
-        .await?
-        {
-            grants
-                .entry(stored.node_id)
-                .or_default()
-                .push(stored.role.parse()?);
-        }
+        .await?;
+        let prepared = audiences::Prepared::load(
+            conn,
+            &mut graph,
+            &mut store,
+            loaded_pages,
+            &wanted,
+            sites,
+            requested_holders,
+            (principal.user(), principal.now()),
+        )
+        .await?;
+        let audience_sites = prepared.sites;
+        let mut decision_sites = sites.to_vec();
+        decision_sites.extend(
+            audience_sites
+                .iter()
+                .filter(|site| !seen.contains(&(site.kind, site.id)))
+                .cloned(),
+        );
+        let owners = prepared.owners;
+        let ownable = prepared.ownable;
+        let group_sources = prepared.groups;
+        let role_sources = prepared.grants;
 
         graph.load_profiles(conn, sites).await?;
         let mut frame = Frame {
@@ -832,56 +1038,38 @@ impl<'p> Frame<'p> {
             store,
             owners,
             roles: HashMap::new(),
+            audience_viewers: HashSet::new(),
+            audience_groups: HashSet::new(),
+            creation_parents: HashMap::new(),
+            admitted_creations: HashSet::new(),
             admin_sources: HashMap::new(),
             ordinary_held: None,
             participation: HashSet::new(),
+            outside_bounds: crate::external::LifeBounds::default(),
+            outside_group_roots: HashMap::new(),
+            outside_place_roots: HashMap::new(),
+            ask_boundaries,
         };
-        frame.roles = frame
-            .graph
-            .nodes()
-            .filter(|node| node.is_place())
-            .map(|node| (node.id, frame.role_on_the_way_to(node, &grants)))
-            .collect();
-        frame.admin_sources = frame
-            .graph
-            .nodes()
-            .filter(|node| node.is_place())
-            .filter_map(|node| {
-                if !frame
-                    .role_at(node.id)
-                    .is_some_and(|held| held.role == Role::Admin)
-                {
-                    return None;
-                }
-                frame
-                    .graph
-                    .places_on(node)
-                    .into_iter()
-                    .rev()
-                    .find(|place| {
-                        frame.counts_as_owner(frame.owners.get(&place.id), Some(place.root))
-                            || grants
-                                .get(&place.id)
-                                .is_some_and(|roles| roles.contains(&Role::Admin))
-                    })
-                    .map(|place| (node.id, PlaceRef::Node(place.id)))
-            })
-            .collect();
-        frame.end_outside_creations(sites);
-        frame.bound_outside_entries(conn, sites).await?;
-        if principal.caller().as_admin() && sites.iter().any(|site| frame.administers(site)) {
+        frame.creation_parents = frame.outside_creation_parents(&decision_sites);
+        frame.resolve_audiences(&audience_sites, &group_sources, &role_sources);
+        frame.bound_outside_entries(conn, &decision_sites).await?;
+        let needs_ordinary = principal.private_admin()
+            && (!audience_sites.is_empty()
+                || !group_sources.is_empty()
+                || sites.iter().any(|site| frame.administers(site)));
+        if needs_ordinary {
             // A system admin may also occur in a holder graph. Re-evaluate with the mode
             // off rather than subtracting Through::Admin from an already elevated answer.
             // This is one batched frame, never one query for every listed object.
             let ordinary = principal.ordinary(conn).await?;
-            let baseline = Box::pin(Frame::load_with(
+            let baseline = Box::pin(Frame::load_prepared(
                 conn,
                 &ordinary,
                 policy,
                 frame.graph.clone(),
-                sites,
-                extra,
+                (sites, extra, requested_holders),
                 permissions,
+                participation,
             ))
             .await?;
             frame.ordinary_held = Some(
@@ -901,9 +1089,60 @@ impl<'p> Frame<'p> {
             );
             frame.admin_sources = baseline.admin_sources.clone();
             frame.participation = baseline.participation.clone();
-        } else if !principal.suspension().altogether() {
+            frame.audience_viewers = baseline.audience_viewers.clone();
+            frame.audience_groups = baseline.audience_groups.clone();
+            frame.roles = baseline.roles.clone();
+            frame.admitted_creations = baseline.admitted_creations.clone();
+            // Restore existing nonviewer role/group identities for native reporting while
+            // ordinary Viewer facts and creation admissions remain frozen. Native role identity
+            // cannot feed back through a source page to manufacture Viewer membership.
+            loop {
+                let before = (frame.audience_groups.len(), frame.roles.clone());
+                frame.refresh_groups(&group_sources);
+                let _ = frame.refresh_roles(&role_sources);
+                if before == (frame.audience_groups.len(), frame.roles.clone()) {
+                    break;
+                }
+            }
+            frame.end_outside_creations();
+        } else {
+            loop {
+                frame.audience_viewers.clear();
+                frame.audience_groups.clear();
+                frame.roles.clear();
+                frame.admitted_creations.clear();
+                frame.resolve_audiences(&audience_sites, &group_sources, &role_sources);
+                // Removing an ended creator entry can end another audience's source. Only
+                // removals occur, so this terminates at the current ordinary permission graph.
+                if !frame.end_outside_creations() {
+                    break;
+                }
+            }
+        }
+        if !needs_ordinary
+            && !principal.suspension().altogether()
+            && participation.is_none_or(|wanted| !wanted.is_empty())
+        {
             let ordinary = principal.ordinary(conn).await?;
-            let nodes: Vec<_> = frame.graph.nodes().map(|node| node.id).collect();
+            let (nodes, pages, resources_only) = match participation {
+                Some(wanted) => (
+                    wanted
+                        .iter()
+                        .filter(|site| site.kind.node().is_some())
+                        .map(|site| site.id)
+                        .collect::<Vec<_>>(),
+                    wanted
+                        .iter()
+                        .map(|site| site.page().key())
+                        .collect::<Vec<_>>(),
+                    true,
+                ),
+                None => (
+                    frame.graph.nodes().map(|node| node.id).collect(),
+                    ownable,
+                    false,
+                ),
+            };
             let scope_roots: Vec<_> = frame
                 .graph
                 .nodes()
@@ -914,21 +1153,28 @@ impl<'p> Frame<'p> {
             let mut closed = ordinary.suspension().in_orgs().to_vec();
             closed.extend(ordinary.suspension().held());
             let roots = ordinary.memberships().roots();
+            let groups: Vec<_> = ordinary
+                .groups()
+                .iter()
+                .copied()
+                .filter(|group| !group_sources.contains_key(group))
+                .chain(frame.audience_groups.iter().copied())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
             let marks = access::participation::marks(
                 conn,
                 ordinary.user(),
-                ordinary.groups(),
+                &groups,
                 ordinary.member_of(),
                 ordinary.now(),
                 &nodes,
-                &ownable,
+                &pages,
                 &roots,
                 &closed,
-                ordinary
-                    .caller()
-                    .grant()
-                    .and_then(crate::TokenGrant::subtree),
+                ordinary.subtree(),
                 &scope_roots,
+                resources_only,
             )
             .await?;
             for mark in marks {
@@ -940,155 +1186,126 @@ impl<'p> Frame<'p> {
         Ok(frame)
     }
 
-    /// An entry lets a person from outside a tree in only while `sharing.external_max_days` admits it where
-    /// it is ([`crate::external::LifeBound`]): on the pages of the sites and places whose tree they are not in,
-    /// the entries that let them in from outside and run beyond the bound (or never end) are not counted for
-    /// them, until somebody gives them a nearer end. Which entries those are is decided as when they are
-    /// written ([`crate::external::any_outside`]): one naming them, everyone, or the members of a place of
-    /// another tree; a group or a role at a place of another tree; never a role held where the thing is, nor
-    /// an admin's naming of themself where they administer. Nothing is read for a person who is in every
-    /// tree asked about, one statement otherwise, and the trees of the groups and places that let them in
-    /// beyond the bound where there are such.
+    /// Loads the current outside-lifetime policy and holder roots in batches. Admission is checked
+    /// at each reached site: pruning a shared row here would also remove an independently valid use.
     async fn bound_outside_entries(
         &mut self,
         conn: &mut Conn,
         sites: &[Site],
     ) -> Result<(), Error> {
-        let principal: &Principal = self.principal;
-        // Each page of something whose tree they are not in, with the way to it, where a role without a
-        // place is held for it, its root org, and whether they administer it.
-        let mut outside: Vec<OutsidePage> = Vec::new();
-        let others = self
-            .graph
-            .nodes()
-            .filter_map(|node| self.graph.site_of(node.id));
-        for site in sites.iter().cloned().chain(others) {
-            let page = site.page();
-            if let Some(root) = site.root
-                && !principal.is_in_tree(root)
-                && !outside.iter().any(|known| known.page == page)
-            {
-                let administers = self.administers(&site);
-                outside.push(OutsidePage {
-                    page,
-                    way: crate::external::way_of(&site),
-                    role_place: site.role_place,
-                    root,
-                    administers,
-                });
-            }
-        }
+        let outside: Vec<Site> = sites
+            .iter()
+            .cloned()
+            .chain(
+                self.graph
+                    .nodes()
+                    .filter_map(|node| self.graph.site_of(node.id)),
+            )
+            .filter(|site| {
+                site.root
+                    .is_some_and(|root| !self.principal.is_in_tree(root))
+            })
+            .collect();
         if outside.is_empty() {
             return Ok(());
         }
         let bounds = crate::external::LifeBounds::load(conn).await?;
-        if bounds.is_empty() {
+        let Some(tightest) = outside
+            .iter()
+            .filter_map(|site| bounds.at(&crate::external::way_of(site)))
+            .min_by_key(|bound| bound.days)
+        else {
             return Ok(());
-        }
-        let now = principal.now();
-        let person = principal.person();
-        let themself = Holder::User {
-            id: principal.user(),
         };
-        let mut beyond: HashSet<Id> = HashSet::new();
-        // Entries of a group, or of a role at a place, beyond the bound: from outside only where the group
-        // or the place is of another tree than the page's (its root org is kept with each).
-        let mut by_tree: Vec<(Id, Id, Holder)> = Vec::new();
-        for OutsidePage {
-            page,
-            way,
-            role_place,
-            root,
-            administers,
-        } in &outside
-        {
-            let Some(bound) = bounds.at(way) else {
-                continue;
-            };
-            for row in self.store.rows_of(*page) {
-                for entry in &row.entries {
-                    if bound.admits(entry.expires_at, now)
-                        || (*administers && entry.holder == themself)
-                        || !entry.holder.matches(&person, |at| {
-                            at.or(*role_place)
-                                .and_then(|place| self.role_at(place))
-                                .map(|held| held.role)
-                        })
-                    {
-                        continue;
-                    }
-                    match entry.holder {
-                        // A role held where the thing is names the tree's own people.
-                        Holder::Role { at: None, .. } => {}
-                        Holder::Group { .. } | Holder::Role { at: Some(_), .. } => {
-                            by_tree.push((entry.id, *root, entry.holder));
-                        }
-                        _ => {
-                            beyond.insert(entry.id);
-                        }
-                    }
+        let mut groups = Vec::new();
+        let mut places = Vec::new();
+        for row in self.store.rows.values() {
+            for entry in &row.entries {
+                if !entry.counts(self.now())
+                    || tightest.admits_entry(entry)
+                    || (!self.holder_matches(&entry.holder, None)
+                        && !matches!(
+                            entry.holder,
+                            Holder::Role {
+                                role: Role::Viewer,
+                                at: Some(_)
+                            } | Holder::Group { .. }
+                        ))
+                {
+                    continue;
+                }
+                match entry.holder {
+                    Holder::Group { id } => groups.push(id),
+                    Holder::Role { at: Some(id), .. } => places.push(id),
+                    _ => {}
                 }
             }
         }
-        if !by_tree.is_empty() {
-            let groups: Vec<Id> = by_tree
-                .iter()
-                .filter_map(|(_, _, holder)| match holder {
-                    Holder::Group { id } => Some(*id),
-                    _ => None,
-                })
-                .collect();
-            let places: Vec<Id> = by_tree
-                .iter()
-                .filter_map(|(_, _, holder)| match holder {
-                    Holder::Role {
-                        at: Some(place), ..
-                    } => Some(*place),
-                    _ => None,
-                })
-                .collect();
-            let group_roots: HashMap<Id, Id> = if groups.is_empty() {
-                HashMap::new()
-            } else {
-                orch_db::queries::access::groups(conn, &groups)
-                    .await?
-                    .into_iter()
-                    .map(|group| (group.id, group.root_id))
-                    .collect()
-            };
-            let place_roots: HashMap<Id, Id> = if places.is_empty() {
-                HashMap::new()
-            } else {
-                orch_db::queries::access::roots_of(conn, &places)
-                    .await?
-                    .into_iter()
-                    .collect()
-            };
-            for (entry, root, holder) in by_tree {
-                let of = match holder {
-                    Holder::Group { id } => group_roots.get(&id),
-                    Holder::Role {
-                        at: Some(place), ..
-                    } => place_roots.get(&place),
-                    _ => None,
-                };
-                if of != Some(&root) {
-                    beyond.insert(entry);
-                }
-            }
-        }
-        if beyond.is_empty() {
-            return Ok(());
-        }
-        for ((page, _, _), row) in &mut self.store.rows {
-            if outside.iter().any(|known| known.page == *page) {
-                row.entries.retain(|entry| !beyond.contains(&entry.id));
-            }
-        }
+        groups.sort_unstable();
+        groups.dedup();
+        places.sort_unstable();
+        places.dedup();
+        self.outside_group_roots = if groups.is_empty() {
+            HashMap::new()
+        } else {
+            access::groups(conn, &groups)
+                .await?
+                .into_iter()
+                .map(|group| (group.id, group.root_id))
+                .collect()
+        };
+        self.outside_place_roots = if places.is_empty() {
+            HashMap::new()
+        } else {
+            access::roots_of(conn, &places).await?.into_iter().collect()
+        };
+        self.outside_bounds = bounds;
         Ok(())
     }
 
-    fn end_outside_creations(&mut self, sites: &[Site]) {
+    fn outside_entry_admitted(
+        &self,
+        site: &Site,
+        entry: &Entry,
+        bound: Option<crate::external::LifeBound>,
+    ) -> bool {
+        if self.creation_parents.contains_key(&entry.id)
+            && !self.admitted_creations.contains(&entry.id)
+        {
+            return false;
+        }
+
+        let Some(root) = site.root else {
+            return true;
+        };
+        if self.principal.is_in_tree(root) {
+            return true;
+        }
+        let Some(bound) = bound else {
+            return true;
+        };
+        if bound.admits_entry(entry)
+            || (self.administers(site)
+                && entry.holder
+                    == (Holder::User {
+                        id: self.principal.user(),
+                    }))
+            || !self.holder_matches(&entry.holder, site.role_place)
+        {
+            return true;
+        }
+        match entry.holder {
+            // These holder classifications are unchanged: a local role, group or place is not
+            // an outside source merely because the person using it is not a member.
+            Holder::Role { at: None, .. } => true,
+            Holder::Group { id } => self.outside_group_roots.get(&id) == Some(&root),
+            Holder::Role { at: Some(id), .. } => self.outside_place_roots.get(&id) == Some(&root),
+            _ => false,
+        }
+    }
+
+    fn outside_creation_parents(&self, sites: &[Site]) -> HashMap<Id, Site> {
+        let mut parents = HashMap::new();
         // Process ancestors first: losing entry to an outside-created folder also ends entry to
         // things made through that folder. Paths have no cycles.
         let mut places: Vec<_> = self.graph.nodes().collect();
@@ -1124,49 +1341,59 @@ impl<'p> Frame<'p> {
             if site.root.is_none_or(|root| self.principal.is_in_tree(root)) {
                 continue;
             }
-            let Some(place) = place.and_then(|id| {
+            let Some(parent) = place.and_then(|id| {
                 self.graph
                     .document_container_site(id)
                     .or_else(|| self.graph.site_of(id))
             }) else {
                 continue;
             };
-            // Credential scopes narrow actions, not the lifetime of the person's existing entry.
-            let reachable =
-                !decisions::effective(place.kind, &self.standing(&place), false, |permission| {
-                    self.named(&place, permission)
-                })
-                .is_empty();
-            if reachable {
-                continue;
-            }
-            let maker = self.principal.user();
-            for ((page, _, permission), row) in &mut self.store.rows {
-                if *page == site.page()
-                    && permission.level() == orch_access_contract::permissions::Level::Manage
+            for ((page, _, permission), row) in &self.store.rows {
+                if *page != site.page()
+                    || permission.level() != orch_access_contract::permissions::Level::Manage
                 {
-                    row.entries.retain(|entry| {
-                        !(entry.source == EntrySource::Creation
-                            && entry.created_by == Some(maker)
-                            && entry.holder == (Holder::User { id: maker }))
-                    });
+                    continue;
+                }
+                for entry in &row.entries {
+                    if entry.source == EntrySource::Creation
+                        && entry.created_by == Some(self.principal.user())
+                        && entry.holder
+                            == (Holder::User {
+                                id: self.principal.user(),
+                            })
+                    {
+                        parents.insert(entry.id, parent.clone());
+                    }
                 }
             }
         }
+        parents
+    }
+
+    fn end_outside_creations(&mut self) -> bool {
+        let mut changed = false;
+        for row in self.store.rows.values_mut() {
+            let before = row.entries.len();
+            row.entries.retain(|entry| {
+                !self.creation_parents.contains_key(&entry.id)
+                    || self.admitted_creations.contains(&entry.id)
+            });
+            changed |= row.entries.len() != before;
+        }
+        changed
     }
 
     /// Whether the person is one of the owners named in `entries`, and is a
     /// member of the tree of `root`, which is the while for which owning
     /// counts.
     fn counts_as_owner(&self, entries: Option<&Vec<Entry>>, root: Option<Id>) -> bool {
-        let person = self.principal.person();
         let now = self.principal.now();
         root.is_some_and(|root| self.principal.is_in_tree(root))
             && entries.is_some_and(|entries| {
                 entries
                     .iter()
                     .filter(|entry| entry.counts(now))
-                    .any(|entry| entry.holder.matches(&person, |_| None))
+                    .any(|entry| self.holder_matches(&entry.holder, None))
             })
     }
 
@@ -1210,7 +1437,7 @@ impl<'p> Frame<'p> {
 
     /// Who is asked about.
     #[must_use]
-    pub fn principal(&self) -> &Principal {
+    pub fn principal(&self) -> &S {
         self.principal
     }
 
@@ -1258,10 +1485,66 @@ impl<'p> Frame<'p> {
         site.role_place.and_then(|place| self.role_at(place))
     }
 
+    fn ask_boundary(&self, site: &Site) -> Option<&crate::ask::Boundary> {
+        std::iter::once(site.id)
+            .chain(site.beside)
+            .chain(site.role_place)
+            .chain(site.chain.iter().filter_map(|place| match place {
+                PlaceRef::Node(id) => Some(*id),
+                PlaceRef::System => None,
+            }))
+            .find_map(|id| self.ask_boundaries.get(&id))
+    }
+
+    fn ask_root_available(&self, boundary: &crate::ask::Boundary) -> bool {
+        if boundary
+            .expires
+            .is_none_or(|expires| expires <= self.principal.now())
+            || self.principal.suspension().applies(&[boundary.root])
+        {
+            return false;
+        }
+        let Some(root) = self.graph.site_of(boundary.root) else {
+            return false;
+        };
+        self.principal.permits(Permission::OrgView)
+            && self.principal.reaches(root.path.as_deref())
+            && (self.principal.is_in_tree(boundary.root)
+                || !self.account_ways(&root, Permission::OrgView).is_empty())
+    }
+
+    fn ask_inspection(&self, site: &Site) -> Option<Site> {
+        let boundary = self.ask_boundary(site)?;
+        if boundary.person == self.principal.user() || !self.ask_root_available(boundary) {
+            return None;
+        }
+        let root = self.graph.site_of(boundary.root)?;
+        self.administers(&root).then_some(root)
+    }
+
+    fn inspection_read(permission: Permission) -> bool {
+        permission.level() == orch_access_contract::permissions::Level::View
+            || permission.is_export()
+    }
+
+    fn ask_allows(&self, site: &Site, permission: Permission) -> bool {
+        let Some(boundary) = self.ask_boundary(site) else {
+            return true;
+        };
+        self.ask_root_available(boundary)
+            && (boundary.person == self.principal.user()
+                || Self::inspection_read(permission) && self.ask_inspection(site).is_some())
+    }
+
     /// Whether the person is one of the owners of the site, and counts as
     /// one: a member of its root org.
     #[must_use]
     pub fn owns(&self, site: &Site) -> bool {
+        if let Some(boundary) = self.ask_boundary(site)
+            && (boundary.person != self.principal.user() || !self.ask_root_available(boundary))
+        {
+            return false;
+        }
         self.counts_as_owner(self.owners.get(&site.id), site.root)
     }
 
@@ -1284,17 +1567,24 @@ impl<'p> Frame<'p> {
     /// as an owner of such a place included.
     #[must_use]
     pub fn administers(&self, site: &Site) -> bool {
-        self.principal.caller().as_admin()
-            && (self.principal.is_system_admin()
-                || site
-                    .role_place
-                    .and_then(|place| self.role_at(place))
-                    .is_some_and(|held| held.role == Role::Admin)
-                || site
-                    .admin_places
-                    .first()
-                    .and_then(|place| self.role_at(*place))
-                    .is_some_and(|held| held.role == Role::Admin))
+        // Temporary conversations have a separate read-only inspection entrance;
+        // their storage home's administrator never becomes their manager.
+        if self.ask_boundary(site).is_some() {
+            return false;
+        }
+        self.principal.private_admin()
+            && (self.principal.is_system_admin() || self.administrative_role(site))
+    }
+
+    fn administrative_role(&self, site: &Site) -> bool {
+        site.role_place
+            .and_then(|place| self.role_at(place))
+            .is_some_and(|held| held.role == Role::Admin)
+            || site
+                .admin_places
+                .first()
+                .and_then(|place| self.role_at(*place))
+                .is_some_and(|held| held.role == Role::Admin)
     }
 
     /// Whether an ordinary role or personal/group assignment names this person
@@ -1303,7 +1593,7 @@ impl<'p> Frame<'p> {
     #[must_use]
     pub fn participates(&self, site: &Site) -> bool {
         !self.principal.suspension().applies(&site.orgs)
-            && self.principal.caller().reaches(site.path.as_deref())
+            && self.principal.reaches(site.path.as_deref())
             && self.participation.contains(&site.page())
     }
 
@@ -1313,7 +1603,7 @@ impl<'p> Frame<'p> {
     pub fn participates_chat(&self, site: &Site) -> bool {
         self.participates(site)
             || (!self.principal.suspension().applies(&site.orgs)
-                && self.principal.caller().reaches(site.path.as_deref())
+                && self.principal.reaches(site.path.as_deref())
                 && self.follows_chat(site.id))
     }
 
@@ -1360,6 +1650,15 @@ impl<'p> Frame<'p> {
     /// As [`Self::admin_access`], for an independently private area such as a chat.
     #[must_use]
     pub fn admin_access_for(&self, site: &Site, permission: Permission) -> Option<AdminReach> {
+        if let Some(root) = self.ask_inspection(site) {
+            return (Self::inspection_read(permission) && !self.ways(site, permission).is_empty())
+                .then(|| self.admin_place(&root))
+                .flatten()
+                .map(|place| AdminReach {
+                    place,
+                    private: true,
+                });
+        }
         if !self.administers(site)
             || self.ordinary_holds(site, permission)
             || self.ways(site, permission).is_empty()
@@ -1380,6 +1679,9 @@ impl<'p> Frame<'p> {
     /// The place actually administered by this enabled session, including the place itself.
     #[must_use]
     pub fn admin_place(&self, site: &Site) -> Option<PlaceRef> {
+        if let Some(root) = self.ask_inspection(site) {
+            return self.admin_place(&root);
+        }
         if !self.administers(site) || self.principal.suspension().applies(&site.orgs) {
             return None;
         }
@@ -1433,36 +1735,7 @@ impl<'p> Frame<'p> {
     /// The row `permission` of the site, with the rows it follows.
     #[must_use]
     pub fn chain(&self, site: &Site, permission: Permission) -> Chain<'_> {
-        let profile = self.graph.profile(site, permission);
-        let mut chain = Chain::of(self.store.row(site.page(), Profile::Any, permission));
-        for id in self.graph.document_ancestors(site.id) {
-            chain = chain.in_document_container(
-                id,
-                self.store.row(
-                    PageRef::live(StoredKind::DocumentContainer, id),
-                    Profile::Any,
-                    permission,
-                ),
-            );
-        }
-        if let Some(node) = site.beside {
-            chain = chain.beside(
-                node,
-                self.store.row(
-                    PageRef::live(StoredKind::Node, node),
-                    Profile::Any,
-                    permission,
-                ),
-            );
-        }
-        for place in &site.chain {
-            chain = chain.under(
-                *place,
-                self.store
-                    .row(PageRef::defaults_of(*place), profile, permission),
-            );
-        }
-        chain
+        self.store.chain(&self.graph, site, permission)
     }
 
     /// The row `permission` / `profile` of the defaults page of the first
@@ -1518,18 +1791,186 @@ impl<'p> Frame<'p> {
         permission: Permission,
         work: Option<&[Id]>,
     ) -> Vec<Named<'_>> {
-        self.chain(site, permission)
-            .holders(self.now())
+        self.matching_entries(site, self.chain(site, permission).holders(self.now()), work)
+    }
+
+    /// Match a controlling defaults row without inventing a live object or implicit ownership.
+    pub(crate) fn matching_defaults(
+        &self,
+        site: &Site,
+        places: &[PlaceRef],
+        profile: Profile,
+        permission: Permission,
+    ) -> Vec<Named<'_>> {
+        self.matching_entries(
+            site,
+            self.defaults_chain(places, profile, permission)
+                .holders(self.now()),
+            None,
+        )
+    }
+
+    fn matching_entries<'a>(
+        &'a self,
+        site: &Site,
+        entries: Vec<Named<'a>>,
+        work: Option<&[Id]>,
+    ) -> Vec<Named<'a>> {
+        let bound = site
+            .root
+            .filter(|root| !self.principal.is_in_tree(*root))
+            .and_then(|_| self.outside_bounds.at(&crate::external::way_of(site)));
+        entries
             .into_iter()
+            .filter(|named| self.outside_entry_admitted(site, named.entry, bound))
             .filter(|named| {
                 work.is_some_and(|path| named.entry.holder.is_work_on(path))
-                    || self.principal.is_held_by(&named.entry.holder, |at| {
-                        at.or(site.role_place)
-                            .and_then(|place| self.role_at(place))
-                            .map(|held| held.role)
-                    })
+                    || self.holder_matches(&named.entry.holder, site.role_place)
             })
             .collect()
+    }
+
+    /// Matches an ordinary person audience. Tokens still narrow the operation on the target;
+    /// they do not change the person's membership in a thread's human audience.
+    pub(crate) fn holder_matches(&self, holder: &Holder, default_place: Option<Id>) -> bool {
+        if let Holder::Group { id } = holder {
+            return self.audience_groups.contains(id);
+        }
+        if let Holder::Role {
+            role: Role::Viewer,
+            at: Some(id),
+        } = holder
+        {
+            return self.audience_viewers.contains(id);
+        }
+        self.principal.is_held_by(holder, |at| {
+            at.or(default_place)
+                .and_then(|place| self.role_at(place))
+                .map(|held| held.role)
+        })
+    }
+
+    /// Current ordinary human membership, rather than an operation's token or AsAdmin reach.
+    #[must_use]
+    pub(crate) fn person_views(&self, thread: Id) -> bool {
+        self.audience_viewers.contains(&thread)
+    }
+
+    fn refresh_groups(&mut self, groups: &HashMap<Id, audiences::Group>) {
+        let new_groups: Vec<_> = groups
+            .iter()
+            .filter(|(id, group)| {
+                !self.audience_groups.contains(*id)
+                    && self.graph.site_of(group.org).is_some_and(|site| {
+                        !self.principal.suspension().applies(&site.orgs)
+                            && group
+                                .members
+                                .iter()
+                                .any(|holder| self.holder_matches(holder, None))
+                    })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        self.audience_groups.extend(new_groups);
+    }
+
+    fn refresh_roles(&mut self, sources: &[audiences::Grant]) -> HashMap<Id, Vec<Role>> {
+        let mut grants: HashMap<Id, Vec<Role>> = HashMap::new();
+        for grant in sources {
+            if self.holder_matches(&grant.subject, None) {
+                grants.entry(grant.place).or_default().push(grant.role);
+            }
+        }
+        self.roles = self
+            .graph
+            .nodes()
+            .filter(|node| node.is_place())
+            .map(|node| (node.id, self.role_on_the_way_to(node, &grants)))
+            .collect();
+        grants
+    }
+
+    fn resolve_audiences(
+        &mut self,
+        sites: &[Site],
+        groups: &HashMap<Id, audiences::Group>,
+        sources: &[audiences::Grant],
+    ) {
+        // Positive group/role/viewer edges share one least fixed point. A group or viewer
+        // cycle supplies nothing without a current ordinary user/member/owner/role seed.
+        loop {
+            let before = (
+                self.audience_groups.len(),
+                self.audience_viewers.len(),
+                self.admitted_creations.len(),
+                self.roles.clone(),
+            );
+            self.refresh_groups(groups);
+            let grants = self.refresh_roles(sources);
+            let creations: Vec<_> = self
+                .creation_parents
+                .iter()
+                .filter(|(entry, _)| !self.admitted_creations.contains(*entry))
+                .filter(|(_, parent)| {
+                    !decisions::effective(
+                        parent.kind,
+                        &self.standing(parent),
+                        false,
+                        |permission| self.named(parent, permission),
+                    )
+                    .is_empty()
+                })
+                .map(|(entry, _)| *entry)
+                .collect();
+            self.admitted_creations.extend(creations);
+            let newly: Vec<_> = sites
+                .iter()
+                .filter(|site| !self.audience_viewers.contains(&site.id))
+                .filter(|site| {
+                    let standing = self.standing(site);
+                    !decisions::holds(view_permission(site.kind), &standing, |row| {
+                        self.named(site, row)
+                    })
+                    .is_empty()
+                })
+                .map(|site| site.id)
+                .collect();
+            self.audience_viewers.extend(newly);
+            if before
+                == (
+                    self.audience_groups.len(),
+                    self.audience_viewers.len(),
+                    self.admitted_creations.len(),
+                    self.roles.clone(),
+                )
+            {
+                self.admin_sources = self
+                    .graph
+                    .nodes()
+                    .filter(|node| node.is_place())
+                    .filter_map(|node| {
+                        if !self
+                            .role_at(node.id)
+                            .is_some_and(|held| held.role == Role::Admin)
+                        {
+                            return None;
+                        }
+                        self.graph
+                            .places_on(node)
+                            .into_iter()
+                            .rev()
+                            .find(|place| {
+                                self.counts_as_owner(self.owners.get(&place.id), Some(place.root))
+                                    || grants
+                                        .get(&place.id)
+                                        .is_some_and(|roles| roles.contains(&Role::Admin))
+                            })
+                            .map(|place| (node.id, PlaceRef::Node(place.id)))
+                    })
+                    .collect();
+                break;
+            }
+        }
     }
 
     /// The ways in which the person holds `permission` on the site: none
@@ -1537,9 +1978,21 @@ impl<'p> Frame<'p> {
     /// reach the site. Archive is not looked at here.
     #[must_use]
     pub fn ways(&self, site: &Site, permission: Permission) -> Vec<Through> {
-        let caller = self.principal.caller();
-        if !caller.permits(permission) || !caller.reaches(site.path.as_deref()) {
+        if !self.principal.permits(permission) || !self.principal.reaches(site.path.as_deref()) {
             return Vec::new();
+        }
+        self.account_ways(site, permission)
+    }
+
+    /// The existing account decision, before endpoint credential narrowing. Only fixed
+    /// internal dependencies of an independently admitted operation may use this factor.
+    #[must_use]
+    pub(crate) fn account_ways(&self, site: &Site, permission: Permission) -> Vec<Through> {
+        if !self.ask_allows(site, permission) {
+            return Vec::new();
+        }
+        if self.ask_inspection(site).is_some() {
+            return vec![Through::Admin];
         }
         decisions::holds(permission, &self.standing(site), |row| {
             self.named(site, row)
@@ -1548,12 +2001,13 @@ impl<'p> Frame<'p> {
 
     /// What a token leaves of the permissions held: all for a session.
     fn narrowed(&self, site: &Site, held: Vec<Held>) -> Vec<Held> {
-        let caller = self.principal.caller();
-        if !caller.reaches(site.path.as_deref()) {
+        if !self.principal.reaches(site.path.as_deref()) {
             return Vec::new();
         }
         held.into_iter()
-            .filter(|held| caller.permits(held.permission))
+            .filter(|held| {
+                self.principal.permits(held.permission) && self.ask_allows(site, held.permission)
+            })
             .collect()
     }
 
@@ -1563,10 +2017,24 @@ impl<'p> Frame<'p> {
     /// read.
     #[must_use]
     pub fn effective(&self, site: &Site) -> Vec<Held> {
-        let held =
+        let mut held =
             decisions::effective(site.kind, &self.standing(site), site.is_archived(), |row| {
                 self.named(site, row)
             });
+        if self.ask_inspection(site).is_some() {
+            for permission in site
+                .kind
+                .permissions()
+                .filter(|permission| Self::inspection_read(*permission))
+            {
+                if !held.iter().any(|held| held.permission == permission) {
+                    held.push(Held {
+                        permission,
+                        through: vec![Through::Admin],
+                    });
+                }
+            }
+        }
         self.narrowed(site, held)
     }
 
@@ -1594,7 +2062,7 @@ impl<'p> Frame<'p> {
     /// The requested rows and their covering levels must have been read, as for [`Self::effective`].
     #[must_use]
     pub fn effective_for(&self, site: &Site, permissions: &[Permission], owned: bool) -> Vec<Held> {
-        if !self.principal.caller().reaches(site.path.as_deref()) {
+        if !self.principal.reaches(site.path.as_deref()) {
             return Vec::new();
         }
         let wanted: Vec<_> = permissions
@@ -1602,7 +2070,7 @@ impl<'p> Frame<'p> {
             .copied()
             .filter(|permission| {
                 permission.exists_on(site.kind)
-                    && self.principal.caller().permits(*permission)
+                    && self.principal.permits(*permission)
                     && (!site.is_archived() || permission.when_archived() != WhenArchived::Withheld)
             })
             .collect();
@@ -1651,8 +2119,8 @@ impl<'p> Frame<'p> {
         respect_archive: bool,
     ) -> bool {
         if !permission.exists_on(site.kind)
-            || !self.principal.caller().permits(permission)
-            || !self.principal.caller().reaches(site.path.as_deref())
+            || !self.principal.permits(permission)
+            || !self.principal.reaches(site.path.as_deref())
             || (respect_archive
                 && site.is_archived()
                 && permission.when_archived() == WhenArchived::Withheld)
@@ -1940,6 +2408,7 @@ mod tests {
             source: "page".into(),
             created_by: None,
             created_at: chrono::Utc::now(),
+            renewed_at: None,
             removed_at: None,
             removed_by: None,
             revision: 1,

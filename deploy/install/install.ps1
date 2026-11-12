@@ -16,6 +16,7 @@ param(
     [string]$Url = '',
     [string]$Token = '',
     [string]$Name = '',
+    [string]$Gateway = '',
     [string]$Roles = '',
     [string]$Delegate = '',
     [string]$DataDir = '',
@@ -52,6 +53,7 @@ if ($Help) {
   -Url              系统地址：HTTPS；HTTP 仅限 127.0.0.0/8、[::1] 或 localhost
   -Token            系统显示的一次性注册令牌（oenr_…）
   -Name             机器在系统中的名称；省略时使用主机名
+  -Gateway          automatic 或网关 ID；可交互时显示标签、区域和实测延迟；手选网关保持固定
   -Roles            environment、agent、provider，使用逗号分隔
   -Delegate         将选中角色的设置交给 Orch；本机保留值仍然优先
   -DataDir          数据目录；指定路径的实例使用独立登录任务
@@ -86,6 +88,7 @@ Uninstall without --purge keeps data and identity; nested instances block their 
   -Url              HTTPS system address; HTTP only on 127.0.0.0/8, [::1] or localhost
   -Token            the one-use enrollment token the system showed (oenr_…)
   -Name             the machine's name in Orch (the host name if left out)
+  -Gateway          automatic or a gateway ID; interactive setup shows labels, regions and RTT; selected gateways stay fixed
   -Roles            environment,agent,provider, separated by commas
   -Delegate         hand the selected roles' settings to Orch; locally kept values still win
   -DataDir          another data directory, identity and task (platform default if left out)
@@ -144,6 +147,7 @@ try {
     if (-not $Url) { throw '-Url is needed: the address of the Orch system (see -Help)' }
     if (-not $Token) { throw '-Token is needed: the enrollment token the system showed (see -Help)' }
     if ($DelegatePolicy -and $Delegate) { throw 'use -Delegate or -DelegatePolicy, not both' }
+    if ($PSBoundParameters.ContainsKey('Gateway') -and [string]::IsNullOrEmpty($Gateway)) { throw '-Gateway needs automatic or a gateway ID' }
     if ($Roles.Split(',') -contains 'node') { throw 'The node role is hosted by orch-node: add this computer as a host as well.' }
     $Url = $Url.TrimEnd('/')
     if (-not (Test-SystemAddress $Url)) { throw (Get-SystemAddressError) }
@@ -152,7 +156,7 @@ try {
     if (-not $machine) { $machine = $env:PROCESSOR_ARCHITECTURE }
     switch ($machine) {
         'AMD64' { $Arch = 'x86_64' }
-        'ARM64' { $Arch = 'x86_64' }
+        'ARM64' { $Arch = 'aarch64' }
         default { throw "no connector is made for a $machine processor" }
     }
     if (-not $env:LOCALAPPDATA) { throw 'LOCALAPPDATA is not set: the connector is installed for a person, in their profile' }
@@ -185,12 +189,8 @@ try {
         throw "release $($manifest.version) lists no SHA-256 for the connector, which this installer checks; it is older than this installer"
     }
 
-    # An x64 PowerShell can itself be emulated, so it may not identify the native ARM64 machine.
-    if ($PSUICulture -like 'zh*') {
-        Say '正在安装 x86-64 连接器；Windows 11 在 ARM64 上通过模拟运行它。'
-    } else {
-        Say 'Installing the x86-64 connector; Windows 11 on ARM64 runs it through emulation.'
-    }
+    # Windows on ARM64 has a native connector of its own. An x64 PowerShell on ARM64 reports AMD64, so it gets
+    # the x86-64 connector, which Windows runs through emulation; the build chosen is the one named below.
     Say "Downloading the connector $($manifest.version) for Windows on $Arch"
     $download = Join-Path $Work 'orch-connector.exe'
     Invoke-WebRequest -Uri "$Url$wanted" -OutFile $download -MaximumRedirection 0 -UseBasicParsing
@@ -220,6 +220,7 @@ try {
     }
 
     $arguments = @('--data-dir', $DataDir, 'enroll', '--url', $Url, '--token', $Token)
+    if ($Gateway) { $arguments += @('--gateway', $Gateway) }
     if ($Name) { $arguments += @('--name', $Name) }
     if ($Dedicated) { $arguments += '--dedicated' }
     if ($Roles) { $arguments += @('--roles', $Roles) }

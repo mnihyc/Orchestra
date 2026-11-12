@@ -54,7 +54,7 @@ impl Entry {
         }
     }
 
-    fn content(&self) -> Result<Vec<u8>, ReleaseError> {
+    pub(super) fn content(&self) -> Result<Vec<u8>, ReleaseError> {
         match &self.source {
             Source::Bytes(bytes) => Ok(bytes.clone()),
             Source::File(path) => fs::read(path).map_err(|source| ReleaseError::Io {

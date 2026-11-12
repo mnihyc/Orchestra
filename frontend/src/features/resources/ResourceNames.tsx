@@ -1,3 +1,6 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
+import { mcpCopySetup } from '@/features/duplicate/CopySetup';
 /** MCP and mount lists keep readable records and private permission-page names apart. */
 import { Link, useNavigate } from '@tanstack/react-router';
 import { ArrowRight, Box, Pencil, Plug, Plus } from 'lucide-react';
@@ -9,7 +12,7 @@ import type { McpServer, Mount } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { Button } from '@/ui/Button';
 import { adminSpec } from '@/ui/AdminAct';
-import { entriesOf, shareAct, type Act, type RowActs } from './acts';
+import { entriesOf, managedAct, shareAct, type Act, type RowActs } from './acts';
 import { ResourceList } from './ResourceList';
 import { EditMcp } from './mcp/Edit';
 import { EditMount } from './mounts/Edit';
@@ -17,6 +20,8 @@ import { MountWhere } from './mounts/Where';
 import type { Column } from '@/ui/Table';
 import { Tooltip } from '@/ui/Tooltip';
 import { UserChip } from '@/ui/UserChip';
+import { ImportFromMachine } from '@/features/resources/mcp/Import';
+import { Menu } from '@/ui/Menu';
 import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
 
 type NameRow = McpServer | Mount;
@@ -26,6 +31,7 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
   const navigate = useNavigate();
   const [text, setText] = useState('');
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [editing, setEditing] = useState<NameRow | null>(null);
   const title = t(`screens.${kind}.title`);
   const Icon = kind === 'mcp' ? Plug : Box;
@@ -35,8 +41,8 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
     const target = environment === null ? { kind: kind === 'mcp' ? 'mcp_server' as const : 'mount' as const, id: row.id, name: row.name } : { kind: 'environment' as const, id: environment.id, name: environment.name };
     const permission = environment !== null ? 'environment.manage' : kind === 'mcp' ? 'mcp.manage' : 'mount.manage';
     const open: Act = { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: kind === 'mcp' ? '/resources/mcp/$id' : '/resources/mounts/$id', params: { id: row.id } }) };
-    const edit: Act | null = holds(row.access, permission) ? { id: 'edit', admin: adminSpec(row, permission), label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(row) } : null;
-    return { busy: false, primary: edit ?? open, keys: {}, entries: entriesOf([shareAct(t, target, row.access), edit]) };
+    const edit = managedAct({ id: 'edit', admin: adminSpec(row, permission), label: t('resources.act.editButton'), icon: <Pencil aria-hidden />, run: () => setEditing(row) }, holds(row.access, permission), t('resources.act.manageRequired'));
+    return { busy: false, primary: holds(row.access, permission) ? edit ?? open : open, keys: {}, entries: [...homeMoveEntries(t, kind === 'mcp' ? 'mcp_server' : 'mount', row), ...resourceDuplicateEntries(t, kind === 'mcp' ? 'mcp_server' : 'mount', row, 'spec' in row ? { imported: row.imported !== null, setup: mcpCopySetup(row), ...(row.environment === null ? {} : { sourceView: 'environment.view' }) } : {}), ...entriesOf([shareAct(t, target, row.access), edit])] };
   };
   const columns: Column<NameRow>[] = [
     { id: 'name', header: t('resources.listName'), cell: (row) => <div className="flex min-w-0 flex-col gap-1">
@@ -46,7 +52,11 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
     { id: 'owner', header: t('resources.listOwner'), from: 'lg', cell: (row) => row.owner ? <UserChip user={row.owner} thing={'spec' in row && row.environment !== null ? { kind: 'environment', id: row.environment.id } : { kind: kind === 'mcp' ? 'mcp_server' : 'mount', id: row.id }} /> : null },
   ];
   if (kind === 'mounts') columns.splice(1, 0, { id: 'where', header: t('resourceDetails.mount.where'), from: 'sm', cell: (row) => 'locations' in row ? <MountWhere compact locations={row.locations} hidden={row.locations_hidden} /> : null });
-  const add = <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>{t(kind === 'mcp' ? 'resourceDetails.mcp.add' : 'resourceDetails.mount.add')}</Button>;
+  const add = kind === 'mcp' ? <Menu label={t('resourceDetails.mcp.add')} entries={[
+    { id: 'create', label: t('mcpImport.create'), onSelect: () => setAdding(true) },
+    { id: 'import', label: t('mcpImport.fromMachine'), onSelect: () => setImporting(true) },
+  ]} trigger={<Button variant="primary" icon={<Plus aria-hidden />}>{t('resourceDetails.mcp.add')}</Button>} />
+    : <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>{t('resourceDetails.mount.add')}</Button>;
   return (
     <>
       <ResourceList<NameRow>
@@ -68,6 +78,7 @@ export function ResourceNames({ kind }: { kind: 'mcp' | 'mounts' }) {
         noMatch={t(`${words}.noMatch`)}
         acts={{ name: (row) => row.name, of: actsFor }}
       />
+      {importing && <ImportFromMachine onClose={() => setImporting(false)} />}
       {adding && (kind === 'mcp' ? <EditMcp onClose={() => setAdding(false)} onCreated={(row) => void navigate({ to: '/resources/mcp/$id', params: { id: row.id } })} /> : <EditMount onClose={() => setAdding(false)} onCreated={(row) => void navigate({ to: '/resources/mounts/$id', params: { id: row.id } })} />)}
       {editing !== null && ('spec' in editing ? <EditMcp server={editing} onClose={() => setEditing(null)} /> : <EditMount mount={editing} onClose={() => setEditing(null)} />)}
     </>

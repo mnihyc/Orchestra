@@ -78,8 +78,9 @@ export function useModelCommands(thread: Thread, openControl: (section: Kind | n
       commands.push({
         name,
         about,
-        off,
+        off: off ?? (state.providerFixed === true ? t('providerOptions.fixedByProvider') : !state.writable ? t('providerOptions.unavailable') : null),
         run: (argument) => {
+          if (!state.writable || state.providerFixed === true) return t(state.providerFixed === true ? 'providerOptions.fixedByProvider' : 'providerOptions.unavailable');
           if (argument === '') return (openControl(name), null);
           const size = readSize(argument);
           if (size === null) return t('composer.model.slash.sizeInvalid');
@@ -94,14 +95,15 @@ export function useModelCommands(thread: Thread, openControl: (section: Kind | n
     commands.push({
       name,
       about,
-      off,
+      off: off ?? (state.providerFixed === true ? t('providerOptions.fixedByProvider') : !state.writable ? t('providerOptions.unavailable') : null),
       run: (argument) => {
+        if (!state.writable || state.providerFixed === true) return t(state.providerFixed === true ? 'providerOptions.fixedByProvider' : 'providerOptions.unavailable');
         if (argument === '') return (openControl(name), null);
         const wanted = argument.toLowerCase();
         const none = name === 'speed' ? t('composer.model.speed.standard') : t('composer.model.access.none');
         const noneWords = [none.toLowerCase(), 'none', 'off', ...(name === 'speed' ? ['standard'] : [])];
-        const found = noneWords.includes(wanted) ? ({ id: null, label: none } as const) : (state.open.find((one) => one.id.toLowerCase() === wanted || one.label.toLowerCase() === wanted) ?? null);
-        if (found === null) return t('composer.model.slash.notOpen', { what: t(`composer.model.${name}.title`), given: argument, list: [none, ...state.open.map((one) => one.label)].join(', ') });
+        const found = noneWords.includes(wanted) && state.allowNone !== false ? ({ id: null, label: none } as const) : (state.open.find((one) => one.id.toLowerCase() === wanted || one.label.toLowerCase() === wanted) ?? null);
+        if (found === null) return t('composer.model.slash.notOpen', { what: t(`composer.model.${name}.title`), given: argument, list: [...(state.allowNone === false ? [] : [none]), ...state.open.map((one) => one.label)].join(', ') });
         runs.choose(state, found.id);
         return say(state, found.id === null ? none : (forceLabel({ ...state, force: found.id }) ?? found.label));
       },

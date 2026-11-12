@@ -37,7 +37,7 @@ export function HolderPeople({ target, param, level, via }: { target: AccessTarg
   const rows = query.data?.pages.flatMap((page) => page.items) ?? [];
   const owners = new Set(query.data?.pages.flatMap((page) => page.owners ?? []) ?? []);
   return <div className="flex min-w-0 flex-col gap-2 pl-6">
-    {query.isPending ? <SkeletonRows rows={2} /> : query.isError && rows.length === 0 ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />
+    {query.isPending ? <SkeletonRows read={query} rows={2} /> : query.isError && rows.length === 0 ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />
       : <ul className="flex flex-col gap-2">{rows.map((user) => <li key={user.id} className="flex min-w-0 items-start gap-2 text-sm">
         <Avatar size={24} text={user.avatar.text} color={user.avatar.color} kind={user.kind === 'service' ? 'service' : 'human'} />
         <span className="min-w-0 flex-1 wrap-anywhere"><span className="font-medium text-text">{user.display_name}</span>

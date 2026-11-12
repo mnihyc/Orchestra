@@ -546,12 +546,34 @@ impl Content {
 
     /// Hashes the file at `path` and puts it up for `command`.
     pub async fn put(&self, command: Id, path: &Path) -> Result<BlobRef, CommandError> {
+        self.put_checked(command, path, None).await
+    }
+
+    /// Puts up exactly the retained output named by an item, before advertising that reference.
+    pub async fn put_expected(
+        &self,
+        command: Id,
+        path: &Path,
+        expected: Hash,
+    ) -> Result<BlobRef, CommandError> {
+        self.put_checked(command, path, Some(expected)).await
+    }
+
+    async fn put_checked(
+        &self,
+        command: Id,
+        path: &Path,
+        expected: Option<Hash>,
+    ) -> Result<BlobRef, CommandError> {
         let local = |e: std::io::Error| {
             CommandError::new(ErrorCode::Internal, format!("a file cannot be read: {e}"))
         };
         let size = i64::try_from(tokio::fs::metadata(path).await.map_err(local)?.len())
             .unwrap_or(i64::MAX);
         let hash = hash_file(path).await.map_err(local)?;
+        if expected.is_some_and(|expected| expected != hash) {
+            return Err(failure(&ContentError::HashMismatch));
+        }
         let mut source = FileSource {
             file: tokio::fs::File::open(path).await.map_err(local)?,
             work: WORK.try_with(Arc::clone).ok(),
@@ -757,6 +779,7 @@ mod tests {
     #[derive(Default)]
     struct Store {
         blobs: Mutex<HashMap<Hash, Vec<u8>>>,
+        missing_batches: Mutex<Vec<Vec<Hash>>>,
     }
 
     #[async_trait]
@@ -814,6 +837,7 @@ mod tests {
         }
 
         async fn missing(&self, _: Id, hashes: &[Hash]) -> Result<Vec<Hash>, PutRefusal> {
+            self.missing_batches.lock().unwrap().push(hashes.to_vec());
             let blobs = self.blobs.lock().unwrap();
             Ok(hashes
                 .iter()
@@ -825,6 +849,117 @@ mod tests {
 
     fn content(store: Arc<Store>, scratch: &Path) -> Content {
         Content::new(store, LinkMeter::new(), scratch.to_owned())
+    }
+
+    #[tokio::test]
+    async fn native_record_retention_batches_unique_typed_outputs_instead_of_querying_every_item()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use orch_agent_contract::discovery::RecordedEntry;
+        use std::io::Write as _;
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(Store::default());
+        let content = Arc::new(content(Arc::clone(&store), dir.path()));
+        let record = dir.path().join("retained-record.jsonl");
+        let mut file = std::fs::File::create(&record)?;
+        let opaque = Hash::of(b"not a declared output");
+        let mut expected = std::collections::BTreeSet::new();
+        let count = orch_link_contract::content::MAX_MISSING_HASHES + 1;
+        for index in 0..count {
+            let bytes = format!("retained-output-{index:06}").into_bytes();
+            let hash = Hash::of(&bytes);
+            expected.insert(hash);
+            store.blobs.lock().unwrap().insert(hash, bytes.clone());
+            let entry: RecordedEntry = serde_json::from_value(serde_json::json!({
+                "entry":"item","native_ref":format!("item-{index}"),"turn":1,"stream":"main",
+                "parent_native_ref":null,"status":"completed","at":null,
+                "content":{"kind":"tool_call","payload":{
+                    "tool":{"kind":"mcp","server":"fixture","tool":"read",
+                        "arguments":{"blob":opaque},"result":{"blob":opaque},"error":null},
+                    "title":"Read","started_at":"2026-01-01T00:00:00Z","duration_ms":1,
+                    "raw":{"name":"mcp","input":{"inline":"{}","total_len":2,"truncated":false,"blob":null},
+                        "output":{"inline":"retai","total_len":bytes.len(),"truncated":true,"blob":hash},"is_error":false}
+                }}
+            }))?;
+            for _ in 0..2 {
+                serde_json::to_writer(&mut file, &entry)?;
+                file.write_all(b"\n")?;
+            }
+        }
+        drop(file);
+        crate::harnesses::output_blobs::keep_record(&content, None, &record)
+            .await
+            .unwrap();
+        let batches = store.missing_batches.lock().unwrap();
+        assert_eq!(
+            batches.len(),
+            2,
+            "one more than the existing wire batch size needs two queries"
+        );
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.len() <= orch_link_contract::content::MAX_MISSING_HASHES)
+        );
+        assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), count);
+        assert_eq!(
+            batches
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert!(!batches.iter().flatten().any(|hash| *hash == opaque));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retained_image_outputs_use_the_shared_blob_path_and_keep_their_cache_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::default());
+        let content = Arc::new(content(Arc::clone(&store), dir.path()));
+        let bytes = b"\x89PNG\r\n\x1a\nretained synthetic image bytes";
+        let hash = Hash::of(bytes);
+        let outputs = dir.path().join("outputs");
+        std::fs::create_dir_all(&outputs).unwrap();
+        let source = outputs.join(hash.to_string());
+        std::fs::write(&source, bytes).unwrap();
+        let event = orch_link_contract::events::Event::decode("item.completed", serde_json::json!({
+            "native_ref":"image-result", "status":"completed", "payload":{
+                "tool":{"kind":"image","blob":hash,"media_type":"image/png","name":"result.png","caption":"An orchard."},
+                "title":"Image result","started_at":"2026-01-01T00:00:00Z","duration_ms":1,
+                "raw":{"name":"image","input":{"inline":"{}","total_len":2,"truncated":false,"blob":null},"output":null,"is_error":false}
+            }
+        })).unwrap();
+        crate::harnesses::output_blobs::keep(&content, Some(&outputs), &event)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.blobs.lock().unwrap().get(&hash).map(Vec::as_slice),
+            Some(bytes.as_slice())
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+        // A cached remote blob needs neither a local file nor an adapter-specific alternative.
+        crate::harnesses::output_blobs::keep(&content, None, &event)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_output_cache_file_with_another_hash_is_refused_before_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::default());
+        let content = content(Arc::clone(&store), dir.path());
+        let path = dir.path().join("retained");
+        std::fs::write(&path, b"different bytes").unwrap();
+        assert!(
+            content
+                .put_expected(STANDING_COMMAND, &path, Hash::of(b"selected bytes"))
+                .await
+                .is_err()
+        );
+        assert!(store.blobs.lock().unwrap().is_empty());
+        assert_eq!(std::fs::read(path).unwrap(), b"different bytes");
     }
 
     #[tokio::test]

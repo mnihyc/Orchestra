@@ -3,7 +3,6 @@
 use crate::{DOCUMENTATION, known_vendor, read};
 use async_trait::async_trait;
 use orch_provider_contract::builtins::{BuiltinSource, VendorClient};
-use orch_provider_contract::choice::builtin as names;
 use orch_provider_contract::source::{SourceCredential, SourceDescriptorFacts};
 use orch_provider_contract::{
     FactMember, FactsReport, FactsSource, SourceAsk, SourceDescriptor, SourceError, SourceErrorCode,
@@ -83,6 +82,10 @@ pub fn descriptor() -> SourceDescriptor {
         ..SourceDescriptorFacts::default()
     });
     descriptor.docs_url = Some(DOCUMENTATION.to_owned());
+    let _ = descriptor.extensions.insert(
+        "x_capability_declarations",
+        serde_json::to_value(crate::capabilities::declarations()).unwrap_or(orch_types::Json::Null),
+    );
     descriptor
 }
 
@@ -95,7 +98,7 @@ fn made(client: Arc<dyn VendorClient>, clock: Arc<dyn Clock>) -> Arc<dyn FactsSo
 #[must_use]
 pub fn builtin() -> BuiltinSource {
     BuiltinSource {
-        name: names::DEEPSEEK,
+        name: "deepseek",
         hosts: &["api.deepseek.com"],
         descriptor,
         matches: known_vendor,

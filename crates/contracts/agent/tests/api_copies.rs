@@ -121,6 +121,7 @@ one_shape!(
     elicitation_action: session::ElicitationAction => approvals::ElicitationAction,
     error_payload: events::ErrorPayload => threads::ErrorPayload,
     file_change: events::FileChange => threads::FileChange,
+    file_change_image: events::FileChangeImage => orch_api_contract::source::FileChangeImage,
     file_change_kind: events::FileChangeKind => threads::FileChangeKind,
     file_search_match: events::FileSearchMatch => threads::FileSearchMatch,
     file_search_mode: events::FileSearchMode => threads::FileSearchMode,
@@ -140,8 +141,86 @@ one_shape!(
     tool_call_payload: events::ToolCallPayload => threads::ToolCallPayload,
     tool_payload: events::ToolPayload => threads::ToolPayload,
     turn_phase_kind: events::TurnPhaseKind => threads::TurnPhaseKind,
+    web_action: events::WebAction => threads::WebAction,
     web_search_result: events::WebSearchResult => threads::WebSearchResult,
 );
+
+#[test]
+fn web_actions_preserve_legacy_rows_and_unknown_actions_are_not_searches()
+-> Result<(), Box<dyn std::error::Error>> {
+    let old = serde_json::json!({"kind":"web_search", "query":"orchards", "results":[]});
+    let native: events::ToolPayload = serde_json::from_value(old.clone())?;
+    let api: threads::ToolPayload = serde_json::from_value(old.clone())?;
+    assert_eq!(serde_json::to_value(native)?, old);
+    assert_eq!(serde_json::to_value(api)?, old);
+    for action in [
+        serde_json::json!({"type":"open_page", "url":"https://docs.example.invalid/guide"}),
+        serde_json::json!({"type":"find_in_page", "url":null, "pattern":"harvest"}),
+        serde_json::json!({"type":"other"}),
+    ] {
+        let row =
+            serde_json::json!({"kind":"web_search", "query":"", "results":[], "action":action});
+        let native: events::ToolPayload = serde_json::from_value(row.clone())?;
+        let api: threads::ToolPayload = serde_json::from_value(row.clone())?;
+        assert_eq!(serde_json::to_value(native)?, row);
+        assert_eq!(serde_json::to_value(api)?, row);
+    }
+    let future: events::WebAction =
+        serde_json::from_value(serde_json::json!({"type":"future_action", "new_member":true}))?;
+    assert_eq!(future, events::WebAction::Other);
+    Ok(())
+}
+
+#[test]
+fn recorded_file_images_survive_both_payload_copies_and_old_changes_still_read() {
+    let old = serde_json::json!({
+        "path":"code.txt", "change":"modify", "old_path":null,
+        "diff":null, "added":1, "removed":1, "binary":false, "truncated":false
+    });
+    for images in [
+        None,
+        Some(serde_json::json!({
+            "before":{"state":"text", "text":"before"},
+            "after":{"state":"text", "text":"after"}
+        })),
+    ] {
+        let mut recorded = old.clone();
+        if let Some(images) = images {
+            recorded
+                .as_object_mut()
+                .unwrap()
+                .extend(images.as_object().unwrap().clone());
+        }
+        let native: events::FileChange = serde_json::from_value(recorded.clone()).unwrap();
+        let shown: threads::FileChange = serde_json::from_value(recorded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(native).unwrap(), recorded);
+        assert_eq!(serde_json::to_value(shown).unwrap(), recorded);
+    }
+}
+
+#[test]
+fn allowance_details_are_optional_and_survive_the_agent_to_api_boundary() {
+    let previous = serde_json::json!({
+        "code": "harness_error", "message": "An earlier notice", "retryable": false
+    });
+    let native: events::ErrorPayload = serde_json::from_value(previous.clone()).unwrap();
+    let shown: threads::ErrorPayload = serde_json::from_value(previous.clone()).unwrap();
+    assert_eq!(serde_json::to_value(native).unwrap(), previous);
+    assert_eq!(serde_json::to_value(shown).unwrap(), previous);
+
+    let limited = serde_json::json!({
+        "code": "image_generation_limit", "message": "Image generation reached its usage limit.",
+        "retryable": false, "details": {"reported":true},
+        "window": "imagegen_premium", "resets_at": "2026-10-12T12:35:52Z"
+    });
+    let native: events::ErrorPayload = serde_json::from_value(limited).unwrap();
+    let wire = serde_json::to_value(native).unwrap();
+    let shown: threads::ErrorPayload = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(shown.window.as_deref(), Some("imagegen_premium"));
+    assert!(shown.resets_at.is_some());
+    assert_eq!(shown.details, Some(serde_json::json!({"reported":true})));
+    assert_eq!(serde_json::to_value(shown).unwrap(), wire);
+}
 
 #[test]
 fn plan_payload() {
@@ -207,4 +286,17 @@ fn words_for_people_are_not_the_shape_and_a_member_more_is() {
         "the words for people are not the shape"
     );
     assert_ne!(shape::<One>(), shape::<Wider>());
+}
+
+#[test]
+fn error_details_are_optional_and_round_trip_through_both_contracts() {
+    let before = serde_json::json!({"code":"harness_diverged","message":"A native setting changed","retryable":false});
+    let agent: events::ErrorPayload = serde_json::from_value(before.clone()).unwrap();
+    assert!(agent.details.is_none());
+    assert_eq!(serde_json::to_value(agent).unwrap(), before);
+    let with_details = serde_json::json!({"code":"mcp_server_failed","message":"A server failed","retryable":false,"details":{"status":"failed"}});
+    let agent: events::ErrorPayload = serde_json::from_value(with_details.clone()).unwrap();
+    let api: threads::ErrorPayload =
+        serde_json::from_value(serde_json::to_value(agent).unwrap()).unwrap();
+    assert_eq!(serde_json::to_value(api).unwrap(), with_details);
 }

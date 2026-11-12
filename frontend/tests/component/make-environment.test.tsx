@@ -12,6 +12,7 @@ import { detailHost, detailTemplate } from './resource-detail-fixtures';
 const server = vi.hoisted(() => ({
   create: vi.fn<(body: Record<string, unknown>, key: string) => Promise<{ id: string; name: string }>>(),
   navigate: vi.fn(), close: vi.fn(),
+  withoutHosts: vi.fn<() => boolean>(),
 }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<object>(), useNavigate: () => server.navigate, useLocation: () => ({ pathname: '/resources/environments', search: {}, searchStr: '' }) }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
@@ -31,18 +32,21 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(),
 }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(),
   templatesQuery: () => ({ queryKey: ['make-test-templates'], queryFn: () => Promise.resolve([
-    { ...detailTemplate, id: 'template-one', name: 'Node', driver: 'docker', enabled: true, description: '' },
-    { ...detailTemplate, id: 'template-two', name: 'Rust', driver: 'docker', enabled: true, description: '' },
+    { ...detailTemplate, id: 'template-one', name: 'Node', driver: 'docker', enabled: true, description: '', access: { ...detailTemplate.access, permissions: [...detailTemplate.access.permissions, 'template.use'] } },
+    { ...detailTemplate, id: 'template-two', name: 'Rust', driver: 'docker', enabled: true, description: '', access: { ...detailTemplate.access, permissions: [...detailTemplate.access.permissions, 'template.use'] } },
+    { ...detailTemplate, id: 'disabled-template', name: 'Disabled recipe', driver: 'docker', enabled: false, description: '' },
   ]) }),
-  hostsQuery: () => ({ queryKey: ['make-test-hosts'], queryFn: () => Promise.resolve([
-    { ...detailHost, id: 'host-one', name: 'Docker one', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-one' }, address: 'one' },
-    { ...detailHost, id: 'host-two', name: 'Docker two', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-two' }, address: 'two' },
+  hostsQuery: () => ({ queryKey: ['make-test-hosts'], queryFn: () => Promise.resolve(server.withoutHosts() ? [] : [
+    { ...detailHost, id: 'host-one', name: 'Docker one', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-one' }, address: 'one', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
+    { ...detailHost, id: 'host-two', name: 'Docker two', schedulable: true, drivers: [{ ...detailHost.drivers[0], name: 'docker', creates: ['environment'] }], machine: { ...detailHost.machine, id: 'machine-two' }, address: 'two', access: { ...detailHost.access, permissions: [...detailHost.access.permissions, 'host.use'] } },
+    { ...detailHost, id: 'read-only-host', name: 'Read-only host', access: { ...detailHost.access, permissions: ['host.view'] } },
   ]) }),
 }));
 
 beforeEach(async () => {
   await setLocale('en');
   vi.clearAllMocks();
+  server.withoutHosts.mockReturnValue(false);
   server.create.mockReset().mockResolvedValue({ id: 'made', name: 'New work' });
   useSelectedOrg.setState({ orgId: 'beta' });
 });
@@ -60,21 +64,22 @@ it('defaults Belongs to to the viewed org for a person with two orgs and sends i
   expect(server.navigate).toHaveBeenCalledWith({ to: '/resources/environments/$id', params: { id: 'made' } });
 });
 
-it.each([{ forThread: false, lifetime: 'temporary' }, { forThread: true, lifetime: 'thread' }])('Temporary submits explicit cleanup consent ($lifetime)', async ({ forThread, lifetime }) => {
+for (const locale of ['en', 'zh-CN'] as const) it.each([{ forThread: false, lifetime: 'temporary' }, { forThread: true, lifetime: 'thread' }])('Temporary submits explicit cleanup consent ($lifetime)', async ({ forThread, lifetime }) => {
+  await setLocale(locale);
   const user = userEvent.setup();
   show(<MakeEnvironmentDialog forThread={forThread} home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
-  const temporary = await screen.findByRole('switch', { name: 'Temporary' });
-  const consent = i18n.t('temporary.consent');
+  const temporary = await screen.findByRole('switch', { name: i18n.t('temporary.name') });
+  const consent = i18n.t(forThread ? 'temporary.consent' : 'temporary.idleConsent');
   expect(temporary).not.toBeChecked();
   expect(screen.queryByText(consent)).not.toBeInTheDocument();
   await user.click(temporary);
   expect(screen.queryByText(consent)).not.toBeInTheDocument();
-  await user.hover(screen.getByRole('textbox', { name: 'Name' }));
+  await user.hover(screen.getByRole('textbox', { name: i18n.t('environments.make.name') }));
   await user.hover(temporary);
   expect(await screen.findByRole('tooltip')).toHaveTextContent(consent);
   expect(document.querySelector('[data-choice-selected-description]')).toBeNull();
-  expect(temporary).toHaveAccessibleDescription(`${i18n.t('temporary.description')} ${consent}`);
-  await user.click(screen.getByRole('button', { name: 'Add environment' }));
+  expect(temporary).toHaveAccessibleDescription(`${i18n.t(forThread ? 'temporary.description' : 'temporary.idleDescription')} ${consent}`);
+  await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
   await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ home_node_id: 'beta', config: { 'env.lifetime': lifetime } }), expect.any(String)));
 });
 
@@ -119,8 +124,8 @@ it('preserves the template and host selected by Add environment', async () => {
   const user = userEvent.setup();
   show(<MakeEnvironmentDialog templateId="template-two" hostId="host-two" onClose={server.close} />);
   await waitFor(() => expect(screen.getByRole('combobox', { name: 'Belongs to' })).toHaveValue('Beta'));
-  expect(screen.getByRole('combobox', { name: 'Template' })).toHaveTextContent('Rust');
-  expect(screen.getByRole('combobox', { name: 'Host' })).toHaveTextContent('Docker two');
+  expect(screen.getByRole('combobox', { name: 'Template' })).toHaveValue('Rust');
+  expect(screen.getByRole('combobox', { name: 'Host' })).toHaveValue('Docker two');
   await user.click(screen.getByRole('button', { name: 'Add environment' }));
   await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ template_id: 'template-two', host_id: 'host-two' }), expect.any(String)));
 });
@@ -146,5 +151,38 @@ it('never substitutes another template when an entry-point preset is unavailable
   await waitFor(() => expect(screen.getByRole('combobox', { name: 'Belongs to' })).toHaveValue('Beta'));
   expect(screen.getByRole('combobox', { name: 'Template' })).toHaveAccessibleDescription('Choose an available environment template.');
   expect(screen.getByRole('button', { name: 'Add environment' })).toHaveAttribute('aria-disabled', 'true');
+  expect(server.create).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`retains Automatic when no named host is currently offered (${locale})`, async () => {
+  await setLocale(locale); server.withoutHosts.mockReturnValue(true);
+  const user = userEvent.setup();
+  show(<MakeEnvironmentDialog home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
+  const host = await screen.findByRole('combobox', { name: i18n.t('environments.make.host') });
+  await user.click(host);
+  expect(screen.getByRole('option', { name: i18n.t('choiceCatalog.placement.automatic.name') })).not.toHaveAttribute('aria-disabled', 'true');
+  await user.keyboard('{Escape}');
+  await user.click(screen.getByRole('button', { name: i18n.t('environments.make.submit') }));
+  await waitFor(() => expect(server.create).toHaveBeenCalledWith(expect.objectContaining({ host_id: null }), expect.any(String)));
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it(`retains an unavailable preset and keeps refused hosts inspectable without creating (${locale})`, async () => {
+  await setLocale(locale);
+  const user = userEvent.setup();
+  show(<MakeEnvironmentDialog templateId="disabled-template" home={{ id: 'beta', name: 'Beta' }} onClose={server.close} />);
+  const template = await screen.findByRole('combobox', { name: i18n.t('environments.make.template') });
+  await waitFor(() => expect(template).toHaveValue('Disabled recipe'));
+  const create = screen.getByRole('button', { name: i18n.t('environments.make.submit') });
+  expect(create).toHaveAttribute('aria-disabled', 'true');
+  await user.click(template);
+  const disabled = screen.getByRole('option', { name: 'Disabled recipe' });
+  expect(disabled).toHaveAttribute('aria-disabled', 'true');
+  expect(within(disabled).getByText(i18n.t('resourceChoices.disabled'))).toBeVisible();
+  await user.click(screen.getByRole('option', { name: 'Node' }));
+  await user.click(screen.getByRole('combobox', { name: i18n.t('environments.make.host') }));
+  const host = screen.getByRole('option', { name: 'Read-only host' });
+  expect(host).toHaveAttribute('aria-disabled', 'true');
+  expect(within(host).getByText(i18n.t('resourceChoices.hostUse'))).toBeVisible();
+  await user.click(host);
   expect(server.create).not.toHaveBeenCalled();
 });

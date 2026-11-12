@@ -97,6 +97,10 @@ impl Engine {
             return Ok(result);
         };
         let runtimes = environments::runtimes_by(conn, ids).await?;
+        if !runtimes.is_empty() && runtimes.iter().all(|runtime| runtime.state == "creating") {
+            // No installed definition exists yet, as in the per-runtime exclusion below.
+            return Ok(result);
+        }
         let inputs: Vec<Input> = sqlx::query_as("SELECT r.id AS runtime,COALESCE(e.id,p.id) AS target,
             COALESCE(e.home_node_id,p.home_id) AS home,COALESCE(e.owner_id,p.owner_id) AS owner,
             COALESCE(e.config,p.runtime_config) AS own,COALESCE(e.revision,p.revision) AS revision,

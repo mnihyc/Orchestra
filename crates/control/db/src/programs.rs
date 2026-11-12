@@ -11,6 +11,8 @@ use crate::{Conn, DbError};
 
 /// Bounded program administration backed by indexed report and build projections.
 pub mod admin;
+/// Narrow current machine catalogue projections.
+pub mod machine;
 
 /// The manifests that machines report in their facts, in the order of their machines. A member that is not a
 /// manifest is skipped.

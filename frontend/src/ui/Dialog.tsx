@@ -6,13 +6,14 @@
  */
 import { X } from 'lucide-react';
 import { Dialog as Primitive } from 'radix-ui';
-import { type ReactNode, useRef } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { restoreFocusQuietly } from '@/ui/focus';
 import { cx } from '@/ui/cx';
 import { ContentBoundary } from '@/ui/ContentBoundary';
 import { useScrolls } from '@/ui/useScrolls';
-import { currentPrompt, PromptScope, restorePromptFocus, usePrompt } from '@/ui/PromptScope';
+import { currentPrompt, PromptScope, registerReturnTarget, restorePromptFocus, usePrompt } from '@/ui/PromptScope';
 
 export type DialogSize = 'sm' | 'md' | 'lg' | 'xl';
 
@@ -40,10 +41,12 @@ const SIZES: Record<DialogSize, string> = {
 /**
  * Gives the keyboard back to whatever had it when something opened above the page. What opens is
  * told to open by a button, a menu entry or a key, and none of them is known to it: so it remembers,
- * as it opens, where the keyboard was, and returns it there when it closes.
+ * as it opens, where the keyboard was, and returns it there when it closes. A menu entry retires with
+ * its menu, so the menu hands the prompt its button instead (see `handReturnTargetToPrompt`).
  */
-export function useOpener(): { remember: () => void; giveBack: (event: Event) => void } {
+export function useOpener(promptId: string): { remember: () => void; giveBack: (event: Event) => void } {
   const opener = useRef<Element | null>(null);
+  useEffect(() => registerReturnTarget(promptId, opener), [promptId]);
   return {
     remember: () => {
       if (opener.current?.isConnected !== true) opener.current = document.activeElement;
@@ -55,13 +58,13 @@ export function useOpener(): { remember: () => void; giveBack: (event: Event) =>
         event.preventDefault();
         const current = currentPrompt();
         if (current !== null && !current.contains(document.activeElement)) {
-          (current.querySelector<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button') ?? current).focus();
+          restoreFocusQuietly(current.querySelector<HTMLElement>('[data-autofocus], input:not([type="hidden"]), textarea, select, button') ?? current);
         }
         return;
       }
       opener.current = null;
       event.preventDefault();
-      element.focus();
+      restoreFocusQuietly(element);
     },
   };
 }
@@ -81,10 +84,15 @@ export function Dialog({
 }: DialogProps) {
   const { t } = useTranslation();
   const layer = usePrompt(open);
-  const opener = useOpener();
+  const opener = useOpener(layer.id);
   const { attach, scrolls, scrollProps } = useScrolls();
   const stay = (event: Event) => {
     if (!dismissible) event.preventDefault();
+  };
+  // Escape that gives up a choice of keys belongs to that choice, not to the dialog around it.
+  const giveUpKeys = (event: KeyboardEvent) => {
+    stay(event);
+    if (event.target instanceof Element && event.target.closest('[data-keys="own"]') !== null) event.preventDefault();
   };
   return (
     <PromptScope layer={layer}><Primitive.Root open={open} onOpenChange={onOpenChange}>
@@ -109,7 +117,7 @@ export function Dialog({
               event.preventDefault();
               first.focus();
             }}
-            onEscapeKeyDown={stay}
+            onEscapeKeyDown={giveUpKeys}
             onPointerDownOutside={stay}
             onInteractOutside={stay}
             className={cx(

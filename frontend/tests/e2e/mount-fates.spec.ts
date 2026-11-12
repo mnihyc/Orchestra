@@ -16,7 +16,7 @@ for (const width of [1280, 390]) {
     await signIn(page);
     await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
     await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-    await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
     const dialog = wizard(page, 'Move Sandbox');
     await dialog.getByRole('combobox', { name: 'Place', exact: true }).click();
     await page.getByRole('option', { name: 'build-host', exact: true }).click();

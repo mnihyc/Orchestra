@@ -24,8 +24,8 @@ export { EMPTY_WORKBENCH, parsePageAddress, pageResource } from './contentAddres
 import { useWorkbench } from './store';
 import type { ViewProps } from './views';
 import { TargetContext } from '@/shell/RouteContext';
-import { isListRoute, storedListState, usePageListSearch } from '@/lib/listState';
-import { readViewChoice } from '@/lib/viewChoices';
+import { isListRoute, isResourceListRoute, navigatedList, resourceListSearch, listSearch, storedListState, usePageListSearch } from '@/lib/listState';
+import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
 import { client } from '@/api/client';
 
 /** Compatibility name used by existing full-page callers; all full content now has an address. */
@@ -50,6 +50,9 @@ async function resolveTarget(target: PageTarget): Promise<PageTarget> {
   return target;
 }
 const hrefOf = pageHref;
+/** What an address asks of the frame rather than of its page: the chat panel, and a chat or message in it. A page's own
+ *  search does not know them, so a page that changes its own search on the address in view keeps them as they stand. */
+const FRAME_SEARCH = ['panel', 'chat', 'message'] as const;
 export async function canonicalPageAddress(href: string): Promise<string> {
   const target = parsePageAddress(href);
   return target === null ? href : hrefOf(await resolveTarget(target));
@@ -121,10 +124,21 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
         const kept=storedListState(readViewChoice(client.session.getState().userId,`page.${scope}`,'state','{}'));
         nextSearch={...kept,...nextSearch};
       }
-      if (isListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
-        nextSearch = { ...nextSearch, _list: true, ...(nextSearch.list === undefined && latestSearch.current.list !== undefined ? { list: latestSearch.current.list } : {}) };
+      if (isResourceListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
+        nextSearch = resourceListSearch(nextSearch);
+        // Store an explicit reset before navigation, so an empty address cannot resurrect the old filters.
+        writeViewChoice(client.session.getState().userId, `page.${target.pathname}`, 'state', JSON.stringify(listSearch(nextSearch, target.route)));
+      } else if (isListRoute(target.route) && (options.to === undefined || options.to === target.pathname)) {
+        // The list state goes with the address by one rule (see lib/listState.ts): its own screen's controls only, always with the marker.
+        const list = navigatedList(target.route, tab.id, latestSearch.current, nextSearch);
+        const { list: _carried, ...rest } = nextSearch;
+        nextSearch = { ...rest, _list: true, ...(list === undefined ? {} : { list }) };
       }
       latestSearch.current = nextSearch;
+      if ((options.to === undefined || options.to === target.pathname) && useWorkbench.getState().activeContent === tab.id) {
+        const live = router.state.location.search as Record<string, unknown>;
+        for (const key of FRAME_SEARCH) if (!Object.hasOwn(nextSearch, key) && live[key] !== undefined) nextSearch = { ...nextSearch, [key]: live[key] };
+      }
       const hash = options.hash ?? (options.to === undefined ? target.hash : '');
       href = `${to}${defaultStringifySearch(nextSearch)}${hash === '' ? '' : `#${hash}`}`;
     }
@@ -140,6 +154,10 @@ function LoadedPage({ tab, target, definition }: { tab: Tab; target: PageTarget;
     }
   }, [router, tab, target]);
   useEffect(() => {
+    if (isResourceListRoute(target.route)) {
+      if (JSON.stringify(target.search) !== JSON.stringify(search)) void navigate({ search, replace: true });
+      return;
+    }
     if (!isListRoute(target.route) || target.search._list !== undefined) return;
     const addressed = { ...definition.validate(target.search), ...(target.search.list === undefined ? {} : { list: target.search.list }), _list: undefined };
     const restored = { ...search, _list: undefined };

@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** Native provider observations for card, privacy and guarded-reset tests. */
 import { maybeHarnessName } from '../doubles/harness-names';
 import type { PlanProvider } from '@/features/resources/providers/plan';
@@ -10,7 +11,7 @@ export const SOURCE_DESCRIPTOR: NonNullable<PlanProvider['sources']['facts']['de
   models:{},presents:null,fields:[],docs_url:null };
 
 export function planProvider(patch: Partial<PlanProvider> = {}): PlanProvider {
-  return {
+  return { ...unjudgedProvenance(),
     id: 'plan-provider', name: 'Team Pro', kind: 'subscription', address: 'acme.team.team-pro', placement: 'managed', status: 'ready',credential_keeper:patch.credential_keeper ?? patch.key_machine ?? null,
     status_detail: null, status_at: OBSERVED, facts_at: OBSERVED, facts_requested_at: OBSERVED,
     sources:{facts:{by:'default',name:'adapter',address:null,config:{},secrets:[],descriptor:structuredClone(SOURCE_DESCRIPTOR),described_at:OBSERVED,last_error:null},models:{by:'default',name:'adapter',address:null,config:{},secrets:[],descriptor:structuredClone(SOURCE_DESCRIPTOR),described_at:OBSERVED,last_error:null},presenter:null},

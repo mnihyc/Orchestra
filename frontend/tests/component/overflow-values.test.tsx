@@ -22,7 +22,7 @@ for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-
     vi.useFakeTimers();
     const toggle = vi.fn();
     const full = locale === 'en' ? 'A complete short description' : '完整的简短说明';
-    const { container } = show(<DescriptionLine thread={{ description: full, description_source: 'user', auto_updated_at: null }} open={false} onToggle={toggle} mayEdit />);
+    const { container } = show(<DescriptionLine thread={{ description: full }} open={false} onToggle={toggle} mayEdit />);
     const value = container.querySelector('[data-overflow-text]');
     if (!(value instanceof HTMLElement)) throw new Error('The description original is missing.');
     // Nonzero equal dimensions model an actual uncut label, rather than an unrendered jsdom box.
@@ -45,7 +45,7 @@ for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-
   it(`reveals every line of a description when its summary receives keyboard focus in ${locale} and ${theme}`, async () => {
     await setLocale(locale); document.documentElement.dataset.theme = theme;
     const full = locale === 'en' ? 'First line\nThe rest of the complete description' : '第一行\n完整说明的其余内容';
-    const { container } = show(<DescriptionLine thread={{ description: full, description_source: 'user', auto_updated_at: null }} open={false} onToggle={() => undefined} mayEdit />);
+    const { container } = show(<DescriptionLine thread={{ description: full }} open={false} onToggle={() => undefined} mayEdit />);
     const value = container.querySelector('[data-overflow-text]');
     if (!(value instanceof HTMLElement)) throw new Error('The description original is missing.');
     Object.defineProperties(value, { clientWidth: { value: 100 }, scrollWidth: { value: 100 }, clientHeight: { value: 20 }, scrollHeight: { value: 20 } });

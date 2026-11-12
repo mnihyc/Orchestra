@@ -11,7 +11,8 @@
 //! endpoint records the authenticated command with each accepted piece. Only uploads of that exact
 //! command can supply progress; when there are two nothing is shown. The one found is kept, and its
 //! command is checked again on every read. What was seen is also kept in the job's
-//! plan, so that a runner that takes the job over goes on showing from where it was.
+//! plan, in the same write as the bytes the progress shows, so that a runner that takes the job over
+//! goes on showing from where it was and never finds bytes shown for an upload the plan does not name.
 //!
 //! **Resuming.** The record this reads is the system's own and lasts a day after the last piece
 //! (`STALE_UPLOAD_AGE` in the API). When a command is given up or fails while the machine is
@@ -88,38 +89,41 @@ pub(crate) struct Watched<T> {
 ///
 /// Showing is for the person, and never fails the command: a read that does not go through is
 /// tried again a second later.
-pub(crate) async fn watching<T>(
+pub(crate) fn watching<T>(
     job: &Job,
     machine: Id,
     command: Id,
     share: f64,
     wait: impl Future<Output = T>,
     succeeded: impl FnOnce(&T) -> bool,
-) -> Watched<T> {
-    let mut watch = Watch::begin(job, machine, command, share).await;
-    let result = {
-        tokio::pin!(wait);
-        let watcher = watch.run(job);
-        tokio::pin!(watcher);
-        tokio::select! {
-            result = &mut wait => result,
-            never = &mut watcher => match never {},
-        }
-    };
-    let succeeded = succeeded(&result);
-    if !succeeded {
-        watch.reached = match watch.retained(job).await {
-            Ok(confirmed) => confirmed,
-            Err(error) => {
-                tracing::debug!(%error, job = %job.id(), "the remaining partial upload could not be confirmed");
-                None
+) -> impl Future<Output = Watched<T>> {
+    let wait = Box::pin(wait);
+    async move {
+        let mut watch = Watch::begin(job, machine, command, share).await;
+        let result = {
+            tokio::pin!(wait);
+            let watcher = Box::pin(watch.run(job));
+            tokio::pin!(watcher);
+            tokio::select! {
+                result = &mut wait => result,
+                never = &mut watcher => match never {},
             }
         };
-    }
-    watch.clear(job, succeeded).await;
-    Watched {
-        result,
-        reached: watch.reached,
+        let succeeded = succeeded(&result);
+        if !succeeded {
+            watch.reached = match watch.retained(job).await {
+                Ok(confirmed) => confirmed,
+                Err(error) => {
+                    tracing::debug!(%error, job = %job.id(), "the remaining partial upload could not be confirmed");
+                    None
+                }
+            };
+        }
+        watch.clear(job, succeeded).await;
+        Watched {
+            result,
+            reached: watch.reached,
+        }
     }
 }
 
@@ -264,6 +268,11 @@ impl Watch {
 
     /// Takes in that `received` of `size` bytes have arrived: shows it, and keeps it in the plan when
     /// it has gone a step further than what the plan holds.
+    ///
+    /// The bytes and the record of which upload they are go into the job in one transaction, so that
+    /// nobody who reads the job, and no runner that takes it over, finds bytes shown for an upload
+    /// that the plan does not name. What was shown and what was kept are taken as such only once
+    /// they were written: a write that does not go through is made again at the next look.
     async fn settle(&mut self, job: &Job, received: i64, size: i64) -> Result<(), EngineError> {
         let Some(hash) = self.locked else {
             return Ok(());
@@ -276,8 +285,11 @@ impl Watch {
         };
         let first = *self.first.get_or_insert((Instant::now(), reached.received));
         self.reached = Some(reached);
+        let step = (size / CHECKPOINT_STEPS).max(1);
+        let due =
+            self.kept == 0 || reached.received - self.kept >= step || reached.received >= size;
+        let record = due.then(|| json!({ CHECKPOINT: reached }));
         if self.shown != Some(reached.received) {
-            self.shown = Some(reached.received);
             let counted = first.1.min(reached.received);
             let seconds = first.0.elapsed().as_secs_f64();
             let rate = (seconds >= 1.0 && reached.received > counted)
@@ -291,7 +303,7 @@ impl Watch {
                 1.0
             };
             let share = self.share;
-            job.amend(move |progress, _| {
+            job.amend_and_remember(record.as_ref(), move |progress, _| {
                 progress.bytes_done = reached.received;
                 progress.bytes_total = Some(reached.size);
                 progress.rate_bps = rate;
@@ -300,11 +312,12 @@ impl Watch {
                 progress.percent = percent_of(progress, share * fraction);
             })
             .await?;
+            self.shown = Some(reached.received);
+        } else if let Some(record) = &record {
+            job.remember(record).await?;
         }
-        let step = (size / CHECKPOINT_STEPS).max(1);
-        if self.kept == 0 || reached.received - self.kept >= step || reached.received >= size {
+        if record.is_some() {
             self.kept = reached.received.max(1);
-            job.remember(&json!({ CHECKPOINT: reached })).await?;
         }
         Ok(())
     }

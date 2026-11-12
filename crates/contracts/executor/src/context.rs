@@ -42,6 +42,9 @@ pub struct EnvironmentContext {
     pub tools_dir: Option<String>,
     /// The tools the environment was made with: the builds an executor of a harness's own may run.
     pub tools: Vec<ToolRef>,
+    /// Existing programs explicitly selected by this machine's local policy, keyed by harness kind.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub local_programs: BTreeMap<String, String>,
     /// The mounts that were attached: further roots, readable, and writable unless read-only.
     pub mounts: Vec<AttachedMount>,
     /// The user the connector, and so the executor, runs as.

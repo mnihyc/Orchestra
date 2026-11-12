@@ -7,7 +7,7 @@
  * - the access token, which is kept in memory only and never written anywhere: it is sent as a
  *   bearer, renewed shortly before it ends, and renewed once when the API says it is no longer good,
  *   after which the request that was refused is sent once more;
- * - the header that the two requests authenticated by the session cookie alone must carry;
+ * - the header that cookie-only session requests must carry;
  * - an error of the API as an `ApiError` that carries its code, the members that code adds, and the
  *   request id to show beside it;
  * - a request given up after silence, never for its length (`lib/requests.ts`).
@@ -19,6 +19,7 @@ import type { AuthResult, ErrorCode, MissingAccess, NodeRef, paths, Problem, Sig
 import { NetworkError, sendUntilSilent } from '@/lib/requests';
 import { openingId } from '@/lib/opening';
 import { apiErrorSentence, fieldErrorSentence } from '@/i18n/errors';
+import { createServerClock, serverClock, type ServerClock } from '@/lib/serverClock';
 
 /** Where every request of the API lives. */
 export const BASE_PATH = '/api/v1';
@@ -27,8 +28,8 @@ const CSRF_HEADER = 'X-Orch-Csrf';
 const REQUEST_ID_HEADER = 'X-Request-Id';
 const IDEMPOTENCY_HEADER = 'Idempotency-Key';
 
-/** The two requests that the session cookie alone authenticates. */
-const COOKIE_REQUESTS = [`${BASE_PATH}/auth/refresh`, `${BASE_PATH}/auth/logout`];
+/** Cookie-only discovery, renewal and sign-out keep the same CSRF transport. */
+const COOKIE_REQUESTS = [`${BASE_PATH}/auth/session`, `${BASE_PATH}/auth/refresh`, `${BASE_PATH}/auth/logout`];
 
 /**
  * How long before its end an access token is renewed: twice the silence a request is allowed, so that
@@ -167,11 +168,59 @@ interface Answer {
   response: Response;
 }
 
-/** The body of a request that succeeded; an `ApiError` or a `NetworkError` is thrown otherwise. */
-export async function ok<A extends Answer>(answer: Promise<A>): Promise<Exclude<A['data'], undefined>> {
-  const { data, error, response } = await answer;
+/** A successful mutation acknowledged without its existing-content projection. */
+export type MutationReceipt = Readonly<Record<string, unknown>> & { readonly projection: 'receipt' };
+
+const isMutationReceipt = (value: unknown): value is MutationReceipt =>
+  isRecord(value) && value.projection === 'receipt';
+
+// A credential-creation receipt can contain its one-time secret. Do not put that payload on an Error's
+// enumerable properties, stack or message, where generic error reporting could copy it to a log.
+const receiptValues = new WeakMap<ReceiptAcknowledged, MutationReceipt>();
+
+/** The write committed. This signal asks the browser to show acknowledgement/readback, never resend. */
+export class ReceiptAcknowledged extends Error {
+  override readonly name = 'ReceiptAcknowledged';
+  readonly committed = true;
+  readonly status: number;
+  readonly requestId: string;
+
+  constructor(receipt: MutationReceipt, status: number, requestId: string) {
+    super('The change was accepted. This response contains its receipt without the full content.');
+    this.status = status;
+    this.requestId = requestId;
+    receiptValues.set(this, receipt);
+  }
+
+  get receipt(): MutationReceipt {
+    const receipt = receiptValues.get(this);
+    if (receipt === undefined) throw new Error('The accepted receipt is unavailable.');
+    return receipt;
+  }
+}
+
+/** Full replies expected by the session UI; the raw generated API retains both truthful alternatives. */
+type FullAnswer<A extends Answer> = Exclude<Exclude<A['data'], undefined>, { projection: 'receipt' }>;
+
+function acceptedBody<A extends Answer>({ data, error, response }: A): Exclude<A['data'], undefined> {
   if (!response.ok) throw toError(error, response);
   return data as Exclude<A['data'], undefined>;
+}
+
+/** A caller that handles both accepted shapes receives either one without inventing full content. */
+export async function accepted<A extends Answer>(answer: Promise<A>): Promise<Exclude<A['data'], undefined>> {
+  return acceptedBody(await answer);
+}
+
+/** The full body, or a distinct committed acknowledgement; failed requests retain their ordinary errors. */
+export async function ok<A extends Answer>(answer: Promise<A>): Promise<FullAnswer<A>> {
+  const reply = await answer;
+  const { response } = reply;
+  const data = acceptedBody(reply);
+  if (isMutationReceipt(data)) {
+    throw new ReceiptAcknowledged(data, response.status, response.headers.get(REQUEST_ID_HEADER) ?? '');
+  }
+  return data as FullAnswer<A>;
 }
 
 /** The same for a request that answers with nothing. */
@@ -201,6 +250,8 @@ export interface SessionState {
   userId: string | null;
   /** When the access token ends, on this device's clock. */
   accessEndsAt: number | null;
+  /** A refused renewal ended a session this device had previously held. No credential is stored. */
+  sessionEnded?: boolean;
 }
 
 export type SessionEvent =
@@ -224,6 +275,17 @@ export interface Act {
   answer?: unknown;
 }
 
+/** Token creation has a one-time secret, and its request may carry a fresh proof. Generic act
+ * observers need only the accepted identity; the dedicated API result still contains the secret.
+ */
+function tokenCreationAct(answer: unknown): { token_id: string; already_created: boolean } | null {
+  if (!isRecord(answer) || typeof answer.already_created !== 'boolean' || !(answer.token === null || typeof answer.token === 'string')) return null;
+  const id = answer.projection === 'receipt'
+    ? answer.token_id
+    : isRecord(answer.info) ? answer.info.id : undefined;
+  return typeof id === 'string' ? { token_id: id, already_created: answer.already_created } : null;
+}
+
 /** The methods of a request that changes something. */
 const WRITES: ReadonlySet<string> = new Set<Act['method']>(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -234,6 +296,8 @@ export interface ApiClientOptions {
   fetch?: (request: Request) => Promise<Response>;
   /** How long nothing may move before a request is given up. */
   silenceLimitMs?: number;
+  /** The application's HTTP and realtime transports share this measured clock. */
+  clock?: ServerClock;
 }
 
 export interface ApiClient {
@@ -273,24 +337,32 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   const send = options.fetch ?? ((request: Request) => fetch(request));
 
   let token: string | null = null;
-  /** How far the server's clock is ahead of this device's, from the date of its last answer. */
-  let serverAhead = 0;
+  const clock = options.clock ?? createServerClock();
   let renewTimer: ReturnType<typeof setTimeout> | undefined;
   let renewing: Promise<boolean> | null = null;
   let restoring: Promise<boolean> | null = null;
   const listeners = new Set<(event: SessionEvent) => void>();
   const actListeners = new Set<(act: Act) => void | Promise<void>>();
-  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0 }));
+  const sessionMarker = `orch.session.${basePath}.present`;
+  let hadSession = false;
+  try { hadSession = localStorage.getItem(sessionMarker) === '1'; } catch { /* Device storage is optional. */ }
+  function rememberSession(present: boolean): void {
+    hadSession = present;
+    try { localStorage.setItem(sessionMarker, present ? '1' : '0'); } catch { /* Keep the fact in this page only. */ }
+  }
+  const session = createStore<SessionState>(() => ({ status: 'unknown', userId: null, accessEndsAt: null, readerVersion: 0, sessionEnded: false }));
 
   const emit = (event: SessionEvent) => {
     for (const listener of listeners) listener(event);
   };
 
-  function forget(): void {
+  function forget(reason: 'ended' | 'refused' | 'deliberate'): void {
     clearTimeout(renewTimer);
     const wasSignedIn = session.getState().status === 'signed_in';
+    const sessionEnded = reason === 'ended' && (wasSignedIn || hadSession);
+    if (reason === 'deliberate') rememberSession(false);
     token = null;
-    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1 });
+    session.setState({ status: 'signed_out', userId: null, accessEndsAt: null, readerVersion: (session.getState().readerVersion ?? 0) + 1, sessionEnded });
     if (wasSignedIn) emit({ type: 'signed_out' });
   }
 
@@ -298,11 +370,12 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const before = session.getState();
     // The life of the token is counted on the server's clock, so that a device whose own clock is
     // wrong still renews in time.
-    const life = Date.parse(result.access_expires_at) - (Date.now() + serverAhead);
+    const life = Date.parse(result.access_expires_at) - (Date.now() + (clock.offset() ?? 0));
     const accessEndsAt = Date.now() + life;
     token = result.access_token;
+    rememberSession(true);
     const sameReader = before.status === 'signed_in' && before.userId === result.user.id;
-    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1) });
+    session.setState({ status: 'signed_in', userId: result.user.id, accessEndsAt, readerVersion: (before.readerVersion ?? 0) + (sameReader ? 0 : 1), sessionEnded: false });
 
     clearTimeout(renewTimer);
     renewTimer = setTimeout(
@@ -329,9 +402,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
   }
 
   async function dispatch(request: Request): Promise<Response> {
+    const sentAt = Date.now();
     const response = await sendUntilSilent(request, send, options.silenceLimitMs);
-    const date = Date.parse(response.headers.get('Date') ?? '');
-    if (!Number.isNaN(date)) serverAhead = date - Date.now();
+    clock.observe(response.headers.get('Date') ?? '', sentAt, Date.now());
     return response;
   }
 
@@ -353,7 +426,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const sent = await input;
     if (readerVersion !== (session.getState().readerVersion ?? 0)) return;
     const requestId = response.headers.get(REQUEST_ID_HEADER);
-    const act: Act = { ...(requestId ? { requestId } : {}), readerVersion, method: request.method as Act['method'], path: pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname, input: sent, answer };
+    const tokenCreation = tokenCreationAct(answer);
+    const act: Act = { ...(requestId ? { requestId } : {}), readerVersion, method: request.method as Act['method'], path: pathname.startsWith(basePath) ? pathname.slice(basePath.length) : pathname, ...(tokenCreation === null ? { input: sent, answer } : { answer: tokenCreation }) };
     await Promise.all(
       [...actListeners].map(async (listener) => {
         try {
@@ -401,7 +475,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const code = await codeOf(response);
     if (code === 'auth.suspended') {
       // The person was suspended: nothing of theirs answers any more, and the page says so by signing out.
-      forget();
+      forget('refused');
       return response;
     }
     if (code !== 'auth.invalid_token') return response;
@@ -415,8 +489,14 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   const api = createClient<paths>({ baseUrl, fetch: transport, credentials: 'same-origin' });
 
-  async function renewOnce(): Promise<boolean> {
-    const answer = await api.POST('/auth/refresh');
+  async function renewOnce(discover = false): Promise<boolean> {
+    const reader = session.getState().readerVersion;
+    const answer = discover ? await api.POST('/auth/session') : await api.POST('/auth/refresh');
+    if (reader !== session.getState().readerVersion) return session.getState().status === 'signed_in';
+    if (answer.data === null) {
+      forget('ended');
+      return false;
+    }
     if (answer.data !== undefined) {
       adopt(answer.data);
       return true;
@@ -424,14 +504,14 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const error = toError(answer.error, answer.response);
     if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
       // No session, an ended one, or a suspended person: nobody is signed in on this page.
-      forget();
+      forget(error.status === 401 ? 'ended' : 'refused');
       return false;
     }
     throw error;
   }
 
-  function renew(): Promise<boolean> {
-    renewing ??= renewOnce().finally(() => {
+  function renew(discover = false): Promise<boolean> {
+    renewing ??= renewOnce(discover).finally(() => {
       renewing = null;
     });
     return renewing;
@@ -439,7 +519,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 
   function restore(): Promise<boolean> {
     if (session.getState().status !== 'unknown') return Promise.resolve(session.getState().status === 'signed_in');
-    restoring ??= renew().finally(() => {
+    restoring ??= renew(true).finally(() => {
       restoring = null;
     });
     return restoring;
@@ -453,7 +533,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       // session as it is: saying "signed out" while the cookie still works would be untrue.
       if (!(error instanceof ApiError) || error.status !== 401) throw error;
     }
-    forget();
+    forget('deliberate');
   }
 
   return {
@@ -476,7 +556,7 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
 }
 
 /** The client of the application. */
-export const client = createApiClient();
+export const client = createApiClient({ clock: serverClock });
 
 /** The typed requests of the API, on the application's client. */
 export const api = client.api;

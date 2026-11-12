@@ -30,7 +30,8 @@ test('a palette choice changes the shared avatar, and reset sends null to use th
   await page.getByRole('button',{name:'Reset avatar colour'}).click();
   const resetReply=await reset;
   expect(await bodySent(resetReply.request())).toEqual({avatar_color:null});
-  const returned=await resetReply.json() as Me;
+  // The server's own record of its answer: the browser no longer holds a body once the page has moved on or its buffer is reused.
+  const returned=await replySent(resetReply) as Me;
   await expect(page.getByRole('radio',{name:`Colour ${returned.avatar.color+1}`,exact:true})).toBeChecked();
   await expectAccessibleInBothThemes(page);
 });

@@ -19,6 +19,7 @@ const pages = {
   "/help/$article/": () => import("@/routes/help/$article/index"),
   "/help/": () => import("@/routes/help/index"),
   "/inbox/": () => import("@/routes/inbox/index"),
+  "/messages/$id/": () => import("@/routes/messages/$id/index"),
   "/inspect/$kind/$id/": () => import("@/routes/inspect/$kind/$id/index"),
   "/org/$slug/": () => import("@/routes/org/$slug/index"),
   "/org/$slug/messages/": () => import("@/routes/org/$slug/messages/index"),

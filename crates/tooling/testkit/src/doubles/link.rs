@@ -27,6 +27,7 @@ use orch_link_contract::backplane::{AuthQuery, AuthReply, DownFrame, UpFrame};
 use orch_link_contract::enrollment::Endpoint;
 use orch_link_contract::frames::Frame;
 use orch_link_contract::session::Role;
+use orch_link_contract::streams::Stream;
 use orch_link_contract::version::{ByeCode, ConnectorVersions, Limits, RejectCode};
 use orch_pki::certificates::Certificate;
 use orch_types::{Clock, Id, Seq};
@@ -71,6 +72,8 @@ struct Rule {
     /// The `t` of a text frame, or `data` for tunnel data; any frame when
     /// `None`.
     frame: Option<String>,
+    /// When set, the frame must carry this event of this durable stream.
+    event: Option<(String, Seq)>,
     /// How many matching frames pass untouched first.
     skip: usize,
     /// How many matching frames suffer the action after that.
@@ -147,6 +150,7 @@ impl Faults {
         lock(&self.inner.rules).push(Rule {
             direction,
             frame: frame.map(str::to_owned),
+            event: None,
             skip,
             times,
             action,
@@ -173,6 +177,19 @@ impl Faults {
     /// `frame` (any kind when `None`) would pass.
     pub fn cut_after(&self, direction: Direction, frame: Option<&str>, skip: usize) {
         self.add(direction, frame, skip, 1, Action::Cut);
+    }
+
+    /// Cuts the first frame carrying `seq` of `stream`, whether sent alone or in a batch.
+    /// The rule is consumed once, so replaying that event can reach the next rule or the peer.
+    pub fn cut_at_event(&self, direction: Direction, stream: &Stream, seq: Seq) {
+        lock(&self.inner.rules).push(Rule {
+            direction,
+            frame: None,
+            event: Some((stream.to_string(), seq)),
+            skip: 0,
+            times: 1,
+            action: Action::Cut,
+        });
     }
 
     /// Cuts every connection now.
@@ -225,10 +242,16 @@ impl Faults {
         lock(&self.inner.shapes)[Self::slot(direction)]
     }
 
-    fn decide(&self, direction: Direction, kind: &str) -> Option<Action> {
+    fn decide(&self, direction: Direction, message: &Message) -> Option<Action> {
+        let kind = kind_of(message);
         let mut rules = lock(&self.inner.rules);
         for rule in rules.iter_mut() {
-            if rule.direction != direction || rule.frame.as_deref().is_some_and(|only| only != kind)
+            if rule.direction != direction
+                || rule.frame.as_deref().is_some_and(|only| only != kind)
+                || rule
+                    .event
+                    .as_ref()
+                    .is_some_and(|(stream, seq)| !carries_event(message, stream, *seq))
             {
                 continue;
             }
@@ -244,6 +267,25 @@ impl Faults {
             return Some(rule.action);
         }
         None
+    }
+}
+
+fn carries_event(message: &Message, stream: &str, seq: Seq) -> bool {
+    let Message::Text(text) = message else {
+        return false;
+    };
+    let Ok(frame) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    if frame["s"].as_str() != Some(stream) {
+        return false;
+    }
+    match frame["t"].as_str() {
+        Some("ev") => frame["q"].as_i64() == Some(seq),
+        Some("evb") => frame["e"]
+            .as_array()
+            .is_some_and(|events| events.iter().any(|event| event["q"].as_i64() == Some(seq))),
+        _ => false,
     }
 }
 
@@ -374,7 +416,7 @@ async fn forward(
                 None => break,
             },
         };
-        let action = faults.decide(direction, &kind_of(&message));
+        let action = faults.decide(direction, &message);
         let mut to_deliver: Vec<Message> = Vec::new();
         match action {
             Some(Action::Cut) => {
@@ -574,6 +616,8 @@ struct HubAuthority {
 impl SessionAuthority for HubAuthority {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let refuse = |code| AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -601,6 +645,8 @@ impl SessionAuthority for HubAuthority {
             return refuse(RejectCode::Revoked);
         }
         AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: lock(&self.hub.advertised).clone(),
             update_permit: None,
             n: query.n,
@@ -721,7 +767,7 @@ impl Hub {
     ) -> (ControllerLink, mpsc::UnboundedReceiver<Notice>) {
         let (controller, outputs) =
             ControllerLink::new(machine_id, roles, cursors, Arc::clone(&self.inner.clock));
-        let ControllerOutputs { down, notices } = outputs;
+        let ControllerOutputs { down, notices, .. } = outputs;
         let previous = lock(&self.inner.machines).insert(
             machine_id,
             Slot {
@@ -886,6 +932,7 @@ impl Dialer for HubDialer {
                 ..PeerInfo::default()
             },
             PeerInfo {
+                purpose: Default::default(),
                 remote_ip: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
                 host: Some(HUB_HOST.to_owned()),
                 client_certificate: self.certificate.clone(),
@@ -919,6 +966,15 @@ async fn carry_down(
                 DownFrame::PortConnectionsQuery(query) => {
                     sender.send(Frame::PortConnectionsQuery(query))
                 }
+                DownFrame::Gateways(advertisement) => sender.send(Frame::Gateways(advertisement)),
+                DownFrame::TunnelRouteAnswer(answer) => {
+                    sender.send(Frame::TunnelRouteAnswer(answer))
+                }
+                DownFrame::TunnelAttach(attach) => sender.send(Frame::TunnelAttach(attach)),
+                DownFrame::TunnelPrepareAnswer(answer) => {
+                    sender.send(Frame::TunnelPrepareAnswer(answer))
+                }
+                DownFrame::TunnelRelease(release) => sender.send(Frame::TunnelRelease(release)),
             };
         }
     }
@@ -953,7 +1009,12 @@ async fn serve(hub: Arc<HubInner>, connection: Connection) {
         }
         slot.controller.clone()
     };
-    lock(&hub.relay).session_up(machine_id, session_id, sender.clone());
+    lock(&hub.relay).session_up_capable(
+        machine_id,
+        session_id,
+        sender.clone(),
+        accepted.auth.capabilities.clone(),
+    );
     controller.session_up(session_id);
     while let Some(event) = inbox.next().await {
         match event {
@@ -1291,5 +1352,38 @@ impl orch_link::content::BlobEndpoint for ShapedBlobs {
             .filter(|hash| !state.complete.contains_key(hash))
             .copied()
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod event_cut_tests {
+    use super::{Action, Direction, Faults, Message, Stream};
+    use serde_json::json;
+
+    #[test]
+    fn event_cuts_follow_stream_sequence_across_single_frames_batches_and_replay() {
+        let faults = Faults::new();
+        faults.cut_at_event(Direction::Up, &Stream::Node, 40);
+        faults.cut_at_event(Direction::Up, &Stream::Node, 90);
+        for frame in [
+            json!({ "t": "ev", "s": "machine", "q": 40 }),
+            json!({ "t": "ev", "s": "node", "q": 39 }),
+            json!({ "t": "ack", "s": "node", "q": 40 }),
+        ] {
+            assert_eq!(
+                faults.decide(Direction::Up, &Message::Text(frame.to_string())),
+                None
+            );
+        }
+        let single = Message::Text(json!({ "t": "ev", "s": "node", "q": 40 }).to_string());
+        assert_eq!(faults.decide(Direction::Down, &single), None);
+        assert_eq!(faults.decide(Direction::Up, &single), Some(Action::Cut));
+        assert_eq!(faults.decide(Direction::Up, &single), None);
+        let batch = Message::Text(
+            json!({ "t": "evb", "s": "node", "e": [{ "q": 40 }, { "q": 90 }] }).to_string(),
+        );
+        assert_eq!(faults.decide(Direction::Up, &batch), Some(Action::Cut));
+        assert_eq!(faults.decide(Direction::Up, &batch), None);
+        assert_eq!(faults.fired(), 2);
     }
 }
