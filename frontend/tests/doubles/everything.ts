@@ -24,6 +24,21 @@ export class EverythingWorld implements Part {
   constructor(world: World) { this.world = world; }
   reset(): void { this.overrides.clear(); }
 
+  /** Inventory owns its cursor; consume every page of a native resource supplier before paging that inventory. */
+  private resourcePages(person: Person, route: string, selection = new URLSearchParams()): unknown[] {
+    const query = new URLSearchParams(selection), rows: unknown[] = [], visited = new Set<string>();
+    query.set('limit', String(PAGE_MAX));
+    for (;;) {
+      const body: unknown = this.world.resources.handle(person, 'GET', route, query, {})?.body;
+      if (Array.isArray(body)) return [...rows, ...body as unknown[]];
+      if (!isRecord(body) || !Array.isArray(body.items)) return rows;
+      rows.push(...body.items as unknown[]);
+      if (typeof body.next_cursor !== 'string') return rows;
+      if (visited.has(body.next_cursor)) throw new Error('The native resource cursor did not advance');
+      visited.add(body.next_cursor); query.set('cursor', body.next_cursor);
+    }
+  }
+
   private path(person: Person, id: string): NodeRef[] {
     const places = this.world.places;
     return places.pathTo(id).map((step) => {
@@ -88,14 +103,15 @@ export class EverythingWorld implements Part {
         participating: (this.world.chats.states.get(`${person.me.username}:${chat.id}`)?.effective_level ?? (participant ? 'all' : 'off')) !== 'off',
         href: webHref({ kind: 'chat', id: chat.id, nodeId: chat.node?.id, orgId: org, path }) }));
     }
-    const resources: readonly [EverythingKind, string][] = [['environment', '/environments'], ['provider', '/providers'], ['agent', '/agents'], ['machine', '/machines'], ['host', '/hosts'], ['mount', '/mounts'], ['mcp_server', '/mcp-servers'], ['template', '/templates']];
+    const extra = this.world.requestFeeds.inventory(person);
+    const resources: readonly [EverythingKind, string][] = [['environment', '/environments'], ['provider', '/providers'], ['agent', '/agents'], ['machine', '/machines'], ['host', '/hosts'], ['mount', '/mounts'], ['mcp_server', '/mcp-servers'], ['template', '/templates'], ['skill', '/skills']];
     for (const [kind, route] of resources) {
-      const response = this.world.resources.handle(person, 'GET', route, new URLSearchParams(), {});
-      const entries: unknown[] = Array.isArray(response?.body) ? response.body : isRecord(response?.body) && Array.isArray(response.body.items) ? response.body.items : [];
+      const listed = this.resourcePages(person, route);
+      const entries: unknown[] = [...listed, ...extra.filter((row) => row.kind === kind).map((row) => row.value)];
       for (const resource of entries) {
         if (!isRecord(resource) || typeof resource.id !== 'string' || typeof resource.name !== 'string') continue;
         const hidden = resource.content_hidden === true;
-        const detail = hidden ? null : this.world.resources.inventoryView(person, kind, resource.id);
+        const detail = hidden ? null : extra.find((row) => row.kind === kind && row.value.id === resource.id) ?? this.world.resources.inventoryView(person, kind, resource.id);
         const home = isRecord(resource.home) && typeof resource.home.id === 'string' ? resource.home.id : null;
         const path = home === null ? [] : this.path(person, home);
         const access = detail?.value.access;
@@ -170,8 +186,8 @@ export class EverythingWorld implements Part {
       return resourceView==='mine'?own:resourceView==='managed'?manage:resourceView==='usable'?manage||permissions.some((permission)=>permission===`${prefix}.use`):true;
     };
     if (details && (parent !== 'resources' || kind.length !== 1)) throw new Refusal(400, 'request.invalid', 'Choose one resource list.');
-    const providers = resourceView === null ? null : this.world.resources.handle(person, 'GET', '/providers', new URLSearchParams({ scope: resourceView }), {});
-    const eligibleProviders = providers === null || !Array.isArray(providers.body) ? null : new Set(providers.body.filter(isRecord).map((row) => row.id));
+    const providers = resourceView === null ? null : this.resourcePages(person, '/providers', new URLSearchParams({ scope: resourceView }));
+    const eligibleProviders = providers === null ? null : new Set(providers.filter(isRecord).map((row) => row.id));
     const filtering = kind.length > 0 || owner !== null || from !== null || to !== null || activeFrom !== null || adminAccess !== null || participating;
     const matching = all.filter((row) => (row.my_access !== 'path_only' || row.parent_id === 'resources' && owner === null && from === null && to === null && activeFrom === null) &&
       (recent === null || row.my_access !== 'path_only' && (recent === 'opened' ? row.last_opened !== undefined && row.last_opened !== null : row.kind === 'thread' || row.kind === 'document')) &&

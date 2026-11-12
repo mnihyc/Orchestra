@@ -7,7 +7,8 @@ import type { Draft, Job } from '../../src/generated/api-types';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { begin, filesPanel, MAIN, MAIN_ENVIRONMENT, openThread, showView } from './inspector-support';
-import { PEOPLE } from './support';
+import { bodySent, PEOPLE } from './support';
+import { USUAL_MODEL } from '../doubles/fixtures';
 
 interface Upload { name: string; size: number; media_type: string; bytes: Buffer }
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
@@ -140,6 +141,36 @@ async function uploads(page: Page, holdNative = false) {
 }
 
 for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
+  test(`an image for a text-only model stays attached through Send at ${width}px in ${theme}/${locale}`, async ({ page, request }, info) => {
+    await begin();
+    const t = await language(request, locale, theme);
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    // The selected text-only model is native to the joined opening and every later parameter read.
+    const configured = await page.request.post(`${DOUBLE}/__double/model/entry`, { data: { model_name: USUAL_MODEL.name, parameters: { input_images: false } } });
+    expect(configured.ok()).toBe(true);
+    const held = await uploads(page);
+    await openThread(page);
+    const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9ZkAAAAASUVORK5CYII=', 'base64');
+    const blob = createHash('sha256').update(bytes).digest('hex');
+    const composer = page.locator('[data-composer]');
+    await composer.locator('input[type=file]').setInputFiles({ name: 'screenshot.png', mimeType: 'image/png', buffer: bytes });
+    await expect(composer.getByText(t('fileMedia.imageByPath'), { exact: true })).toBeVisible();
+    await expect(composer.getByText(`→ .orch/attachments/screenshot.png · ${t('uploads.whenSent')}`)).toBeVisible();
+    await expect(composer.getByRole('button', { name: t('composer.send'), exact: true })).toBeEnabled();
+    expect(held.blobs.get(blob)?.bytes.equals(bytes)).toBe(true);
+    expect(held.counts().agentInputs).toBe(0);
+    expect(held.counts().workspaceWrites).toBe(0);
+    await page.screenshot({ path: info.outputPath(`image-file-${width}-${theme}-${locale}.png`), animations: 'disabled' });
+    const sent = page.waitForRequest(request => request.method() === 'POST' && new URL(request.url()).pathname === `/api/v1/threads/${MAIN}/inputs`);
+    await composer.getByRole('button', { name: t('composer.send'), exact: true }).click();
+    const body = await bodySent(await sent) as { content: unknown[] };
+    expect(body.content).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'image', blob, name: 'screenshot.png', media_type: 'image/png' })]));
+    await expect.poll(() => held.counts().agentInputs).toBe(1);
+    expect(held.blobs.get(blob)?.bytes.equals(bytes)).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+
   test(`pasted drafts stay editable and private at ${width}px in ${theme}/${locale}`, async ({ page, request }, info) => {
     await begin(); const t = await language(request, locale, theme); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
     const held = await uploads(page); await openThread(page);
@@ -195,7 +226,10 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
 
   test(`folder drops name their count and viewers reject files at ${width}px in ${theme}/${locale}`, async ({ page, request }, info) => {
     await begin(); const t = await language(request, locale, theme); await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
-    const held = await uploads(page); await openThread(page); await showView(page, 'Files'); await fileRow(page, /^src/).click();
+    const held = await uploads(page); await openThread(page);
+    const threadTabId = await page.getByRole('tab', { name: /Main thread/, selected: true }).getAttribute('id');
+    if (threadTabId === null) throw new Error('The retained conversation needs its workspace identity');
+    await showView(page, 'Files'); await fileRow(page, /^src/).click();
     const data = await page.evaluateHandle(() => {
       const data = new DataTransfer(); for (const name of ['screenshot.png', 'data.csv', 'notes.txt']) data.items.add(new File(['uploaded'], name)); return data;
     });
@@ -218,8 +252,8 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     if (width === 400) {
       await page.getByRole('dialog', { name: 'web/src/app.ts', exact: true }).getByRole('button', { name: t('common.close'), exact: true }).click();
       await page.getByRole('button', { name: t('workbench.allTabs', { name: t('workbench.areas.main') }), exact: true }).click();
-      await page.getByRole('option', { name: /Main thread/ }).click();
-    } else await page.getByRole('tab').filter({ hasText: 'Main thread' }).click();
+      await page.locator(`[role="option"][data-value="commands:workspace.focus.${threadTabId.replace(/^(?:mobile-)?tab-/, '')}"]`).click();
+    } else await page.locator(`[role="tab"][id="${threadTabId}"]`).click();
     await page.locator('[data-composer] textarea').dispatchEvent('drop', { dataTransfer: reference });
     await expect(page.getByRole('textbox', { name: t('composer.label') })).toHaveValue(new RegExp(`id:${MAIN_ENVIRONMENT}/web/src/app.ts`));
     expect(held.counts().workspaceWrites).toBe(3);

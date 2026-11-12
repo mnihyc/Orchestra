@@ -149,7 +149,7 @@ export class SearchWorld implements Part {
       for (const row of tree.nodes.values()) {
         if (row.deleted) continue;
         if (!places.access(person, row.id).permissions.includes(`${row.kind}.view`)) continue;
-        hits.push({
+        hits.push({ home_path: [],
           ...(row.thread?.display === undefined ? {} : { thread_display: row.thread.display }),
           kind: row.kind,
           participating: places.participates(person, row.id),
@@ -186,9 +186,9 @@ export class SearchWorld implements Part {
       if (root === undefined || other.suspended) continue;
       const row = places.rowOf(root);
       const home = row === undefined ? other.me.username : `${places.metaOf(root).slug ?? row.name.toLowerCase()}.${other.me.username}`;
-      hits.push({ kind: 'user', participating: places.participates(person, root), thread_attention:null, id: other.me.id, name: other.me.display_name, tag: null, color: null, custom_color: null, address: home, username: other.me.username, avatar: userRef(other.me).avatar, path: [], owner: null, archived: false, recent: false });
+      hits.push({ home_path: [], kind: 'user', participating: places.participates(person, root), thread_attention:null, id: other.me.id, name: other.me.display_name, tag: null, color: null, custom_color: null, address: home, username: other.me.username, avatar: userRef(other.me).avatar, path: [], owner: null, archived: false, recent: false });
     }
-    hits.push({ kind: 'group', thread_attention:null, id: fixtureId(0x32, 1), name: 'Infra team', tag: null, color: null, custom_color: null, address: 'acme.infra-team', username: null, avatar: null, path: [], owner: null, archived: false, recent: false });
+    hits.push({ home_path: [], kind: 'group', thread_attention:null, id: fixtureId(0x32, 1), name: 'Infra team', tag: null, color: null, custom_color: null, address: 'acme.infra-team', username: null, avatar: null, path: [], owner: null, archived: false, recent: false });
     return hits;
   }
 
@@ -197,10 +197,13 @@ export class SearchWorld implements Part {
     const hits: NameHit[] = [];
     for (const [kind, path] of RESOURCE_LISTS) {
       const answer = this.world.resources.handle(person, 'GET', path, new URLSearchParams(), {});
-      if (answer === null || !Array.isArray(answer.body)) continue;
-      for (const entry of answer.body as unknown[]) {
+      // A resource list answers a page of rows, as the server does; an older list answered the rows alone.
+      const rows: unknown = answer === null ? null : Array.isArray(answer.body) ? answer.body : isRecord(answer.body) ? answer.body.items : null;
+      if (!Array.isArray(rows)) continue;
+      for (const entry of rows as unknown[]) {
         if (!isRecord(entry) || typeof entry.id !== 'string' || typeof entry.name !== 'string') continue;
-        hits.push({
+        const homeId = isRecord(entry.home) && typeof entry.home.id === 'string' ? entry.home.id : null;
+        hits.push({ home_path: homeId === null ? [] : this.world.places.pathFor(person, homeId),
           kind,
           participating: isRecord(entry.access) && entry.access.participating === true,
           state: typeof entry.status === 'string' ? entry.status : null,
@@ -227,7 +230,7 @@ export class SearchWorld implements Part {
   /** The documents the person may read, as names: by the place they are written beside. */
   private documentNames(person: Person): NameHit[] {
     return this.world.documents.forSearch(person).map(
-      ({ ref, path }): NameHit => ({
+      ({ ref, path }): NameHit => ({ home_path: [],
         kind: 'document',
         participating: ref.owner.id === person.me.id || this.world.access.namedOn(person, 'documents', ref.id),
         thread_attention:null,
@@ -249,7 +252,7 @@ export class SearchWorld implements Part {
 
   /** The chats the person may read, as names: a place's chat by the place, a group or a direct chat by who is in it. */
   private chatNames(person: Person): NameHit[] {
-    return this.world.chats.forSearch(person).filter((one) => one.chat.kind === 'node' ? one.messages.some((message) => message.kind === 'message' && !message.deleted) : one.in).map(({ chat, label, path, in: member }): NameHit => ({
+    return this.world.chats.forSearch(person).filter((one) => one.chat.kind === 'node' ? one.messages.some((message) => message.kind === 'message' && !message.deleted) : one.in).map(({ chat, label, path, in: member }): NameHit => ({ home_path: [],
       kind: 'chat',
       href: webHref({ kind: 'chat', id: chat.id, nodeId: chat.node?.id, orgId: chat.org_id, path }),
       participating: this.chatParticipation(person, chat.id, chat.node?.id ?? null, member),
@@ -283,7 +286,7 @@ export class SearchWorld implements Part {
         const defining = this.world.places.rowOf(tag.node.id);
         const safeTag = { ...tag, node: defining !== undefined && this.world.places.visibleTo(person,defining)
           ? tag.node : { ...tag.node,name:null,redacted:true } };
-        tags.set(tag.id, { kind:'tag',thread_attention:null,id:tag.id,name:tag.name,tag:safeTag,color:tag.color,
+        tags.set(tag.id, { home_path: [], kind:'tag',thread_attention:null,id:tag.id,name:tag.name,tag:safeTag,color:tag.color,
           participating:this.world.places.participates(person,tag.node.id),
           custom_color:null, address:null,username:null,avatar:null,owner:null,archived:scope.archived,recent:false,
           path:this.world.places.pathTo(tag.node.id).map((node) => this.world.places.visibleTo(person,node)
@@ -319,7 +322,15 @@ export class SearchWorld implements Part {
     const onlyStarred = query.get('starred') === 'true';
     if (onlyStarred) pool = pool.filter((hit) => hit.starred);
     if (query.get('participating') === 'true') pool = pool.filter((hit) => hit.participating === true);
-    if (root !== null) pool = pool.filter((hit) => hit.path[0]?.id === root || hit.id === root);
+    if (root !== null) pool = pool.filter((hit) => {
+      if (hit.path[0]?.id === root || hit.home_path[0]?.id === root || hit.id === root) return true;
+      if (hit.kind === 'user') {
+        const user = [...this.world.people.values()].find((entry) => entry.me.id === hit.id);
+        return user !== undefined && (this.world.places.isMember(user, root) || user.me.personal_org_id === root);
+      }
+      if (hit.kind === 'group') return root === ACME.org; // The one recorded group belongs to Acme.
+      return hit.kind === 'chat' && this.world.chats.forSearch(person).some((entry) => entry.chat.id === hit.id && entry.chat.org_id === root);
+    });
 
     if (typed === '') {
       if (onlyStarred) return pool.sort((one, other) => (savedOrder.get(key(one)) ?? 0) - (savedOrder.get(key(other)) ?? 0)).slice(0, limit);
@@ -647,7 +658,7 @@ export class SearchWorld implements Part {
         const kinds: NameKind[] = ['topic', 'thread', 'document'];
         this.synthetic = Array.from({ length: count }, (_, index): NameHit => {
           const kind = kinds[index % kinds.length] ?? 'topic';
-          return {
+          return { home_path: [],
             kind,
             state: kind === 'thread' ? 'idle' : kind === 'topic' ? 'open' : null,
             last_activity: MADE_AT,

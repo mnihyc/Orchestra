@@ -1,6 +1,6 @@
 # Interface words
 
-`en.json` and `zh-CN.json` hold the product's interface text. `index.ts` owns locale selection and typed translation keys; `dev.ts` and the development catalogues keep development-only words separate.
+`en.json` and `zh-CN.json` hold the product's interface text. `index.ts` owns locale selection and a finite metadata-key type; `dev.ts` and the development catalogues keep development-only words separate.
 
 `errors.ts` resolves every API error through its typed catalogue key, keeps diagnostic tokens out of
 field explanations, and supplies an older client with a safe fallback for a newer server. Each error
@@ -20,3 +20,7 @@ Catalogue checks resolve `$t(...)` references with the product's translation eng
 visible words. A missing nested target fails without falling back to another language. Native program,
 language and file names may stay the same on labels; explanatory sentences still need translation.
 Deliberate copied-English and missing-target cases keep those boundaries checked.
+
+The ordinary i18next `t` API does not instantiate the complete catalogue at each call. `npm run typecheck` first runs the syntax-only `build/check-translation-keys.ts` gate, then the same compiler and heap limit. The gate parses each authored source once for both languages; it checks literal and finite locally computed calls, fixed-language aliases and `<Trans i18nKey>`, including a call with `defaultValue`. It never creates a TypeScript program. `TranslationKey` still rejects unknown keys in authored metadata.
+
+A server/plugin-supplied key cannot be enumerated from syntax. Those readers retain their actual finite registry/choice tests or their existing `i18n.exists` check and explicit runtime fallback. The gate does not invent a native vocabulary, execute application code, treat a comment as a reader, or allow development words in production source. The deciding missing-key canaries live in `tests/unit/translation-keys.test.ts`; catalogue shape, placeholder, alias and registry tests remain in force.

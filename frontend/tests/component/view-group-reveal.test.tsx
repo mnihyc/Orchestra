@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { ViewGroup } from '@/ui/ViewGroup';
 import { ViewTab } from '@/ui/ViewTab';
 import { show } from './support';
+import { setLocale } from '@/i18n';
 
 const ids = ['start', 'providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts'];
 const titles = ['Acme', 'Providers', 'Agents', 'Machines', 'Environments', 'Templates', 'Hosts', 'MCP servers', 'Mounts'];
@@ -124,6 +125,7 @@ it('reveals a selected wrapped row within the tab viewport without scrolling its
   show(<Group loaded marks />); const box = geometry(24);
   const tab = screen.getByRole('tab', { name: 'Mounts' }), whole = tab.parentElement!;
   Object.defineProperty(box.strip, 'clientHeight', { configurable: true, value: 64 });
+  Object.defineProperty(box.strip, 'scrollHeight', { configurable: true, value: ids.length * 32 });
   vi.spyOn(box.strip, 'getBoundingClientRect').mockImplementation(() => new DOMRect(40, 10, 420, 64));
   vi.spyOn(whole, 'getBoundingClientRect').mockImplementation(() => new DOMRect(40, 266 - box.strip.scrollTop, 140, 32));
   const body = screen.getByRole('tabpanel'), input = screen.getByRole('textbox');
@@ -135,4 +137,28 @@ it('reveals a selected wrapped row within the tab viewport without scrolling its
   expect(box.strip.scrollTop).toBeGreaterThan(0); expect(body.scrollTop).toBe(91); expect(input).toHaveFocus();
   fireEvent.wheel(box.strip, { deltaY: -120 }); box.strip.scrollTop = 0;
   act(() => currentObserver().deliver()); expect(box.strip.scrollTop).toBe(0);
+});
+
+// EN: Open three rows → select the final tab → the final two complete rows fill the strip; browse and resize.
+// 中文：打开三行标签 → 选择最后一项 → 最后两行完整填满标签栏；手动滚动并调整宽度。
+it.each(['en', 'zh-CN'] as const)('shows the final two complete rows without trailing space when the last row is selected (%s)', async (locale) => {
+  await setLocale(locale);
+  try {
+    show(<Group loaded />); const strip = screen.getByRole('tablist'); const row = 36;
+    Object.defineProperties(strip, {
+      clientWidth: { configurable: true, value: 420 }, clientHeight: { configurable: true, value: row * 2 },
+      scrollHeight: { configurable: true, value: row * 3 },
+    });
+    vi.spyOn(strip, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 0, 420, row * 2));
+    for (let index = 0; index < ids.length; index += 1) {
+      const tab = document.getElementById(elementId(ids[index]!)); if (tab === null) throw new Error('The tab exists');
+      vi.spyOn(tab, 'getBoundingClientRect').mockImplementation(() => new DOMRect(index % 3 * 140, Math.floor(index / 3) * row - strip.scrollTop, 140, row));
+    }
+    const body = screen.getByRole('tabpanel'); body.scrollTop = 91;
+    act(() => currentObserver().deliver());
+    expect(strip.scrollTop).toBe(row); expect(strip.style.paddingBottom).toBe('');
+    expect(document.getElementById(elementId('machines'))?.getBoundingClientRect().top).toBe(0);
+    expect(document.getElementById(elementId('mounts'))?.getBoundingClientRect().bottom).toBe(strip.clientHeight);
+    expect(body.scrollTop).toBe(91);
+  } finally { await setLocale('en'); }
 });

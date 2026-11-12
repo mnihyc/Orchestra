@@ -43,13 +43,13 @@ export function PlaceDocuments({ tab, area }: ViewProps) {
   if (failed !== null) {
     return <ErrorState compact className="h-full" error={failed.error} retrying={failed.isRefetching} onRetry={() => void failed.refetch()} />;
   }
-  if (own.data === undefined) return <SkeletonRows rows={4} className="p-4" />;
+  if (own.data === undefined) return <SkeletonRows read={own} rows={4} className="p-4" />;
   let listed: ListedNode | undefined = own.data;
   if (own.data.kind === 'thread') {
     if (topicId === null) return none;
     listed = topic.data;
   }
-  if (listed === undefined) return <SkeletonRows rows={4} className="p-4" />;
+  if (listed === undefined) return <SkeletonRows read={topic} rows={4} className="p-4" />;
   return (
     <div className="h-full min-h-0 overflow-y-auto p-3" data-testid="documents-view">
       <DocumentList key={listed.id} node={listed} below />

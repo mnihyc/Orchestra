@@ -24,6 +24,7 @@ mod access;
 mod chats;
 mod comments;
 mod documents;
+pub use documents::PreparedDocument;
 mod places;
 mod threads;
 mod versions;
@@ -83,9 +84,26 @@ pub async fn take_back(
     principal: &orch_authz::Principal,
     now: DateTime<Utc>,
 ) -> Result<Taken, MakeError> {
+    take_back_before(tx, import, which, parent, principal, now, || Ok(())).await
+}
+
+/// The same native batch with a once-only check at its actual first SQL effect.
+pub async fn take_back_before(
+    tx: &mut Tx,
+    import: Id,
+    which: Merged,
+    parent: Id,
+    principal: &orch_authz::Principal,
+    now: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), MakeError>,
+) -> Result<Taken, MakeError> {
     match which {
-        Merged::Chat => chats::take_back(tx, import, parent, principal, now, TAKE_BACK_BATCH).await,
-        Merged::Thread => threads::take_back(tx, import, parent, principal, TAKE_BACK_BATCH).await,
+        Merged::Chat => {
+            chats::take_back(tx, import, parent, principal, now, TAKE_BACK_BATCH, before).await
+        }
+        Merged::Thread => {
+            threads::take_back(tx, import, parent, principal, TAKE_BACK_BATCH, before).await
+        }
     }
 }
 
@@ -220,6 +238,8 @@ pub struct Batch<'a> {
     /// Where a long piece of work (the history of a thread, the messages of a chat) says how far it has come, a page of its record at a time:
     /// the job shows the words, and looks whether it is cancelled, between the pages of a record that takes minutes.
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Actual queued operation and the immutable native plan for continuing cuts.
+    pub operation: Option<(&'a super::operation::Request, &'a std::sync::Arc<Plan>)>,
 }
 
 impl Batch<'_> {
@@ -529,10 +549,18 @@ pub async fn settle_name(
 /// Whether the importer may still make `object` where it goes. It is asked again as each object is made that does not lie in
 /// something this import made, so that a role taken away during a long import is honoured from that moment on.
 async fn may_still(tx: &mut Tx, batch: &Batch<'_>, object: &Object) -> Result<bool, MakeError> {
+    may_still_on(tx, batch.principal, object).await
+}
+/// The native creation prerequisite, reusable on its caller's actual current source connection.
+pub(crate) async fn may_still_on(
+    conn: &mut Conn,
+    principal: &Principal,
+    object: &Object,
+) -> Result<bool, MakeError> {
     if object.parent_made {
         return Ok(true);
     }
-    let Some(place) = orch_db::queries::shares::places(tx, &[object.lies_in])
+    let Some(place) = orch_db::queries::shares::places(conn, &[object.lies_in])
         .await?
         .into_iter()
         .next()
@@ -544,8 +572,8 @@ async fn may_still(tx: &mut Tx, batch: &Batch<'_>, object: &Object) -> Result<bo
         return Ok(true);
     };
     match orch_authz::nodes::check(
-        tx,
-        batch.principal,
+        conn,
+        principal,
         object.lies_in,
         permission,
         orch_authz::Act::Use,
@@ -566,6 +594,131 @@ pub async fn make_object(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
+    make_with(tx, batch, object, None).await
+}
+/// A native body copied outside its action transaction, never target authority.
+pub enum PreparedObject {
+    Simple,
+    Document(Option<Box<PreparedDocument>>),
+    Thread(Option<std::sync::Arc<Record>>),
+    Chat(std::sync::Arc<Record>),
+}
+/// Prepare once outside writer locks and recheck the original source after its supplier waits.
+pub async fn prepare_object(
+    batch: &Batch<'_>,
+    object: &Object,
+) -> Result<PreparedObject, MakeError> {
+    if let Some((request, _)) = batch.operation {
+        request.principal(batch.engine).await.map_err(scope_error)?;
+    }
+    let ready = match object.made_as {
+        PackageKind::Document => PreparedObject::Document(
+            documents::prepare_document(batch, object)
+                .await?
+                .map(Box::new),
+        ),
+        PackageKind::Thread => PreparedObject::Thread(if object.bare {
+            None
+        } else {
+            Some(std::sync::Arc::new(
+                Record::open(batch, object, "thread").await?,
+            ))
+        }),
+        PackageKind::Chat => PreparedObject::Chat(std::sync::Arc::new(
+            Record::open(batch, object, "chat").await?,
+        )),
+        _ => PreparedObject::Simple,
+    };
+    if let Some((request, _)) = batch.operation {
+        request.principal(batch.engine).await.map_err(scope_error)?;
+    }
+    Ok(ready)
+}
+/// Consume precisely the native body already opened; no archive supplier repeats under the action guard.
+pub async fn make_prepared_object(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    prepared: PreparedObject,
+) -> Result<Made, MakeError> {
+    make_with(tx, batch, object, Some(prepared)).await
+}
+fn scope_error(error: crate::operation_scope::continuing::Error) -> MakeError {
+    match error {
+        crate::operation_scope::continuing::Error::Refused
+        | crate::operation_scope::continuing::Error::Binding(
+            crate::operation_scope::BindingError::Refused,
+        ) => MakeError::Coded {
+            code: "authz.denied",
+            message: "The original access no longer permits this import.".into(),
+        },
+        other => MakeError::Internal(ImportError::Internal(crate::EngineError::unreadable(other))),
+    }
+}
+impl<'a> Batch<'a> {
+    pub(super) fn live(&self) -> Result<(), MakeError> {
+        if let Some((request, _)) = self.operation {
+            request
+                .live_deadline(self.engine.inner.clock.as_ref())
+                .map_err(scope_error)?;
+            if !self
+                .principal
+                .caller()
+                .key_deadline_allows(self.engine.inner.clock.as_ref())
+            {
+                return Err(scope_error(
+                    crate::operation_scope::continuing::Error::Refused,
+                ));
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn with_principal<'b>(&'b self, principal: &'b Principal) -> Batch<'b> {
+        Batch {
+            engine: self.engine,
+            plan: self.plan,
+            principal,
+            import: self.import,
+            now: self.now,
+            staged: self.staged,
+            maps: self.maps,
+            notes: self.notes.clone(),
+            operation: self.operation,
+        }
+    }
+    pub(super) async fn before(
+        &self,
+        conn: &mut Conn,
+        object: &Object,
+    ) -> Result<Option<super::operation::Cut>, MakeError> {
+        match self.operation {
+            Some((request, plan)) => request
+                .cut(
+                    self.engine,
+                    conn,
+                    std::sync::Arc::clone(plan),
+                    object.object.id,
+                )
+                .await
+                .map(Some)
+                .map_err(scope_error),
+            None => Ok(None),
+        }
+    }
+    pub(super) fn cut(&self, cut: &mut Option<super::operation::Cut>) -> Result<(), MakeError> {
+        if let Some(cut) = cut {
+            cut.before(self.engine.inner.clock.as_ref())
+                .map_err(scope_error)?;
+        }
+        Ok(())
+    }
+}
+async fn make_with(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    prepared: Option<PreparedObject>,
+) -> Result<Made, MakeError> {
     if !may_still(tx, batch, object).await? {
         return Ok(Made::failed(
             "import.forbidden",
@@ -581,9 +734,27 @@ pub async fn make_object(
             places::make_place(tx, batch, object).await
         }
         PackageKind::Folder => places::make_folder(tx, batch, object).await,
-        PackageKind::Document => documents::make_document(tx, batch, object).await,
-        PackageKind::Chat => chats::make_chat(tx, batch, object).await,
-        PackageKind::Thread => threads::make_thread(tx, batch, object).await,
+        PackageKind::Document => match prepared {
+            Some(PreparedObject::Document(body)) => {
+                documents::make_document_ready(tx, batch, object, body.map(|body| *body)).await
+            }
+            None => documents::make_document(tx, batch, object).await,
+            _ => refuse("the native document input changed"),
+        },
+        PackageKind::Chat => match prepared {
+            Some(PreparedObject::Chat(record)) => {
+                chats::make_chat_ready(tx, batch, object, Some(record)).await
+            }
+            None => chats::make_chat(tx, batch, object).await,
+            _ => refuse("the native chat input changed"),
+        },
+        PackageKind::Thread => match prepared {
+            Some(PreparedObject::Thread(record)) => {
+                threads::make_thread_ready(tx, batch, object, Some(record)).await
+            }
+            None => threads::make_thread(tx, batch, object).await,
+            _ => refuse("the native thread input changed"),
+        },
     };
     match made {
         Ok(made) => {

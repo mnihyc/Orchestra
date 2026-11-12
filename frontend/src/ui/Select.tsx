@@ -9,7 +9,7 @@ import { Select as Primitive } from 'radix-ui';
 import { type ComponentProps, type ReactNode, type SyntheticEvent, useRef, useState } from 'react';
 
 import { Choice, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
-import { ChoiceCard, ChoiceInspection } from '@/ui/DetailCard';
+import { ChoiceCard, ChoiceInspection, type ChoiceResource } from '@/ui/DetailCard';
 import { cx } from '@/ui/cx';
 import { Field, type FieldSlots } from '@/ui/Field';
 import { fieldBoxClasses } from '@/ui/Input';
@@ -18,6 +18,8 @@ import { useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
 
 export type SelectOption<Value extends string> = ChoiceName & ChoiceDetails & {
+  /** The actual resource, when this is a resource option without an inspection preview. */
+  resource?: ChoiceResource;
   /** What the choice is; never empty. */
   value: Value;
   /** The complete original when a caller deliberately shortens an option label before rendering. */

@@ -76,6 +76,17 @@ pub fn enqueue(
     filter: &QueueFilter,
     times: u64,
 ) -> Result<usize, ScriptError> {
+    enqueue_matching(shared, script, filter, times, None)
+}
+
+/// In-process native fixtures may match actual request bodies before consuming a queued reply.
+pub fn enqueue_matching(
+    shared: &Shared,
+    script: &str,
+    filter: &QueueFilter,
+    times: u64,
+    request_matcher: Option<super::server::RequestMatcher>,
+) -> Result<usize, ScriptError> {
     let segments = Script::parse(script)?.segments;
     let added = segments.len();
     let mut inner = shared.lock();
@@ -84,6 +95,7 @@ pub fn enqueue(
             segment,
             filter: filter.clone(),
             remaining: times.max(1),
+            request_matcher: request_matcher.clone(),
         });
     }
     Ok(added)

@@ -16,9 +16,11 @@ import { comparePositions, threadViewOf, threadWriter, useThreadView } from '@/r
 import { defaultThreadRead } from '@/realtime/threadScope';
 import { KEY_ACTIONS } from '@/shell/keyActions';
 import { me, userRef } from '../doubles/fixtures';
-import { threadInput, userMessage } from '../doubles/thread-rows';
+import { threadInput, turn, userMessage } from '../doubles/thread-rows';
 import { show } from './support';
+import { backgroundWake } from '../doubles/background-wake';
 import { snapshot } from '../unit/continuation-fixtures';
+import { deferred } from './deferred';
 
 const calls = vi.hoisted(() => ({ update: vi.fn<typeof ThreadsApi.updateInput>(), remove: vi.fn<typeof ThreadsApi.cancelInput>(), resume: vi.fn<typeof ThreadsApi.resumeQueue>() }));
 vi.mock('@/api/threads', async (original) => ({ ...await original<typeof ThreadsApi>(), updateInput: calls.update, cancelInput: calls.remove, resumeQueue: calls.resume }));
@@ -86,6 +88,36 @@ function draw(inputs: ThreadInput[], more: Partial<Thread> = {}, readOnly = fals
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); client.session.setState({ userId: null }); useComposerStore.setState({ cannotSteer: {} }); await setLocale('en'); document.documentElement.removeAttribute('data-theme'); });
 
 describe('the waiting-input queue', () => {
+  for (const locale of ['en', 'zh-CN'] as const) {
+    it.each(['editRow', 'moveRowUp', 'moveRowDown', 'removeRow'] as const)('explains a disabled %s while the queue change waits in '+locale, async (key) => {
+      await setLocale(locale);
+      const one = input('pending-change', 'Retain this waiting input', '1');
+      const pending = deferred<Awaited<ReturnType<typeof ThreadsApi.cancelInput>>>();
+      calls.remove.mockReturnValueOnce(pending.promise);
+      draw([one]);
+      await userEvent.click(button('removeRow', 1));
+      const control = button(key, 1);
+      expect(control).toBeDisabled();
+      const target = control.parentElement;
+      if (target === null) throw new Error('The disabled reason must have a keyboard target');
+      try {
+        expect(target).toHaveAttribute('tabindex', '0');
+        act(() => target.focus());
+        expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t('ui.unavailable.queueChanging'));
+        expect(heldInputs.get(one.id)).toEqual(one);
+      } finally { await act(async () => { pending.resolve({ ...one, state: 'cancelled', seq_updated: ++sequence }); await pending.promise; }); }
+    });
+
+    it.each([['moveRowUp', 'first'], ['moveRowDown', 'last']] as const)('explains the %s boundary in '+locale, async (key, reason) => {
+      await setLocale(locale); draw([input('only-one', 'Only waiting input', '1')]);
+      const control = button(key, 1), target = control.parentElement;
+      if (target === null) throw new Error('The disabled reason must have a keyboard target');
+      act(() => target.focus());
+      expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t(`ui.unavailable.${reason}`));
+      expect(calls.update).not.toHaveBeenCalled();
+    });
+  }
+
   it('offers Back to queue while a steer has not entered native dispatch', async () => {
     draw([input('steering', 'Take this or let it wait', '2', { state: 'delivering', delivery: 'steer', turn_id: 'running-turn' })], { state: 'running' });
     expect(screen.getByText('Steering…')).toBeVisible();
@@ -180,6 +212,41 @@ describe('the waiting-input queue', () => {
     await waitFor(() => expect(calls.update).toHaveBeenLastCalledWith(READ, 'one', { delivery: 'interrupt', afterInputId: null }));
     expect(calls.update).toHaveBeenCalledTimes(2);
   });
+
+  for (const locale of ['en', 'zh-CN'] as const) {
+    it('learns only the queue attempt’s actual turn and offers steering again on the next in '+locale, async () => {
+      await setLocale(locale);
+      const first = input('one', 'Guide the running turn', '1');
+      draw([first], { state: 'running', current_turn_id: 'turn-one' });
+      calls.update.mockRejectedValueOnce(new ApiError({ type: 'about:blank', title: 'Unavailable', status: 409, code: 'capability.unsupported', detail: 'This turn cannot be steered', request_id: 'queue-refusal' }, null));
+      await userEvent.click(button('sendNowLabel', 1));
+      await waitFor(() => expect(useComposerStore.getState().cannotSteer[THREAD]).toBe('turn-one'));
+      expect(button('interruptNowLabel', 1)).toBeVisible();
+      const before = threadViewOf(THREAD).thread;
+      if (before === null) throw new Error('The queue keeps its native thread');
+      act(() => threadWriter.apply(THREAD, { thread: { ...before, current_turn_id: 'turn-two', seq: ++sequence } }));
+      expect(button('sendNowLabel', 1)).toBeVisible();
+      await userEvent.click(button('sendNowLabel', 1));
+      await waitFor(() => expect(calls.update).toHaveBeenLastCalledWith(READ, first.id, { delivery: 'steer', afterInputId: null }));
+      expect(calls.update).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not let an old queue turn’s delayed refusal disable the new turn in '+locale, async () => {
+      await setLocale(locale);
+      const first = input('one', 'Keep this waiting input', '1');
+      const pending = deferred<Awaited<ReturnType<typeof ThreadsApi.updateInput>>>();
+      calls.update.mockReturnValueOnce(pending.promise);
+      draw([first], { state: 'running', current_turn_id: 'turn-one' });
+      await userEvent.click(button('sendNowLabel', 1));
+      const before = threadViewOf(THREAD).thread;
+      if (before === null) throw new Error('The queue keeps its native thread');
+      act(() => threadWriter.apply(THREAD, { thread: { ...before, current_turn_id: 'turn-two', seq: ++sequence } }));
+      await act(async () => { pending.reject(new ApiError({ type: 'about:blank', title: 'Unavailable', status: 409, code: 'capability.unsupported', detail: 'The old turn takes no steering', request_id: 'old-queue-refusal' }, null)); await pending.promise.catch(() => undefined); });
+      await waitFor(() => expect(button('sendNowLabel', 1)).toBeEnabled());
+      expect(useComposerStore.getState().cannotSteer).toEqual({});
+      expect(heldInputs.get(first.id)).toEqual(first);
+    });
+  }
 
   it('changes delivery deliberately and removes the same held row', async () => {
     draw([input('one', 'A held message', '1', { queue_held: true })], { state: 'running' });
@@ -494,4 +561,39 @@ it('preserves an open pending editor but cannot save after interaction access is
   expect(editor).toHaveValue('Unsent edited words'); expect(editor).toBeDisabled();
   const save = screen.getByRole('button', { name: i18n.t('composer.queue.save') });
   await user.click(save); expect(calls.update).not.toHaveBeenCalled();
+});
+
+it('keeps another author’s pending input ordinary while background work runs', () => {
+  mount([input('later-author', 'Continue after the build', '1', { state_detail: null, author: GRACE })], {
+    background: backgroundWake(),
+  });
+  expect(screen.getByText('Continue after the build')).toBeVisible();
+  expect(screen.queryByText(/Waiting for .*background tasks/)).not.toBeInTheDocument();
+});
+
+it('keeps Stop-held background completions separate from ordinary queue resume', () => {
+  mount([], { background: backgroundWake({ tasks: [], held_completions: 2 }), queue: { held: false, by: null, at: null, held_inputs: 0, revision: 1 } });
+  expect(screen.getByText('2 finished tasks waiting')).toBeVisible();
+  expect(screen.queryByRole('button', { name: i18n.t('composer.queue.resume') })).not.toBeInTheDocument();
+  expect(calls.resume).not.toHaveBeenCalled();
+  act(() => threadWriter.patch(READ, (thread) => ({ ...thread, background: backgroundWake({ tasks: [], held_completions: 0 }) })));
+  expect(screen.queryByText('2 finished tasks waiting')).not.toBeInTheDocument();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('keeps the next native message visible while a turn runs and when it ends in %s', async (locale) => {
+  await setLocale(locale);
+  const next = input('next-message', 'Run the next check', '1');
+  draw([next], { state: 'running', current_turn_id: 'active-turn' });
+  const running = { ...turn('active-turn', { ordinal: 1, state: 'running', inputId: 'current-message' }), thread_id: THREAD, seq_updated: 20 };
+  act(() => threadWriter.apply(READ, { turns: [running] }));
+  expect(screen.getByText('Run the next check')).toBeVisible();
+  expect(row(1)).toHaveAttribute('data-queued', next.id);
+  const thread = threadViewOf(READ).thread;
+  if (thread === null) throw new Error('The active queue retains its native thread');
+  act(() => threadWriter.apply(READ, { thread: { ...thread, seq: 30, state: 'idle', current_turn_id: null }, turns: [{ ...running, state: 'completed', seq_updated: 30, completed_at: '2026-10-01T10:01:00Z' }] }));
+  expect(screen.getByText('Run the next check')).toBeVisible();
+  expect(row(1)).toHaveAttribute('data-queued', next.id);
+  expect(calls.update).not.toHaveBeenCalled();
+  expect(calls.remove).not.toHaveBeenCalled();
 });

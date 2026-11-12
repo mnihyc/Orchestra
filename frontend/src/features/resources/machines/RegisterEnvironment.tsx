@@ -9,6 +9,7 @@ import { registerEnvironment } from '@/api/environments';
 import { readMachineFacts } from '@/features/resources/machines/facts';
 import { DataSourcesEditor, madeDataSources } from '@/features/resources/environments/DataSources';
 import { HomePicker, useHomeChoices } from '@/features/resources/HomePicker';
+import { resourceGroupMeta, resourceHomeLabel } from '@/features/resources/groups';
 import { NewAccess } from '@/features/resources/NewAccess';
 import { Hint } from '@/features/help/Hint';
 import type { Machine, NewEnvironmentAccess, NewResourceAccess } from '@/generated/api-types';
@@ -38,8 +39,10 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
   const key = useActKey();
   // Whether the form took the server's complaint to one of its fields; if not, it is said as a whole.
   const [placed, setPlaced] = useState(false);
+  const machineHome = resourceGroupMeta(machine);
+  const defaultHomeName = (machineHome.home === null || machineHome.home === undefined) ? '' : resourceHomeLabel(machineHome,t);
   const choices = useHomeChoices(home).choices;
-  const homeName = choices.find((choice) => choice.id === home)?.label ?? '';
+  const homeName = choices.find((choice) => choice.id === home)?.label ?? defaultHomeName;
 
   const form = useForm(
     { name: '' },
@@ -53,7 +56,7 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
       if (!sourcesReady) throw new Error(t('environmentData.chooseAllowed'));
       const asked: NewEnvironmentAccess = access === 'only_me' ? 'only_me' : 'defaults';
       const body = {
-        home_id: home,
+        ...(home === '' ? {} : {home_id: home}),
         name: values.name.trim(),
         root:dataSources.workspace.kind==='existing_directory'?dataSources.workspace.path:'',
         data_sources: dataSources,
@@ -63,10 +66,10 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
       };
       return registerEnvironment(machine.id, body, key(body));
     },
-    onSuccess: (environment) => {
-      toast({ tone: 'success', title: t('machines.environment.done', { name: environment.name }) });
+    onSuccess: (environment, values) => {
+      toast({ tone: 'success', title: t('machines.environment.done', { name: values.name.trim() }) });
       onClose();
-      void navigate({ to: '/resources/environments/$id', params: { id: environment.id } });
+      void navigate({ to: '/resources/environments/$id', params: { id: 'environment_id' in environment ? String(environment.environment_id) : environment.id } });
     },
     onError: (error) => setPlaced(form.refuse(error)),
   });
@@ -84,7 +87,7 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
           <Button disabled={register.isPending} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" type="submit" form="register-environment" pending={register.isPending} blocked={home === '' || !sourcesReady}>
+          <Button variant="primary" type="submit" form="register-environment" pending={register.isPending} blocked={!sourcesReady}>
             {t('machines.environment.submit')}
           </Button>
         </>
@@ -94,11 +97,13 @@ export function RegisterEnvironmentDialog({ machine, open, onClose }: { machine:
         id="register-environment"
         className="flex flex-col gap-4 py-2"
         noValidate
-        onSubmit={form.submit((values) => home !== '' && register.mutate(values))}
+        onSubmit={form.submit((values) => register.mutate(values))}
       >
         <Input label={t('machines.environment.name')} {...form.field('name')} autoComplete="off" />
         <DataSourcesEditor machine={machine.id} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={register.isPending} />
-        <HomePicker value={home} onChange={setHome} />
+        <HomePicker value={home} onChange={setHome} disabled={register.isPending}
+          defaultChoice={t(defaultHomeName===''?'resourceGroups.machineHome':'resourceGroups.machineHomeNamed',{name:defaultHomeName})}
+          places={(machineHome.home === null || machineHome.home === undefined) || machineHome.home.redacted ? [] : [{id:machineHome.home.id,name:defaultHomeName}]} />
         <Switch
           label={t('machines.environment.remoteWrite')}
           help={<Hint id="env-remote-write" />}

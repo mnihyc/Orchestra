@@ -79,7 +79,7 @@ export class PeopleWorld implements Part {
         if (found !== undefined && this.world.access.isHolder(found, { kind:'role', role:target.role, at:{id:target.node_id,kind:'org',name:null,redacted:true}, count:0 }, target.node_id)) named.add(found.me.id);
       }
       if (target.kind === 'group') {
-        const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number }[] | undefined;
+        const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number; revision:number }[] | undefined;
         const group = groups?.find((group) => group.id === target.id);
         if (group !== undefined) for (const reader of readers) {
           const found = this.world.people.get(reader.name);
@@ -123,13 +123,13 @@ export class PeopleWorld implements Part {
     const base = { user:null, available: true, reason: null, thread: null, agent: null, state: null, started_at: null };
     const choices: MentionChoice[] = users.map((reader) => ({ ...base, target: { kind: 'user', id: reader.me.id }, name: reader.me.username, user: userRef(reader.me), count: reader.me.id === person.me.id ? 0 : 1 }));
     const broad = this.groupPolicy === 'writers' || chat.can.moderate || chat.created_by?.id === person.me.id;
-    if (chat.kind !== 'direct' && users.length > 0) {
+    if (chat.kind !== 'direct' && users.length > 0 && this.world.places.access(person, chat.org_id).permissions.includes('org.view')) {
       const scope = chat.node?.id ?? chat.org_id;
       const count = users.filter((reader) => reader.me.id !== person.me.id && this.world.access.isHolder(reader, {kind:'role',role:'viewer',at:{id:scope,kind:'org',name:null,redacted:true},count:0},scope)).length;
       choices.push({ ...base, target: { kind: 'role', node_id: scope, role: 'viewer' }, name: 'Everyone here', count, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });
       const developers = users.filter((reader) => reader.me.id !== person.me.id && this.world.access.isHolder(reader, {kind:'role',role:'developer',at:{id:scope,kind:'org',name:null,redacted:true},count:0},scope));
       if (developers.length > 0) choices.push({ ...base, target: { kind: 'role', node_id: chat.node?.id ?? chat.org_id, role: 'developer' }, name: 'Developers', count: developers.length, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });
-      const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number }[] | undefined;
+      const groups = this.world.access.handle(person, 'GET', `/orgs/${chat.org_id}/groups`, new URLSearchParams(), {})?.body as { id:string; name:string; description:string; org_id:string; member_count:number; revision:number }[] | undefined;
       for (const group of groups ?? []) {
         const count = users.filter((reader) => reader.me.id !== person.me.id && this.world.access.isHolder(reader, {kind:'group',group},scope)).length;
         if (count > 0) choices.push({ ...base, target: { kind: 'group', id: group.id }, name: group.name, count, available: broad, reason: broad ? null : 'Only managers may name roles and groups here. Acme decides.' });
@@ -172,7 +172,7 @@ export class PeopleWorld implements Part {
     const node = chat.node === null ? null : this.world.places.pathTo(chat.node.id).at(-1);
     const owner = node?.kind === 'thread' && this.world.places.metaOf(node.id).owner === person.me.username;
     const following = node?.kind === 'thread' && this.world.places.access(person, node.id).effective_subscription === 'all';
-    if ((owner || following) && my === null) my = { chat_id: chat.id, level: null, engaged: false, effective_level: 'all', last_read_seq: 0, mentions_unread: 0, hidden: false, read_revision: 0, default_level: 'all', default_reason: owner ? 'owner' : 'following' };
+    if ((owner || following) && my === null) my = { chat_id: chat.id, org_id: chat.org_id, last_message_seq: chat.last_message_seq, level: null, engaged: false, effective_level: 'all', last_read_seq: 0, mentions_unread: 0, hidden: false, read_revision: 0, default_level: 'all', default_reason: owner ? 'owner' : 'following' };
     if (my !== null) {
       const default_level = owner || following || my.engaged || chat.kind !== 'node' ? 'all' : 'off';
       my = { ...my, default_level, default_reason: owner ? 'owner' : following ? 'following' : my.engaged ? 'engaged' : chat.kind !== 'node' ? 'member' : 'quiet', effective_level: my.level ?? default_level };
@@ -339,7 +339,7 @@ export class PeopleWorld implements Part {
       const seq = Number(body.seq);
       const rec = this.world.chats.records.get(id);
       if (body.unread_from === true && !rec?.messages.some((message) => message.seq_created === seq && !message.deleted)) throw new Refusal(404, 'not_found', 'No live message there');
-      const next: RevisedChatState = { chat_id: id, level: null, effective_level: 'off', engaged: false, hidden: false, mentions_unread: 0, ...held, read_revision: body.unread_from === true ? revision + 1 : revision, last_read_seq: body.unread_from === true ? Math.max(0, seq - 1) : Math.max(held?.last_read_seq ?? 0, seq) };
+      const next: RevisedChatState = { chat_id: id, org_id: chat.org_id, last_message_seq: chat.last_message_seq, level: null, effective_level: 'off', engaged: false, hidden: false, mentions_unread: 0, ...held, read_revision: body.unread_from === true ? revision + 1 : revision, last_read_seq: body.unread_from === true ? Math.max(0, seq - 1) : Math.max(held?.last_read_seq ?? 0, seq) };
       next.mentions_unread = rec?.messages.filter((message) => message.seq_created > next.last_read_seq && message.mentions.some((user) => user.id === person.me.id)).length ?? 0;
       this.world.chats.states.set(`${person.me.username}:${id}`, next);
       this.world.users.tell(person.me.username, { what: 'chat_state', state: next });

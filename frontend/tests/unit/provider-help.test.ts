@@ -79,6 +79,7 @@ describe('provider implementer help', () => {
     expect(commands?.body).toContain('only its owners');
     expect(providerGuidesForSetting('runtime.after_up')).toEqual(['commands-after-start']);
     expect(providerGuidesForSetting('providers.allow_http_upstreams')).toEqual(['provider-details']);
+    expect(providerGuidesForSetting('providers.model_groups_max')).toEqual(['provider-details']);
     expect(readArticle('x', '# X').section).toBeUndefined();
   });
 });

@@ -226,7 +226,11 @@ impl Presenter {
             ));
         }
         let mut fields = self.selection.secrets.clone();
-        fields.retain(|name, _| descriptor.secret_fields().any(|field| field.name == *name));
+        fields.retain(|name, _| {
+            descriptor
+                .secret_fields_for(orch_provider_contract::SourceElement::Presenter)
+                .any(|field| field.name == *name)
+        });
         let reply = source
             .present(PresentAsk {
                 provider: self.selection.provider.clone(),

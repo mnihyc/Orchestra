@@ -1,5 +1,9 @@
 /** Every shared floating family fits the real viewport at all corners, with long contents still reachable. */
 import { expect, test } from '@playwright/test';
+import en from '../../src/i18n/en.json' with { type: 'json' };
+import zh from '../../src/i18n/zh-CN.json' with { type: 'json' };
+import { resourceFixtures } from '../../e2e/layout-fixtures';
+import { asAdmin } from './admin-mode-support';
 import { scenario, signIn } from './support.ts';
 import { FLOATING_KINDS, type FloatingKind } from './floating-cases';
 
@@ -97,5 +101,60 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark']) for (con
     await expect(trigger).toBeFocused();
     await page.keyboard.press('Escape');
     await expect(parent).toBeHidden();
+  });
+}
+
+type InspectionWindow = Window & { __inspectionFrames: { active: boolean; frames: { left: number; top: number; right: number; bottom: number }[] } };
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  test(`a host inspection stays inside the viewport while its native sharing read resolves (${locale})`, async ({ page }, info) => {
+    const words = locale === 'en' ? en : zh;
+    await scenario();
+    await resourceFixtures(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await signIn(page);
+    await asAdmin(page, true);
+    if (locale === 'zh-CN') {
+      await page.goto('/settings/interface');
+      await page.getByRole('combobox', { name: 'Language', exact: true }).click();
+      await page.getByRole('option', { name: '简体中文', exact: true }).click();
+      await expect(page.locator('html')).toHaveAttribute('lang', locale);
+    }
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((done) => { release = done; });
+    await page.route(/\/api\/v1\/hosts\/[^/]+\/permissions$/, async (route) => {
+      await held;
+      await route.fulfill({ status: 503, json: { type: 'about:blank', status: 503, title: 'Temporarily unavailable' } });
+    });
+    await page.goto('/admin/runtimes');
+    await page.getByRole('combobox', { name: words.admin.runtimes.host, exact: true }).click();
+    await page.getByRole('option', { name: /build-box/ }).hover();
+    const card = page.locator('[data-inspection-card][aria-label="build-box"]');
+    await expect(card.getByText(words.linkCards.sharingChecking, { exact: true })).toBeVisible();
+    await card.evaluate((element) => {
+      const observed = window as unknown as InspectionWindow;
+      observed.__inspectionFrames = { active: true, frames: [] };
+      const sample = () => {
+        if (!observed.__inspectionFrames.active) return;
+        const box = element.getBoundingClientRect();
+        observed.__inspectionFrames.frames.push({ left: box.left, top: box.top, right: box.right, bottom: box.bottom });
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+    release();
+    await expect(card.getByText(words.linkCards.sharingUnavailable, { exact: true })).toBeVisible();
+    const frames = await page.evaluate(async () => {
+      await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+      const observation = (window as unknown as InspectionWindow).__inspectionFrames;
+      observation.active = false;
+      return observation.frames;
+    });
+    expect(frames.length).toBeGreaterThan(1);
+    for (const box of frames) {
+      expect(box.left).toBeGreaterThanOrEqual(0); expect(box.top).toBeGreaterThanOrEqual(0);
+      expect(box.right).toBeLessThanOrEqual(1440); expect(box.bottom).toBeLessThanOrEqual(900);
+    }
+    await info.attach('native-sharing-resize-bounds', { body: JSON.stringify(frames), contentType: 'application/json' });
   });
 }

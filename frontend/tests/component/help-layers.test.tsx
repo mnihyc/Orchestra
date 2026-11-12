@@ -55,6 +55,25 @@ beforeEach(async () => {
 });
 afterEach(async () => { act(() => useHelpState.setState({ overlay: false })); document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
 
+it('makes the covered page inert and restores only the input state owned by the modal', async () => {
+  const user = userEvent.setup();
+  const retained = document.createElement('aside');
+  retained.setAttribute('inert', 'existing');
+  retained.setAttribute('aria-hidden', 'true');
+  document.body.append(retained);
+  const view = show(<Work />);
+  try {
+    await user.click(screen.getByRole('button', { name: 'Open setup' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Setup' });
+    await waitFor(() => expect(view.container).toHaveAttribute('inert'));
+    expect(dialog.closest('[inert]')).toBeNull();
+    expect(within(dialog).getByRole('textbox', { name: 'Draft' })).toBeEnabled();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(view.container).not.toHaveAttribute('inert'));
+    expect(retained).toHaveAttribute('inert', 'existing');
+  } finally { retained.remove(); }
+});
+
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const shape of ['wide', 'small'] as const) {
   it(`reads help without another dialog or navigation, then restores the deep draft (${locale}, ${theme}, ${shape})`, async () => {
     await setLocale(locale); scene.shape = shape; document.documentElement.dataset.theme = theme;
