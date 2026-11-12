@@ -1,0 +1,3 @@
+# Where and the type's default, round two: the access contract, the access engine whole.
+test -p orch-access-contract --lib
+test -p orch-authz

@@ -176,6 +176,34 @@ async fn visible(
     })
 }
 
+/// Rechecks only the original native matches, using the planner's existing visibility producer.
+/// The destination itself keeps its separate native archived-place viewing rule.
+pub async fn existing_readable(
+    conn: &mut Conn,
+    principal: &Principal,
+    destination: Id,
+    existing: &[(Table, Id)],
+) -> Result<bool, ImportError> {
+    for (table, kind) in [
+        (Table::Nodes, PackageKind::Project),
+        (Table::Documents, PackageKind::Document),
+        (Table::Containers, PackageKind::Folder),
+    ] {
+        let ids = existing
+            .iter()
+            .filter(|(found, id)| *found == table && !(table == Table::Nodes && *id == destination))
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        let seen = visible(conn, principal, kind, &ids).await?;
+        if ids.iter().any(|id| !seen.contains(id)) {
+            return Ok(false);
+        }
+    }
+    Ok(existing
+        .iter()
+        .all(|(table, _)| matches!(table, Table::Nodes | Table::Documents | Table::Containers)))
+}
+
 /// The permission that makes a thing of `kind` in the node `node`, which is of the kind `parent`.
 pub(super) fn creation_right(parent: NodeKind, kind: PackageKind) -> Option<Permission> {
     use PackageKind::{Chat, Document, Folder, Org, Project, Thread, Topic};
@@ -352,22 +380,8 @@ pub async fn build(
         root: request.destination.root.unwrap_or_default(),
     };
     let mut rights = Rights::new(principal);
-    let effective = nodes::effective(conn, principal, node, Policy::default()).await?;
-    let admin =
-        principal.is_system_admin() || effective.role.is_some_and(|held| held.role == Role::Admin);
-    let manages_access = effective
-        .held
-        .iter()
-        .any(|held| held.permission == Permission::AccessManage);
-    let authors = match wants.authors {
-        Some(ImportAuthors::Accounts) | None if admin => ImportAuthors::Accounts,
-        _ => ImportAuthors::Labels,
-    };
-    let access = ImportAccessPlan {
-        carried: opened.access.is_some(),
-        allowed: manages_access,
-        restored: wants.access && opened.access.is_some() && manages_access,
-    };
+    let (admin, authors, access) =
+        authority_of(conn, principal, node, &wants, opened.access.is_some()).await?;
     // The folder the documents go into must be one of this place's.
     if let Some(folder) = destination.folder {
         let found = orch_db::queries::documents::containers::get(conn, folder)
@@ -541,6 +555,7 @@ pub async fn build(
                 },
                 allowed: Vec::new(),
                 existing: Some(Existing {
+                    table: Table::Nodes,
                     id: node,
                     name: destination.name.clone(),
                     found_by: ImportMatch::Name,
@@ -610,6 +625,7 @@ pub async fn build(
 
         // What it meets that is here: what an earlier import made of it, or what has its name beside the same things.
         let mut existing: Option<Existing> = live_origins.get(&object.id).map(|row| Existing {
+            table: table_of(origin_package_kind(&row.kind)),
             id: row.object_id,
             name: row
                 .source_name
@@ -660,6 +676,7 @@ pub async fn build(
                 .and_then(|group| group.get(&object.name.to_lowercase()))
             {
                 existing = Some(Existing {
+                    table: table_of(made),
                     id: found.id,
                     name: found.name.clone(),
                     found_by: ImportMatch::Name,
@@ -845,6 +862,12 @@ pub async fn build(
 
     Ok(Plan {
         destination,
+        access_objects: opened
+            .access
+            .iter()
+            .flatten()
+            .map(|entry| entry.object)
+            .collect(),
         opened,
         objects: planned,
         index,
@@ -925,6 +948,36 @@ fn left_out_text(what: PackageLeftOutWhat, count: i64) -> String {
         }
         PackageLeftOutWhat::WebImages => "images on the web stay links".to_owned(),
     }
+}
+
+/// The same current native author/access choice for planning and continuing import writes.
+pub(crate) async fn authority_of(
+    conn: &mut Conn,
+    principal: &Principal,
+    node: Id,
+    wants: &Wants,
+    carried: bool,
+) -> Result<(bool, ImportAuthors, ImportAccessPlan), ImportError> {
+    let effective = nodes::effective(conn, principal, node, Policy::default()).await?;
+    let admin =
+        principal.is_system_admin() || effective.role.is_some_and(|held| held.role == Role::Admin);
+    let manages_access = effective
+        .held
+        .iter()
+        .any(|held| held.permission == Permission::AccessManage);
+    let authors = match wants.authors {
+        Some(ImportAuthors::Accounts) | None if admin => ImportAuthors::Accounts,
+        _ => ImportAuthors::Labels,
+    };
+    Ok((
+        admin,
+        authors,
+        ImportAccessPlan {
+            carried,
+            allowed: manages_access,
+            restored: wants.access && carried && manages_access,
+        },
+    ))
 }
 
 #[cfg(test)]

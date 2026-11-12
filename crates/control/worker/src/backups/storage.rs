@@ -74,6 +74,9 @@ mod tests {
     fn report() -> OperatorStorageInventory {
         let at = Time::new("2026-10-01T12:00:00Z".parse().unwrap());
         let mut record = KeptRecord {
+            artifact: None,
+            physical_parts: Vec::new(),
+            upload: None,
             id: "release:server:old".into(),
             accounting_key: "release:server:old".into(),
             kind: StorageKind::Release,

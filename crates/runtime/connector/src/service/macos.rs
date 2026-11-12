@@ -146,11 +146,11 @@ pub fn act(action: Action, service: &Service) -> Result<String, ServiceError> {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 
     // A launchd file names Unix paths; Windows joins the same names with its own separator.
-    #[cfg(unix)]
     #[test]
     fn the_agent_runs_the_program_on_its_directory_with_what_xml_would_read_escaped() {
         let service = Service {

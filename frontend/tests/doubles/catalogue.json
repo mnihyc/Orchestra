@@ -61,7 +61,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -229,7 +230,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -247,7 +249,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -265,7 +268,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -844,7 +848,7 @@
         "provider"
       ],
       "label": "Use Provider",
-      "allows": "Run turns on the provider: put a thread on it, and give input to threads that run on it, with the models and efforts the entry allows.",
+      "allows": "Run turns and enabled services on the provider, within the entry's model, service and effort lists.",
       "profiles": false,
       "holders": [
         "role",
@@ -866,6 +870,16 @@
             },
             "description": "The models the holder may run, by name; left out, every enabled model\nof the provider."
           },
+          "services": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The enabled service offerings the holder may use, by name, family or group.\nLeft out, every enabled service; independent of the model list."
+          },
           "efforts": {
             "type": [
               "array",
@@ -885,6 +899,16 @@
               "$ref": "#/$defs/Arrangement"
             },
             "description": "The arrangement types in which work done through this entry may use\nthe provider; left out, all that the provider's owners allow. It can\nonly narrow what they allow."
+          },
+          "where": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/$defs/WhereName"
+            },
+            "description": "Where work done through this entry may run: the environments, hosts and\nmachines it names, a host or a machine meaning every environment on it,\nthose made later included; left out, anywhere. It can only narrow. Work\nthat runs in no environment (Ask, summaries, the semantic index) is not\nheld to it."
           }
         },
         "description": "What an entry in the Use row of a provider lets its holder run. A member\nthat is left out does not narrow.",
@@ -906,15 +930,57 @@
               {
                 "type": "string",
                 "const": "credential_shared",
-                "description": "A copy of the credential is shared."
+                "description": "A copy of the credential is shared.",
+                "x-credential-leaves": true
               },
               {
                 "type": "string",
                 "const": "handed_over",
-                "description": "The credential itself is handed over."
+                "description": "The credential itself is handed over.",
+                "x-credential-leaves": true
               }
             ],
             "description": "A way to place a harness, its tools and a credential that an entry\nmay allow for work done through it. The fifth arrangement, everything\non one machine, is never chosen and so is no option."
+          },
+          "WhereKind": {
+            "oneOf": [
+              {
+                "type": "string",
+                "const": "environment",
+                "description": "One environment."
+              },
+              {
+                "type": "string",
+                "const": "host",
+                "description": "A host: every environment on it."
+              },
+              {
+                "type": "string",
+                "const": "machine",
+                "description": "A physical machine: every environment on it."
+              }
+            ],
+            "description": "A kind of place an entry can name."
+          },
+          "WhereName": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/WhereKind",
+                "description": "What kind of place it is."
+              },
+              "id": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Which one."
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "id"
+            ],
+            "description": "One place an entry names: a kind and the identifier of one of that kind."
           }
         }
       }

@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from './resource-grouping.ts';
 /** What the fake API says of the system's own screens: its people and root orgs, its settings, what it stores about itself, its hosts and runtimes, its capabilities, harness builds and agent profiles, its storage and authority, its audit trail, its plugins and its identity providers.
  *
  * It keeps to what the real API promises of these requests, as far as a screen can tell: everything
@@ -18,6 +19,8 @@ import type {
   HarnessChannelsStatus,
   HarnessKindInfo,
   Host,
+  GatewayCatalogue,
+  GatewayCatalogueEntry,
   IdentityProvider,
   InstallationRecords,
   MachineRef,
@@ -119,10 +122,16 @@ const KINDS: readonly [action: string, verb: string, object: string][] = [
   ['environment.created', 'made the environment', 'Main'],
 ];
 const SEEDED_ENTRIES = 130;
+const initialGatewayCatalogue = (): GatewayCatalogue => ({ revision: 'gateways-1', gateways: [
+  { id: 'main', label: 'Main gateway', region: 'Unspecified', endpoints: [{ url: 'wss://gateway.example.test:9443', trust: 'pinned' }] },
+] });
 
 // ---------------------------------------------------------------- the world
 
 export class AdminWorld implements Part {
+  /** Public installation metadata, mutable only through the existing system-admin gate. */
+  gatewayCatalogue: GatewayCatalogue = initialGatewayCatalogue();
+
   private channelsReadAt: string | null = null;
   private installation: InstallationRecords = { release: null, backup: null, backup_warning: true, backup_error: null };
   readonly world: World;
@@ -257,7 +266,7 @@ export class AdminWorld implements Part {
       readme: null,
       color: null,
       title_source: 'user',
-      description_source: 'user',
+
       tags: [],
       tags_source: 'user',
       auto_updated_at: null,
@@ -285,7 +294,7 @@ export class AdminWorld implements Part {
 
   private agent(name: string, kind: string, profile: Agent['profile']): Agent {
     const created = new Date().toISOString();
-    return {
+    return { ...unjudgedProvenance(),
       id: fixtureId(27, this.world.resources.agents.length + 1),
       name,
       address: name.toLowerCase().replaceAll(' ', '-'),
@@ -307,6 +316,7 @@ export class AdminWorld implements Part {
 
   /** Puts the double back as it was made. */
   reset(): void {
+    this.gatewayCatalogue = initialGatewayCatalogue();
     this.installation = { release: null, backup: null, backup_warning: true, backup_error: null };
     this.own.clear();
     this.entries = [];
@@ -348,6 +358,26 @@ export class AdminWorld implements Part {
     const route = `${method} ${path}`;
     let found: RegExpExecArray | null;
 
+
+    if (route === 'GET /gateways') return { status: 200, body: this.gatewayCatalogue };
+    if (route === 'PUT /gateways') {
+      this.need(person);
+      if (body.expected_revision !== this.gatewayCatalogue.revision) throw new Refusal(409, 'conflict.stale_revision', 'The catalogue changed. Review it again.');
+      if (!Array.isArray(body.gateways)) invalid('gateways', 'must be a list of gateways');
+      const gateways: GatewayCatalogueEntry[] = body.gateways.map((raw: unknown) => {
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) invalid('gateways', 'must contain gateway entries');
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry.id !== 'string' || typeof entry.label !== 'string' || typeof entry.region !== 'string' || !Array.isArray(entry.endpoints)) invalid('gateways', 'must name the gateway and its endpoints');
+        return { id: entry.id, label: entry.label, region: entry.region, endpoints: entry.endpoints.map((rawEndpoint: unknown) => {
+          if (typeof rawEndpoint !== 'object' || rawEndpoint === null || Array.isArray(rawEndpoint)) invalid('endpoints', 'must contain addresses');
+          const endpoint = rawEndpoint as Record<string, unknown>;
+          if (typeof endpoint.url !== 'string' || (endpoint.trust !== 'pinned' && endpoint.trust !== 'public')) invalid('endpoints', 'must name the address and trust');
+          return { url: endpoint.url, trust: endpoint.trust };
+        }) };
+      });
+      this.gatewayCatalogue = { revision: `gateways-${randomUUID()}`, gateways };
+      return { status: 200, body: { revision: this.gatewayCatalogue.revision } };
+    }
     // What the system's screens read that does not lie under /admin.
     if (route === 'GET /harness-kinds') return { status: 200, body: this.harnessKinds() };
     if (route === 'GET /pki/ca.pem') {
@@ -896,7 +926,7 @@ export class AdminWorld implements Part {
     const systemWhenFull = this.settingValue('hosts.when_full') === 'block' ? 'block' : 'warn';
     const ada = this.world.people.get('ada');
     const vera = this.world.people.get('vera');
-    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({
+    const host = (n: number, name: string, memory: number, declared: number, more: Partial<Host> = {}): Host => ({ ...unjudgedProvenance(),
       access: { admin_only: [], participating: false, administers: true, permissions: [], through: [] },
       address: name,
       capacity: { cpu_millis: 16_000, disk_gb: 500, memory_mb: memory },

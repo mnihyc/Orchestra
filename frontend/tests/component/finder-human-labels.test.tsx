@@ -14,7 +14,7 @@ import { useAppearance } from '@/lib/appearance';
 import { show } from './support';
 const calls = vi.hoisted(() => ({ go: vi.fn<Env['go']>() }));
 const root: NodeRef = { id: 'acme', kind: 'org', name: 'Acme', redacted: false };
-const hit = (more: Partial<NameHit> & Pick<NameHit, 'id' | 'kind' | 'name'>): NameHit => ({ href: null, tag: null, thread_attention: null, color: null, custom_color: null, address: null, username: null, avatar: null, path: [], owner: null, archived: false, recent: true, ...more });
+const hit = (more: Partial<NameHit> & Pick<NameHit, 'id' | 'kind' | 'name'>): NameHit => ({ home_path: [], href: null, tag: null, thread_attention: null, color: null, custom_color: null, address: null, username: null, avatar: null, path: [], owner: null, archived: false, recent: true, ...more });
 const recents = [
   hit({ id: 'alice', kind: 'user', name: 'Alice Archer', username: 'alice', address: 'acme.alice', href: '/u/alice' }),
   hit({ id: root.id, kind: 'org', name: 'Acme', address: 'acme', path: [root], href: '/org/acme' }),

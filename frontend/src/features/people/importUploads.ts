@@ -28,8 +28,10 @@ export class ImportUploads {
   private pending: Promise<ImportUploadedFile[]> | null = null;
   private cancelled = false;
   private cancellation: Promise<void> | null = null;
+  private readonly makeTask: (file: File) => Task;
 
-  constructor(source: Extract<ImportSource, { fault: null }>, private readonly makeTask: (file: File) => Task = (file) => new UploadTask(file)) {
+  constructor(source: Extract<ImportSource, { fault: null }>, makeTask: (file: File) => Task = (file) => new UploadTask(file)) {
+    this.makeTask = makeTask;
     this.files = source.files;
     this.bytes = source.bytes;
   }

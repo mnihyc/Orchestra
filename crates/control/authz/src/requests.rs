@@ -75,6 +75,8 @@ impl Whom {
 pub struct AskedOptions {
     /// The models.
     pub models: Option<Vec<String>>,
+    /// The enabled service offerings.
+    pub services: Option<Vec<String>>,
     /// The efforts.
     pub efforts: Option<Vec<String>>,
 }
@@ -86,6 +88,9 @@ impl AskedOptions {
         let mut members = serde_json::Map::new();
         if let Some(models) = &self.models {
             members.insert("models".to_owned(), serde_json::json!(models));
+        }
+        if let Some(services) = &self.services {
+            members.insert("services".to_owned(), serde_json::json!(services));
         }
         if let Some(efforts) = &self.efforts {
             members.insert("efforts".to_owned(), serde_json::json!(efforts));
@@ -102,6 +107,7 @@ impl AskedOptions {
         };
         Some(Self {
             models: words("models")?,
+            services: words("services")?,
             efforts: words("efforts")?,
         })
     }
@@ -435,34 +441,21 @@ pub async fn givers_for(
             else {
                 continue;
             };
-            let held = grant.provider();
-            let models = options.and_then(|options| options.models.as_ref());
-            let efforts = options.and_then(|options| options.efforts.as_ref());
-            let groups = orch_db::queries::resources::groups_of(
-                conn,
-                &models
-                    .into_iter()
-                    .flatten()
-                    .map(|model| (object.id, model.clone()))
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(crate::Error::from)?;
-            let models_fit = models.map_or(held.models.is_none(), |models| {
-                models.iter().all(|model| {
-                    crate::options::allows_model(
-                        &held,
-                        model,
-                        groups
-                            .get(&(object.id, model.clone()))
-                            .map_or(&[][..], Vec::as_slice),
-                    )
-                })
-            });
-            let efforts_fit = efforts.map_or(held.efforts.is_none(), |efforts| {
-                efforts.iter().all(|effort| held.allows_effort(effort))
-            });
-            if !models_fit || !efforts_fit {
+            // A giver gives what one single entry of theirs allows, and the entry a request writes
+            // names the models, services and efforts that were asked for, and no type and no
+            // place: the givers are those who could write that entry, as the approval holds them.
+            let writes = orch_access_contract::permissions::ProviderUse {
+                models: options.and_then(|options| options.models.clone()),
+                services: options.and_then(|options| options.services.clone()),
+                efforts: options.and_then(|options| options.efforts.clone()),
+                arrangements: None,
+                r#where: None,
+            };
+            let fits = grant
+                .each
+                .iter()
+                .any(|allowance| writes.within(&allowance.provider));
+            if !fits {
                 continue;
             }
         }
@@ -840,8 +833,10 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
     })?;
     let Options::ProviderUse(ProviderUse {
         models,
+        services,
         efforts,
         arrangements,
+        r#where,
     }) = &parsed
     else {
         return Err(unfit("options", "are for the use of a provider"));
@@ -861,6 +856,11 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         "models",
     )?;
     within(
+        services,
+        asked.options.as_ref().and_then(|o| o.services.as_ref()),
+        "services",
+    )?;
+    within(
         efforts,
         asked.options.as_ref().and_then(|o| o.efforts.as_ref()),
         "efforts",
@@ -873,13 +873,21 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         {
             members.insert("models".to_owned(), serde_json::json!(models));
         }
+        if services.is_none()
+            && let Some(services) = &wanted.services
+        {
+            members.insert("services".to_owned(), serde_json::json!(services));
+        }
         if efforts.is_none()
             && let Some(efforts) = &wanted.efforts
         {
             members.insert("efforts".to_owned(), serde_json::json!(efforts));
         }
     }
-    let _ = arrangements;
+    // The types and the places are not asked for, so none is held to what was asked. What the
+    // approver writes is held to what they hold when the change is made, as for any entry: a
+    // type in which the credential leaves, or a place, is theirs to give only if they hold it.
+    let _ = (arrangements, r#where);
     Ok(written)
 }
 
@@ -963,4 +971,44 @@ pub async fn grant(
     let outcome =
         pages::change_for_request(conn, approver, target, &change, policy, origin).await?;
     Ok((outcome, permissions))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "fixture assertions"
+)]
+mod service_option_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn granting_service_use_preserves_an_omitted_limit_and_refuses_a_wider_selection() {
+        let asked = Asked {
+            label: None,
+            object: ObjectRef {
+                kind: ObjectKind::Provider,
+                id: orch_types::new_id(),
+            },
+            permissions: vec![Permission::ProviderUse],
+            options: Some(AskedOptions {
+                services: Some(vec!["search".into(), "fetch".into()]),
+                ..AskedOptions::default()
+            }),
+            whom: Whom::Requester,
+            reason: "Read the public documentation".into(),
+        };
+        let original = json!({"services":["search","fetch"]});
+        assert_eq!(options_given(&asked, None).unwrap(), original);
+        assert_eq!(options_given(&asked, Some(&json!({}))).unwrap(), original);
+        assert_eq!(
+            options_given(&asked, Some(&json!({"services":["search"]}))).unwrap(),
+            json!({"services":["search"]})
+        );
+        assert!(options_given(&asked, Some(&json!({"services":["images"]}))).is_err());
+        let decoded = AskedOptions::from_json(&original).unwrap();
+        assert_eq!(decoded.to_json(), original);
+        assert!(decoded.models.is_none());
+    }
 }

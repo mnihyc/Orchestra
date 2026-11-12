@@ -7,7 +7,7 @@ import { threadInput, userMessage } from '../doubles/thread-rows';
 import { ADA } from '../doubles/chat-rows';
 import { RUNS_ON } from '../doubles/fixtures';
 import { change } from './change-support';
-import { bodySent, ACME, emit, scenario, signIn, threadHeld } from './support';
+import { bodySent, replySent, ACME, emit, scenario, signIn, threadHeld } from './support';
 
 const TEXT = 'hello from scenario 39';
 const INPUT = '00000000-0000-4000-8088-000000000001';
@@ -49,13 +49,24 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await recovery.getByRole('button', { name: words.startRecovery.retry, exact: true }).click();
       expect((await retried).ok()).toBe(true);
     } else {
+      const plans = new Map<string, unknown>();
+      const reads: Promise<void>[] = [];
+      page.on('response', (response) => {
+        if (response.request().method() !== 'POST' || !response.ok()
+          || new URL(response.url()).pathname !== `/api/v1/threads/${ACME.mainThread}/forks/preflight`) return;
+        reads.push((async () => {
+          const plan = await replySent(response) as { preflight_id: string };
+          plans.set(plan.preflight_id, await bodySent(response.request()));
+        })());
+      });
       await recovery.getByRole('button', { name: words.startRecovery.elsewhere, exact: true }).click();
       const dialog = page.getByRole('dialog');
       await expect(dialog).toBeVisible();
       await dialog.getByRole('combobox', { name: words.change.where.label, exact: true }).click();
       await page.getByRole('option', { name: words.changeCompact.destination.use, exact: true }).click();
       await dialog.getByRole('combobox', { name: words.change.where.another, exact: true }).click();
-      await page.getByRole('option', { name: /Acme workspace/ }).click();
+      await dialog.getByRole('combobox', { name: words.change.where.another, exact: true }).fill('Workspace');
+      await page.getByRole('option', { name: /^Workspace\b/ }).click();
       // Explicitly choose not to copy from the failed setup in the reviewed plan.
       await dialog.getByRole('radio', { name: words.changeCompact.files.none, exact: true }).click();
       const confirm = dialog.getByRole('button', { name: words.change.confirm.switch, exact: true });
@@ -65,7 +76,12 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await confirm.click();
       const accepted = await switched;
       expect(accepted.ok()).toBe(true);
-      expect((await bodySent(accepted.request()))).toMatchObject({ result: 'replace', environment: { use: RUNS_ON.workspace, files: { mode: 'none' } } });
+      // Confirmation sends only the saved plan identity; verify the intent on that exact preflight.
+      const admission = await bodySent(accepted.request()) as { preflight_id: string };
+      expect(admission.preflight_id).toEqual(expect.any(String));
+      expect(admission).toEqual({ preflight_id: admission.preflight_id });
+      await Promise.all(reads);
+      expect(plans.get(admission.preflight_id)).toMatchObject({ result: 'replace', environment: { use: RUNS_ON.workspace, files: { mode: 'none' } } });
       await change.finish();
       await expect(dialog.locator('[data-job-result="succeeded"]')).toBeVisible();
       await dialog.getByRole('button', { name: words.change.result.doneButton, exact: true }).click();

@@ -32,8 +32,8 @@ async fn native_projection_writes_keep_counts_and_earliest_anchors_exact() -> Te
            VALUES(md5('segment')::uuid,md5('thread')::uuid,1,0,'separated','native',1,md5('continuation')::uuid,'structured',now());
          INSERT INTO documents(id,node_id,org_id,owner_id,title,basename)
            VALUES(md5('document')::uuid,md5('topic')::uuid,md5('org')::uuid,md5('owner')::uuid,'Document','Document.md');
-         INSERT INTO document_discussions(id,document_id,created_by,seq_updated)
-           VALUES(md5('discussion')::uuid,md5('document')::uuid,md5('owner')::uuid,1);
+         INSERT INTO document_discussions(id,document_id,created_by,seq_updated,last_activity_at)
+           VALUES(md5('discussion')::uuid,md5('document')::uuid,md5('owner')::uuid,1,now());
          SET LOCAL session_replication_role=origin;
          INSERT INTO items(id,thread_id,segment_id,kind,status,payload,search_text,continuation_id,seq_created,seq_updated)
            SELECT md5('item-'||n)::uuid,md5('thread')::uuid,md5('segment')::uuid,'user_message','completed',

@@ -29,6 +29,8 @@ const FOLD_MS = 140;
 export interface SectionProps {
   /** The name of the section: its heading, and what its marker is called. */
   title: string;
+  /** Distinguishes the fold control when the heading alone names another action too. */
+  toggleLabel?: string;
   folded: boolean;
   onFoldedChange: (folded: boolean) => void;
   /** What in it needs a look; shown only while the section is folded, since its rows say it otherwise. */
@@ -40,7 +42,7 @@ export interface SectionProps {
   children: ReactNode;
 }
 
-export function Section({ title, folded, onFoldedChange, needs, path, action, children }: SectionProps) {
+export function Section({ title, toggleLabel, folded, onFoldedChange, needs, path, action, children }: SectionProps) {
   const { t } = useTranslation();
   const body = useId();
   // The rows stay drawn while the section closes, and are gone once it has: a folded tree of thousands costs nothing.
@@ -61,6 +63,7 @@ export function Section({ title, folded, onFoldedChange, needs, path, action, ch
         <h2 className={cx('flex min-w-0 self-stretch', path === undefined && 'flex-1')}>
           <button
             type="button"
+            aria-label={toggleLabel}
             aria-expanded={!folded}
             aria-controls={body}
             data-navigation-section-label

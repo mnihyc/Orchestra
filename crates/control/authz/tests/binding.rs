@@ -327,6 +327,97 @@ async fn what_cannot_run_for_anybody_blocks_the_choice_instead_of_refusing_the_c
 }
 
 #[tokio::test]
+async fn an_entry_that_names_no_type_allows_none_in_which_the_credential_leaves_and_an_owner_keeps_them()
+ {
+    let s = setting().await;
+    {
+        let mut conn = s.w.conn().await;
+        sqlx::query("UPDATE providers SET arrangements = ARRAY['separated','key_separated','credential_shared','handed_over'] WHERE id = $1")
+            .bind(s.provider)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    s.w.grant("agent", s.profile, P::AgentUse, Holder::User { id: s.dev })
+        .await;
+    s.w.grant(
+        "provider",
+        s.provider,
+        P::ProviderUse,
+        Holder::User { id: s.dev },
+    )
+    .await;
+    s.w.give(s.w.project, s.ada, Role::Developer).await;
+    let choice = |arrangement: Arrangement| BindingAsk {
+        node: s.w.topic,
+        permission: P::TopicStartThreads,
+        provider: Some(ProviderChoice {
+            id: s.provider,
+            model: "big",
+            effort: None,
+            arrangement: Some(arrangement),
+        }),
+        profile: Some(s.profile),
+        environment: None,
+        models_allowed: None,
+    };
+    for staying in [Arrangement::Separated, Arrangement::KeySeparated] {
+        assert!(
+            matches!(
+                bind(&s.w, s.dev, &choice(staying)).await,
+                BindingDecision::Allowed(_)
+            ),
+            "{staying:?} leaves the credential where it is kept"
+        );
+    }
+    for leaving in [Arrangement::CredentialShared, Arrangement::HandedOver] {
+        assert_eq!(
+            bind(&s.w, s.dev, &choice(leaving)).await,
+            BindingDecision::Blocked(vec![Blocker::ArrangementNotAllowed {
+                arrangement: leaving
+            }]),
+            "{leaving:?} is not allowed by an entry that names nothing"
+        );
+        // Its owner is not held to what an entry names.
+        assert!(
+            matches!(
+                bind(&s.w, s.ada, &choice(leaving)).await,
+                BindingDecision::Allowed(_)
+            ),
+            "{leaving:?} for the owner"
+        );
+    }
+    // The owners name the type on an entry, and it is allowed there, for that entry alone.
+    let sharing = s.w.member("sharing").await;
+    s.w.give(s.w.project, sharing, Role::Developer).await;
+    s.w.grant(
+        "agent",
+        s.profile,
+        P::AgentUse,
+        Holder::User { id: sharing },
+    )
+    .await;
+    s.w.put(
+        "provider",
+        s.provider,
+        P::ProviderUse,
+        Holder::User { id: sharing },
+        json!({ "arrangements": ["credential_shared"] }),
+    )
+    .await;
+    assert!(matches!(
+        bind(&s.w, sharing, &choice(Arrangement::CredentialShared)).await,
+        BindingDecision::Allowed(_)
+    ));
+    assert_eq!(
+        bind(&s.w, sharing, &choice(Arrangement::HandedOver)).await,
+        BindingDecision::Blocked(vec![Blocker::ArrangementNotAllowed {
+            arrangement: Arrangement::HandedOver
+        }])
+    );
+}
+
+#[tokio::test]
 async fn a_new_environment_adds_what_creating_one_takes_to_the_same_refusal_and_is_held_to_the_entries()
  {
     let s = setting().await;

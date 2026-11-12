@@ -116,11 +116,13 @@ async fn serve_measurements(
 }
 
 /// Runs the service until it is asked to stop.
-pub async fn run(launch: &Launch<'_>, build: BuildInfo) -> anyhow::Result<()> {
-    let config: ServerConfig = orch_config::load(launch.config)
-        .with_context(|| format!("reading {}", launch.config.display()))?;
+pub async fn run(
+    launch: &Launch<'_>,
+    build: BuildInfo,
+    config: ServerConfig,
+) -> anyhow::Result<()> {
     orch_telemetry::init_logging("worker", LogFormat::named(&config.log.format));
-    tracing::info!(%build, "starting");
+    tracing::info!(%build, worker_stack_mib = config.worker.worker_stack_mib, "starting");
 
     anyhow::ensure!(
         !config.database.url.is_empty(),

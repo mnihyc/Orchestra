@@ -299,6 +299,34 @@ fn ending(language: &str, left: i64, inbox: &str) -> String {
 /// `row_id` names the row, which names the notifications that have no
 /// identifier of their own.
 pub fn render(row_id: Id, rendering: &Rendering<'_>) -> Result<Message, RenderFault> {
+    render_selected(row_id, rendering, None)
+}
+
+/// The native renderer with per-notification factual place projections. An explicitly
+/// empty projection remains empty even when another notice names the same native place.
+pub(crate) fn render_with_places(
+    row_id: Id,
+    rendering: &Rendering<'_>,
+    places: &BTreeMap<Id, Vec<PlaceRow>>,
+) -> Result<Message, RenderFault> {
+    render_selected(row_id, rendering, Some(places))
+}
+
+fn selected_places<'a>(
+    notification: &Snapshot,
+    rendering: &Rendering<'a>,
+    places: Option<&'a BTreeMap<Id, Vec<PlaceRow>>>,
+) -> &'a [PlaceRow] {
+    places
+        .and_then(|places| notification.id.and_then(|id| places.get(&id)))
+        .map_or(rendering.places, Vec::as_slice)
+}
+
+fn render_selected(
+    row_id: Id,
+    rendering: &Rendering<'_>,
+    places: Option<&BTreeMap<Id, Vec<PlaceRow>>>,
+) -> Result<Message, RenderFault> {
     let descriptor = rendering.descriptor;
     let own: BTreeMap<String, TemplateOverride> =
         serde_json::from_value(rendering.own_texts.clone()).unwrap_or_default();
@@ -315,7 +343,17 @@ pub fn render(row_id: Id, rendering: &Rendering<'_>) -> Result<Message, RenderFa
         .notifications
         .iter()
         .enumerate()
-        .map(|(index, each)| body_of(each, index, row_id, rendering))
+        .map(|(index, each)| {
+            body_of(
+                each,
+                index,
+                row_id,
+                &Rendering {
+                    places: selected_places(each, rendering, places),
+                    ..*rendering
+                },
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let Some(text) = resolve(&own, &shipped, rendering.language, form) else {
         return if descriptor.body == BodyKind::Json {
@@ -336,7 +374,16 @@ pub fn render(row_id: Id, rendering: &Rendering<'_>) -> Result<Message, RenderFa
         items: rendering
             .notifications
             .iter()
-            .map(|each| item_of(each, rendering, zone))
+            .map(|each| {
+                item_of(
+                    each,
+                    &Rendering {
+                        places: selected_places(each, rendering, places),
+                        ..*rendering
+                    },
+                    zone,
+                )
+            })
             .collect(),
         recipient_name: rendering
             .recipient
