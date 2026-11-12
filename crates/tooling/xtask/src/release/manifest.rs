@@ -162,8 +162,11 @@ pub fn is_release_asset_name(name: &str) -> bool {
     if let Some(rest) = name.strip_prefix("orch-connector-macos-") {
         return arch(rest);
     }
-    if name == "orch-connector-windows-x86_64.exe" {
-        return true;
+    if let Some(rest) = name
+        .strip_prefix("orch-connector-windows-")
+        .and_then(|rest| rest.strip_suffix(".exe"))
+    {
+        return arch(rest);
     }
     name.strip_prefix("orch-deploy-v")
         .and_then(|rest| rest.strip_suffix(".tar.gz"))

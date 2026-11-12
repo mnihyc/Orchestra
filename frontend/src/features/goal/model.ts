@@ -1,8 +1,9 @@
 /** What a goal says of itself, as the screens put it in words: its chip, its reason, its limits and its figures. */
 import type { TFunction } from 'i18next';
 
-import type { ThreadGoal } from '@/generated/api-types';
+import type { Thread, ThreadGoal } from '@/generated/api-types';
 import { formatNumber, formatTokens } from '@/lib/format';
+import { holds } from '@/lib/permissions';
 import { formatSpan } from '@/lib/time';
 import { formatCredits } from '@/features/usage/figures';
 
@@ -21,6 +22,13 @@ export function chipOf(goal: ThreadGoal): GoalChip {
 
 /** Whether the goal is still the loop's to run: nothing is over yet. */
 export const isLive = (goal: ThreadGoal): boolean => goal.status === 'active' || goal.status === 'paused';
+
+/** The same goal action stays visible in the slash list and thread menu. */
+export function goalActionReason(thread: Pick<Thread, 'archived' | 'side_of' | 'access'>, t: TFunction): string | null {
+  if (thread.archived) return t('goals.act.archived');
+  if (thread.side_of !== null) return t('goals.act.sideThread');
+  return holds(thread.access, 'thread.interact') ? null : t('goals.act.driveOnly');
+}
 
 /** The words of the reason a goal is paused or stopped, with the limit that was reached where it was one. */
 export function reasonWords(goal: ThreadGoal, t: TFunction, locale: string): string | null {

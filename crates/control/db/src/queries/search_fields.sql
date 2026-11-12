@@ -19,7 +19,7 @@ CREATE VIEW search_fields AS
  UNION ALL SELECT 'document',b.document_id,b.id,d.node_id,b.id,'block',0,
         b.text,b.updated_at,b.updated_by,NULL,EXISTS(SELECT 1 FROM document_files f WHERE f.document_id=d.id),b.content
  FROM document_blocks b JOIN documents d ON d.id=b.document_id WHERE b.removed_at IS NULL AND d.deleted_at IS NULL AND b.type<>'heading'
- UNION ALL SELECT 'chat_message',m.chat_id,m.id,COALESCE(c.node_id,c.org_id),NULL,'chat',0,m.search_text,m.created_at,m.author_id,NULL,
+ UNION ALL SELECT 'chat_message',m.chat_id,m.id,COALESCE(c.node_id,c.home_id,c.org_id),NULL,'chat',0,m.search_text,m.created_at,m.author_id,NULL,
         jsonb_path_exists(m.content,'$[*] ? (@.type == "attachment" || @.type == "image" || exists(@.attachments[0]) || exists(@.images[0]))'),
         to_jsonb(m.mentions)
  FROM chat_messages m JOIN chats c ON c.id=m.chat_id WHERE m.deleted_at IS NULL AND m.search_text IS NOT NULL

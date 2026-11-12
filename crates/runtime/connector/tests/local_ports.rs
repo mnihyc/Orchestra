@@ -4,14 +4,21 @@
     clippy::expect_used,
     reason = "a test fails by panicking"
 )]
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use orch_connector_core::local_ports::{LocalReadError, read_local};
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::EnvDetach;
+#[cfg(target_os = "linux")]
 use orch_plugin_contract::Secret;
+#[cfg(target_os = "linux")]
 use orch_types::new_id;
+#[cfg(target_os = "linux")]
 use rig_environment::EnvRig;
 
+#[cfg(target_os = "linux")]
 async fn raw(base: &str, method: hyper::Method, host: &str) -> hyper::StatusCode {
     let parsed = url::Url::parse(base).unwrap();
     let socket = tokio::net::TcpStream::connect(("127.0.0.1", parsed.port().unwrap()))
@@ -39,6 +46,7 @@ async fn raw(base: &str, method: hyper::Method, host: &str) -> hyper::StatusCode
     status
 }
 
+#[cfg(target_os = "linux")]
 fn variables(rig: &EnvRig) -> std::collections::BTreeMap<String, String> {
     rig.connector
         .as_ref()
@@ -52,6 +60,7 @@ fn variables(rig: &EnvRig) -> std::collections::BTreeMap<String, String> {
         .clone()
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn connected_environments_have_distinct_bearers_and_reattaching_rotates_the_one_retired_by_detach()
  {

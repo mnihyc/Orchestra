@@ -306,6 +306,7 @@ mod tests {
     fn start(provider: Id, agent: Id) -> AgentStart {
         AgentStart {
             provider_id: provider,
+            provider_kind: None,
             agent_id: agent,
             harness_kind: "fake".into(),
             profile: serde_json::from_value(serde_json::json!({ "config": {} })).unwrap(),

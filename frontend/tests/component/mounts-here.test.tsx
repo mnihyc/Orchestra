@@ -1,3 +1,6 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
+import { TestRouter } from './TestRouter';
+import type * as RouterModule from '@tanstack/react-router';
 /** A machine's mount locations retain scope, reported sizes, permission cuts, guarded edits and drafts. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
@@ -20,14 +23,14 @@ vi.mock('@/api/resource-tools', () => ({
   machineMountsQuery: (machine: string) => ({ queryKey: ['mounts', 'machine', machine], queryFn: () => read(machine) }),
   setMountLocation: add, removeMountLocation: remove,
 }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),
   Link: ({ to, params, children, className }: { to: string; params?: { id: string }; children: ReactNode; className?: string }) => <a href={to.replace('$id', params?.id ?? '')} className={className}>{children}</a>,
 }));
 
-const saved: Mount = { id: 'new', name: 'new-data', address: 'team.new-data', description: '', org_id: 'org', home: null,
+const saved: Mount = { ...unjudgedProvenance(), id: 'new', name: 'new-data', address: 'team.new-data', description: '', org_id: 'org', home: null,
   owner: null, target: '/mnt/new', read_only: true, enabled: true, default_fate: 'as_is', locations: [], kept: [], revision: 1, access: { permissions: ['mount.manage'], administers: false, participating: true, admin_only: [], through: [] } };
 function projection(): MachineMounts {
-  return { locations: [
+  return { grouping: [], locations: [
     { mount: { id: 'data', name: 'data', address: 'team.data' }, target: '/mnt/data', kind: 'path', source: '/srv/data', storage: null, data_kind: null, size_bytes: 1024,
       environments: [{ id: 'environment', name: 'Workspace', status: 'running' }], can_remove: true },
     { mount: { id: 'volume', name: 'empty-volume', address: 'team.empty-volume' }, target: '/mnt/cache', kind: 'volume', source: 'owned-volume', storage: 'fast', data_kind: null, size_bytes: 0, environments: [], can_remove: true },
@@ -104,7 +107,7 @@ describe('Mounts here', () => {
     const user = userEvent.setup();
     const cache = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const view = render(<MountsHere machine="node" name="Build host" />, { wrapper: ({ children }) =>
-      <QueryClientProvider client={cache}><TooltipProvider><Toaster>{children}</Toaster></TooltipProvider></QueryClientProvider> });
+      <QueryClientProvider client={cache}><TestRouter><TooltipProvider><Toaster>{children}</Toaster></TooltipProvider></TestRouter></QueryClientProvider> });
     await screen.findByRole('table');
     await user.click(screen.getByRole('button', { name: 'Add a location here…' }));
     const dialog = screen.getByRole('dialog', { name: 'Add a location here…' });

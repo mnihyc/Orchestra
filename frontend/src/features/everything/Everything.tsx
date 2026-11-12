@@ -37,6 +37,22 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { choiceOption } from '@/i18n/choices';
 
 const KINDS = EVERYTHING_KINDS;
+
+/** The native selection keeps its eligible targets and says when sharing covers only part of it. */
+export function SelectionSharing({ rows }: { rows: readonly Pick<EverythingRow, 'kind' | 'id' | 'name' | 'can_share'>[] }) {
+  const { t } = useTranslation();
+  const { locale } = useFormatContext();
+  const targets = rows.flatMap((row) => row.can_share && row.kind !== 'group' && row.kind !== 'machine' && row.kind !== 'chat'
+    ? [{ kind: row.kind, id: row.id, name: row.name ?? '' }] : []);
+  return <>
+    <Button size="sm" icon={<Share2 aria-hidden />} blocked={targets.length === 0}
+      reason={targets.length === 0 ? t(rows.length === 0 ? 'implicitAvailability.noneSelected' : 'implicitAvailability.noShareable') : undefined}
+      onClick={() => openAccessToMany(targets)}>{t('everything.share')}</Button>
+    {targets.length !== rows.length && <span role="status" className="text-sm text-text-muted tabular-nums">{t('implicitAvailability.sharingSubset', {
+      count: targets.length, number: formatNumber(targets.length, locale), total: formatNumber(rows.length, locale),
+    })}</span>}
+  </>;
+}
 const SORT_COLUMNS = ['name', 'where', 'opened', 'activity_by', ...OPTIONAL_COLUMNS.filter((column) => column !== 'admin_access')] as const;
 const RESOURCE_GUIDES: Partial<Record<EverythingKind, string>> = {
   environment: 'environments-and-their-doors', provider: 'providers-and-models', machine: 'profiles-hosts-and-computers',
@@ -215,7 +231,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
     </div>
     {selecting && <div role="region" aria-label={t('everything.selection')} className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-subtle px-3 py-2">
       <span className="text-sm text-text-muted tabular-nums">{t('everything.selected', { number: formatNumber(selected.size, locale) })}</span>
-      <Button size="sm" icon={<Share2 aria-hidden />} disabled={selected.size === 0} onClick={() => openAccessToMany([...selected.values()].flatMap((row) => row.can_share && row.kind !== 'group' && row.kind !== 'machine' && row.kind !== 'chat' ? [{ kind: row.kind, id: row.id, name: row.name ?? '' }] : []))}>{t('everything.share')}</Button>
+      <SelectionSharing rows={[...selected.values()]} />
       <Button size="sm" variant="ghost" disabled={selected.size === 0} onClick={() => setSelection({ key: selectionKey, rows: new Map() })}>{t('day100.batch.clear')}</Button>
     </div>}
     <ScrollRegion visibleScrollbars label={t('everything.tree')} kind="table" className="relative flex-none rounded-lg border border-border bg-surface sm:min-h-0 sm:flex-1">
@@ -229,7 +245,7 @@ function Browser({ person, scope = 'mine', parent = null, q = '', onQuery, onSco
 /** Also embedded by an org's settings; Management links to this same page in system scope. */
 export function EverythingBrowser(props: EverythingBrowserProps) {
   const me = useQuery(meQuery);
-  if (me.isPending) return <SkeletonRows rows={4} />;
+  if (me.isPending) return <SkeletonRows read={me} rows={4} />;
   if (me.isError) return <ErrorState error={me.error} onRetry={() => void me.refetch()} />;
   return <Browser key={`${me.data.id}:${props.scope ?? 'mine'}:${props.parent ?? ''}:${props.q === undefined ? '' : 'controlled'}`} person={me.data} {...props} />;
 }

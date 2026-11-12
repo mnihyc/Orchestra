@@ -6,6 +6,7 @@ import { PanelsTopLeft } from 'lucide-react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Nodes from '@/api/nodes';
 import type * as Sources from '@/features/finder/sources';
+import type * as PaletteModule from '@/ui/Palette';
 import { Finder } from '@/features/finder/Finder';
 import { commandEntries, commandRows } from '@/features/finder/local';
 import { useCommands } from '@/features/finder/commands';
@@ -20,7 +21,19 @@ import { registerView } from '@/features/workbench/views';
 import { i18n, setLocale } from '@/i18n';
 import { clearScreenHeading } from '@/shell/screen';
 import { Menu } from '@/ui/Menu';
+import type { PaletteProps } from '@/ui/Palette';
 import { show } from './support';
+
+const dismissal = vi.hoisted(() => ({ hold: false, finish: null as (() => void) | null }));
+vi.mock('@/ui/Palette', async (original) => {
+  const actual = await original<typeof PaletteModule>();
+  return { ...actual, Palette: ({ onCloseAutoFocus, ...props }: PaletteProps) => (
+    <actual.Palette {...props} onCloseAutoFocus={(event) => {
+      if (dismissal.hold) dismissal.finish = () => onCloseAutoFocus?.(event);
+      else onCloseAutoFocus?.(event);
+    }} />
+  ) };
+});
 
 vi.mock('@/features/navigation/area', () => ({ useAreaNavigation: () => null }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => () => undefined }));
@@ -52,6 +65,24 @@ beforeEach(() => {
   } });
 });
 afterEach(async () => { cleanup(); closeFinder(); for (const remove of undo.splice(0)) remove(); useWorkbench.setState(before); document.documentElement.removeAttribute('data-theme'); await setLocale('en'); });
+
+it('opens the chosen view after the chooser finishes dismissing', async () => {
+  dismissal.hold = true;
+  try {
+    showOpenViews();
+    show(<><OpenViewCommands /><Finder /></>);
+    const chooser = await screen.findByRole('dialog', { name: i18n.t('workbench.openView.choose') });
+    const choice = await within(chooser).findByRole('option', { name: i18n.t('workbench.choices.views.resource-navigation.name') });
+    await userEvent.click(choice);
+    await waitFor(() => expect(dismissal.finish).toBeTypeOf('function'));
+    expect(useWorkbench.getState().layout.left.active).toBe('navigation');
+    dismissal.finish?.();
+    await waitFor(() => expect(useWorkbench.getState().layout.left.active).toBe('resource-navigation'));
+  } finally {
+    dismissal.hold = false;
+    dismissal.finish = null;
+  }
+});
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`puts native and layout actions behind one title menu at ${locale}/${theme}`, async () => {

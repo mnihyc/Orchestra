@@ -140,6 +140,24 @@ pub fn allows_model(options: &ProviderUse, model: &str, groups: &[String]) -> bo
         .is_none_or(|patterns| ModelPattern::list_names(patterns, model, groups))
 }
 
+/// One enabled service must satisfy its Use entry and every applying place list.
+/// Model lists never narrow services; the caller supplies the actual offering's groups.
+#[must_use]
+pub fn allows_service(
+    options: &ProviderUse,
+    enabled: bool,
+    service: &str,
+    groups: &[String],
+    place_setting: Option<&[String]>,
+) -> bool {
+    enabled
+        && options
+            .services
+            .as_deref()
+            .is_none_or(|patterns| ModelPattern::list_names(patterns, service, groups))
+        && place_setting.is_none_or(|patterns| ModelPattern::list_names(patterns, service, groups))
+}
+
 /// The models a person may run on a provider: those it has enabled, within the models their
 /// options allow and within the models the thread's place allows (the setting `models.allowed`
 /// resolved at the thread, where one is set). Both are lists of the same kind: names, families
@@ -203,6 +221,7 @@ mod tests {
             source: EntrySource::Page,
             created_by: None,
             created_at: at.parse::<Time>().unwrap(),
+            renewed_at: None,
             removed_at: None,
             revision: 1,
         }
@@ -222,6 +241,58 @@ mod tests {
             groups: groups.iter().map(|group| (*group).to_owned()).collect(),
             ..model(name, &[], true)
         }
+    }
+
+    #[test]
+    fn services_require_enablement_and_both_service_lists_while_model_limits_stay_separate() {
+        let groups = vec!["web".into()];
+        let model_only = ProviderUse {
+            models: Some(vec!["@small".into()]),
+            ..ProviderUse::default()
+        };
+        assert!(allows_service(&model_only, true, "search", &groups, None));
+        assert!(!allows_service(&model_only, false, "search", &groups, None));
+        let service_only = ProviderUse {
+            services: Some(vec!["@web".into(), "image-*".into()]),
+            ..ProviderUse::default()
+        };
+        assert!(allows_service(&service_only, true, "search", &groups, None));
+        assert!(allows_service(
+            &service_only,
+            true,
+            "image-large",
+            &[],
+            None
+        ));
+        assert!(!allows_service(&service_only, true, "other", &[], None));
+        assert!(!allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&["images".into()])
+        ));
+        assert!(!allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&[])
+        ));
+        assert!(allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&["search".into()])
+        ));
+        let models = [model("large", &[], true)];
+        assert_eq!(allowed_models(&models, &service_only, None), ["large"]);
+        let none = ProviderUse {
+            services: Some(Vec::new()),
+            ..ProviderUse::default()
+        };
+        assert!(!allows_service(&none, true, "search", &groups, None));
     }
 
     #[test]

@@ -7,8 +7,10 @@
 
 mod composition;
 
+use anyhow::Context;
 use clap::Parser;
 use orch_build_info::BuildInfo;
+use orch_config::{RuntimeComponent, ServerConfig};
 use std::path::PathBuf;
 
 const BUILD: BuildInfo = BuildInfo::new(
@@ -17,10 +19,6 @@ const BUILD: BuildInfo = BuildInfo::new(
     env!("ORCH_RELEASE_TAG"),
     env!("ORCH_SERVER_BUILD_NUMBER"),
 );
-
-// Debug request and service futures can exhaust Tokio's default 2 MiB stack;
-// keep 8 MiB for runtime workers and blocking tasks as a server-wide guard.
-const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 /// The Orch API service.
 #[derive(Parser)]
@@ -44,18 +42,29 @@ struct Args {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    tokio::runtime::Builder::new_multi_thread()
-        .thread_stack_size(WORKER_STACK_BYTES)
+    let launch = composition::Launch {
+        config: &args.config,
+        secrets_dir: &args.secrets_dir,
+        plain_http: args.plain_http,
+    };
+    #[cfg(feature = "test-observers")]
+    let observer =
+        orch_api_core::test_observers::process::ProcessRecording::from_env("api", &BUILD)?;
+    let config: ServerConfig = orch_config::load(launch.config)
+        .with_context(|| format!("reading {}", launch.config.display()))?;
+    let worker_stack_bytes = config.worker_stack_bytes(RuntimeComponent::Api)?;
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(worker_stack_bytes)
         .enable_all()
         .build()?
-        .block_on(Box::pin(composition::run(
-            &composition::Launch {
-                config: &args.config,
-                secrets_dir: &args.secrets_dir,
-                plain_http: args.plain_http,
-            },
-            BUILD,
-        )))
+        .block_on(Box::pin(composition::run(&launch, BUILD, config)));
+    #[cfg(feature = "test-observers")]
+    if result.is_ok()
+        && let Some(observer) = observer
+    {
+        observer.finish()?;
+    }
+    result
 }
 
 #[cfg(test)]

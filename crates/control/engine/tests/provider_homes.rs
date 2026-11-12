@@ -8,18 +8,19 @@ mod common;
 mod hosting;
 mod runtimes;
 
-use common::World;
+use common::{World, eventually};
 use hosting::{ScriptedHost, serve, wait_over};
 use orch_api_contract::environment::UpdatePreflightReason;
 use orch_authz::{Caller, Principal};
 use orch_db::queries::{environments::hosting as rows, storage};
 use orch_engine::updates::Target;
 use orch_link_contract::commands::{
-    BlobRef, Command, CommandKind as K, CommandResult, Empty, ExportedVolume,
+    AgentStartResult, BlobRef, Command, CommandKind as K, CommandResult, Empty, ExportedVolume,
     NodeRuntimeExportResult, NodeRuntimeVolumesExportResult, ProviderRefreshResult, VolumeArchive,
 };
-use orch_types::{Hash, Id, Time};
+use orch_types::{Hash, Id, Json, Time};
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 /// The provider's state, which a replacement that kept its home keeps.
 async fn provider_status(world: &World, provider: Id) -> String {
@@ -80,7 +81,7 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
     serve(&world);
     let host = ScriptedHost::on(&world, "Home host", 16384).await;
     let provider = borrowed(&world, &host).await;
-    let (old, _unit) = runtimes::made(&world, &host, provider).await;
+    let (old, original) = runtimes::made(&world, &host, provider).await;
     let first = host
         .calls()
         .into_iter()
@@ -96,6 +97,10 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
         1,
         "only private state is allocated; the borrowed directory is never created or chowned"
     );
+    // Keep the observed sign-in state from before the runtime is stopped.
+    let status = provider_status(&world, provider).await;
+    let stopped_before = host.began(K::NodeRuntimeStop);
+    host.added.machine.handler.hold(K::NodeRuntimeStop);
     let mut tx = world.pool.begin().await.unwrap();
     let principal = Principal::load(
         &mut tx,
@@ -117,18 +122,93 @@ async fn a_borrowed_home_is_separate_from_private_state_and_recreate_keeps_its_b
         .unwrap();
     assert!(draft.blockers.is_empty(), "{:?}", draft.blockers);
     assert!(draft.recipe.data_sources.is_none());
+    assert_eq!(
+        draft.recipe.old_facts["provider_status"].as_str(),
+        Some(status.as_str())
+    );
     let job = orch_engine::jobs::recreate::queue(&mut tx, draft, None, world.clock.now())
         .await
         .unwrap();
     tx.commit().await.unwrap();
     world.engine().kick();
+    host.wait_began(K::NodeRuntimeStop, stopped_before + 1)
+        .await;
+    // A successful native stop means the old unit's peer has joined, not merely that its row changed.
+    original.added.machine.link.shutdown().await;
+    eventually("the stopped old connector is offline", || async {
+        !world
+            .scalar::<bool>("SELECT online FROM machines WHERE id=$1", original.id)
+            .await
+    })
+    .await;
+    host.added.machine.handler.release();
     host.wait_for(K::NodeRuntimeStart, 2).await;
     let next = host.started().unwrap();
-    let status = provider_status(&world, provider).await;
-    let candidate = runtimes::enrol(&world, next).await;
-    answers_refresh(&candidate, status);
+    let candidate =
+        runtimes::enrol_with(&world, next, |candidate| answers_refresh(candidate, status)).await;
     let (state, _, error) = wait_over(&world, job.id).await;
+    if state != "succeeded" {
+        let verify = orch_engine::ids::derived("provider.refresh", &[job.id.as_bytes()]);
+        let bindings: orch_types::Json = sqlx::query_scalar(
+            "SELECT jsonb_build_object('job_runtime',j.plan->'runtime',
+                'runtimes',(SELECT jsonb_agg(jsonb_build_object('runtime_id',r.id,
+                    'machine_id',r.machine_id,'state',r.state)) FROM runtimes r
+                    WHERE r.id=$2 OR r.id=$3 OR r.id::text=j.plan->>'runtime'))
+                FROM jobs j WHERE j.id=$1",
+        )
+        .bind(job.id)
+        .bind(old)
+        .bind(next)
+        .fetch_one(world.pool.pool())
+        .await
+        .unwrap();
+        eprintln!("provider-home-verify bindings={bindings}");
+        eprintln!(
+            "provider-home-verify job={} provider={} old_runtime={} candidate_runtime={} old_machine={} candidate_machine={} primary_machine={} host_machine={} host_refresh_runs={} expected_command={}",
+            job.id,
+            provider,
+            old,
+            next,
+            original.id,
+            candidate.id,
+            world.machine_id,
+            host.machine,
+            host.began(K::ProviderRefresh),
+            verify
+        );
+        let issued: Vec<_> = world
+            .commands
+            .issued_commands("provider.refresh")
+            .into_iter()
+            .map(|(machine, command)| {
+                json!({"command_id":command.id,"machine_id":machine,"key":command.key,
+                    "provider_id":command.body.get("provider_id"),"is_verify":command.id==verify})
+            })
+            .collect();
+        eprintln!("provider-home-verify issued={}", json!(issued));
+        for (name, machine) in [
+            ("original", &original.added.machine),
+            ("candidate", &candidate.added.machine),
+            ("primary", &world.machine),
+            ("host", &host.added.machine),
+        ] {
+            let executed: Vec<_> = machine
+                .handler
+                .executions()
+                .into_iter()
+                .filter(|run| run.kind == K::ProviderRefresh)
+                .map(|run| json!({"command_id":run.id,"is_verify":run.id==verify}))
+                .collect();
+            eprintln!(
+                "provider-home-verify executed_on={name} commands={}",
+                json!(executed)
+            );
+        }
+    }
     assert_eq!(state, "succeeded", "{error:?}");
+    let verify = orch_engine::ids::derived("provider.refresh", &[job.id.as_bytes()]);
+    assert_eq!(original.added.machine.handler.runs_of(verify), 0);
+    assert_eq!(candidate.added.machine.handler.runs_of(verify), 1);
     let mut conn = world.pool.acquire().await.unwrap();
     let replacement = rows::runtime(&mut conn, next).await.unwrap().unwrap();
     let original = rows::runtime(&mut conn, old).await.unwrap().unwrap();
@@ -254,8 +334,8 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
     target.wait_for(K::NodeRuntimeStart, 1).await;
     let next = target.started().unwrap();
     let status = provider_status(&world, provider).await;
-    let candidate = runtimes::enrol(&world, next).await;
-    answers_refresh(&candidate, status);
+    let _candidate =
+        runtimes::enrol_with(&world, next, |candidate| answers_refresh(candidate, status)).await;
     let (state, _, error) = wait_over(&world, job.id).await;
     assert_eq!(state, "succeeded", "{error:?}");
     let kinds = target.kinds();
@@ -287,4 +367,78 @@ async fn a_provider_home_copy_is_reviewed_and_imported_before_the_destination_un
             .all(|call| call.body["name"] != json!(format!("orch-home-{provider}")))
     );
     world.engine().stop();
+}
+
+/// A unit the system made is the provider's own place for its sign-in: nothing there is a person's account to be
+/// left alone, so a harness whose home was not chosen is told that Orch makes it (in the unit's private state, one
+/// for each provider and profile), and not left to the harness's own default, where its adapter could not keep a
+/// sign-in that is given to it or take it away again.
+///
+/// Making the unit does not start the harness; the first read of the provider and a Start by hand do. The case asks
+/// for the start by hand, and when no start comes it says what the unit's machine was asked instead.
+#[tokio::test]
+async fn the_harness_of_a_unit_the_system_made_is_told_to_keep_a_home_made_by_orch() {
+    let world = World::new().await;
+    serve(&world);
+    let host = ScriptedHost::on(&world, "Owned home host", 16384).await;
+    runtimes::provider_template(&world).await;
+    let provider = runtimes::managed_subscription(&world, "Owned harness home").await;
+    let starts: Arc<Mutex<Vec<Json>>> = Arc::default();
+    let before = host.count(K::NodeRuntimeStart);
+    let job = runtimes::queue(
+        &world,
+        provider,
+        orch_engine::jobs::provider_provision::Mode::Make,
+    )
+    .await;
+    host.wait_for(K::NodeRuntimeStart, before + 1).await;
+    let runtime = host.started().unwrap();
+    let recorded = Arc::clone(&starts);
+    let unit = runtimes::enrol_with(&world, runtime, move |unit| {
+        answers_refresh(unit, "ready".to_owned());
+        unit.added
+            .machine
+            .handler
+            .on(K::AgentStart, move |command: &Command| {
+                recorded.lock().unwrap().push(command.body().unwrap());
+                Ok(CommandResult::AgentStart(AgentStartResult {
+                    reused: false,
+                    harness_version: "1.0.0".to_owned(),
+                    descriptor: serde_json::from_value(common::descriptor()).unwrap(),
+                }))
+            });
+    })
+    .await;
+    let (state, _, error) = wait_over(&world, job).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let started = world
+        .engine()
+        .start_provider_runtime(provider, Some(world.ada))
+        .await;
+    let waited = std::time::Instant::now();
+    while starts.lock().unwrap().is_empty() && waited.elapsed() < std::time::Duration::from_secs(30)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let seen = starts.lock().unwrap().clone();
+    assert!(
+        !seen.is_empty(),
+        "no start of the unit's harness came; the start by hand answered {started:?}; the unit's machine ({}) was asked, \
+         in order: {:?}",
+        unit.id,
+        unit.added
+            .machine
+            .handler
+            .executions()
+            .iter()
+            .map(|run| run.kind)
+            .collect::<Vec<_>>()
+    );
+    for body in &seen {
+        assert_eq!(
+            body["runtime"]["home"],
+            json!({"kind": "made_by_orch"}),
+            "{body}"
+        );
+    }
 }

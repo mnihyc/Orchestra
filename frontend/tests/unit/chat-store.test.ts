@@ -210,6 +210,16 @@ describe('what is unread', () => {
     expect(mergeState(held, state('c', { last_read_seq: 5, mentions_unread: 2 })).last_read_seq).toBe(8);
     expect(mergeState(held, state('c', { last_read_seq: 9, mentions_unread: 1 }))).toMatchObject({ last_read_seq: 9, mentions_unread: 1 });
   });
+
+  it('keeps the newest message independently of the deliberate read revision', () => {
+    const held = state('c', { last_read_seq: 8, read_revision: 2, last_message_seq: 10 });
+    expect(mergeState(held, state('c', { last_read_seq: 5, read_revision: 1, last_message_seq: 12 })))
+      .toMatchObject({ last_read_seq: 8, read_revision: 2, last_message_seq: 12 });
+    expect(mergeState(held, state('c', { last_read_seq: 3, read_revision: 3, last_message_seq: 9 })))
+      .toMatchObject({ last_read_seq: 3, read_revision: 3, last_message_seq: 10 });
+    expect(mergeState(held, state('c', { last_read_seq: 9, read_revision: 2, last_message_seq: 9 })))
+      .toMatchObject({ last_read_seq: 9, last_message_seq: 10 });
+  });
 });
 
 describe('a message that was not sent', () => {

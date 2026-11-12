@@ -1,0 +1,6 @@
+The file src/model-prompt.md is the native fallback instruction template
+from OpenAI Codex rust-v0.167.0, codex-rs/models-manager/prompt.md.
+Source: https://github.com/openai/codex/tree/rust-v0.167.0
+Copyright OpenAI. Distributed under Apache-2.0; see UPSTREAM-LICENSE.txt.
+A source attribution comment was added and trailing whitespace was removed.
+It preserves the program instructions while Orch supplies the admitted model details.

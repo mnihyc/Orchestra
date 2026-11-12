@@ -92,7 +92,7 @@ export async function documentTreeFixture(page: Page) {
     if (name === '/shared') { await route.fulfill({ json: { items: [{ kind: 'document_container', folder: { kind: 'document_container', id: TREE.research, name: 'Research', redacted: false }, path, participating: true }], partial: false, next_cursor: null } }); return; }
     if (name === '/search/names') {
       const q = (url.searchParams.get('q') ?? '').toLowerCase();
-      const hits: NameHit[] = [...rows.values()].filter((row) => row.entry.item.kind === 'container' && row.entry.deleted_at === null && row.entry.title.toLowerCase().includes(q) && (url.searchParams.get('org_id') === null || row.entry.root === url.searchParams.get('org_id'))).map((row) => ({ id: row.entry.item.id, kind: 'document_container', name: row.entry.title, path: [{ id: row.entry.root, kind: 'org', name: null, redacted: true }, { ...parent, id: row.entry.node }],
+      const hits: NameHit[] = [...rows.values()].filter((row) => row.entry.item.kind === 'container' && row.entry.deleted_at === null && row.entry.title.toLowerCase().includes(q) && (url.searchParams.get('org_id') === null || row.entry.root === url.searchParams.get('org_id'))).map((row) => ({ id: row.entry.item.id, kind: 'document_container', name: row.entry.title, home_path: [], path: [{ id: row.entry.root, kind: 'org', name: null, redacted: true }, { ...parent, id: row.entry.node }],
         href: `/document-folder/${row.entry.item.id}`, address: null, archived: false, avatar: null, color: null, custom_color: null, owner: null, recent: false, tag: null, thread_attention: null, username: null }));
       await route.fulfill({ json: { items: hits, partial: false } }); return;
     }

@@ -335,24 +335,59 @@ impl Runtimes {
 
     /// Shares the node's authenticated connection with unit creation.
     pub fn set_link(&self, link: orch_link::machine::MachineLink) {
+        let mut gateways = link.advertised_gateways();
         *lock(&self.inner.link) = Some(link);
+        let weak = Arc::downgrade(&self.inner);
+        let stop = self.inner.stop.clone();
+        self.inner.copy_tasks.spawn(async move {
+            loop {
+                tokio::select! {
+                    () = stop.cancelled() => return,
+                    changed = gateways.changed() => if changed.is_err() {return;},
+                }
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                let runtimes = Self { inner };
+                for (_, driver) in runtimes.inner.drivers.all() {
+                    driver
+                        .contract()
+                        .control_endpoints(runtimes.gateway_addresses());
+                }
+                runtimes.refresh_control_addresses().await;
+            }
+        });
     }
 
     /// The addresses a unit must always be able to reach.
     #[must_use]
     pub fn gateway_addresses(&self) -> Vec<String> {
+        let mut addresses = Vec::new();
         if !self.inner.settings.managed_endpoint.is_empty() {
-            return vec![crate::enrollment::endpoint(&self.inner.settings.managed_endpoint).url];
+            addresses.push(crate::enrollment::endpoint(&self.inner.settings.managed_endpoint).url);
         }
-        lock(&self.inner.link)
-            .as_ref()
-            .map(|link| {
-                link.hosted_endpoints()
+        if let Some(link) = lock(&self.inner.link).as_ref() {
+            if self.inner.settings.managed_endpoint.is_empty() {
+                addresses.extend(
+                    link.hosted_endpoints()
+                        .into_iter()
+                        .map(|endpoint| endpoint.url),
+                );
+            }
+            // Regional dedicated gateway entrances do not admit the shared browser/API front.
+            addresses.extend(link.gateway_catalogue().into_iter().flat_map(|gateway| {
+                gateway
+                    .endpoints
                     .into_iter()
+                    .filter(|endpoint| {
+                        endpoint.trust == orch_link_contract::enrollment::Trust::Pinned
+                    })
                     .map(|endpoint| endpoint.url)
-                    .collect()
-            })
-            .unwrap_or_default()
+            }));
+        }
+        addresses.sort();
+        addresses.dedup();
+        addresses
     }
 
     /// Reapplies each retained restriction against the node's newly authenticated address list.

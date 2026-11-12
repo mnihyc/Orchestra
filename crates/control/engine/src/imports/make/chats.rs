@@ -153,6 +153,14 @@ pub(super) async fn make_chat(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
+    make_chat_ready(tx, batch, object, None).await
+}
+pub(super) async fn make_chat_ready(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    prepared: Option<std::sync::Arc<Record>>,
+) -> Result<Made, MakeError> {
     if object.action == ImportAction::Skip {
         return Ok(Made::left(ImportOutcome::Skipped, None));
     }
@@ -160,8 +168,18 @@ pub(super) async fn make_chat(
         return refuse("the chat of the place it belongs to is not there any more");
     };
     // The record is copied and checked against its hash before anything is written: one that is damaged makes nothing.
-    let record = Record::open(batch, object, "chat").await?;
+    let record = match prepared {
+        Some(record) => record,
+        None => std::sync::Arc::new(Record::open(batch, object, "chat").await?),
+    };
     rows::lock(tx, chat.id).await?;
+    let mut operation_cut = batch.before(tx, object).await?;
+    let current_principal = operation_cut.as_ref().map(|cut| cut.principal.clone());
+    let current_batch = current_principal
+        .as_ref()
+        .map(|principal| batch.with_principal(principal));
+    let batch = current_batch.as_ref().unwrap_or(batch);
+    batch.cut(&mut operation_cut)?;
     let staged: HashSet<Hash> = object
         .object
         .files
@@ -227,6 +245,7 @@ pub(super) async fn take_back(
     principal: &orch_authz::Principal,
     now: DateTime<Utc>,
     limit: i64,
+    before: impl FnOnce() -> Result<(), MakeError>,
 ) -> Result<Taken, MakeError> {
     let Some(row) = rows::lock(tx, chat).await? else {
         return Ok(Taken::Nothing);
@@ -258,6 +277,7 @@ pub(super) async fn take_back(
     if added.is_empty() {
         return Ok(Taken::Nothing);
     }
+    before()?;
     let looked: Vec<Id> = added.iter().map(|(message, _)| *message).collect();
     let live: Vec<Id> = added
         .iter()
@@ -387,6 +407,7 @@ impl Writing<'_, '_> {
         placed: &HashMap<Id, Placed>,
     ) -> Result<(), MakeError> {
         let (batch, chat) = (self.batch, self.chat);
+        self.batch.live()?;
         let Some(first) = extra::take_seqs(tx, chat, count_of(group.len())).await? else {
             return Err(no_sequence());
         };
@@ -831,6 +852,7 @@ mod tests {
 
     fn message(parts: Vec<ChatPart>) -> ChatMessage {
         ChatMessage {
+            reference_number: None,
             mention_names: Vec::new(),
             mention_targets: Vec::new(),
             asked_agents: Vec::new(),

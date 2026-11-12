@@ -52,7 +52,7 @@ export function SplitButton({ children, onClick, entries, menuLabel, variant = '
         side="top"
         entries={entries}
         trigger={
-          <Button variant={variant} size={size} disabled={menuDisabled ?? disabled} aria-label={menuLabel} className="rounded-l-none border-l border-text-on-accent/30 px-1">
+          <Button variant={variant} size={size} disabled={menuDisabled ?? disabled} aria-label={menuLabel} className="rounded-l-none border-l border-l-current px-1">
             <ChevronDown aria-hidden />
           </Button>
         }
