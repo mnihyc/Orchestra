@@ -1,4 +1,5 @@
 import { executionDisplay } from './thread-display.ts';
+import { treeNode } from './tree-node.ts';
 /** What the fake API starts from: a system, its people, an org with its tree, and invitations, each in the shape the real API answers in. */
 import type {
   Access,
@@ -63,6 +64,9 @@ export const LATER_AT = '2026-10-01T09:30:00.000Z';
 export function meta(overrides: Partial<Meta> = {}): Meta {
   return {
     name: 'Orch (double)',
+    // No configured public address: link helpers retain the browser address in use.
+    public_url: '',
+    alternate_urls: [],
     version: '0.1.0',
     build: 'double 1',
     needs_setup: false,
@@ -156,7 +160,7 @@ export function org(
     color: null,
     readme: null,
     title_source: 'user',
-    description_source: 'user',
+
     tags: [],
     tags_source: 'user',
     auto_updated_at: null,
@@ -224,24 +228,16 @@ function node(
   seq: number,
   more: Partial<TreeNode> = {},
 ): TreeNode {
-  return {
+  return treeNode({
     id: nodeId,
     kind,
     name,
-    address: null,
     parent_id: parentId,
-    color: null,
-    docs: 0,
-    archived: false,
-    deleted: false,
-    restricted: false,
-    participating: true,
     chat: { id: id(9, seq), seq: 0 },
-    thread: null,
     topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
     tree_seq: seq,
     ...more,
-  };
+  });
 }
 
 function thread(state: NonNullable<TreeNode['thread']>['state'], more: Partial<NonNullable<TreeNode['thread']>> = {}) {
@@ -301,7 +297,7 @@ export function personalTree(orgId: string, name: string, address: string): Tree
 }
 
 export function invitation(inviter: UserRef, overrides: Partial<InvitationPreview> = {}): InvitationPreview {
-  return {
+  return { terms: null,
     kind: 'org',
     inviter,
     org: { name: 'Acme', slug: 'acme' },

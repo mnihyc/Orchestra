@@ -4,7 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 import type * as AccessApi from '@/api/access';
+import type * as Client from '@/api/client';
 import { ApiError } from '@/api/client';
+import type * as SettingsApi from '@/api/settings';
 import type * as ShareApi from '@/api/share';
 import { ChangePreview, type Asked } from '@/features/access/ChangePreview';
 import { ShareWithAgentsDialog } from '@/features/access/ShareWithAgents';
@@ -19,6 +21,14 @@ import { show } from './support';
 const calls = vi.hoisted(() => ({
   read: vi.fn<typeof AccessApi.readPage>(), preview: vi.fn<typeof AccessApi.previewPage>(),
   review: vi.fn<typeof AccessApi.previewShare>(), share: vi.fn<typeof ShareApi.shareWithAgents>(),
+  put: vi.fn(),
+}));
+vi.mock('@/api/client', async (load) => {
+  const actual = await load<typeof Client>();
+  return { ...actual, api: { ...actual.api, PUT: calls.put } };
+});
+vi.mock('@/api/settings', async (load) => ({ ...await load<typeof SettingsApi>(),
+  settingsQuery: (id: string) => ({ queryKey: ['copy-limit', id], queryFn: () => Promise.resolve([{ key: 'sharing.snapshot_max_bytes', writable: true }]) }),
 }));
 vi.mock('@/api/access', async (load) => ({ ...await load<typeof AccessApi>(), readPage: calls.read, previewPage: calls.preview, previewShare: calls.review,
   permissionsQuery: { queryKey: ['access-error-permissions'], queryFn: () => Promise.resolve(CATALOGUE.reply) },
@@ -91,3 +101,32 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     expect(calls.share.mock.calls[1]).toEqual(first);
   });
 }
+
+it('reviews a previously refused copy again after raising its limit, before enabling submit', async () => {
+  await setLocale('en');
+  const bytes = 15 * 1024 * 1024;
+  calls.review.mockImplementation((_target, body) => {
+    if (body.kind === 'agents' && body.share.mode === 'snapshot' && calls.put.mock.calls.length === 0) {
+      return Promise.reject(new ApiError({ type: 'orch:error:share.too_large', code: 'share.too_large', title: 'Copy too large', status: 413,
+        detail: 'The copy exceeds the limit.', request_id: 'copy-limit', bytes, limit: 1024 * 1024,
+        scope: { id: 'web', name: 'Web' } }, null));
+    }
+    return Promise.resolve(review);
+  });
+  calls.put.mockResolvedValue({ data: {}, response: new Response(null, { status: 200 }) });
+  calls.share.mockResolvedValue({ shares: [] });
+  const close = vi.fn();
+  show(<ShareWithAgentsDialog target={target} page={pageFor('document')} open onClose={close} initialRecipient={{ id: 'receiving-thread', name: 'Review thread' }} />);
+  await userEvent.click(screen.getByRole('radio', { name: i18n.t('choiceCatalog.agentShareMode.snapshot.name') }));
+  const submit = screen.getByRole('button', { name: i18n.t('access.agents.dialog.button.copyOne', { name: 'Review thread' }) });
+  await userEvent.click(await screen.findByRole('button', { name: i18n.t('access.agents.dialog.raise', { scope: 'Web' }) }));
+  expect(calls.put).toHaveBeenCalledExactlyOnceWith('/nodes/{id}/settings/{key}', {
+    params: { path: { id: 'web', key: 'sharing.snapshot_max_bytes' } }, body: { value: bytes },
+  });
+  await waitFor(() => expect(submit).toBeEnabled());
+  expect(calls.review.mock.calls.filter(([, body]) => body.kind === 'agents' && body.share.mode === 'snapshot')).toHaveLength(2);
+  expect(calls.share).not.toHaveBeenCalled();
+  await userEvent.click(submit);
+  await waitFor(() => expect(close).toHaveBeenCalledOnce());
+  expect(calls.share).toHaveBeenCalledOnce();
+});

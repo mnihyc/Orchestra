@@ -63,7 +63,7 @@ export function ResourceEnableReview({ resources, onClose }: { resources: readon
   } });
   const rows = resources.map((resource, index) => ({ resource, impact: impacts[index], key: keyOf(resource) }));
   const effects = ({ resource, impact, key }: typeof rows[number]) => accepted.has(key) ? <StateLine compact message={t('source.job.succeeded')} /> : <>
-    {impact === undefined || impact.isPending ? <SkeletonRows rows={2} /> : impact.isError ? <ErrorState compact error={impact.error} onRetry={() => void impact.refetch()} /> : <>
+    {impact === undefined || impact.isPending ? <SkeletonRows read={impact} rows={2} /> : impact.isError ? <ErrorState compact error={impact.error} onRetry={() => void impact.refetch()} /> : <>
       <ActivityCount group={impact.data.activity.waiting} kind="waiting" />
       <ActivityCount group={impact.data.activity.stopped} kind="stopped" />
       {impact.data.stopping && <StateLine compact message={t('resourceImpact.stopping')} />}

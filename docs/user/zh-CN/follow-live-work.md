@@ -6,6 +6,7 @@ heading_id.阅读进度: read-progress
 heading_id.停止或重试: stop-or-retry
 heading_id.安排状态项目: arrange-status-items
 heading_id.服务器更新期间: during-a-server-update
+summary: 跟踪计数和传输、取消正在执行的工作，并安排状态项目。
 ---
 
 # 跟踪进度并安排状态项目

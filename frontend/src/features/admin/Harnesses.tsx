@@ -17,6 +17,7 @@ import { ProgramSettings } from '@/features/admin/ProgramSettings';
 import type { SectionProps } from '@/features/admin/sections';
 import { Tabs } from '@/ui/Tabs';
 import { useForm } from '@/lib/forms';
+import { DEFAULT_PROGRAM_BUILD_POLL_MS } from '@/lib/pollingDefaults';
 import { Section } from '@/shell/Page';
 import { StatusTag } from '@/features/admin/StatusTag';
 import { Button } from '@/ui/Button';
@@ -38,7 +39,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
 const SHORT_SHA = 12;
 const BUILD_HELP = { article: 'agent-program-builds' } as const;
 /** How often the list is read again while a build is being checked: a check takes seconds once the build is fetched. */
-const CHECK_FOLLOW_MS = 5_000;
+const CHECK_FOLLOW_MS = DEFAULT_PROGRAM_BUILD_POLL_MS;
 
 function Checksum({ build, name }: { build: HarnessBuild; name: string }) {
   const { t } = useTranslation();
@@ -227,7 +228,7 @@ function ProgramDirectory({ search, onSearch }: SectionProps) {
   });
   return <Section id="admin-programs" title={t('programList.title')} action={<Button variant="primary" icon={<Plus aria-hidden />} onClick={() => setAdding(true)}>{t('admin.harnesses.addTitle')}</Button>}>
     <Input label={t('programList.search')} value={search.q ?? ''} onChange={(event) => onSearch({ q: event.target.value, programCursor: undefined })} />
-    {programs.isPending ? <SkeletonRows rows={3} /> : programs.isError ? <ErrorState compact error={programs.error} retrying={programs.isRefetching} onRetry={() => void programs.refetch()} /> : <>
+    {programs.isPending ? <SkeletonRows read={programs} rows={3} /> : programs.isError ? <ErrorState compact error={programs.error} retrying={programs.isRefetching} onRetry={() => void programs.refetch()} /> : <>
       <ProgramList programs={programs.data.items.map(state)} onOpen={(program) => onSearch({ program, programTab: undefined, buildCursor: undefined }, { replace: false })} />
       <Pages cursor={search.programCursor} next={programs.data.next_cursor} loading={programs.isFetching} onPage={(programCursor) => onSearch({ programCursor }, { replace: false })} />
     </>}
@@ -258,7 +259,7 @@ function ProgramBuilds({ detail, search, onSearch }: SectionProps & { detail: Pr
   </span>}>
     {readChannels.error !== null && <ErrorAlert error={readChannels.error} />}
     <ChannelReadStatus value={detail.channels} title={() => name} />
-    {builds.isPending ? <SkeletonRows rows={3} /> : builds.isError ? <ErrorState compact error={builds.error} retrying={builds.isRefetching} onRetry={() => void builds.refetch()} /> : builds.data.items.length === 0 ? <EmptyState compact icon={<Package aria-hidden />} title={t('admin.harnesses.noBuilds')} description={t('admin.harnesses.noBuildsHint')} /> : <BuildsTable builds={builds.data.items} title={() => name} catalogue={() => detail.program?.checks ?? null} onChange={refresh} />}
+    {builds.isPending ? <SkeletonRows read={builds} rows={3} /> : builds.isError ? <ErrorState compact error={builds.error} retrying={builds.isRefetching} onRetry={() => void builds.refetch()} /> : builds.data.items.length === 0 ? <EmptyState compact icon={<Package aria-hidden />} title={t('admin.harnesses.noBuilds')} description={t('admin.harnesses.noBuildsHint')} /> : <BuildsTable builds={builds.data.items} title={() => name} catalogue={() => detail.program?.checks ?? null} onChange={refresh} />}
     <Pages cursor={search.buildCursor} next={builds.data?.next_cursor} loading={builds.isFetching} onPage={(buildCursor) => onSearch({ buildCursor }, { replace: false })} />
     {adding && <BuildDialog kinds={[detail.summary.harness]} onClose={() => { setAdding(false); void refresh(); }} />}
   </Section>;
@@ -271,7 +272,7 @@ function ProgramPage({ search, onSearch }: SectionProps) {
   const tab = search.programTab ?? 'builds';
   const locale = i18n.resolvedLanguage ?? i18n.language;
   const localized = (text: Record<string, string | undefined>) => text[locale] ?? text.en ?? '';
-  const body = detail.isPending ? <SkeletonRows rows={3} /> : detail.isError ? <ErrorState compact error={detail.error} retrying={detail.isRefetching} onRetry={() => void detail.refetch()} /> : <Section id="admin-program" title={<SummaryName summary={detail.data.summary} />}>
+  const body = detail.isPending ? <SkeletonRows read={detail} rows={3} /> : detail.isError ? <ErrorState compact error={detail.error} retrying={detail.isRefetching} onRetry={() => void detail.refetch()} /> : <Section id="admin-program" title={<SummaryName summary={detail.data.summary} />}>
     <Tabs label={t('programList.title')} value={tab} onValueChange={(programTab) => onSearch({ programTab }, { replace: false })} panelClassName="pt-4" tabs={[
       { value: 'builds', label: t('admin.harnesses.buildsTitle'), panel: <ProgramBuilds detail={detail.data} search={search} onSearch={onSearch} /> },
       { value: 'capabilities', label: t('programList.capabilities'), panel: <ProgramCapabilities groups={detail.data.capabilities?.map((group) => ({ id: group.id, title: localized(group.title), items: group.items.map((item): ProgramCapability => item.available ? { id: item.id, title: localized(item.title), available: true } : { id: item.id, title: localized(item.title), available: false, reason: item.reason === null ? t('programCapabilities.off') : localized(item.reason) }) })) ?? null} /> },

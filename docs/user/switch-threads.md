@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Switch threads
 screens: /thread/$threadId, /resources/providers/$id, /resources/agents/$id, /resources/environments/$id, /admin
 keywords: switch, batch, provider, profile, model, environment, history, carry, queued messages, switch.batch_threads
+summary: Review a provider-wide batch and switch each eligible thread to its chosen target.
 ---
 
 # Switch threads

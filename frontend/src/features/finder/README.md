@@ -43,7 +43,7 @@ its Access dialog. The server cuts to both people's current View before paging, 
 The arrow key that lists other scopes of a setting is still not built.
 
 `>` runs acts as well as navigation: New thread/document, the current thread's native Fork/Fork to,
-Switch provider or agent and Ask on the side, every addressed settings section, the session's opposite
+Switch provider or agent and Side thread, every addressed settings section, the session's opposite
 As admin choice, appearance, Help articles and Keyboard shortcuts. Menu acts re-read their current
 entry before running; a refusal stays visible with the menu's own reason. Settings use the same section
 lists as their frames, including the org's single Outside entry and flat-org filtering. Thread settings

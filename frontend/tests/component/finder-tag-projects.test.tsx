@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TreeReply } from '@/api/nodes';
 import { TagProjects } from '@/features/finder/TagProjects';
 import type { HiddenItem, TreeNode } from '@/generated/api-types';
+import { treeNode } from '../doubles/tree-node';
 
 import { show } from './support';
 
@@ -15,7 +16,7 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<object>(), fetch
 afterEach(() => { vi.clearAllMocks(); });
 
 function node(id: string, kind: TreeNode['kind'], parent_id: string | null, name = id): TreeNode {
-  return { id, kind, parent_id, name, participating: true, address: kind === 'org' && parent_id === null ? name.toLowerCase() : null, color: null, custom_color: id === 'web-research' ? '#123456' : null, archived: false, deleted: false, restricted: false, docs: 0, chat: { id: `chat-${id}`, seq: 0 }, thread: null, topic: null, tree_seq: 1 };
+  return treeNode({ id, kind, parent_id, name, address: kind === 'org' && parent_id === null ? name.toLowerCase() : null, custom_color: id === 'web-research' ? '#123456' : null, tree_seq: 1 });
 }
 
 const TAG = { id: 'tag', name: 'Urgent', node: { id: 'acme', kind: 'org', name: 'Acme', redacted: false } } as const;

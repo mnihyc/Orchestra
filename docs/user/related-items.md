@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Related items
 screens: /doc/$documentId, /help, /help/$article
 keywords: related, documents, chats, threads, meaning, place, references, weights
+summary: Find readable documents, chats and threads connected by meaning, place or references.
 ---
 
 # Related items
@@ -63,3 +65,6 @@ An `id:` reference also works. `kinds`, `path` and `names` can narrow the list.
 A changed ranking or access ends the old cursor; start the list again.
 Each result has `related_by`: `meaning`, `place`, `references`, or a combination.
 The agent sees only its current shared reach, which can differ from your own reading access.
+
+
+Shared agent search budgets are adjustable at **Settings → Policies → Agent**. `orch_tools.search_query_chars`, `orch_tools.search_results` and `orch_tools.search_context` ship as 1000 query characters, 200 results and five surrounding lines. Raising them changes both the tool schema shown to the agent and its executor. An omitted result count still asks for 50 and omitted context for one line, within the resolved budgets. Current Read, byte/time windows and continuation cursors still apply; this does not change paid web search.

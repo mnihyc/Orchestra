@@ -60,7 +60,7 @@ it('remembers a request accepted after its form was closed', async () => {
   fireEvent.submit(form);
   await waitFor(() => expect(calls.request).toHaveBeenCalledOnce());
   view.unmount();
-  await act(async () => finish({ batch_id: 'batch', approvals: [approval] }));
+  await act(async () => { finish({ batch_id: 'batch', approvals: [approval] }); await Promise.resolve(); });
   const key = `orch.access.request.v2.${JSON.stringify(['reader', 'release.use', null, false])}`;
   await waitFor(() => expect(sessionStorage.getItem(key)).toBe('batch'));
   show(<AccessRequest missing={[missing]} objectId="release" rememberAs="release.use" fixed />);

@@ -9,6 +9,7 @@ use crate::tools::{
     tree::{FoundEntry, Tree, Where},
 };
 use crate::{Engine, EngineError};
+use futures::future::BoxFuture;
 use orch_authz::reach::{Reach, Things};
 use orch_db::queries::{documents, threads::ThreadRow};
 use orch_db::{Conn, DbError};
@@ -108,16 +109,16 @@ fn wrong_source(at: FoundEntry, tree: &Tree) -> Refusal {
             "An earlier document version can only be restored on its own. Select the current document for other operations."
         }
         FoundEntry::File(Where::Conversation(_)) => {
-            "Conversations are managed by people. Select a document or document folder."
+            "Use archive, unarchive, fork or delete for a thread. Document commands need a document or document folder."
         }
         FoundEntry::File(Where::NodeChat(_) | Where::PeopleChat(_))
         | FoundEntry::Directory(Where::Messages(_) | Where::PeopleChatDir(_)) => {
-            "Chats are managed by people. Select a document or document folder."
+            "To delete a chat message, use delete with its chat path and message_id. A chat itself is not deleted or moved by this tool."
         }
         FoundEntry::Directory(Where::Place(id))
             if tree.place(id).is_some_and(|place| place.kind == "thread") =>
         {
-            "Threads are managed by people. Select a document or document folder."
+            "Use archive, unarchive, fork or delete for a thread. Document commands need a document or document folder."
         }
         FoundEntry::Directory(Where::Place(_)) => {
             "Places are managed by people. Select a document or document folder."
@@ -145,6 +146,12 @@ impl Engine {
                 Command::Move => domain::Command::Move,
                 Command::Delete => domain::Command::Delete,
                 Command::Restore => domain::Command::Restore,
+                Command::Archive | Command::Unarchive | Command::Fork => {
+                    return Ok(Err(Refusal::new(
+                        Code::WrongKind,
+                        "This command needs a thread path.",
+                    )));
+                }
             },
             items: Vec::new(),
             to: None,
@@ -309,34 +316,42 @@ impl Engine {
     }
 
     /// The tool owns paths and deletion capabilities; every mutation belongs to the shared domain.
-    pub(crate) async fn manage_shared_call(
-        &self,
-        call: &CallContext,
-        thread: &ThreadRow,
-    ) -> Result<Answer, EngineError> {
-        let (asked, confirm) = match asked_of(&call.arguments) {
-            Ok(asked) => asked,
-            Err(refusal) => return Ok(refusal.into()),
-        };
-        if let Some(answer) = lock(&self.inner.manage_plans).replay(
-            call.thread,
-            &call.call_ref,
-            &asked,
-            self.inner.clock.now(),
-        ) {
-            return Ok(answer);
-        }
-        let answer = self
-            .manage_document_tree(call, thread, &asked, confirm.as_deref())
-            .await?;
-        lock(&self.inner.manage_plans).remember(
-            call.thread,
-            &call.call_ref,
-            &asked,
-            self.inner.clock.now(),
-            &answer,
-        );
-        Ok(answer)
+    pub(crate) fn manage_shared_call<'a>(
+        &'a self,
+        call: &'a CallContext,
+        thread: &'a ThreadRow,
+    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
+        Box::pin(async move {
+            let (asked, confirm) = match asked_of(&call.arguments) {
+                Ok(asked) => asked,
+                Err(refusal) => return Ok(refusal.into()),
+            };
+            if let Some(answer) = lock(&self.inner.manage_plans).replay(
+                call.thread,
+                &call.call_ref,
+                &asked,
+                self.inner.clock.now(),
+            ) {
+                return Ok(answer);
+            }
+            let answer = if let Some(answer) = self
+                .manage_session_or_chat(call, thread, &asked, confirm.as_deref())
+                .await?
+            {
+                answer
+            } else {
+                self.manage_document_tree(call, thread, &asked, confirm.as_deref())
+                    .await?
+            };
+            lock(&self.inner.manage_plans).remember(
+                call.thread,
+                &call.call_ref,
+                &asked,
+                self.inner.clock.now(),
+                &answer,
+            );
+            Ok(answer)
+        })
     }
 
     async fn manage_document_tree(
@@ -426,6 +441,7 @@ impl Engine {
                         made: self.inner.clock.now(),
                         asked: asked.clone(),
                         stamp: Some(plan.stamp),
+                        shared_stamp: None,
                     },
                     self.inner.clock.now(),
                 );
@@ -438,7 +454,7 @@ impl Engine {
                 asked,
                 self.inner.clock.now(),
             ) {
-                Claim::Claimed(waiting) => waiting,
+                Claim::Claimed(waiting) => *waiting,
                 Claim::Missing => {
                     return Ok(not_confirmed(
                         "That word is missing, expired, made up, used already or belongs to another call.",
@@ -508,15 +524,7 @@ impl Engine {
                 .collect(),
             people_chats: Vec::new(),
         };
-        let reach = Reach::load(
-            conn,
-            asking.agent.clone(),
-            asking.policy,
-            asking.now,
-            &things,
-        )
-        .await?
-        .with_document_policy(asking.documents_policy);
+        let reach = Reach::load_current(conn, asking.agent.clone(), asking.now, &things).await?;
         let counts = rows
             .iter()
             .map(|row| {
@@ -620,7 +628,7 @@ impl Engine {
                 .unwrap_or_else(|| new_path.clone());
             let mut result = json!({"id":entry.item.id(),"kind":kind(entry.item),"path":old_path,"name":entry.basename,
                 "action":if located.request.command==domain::Command::RestoreVersion {"put_back"} else {match located.request.command {
-                    domain::Command::CreateFolder=>"create_folder",domain::Command::Copy=>"copy",domain::Command::Move=>"move",
+                    domain::Command::CreateFolder=>"create_folder",domain::Command::Copy=>"copy",domain::Command::Move=>"move",domain::Command::MoveOut=>"move_out",
                     domain::Command::Delete=>"delete",domain::Command::Restore=>"restore",domain::Command::Rename=>"rename",domain::Command::RestoreVersion=>"put_back"}},
                 "blocks":rows.get(&entry.item.id()).map_or(0,|row|row.block_count),"files":entry.files,"versions":entry.versions,
                 "shared_with":shared.get(&entry.item.id()).copied().unwrap_or(0)});
@@ -669,6 +677,7 @@ impl Engine {
             paths: vec![source.to_owned()],
             to: Some(format!("{to}/")),
             name: Some(name.to_owned()),
+            message_id: None,
         };
         let mut tx = orch_db::queries::transaction_guard::request_scope(
             orch_db::queries::transaction_guard::Scope::Creation,

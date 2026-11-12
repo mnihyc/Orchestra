@@ -1,4 +1,5 @@
 //! A person's shell on the environment role: opened by a command, attached through a tunnel that ends at the API, typed into, left and taken up again with its last output, and ended.
+#![cfg(target_os = "linux")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

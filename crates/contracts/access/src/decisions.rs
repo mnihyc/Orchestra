@@ -292,17 +292,23 @@ words! {
     }
 }
 
-/// The least of a provider's models and efforts that would do, for a
-/// missing use of it.
+/// The least of a provider's models and efforts that would do, and the place
+/// the work was to run in, for a missing use of it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MissingOptions {
     /// The models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// The service offerings, independently of generation models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
     /// The efforts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efforts: Option<Vec<String>>,
+    /// Where the work was to run, when the entries of the person leave that place out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<Vec<crate::whereabouts::WhereName>>,
 }
 
 /// The thing that something is missing on, with the little of it that a
@@ -350,6 +356,15 @@ pub struct MissingAccess {
 }
 
 impl MissingAccess {
+    /// Whether what is missing is the use of a provider in the place the work was to run, which the
+    /// entries of the person leave out.
+    #[must_use]
+    pub fn leaves_out_the_place(&self) -> bool {
+        self.options
+            .as_ref()
+            .is_some_and(|options| options.r#where.is_some())
+    }
+
     /// Something that can be given: by `givers`, and by force where the
     /// caller `administers` the thing.
     #[must_use]
@@ -1137,8 +1152,10 @@ mod tests {
         };
         let on_provider = |administers| {
             let options = MissingOptions {
+                services: None,
                 models: Some(vec!["gpt-x".into()]),
                 efforts: Some(vec!["high".into()]),
+                r#where: None,
             };
             MissingAccess::open(
                 object(ObjectKind::Provider),
@@ -1286,8 +1303,10 @@ mod tests {
                         owner: None,
                     },
                     Some(MissingOptions {
+                        services: None,
                         models: Some(vec!["gpt-x".into()]),
                         efforts: None,
+                        r#where: None,
                     }),
                 ),
             ],

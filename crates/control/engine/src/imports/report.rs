@@ -3,10 +3,72 @@
 use super::make::Made;
 use super::model::Object;
 use orch_api_contract::imports::{
-    ImportAction, ImportActionCounts, ImportCounts, ImportOutcome, ImportReportRow,
+    Import, ImportAction, ImportActionCounts, ImportCounts, ImportOutcome, ImportReportFormat,
+    ImportReportRow,
 };
 use orch_api_contract::package::PackageKind;
 use orch_db::queries::imports::NewReportRow;
+
+/// Native report file metadata and its once-formatted opening piece.
+pub struct ReportFile {
+    /// The original native media type.
+    pub media_type: &'static str,
+    /// The original day-based download filename.
+    pub name: String,
+    /// CSV heading or the JSON object opening with actual prepared import metadata.
+    pub head: String,
+}
+
+/// Format the native report opening from actual stored custody and approved metadata.
+pub fn file(
+    row: &orch_db::queries::imports::ImportRow,
+    format: ImportReportFormat,
+    metadata: Option<&Import>,
+) -> Result<ReportFile, crate::EngineError> {
+    let day = row.finished_at.unwrap_or(row.created_at).format("%Y-%m-%d");
+    match format {
+        ImportReportFormat::Csv => Ok(ReportFile {
+            media_type: "text/csv; charset=utf-8",
+            name: format!("import-report-{day}.csv"),
+            head: csv_head().to_owned(),
+        }),
+        ImportReportFormat::Json => {
+            let metadata = metadata.ok_or_else(|| {
+                crate::EngineError::unreadable(
+                    "the report opening needs its native import metadata",
+                )
+            })?;
+            let head = serde_json::to_string(&serde_json::json!({"import":metadata}))?;
+            Ok(ReportFile {
+                media_type: "application/json",
+                name: format!("import-report-{day}.json"),
+                head: format!("{},\"rows\":[", head.strip_suffix('}').unwrap_or(&head)),
+            })
+        }
+    }
+}
+
+/// The existing native row escaping and cross-page JSON comma state.
+pub fn chunk(
+    format: ImportReportFormat,
+    mut first: bool,
+    rows: impl IntoIterator<Item = ImportReportRow>,
+) -> (String, bool) {
+    let mut out = String::new();
+    for row in rows {
+        match format {
+            ImportReportFormat::Json => {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                out.push_str(&serde_json::to_string(&row).unwrap_or_default());
+            }
+            ImportReportFormat::Csv => out.push_str(&csv_row(&row)),
+        }
+    }
+    (out, first)
+}
 
 /// The word of an outcome as the report writes it.
 #[must_use]

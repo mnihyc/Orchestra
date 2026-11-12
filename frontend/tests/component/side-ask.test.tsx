@@ -32,7 +32,7 @@ function open(thread: Thread | null) {
 beforeEach(() => { calls.start.mockReset(); calls.read.mockReset(); threadWriter.evict(THREAD); useSideAsk.getState().forget(); });
 afterEach(async () => { cleanup(); threadWriter.evict(THREAD); threadWriter.evict('accepted-side'); useSideAsk.getState().forget(); await setLocale('en'); });
 
-describe('asking on the side', () => {
+describe('starting a side thread', () => {
   it.each(['en', 'zh-CN'] as const)('keeps an unanswered draft across Escape and reopens quietly in %s', async (locale) => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale), user = userEvent.setup();
@@ -52,14 +52,14 @@ describe('asking on the side', () => {
     calls.start.mockRejectedValueOnce(new Error('The connection ended before the answer arrived.'));
     calls.start.mockImplementation(() => new Promise(() => undefined));
     const user = userEvent.setup(), dialog = open(parent('read_only'));
-    await user.click(within(dialog).getByRole('button', { name: 'Ask' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start side thread' }));
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Try again' })).toBeVisible());
     const first = calls.start.mock.calls[0];
     expect(within(dialog).getByRole('textbox')).toBeDisabled();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     act(() => { openSideAsk({ threadId: THREAD, threadName: 'Repair login', toTurn: null, text: '' }); });
-    const again = screen.getByRole('dialog', { name: 'Ask on the side' });
+    const again = screen.getByRole('dialog', { name: 'Side thread' });
     expect(within(again).getByRole('textbox')).toBeDisabled();
     await user.click(within(again).getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(calls.start).toHaveBeenCalledTimes(2));
@@ -75,13 +75,13 @@ describe('asking on the side', () => {
     calls.start.mockRejectedValueOnce(new Error('The reply was lost.'));
     calls.start.mockImplementation(() => new Promise(() => undefined));
     const user = userEvent.setup(), dialog = open(parent('read_only'));
-    await user.click(within(dialog).getByRole('button', { name: 'Ask' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Start side thread' }));
     await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Try again' })).toBeVisible());
     const original = calls.start.mock.calls[0];
     cleanup();
     act(() => { openSideAsk({ threadId: THREAD, threadName: 'Repair login', toTurn: null, text: '' }); });
     show(<SideAskHost />);
-    const reopened = screen.getByRole('dialog', { name: 'Ask on the side' });
+    const reopened = screen.getByRole('dialog', { name: 'Side thread' });
     expect(within(reopened).getByRole('textbox')).toHaveValue('Which test covers this?');
     expect(within(reopened).getByRole('textbox')).toBeDisabled();
     await user.click(within(reopened).getByRole('button', { name: 'Try again' }));
@@ -109,7 +109,7 @@ describe('asking on the side', () => {
     let accept: (value: Awaited<ReturnType<typeof ForksApi.startSide>>) => void = () => undefined;
     calls.start.mockImplementation(() => new Promise((resolve) => { accept = resolve; }));
     const dialog = open(parent('read_only'));
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Ask' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Start side thread' }));
     expect(within(dialog).getByRole('textbox')).toBeDisabled();
     const side = { ...parent('read_only'), id: 'accepted-side', side_of: { id: THREAD, kind: 'thread' as const, name: 'Repair login', redacted: false } };
     act(() => { accept({ thread: side, input: { ...threadInput('accepted', 'Which test covers this?', { author: null, position: '1' }), thread_id: side.id }, seq: 1 }); });
@@ -151,7 +151,7 @@ describe('asking on the side', () => {
     const dialog = open(parent(null, { sides: { allowed: true, open: 0, max: 4, mode: null, reason: 'This adapter cannot enforce read-only files.' } }));
     expect(within(dialog).getByRole('status')).toHaveTextContent(i18n.t('side.unavailable.readOnly'));
     expect(within(dialog).queryByText('This adapter cannot enforce read-only files.')).not.toBeInTheDocument();
-    expect(within(dialog).getByRole('button', { name: 'Ask' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Start side thread' })).toBeDisabled();
     expect(calls.start).not.toHaveBeenCalled();
   });
 
@@ -176,7 +176,7 @@ describe('asking on the side', () => {
   it('reads the native thread once only when it is absent, and enables asking after its mode arrives', async () => {
     calls.read.mockResolvedValue(parent('read_only'));
     const dialog = open(null);
-    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Ask' })).toBeEnabled());
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Start side thread' })).toBeEnabled());
     expect(calls.read).toHaveBeenCalledTimes(1);
     expect(within(dialog).getByText('Side mode: Enforced read-only files')).toBeVisible();
     expect(calls.start).not.toHaveBeenCalled();
@@ -196,7 +196,7 @@ describe('asking on the side', () => {
   it('does not mistake a policy refusal for verified harness support', () => {
     const dialog = open(parent('read_only', { sides: { allowed: false, open: 0, max: 4, mode: 'read_only', reason: null } }));
     expect(within(dialog).getByRole('status')).toHaveTextContent('Side threads are switched off here. Use Fork instead.');
-    expect(within(dialog).getByRole('button', { name: 'Ask' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Start side thread' })).toBeDisabled();
     expect(calls.start).not.toHaveBeenCalled();
   });
 });

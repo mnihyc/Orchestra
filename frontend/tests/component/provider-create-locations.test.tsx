@@ -1,3 +1,4 @@
+import type * as RouterModule from '@tanstack/react-router';
 /** The one provider form keeps native/key credentials and runtime location independent. */
 import { cleanup,screen,waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -9,6 +10,7 @@ import { AddProviderDialog } from '@/features/resources/providers/AddProvider';
 import type { HomePickerProps } from '@/features/resources/HomePicker';
 import type { ArrangementType,ProviderSetup,Template,ProviderModel,Provider } from '@/generated/api-types';
 import { i18n,setLocale } from '@/i18n';
+import { useAppearance } from '@/lib/appearance';
 import { NetworkError } from '@/lib/requests';
 import { planProvider,SOURCE_DESCRIPTOR } from '../unit/provider-plan-fixtures';
 import { show } from './support';
@@ -18,7 +20,7 @@ vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
 const navigate=vi.hoisted(()=>vi.fn());
 const readProvider=vi.hoisted(()=>vi.fn<(id:string)=>Promise<Provider>>());
-vi.mock('@tanstack/react-router',()=>({useNavigate:()=>navigate,Link:({children,to,params,search,onClick}:{children:ReactNode;to?:string;params?:{id?:string};search?:{tab?:string};onClick?:()=>void})=><a href={`${(to??'#provider').replace('$id',params?.id??'$id')}${search?.tab===undefined?'':`?tab=${search.tab}`}`} onClick={(event)=>{event.preventDefault();onClick?.();}}>{children}</a>}));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),useNavigate:()=>navigate,Link:({children,to,params,search,onClick}:{children:ReactNode;to?:string;params?:{id?:string};search?:{tab?:string};onClick?:()=>void})=><a href={`${(to??'#provider').replace('$id',params?.id??'$id')}${search?.tab===undefined?'':`?tab=${search.tab}`}`} onClick={(event)=>{event.preventDefault();onClick?.();}}>{children}</a>}));
 vi.mock('@/features/resources/HomePicker',()=>({
   HomePicker:({value,onChange}:Pick<HomePickerProps,'value'|'onChange'>)=><select aria-label="Home" value={value} onChange={(event)=>onChange(event.target.value)}><option value="">Choose home</option><option value="org">Acme</option></select>,
   useHomeChoices:()=>({choices:[{id:'org',label:'Acme',personal:false,department:false}],pending:false,error:null}),
@@ -27,7 +29,7 @@ vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),cr
 let localTemplates: Template[] = [];
 const keeper={id:'keeper',name:'Keeper',online:true,placement:'connected' as const,platform_os:'linux' as const};
 const runner={...keeper,id:'runner',name:'Runner'};
-const setup:ProviderSetup={
+const setup:ProviderSetup={ grouping: [],
   machines:[keeper,runner].map((machine)=>({machine,directory_runtime:true,roles:['agent','provider'],harnesses:['fake'],upstreams:['*']})),
   key_machines:[keeper,runner],http_allowed:false,subscriptions_unshared:[],subscriptions_withheld:[],runtime_templates:[],
   subscriptions:[{agent:{id:'native-profile',name:'Native profile',harness_kind:'fake', harness: harnessName('fake'),address:'acme.native',machine:null,disabled:false},harness:{kind:'fake',name:'Fake'},
@@ -155,6 +157,46 @@ it.each(['en','zh-CN'] as const)('explains when the selected keeper permits none
   expect(createProvider).not.toHaveBeenCalled();expect(navigate).not.toHaveBeenCalled();
 });
 
+it.each(['en', 'zh-CN'] as const)('keeps proposed and optional arrangements distinct from program and keeper refusals in %s', async (locale) => {
+  await setLocale(locale);
+  const profile = setup.subscriptions[0];
+  if (profile === undefined) throw new Error('the native setup fixture is required');
+  profile.arrangements = [
+    { type: 'separated', allowed: true, available: true, puts: '', form: null },
+    { type: 'key_separated', allowed: false, available: true, puts: '', form: null },
+    { type: 'credential_shared', allowed: false, available: true, puts: '', form: null },
+    { type: 'handed_over', allowed: false, available: false, puts: '', form: null },
+  ];
+  const user = userEvent.setup();
+  show(<AddProviderDialog initialHome="org" onClose={vi.fn()} />);
+  await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
+  await chooseLocation(user, i18n.t('providerCreation.examples'), 'Native profile (Fake)');
+  await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+  await chooseLocation(user, i18n.t('providerCreation.signInMachine'), 'Keeper');
+  await user.click(screen.getByText(i18n.t('providers.add.arrangements'), { exact: true }));
+  const proposed = screen.getByRole('checkbox', { name: i18n.t('providerCreation.arrangements.separated') });
+  const optional = screen.getByRole('checkbox', { name: i18n.t('providerCreation.arrangements.key_separated') });
+  const machineRefused = screen.getByRole('checkbox', { name: i18n.t('providerCreation.arrangements.credential_shared') });
+  const programRefused = screen.getByRole('checkbox', { name: i18n.t('providerCreation.arrangements.handed_over') });
+  expect(proposed).toBeEnabled(); expect(proposed).toBeChecked();
+  expect(optional).toBeEnabled(); expect(optional).not.toBeChecked();
+  expect(machineRefused).toBeDisabled(); expect(machineRefused).not.toBeChecked();
+  expect(machineRefused).toHaveAccessibleDescription(i18n.t('arrangementAvailability.machine'));
+  expect(programRefused).toBeDisabled(); expect(programRefused).not.toBeChecked();
+  expect(programRefused).toHaveAccessibleDescription(i18n.t('arrangementAvailability.program'));
+  expect(screen.getByText(i18n.t('arrangementAvailability.machine'))).toBeVisible();
+  expect(screen.getByText(i18n.t('arrangementAvailability.program'))).toBeVisible();
+  await user.click(machineRefused); await user.click(programRefused);
+  await user.click(optional);
+  expect(optional).toBeChecked();
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+  expect(createProvider).not.toHaveBeenCalled();
+  await user.click(screen.getByLabelText(i18n.t('providers.add.name'))); await user.paste('Explicit native setup');
+  await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+  await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
+  expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toMatchObject({ kind: 'subscription', keeper_machine_id: 'keeper', arrangements: ['separated', 'key_separated'] });
+});
+
 for(const locale of ['en','zh-CN'] as const)it(`the machine provider entrance keeps its runtime and opens both navigation steps (${locale})`,async()=>{
   await setLocale(locale);const t=i18n.getFixedT(locale);const user=userEvent.setup();
   show(<AddProviderDialog initialRuntimeMachine={keeper.id} onClose={vi.fn()}/>);
@@ -163,7 +205,7 @@ for(const locale of ['en','zh-CN'] as const)it(`the machine provider entrance ke
   await chooseLocation(user,t('providerCreation.examples'),'Example API');
   expect(screen.getAllByRole('button',{name:t('common.next')})).toHaveLength(1);
   await user.click(screen.getByRole('button',{name:t('common.next')}));
-  expect(await screen.findByRole('combobox',{name:t('providerCreation.runtime')})).toHaveTextContent('Keeper');
+  expect(await screen.findByRole('combobox',{name:t('providerCreation.runtime')})).toHaveValue('Keeper');
   expect(screen.getByRole('button',{name:t('common.back')})).toBeVisible();
   await user.click(screen.getByRole('button',{name:t('common.back')}));
   expect(screen.getByRole('button',{name:t('common.next')})).toBeVisible();expect(createProvider).not.toHaveBeenCalled();
@@ -230,3 +272,98 @@ for (const locale of ['en', 'zh-CN'] as const) for (const failed of ['model', 'r
     } finally { setup.presets = before; setup.protocols = protocols; localTemplates = []; }
   });
 }
+
+
+for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const admin of [false, true]) {
+  it(`reviews the declared key role and saves it only in its native store (${language}/${theme}, admin=${admin})`, async () => {
+    const presets = setup.presets;
+    const sources = setup.sources;
+    const appearance = useAppearance.getState();
+    try {
+      await setLocale(language);
+      useAppearance.setState({ locale: language, theme, resolvedTheme: theme });
+      const original = presets[0];
+      if (original === undefined || SOURCE_DESCRIPTOR.facts === null) throw new Error('the provider fixture is required');
+      setup.presets = [{ ...original, credential_hints: [
+        { prefix: 'fixture-model-', role: 'model' }, { prefix: 'fixture-admin-', role: 'admin', field: 'admin_key' },
+      ] }];
+      setup.sources = [...sources, { by: 'builtin', name: 'fixture-facts', default_for: ['models.example'], machine: null, template: null, command: null,
+        descriptor: { ...SOURCE_DESCRIPTOR, name: 'fixture-facts', models: null,
+          facts: { ...SOURCE_DESCRIPTOR.facts, admin_credential: { labels: { en: 'Admin key', 'zh-CN': '管理密钥' }, reports: ['spend'] } },
+          fields: [{ name: 'admin_key', label: 'Admin key', type: 'secret', required: false, help: null, choices: null, default: null, max_bytes: null }],
+        } }];
+      const user = userEvent.setup();
+      show(<AddProviderDialog onClose={vi.fn()} />);
+      await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+      await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
+      const key = `fixture-${admin ? 'admin' : 'model'}-private-value`;
+      const field = screen.getByLabelText(i18n.t('providerFill.key'), { exact: true });
+      await user.type(field, key);
+      expect(field).toHaveAttribute('type', 'password');
+      expect(screen.getByTestId('credential-proposal')).toHaveTextContent(i18n.t('providerFill.sources.format'));
+      await user.click(screen.getByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
+      expect(screen.getByLabelText(i18n.t('resources.endpoint.address'), { exact: true })).toHaveValue('https://models.example/v1');
+      expect(screen.getByText(i18n.t('providerFill.sources.catalogue'), { exact: true })).toBeVisible();
+      expect(createProvider).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+      const review = screen.getByRole('region', { name: i18n.t('providerFill.review') });
+      expect(review).toHaveTextContent(i18n.t(admin ? 'providerFill.adminKey' : 'providerFill.modelKey'));
+      expect(review).toHaveTextContent(i18n.t('providerFill.sources.format'));
+      expect(review).not.toHaveTextContent(key);
+      await chooseLocation(user, i18n.t('providerCreation.keyMachine'), 'Keeper');
+      await chooseLocation(user, i18n.t('providerCreation.runtime'), 'Runner');
+      const name = screen.getByLabelText(i18n.t('providers.add.name'));
+      await user.clear(name); await user.paste('Kept personal name');
+      await user.click(screen.getByRole('button', { name: i18n.t('common.back') }));
+      expect(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true })).toHaveValue(key);
+      await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+      expect(screen.getByLabelText(i18n.t('providers.add.name'))).toHaveValue('Kept personal name');
+      await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+      await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
+      const body = vi.mocked(createProvider).mock.calls[0]?.[0];
+      expect(body).toMatchObject({ kind: 'api', name: 'Kept personal name', runtime_machine_id: 'runner', keeper_machine_id: 'keeper' });
+      if (admin) {
+        expect(body).not.toHaveProperty('api_key');
+        expect(body).toMatchObject({ sources: { facts: { by: 'default', secrets: { admin_key: key } } } });
+      } else {
+        expect(body).toHaveProperty('api_key', key);
+        expect(body).not.toHaveProperty('sources.facts.secrets.admin_key');
+      }
+    } finally {
+      setup.presets = presets;
+      setup.sources = sources;
+      useAppearance.setState(appearance);
+    }
+  });
+}
+
+
+it.each(['en', 'zh-CN'] as const)('keeps an unsupported admin draft out of the model-key store and permits an explicit role override in %s', async (language) => {
+  const presets = setup.presets;
+  try {
+    await setLocale(language);
+    const original = presets[0];
+    if (original === undefined) throw new Error('the provider fixture is required');
+    setup.presets = [{ ...original, credential_hints: [{ prefix: 'fixture-admin-', role: 'admin', field: 'admin_key' }] }];
+    const user = userEvent.setup();
+    show(<AddProviderDialog onClose={vi.fn()} />);
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Home' }), 'org');
+    await screen.findByRole('combobox', { name: i18n.t('providerCreation.examples') });
+    await user.type(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true }), 'fixture-admin-private');
+    await user.click(screen.getByRole('button', { name: i18n.t('providerFill.use', { name: original.name }) }));
+    await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+    expect(screen.getByText(i18n.t('providerFill.adminSourceRequired'))).toBeVisible();
+    const save = screen.getByRole('button', { name: i18n.t('providerCreation.create') });
+    expect(save).toHaveAttribute('aria-disabled', 'true');
+    await user.click(save);
+    expect(createProvider).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: i18n.t('common.back') }));
+    expect(screen.getByLabelText(i18n.t('providerFill.key'), { exact: true })).toHaveValue('fixture-admin-private');
+    await chooseLocation(user, i18n.t('providerFill.role'), i18n.t('providerFill.modelKey'));
+    await user.click(screen.getByRole('button', { name: i18n.t('common.next') }));
+    expect(screen.getByRole('region', { name: i18n.t('providerFill.review') })).toHaveTextContent(i18n.t('providerFill.sources.choice'));
+    await user.click(screen.getByRole('button', { name: i18n.t('providerCreation.create') }));
+    await waitFor(() => expect(createProvider).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(createProvider).mock.calls[0]?.[0]).toHaveProperty('api_key', 'fixture-admin-private');
+  } finally { setup.presets = presets; }
+});

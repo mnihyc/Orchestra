@@ -73,6 +73,7 @@ impl Engine {
     /// One look at everything of environments that may be due.
     async fn reap(&self) -> Result<(), EngineError> {
         self.schedule_agent_history(false);
+        self.reap_paid_service_commands(REAP_BATCH).await?;
         self.reap_temporary_environments().await?;
         self.purge_due_kept().await?;
         self.finish_stale_stops().await?;
@@ -132,6 +133,7 @@ impl Engine {
             }
             Err(MakeError::Running(_) | MakeError::NoEnvironment) => Ok(false),
             Err(MakeError::Db(error)) => Err(error.into()),
+            Err(MakeError::Internal(error)) => Err(error),
         }
     }
 
@@ -227,6 +229,9 @@ impl Engine {
         now: DateTime<Utc>,
     ) -> Result<bool, EngineError> {
         let mut conn = self.inner.db.acquire().await?;
+        if crate::background_wake::running(&mut conn, None, None, Some(environment.id)).await? {
+            return Ok(false);
+        }
         let minutes: i64 = setting(
             &mut conn,
             SettingsPlace::Environment(environment.id),
@@ -329,6 +334,7 @@ impl Engine {
             Ok(_) | Err(MakeError::Running(_)) => {}
             Err(MakeError::NoEnvironment) => return Ok(()),
             Err(MakeError::Db(error)) => return Err(error.into()),
+            Err(MakeError::Internal(error)) => return Err(error),
         }
         tx.commit().await.map_err(DbError::from)?;
         self.kick();

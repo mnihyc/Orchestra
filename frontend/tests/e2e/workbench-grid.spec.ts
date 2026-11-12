@@ -85,8 +85,10 @@ for (const [count, grid] of [[8, '2 rows × 4 columns'], [9, '3 rows × 3 column
       await expect.poll(async () => (await threadHeld(ids[index]!)).inputs.map((input) => input.content)).toEqual([[{ type: 'text', text: `Message for agent ${index + 1}` }]]);
       const live = turn(`01960000-0000-7000-8001-${String(index + 1).padStart(12, '0')}`, { ordinal: 101, state: 'running', inputId: (await threadHeld(ids[index]!)).inputs[0]!.id, tokens: 10_000_000_000 });
       await emit(ids[index]!, { turns: [{ ...live, thread_id: ids[index]! }], thread: { state: 'running', current_turn_id: live.id } });
-      await expect(view.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
-      await view.getByRole('button', { name: 'Stop', exact: true }).click();
+      // A running turn also offers Stop beside its status in the header; this case follows the composer's own.
+      const stop = view.getByRole('group', { name: 'Message controls', exact: true }).getByRole('button', { name: 'Stop', exact: true });
+      await expect(stop).toBeVisible();
+      await stop.click();
       await expect.poll(async () => (await threadHeld(ids[index]!)).turns.find((entry) => entry.id === live.id)?.state).toBe('interrupted');
     }
     await page.screenshot({ path: info.outputPath(`grid-${count}-${theme}-focus.png`), animations: 'disabled' });
@@ -204,13 +206,13 @@ test('detached Files stays on A while B is focused and after A conversation clos
   await split.click({ timeout: 15_000 });
   const fixed = page.getByRole('tab', { name: 'Files · Grid agent 1', exact: true });
   await expect(fixed).toBeVisible();
-  await page.getByRole('tab', { name: 'Grid agent 2', exact: true }).click();
+  await page.getByRole('tab', { name: 'Idle Grid agent 2', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ids[1]}$`));
   await expect(fixed).toBeVisible();
   await expect(page.getByTestId('files-panel')).toContainText('web/');
-  await page.getByRole('tab', { name: 'Grid agent 1', exact: true }).click({ button: 'right' });
+  await page.getByRole('tab', { name: 'Idle Grid agent 1', exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Close', exact: true }).click();
-  await expect(page.getByRole('tab', { name: 'Grid agent 1', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: 'Idle Grid agent 1', exact: true })).toHaveCount(0);
   await expect(fixed).toBeVisible();
   await expect(page.getByTestId('files-panel')).toBeVisible();
   const scope = await page.evaluate(() => {
@@ -246,7 +248,7 @@ test('duplicate full thread views share the draft, retain independent reading po
   await expect(duplicate.getByRole('textbox', { name: 'Message to the agent' })).toHaveValue('Shared draft for this thread');
   await duplicate.getByRole('textbox', { name: 'Message to the agent' }).fill('Edited in the second view');
   await expect(first.getByRole('textbox', { name: 'Message to the agent' })).toHaveValue('Edited in the second view');
-  await page.getByRole('tab', { name: 'Grid agent 2', exact: true }).click();
+  await page.getByRole('tab', { name: 'Idle Grid agent 2', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ids[1]}$`));
   await firstTab.click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ids[0]}$`));
@@ -258,24 +260,26 @@ test('duplicate full thread views share the draft, retain independent reading po
   await emit(ids[0]!, { items });
   const left = first.getByRole('log', { name: 'Conversation', exact: true });
   const right = duplicate.getByRole('log', { name: 'Conversation', exact: true });
+  // A conversation shares one scrolling viewport with its controls, so a reading position is that viewport's.
+  const leftView = first.locator('[data-screen="thread"]'), rightView = duplicate.locator('[data-screen="thread"]');
   await expect(left).toBeVisible(); await expect(right).toBeVisible();
   await expect(left).not.toHaveAttribute('aria-busy', 'true'); await expect(right).not.toHaveAttribute('aria-busy', 'true');
   await left.hover(); await page.mouse.wheel(0, -2400);
-  await expect.poll(() => left.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(1000);
-  const anchor = await left.evaluate((element) => {
+  await expect.poll(() => leftView.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeGreaterThan(1000);
+  const anchor = await leftView.evaluate((element) => {
     const top = element.getBoundingClientRect().top;
     const row = Array.from(element.querySelectorAll<HTMLElement>('[data-item]')).find((row) => row.getBoundingClientRect().bottom > top);
     if (row === undefined) throw new Error('No visible reading anchor');
     return { id: row.dataset.item, offset: row.getBoundingClientRect().top - top };
   });
-  expect(await right.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(100);
+  expect(await rightView.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThan(100);
   await firstTab.click({ button: 'right' }); await page.getByRole('menuitem', { name: 'Close', exact: true }).click();
   await expect(first).toHaveCount(0); await expect(right).toBeVisible();
-  await page.getByRole('tab', { name: 'Grid agent 1', exact: true }).click({ button: 'right' });
+  await page.getByRole('tab', { name: 'Idle Grid agent 1', exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Reopen closed tab', exact: true }).click();
   await expect(left).toBeVisible(); await expect(left).not.toHaveAttribute('aria-busy', 'true');
   const restored = left.locator(`[data-item="${anchor.id}"]`); await expect(restored).toBeVisible();
-  await expect.poll(async () => Math.abs((await restored.evaluate((row) => row.getBoundingClientRect().top - (row.closest('[role="log"]')?.getBoundingClientRect().top ?? 0))) - anchor.offset)).toBeLessThan(8);
+  await expect.poll(async () => Math.abs((await restored.evaluate((row) => row.getBoundingClientRect().top - (row.closest('[data-screen="thread"]')?.getBoundingClientRect().top ?? 0))) - anchor.offset)).toBeLessThan(8);
   await expect(first.getByRole('textbox', { name: 'Message to the agent' })).toHaveValue('Edited in the second view');
   await page.reload(); await expect(left).toBeVisible(); await expect(restored).toBeVisible();
   await expect(first.getByRole('textbox', { name: 'Message to the agent' })).toHaveValue('Edited in the second view');
@@ -296,9 +300,9 @@ test('a full chat keeps its address and composer as an ordinary closable main ta
   const active = main.getByRole('tab', { selected: true });
   await active.click({ button: 'right' }); await page.getByRole('menuitem', { name: 'Copy link', exact: true }).click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(href);
-  await main.getByRole('tab', { name: 'Grid agent 1', exact: true }).click();
+  await main.getByRole('tab', { name: 'Idle Grid agent 1', exact: true }).click();
   await expect(page).toHaveURL(new RegExp(`/thread/${ids[0]}$`));
-  await main.getByRole('tab', { name: 'Fix login', exact: true }).click();
+  await main.getByRole('tab', { name: 'Fix login · topic chat', exact: true }).click();
   await expect(page).toHaveURL(href);
   await expect(chat.getByRole('textbox', { name: /^Message / })).toHaveValue('A recoverable full-chat draft');
   await page.reload(); await expect(page).toHaveURL(href);
@@ -337,7 +341,8 @@ for (const count of [11, 160]) test(`${count} tabs keep a bounded grid strip and
 test('two full Help panes keep their own section when focus and local navigation change', async ({ page }, info) => {
   await page.setViewportSize({ width: 1440, height: 900 }); await start(page, 1);
   await page.goto('/help?part=settings');
-  const firstTab = page.locator('[data-main-area] [role="tab"][aria-selected="true"]');
+  // The workbench's own tab, not the section tabs the Help page draws inside it.
+  const firstTab = page.locator('[data-main-area] [role="tab"][aria-selected="true"][id^="tab-"]');
   const firstId = (await firstTab.getAttribute('id'))?.replace(/^tab-/, '');
   if (firstId === undefined) throw new Error('The first Help tab has no stable ID');
   const first = page.locator(`[data-view-instance="${firstId}"]`);

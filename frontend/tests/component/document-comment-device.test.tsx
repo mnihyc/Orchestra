@@ -8,7 +8,8 @@ import type * as Personal from '@/api/personal';
 import { client } from '@/api/client';
 import { getCommentDrafts, forgetCommentDraftDeviceData, retireCommentDraftSession, setCommentText, commentSlotKey } from '@/features/documents/commentDrafts';
 import { InterfaceSettings } from '@/features/settings/personal/Interface';
-import { i18n } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
+import { forgetViewChoiceDeviceData, readViewChoice, useViewChoice, writeViewChoice } from '@/lib/viewChoices';
 import { me } from '../doubles/fixtures';
 import { show } from './support';
 
@@ -19,7 +20,35 @@ vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: 
 const session = client.session.getState(), person = 'device-comment-person';
 const target = { kind: 'reply' as const, discussion: 'original-discussion' };
 beforeEach(() => { localStorage.clear(); client.session.setState({ status: 'signed_in', userId: person, readerVersion: (session.readerVersion ?? 0) + 1 }); });
-afterEach(() => { cleanup(); vi.restoreAllMocks(); forgetCommentDraftDeviceData(person, null); retireCommentDraftSession(); localStorage.clear(); client.session.setState(session); });
+afterEach(async () => { cleanup(); vi.restoreAllMocks(); forgetCommentDraftDeviceData(person, null); forgetViewChoiceDeviceData(person, null); retireCommentDraftSession(); localStorage.clear(); client.session.setState(session); await setLocale('en'); });
+
+function OpenPageChoice() {
+  const [choice] = useViewChoice('page', 'state', 'Default filters', 'screen-0');
+  return <output aria-label="Mounted page filters">{choice}</output>;
+}
+
+it.each([['en', 'List filters and tabs'], ['zh-CN', '列表筛选和标签']] as const)('names one page-choice group and clears its real mounted values without touching another kind or person in %s', async (locale, label) => {
+  await setLocale(locale);
+  for (let at = 0; at < 40; at += 1) writeViewChoice(person, 'page', 'state', 'Saved filters', `screen-${at}`);
+  writeViewChoice(person, 'resource-environments', 'listOrigin', 'Environment filters');
+  writeViewChoice('another-person', 'page', 'state', 'Private filters', 'screen-0');
+  show(<><OpenPageChoice /><InterfaceSettings /></>);
+  const name = await screen.findByText(label);
+  expect(screen.getAllByText(label)).toHaveLength(1);
+  expect(screen.queryByText(i18n.t('craftChoiceNames.unknown'))).not.toBeInTheDocument();
+  const row = name.closest('li'); if (row === null) throw new Error('The grouped choices need one ordinary device row');
+  expect(within(row).getAllByRole('button')).toHaveLength(1);
+  expect(row).not.toHaveTextContent(/screen-\d|Private filters/);
+  expect(screen.getByLabelText('Mounted page filters')).toHaveTextContent('Saved filters');
+  const environmentName = i18n.t('craftChoiceNames.scope', { kind: i18n.t('craftChoiceNames.kinds.resource-environments'), choice: i18n.t('craftChoiceNames.keys.listOrigin') });
+  expect(screen.getByText(environmentName)).toBeVisible();
+  await userEvent.click(within(row).getByRole('button'));
+  expect(screen.getByLabelText('Mounted page filters')).toHaveTextContent('Default filters');
+  for (let at = 0; at < 40; at += 1) expect(readViewChoice(person, 'page', 'state', 'Default filters', `screen-${at}`)).toBe('Default filters');
+  expect(readViewChoice(person, 'resource-environments', 'listOrigin', '')).toBe('Environment filters');
+  expect(readViewChoice('another-person', 'page', 'state', '', 'screen-0')).toBe('Private filters');
+  expect(screen.queryByText(label)).not.toBeInTheDocument(); expect(screen.getByText(environmentName)).toBeVisible();
+});
 
 it('labels a mounted draft with human words and clearing it cannot be undone by that writer', async () => {
   const draft = getCommentDrafts(person, 'opaque-view', 'opaque-document'); setCommentText(draft, target, 'Forget these words');
