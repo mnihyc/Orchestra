@@ -23,8 +23,8 @@ function isRecoveryDisplay(value: unknown): boolean {
     && ['attempts', 'count', 'window_secs'].every((key) => row[key] === null || nonnegative(row[key]))
     && (row.due_at === null || typeof row.due_at === 'string' && Number.isFinite(Date.parse(row.due_at)))
     && (row.step === null || typeof row.step === 'string' && ['retry', 'continue', 'failover', 'wait'].includes(row.step))
-    && typeof row.failure_kind === 'string' && ['provider_busy', 'provider_unreachable', 'model_refused', 'model_unavailable', 'access', 'provider_exhausted', 'provider_unauthorized', 'context_overflow', 'harness_error', 'any'].includes(row.failure_kind)
-    && (row.stop_reason === null || typeof row.stop_reason === 'string' && ['repeat_limit', 'history_changed', 'author_missing', 'author_lacks_interact', 'author_lacks_use', 'switch_failed', 'switch_blocked', 'stopped_by_person', 'candidate_not_allowed', 'embedding_identity', 'origin_missing', 'rule_unavailable', 'rules_changed', 'auto_disabled', 'repeat_limit_changed', 'service_precondition', 'delay_unrepresentable', 'candidate_parameters', 'candidate_unavailable', 'origin_authority'].includes(row.stop_reason));
+    && typeof row.failure_kind === 'string' && ['provider_busy', 'rate_limited', 'overloaded', 'stream_interrupted', 'provider_unreachable', 'model_refused', 'model_unavailable', 'access', 'provider_exhausted', 'provider_unauthorized', 'context_overflow', 'harness_error', 'session_lost', 'any'].includes(row.failure_kind)
+    && (row.stop_reason === null || typeof row.stop_reason === 'string' && ['repeat_limit', 'history_changed', 'author_missing', 'author_lacks_interact', 'author_lacks_use', 'switch_failed', 'switch_blocked', 'stopped_by_person', 'candidate_not_allowed', 'embedding_identity', 'origin_missing', 'rule_unavailable', 'rules_changed', 'auto_disabled', 'repeat_limit_changed', 'service_precondition', 'delay_unrepresentable', 'candidate_parameters', 'candidate_unavailable', 'origin_authority', 'machine_offline'].includes(row.stop_reason));
 }
 
 export function isThreadDisplay(value: unknown): value is ThreadDisplay {

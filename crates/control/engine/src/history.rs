@@ -116,7 +116,8 @@ pub fn kind_of(action: AuditAction) -> Option<HistoryKind> {
     Some(match action {
         AuditAction::EnvironmentExecChanged => HistoryKind::Tools,
         AuditAction::ThreadBound | AuditAction::ThreadSwitched => HistoryKind::Threads,
-        AuditAction::ResourceTransferred => HistoryKind::Access,
+        AuditAction::ResourceTransferred | AuditAction::ResourceHomeChanged => HistoryKind::Access,
+        AuditAction::ResourceTagsChanged => HistoryKind::Lifecycle,
         _ if key.starts_with("environment.") => HistoryKind::Lifecycle,
         _ if key.starts_with("capability.") || key.starts_with("mcp.") => HistoryKind::Tools,
         _ if key.starts_with("terminal.") || key == "process.signalled" => HistoryKind::Shells,

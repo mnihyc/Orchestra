@@ -16,8 +16,8 @@ use std::path::{Path, PathBuf};
 
 use orch_agent_contract::adapter::AdapterError;
 use orch_agent_contract::discovery::{
-    DEFAULT_STARTUP_TIMEOUT_SECS, McpDefinition, McpFound, McpImportRequest, McpRequires, McpScope,
-    McpSearch, McpServerSpec, McpTransport, McpWorkingDir, NativeSession,
+    DEFAULT_STARTUP_TIMEOUT_SECS, McpDefinition, McpFound, McpHttpCredentials, McpImportRequest,
+    McpRequires, McpScope, McpSearch, McpServerSpec, McpTransport, McpWorkingDir, NativeSession,
 };
 use orch_plugin_contract::Secret;
 use orch_types::{Hash, Json, Time};
@@ -235,17 +235,19 @@ pub fn found_servers(user_file: Option<&Path>, search: &McpSearch) -> Vec<(McpFo
                def: Json,
                scope: McpScope,
                directory: Option<String>| {
+        let parsed = definition_from(&def).ok();
         found.push((
             McpFound {
-                definition_fingerprint: definition_from(&def)
-                    .ok()
-                    .map(|definition| definition.definition_fingerprint()),
+                definition_fingerprint: parsed.as_ref().map(McpDefinition::definition_fingerprint),
                 name,
                 source: KIND.to_owned(),
                 scope,
                 directory,
                 transport: transport_of(&def),
-                digest: Hash::of(def.to_string().as_bytes()).to_string(),
+                digest: parsed
+                    .as_ref()
+                    .map(|definition| definition.digest().to_string())
+                    .unwrap_or_else(|| Hash::of(def.to_string().as_bytes()).to_string()),
             },
             def,
         ));
@@ -295,6 +297,30 @@ fn holds_a_secret(name: &str) -> bool {
     SECRET_WORDS.iter().any(|word| upper.contains(word))
 }
 
+/// Native remote-template exclusions: importing a configuration does not turn
+/// model, cloud or package credentials into a server's header variables.
+fn remote_credential_variables() -> &'static [&'static str] {
+    &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_OPENAI_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+        "NPM_TOKEN",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    ]
+}
+
 /// The definition of a server as the harness's file states it, in the shape Orch runs servers from.
 pub fn definition_from(raw: &Json) -> Result<McpDefinition, AdapterError> {
     let transport = transport_of(raw);
@@ -337,18 +363,36 @@ pub fn definition_from(raw: &Json) -> Result<McpDefinition, AdapterError> {
     let url = (transport == McpTransport::Http)
         .then(|| raw.get("url").and_then(Json::as_str).map(str::to_owned))
         .flatten();
-    if transport == McpTransport::Http
-        && raw
-            .get("headers")
-            .and_then(Json::as_object)
-            .is_some_and(|headers| !headers.is_empty())
-    {
-        return Err(AdapterError::Unsupported(
-            "an http MCP server that needs headers cannot be imported: a definition has no place for them"
-                .to_owned(),
-        ));
-    }
+    let headers = raw
+        .get("headers")
+        .and_then(Json::as_object)
+        .into_iter()
+        .flatten()
+        .filter_map(|(name, value)| {
+            value
+                .as_str()
+                .map(|value| (name.clone(), Secret::new(value)))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let interpolate = headers.values().any(|value| value.expose().contains("${"))
+        || url.as_ref().is_some_and(|value| value.contains("${"));
+    let http_credentials = (transport == McpTransport::Http
+        && (!headers.is_empty() || interpolate))
+        .then_some(McpHttpCredentials {
+            headers,
+            interpolate,
+            blocked_env: if interpolate {
+                remote_credential_variables()
+                    .iter()
+                    .map(|name| (*name).to_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        });
     let definition = McpDefinition {
+        http_credentials,
         spec: McpServerSpec {
             transport,
             command,
@@ -524,6 +568,50 @@ mod tests {
     }
 
     #[test]
+    fn native_configuration_discovery_and_the_imported_copy_share_the_same_digest() {
+        let home = tempfile::tempdir().unwrap();
+        let file = home.path().join(".claude.json");
+        write(&file, &json!({"mcpServers":{"github":example_server(),"docs":{"type":"http","url":"https://docs.example.test/mcp"}}}).to_string());
+        let discovered = found_servers(Some(&file), &McpSearch::default());
+        assert_eq!(discovered.len(), 2);
+        for (found, _) in &discovered {
+            let kept = read_definition(
+                Some(&file),
+                &McpImportRequest {
+                    server_id: new_id(),
+                    source: KIND.to_owned(),
+                    scope: found.scope,
+                    name: found.name.clone(),
+                    directory: found.directory.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(found.digest, kept.imported(None).digest);
+            assert_eq!(
+                found.definition_fingerprint,
+                Some(kept.definition_fingerprint())
+            );
+        }
+        let before = discovered
+            .iter()
+            .find(|(server, _)| server.name == "github")
+            .unwrap()
+            .0
+            .digest
+            .clone();
+        let mut changed = example_server();
+        changed["env"]["API_KEY"] = json!("different_private_token");
+        write(&file, &json!({"mcpServers":{"github":changed}}).to_string());
+        let after = found_servers(Some(&file), &McpSearch::default());
+        assert_ne!(before, after[0].0.digest);
+        assert!(
+            !serde_json::to_string(&after[0].0)
+                .unwrap()
+                .contains("different_private_token")
+        );
+    }
+
+    #[test]
     fn a_definition_read_out_keeps_the_secrets_apart() {
         let definition = definition_from(&example_server()).unwrap();
         assert_eq!(
@@ -541,17 +629,14 @@ mod tests {
     }
 
     #[test]
-    fn a_server_that_needs_headers_cannot_be_imported_and_one_that_is_not_there_is_not_found() {
-        let with_headers = json!({ "type": "http", "url": "https://x.example/mcp", "headers": { "Authorization": "Bearer t" } });
-        assert!(matches!(
-            definition_from(&with_headers),
-            Err(AdapterError::Unsupported(_))
-        ));
+    fn a_server_with_headers_is_imported_privately_and_one_that_is_not_there_is_not_found() {
+        let with_headers = json!({ "type": "http", "url": "${API_BASE_URL:-https://x.example}/mcp", "headers": { "Authorization": "Bearer private-header-value", "X-Workspace": "${WORKSPACE:-default}" } });
         let home = tempfile::tempdir().unwrap();
         let file = home.path().join(".claude.json");
         write(
             &file,
-            &json!({ "mcpServers": { "github": example_server() } }).to_string(),
+            &json!({ "mcpServers": { "github": example_server(), "private-api": with_headers } })
+                .to_string(),
         );
         let request = |name: &str| McpImportRequest {
             server_id: new_id(),
@@ -561,6 +646,42 @@ mod tests {
             directory: None,
         };
         assert!(read_definition(Some(&file), &request("github")).is_ok());
+        let definition = read_definition(Some(&file), &request("private-api")).unwrap();
+        let kept: McpDefinition =
+            serde_json::from_slice(&serde_json::to_vec(&definition).unwrap()).unwrap();
+        let credentials = kept.http_credentials.as_ref().unwrap();
+        assert_eq!(
+            credentials.headers["Authorization"].expose(),
+            "Bearer private-header-value"
+        );
+        assert_eq!(
+            credentials.headers["X-Workspace"].expose(),
+            "${WORKSPACE:-default}"
+        );
+        assert!(credentials.interpolate);
+        assert!(
+            credentials
+                .blocked_env
+                .iter()
+                .any(|name| name == "ANTHROPIC_AUTH_TOKEN")
+        );
+        assert_eq!(kept.check(), Ok(()));
+        let found = found_servers(Some(&file), &McpSearch::default())
+            .into_iter()
+            .find(|(found, _)| found.name == "private-api")
+            .unwrap()
+            .0;
+        assert_eq!(found.digest, kept.imported(None).digest);
+        assert_eq!(
+            found.definition_fingerprint,
+            Some(kept.definition_fingerprint())
+        );
+        assert!(
+            !serde_json::to_string(&(found, kept.imported(None), &kept.spec))
+                .unwrap()
+                .contains("private-header-value")
+        );
+        assert!(!format!("{kept:?}").contains("private-header-value"));
         assert!(matches!(
             read_definition(Some(&file), &request("missing")),
             Err(AdapterError::NotFound(_))

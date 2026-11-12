@@ -128,3 +128,31 @@ it('serializes a retired composer save before newer words and keeps their warnin
     expect(screen.getByLabelText('Current save')).toHaveTextContent('saved');
   } finally { view.unmount(); cache.clear(); }
 });
+
+it('tells nothing of a save once the draft is empty, at the send, and still removes the saved draft afterwards', async () => {
+  const id = 'sent-draft-status';
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  cache.setQueryData(draftKey(id), null);
+  reads.save.mockImplementation((_chat, body) => Promise.resolve({ ...body, reply_to: body.reply_to ?? null, mention_names: [], updated_at: '2026-10-16T00:00:00Z' }));
+  reads.clear.mockResolvedValue(undefined);
+  function Editor() {
+    const draft = useDraft(id, true);
+    return <><input aria-label="Sent draft" value={draft.text} onChange={(event) => draft.setText(event.target.value)} /><output aria-label="Sent save">{draft.saving}</output><button onClick={draft.clear}>Send it</button></>;
+  }
+  const view = show(<QueryClientProvider client={cache}><Editor /></QueryClientProvider>);
+  vi.useFakeTimers();
+  try {
+    fireEvent.change(screen.getByLabelText('Sent draft'), { target: { value: 'Words that are sent' } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_AFTER_MS); });
+    expect(screen.getByLabelText('Sent save')).toHaveTextContent('saved');
+    // The message leaves the box: the line under it leaves in the same moment, with no timer run.
+    fireEvent.click(screen.getByRole('button', { name: 'Send it' }));
+    expect(screen.getByLabelText('Sent draft')).toHaveValue('');
+    expect(screen.getByLabelText('Sent save')).toHaveTextContent('idle');
+    expect(reads.clear).not.toHaveBeenCalled();
+    // The saved copy is still removed from the server, later and without a line.
+    await act(async () => { await vi.advanceTimersByTimeAsync(SAVE_AFTER_MS); });
+    expect(reads.clear).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText('Sent save')).toHaveTextContent('idle');
+  } finally { view.unmount(); cache.clear(); }
+});

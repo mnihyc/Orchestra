@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-link/test-observers"]
+
 [dependencies]
 flate2.workspace = true
 orch-agent-contract.workspace = true

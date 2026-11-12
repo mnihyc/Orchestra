@@ -273,6 +273,21 @@ pub enum Outcome {
     ClientGone,
 }
 
+/// The use a request was answered with: the figures the answer states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Answered {
+    /// Tokens of input, those read from a cache and those written to one among them.
+    pub input: i64,
+    /// Tokens of output, the reasoning among them.
+    pub output: i64,
+    /// Of the input, those read from a cache.
+    pub cached: i64,
+    /// Of the output, the reasoning.
+    pub reasoning: i64,
+    /// Of the input, those written to a cache.
+    pub cache_write: i64,
+}
+
 /// What the server remembers of one request.
 #[derive(Debug, Clone, Serialize)]
 pub struct RecordedRequest {
@@ -304,6 +319,8 @@ pub struct RecordedRequest {
     pub status: Option<u16>,
     /// How the answer ended.
     pub outcome: Outcome,
+    /// The use the answer states, where the request was answered with a response (not with an error).
+    pub usage: Option<Answered>,
 }
 
 impl RecordedRequest {

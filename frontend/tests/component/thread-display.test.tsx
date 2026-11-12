@@ -1,3 +1,5 @@
+import type * as RouterModule from '@tanstack/react-router';
+import { i18n } from '@/i18n';
 /** Every thread icon slot reads the server presentation, including when execution state differs. */
 import { act, cleanup, screen, within } from '@testing-library/react';
 import type { ReactNode } from 'react';
@@ -22,7 +24,7 @@ vi.mock('@/api/references', () => ({ referencePreviewQuery: ({ id }: { id: strin
   return Promise.resolve({ kind: 'node', id, node_kind: 'thread', title: supplied.thread?.name ?? 'Work', description: '',
     place: null, updated_at: null, updated_by: null, part: null, thread_display: supplied.thread?.display });
 } }) }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }), useNavigate: () => vi.fn() }));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a>, useRouter: () => ({ invalidate: vi.fn() }), useNavigate: () => vi.fn() }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeContextMenu: ({ children }: { children: ReactNode }) => children, NodeMakeButton: () => null, NodeMenuButton: () => null, useIsPending: () => false }));
 vi.mock('@/features/navigation/DocMenu', () => ({ DocContextMenu: ({ children }: { children: ReactNode }) => children, DocMenuButton: () => null }));
 vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: vi.fn() }));
@@ -76,6 +78,13 @@ it('leaves an inaccessible reference as the plain glyph with no work state or pr
   expect(view.container.querySelector('[data-work-state]')).toBeNull();
   expect(view.container.querySelector('svg.lucide-message-square-text')).not.toBeNull();
   expect(screen.queryByRole('img')).not.toBeInTheDocument();
+});
+
+it('keeps a known visible thread with an absent observation explicitly unreported', () => {
+  const view = show(<ThreadStateIcon display={null} />);
+  expect(view.container.querySelector('[data-work-state]')).toBeNull();
+  expect(screen.getByRole('img')).toHaveAccessibleName(i18n.t('threadStates.notReported'));
+  expect(view.container.querySelector('svg.lucide-message-square-text')).toBeNull();
 });
 
 it('keeps a retained tab current from its existing tree facts without opening a reader', () => {

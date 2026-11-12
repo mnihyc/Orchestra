@@ -5,6 +5,7 @@
  * the tone it deserves: a plain line, a warning where something is opened or lost, a danger where it cannot go
  * on. Nothing here asks the server for anything or draws anything.
  */
+import { mcpReason, mcpReasonCode } from '@/features/resources/mcp/words';
 import type { TFunction } from 'i18next';
 import type { MeasurementSizeData } from '@/features/change/Measurements';
 
@@ -24,6 +25,8 @@ export interface Line {
   tone: Tone;
   text: string;
   resources?: readonly NamedResource[];
+  /** Known people use the same inspection chips as every other plan and resource row. */
+  people?: readonly UserRef[];
   /** Exact technical values stay behind the renderer's disclosure, outside the ordinary sentence. */
   technical?: PendingUpdate;
   size?: MeasurementSizeData;
@@ -43,6 +46,11 @@ export interface PlanContext {
 }
 
 const environmentName = (ref: EnvironmentRef | null): string => ref?.name ?? '';
+
+/** Only an actual agent source may bind a source environment. */
+export function sourceEnvironment(plan: Pick<ForkPlan, 'from'>): EnvironmentRef | null {
+  return plan.from.kind === 'agent' ? plan.from.environment : null;
+}
 
 /** A namesake is qualified by its visible origin; absent origins are described by the provider's role in this plan. */
 export function planProviderName(plan: { from: { provider: { id: string; name: string } }; to: { provider: { id: string; name: string } } }, side: 'from' | 'to', context: Pick<PlanContext, 'providerNames'>, t: TFunction): string {
@@ -189,20 +197,41 @@ export function copyLines(mounts: readonly PlanMount[], locale: string, t: TFunc
   });
 }
 
-/** What becomes of the MCP servers that a plan names as new, lost or unavailable there. */
+/** What becomes of every MCP server, including the ones the plan keeps. */
 export function mcpLines(servers: readonly PlanMcpServer[], t: TFunction): Line[] {
-  return servers.map((server): Line => ({
-    id: `mcp-${server.id}`,
-    resources: [{ label: server.name, subject: { kind: 'mcp_server', server: { id: server.id, name: server.name } } }],
-    tone: server.fate === 'new' || server.fate === 'kept' ? 'plain' : 'warning',
-    text: server.reason === null ? t(`mcpPlan.${server.fate}`, { name: server.name }) : t(`mcpPlan.${server.fate}Because`, { name: server.name, reason: server.reason }),
-  }));
+  return servers.map((server): Line => {
+    const reason = mcpReason(server.reason, 'unavailable', t, mcpReasonCode(server));
+    return {
+      id: `mcp-${server.id}`,
+      resources: [{ label: server.name, subject: { kind: 'mcp_server', server: { id: server.id, name: server.name } } }],
+      tone: server.fate === 'new' || server.fate === 'kept' ? 'plain' : 'warning',
+      text: reason === null ? t(`mcpPlan.${server.fate}`, { name: server.name }) : t(`mcpPlan.${server.fate}Because`, { name: server.name, reason: reason.text }),
+    };
+  });
+}
+
+/** Resources whose reported identity and attachment are retained. */
+export function keptResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'keep'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'kept'), t)];
+}
+
+/** New resource attachments also matter in the compact switch plan. */
+export function addedResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'attach'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t)];
+}
+
+/** Losses retain their reported warning and reason in every plan. */
+export function removedResourcesOf(plan: Pick<ForkPlan, 'mounts' | 'mcp'>, t: TFunction): Line[] {
+  return [...mountLines(plan.mounts.filter((mount) => mount.action === 'detach'), t), ...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t)];
 }
 
 /** What the result will be, and what is different: for a fork, first that it is its maker's. */
 export function changesOf(plan: ForkPlan, context: PlanContext, t: TFunction): Line[] {
   const lines: Line[] = [];
   const fork = plan.result === 'new';
+  const from = plan.from;
+  const beforeEnvironment = sourceEnvironment(plan);
+  const beforeModel = from.kind === 'program' ? from.model : context.thread.model;
   if (fork) lines.push({ id: 'owner', tone: 'plain', text: t('change.plan.newOwner') });
   if (isNewEnvironment(plan.to.environment)) {
     const host = plan.to.environment.new.place.host;
@@ -211,16 +240,24 @@ export function changesOf(plan: ForkPlan, context: PlanContext, t: TFunction): L
   // What an environment not made yet will offer is its template's promise: checked before anything is committed.
   if (plan.to.predicted) lines.push({ id: 'predicted', tone: 'plain', text: t('change.plan.predicted') });
   if (plan.to.provider.id !== plan.from.provider.id) lines.push({ id: 'provider', tone: 'plain', resources: [{ label: planProviderName(plan, 'from', context, t), subject: { kind: 'provider', provider: plan.from.provider } }, { label: planProviderName(plan, 'to', context, t), subject: { kind: 'provider', provider: plan.to.provider } }], text: t('change.plan.provider', { to: planProviderName(plan, 'to', context, t), from: planProviderName(plan, 'from', context, t) }) });
-  if (plan.to.agent.id !== plan.from.agent.id) lines.push({ id: 'agent', tone: 'plain', resources: [{ label: plan.from.agent.name, subject: { kind: 'agent', agent: plan.from.agent } }, { label: plan.to.agent.name, subject: { kind: 'agent', agent: plan.to.agent } }], text: t('change.plan.agent', { to: plan.to.agent.name, from: plan.from.agent.name }) });
-  if (plan.to.model !== context.thread.model || plan.to.effort !== context.thread.effort) {
-    const before = modelWords(modelLabel(context.thread.model, plan.from.provider.id === plan.to.provider.id ? context.models ?? [] : [], context.thread.modelDisplay, t), effortLabel(context.thread.effort, t));
+  if (from.kind === 'program') {
+    lines.push({ id: 'program', tone: 'plain', resources: [{ label: plan.to.agent.name, subject: { kind: 'agent', agent: plan.to.agent } }], text: t('change.plan.program', { from: t('ask.threadProgram'), to: plan.to.agent.name }) });
+  } else if (plan.to.agent.id !== from.agent.id) {
+    lines.push({ id: 'agent', tone: 'plain', resources: [{ label: from.agent.name, subject: { kind: 'agent', agent: from.agent } }, { label: plan.to.agent.name, subject: { kind: 'agent', agent: plan.to.agent } }], text: t('change.plan.agent', { to: plan.to.agent.name, from: from.agent.name }) });
+  }
+  if (plan.to.model !== beforeModel || plan.to.effort !== context.thread.effort) {
+    const before = modelWords(modelLabel(beforeModel, plan.from.provider.id === plan.to.provider.id ? context.models ?? [] : [], beforeModel === context.thread.model ? context.thread.modelDisplay : null, t), effortLabel(context.thread.effort, t));
     const after = targetModelWords(plan, context, t);
     const resources: NamedResource[] = [{ label: after, subject: { kind: 'model', providerId: plan.to.provider.id, model: { model_name: plan.to.model, display_name: targetModelName(plan, context, t), parameters: context.models?.find((model) => model.model_name === plan.to.model)?.parameters ?? {} }, effort: plan.to.effort } }];
-    if (context.thread.model !== null) resources.unshift({ label: before, subject: { kind: 'model', providerId: plan.from.provider.id, model: { model_name: context.thread.model, display_name: context.thread.modelDisplay ?? '', parameters: plan.from.provider.id === plan.to.provider.id ? context.models?.find((model) => model.model_name === context.thread.model)?.parameters ?? {} : {} }, effort: context.thread.effort } });
+    if (beforeModel !== null) resources.unshift({ label: before, subject: { kind: 'model', providerId: plan.from.provider.id, model: { model_name: beforeModel, display_name: beforeModel === context.thread.model ? context.thread.modelDisplay ?? '' : '', parameters: plan.from.provider.id === plan.to.provider.id ? context.models?.find((model) => model.model_name === beforeModel)?.parameters ?? {} : {} }, effort: context.thread.effort } });
     lines.push({ id: 'model', resources, tone: 'plain', text: t('changeCompact.modelChange', { from: before, to: after }) });
   }
-  if (!isNewEnvironment(plan.to.environment) && plan.from.environment !== null && plan.to.environment.id !== plan.from.environment.id) {
-    lines.push({ id: 'environment', tone: 'plain', resources: [{ label: plan.from.environment.name, subject: { kind: 'environment', environment: plan.from.environment } }, { label: plan.to.environment.name, subject: { kind: 'environment', environment: plan.to.environment } }], text: t('change.plan.environment', { to: plan.to.environment.name, from: environmentName(plan.from.environment) }) });
+  if (!isNewEnvironment(plan.to.environment)) {
+    if (beforeEnvironment === null) {
+      lines.push({ id: 'environment', tone: 'plain', resources: [{ label: plan.to.environment.name, subject: { kind: 'environment', environment: plan.to.environment } }], text: t('change.plan.startsIn', { environment: plan.to.environment.name }) });
+    } else if (plan.to.environment.id !== beforeEnvironment.id) {
+      lines.push({ id: 'environment', tone: 'plain', resources: [{ label: beforeEnvironment.name, subject: { kind: 'environment', environment: beforeEnvironment } }, { label: plan.to.environment.name, subject: { kind: 'environment', environment: plan.to.environment } }], text: t('change.plan.environment', { to: plan.to.environment.name, from: environmentName(beforeEnvironment) }) });
+    }
   }
   lines.push({ id: 'history', tone: 'plain', text: historyLine(plan, t), hint: 'history' });
   if (plan.files !== null) lines.push(...filesLines(plan.files, context.locale, t));
@@ -231,9 +268,8 @@ export function changesOf(plan: ForkPlan, context: PlanContext, t: TFunction): L
       text: t(plan.memory.carried ? 'change.plan.memoryAlong' : 'change.plan.memoryLeft', { count: plan.memory.files, size: formatBytes(plan.memory.bytes, context.locale) }),
     });
   }
-  lines.push(...mountLines(plan.mounts.filter((one) => one.action !== 'detach'), t));
+  lines.push(...addedResourcesOf(plan, t));
   lines.push(...copyLines(plan.mounts, context.locale, t));
-  lines.push(...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t));
   return lines;
 }
 
@@ -252,6 +288,7 @@ export function historyLine(plan: ForkPlan, t: TFunction): string {
 export function staysOf(plan: ForkPlan, context: PlanContext, t: TFunction): Line[] {
   const lines: Line[] = [];
   const fork = plan.result === 'new';
+  const beforeEnvironment = sourceEnvironment(plan);
   if (fork) {
     lines.push({ id: 'source', tone: 'plain', text: t('change.plan.sourceUntouched') });
   } else {
@@ -262,8 +299,8 @@ export function staysOf(plan: ForkPlan, context: PlanContext, t: TFunction): Lin
       text: owner.id === context.me ? t('change.plan.staysYours') : t('change.plan.staysOwners', { name: owner.display_name }),
     });
     if (plan.to.provider.id === plan.from.provider.id) lines.push({ id: 'same-provider', tone: 'plain', resources: [{ label: planProviderName(plan, 'from', context, t), subject: { kind: 'provider', provider: plan.from.provider } }], text: t('change.plan.staysOn', { provider: planProviderName(plan, 'from', context, t) }) });
-    if (!isNewEnvironment(plan.to.environment) && plan.from.environment !== null && plan.to.environment.id === plan.from.environment.id) {
-      lines.push({ id: 'same-environment', tone: 'plain', resources: [{ label: plan.from.environment.name, subject: { kind: 'environment', environment: plan.from.environment } }], text: t('change.plan.staysIn', { environment: plan.from.environment.name }) });
+    if (!isNewEnvironment(plan.to.environment) && beforeEnvironment !== null && plan.to.environment.id === beforeEnvironment.id) {
+      lines.push({ id: 'same-environment', tone: 'plain', resources: [{ label: beforeEnvironment.name, subject: { kind: 'environment', environment: beforeEnvironment } }], text: t('change.plan.staysIn', { environment: beforeEnvironment.name }) });
     }
   }
   if (plan.access.differs.length === 0) {
@@ -278,7 +315,7 @@ export function staysOf(plan: ForkPlan, context: PlanContext, t: TFunction): Lin
       });
     }
   }
-  return lines;
+  return [...lines, ...keptResourcesOf(plan, t)];
 }
 
 /** What stops and what is taken away: the old side in one exact sentence, processes, mounts the new place does not have. */
@@ -292,8 +329,7 @@ export function endsOf(plan: ForkPlan, context: PlanContext, t: TFunction): Line
     if (processes > 0 && plan.options.stop_processes) lines.push({ id: 'processes', resources, tone: 'plain', text: t('change.plan.processes', { count: processes, name: environment.name }) });
   }
   if (left?.session === true) lines.push({ id: 'session', tone: 'plain', text: t('change.plan.oldSession') });
-  lines.push(...mountLines(plan.mounts.filter((one) => one.action === 'detach'), t));
-  lines.push(...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t));
+  lines.push(...removedResourcesOf(plan, t));
   if (lines.length === 0) lines.push({ id: 'nothing', tone: 'plain', text: context.kind === 'fork' ? t('change.plan.endsNothingFork') : t('change.plan.endsNothing') });
   return lines;
 }

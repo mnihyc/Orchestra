@@ -2,6 +2,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { writeFile } from 'node:fs/promises';
 import { expect, type Page, type TestInfo, test } from '@playwright/test';
+import type { CopyDestinationsRequest } from '../../src/api/copyDestinations';
 import type { Document } from '../../src/generated/api-types';
 import { signInWithProjectionReader } from './projection-support.ts';
 import { DOCS } from './documents-support.ts';
@@ -77,7 +78,10 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
     await expect(copied).toHaveCount(0);
     const deletion = fixture.requests.filter((request) => request.path === '/document-tree/operations' && request.body?.command === 'delete');
-    expect(deletion).toHaveLength(1); expect(deletion[0]?.body?.deletion_plan?.entries).toHaveLength(2);
+    expect(deletion).toHaveLength(1);
+    const membership = deletion[0]?.body?.deletion_plan;
+    if (membership === undefined || membership === null || !('entries' in membership)) throw new Error('The fixture deletion must carry its full observed membership');
+    expect(membership.entries).toHaveLength(2);
     await page.getByRole('radio', { name: 'Deleted', exact: true }).click();
     await expect(page.getByText('Experiments copy', { exact: true })).toBeVisible();
     await page.getByRole('button', { name: 'Restore', exact: true }).click();
@@ -158,6 +162,14 @@ test('selected-folder rename uses its parent and Move keeps its root scope while
   outside.entry.root = '00000000-0000-4000-8091-000000000091'; outside.entry.node = '00000000-0000-4000-8091-000000000092';
   outside.entry.parent = { kind: 'node_docs', id: outside.entry.node }; outside.entry.title = outside.entry.basename = 'Other org folder';
   fixture.rows.set(outside.entry.item.id, outside);
+  // The native judgement of a folder's destinations, in the small: a place of the folder's own org is an in-org move, the other org's is across.
+  await page.route(/\/api\/v1\/copy-destinations\/judge$/u, async (route) => {
+    const body = route.request().postDataJSON() as CopyDestinationsRequest;
+    await route.fulfill({ json: { subject: body.subject, intent: body.intent, source_owned: true, destinations: body.destinations.map((destination) => {
+      const across = destination.kind === 'node' && destination.id === outside.entry.root;
+      return { destination, cross_root: across, outcome: { state: 'needs_choice', choice: across ? 'delete_preview' : 'in_org_move' } };
+    }) } });
+  });
   await signIn(page); await page.goto(`/document-folder/${TREE.research}`);
   await page.getByRole('button', { name: 'Actions for Research', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Rename', exact: true }).click();
@@ -170,11 +182,13 @@ test('selected-folder rename uses its parent and Move keeps its root scope while
   await page.getByRole('link', { name: 'Experiments', exact: true }).click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Move to…', exact: true }).click();
   dialog = page.getByRole('dialog', { name: 'Move to…', exact: true });
-  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Other org');
+  // The destination place starts as the folder's own place; the folder choice below it searches only inside that place's org.
+  const folderChoice = dialog.getByRole('combobox', { name: 'Folder (optional)', exact: true });
+  await folderChoice.fill('Other org');
   await expect.poll(() => fixture.requests.filter((request) => request.path === '/search/names').at(-1)?.query.includes(`org_id=${research.entry.root}`)).toBe(true);
   await expect(page.getByRole('option').filter({ hasText: 'Other org folder' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Move', exact: true })).toBeDisabled();
-  await dialog.getByRole('combobox', { name: 'Destination', exact: true }).fill('Archive');
+  await folderChoice.fill('Archive');
   await page.getByRole('option').filter({ hasText: 'Archive' }).click();
   await expect(dialog.getByRole('button', { name: 'Move', exact: true })).toBeEnabled();
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();

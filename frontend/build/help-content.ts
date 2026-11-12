@@ -8,7 +8,29 @@ import { checkHelpContent, type HelpContentInput } from '../src/help/contentChec
 import { makeGuide } from '../src/help/guide';
 import { TARGETS } from '../src/help/targets';
 import { TUTORIALS } from '../src/help/tutorials';
+import { requiredHelpReferences } from '../src/help/referenceCoverage';
 import { SETTINGS_REGISTRY } from '../src/generated/settings-registry';
+
+/** Task articles that accompany the release's new screens; both authored bodies must ship together. */
+export const RELEASE_HELP_ARTICLES = [
+  'organization-terms',
+  'messages-from-admins',
+  'group-chats',
+  'resource-groups',
+  'duplicate-resources',
+  'send-later',
+  'running-thread-views',
+  'restore-files-before-a-message',
+  'mcp-import-and-use',
+  'switch-and-move-environments',
+  'admin-inspection',
+  'provider-web-search',
+  'link-sharing',
+  'settings-reference',
+  'state-reference',
+  'error-reference',
+  'option-reference',
+] as const;
 
 const sourceRoot = fileURLToPath(new URL('../src/', import.meta.url));
 const guideRoot = fileURLToPath(new URL('../../docs/user/', import.meta.url));
@@ -30,13 +52,22 @@ export function readHelpContent(): HelpContentInput {
   const articles = Object.fromEntries(readdirSync(guideRoot).filter((name) => name.endsWith('.md')).map((name) => [name, readFileSync(join(guideRoot, name), 'utf8')]));
   const chineseRoot = join(guideRoot, 'zh-CN');
   const chinese = Object.fromEntries(readdirSync(chineseRoot).filter((name) => name.endsWith('.md')).map((name) => [name, readFileSync(join(chineseRoot, name), 'utf8')]));
+  for (const id of RELEASE_HELP_ARTICLES) {
+    const file = `${id}.md`;
+    for (const [language, files] of [['en', articles], ['zh-CN', chinese]] as const) {
+      const body = files[file];
+      if (body === undefined || body.trim() === '') throw new Error(`Missing release help article: ${id}:${language}`);
+    }
+  }
   const providers = Object.fromEntries(readdirSync(providerRoot).filter((name) => name.endsWith('.md')).map((name) => [`providers/${name}`, readFileSync(join(providerRoot, name), 'utf8')]));
   const schemaRoot = join(providerRoot, 'schema');
   const files = { ...Object.fromEntries((existsSync(schemaRoot) ? readdirSync(schemaRoot) : []).filter((name) => name.endsWith('.json')).map((name) => [`schema/${name}`, join(schemaRoot, name)])), ...(existsSync(agentContract) ? { '../../../crates/contracts/agent/README.md': agentContract } : {}), ...(existsSync(programContract) ? { '../../../crates/contracts/agent-programs/README.md': programContract } : {}) };
   const adapters = { 'adapters.md': readFileSync(adapterGuide, 'utf8') };
   const routes = Object.entries(sources).filter(([path]) => path.startsWith('routes/')).flatMap(([, source]) => [...source.matchAll(/createFileRoute\(\s*['"]([^'"]+)['"]\s*\)/g)].flatMap((match) => match[1] === undefined ? [] : [match[1]]));
   const catalogues: unknown[] = ['en', 'zh-CN'].map((language) => JSON.parse(readFileSync(join(sourceRoot, 'i18n', `${language}.json`), 'utf8')) as unknown);
-  return { guide: makeGuide({ ...articles, ...providers, ...adapters }, files, { 'zh-CN': chinese }), userArticles: makeGuide(articles).articles.map((article) => article.id), tutorials: TUTORIALS, targets: TARGETS, sources, catalogues, routes, settings: SETTINGS_REGISTRY };
+  const openapi: unknown = JSON.parse(readFileSync(new URL('../../docs/openapi.json', import.meta.url), 'utf8'));
+  const declarations: unknown = JSON.parse(readFileSync(new URL('../../shared/protocol-options.json', import.meta.url), 'utf8'));
+  return { references: requiredHelpReferences(SETTINGS_REGISTRY, openapi, declarations), guide: makeGuide({ ...articles, ...providers, ...adapters }, files, { 'zh-CN': chinese }), userArticles: makeGuide(articles).articles.map((article) => article.id), tutorials: TUTORIALS, targets: TARGETS, sources, catalogues, routes, settings: SETTINGS_REGISTRY };
 }
 
 export function helpContentPlugin(): Plugin {

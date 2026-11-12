@@ -4,6 +4,7 @@ screens: /thread/$threadId, /admin/$section
 keywords: 携带, 分支, 切换, 历史, 原生导入, 中立导入, 文件交接, Codex, 智能体版本, 检查, 不可用
 heading_id.查看传递方式: read-the-method
 heading_id.检查另一个版本: check-another-build
+summary: 查看分支或切换如何将选定的对话历史交给另一个代理。
 ---
 
 # 将线程历史带给另一个智能体

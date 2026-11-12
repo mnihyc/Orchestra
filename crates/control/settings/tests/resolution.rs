@@ -103,20 +103,55 @@ async fn the_most_specific_scope_wins_for_a_replace_key() {
 #[tokio::test]
 async fn of_two_orgs_on_a_path_the_inner_one_is_nearer() {
     let w = World::new().await;
-    w.set(Target::Node(w.root), keys::CHAT_ENABLED, json!(false))
-        .await;
-    w.set(Target::Node(w.department), keys::CHAT_ENABLED, json!(true))
-        .await;
+    w.set(
+        Target::Node(w.root),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(30),
+    )
+    .await;
+    w.set(
+        Target::Node(w.department),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(7),
+    )
+    .await;
     let sibling = w.node("project", w.department, "Sibling").await;
-    let view = w.view(Place::Node(sibling), keys::CHAT_ENABLED).await;
-    assert_eq!(view.value(), Some(&json!(true)));
+    let view = w
+        .view(Place::Node(sibling), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+        .await;
+    assert_eq!(view.value(), Some(&json!(7)));
     assert_eq!(view.resolved.source.node, Some(w.department));
     let elsewhere = w.node("project", w.root, "Elsewhere").await;
     assert_eq!(
-        w.value(Place::Node(elsewhere), keys::CHAT_ENABLED).await,
-        Some(json!(false)),
+        w.value(Place::Node(elsewhere), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(30)),
         "a project of the root org itself is not inside the department"
     );
+}
+
+#[tokio::test]
+async fn a_permission_policy_keeps_an_unlocked_ancestor_refusal_and_the_saved_child_choice() {
+    let w = World::new().await;
+    for key in [keys::CHAT_ENABLED, keys::TERMINAL_ENABLED] {
+        w.set(Target::Node(w.root), key, json!(false)).await;
+        w.set(Target::Node(w.department), key, json!(true)).await;
+        let view = w.view(Place::Node(w.department), key).await;
+        assert_eq!(view.value(), Some(&json!(false)), "{key}");
+        assert_eq!(view.own.as_ref().map(|row| &row.value), Some(&json!(true)));
+        assert_eq!(view.resolved.source.node, Some(w.root));
+        assert_eq!(view.resolved.locked_by, None);
+        w.set(Target::Node(w.root), key, json!(true)).await;
+        assert_eq!(
+            w.value(Place::Node(w.department), key).await,
+            Some(json!(true))
+        );
+        w.set(Target::Node(w.department), key, json!(false)).await;
+        assert_eq!(
+            w.value(Place::Node(w.department), key).await,
+            Some(json!(false))
+        );
+    }
 }
 
 #[tokio::test]
@@ -315,28 +350,36 @@ async fn a_lock_above_decides_whatever_is_set_below_and_what_was_set_below_is_as
 #[tokio::test]
 async fn of_two_locks_the_one_further_up_decides_and_a_lock_does_not_bind_what_is_above_it() {
     let w = World::new().await;
-    w.set(Target::Node(w.root), keys::TERMINAL_ENABLED, json!(true))
-        .await;
+    w.set(
+        Target::Node(w.root),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(30),
+    )
+    .await;
     w.lock(
         Target::Node(w.project),
-        keys::TERMINAL_ENABLED,
-        json!(false),
+        keys::RETENTION_ARCHIVE_IDLE_DAYS,
+        json!(0),
     )
     .await;
     assert_eq!(
-        w.value(Place::Node(w.topic), keys::TERMINAL_ENABLED).await,
-        Some(json!(false))
+        w.value(Place::Node(w.topic), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(0))
     );
     assert_eq!(
-        w.value(Place::Node(w.root), keys::TERMINAL_ENABLED).await,
-        Some(json!(true))
+        w.value(Place::Node(w.root), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+            .await,
+        Some(json!(30))
     );
-    w.lock(Target::System, keys::TERMINAL_ENABLED, json!(true))
+    w.lock(Target::System, keys::RETENTION_ARCHIVE_IDLE_DAYS, json!(30))
         .await;
-    let view = w.view(Place::Node(w.topic), keys::TERMINAL_ENABLED).await;
+    let view = w
+        .view(Place::Node(w.topic), keys::RETENTION_ARCHIVE_IDLE_DAYS)
+        .await;
     assert_eq!(
         view.value(),
-        Some(&json!(true)),
+        Some(&json!(30)),
         "the system's lock is further up"
     );
     assert_eq!(
@@ -552,6 +595,102 @@ async fn the_keys_of_an_environment_are_those_of_its_scope_and_its_home_decides_
         "what the path of its home node resolves"
     );
     assert_eq!(update.resolved.source.node, Some(w.department));
+}
+
+#[tokio::test]
+async fn provider_fact_intervals_share_a_batch_read_and_follow_topic_and_provider_values() {
+    use orch_settings::{ProviderAt, snapshots_at_providers};
+    use orch_settings_contract::registry::get as definition;
+    let w = World::new().await;
+    let (own, topic, default) = (new_id(), new_id(), new_id());
+    let own_values = json!({"providers.facts_idle_minutes": 10});
+    let empty = json!({});
+    let keys = [
+        keys::PROVIDERS_FACTS_IDLE_MINUTES,
+        keys::PROVIDERS_FACTS_ACTIVE_MINUTES,
+        keys::PROVIDERS_FACTS_RECENT_MINUTES,
+        keys::PROVIDERS_FACTS_REFUSED_MINUTES,
+    ];
+    for (key, minutes) in keys.into_iter().zip([12, 3, 20, 2]) {
+        w.set(Target::Node(w.topic), key, json!(minutes)).await;
+    }
+    let mut conn = w.conn().await;
+    for (id, home, values) in [
+        (own, w.topic, &own_values),
+        (topic, w.topic, &empty),
+        (default, w.root, &empty),
+    ] {
+        insert_provider(&mut conn, id, "Provider", w.ada, home, values)
+            .await
+            .unwrap();
+    }
+    let providers = [
+        ProviderAt {
+            id: own,
+            home_id: w.topic,
+            runtime_config: &own_values,
+            revision: 1,
+        },
+        ProviderAt {
+            id: topic,
+            home_id: w.topic,
+            runtime_config: &empty,
+            revision: 1,
+        },
+        ProviderAt {
+            id: default,
+            home_id: w.root,
+            runtime_config: &empty,
+            revision: 1,
+        },
+    ];
+    let start = Statements::now();
+    snapshots_at_providers(&mut conn, &providers[..1], &keys[..1])
+        .await
+        .unwrap();
+    let one_cost = Statements::now() - start;
+    let start = Statements::now();
+    let batch = snapshots_at_providers(&mut conn, &providers, &keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        Statements::now() - start,
+        one_cost,
+        "neither providers nor keys add database queries"
+    );
+    assert_eq!(one_cost, 2, "one ancestor query and one setting-row query");
+    for ((key, shipped), inherited) in keys.into_iter().zip([60, 5, 15, 5]).zip([12, 3, 20, 2]) {
+        let def = definition(key).unwrap();
+        assert_eq!(batch[&default].resolve(def).value, Some(json!(shipped)));
+        assert_eq!(batch[&topic].resolve(def).value, Some(json!(inherited)));
+        assert_eq!(batch[&topic].resolve(def).source.node, Some(w.topic));
+        assert_eq!(
+            batch[&own].resolve(def).value,
+            Some(json!(if key == keys::PROVIDERS_FACTS_IDLE_MINUTES {
+                10
+            } else {
+                inherited
+            }))
+        );
+    }
+    drop(conn);
+    w.lock(
+        Target::Node(w.project),
+        keys::PROVIDERS_FACTS_IDLE_MINUTES,
+        json!(8),
+    )
+    .await;
+    let mut conn = w.conn().await;
+    let locked = snapshots_at_providers(&mut conn, &providers, &keys)
+        .await
+        .unwrap();
+    assert_eq!(
+        locked[&own]
+            .resolve(definition(keys::PROVIDERS_FACTS_IDLE_MINUTES).unwrap())
+            .value,
+        Some(json!(8)),
+        "the shared reader preserves parent locks over a provider's own values"
+    );
 }
 
 #[tokio::test]

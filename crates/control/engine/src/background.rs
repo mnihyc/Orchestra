@@ -18,6 +18,11 @@ use orch_types::{Id, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod projection;
+mod reading;
+pub use projection::PreparedProjection;
+pub use reading::{read_scope, read_scope_for_capture};
+
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
@@ -85,6 +90,25 @@ pub struct Target {
     pub item_id: Option<Id>,
 }
 
+/// A bounded native page selection, kept outside effect-free projection retries.
+#[derive(Debug, Clone)]
+pub struct PreparedPage {
+    caller: Caller,
+    identity: Identity,
+    thread: Id,
+    reference: String,
+    capture: Capture,
+    offset: usize,
+    limit: usize,
+}
+
+impl PreparedPage {
+    /// The exact recorded native sources of this page.
+    pub fn capture(&self) -> &Capture {
+        &self.capture
+    }
+}
+
 struct Review {
     caller: Caller,
     identity: Identity,
@@ -105,6 +129,9 @@ pub struct Memory {
 /// A roster or End refusal that the person can act on.
 #[derive(Debug, thiserror::Error)]
 pub enum BackgroundError {
+    /// This read is outside the credential's current operation or source bounds.
+    #[error("the key does not allow this background read")]
+    Scope,
     /// The thread does not exist.
     #[error("the thread does not exist")]
     NotFound,
@@ -276,7 +303,7 @@ impl Engine {
         combined.ok_or_else(|| EngineError::unreadable("no native snapshot was read"))
     }
 
-    /// Projects one captured list using this reader's current source redaction and End authority.
+    /// Native convenience projection. Transports use the explicit actual-reader render handoff.
     pub async fn project_background(
         &self,
         conn: &mut Conn,
@@ -284,181 +311,58 @@ impl Engine {
         thread: Id,
         capture: &Capture,
     ) -> Result<(ThreadBackground, Vec<Target>), BackgroundError> {
-        permitted(
-            nodes::check(
-                conn,
-                principal,
-                thread,
-                Permission::ThreadView,
-                Act::Use,
-                Policy::default(),
-            )
-            .await?,
-        )?;
-        let row = threads::thread(conn, thread)
-            .await?
-            .ok_or(BackgroundError::NotFound)?;
-        let interact = nodes::check(
-            conn,
-            principal,
-            thread,
-            Permission::ThreadInteract,
-            Act::Use,
-            Policy::default(),
-        )
-        .await
-        .is_ok_and(|decision| decision.is_allowed());
-        let mut items = Vec::new();
-        let mut targets = Vec::new();
-        let mut total = Some(0_i64);
-        let mut state = BackgroundState::Live;
-        let mut supported = false;
-        let mut live = false;
-        let mut end_live = false;
-        let mut reason = None;
-        for (source, observed) in &capture.sessions {
-            supported |= observed.supported;
-            live |= observed.state == orch_link_contract::background::BackgroundState::Live;
-            end_live |= observed.supported
-                && observed.state == orch_link_contract::background::BackgroundState::Live;
-            if observed.state != orch_link_contract::background::BackgroundState::Live {
-                state =
-                    if observed.state == orch_link_contract::background::BackgroundState::Offline {
-                        BackgroundState::Offline
-                    } else {
-                        BackgroundState::Unavailable
-                    };
-            }
-            if reason.is_none() {
-                reason.clone_from(&observed.reason);
-            }
-            total = total.zip(observed.total).map(|(sum, count)| sum + count);
-            let may_see_provider = resources::check(
-                conn,
-                principal,
-                ObjectRef {
-                    kind: ObjectKind::Provider,
-                    id: source.provider_id,
-                },
-                Permission::ProviderManage,
-                Policy::default(),
-            )
-            .await
-            .is_ok_and(|decision| decision.is_allowed());
-            let environment = orch_db::queries::environments::thread_engine::environment(
-                conn,
-                source.environment_id,
-            )
+        let prepared = self
+            .prepare_background_projection(conn, thread, capture)
             .await?;
-            for native in &observed.items {
-                let recorded: Option<(Id, Option<Id>)> = match native.native_item_ref.as_deref() {
-                    Some(reference) => sqlx::query_as("SELECT id, turn_id FROM items WHERE thread_id=$1 AND segment_id=$2 AND native_ref=$3 AND kind='tool_call' ORDER BY seq_created LIMIT 1")
-                        .bind(thread).bind(source.segment_id).bind(reference).fetch_optional(&mut *conn).await?,
-                    None => None,
-                };
-                let id = format!("{}:{}", source.segment_id, native.id);
-                let preview = crate::raw_events::mask_live(
-                    conn,
-                    &row,
-                    Some(source.environment_id),
-                    json!({"command": native.command, "cwd": native.cwd}),
-                )
-                .await?;
-                let mut cwd = preview
-                    .as_ref()
-                    .and_then(|value| value["cwd"].as_str())
-                    .map(str::to_owned);
-                let place: BackgroundPlace =
-                    serde_json::from_value(serde_json::to_value(native.place)?)?;
-                let redacted = if place == BackgroundPlace::Provider {
-                    !may_see_provider
-                } else {
-                    match (&cwd, &environment) {
-                        (Some(path), Some(env)) => {
-                            let root =
-                                std::path::Path::new(&env.workspace_root).join(&row.workspace_dir);
-                            let path = std::path::Path::new(path);
-                            path.components()
-                                .any(|part| matches!(part, std::path::Component::ParentDir))
-                                || (path.is_absolute() && !path.starts_with(root))
-                        }
-                        (Some(_), None) => true,
-                        _ => false,
-                    }
-                };
-                if redacted {
-                    cwd = None;
-                }
-                items.push(BackgroundCommand {
-                    id: id.clone(),
-                    segment_id: source.segment_id,
-                    command: preview
-                        .as_ref()
-                        .and_then(|value| value["command"].as_str())
-                        .map(str::to_owned),
-                    command_truncated: native.command_truncated,
-                    cwd,
-                    cwd_redacted: redacted,
-                    place,
-                    since: native.since,
-                    turn_id: recorded.and_then(|(_, turn)| turn),
-                    item_id: recorded.map(|(item, _)| item),
-                    cpu_percent: native.cpu_percent,
-                    memory_bytes: native.memory_bytes,
-                });
-                if let Some(machine) = source.machine_id.filter(|_| {
-                    observed.supported
-                        && observed.state == orch_link_contract::background::BackgroundState::Live
-                }) {
-                    targets.push(Target {
-                        id,
-                        segment_id: source.segment_id,
-                        machine_id: machine,
-                        native_session_ref: source.native_session_ref.clone(),
-                        command_id: native.id.clone(),
-                        turn_id: recorded.and_then(|(_, turn)| turn),
-                        item_id: recorded.map(|(item, _)| item),
-                    });
-                }
+        let caller = if principal.caller().grant().is_some() {
+            // A native key caller retains its existing accepted/current key semantics.
+            // Session context is supplied by the native caller, never reconstructed here.
+            orch_authz::CapturedCaller::capture(principal.caller())
+                .restore_current(conn, self.inner.clock.as_ref())
+                .await?
+                .ok_or(BackgroundError::Scope)?
+        } else {
+            principal.caller().clone()
+        };
+        let (scope, directories) = read_scope_for_capture(conn, &caller, thread, capture).await?;
+        let admitted = scope.admit(&caller, true).map_err(reading::binding)?;
+        let reader = if caller.grant().is_some() {
+            let reader = Principal::load(conn, admitted, self.inner.clock.time()).await?;
+            match principal.second_step_hold() {
+                Some(hold) => reader.held_for_second_step(hold.clone()),
+                None => reader,
             }
+        } else {
+            principal.clone()
+        };
+        let result = self
+            .render_background_projection(conn, &reader, &prepared, &directories)
+            .await;
+        if !reader
+            .caller()
+            .key_deadline_allows(self.inner.clock.as_ref())
+        {
+            return Err(BackgroundError::Scope);
         }
-        // A reachable session still permits exact selected End when an older source is unavailable.
-        // Its missing count keeps the combined list partial, so it can never authorize End all.
-        if live {
-            state = BackgroundState::Live;
-        }
-        if capture.sessions.is_empty() {
-            state = BackgroundState::Unavailable;
-            total = None;
-            reason = Some("there is no existing native session to inspect".to_owned());
-        }
-        let as_of = (state == BackgroundState::Live
-            && capture
-                .sessions
-                .iter()
-                .filter(|(_, native)| {
-                    native.state == orch_link_contract::background::BackgroundState::Live
-                })
-                .all(|(_, native)| native.as_of.is_some()))
-        .then_some(capture.at);
-        Ok((
-            ThreadBackground {
-                supported,
-                as_of,
-                state,
-                reason,
-                items,
-                next_cursor: None,
-                total,
-                list_ref: None,
-                expires_at: None,
-                can_end: end_live && interact,
-            },
-            targets,
-        ))
+        result
     }
 
-    /// Reads or continues a caller-bound snapshot, renewing its deadline only on active transfer.
+    async fn project_background_for(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        thread: Id,
+        capture: &Capture,
+        provider_directories: &HashSet<Id>,
+    ) -> Result<(ThreadBackground, Vec<Target>), BackgroundError> {
+        let prepared = self
+            .prepare_background_projection(conn, thread, capture)
+            .await?;
+        self.render_background_projection(conn, principal, &prepared, provider_directories)
+            .await
+    }
+
+    /// Reads or continues a native caller's roster. Transports use the explicit current-reader handoff.
     pub async fn background(
         &self,
         caller: &Caller,
@@ -467,6 +371,26 @@ impl Engine {
         cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<ThreadBackground, BackgroundError> {
+        let page = self
+            .prepare_background_page(caller, identity, thread, cursor, limit)
+            .await?;
+        let mut conn = self.inner.db.acquire().await?;
+        let principal = Principal::load(&mut conn, caller.clone(), self.inner.clock.time()).await?;
+        let (roster, targets) = self
+            .project_background(&mut conn, &principal, thread, page.capture())
+            .await?;
+        self.finish_background_page(page, roster, targets)
+    }
+
+    /// Capture or retrieve the original reviewed native observation, without a publication reader.
+    pub async fn prepare_background_page(
+        &self,
+        caller: &Caller,
+        identity: Identity,
+        thread: Id,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<PreparedPage, BackgroundError> {
         let limit = usize::try_from(limit.unwrap_or(PAGE_DEFAULT as u32)).unwrap_or(PAGE_MAX);
         if limit == 0 || limit > PAGE_MAX {
             return Err(BackgroundError::Invalid(
@@ -478,8 +402,8 @@ impl Engine {
             let (reference, offset) = cursor.rsplit_once('/').ok_or(BackgroundError::Stale)?;
             let offset: usize = offset.parse().map_err(|_| BackgroundError::Stale)?;
             let capture = {
-                let mut reviews = lock(&self.inner.background.reviews);
-                let review = reviews.get_mut(reference).ok_or(BackgroundError::Stale)?;
+                let reviews = lock(&self.inner.background.reviews);
+                let review = reviews.get(reference).ok_or(BackgroundError::Stale)?;
                 if review.caller != *caller
                     || review.identity != identity
                     || review.thread != thread
@@ -487,7 +411,6 @@ impl Engine {
                 {
                     return Err(BackgroundError::Stale);
                 }
-                review.until = now + REVIEW_IDLE;
                 review.capture.clone()
             };
             (reference.to_owned(), capture, offset)
@@ -498,11 +421,34 @@ impl Engine {
                 0,
             )
         };
-        let mut conn = self.inner.db.acquire().await?;
-        let principal = Principal::load(&mut conn, caller.clone(), self.inner.clock.time()).await?;
-        let (mut roster, targets) = self
-            .project_background(&mut conn, &principal, thread, &capture)
-            .await?;
+        Ok(PreparedPage {
+            caller: caller.clone(),
+            identity,
+            thread,
+            reference,
+            capture,
+            offset,
+            limit,
+        })
+    }
+
+    /// Register a review only after its page has passed the transport's final current-reader cut.
+    pub fn finish_background_page(
+        &self,
+        page: PreparedPage,
+        mut roster: ThreadBackground,
+        targets: Vec<Target>,
+    ) -> Result<ThreadBackground, BackgroundError> {
+        let PreparedPage {
+            caller,
+            identity,
+            thread,
+            reference,
+            capture,
+            offset,
+            limit,
+        } = page;
+        let now = self.inner.clock.now();
         if offset > roster.items.len() {
             return Err(BackgroundError::Stale);
         }
@@ -537,7 +483,7 @@ impl Engine {
         reviews.insert(
             reference,
             Review {
-                caller: caller.clone(),
+                caller,
                 identity,
                 thread,
                 until,
@@ -587,8 +533,15 @@ impl Engine {
             let selected = select_targets(&review.targets, review.total, &request)?;
             (review.capture.clone(), selected)
         };
+        // End retains its own operation boundary; do not add the roster read's
+        // key selection to this existing ordinary control check.
+        let provider_directories = capture
+            .sessions
+            .iter()
+            .map(|(source, _)| source.provider_id)
+            .collect();
         let (roster, _) = self
-            .project_background(&mut tx, &principal, thread, &capture)
+            .project_background_for(&mut tx, &principal, thread, &capture, &provider_directories)
             .await?;
         if !roster.can_end {
             return Err(BackgroundError::Stale);

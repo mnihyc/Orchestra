@@ -20,7 +20,7 @@ import { composerWriter } from '@/features/composer/Draft';
 import { ForwardDialog, type ForwardSource } from '@/features/forward/ForwardDialog';
 import { SelectionBar } from '@/features/forward/Selection';
 import { openSideAsk } from '@/features/side-threads/ask';
-import { useForkNow } from '@/features/thread/forkNow';
+import { useImmediateFork } from '@/features/thread/ImmediateFork';
 import { itemsLink, itemText } from '@/features/timeline/ItemActions';
 import type { Item } from '@/generated/api-types';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
@@ -30,21 +30,15 @@ import { Button } from '@/ui/Button';
 import { copyText } from '@/ui/clipboard';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { toast } from '@/ui/Toast';
-
-/** A fenced block that no run of backticks in its body can close. */
-function fenced(language: string, body: string): string {
-  const longest = Math.max(2, ...Array.from(body.matchAll(/`+/g), (run) => run[0].length));
-  const marks = '`'.repeat(longest + 1);
-  return `${marks}${language}\n${body}\n${marks}`;
-}
+import { fencedCode } from '@/lib/fencedCode';
 
 /** An item as Markdown: a command and its output in a fenced block, a change as a diff, a step that is neither by its title, and what was said as its text. */
 export function itemMarkdown(item: Item): string {
   if (item.kind === 'tool_call') {
     const tool = item.payload.tool;
-    if (tool.kind === 'command') return fenced('sh', `$ ${tool.command}\n${tool.output.inline}`.trimEnd());
+    if (tool.kind === 'command') return fencedCode(`$ ${tool.command}\n${tool.output.inline}`.trimEnd(), 'sh');
     if (tool.kind === 'file_change') {
-      return tool.changes.map((change) => (change.diff === null ? `\`${change.path}\`` : fenced('diff', change.diff))).join('\n\n');
+      return tool.changes.map((change) => (change.diff === null ? `\`${change.path}\`` : fencedCode(change.diff, 'diff'))).join('\n\n');
     }
     return `**${item.payload.title}**`;
   }
@@ -78,7 +72,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
   const thread = view.thread;
   const items = ids.flatMap((id) => view.items.get(id) ?? []);
   const words = items.map(itemText).filter((one) => one.trim() !== '').join('\n\n');
-  const quickFork = useForkNow(threadId);
+  const quickFork = useImmediateFork(thread);
 
   // The forks start from the last item picked: through its turn, or through the turn before a person's message, whose
   // words then stand in the new composer.
@@ -124,7 +118,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
   const copies: MenuEntry[] = [
     { id: 'copy-plain', label: t('timeline.selection.copyPlain'), onSelect: () => void copyText(words) },
     { id: 'copy-json', label: t('timeline.selection.copyJson'), onSelect: () => void copyText(JSON.stringify(items, null, 2)) },
-    { id: 'copy-link', label: t('timeline.selection.copyLink'), onSelect: () => void copyText(itemsLink(threadId, ids)) },
+    { id: 'copy-link', label: t('linkActions.copyLines'), onSelect: () => void copyText(itemsLink(read, ids)) },
   ];
 
   const forward = () => {
@@ -207,6 +201,7 @@ export function TimelineSelectionBar({ threadId, ids, canQuote, onCancel }: Time
           </>
         }
       />
+      {quickFork.confirmation}
       <ForwardDialog
         source={forwarding}
         onClose={() => setForwarding(null)}

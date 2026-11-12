@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { helpTarget, rewriteLinks } from '@/features/help/Article';
 import { HINT_IDS, articleOf, hintOf } from '@/features/help/hints';
-import { belongsTo, makeGuide, readArticle, slugOf, splitFrontMatter } from '@/help/guide';
+import { ARTICLE_GROUPS, articleAvailable, articleFirstLine, articleInLanguage, belongsTo, makeGuide, readArticle, slugOf, splitFrontMatter } from '@/help/guide';
 import { guide } from '@/help/library';
 import { proseLinks, resolveArticleLink } from '@/help/links';
 import { i18n, loadSearchCatalogues } from '@/i18n';
@@ -12,6 +12,26 @@ import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
 
 describe('reading an article', () => {
+  it('keeps one authored catalogue group across translated bodies', () => {
+    const source = makeGuide({ 'work.md': '---\ngroup: work\n---\n# Work\n\nRead your work.' }, {}, {
+      'zh-CN': { 'work.md': '# 工作\n\n阅读你的工作。' },
+    });
+    const article = source.articles[0]; if (article === undefined) throw new Error('The authored article is required');
+    expect(articleInLanguage(article, 'zh-CN').group).toBe('work');
+    expect(articleFirstLine(articleInLanguage(article, 'zh-CN'))).toBe('阅读你的工作。');
+  });
+  it('reads the first prose line without exposing Markdown syntax or another link', () => {
+    const body = '# A title\n\n```sh\nnot the introduction\n```\n\n> Read **the [guide](./work.md)** and `file_name<T>.ts`.\n\nLater text.';
+    expect(articleFirstLine({ body })).toBe('Read the guide and file_name<T>.ts.');
+  });
+  it('gives every shipped user article an authored group and a real introduction', () => {
+    const user = guide.articles.filter((article) => article.section === undefined && articleAvailable(article));
+    expect(user.length).toBeGreaterThan(0);
+    for (const article of user) {
+      expect(ARTICLE_GROUPS, article.id).toContain(article.group);
+      expect(articleFirstLine(article), article.id).not.toBe('');
+    }
+  });
   const source = ['---', 'title: Finding things', 'screens: /search, /help/$article', 'keywords: [finder, search]', '---', '# Heading one', '', 'Words.', '', '## The finder', '', '```md', '## not a heading', '```', '', '### Signs: `>` and `@`', '#### Deep', ''].join('\n');
 
   it('takes the title, the headings with their anchors and the front matter', () => {

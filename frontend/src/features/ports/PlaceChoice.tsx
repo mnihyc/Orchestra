@@ -16,7 +16,7 @@ export function PlaceChoice({ chosen, onChoose }: { chosen: NameHit | null; onCh
   const names = useQuery(namesQuery({ kinds: ['org', 'project', 'topic'], q: typed }));
   return <div className="flex flex-col gap-2">
     <Input label={t('ports.searchPlace')} value={typed} onChange={(event) => setTyped(event.target.value)} />
-    {names.isPending ? <SkeletonRows rows={2} /> : names.isError ? <PortFault error={names.error} /> : names.data.length === 0 ? <EmptyState compact title={t('ports.noPlaces')} /> :
+    {names.isPending ? <SkeletonRows read={names} rows={2} /> : names.isError ? <PortFault error={names.error} /> : names.data.length === 0 ? <EmptyState compact title={t('ports.noPlaces')} /> :
       <Tree label={t('ports.choosePlace')} rows={names.data.map((item) => ({ id: item.id, depth: 0, parentId: null, expandable: false, expanded: false, item, tick: chosen?.id === item.id }))} currentId={chosen?.id} onExpandedChange={() => undefined} onTick={(row, on) => onChoose(on ? row.item : null)} nameOf={(item) => item.name} renderRow={(row) => <span className="truncate text-sm">{row.item.name}</span>} />}
   </div>;
 }

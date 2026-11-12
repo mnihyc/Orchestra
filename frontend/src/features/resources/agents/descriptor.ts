@@ -101,11 +101,16 @@ export function humanize(key: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
-export function readDescriptor(value: unknown): DescriptorView {
+export function readDescriptor(value: unknown, locale = 'en'): DescriptorView {
   if (!isRecord(value) || Object.keys(value).length === 0) {
     return { declared: false, harness: null, parameters: [], capabilities: [], arrangements: [], sandboxModes: [], approvalModes: [], adapterVersion: null };
   }
   const harness = isRecord(value.harness) ? value.harness : null;
+  const translations = isRecord(value.text) && isRecord(value.text[locale]) ? value.text[locale] : null;
+  const translated = (key: string, fallback: string): string => {
+    const words = translations === null ? null : text(translations[key]);
+    return words === null || words.trim() === '' ? fallback : words;
+  };
   const parameters = Array.isArray(value.parameters) ? value.parameters : [];
   const arrangements = Array.isArray(value.arrangements) ? value.arrangements : [];
   const capabilities = isRecord(value.capabilities) ? Object.entries(value.capabilities) : [];
@@ -114,7 +119,7 @@ export function readDescriptor(value: unknown): DescriptorView {
     harness:
       harness === null
         ? null
-        : { name: text(harness.name) ?? '', status: text(harness.status) ?? '', version: text(harness.version), range: text(harness.supported_range) },
+        : { name: translated('harness.name', text(harness.name) ?? ''), status: text(harness.status) ?? '', version: text(harness.version), range: text(harness.supported_range) },
     parameters: parameters.flatMap((entry): ParameterDef[] => {
       if (!isRecord(entry)) return [];
       const key = text(entry.key);
@@ -125,9 +130,9 @@ export function readDescriptor(value: unknown): DescriptorView {
           type: text(entry.type) ?? '',
           apply: text(entry.apply) ?? '',
           group: text(entry.group) ?? '',
-          title: text(entry.title) ?? key,
+          title: translated(`parameters.${key}.title`, text(entry.title) ?? key),
           scopes: words(entry.scopes),
-          description: text(entry.description) ?? '',
+          description: translated(`parameters.${key}.description`, text(entry.description) ?? ''),
           default: phrase(entry.default),
           options: phrase(entry.options),
         },

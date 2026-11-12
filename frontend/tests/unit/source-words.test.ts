@@ -39,7 +39,7 @@ function snapshot(change: Partial<Snapshot> = {}): Snapshot {
 
 function plan(change: Partial<RestorePlan> = {}): RestorePlan {
   return {
-    blockers: [], directory: 'web', environment: { id: 'e', name: 'Main' } as RestorePlan['environment'], expires_at: '2026-10-14T10:15:00.000Z', generation: 1, ignore_fingerprint: 'i', ignored: [], namespace_fingerprint: 'n',
+    form: { kind: 'whole_directory' }, blockers: [], directory: 'web', environment: { id: 'e', name: 'Main' } as RestorePlan['environment'], expires_at: '2026-10-14T10:15:00.000Z', generation: 1, ignore_fingerprint: 'i', ignored: [], namespace_fingerprint: 'n',
     options: { active_turn: 'wait', keep_previous: false, stop_processes: false, verify_timeout_secs: 60, wait_minutes: 10 },
     paths: [{ action: 'change', expected: 'h', later_change: false, later_writers: [], path: 'src/login.ts' }], preflight_id: 'p', snapshot: snapshot(), undo_available: true, writers: [], ...change,
   };
@@ -154,4 +154,16 @@ it.each(['en', 'zh-CN'] as const)('words why a restore plan is blocked, never as
     expect(future).toBe(i18n.t('source.restore.blocked.other'));
     expect(future).not.toContain('future_blocker');
   } finally { await setLocale('en'); }
+});
+
+it('only explicit overwrite covers a touched path with a changed or unknown last write', () => {
+  const touched = plan({ form: { kind: 'touched_files', count: 1, whole_unavailable: 'off' }, paths: [
+    { action: 'change', path: 'code', expected: 'h', later_change: true, later_writers: [] },
+  ] });
+  expect(confirmable(touched)).toBe(false);
+  expect(confirmable(touched, ['somewhere else'])).toBe(false);
+  expect(confirmable(touched, ['code'])).toBe(true);
+  touched.paths[0]!.later_change = null;
+  expect(confirmable(touched)).toBe(false);
+  expect(confirmable(touched, ['code'])).toBe(true);
 });

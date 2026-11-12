@@ -35,6 +35,7 @@ class Evidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'interrupted'):
             verify(cut, peer)
         cut['streams'][0]['download_bytes'] = 512
+        cut['streams'][0]['download_sha256'] = digest('one', 'download', 512)
         verify(cut, peer)
 
 

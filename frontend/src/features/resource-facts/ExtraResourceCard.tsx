@@ -1,4 +1,7 @@
 /** Mount, MCP, template, profile and skill facts use the same bounded inspection card and one native detail read. */
+import { CardSharing } from '@/features/access/CardSharing';
+import type { AccessTarget } from '@/api/access';
+import { CardHome, cardHome } from '@/features/navigation/CardHome';
 import { useQuery } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
 import { api, ok } from '@/api/client';
@@ -97,11 +100,18 @@ export default function ExtraResourceCard({ subject }: { subject: Subject }) {
       const origin = skill.latest?.origin ?? skill.origin;
       rows = [
         { name: t('resourceFacts.versionLabel'), value: skill.latest === null || skill.latest === undefined ? t('resourceFacts.noVersion') : count(skill.latest.number) },
-        { name: t('resourceFacts.source'), value: origin === null || origin === undefined ? t('usagePerf.dash') : <span>{t(`resourceFacts.origin.${origin.kind}`)}{' · '}{origin.kind === 'git' ? origin.repository : origin.kind === 'url' ? origin.url : origin.kind === 'environment' ? origin.path : origin.kind === 'upload' ? origin.name : ''}</span> },
+        { name: t('resourceFacts.source'), value: origin === null || origin === undefined ? t('usagePerf.dash') : <span>{origin.kind === 'copy' ? t('resourceFacts.origin.copy') : t(`resourceFacts.origin.${origin.kind}`)}{' · '}{origin.kind === 'git' ? origin.repository : origin.kind === 'url' ? origin.url : origin.kind === 'environment' ? origin.path : origin.kind === 'upload' ? origin.name : ''}</span> },
         { name: t('resourceFacts.enabledAt'), value: count(skill.enabled_places) },
       ]; break;
     }
   }
   const known = query.data !== undefined || 'access' in supplied;
-  return <>{known ? <Facts compact rows={rows} /> : query.isError ? null : <SkeletonRows rows={3} />}{query.isError && <ErrorAlert error={query.error} action={<Button size="sm" onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />}</>;
+  const current = { ...supplied, ...(query.isError ? {} : query.data) };
+  const home = cardHome('home' in current ? current.home : null);
+  const environment = record('environment' in current ? current.environment : null);
+  const target: AccessTarget = subject.kind === 'mcp_server' && typeof environment.id === 'string' && typeof environment.name === 'string'
+    ? { kind: 'environment', id: environment.id, name: environment.name }
+    : { kind: subject.kind, id: supplied.id, name: supplied.name };
+
+  return <>{home !== null && <CardHome place={home} />}{known ? <Facts compact rows={rows} /> : query.isError ? null : <SkeletonRows read={query} rows={3} />}{query.isError && <ErrorAlert error={query.error} action={<Button size="sm" onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />}<CardSharing target={target} /></>;
 }

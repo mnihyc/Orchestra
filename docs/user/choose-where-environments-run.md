@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Choose where environments run
 screens: /resources/templates, /resources/templates/$id, /resources/environments, /resources/environments/$id, /resources/hosts/$id
 keywords: runtime, runc, gVisor, Kata, microVM, isolation, boundary, container, kernel, docker inside, developer tools, qemu, kvm, runs on, limits here, env.runtime, environments.runtimes, 运行时, 隔离
+summary: Choose the host and runtime that provide an environment’s execution and isolation.
 ---
 
 # Choose where environments run
