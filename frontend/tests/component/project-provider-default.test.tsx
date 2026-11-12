@@ -1,7 +1,12 @@
 /** The project setting uses provider names and keeps native revision, lock, failure and Undo semantics. */
-import { screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ReactNode } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { ApiError } from '@/api/client';
+import { providerDefaultKey } from '@/api/defaultsOpening';
+import { providerKey } from '@/api/resources';
 import { clearSetting, putSetting, type SettingsTarget } from '@/api/settings';
 import type * as Client from '@/api/client';
 import { SettingRow } from '@/features/settings/SettingRow';
@@ -19,9 +24,6 @@ interface ReadOptions { params?: { path?: { id?: string } } }
 const calls = vi.hoisted(() => ({
   list: vi.fn<() => Promise<Provider[]>>(), read: vi.fn<(id: string) => Promise<Provider>>(), create: vi.fn(),
   created: null as Provider | null,
-}));
-vi.mock('@/api/resources', async (original) => ({ ...await original<object>(),
-  providerQuery: (id: string) => ({ queryKey: ['default-provider', id], staleTime: Infinity, queryFn: () => calls.read(id) }),
 }));
 vi.mock('@/api/client', async (load) => {
   const actual = await load<typeof Client>();
@@ -57,6 +59,17 @@ const rows: Provider[] = [
 ];
 const target: SettingsTarget = { kind: 'node', id: PROJECT };
 const place = { name: 'Web', kind: 'project', owner: null, access: { permissions: ['project.manage', 'settings.manage'] } };
+const caches: QueryClient[] = [];
+function nativeNames(source: 'choice' | 'reference' | 'unread' = 'choice') {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  caches.push(cache);
+  // The enclosing Defaults opening supplies its independently admitted current name.
+  if (source !== 'unread') cache.setQueryData(source === 'choice' ? providerDefaultKey(FIRST) : providerKey(FIRST), rows[0]!);
+  return cache;
+}
+function draw(content: ReactNode, cache = nativeNames()) {
+  return show(<QueryClientProvider client={cache}>{content}</QueryClientProvider>);
+}
 function definition(): KeyDef {
   return { key: KEY, title: i18n.t('day100.builtin.agent.default_provider_id.title'), description: i18n.t('day100.builtin.agent.default_provider_id.description'),
     group: 'agent', class: 'parameter', scopes: ['org', 'project', 'topic'], merge: 'replace', default: null, example: SAMPLE,
@@ -74,7 +87,7 @@ beforeEach(() => {
     return row === undefined ? Promise.reject(new Error('the provider is no longer readable')) : Promise.resolve(row);
   });
 });
-afterEach(async () => { useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { cleanup(); for (const cache of caches.splice(0)) cache.clear(); useAppearance.setState(appearance); await setLocale('en'); });
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   it(`commits one named choice at project scope and undoes its acknowledged revision (${locale}/${theme})`, async () => {
@@ -82,10 +95,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const accepted = value(SECOND, true);
     vi.mocked(putSetting).mockResolvedValue(accepted); vi.mocked(clearSetting).mockResolvedValue(value());
     const def = definition();
-    const view = show(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
+    const view = draw(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
     const choose = await screen.findByRole('combobox', { name: def.title });
     await waitFor(() => expect(choose).toHaveValue('Release AI'));
     expect(calls.list).not.toHaveBeenCalled();
+    expect(calls.read).not.toHaveBeenCalled();
     expect(screen.queryByRole('textbox', { name: def.title })).not.toBeInTheDocument();
     expect(view.container).not.toHaveTextContent(FIRST);
     expect(view.container).not.toHaveTextContent(SAMPLE);
@@ -97,7 +111,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await user.click(await screen.findByRole('option', { name: 'Review AI' }));
     await waitFor(() => expect(putSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, { value: SECOND, expectedRevision: null }));
     await waitFor(() => expect(screen.getByRole('combobox', { name: def.title })).toHaveValue('Review AI'));
-    expect(calls.read).toHaveBeenCalledExactlyOnceWith(FIRST);
+    expect(calls.read).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: i18n.t('settings.compact.undoNamed', { name: def.title }) }));
     await waitFor(() => expect(clearSetting).toHaveBeenCalledExactlyOnceWith(target, KEY, 7));
   });
@@ -107,10 +121,11 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const source = { scope: 'org' as const, node: { id: HOME, kind: 'org' as const, name: 'Acme', redacted: false } };
     // Even a local stored choice and manage authority cannot replace an ancestor's effective lock.
     const setting: ResolvedSetting = { ...value(), own: { value: SECOND, revision: 7, locked: false }, source, locked_by: source };
-    const view = show(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>);
+    const view = draw(<ul><SettingRow def={definition()} setting={setting} target={target} place={place} /></ul>, nativeNames('reference'));
     expect(await screen.findByText('Release AI', { exact: true })).toBeVisible();
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(calls.list).not.toHaveBeenCalled();
+    expect(calls.read).not.toHaveBeenCalled();
     expect(view.container).not.toHaveTextContent(FIRST);
     expect(screen.queryByText('Review AI', { exact: true })).not.toBeInTheDocument();
     expect(putSetting).not.toHaveBeenCalled();
@@ -119,7 +134,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
   it(`keeps failed inventory distinct from an empty one and offers its existing creation workflow (${locale}/${theme})`, async () => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     calls.list.mockRejectedValueOnce(new Error('the provider inventory is unavailable')).mockResolvedValue([]);
-    const def = definition(); show(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
+    const def = definition(); draw(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
     expect(calls.list).not.toHaveBeenCalled();
     await userEvent.click(await screen.findByRole('combobox', { name: def.title }));
     const retry = await screen.findByRole('button', { name: i18n.t('common.tryAgain') });
@@ -138,7 +153,7 @@ it('retains a refused named choice and retries under the original own revision',
   await setLocale('en'); const def = definition();
   vi.mocked(putSetting).mockRejectedValueOnce(new Error('the setting could not be changed'))
     .mockResolvedValue({ ...value(SECOND, true), own: { value: SECOND, revision: 8, locked: false } });
-  show(<ul><SettingRow def={def} setting={value(FIRST, true)} target={target} place={place} /></ul>);
+  draw(<ul><SettingRow def={def} setting={value(FIRST, true)} target={target} place={place} /></ul>);
   const choose = await screen.findByRole('combobox', { name: def.title });
   await waitFor(() => expect(choose).toHaveValue('Release AI'));
   const user = userEvent.setup(); await user.click(choose);
@@ -157,7 +172,7 @@ it('keeps duplicate provider names distinguishable using readable homes', async 
     { ...rows[0]!, name: 'Team AI' },
     { ...rows[1]!, name: 'Team AI', home: { id: BETA, kind: 'org', name: 'Beta', redacted: false } },
   ]);
-  const def = definition(); show(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
+  const def = definition(); draw(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
   const choose = await screen.findByRole('combobox', { name: def.title });
   await userEvent.click(choose);
   expect(choose).toHaveValue('');
@@ -170,7 +185,7 @@ it('returns an empty-list creation answer to the picker and waits for an explici
   await setLocale('en'); calls.list.mockResolvedValue([]);
   calls.created = { ...rows[1]!, access: { ...rows[1]!.access, permissions: ['provider.view', 'provider.use'] } };
   vi.mocked(putSetting).mockResolvedValue(value(SECOND, true));
-  const def = definition(); show(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
+  const def = definition(); draw(<ul><SettingRow def={def} setting={value()} target={target} place={place} /></ul>);
   const user = userEvent.setup();
   expect(calls.list).not.toHaveBeenCalled();
   await user.click(await screen.findByRole('combobox', { name: def.title }));
@@ -186,13 +201,18 @@ it('returns an empty-list creation answer to the picker and waits for an explici
 
 it('does not fetch an illustrative UUID, and a lost read-only provider exposes no raw identifier', async () => {
   await setLocale('en'); const def = definition();
-  const sample = show(<SettingSummary def={def} value={SAMPLE} example />);
+  const sample = draw(<SettingSummary def={def} value={SAMPLE} example />, nativeNames('unread'));
   expect(screen.getByText(i18n.t('places.providerDefault.example'))).toBeVisible();
   expect(calls.read).not.toHaveBeenCalled(); sample.unmount();
-  const unavailable = show(<SettingSummary def={def} value={SAMPLE} />);
+  const cache = nativeNames('unread');
+  cache.getQueryCache().build(cache, { queryKey: providerDefaultKey(SAMPLE) }).setState({
+    status: 'error', data: undefined,
+    error: new ApiError({ type: 'about:blank', title: 'Unavailable', status: 503, code: 'provider.unavailable', detail: 'The provider name could not be read.', request_id: 'provider-name-unavailable' }, null),
+  });
+  const unavailable = draw(<SettingSummary def={def} value={SAMPLE} />, cache);
   expect(await screen.findByText(i18n.t('places.providerDefault.unavailable'))).toBeVisible();
   expect(unavailable.container).not.toHaveTextContent(SAMPLE);
+  expect(calls.read).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole('button', { name: i18n.t('common.tryAgain') }));
-  await waitFor(() => expect(calls.read).toHaveBeenCalledTimes(2));
-  expect(calls.read).toHaveBeenNthCalledWith(2, SAMPLE);
+  await waitFor(() => expect(calls.read).toHaveBeenCalledExactlyOnceWith(SAMPLE));
 });

@@ -76,7 +76,7 @@ export function VerifyEmail({ outcome, onRetry }: VerifyEmailProps) {
     >
       <EmptyState compact icon={<LinkIcon aria-hidden />} title={t('auth.verify.spent')} />
       {meta?.mail === true ? <ResendForm /> : meta?.mail === false ? <p className="text-sm text-text-muted">{t('auth.verify.noMail')}</p> : null}
-      {meta===undefined && (system.isError ? <ErrorState compact error={system.error} onRetry={()=>void system.refetch()} /> : <SkeletonRows rows={1} />)}
+      {meta===undefined && (system.isError ? <ErrorState compact error={system.error} onRetry={()=>void system.refetch()} /> : <SkeletonRows read={system} rows={1} />)}
     </AuthCard>
   );
 }

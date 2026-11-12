@@ -96,6 +96,19 @@ fn failure(error: &ImportError) -> Failure {
     }
 }
 
+fn source_failure(error: crate::operation_scope::continuing::Error) -> Failure {
+    match error {
+        crate::operation_scope::continuing::Error::Refused
+        | crate::operation_scope::continuing::Error::Binding(
+            crate::operation_scope::BindingError::Refused,
+        ) => Failure::new(
+            "authz.denied",
+            "The original access no longer permits this import.",
+        ),
+        other => Failure::new(INTERNAL, other.to_string()),
+    }
+}
+
 /// The phased work of one job that brings an import, or takes one back.
 pub struct Importing {
     engine: Engine,
@@ -104,6 +117,8 @@ pub struct Importing {
     node: Id,
     credential: Option<(Vec<String>, Option<Id>)>,
     undo: bool,
+    undo_source: Option<imports::undo::operation::Request>,
+    source: Option<imports::operation::Request>,
     /// The plan, once it is made: kept for the phases of this run.
     plan: tokio::sync::Mutex<Option<Arc<Plan>>>,
 }
@@ -129,6 +144,8 @@ impl Importing {
                 (scopes, plan_id(each, "subtree"))
             });
         Ok(Self {
+            undo_source: imports::undo::operation::Request::from_job(row)?,
+            source: imports::operation::Request::from_job(row)?,
             engine,
             import: plan_id(&row.plan, "import").ok_or_else(|| missing("import"))?,
             user: plan_id(&row.plan, "user").ok_or_else(|| missing("person"))?,
@@ -145,6 +162,12 @@ impl Importing {
 
     /// Whoever asked, reading with what they asked with.
     fn caller(&self) -> Result<Caller, Failure> {
+        if self.source.is_some() {
+            return Err(Failure::new(
+                INTERNAL,
+                "the import requires its retained current request",
+            ));
+        }
         match &self.credential {
             None => Ok(Caller::session(self.user)),
             Some((scopes, subtree)) => TokenGrant::from_stored(scopes, *subtree)
@@ -154,6 +177,12 @@ impl Importing {
     }
 
     async fn principal(&self, conn: &mut orch_db::Conn) -> Result<Principal, Stop> {
+        if let Some(source) = &self.source {
+            return source
+                .principal(&self.engine)
+                .await
+                .map_err(|error| source_failure(error).into());
+        }
         Principal::load(
             conn,
             self.caller()?,
@@ -163,6 +192,12 @@ impl Importing {
         .map_err(|error| Stop::Failed(Failure::new(INTERNAL, error.to_string())))
     }
 
+    fn source_stream(&self, stream: ByteStream) -> ByteStream {
+        match &self.source {
+            Some(source) => source.stream(self.engine.clone(), stream),
+            None => stream,
+        }
+    }
     /// The import as it was asked, and its row.
     async fn asked(&self, conn: &mut orch_db::Conn) -> Result<(ImportRow, ImportRequest), Stop> {
         let row = rows::get(conn, self.import).await?.ok_or(Stop::Cancelled)?;
@@ -183,6 +218,10 @@ impl Importing {
         }
         let mut conn = self.engine.inner.db.acquire().await?;
         let (_, request) = self.asked(&mut conn).await?;
+        let request = self.source.as_ref().map_or_else(
+            || request.clone(),
+            |source| source.execution_request(request.clone()),
+        );
         let principal = self.principal(&mut conn).await?;
         let plan = self
             .engine
@@ -262,9 +301,21 @@ impl Importing {
             .await
             .map_err(|error| failure(&error))?;
         drop(conn);
+        if let Some(source) = &self.source {
+            source
+                .principal(&self.engine)
+                .await
+                .map_err(source_failure)?;
+        }
         let opened = imports::open(&self.engine, &request.source, &limits)
             .await
             .map_err(|error| failure(&ImportError::from(error)))?;
+        if let Some(source) = &self.source {
+            source
+                .principal(&self.engine)
+                .await
+                .map_err(source_failure)?;
+        }
         if opened.mode == orch_api_contract::imports::ImportSourceMode::Package {
             let most_file =
                 u64::try_from(self.engine.inner.config.export_file_max_bytes).unwrap_or(u64::MAX);
@@ -289,6 +340,12 @@ impl Importing {
             let total = checks.len().max(1);
             for (at, (path, sha, limit)) in checks.iter().enumerate() {
                 job.check()?;
+                if let Some(source) = &self.source {
+                    source
+                        .principal(&self.engine)
+                        .await
+                        .map_err(source_failure)?;
+                }
                 let found = opened
                     .entries
                     .sha256(path, *limit)
@@ -343,6 +400,255 @@ struct Progress {
     carried_warnings: i64,
 }
 
+impl Importing {
+    /// Keep one native object atomic, with IO outside its fresh source/writer transaction.
+    async fn create_sourced(&self, job: &Job) -> Result<Done, Stop> {
+        let source = self
+            .source
+            .as_ref()
+            .ok_or_else(|| Failure::new(INTERNAL, "the import source is unavailable"))?;
+        let plan = self.plan().await?;
+        let remembered: Progress = job
+            .plan()
+            .await
+            .ok()
+            .and_then(|plan| plan.get("progress").cloned())
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        let mut progress = remembered;
+        let first = {
+            let mut conn = self.engine.inner.db.acquire().await?;
+            usize::try_from(rows::last_position(&mut conn, self.import).await? + 1).unwrap_or(0)
+        };
+        let total = plan.objects.len().max(1);
+        let mut known = PlanMaps::of(&plan, self.import);
+        let mut lost = HashSet::new();
+        let mut chats_in = HashMap::<Id, Vec<Id>>::new();
+        for object in plan
+            .objects
+            .iter()
+            .filter(|object| object.made_as == PackageKind::Chat && object.goes())
+        {
+            chats_in
+                .entry(object.lies_in)
+                .or_default()
+                .push(object.object.id);
+        }
+        self.current_chats_for(
+            &mut known,
+            &chats_in.keys().copied().collect::<Vec<_>>(),
+            &chats_in,
+        )
+        .await?;
+        let mut staged = HashMap::new();
+        for (position, object) in plan.objects.iter().enumerate().skip(first) {
+            job.check()?;
+            let parent_lost = object
+                .object
+                .parent
+                .is_some_and(|parent| lost.contains(&parent));
+            let immediate = if let Some(block) = &object.blocked {
+                Some(Made::failed(&block.code, block.message.clone()))
+            } else if parent_lost || object.skipped_above {
+                let mut made = Made::left(
+                    ImportOutcome::Skipped,
+                    Some(
+                        if parent_lost {
+                            "what it lies in could not be made, and so it was not"
+                        } else {
+                            "the place it lies in is left alone, and so is it"
+                        }
+                        .into(),
+                    ),
+                );
+                if parent_lost {
+                    made.code = Some("import.parent_failed".into());
+                }
+                Some(made)
+            } else if object.action == ImportAction::Skip {
+                Some(Made::left(ImportOutcome::Skipped, None))
+            } else {
+                None
+            };
+            let mut conn = self.engine.inner.db.acquire().await?;
+            let principal = self.principal(&mut conn).await?;
+            drop(conn);
+            let prepared = if immediate.is_none() {
+                staged.clear();
+                self.stage(&plan, &[object], &mut staged).await?;
+                let preparation = Batch {
+                    engine: &self.engine,
+                    plan: &plan,
+                    principal: &principal,
+                    import: self.import,
+                    now: self.engine.inner.clock.now(),
+                    staged: &staged,
+                    maps: &known,
+                    notes: None,
+                    operation: Some((source, &plan)),
+                };
+                Some(crate::imports::make::prepare_object(&preparation, object).await)
+            } else {
+                None
+            };
+            let mut tx = self.engine.inner.db.begin().await?;
+            let now = self.engine.inner.clock.now();
+            let (notes, mut said) = tokio::sync::mpsc::unbounded_channel();
+            let batch = Batch {
+                engine: &self.engine,
+                plan: &plan,
+                principal: &principal,
+                import: self.import,
+                now,
+                staged: &staged,
+                maps: &known,
+                notes: Some(notes),
+                operation: Some((source, &plan)),
+            };
+            let made = if let Some(made) = immediate {
+                made
+            } else {
+                let prepared = match prepared.ok_or_else(|| {
+                    Failure::new(INTERNAL, "the native import body was not prepared")
+                })? {
+                    Ok(prepared) => Some(prepared),
+                    Err(imports::make::MakeError::Coded {
+                        code: "authz.denied",
+                        message,
+                    }) => return Err(Failure::new("authz.denied", message).into()),
+                    Err(imports::make::MakeError::Internal(error)) => {
+                        return Err(failure(&error).into());
+                    }
+                    Err(error) => {
+                        let made = match error {
+                            imports::make::MakeError::Damaged(entry) => Made::failed(
+                                "import.damaged",
+                                format!("{entry} does not match the hash the manifest gives it"),
+                            ),
+                            imports::make::MakeError::Coded { code, message } => {
+                                Made::failed(code, message)
+                            }
+                            other => Made::failed("import.refused", other.to_string()),
+                        };
+                        progress.counts_note(object, &made);
+                        rows::add_report_rows(
+                            &mut tx,
+                            self.import,
+                            &[stored_row(&row_of(
+                                i64::try_from(position).unwrap_or(i64::MAX),
+                                object,
+                                &made,
+                            ))],
+                        )
+                        .await?;
+                        source
+                            .flush(&self.engine, &mut tx)
+                            .await
+                            .map_err(source_failure)?;
+                        orch_db::queries::jobs::merge_plan(
+                            &mut tx,
+                            job.id(),
+                            &json!({"progress":progress}),
+                            self.engine.inner.clock.now(),
+                        )
+                        .await?;
+                        source
+                            .deadline(&self.engine, &mut tx)
+                            .await
+                            .map_err(source_failure)?;
+                        tx.commit().await.map_err(orch_db::DbError::from)?;
+                        lost.insert(object.object.id);
+                        continue;
+                    }
+                };
+                let prepared = prepared.ok_or_else(|| {
+                    Failure::new(INTERNAL, "the native import body is unavailable")
+                })?;
+                let work =
+                    crate::imports::make::make_prepared_object(&mut tx, &batch, object, prepared);
+                tokio::pin!(work);
+                let mut last_said = std::time::Instant::now();
+                loop {
+                    tokio::select! {
+                        result=&mut work=>break result.map_err(|error|match error {imports::make::MakeError::Internal(error)=>failure(&error),other=>Failure::new(INTERNAL,other.to_string())})?,
+                        words=said.recv()=>{job.check()?;if let Some(words)=words && last_said.elapsed()>=SAY_EVERY {last_said=std::time::Instant::now();job.progress(position as f64/total as f64,Some(&format!("{position} of {total} things; {words}"))).await?;}}
+                    }
+                }
+            };
+            if made.outcome == ImportOutcome::Failed || parent_lost {
+                lost.insert(object.object.id);
+            }
+            progress.counts_note(object, &made);
+            rows::add_report_rows(
+                &mut tx,
+                self.import,
+                &[stored_row(&row_of(
+                    i64::try_from(position).unwrap_or(i64::MAX),
+                    object,
+                    &made,
+                ))],
+            )
+            .await?;
+            source
+                .flush(&self.engine, &mut tx)
+                .await
+                .map_err(source_failure)?;
+            orch_db::queries::jobs::merge_plan(
+                &mut tx,
+                job.id(),
+                &json!({"progress":progress}),
+                self.engine.inner.clock.now(),
+            )
+            .await?;
+            source
+                .deadline(&self.engine, &mut tx)
+                .await
+                .map_err(source_failure)?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+            if object.goes()
+                && object.action != ImportAction::Replace
+                && chats_in.contains_key(&object.target)
+            {
+                self.current_chats_for(&mut known, &[object.target], &chats_in)
+                    .await?;
+            }
+            let done = position + 1;
+            job.progress(
+                done as f64 / total as f64,
+                Some(&format!("{done} of {total} things")),
+            )
+            .await?;
+            job.amend(move |step, _| {
+                step.files_done = i64::try_from(done).unwrap_or(i64::MAX);
+            })
+            .await?;
+        }
+        Ok(Done::Finished)
+    }
+    async fn current_chats_for(
+        &self,
+        known: &mut PlanMaps,
+        nodes: &[Id],
+        chats_in: &HashMap<Id, Vec<Id>>,
+    ) -> Result<(), Stop> {
+        let mut conn = self.engine.inner.db.acquire().await?;
+        for page in nodes.chunks(CHATS_PAGE) {
+            let found: Vec<(Id, Id)> =
+                sqlx::query_as("SELECT node_id,id FROM chats WHERE node_id=ANY($1)")
+                    .bind(page)
+                    .fetch_all(&mut *conn)
+                    .await
+                    .map_err(orch_db::DbError::from)?;
+            for (node, chat) in found {
+                for source in chats_in.get(&node).into_iter().flatten() {
+                    known.chats.insert(*source, chat);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Progress {
     fn counts(&self) -> Counts {
         Counts {
@@ -389,6 +695,12 @@ impl Importing {
                 if staged.contains_key(path) {
                     continue;
                 }
+                if let Some(source) = &self.source {
+                    source
+                        .principal(&self.engine)
+                        .await
+                        .map_err(source_failure)?;
+                }
                 let spooled = match plan.opened.entries.spool(path, most, &self.scratch()).await {
                     Ok(spooled) => spooled,
                     Err(error) => {
@@ -407,6 +719,7 @@ impl Importing {
                 let content: ByteStream = ReaderStream::with_capacity(opened, 256 * 1024)
                     .map(|piece| piece.map_err(|error| BlobError::Io(error.to_string())))
                     .boxed();
+                let content = self.source_stream(content);
                 let put = store.put(&spooled.blob, Some(size), content).await;
                 let _ = std::fs::remove_file(&spooled.path);
                 put.map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
@@ -438,6 +751,9 @@ impl Importing {
     async fn create(&self, job: &Job) -> Result<Done, Stop> {
         if self.undo {
             return Ok(Done::Skipped("nothing to make".to_owned()));
+        }
+        if self.source.is_some() {
+            return self.create_sourced(job).await;
         }
         let plan = self.plan().await?;
         let remembered: Progress = job
@@ -509,6 +825,7 @@ impl Importing {
                 staged: &staged,
                 maps: &known,
                 notes: Some(notes),
+                operation: None,
             };
             let mut last_said = std::time::Instant::now();
             let mut written = Vec::with_capacity(chunk.len());
@@ -736,8 +1053,29 @@ impl Importing {
         &self.engine
     }
 
+    /// Bind the real current native undo page after the original credential and source locks.
+    pub async fn undo_cut(
+        &self,
+        conn: &mut orch_db::Conn,
+        work: imports::undo::operation::Work,
+    ) -> Result<Option<imports::undo::operation::Cut>, Stop> {
+        match &self.undo_source {
+            Some(source) => source
+                .frame(&self.engine, conn, work)
+                .await
+                .map(Some)
+                .map_err(|error| Failure::new("access.denied", error.to_string()).into()),
+            None => Ok(None),
+        }
+    }
+
     /// The person, loaded for a batch.
     pub async fn principal_for(&self, conn: &mut orch_db::Conn) -> Result<Principal, Stop> {
+        if self.undo_source.is_some() {
+            return Err(
+                Failure::new("access.denied", "the undo requires its actual native page").into(),
+            );
+        }
         self.principal(conn).await
     }
 }

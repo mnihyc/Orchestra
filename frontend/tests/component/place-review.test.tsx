@@ -2,7 +2,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
-import { ApiError } from '@/api/client';
+import { ApiError, ReceiptAcknowledged } from '@/api/client';
 import { applyArchivePlan, deleteNode, moveNode, previewArchive, previewDelete, previewMove, readNode } from '@/api/nodes';
 import { PlaceReview } from '@/features/project/PlaceReview';
 import type { Node, NodeArchivePlan, NodeArchiveResult, NodeDeletePlan, NodeMovePlan } from '@/generated/api-types';
@@ -90,4 +90,58 @@ it('shows the deletion group and last recovery day before sending each deletion 
   expect(deleteNode).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
   await waitFor(() => expect(deleteNode).toHaveBeenCalledWith('Delete me', { preflight_id: 'delete-reviewed', expected_revision: 4 }, expect.any(String)));
+});
+
+
+it('keeps an accepted archive receipt neutral and complete without Full readback or a fabricated Undo', async () => {
+  const onApplied = vi.fn();
+  vi.mocked(applyArchivePlan).mockRejectedValue(new ReceiptAcknowledged({ projection: 'receipt', node_id: 'Receipt only', archiving: true, revision: 5,
+    undo: { preflight_id: 'opaque-inverse', stamp: 'not-a-descriptive-plan', expected_revision: 5 } }, 200, 'accepted-archive'));
+  show(<PlaceReview action="archive" rows={[place('Receipt only')]} onClose={vi.fn()} onApplied={onApplied} />);
+  await screen.findByRole('button', { name: 'Apply to 1 ready place' });
+  const readsBefore = vi.mocked(readNode).mock.calls.length;
+  await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
+  expect(await screen.findByText(i18n.t('ui.receipt.title'))).toBeVisible();
+  expect(screen.getByText(i18n.t('placeReview.succeeded'), { exact: true })).toBeVisible();
+  expect(screen.queryByText(i18n.t('placeReview.uncertain'), { exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByText(i18n.t('placeReview.partial'))).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Read current state' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Undo successful rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Review these rows again' })).not.toBeInTheDocument();
+  expect(readNode).toHaveBeenCalledTimes(readsBefore); expect(applyArchivePlan).toHaveBeenCalledOnce();
+  expect(onApplied).not.toHaveBeenCalled();
+});
+
+it('marks an accepted archive inverse undone without another read or a second inverse', async () => {
+  const undo = archive('Undo receipt', false);
+  vi.mocked(applyArchivePlan).mockResolvedValueOnce({ node: { ...place('Undo receipt'), revision: 5, archived: true }, undo })
+    .mockRejectedValueOnce(new ReceiptAcknowledged({ projection: 'receipt', node_id: 'Undo receipt', archiving: false, revision: 6, undo: null }, 200, 'accepted-inverse'));
+  const onApplied = vi.fn();
+  show(<PlaceReview action="archive" rows={[place('Undo receipt')]} onClose={vi.fn()} onApplied={onApplied} />);
+  await screen.findByRole('button', { name: 'Apply to 1 ready place' });
+  await userEvent.click(screen.getByRole('button', { name: 'Apply to 1 ready place' }));
+  await screen.findByRole('button', { name: 'Undo successful rows' });
+  const readsBefore = vi.mocked(readNode).mock.calls.length;
+  await userEvent.click(screen.getByRole('button', { name: 'Undo successful rows' }));
+  expect(await screen.findByText(i18n.t('ui.receipt.title'))).toBeVisible();
+  expect(screen.getByText(i18n.t('placeReview.undone'), { exact: true })).toBeVisible();
+  expect(screen.queryByRole('button', { name: 'Undo successful rows' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Read current state' })).not.toBeInTheDocument();
+  expect(readNode).toHaveBeenCalledTimes(readsBefore); expect(applyArchivePlan).toHaveBeenCalledTimes(2);
+  expect(applyArchivePlan).toHaveBeenLastCalledWith(undo); expect(onApplied).toHaveBeenCalledOnce();
+});
+
+it('keeps Full and acknowledged rows successful while only the Full row supplies Undo and refresh', async () => {
+  const undo = archive('Full row', false), onApplied = vi.fn();
+  vi.mocked(applyArchivePlan).mockImplementation((plan) => plan.node.id === 'Full row'
+    ? Promise.resolve({ node: place('Full row'), undo })
+    : Promise.reject(new ReceiptAcknowledged({ projection: 'receipt', node_id: 'Restricted row', archiving: true, revision: 5, undo: null }, 200, 'restricted-archive')));
+  show(<PlaceReview action="archive" rows={['Full row', 'Restricted row'].map(place)} onClose={vi.fn()} onApplied={onApplied} />);
+  await screen.findByRole('button', { name: 'Apply to 2 ready places' });
+  await userEvent.click(screen.getByRole('button', { name: 'Apply to 2 ready places' }));
+  expect(await screen.findByText(i18n.t('ui.receipt.title'))).toBeVisible();
+  expect(screen.getAllByText(i18n.t('placeReview.succeeded'), { exact: true })).toHaveLength(2);
+  expect(screen.queryByText(i18n.t('placeReview.partial'))).not.toBeInTheDocument();
+  expect(onApplied).toHaveBeenCalledOnce(); expect(applyArchivePlan).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole('button', { name: 'Undo successful rows' })).toBeEnabled();
 });

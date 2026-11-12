@@ -22,6 +22,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use super::admission::{Admission, Decision, canonical_name, reasons, shown};
+use super::parent::Parent;
 
 /// The most a request's head may hold: a longer one is no request a program sends through a proxy.
 const HEAD_MAX: usize = 16 * 1024;
@@ -64,6 +65,7 @@ pub struct Gate {
     flows: Mutex<HashMap<u64, Flow>>,
     next: AtomicU64,
     denied: Mutex<Option<NetworkDenial>>,
+    parent: RwLock<Option<Parent>>,
 }
 
 impl Gate {
@@ -71,6 +73,27 @@ impl Gate {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The trusted node's current parent, independent of unit requests and hostname policy.
+    pub fn parent(&self) -> Option<Parent> {
+        self.parent
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A changed parent closes every prior flow before it is applied.
+    pub fn set_parent(&self, parent: Option<Parent>) {
+        let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut current = self.parent.write().unwrap_or_else(PoisonError::into_inner);
+        if *current != parent {
+            for flow in flows.values() {
+                flow.end.cancel();
+            }
+            flows.clear();
+            *current = parent;
+        }
     }
 
     /// Puts `admission` in force, or closes the gate with none, and ends every flow it no longer admits before
@@ -117,8 +140,16 @@ impl Gate {
 
     /// Registers a flow to `host` at `port`, if the policy in force admits it at this moment: the decision and
     /// the registration are one step under the lock a change of policy takes.
-    fn open_flow(&self, host: &str, port: u16) -> Option<(u64, CancellationToken)> {
+    fn open_flow(
+        &self,
+        host: &str,
+        port: u16,
+        parent: &Option<Parent>,
+    ) -> Option<(u64, CancellationToken)> {
         let mut flows = self.flows.lock().unwrap_or_else(PoisonError::into_inner);
+        if *self.parent.read().unwrap_or_else(PoisonError::into_inner) != *parent {
+            return None;
+        }
         let admitted = self
             .admission
             .read()
@@ -483,13 +514,21 @@ async fn handle(mut client: TcpStream, gate: &Gate, clock: &dyn Clock) -> io::Re
         }
         Decision::Other(name) => (name, Some(&admission)),
     };
-    let found = match addresses(&name, port, refusing).await {
-        Ok(found) => found,
-        Err(reason) => {
-            return refuse(&mut client, gate, clock, name, reason, "403 Forbidden").await;
-        }
+    let parent = gate.parent();
+    let upstream = if let Some(parent) = &parent {
+        // Admission above is exact-name based. The parent resolves and connects to that
+        // canonical authority; no local destination DNS/address decision can replace it.
+        parent.connect(&name, port).await.ok()
+    } else {
+        let found = match addresses(&name, port, refusing).await {
+            Ok(found) => found,
+            Err(reason) => {
+                return refuse(&mut client, gate, clock, name, reason, "403 Forbidden").await;
+            }
+        };
+        connect(&found).await
     };
-    let Some(mut upstream) = connect(&found).await else {
+    let Some(mut upstream) = upstream else {
         return refuse(
             &mut client,
             gate,
@@ -500,7 +539,7 @@ async fn handle(mut client: TcpStream, gate: &Gate, clock: &dyn Clock) -> io::Re
         )
         .await;
     };
-    let Some((flow, end)) = gate.open_flow(&name, port) else {
+    let Some((flow, end)) = gate.open_flow(&name, port, &parent) else {
         return refuse(
             &mut client,
             gate,
@@ -534,6 +573,11 @@ async fn handle(mut client: TcpStream, gate: &Gate, clock: &dyn Clock) -> io::Re
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests fail by panicking"
+)]
 mod tests {
     use super::*;
     use orch_driver_contract::network::{NetworkTransport, TransportPurpose};
@@ -628,17 +672,19 @@ mod tests {
     #[test]
     fn a_new_policy_ends_the_flows_it_no_longer_admits_and_a_closed_gate_ends_all() {
         let gate = Gate::new();
-        assert!(gate.open_flow("pypi.org", 443).is_none(), "closed");
+        assert!(gate.open_flow("pypi.org", 443, &None).is_none(), "closed");
         gate.set(Some(admission(&["pypi.org", "crates.io"])));
-        let (_, pypi) = gate.open_flow("pypi.org", 443).unwrap();
-        let (_, crates) = gate.open_flow("crates.io", 443).unwrap();
-        let (_, link) = gate.open_flow("gateway.orch.internal", 9443).unwrap();
+        let (_, pypi) = gate.open_flow("pypi.org", 443, &None).unwrap();
+        let (_, crates) = gate.open_flow("crates.io", 443, &None).unwrap();
+        let (_, link) = gate
+            .open_flow("gateway.orch.internal", 9443, &None)
+            .unwrap();
         assert_eq!(gate.flows(), 3);
         gate.set(Some(admission(&["crates.io"])));
         assert!(pypi.is_cancelled(), "a host taken off the list is cut off");
         assert!(!crates.is_cancelled() && !link.is_cancelled());
         assert_eq!(gate.flows(), 2);
-        assert!(gate.open_flow("pypi.org", 443).is_none());
+        assert!(gate.open_flow("pypi.org", 443, &None).is_none());
         gate.set(None);
         assert!(
             crates.is_cancelled() && link.is_cancelled(),
@@ -668,5 +714,109 @@ mod tests {
         let denied = gate.last_denied().unwrap();
         assert_eq!(denied.host, "evil.example");
         assert_eq!(denied.reason, reasons::NOT_LISTED);
+    }
+
+    #[test]
+    fn changing_parent_closes_old_flows_and_an_inflight_old_parent_cannot_register() {
+        let gate = Gate::new();
+        gate.set(Some(admission(&["approved.invalid"])));
+        let old = Some(Parent::parse("http://first.invalid:3128").unwrap());
+        gate.set_parent(old.clone());
+        let (_, flow) = gate.open_flow("approved.invalid", 443, &old).unwrap();
+        let next = Some(Parent::parse("http://second.invalid:3128").unwrap());
+        gate.set_parent(next.clone());
+        assert!(flow.is_cancelled());
+        assert_eq!(gate.flows(), 0);
+        assert!(gate.open_flow("approved.invalid", 443, &old).is_none());
+        assert!(gate.open_flow("approved.invalid", 443, &next).is_some());
+    }
+
+    #[tokio::test]
+    async fn admitted_connect_and_http_use_parent_names_while_unlisted_names_and_ips_never_reach_it()
+     {
+        let parent = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let parent_address = parent.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            for port in [443, 80] {
+                let (mut stream, _) = parent.accept().await.unwrap();
+                let (head, _) = read_head(&mut stream).await.unwrap().unwrap();
+                let head = String::from_utf8(head).unwrap();
+                assert!(head.starts_with(&format!("CONNECT approved.invalid:{port} HTTP/1.1\r\n")));
+                assert!(head.contains("Proxy-Authorization: Basic "));
+                stream
+                    .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+                    .await
+                    .unwrap();
+                if port == 443 {
+                    stream.write_all(b"PONG").await.unwrap();
+                } else {
+                    let (head, _) = read_head(&mut stream).await.unwrap().unwrap();
+                    let head = String::from_utf8(head).unwrap();
+                    assert!(head.starts_with("GET /private-path?query=provided HTTP/1.1\r\n"));
+                    assert!(!head.to_ascii_lowercase().contains("proxy-authorization:"));
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let gate = Arc::new(Gate::new());
+        let mut allowed = admission(&["approved.invalid"]);
+        allowed.refused = vec!["0.0.0.0/0".parse().unwrap(), "::/0".parse().unwrap()];
+        gate.set(Some(allowed));
+        gate.set_parent(Some(
+            Parent::parse(&format!(
+                "http://operator:private-password@{parent_address}"
+            ))
+            .unwrap(),
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let proxy = tokio::spawn(serve(
+            listener,
+            gate.clone(),
+            Arc::new(orch_types::SystemClock),
+        ));
+        for target in ["unlisted.invalid:443", "127.0.0.1:443", "0x7f.1:443"] {
+            let mut client = TcpStream::connect(address).await.unwrap();
+            client
+                .write_all(format!("CONNECT {target} HTTP/1.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut reply = String::new();
+            client.read_to_string(&mut reply).await.unwrap();
+            assert!(reply.starts_with("HTTP/1.1 403"));
+        }
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"CONNECT APPROVED.invalid.:443 HTTP/1.1\r\nHost: approved.invalid:443\r\nProxy-Authorization: client-value\r\n\r\n").await.unwrap();
+        let (head, mut rest) = tokio::time::timeout(Duration::from_secs(5), read_head(&mut client))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(head.starts_with(b"HTTP/1.1 200"));
+        while rest.len() < 4 {
+            let mut bytes = [0; 4];
+            let n = client.read(&mut bytes).await.unwrap();
+            assert_ne!(n, 0);
+            rest.extend_from_slice(&bytes[..n]);
+        }
+        assert_eq!(&rest[..4], b"PONG");
+        drop(client);
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client.write_all(b"GET http://approved.invalid/private-path?query=provided HTTP/1.1\r\nHost: approved.invalid\r\nProxy-Authorization: client-value\r\n\r\n").await.unwrap();
+        let mut reply = String::new();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(reply.starts_with("HTTP/1.1 200"));
+        assert!(reply.ends_with("OK"));
+        upstream.await.unwrap();
+        proxy.abort();
+        let _ = proxy.await;
     }
 }

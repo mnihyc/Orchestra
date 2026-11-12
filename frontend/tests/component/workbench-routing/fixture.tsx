@@ -1,5 +1,6 @@
 /** Synthetic feature bodies expose their real PageView context; no router hook/context is mocked. */
 import { useEffect, useLayoutEffect, useState, type ReactNode } from 'react';
+import { LayoutGrid } from 'lucide-react';
 import { client } from '@/api/client';
 import type { Node, Thread } from '@/generated/api-types';
 import { usePageContext, type PageContextValue, type PageNavigation } from '@/features/workbench/pageContext';
@@ -9,6 +10,7 @@ import type { OrgSettingsProps } from '@/features/settings/org/OrgSettings';
 import { useThreadReadRef } from '@/realtime/threadReadContext';
 import { threadViewOf, threadWriter, useThreadView } from '@/realtime/stores/thread';
 import type { ThreadReadTarget } from '@/realtime/threadScope';
+import { useScreenHeading } from '@/shell/screen';
 import { ACME, me, org, userRef } from '../../doubles/fixtures';
 import { World } from '../../doubles/world';
 
@@ -141,6 +143,7 @@ export function ThreadBody({ threadId, continuation, onVersionSelect }: ThreadPr
   </FeaturePane>;
 }
 export function OrgBody({ slug, tab }: OrgHomeProps) {
+  useScreenHeading({ title: department.name, nodeId: department.id, icon: LayoutGrid }, slug === ORG_ADDRESS || slug === ORG_ID);
   return <FeaturePane kind="org"><output aria-label="Org address">{slug}</output><output aria-label="Org tab">{tab}</output></FeaturePane>;
 }
 export function OrgSettingsBody({ slug, section }: OrgSettingsProps) {

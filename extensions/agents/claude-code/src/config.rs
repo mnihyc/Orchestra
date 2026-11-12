@@ -20,10 +20,18 @@ pub const SUBSCRIPTION_TITLE: &str = "Claude subscription";
 
 /// The exact candidate harness pin. A wider range needs real contract/startup evidence for every
 /// advertised version, including the native instruction and quiet-start configuration.
-pub const SUPPORTED_RANGE: &str = "=2.1.312";
+pub const SUPPORTED_RANGE: &str = "=2.1.319";
+
+/// Exact native UUID-prefix protocol set, checked independently of the general startup range.
+/// A new build needs the prefix exclusion, empty-prefix and retained-source controls before addition.
+pub(crate) const INPUT_PREFIX_VERSIONS: &[&str] = &["2.1.319"];
+
+pub(crate) fn input_prefix_supported(version: &str) -> bool {
+    INPUT_PREFIX_VERSIONS.contains(&version)
+}
 
 /// The candidate whose same-version native transcript is being checked before support is advertised.
-pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = "2.1.312";
+pub(crate) const PORTABLE_ARCHIVE_CANDIDATE: &str = "2.1.319";
 
 /// The program looked up on the search path when no binary is given.
 pub const PROGRAM: &str = "claude";
@@ -68,6 +76,12 @@ pub const DEFAULT_SILENCE_SECS: u64 = 15 * 60;
 /// this is only for a harness that is set to try longer, or for one that does not stop.
 pub const DEFAULT_RETRY_PATIENCE_SECS: u64 = 10 * 60;
 
+/// How long a due sub-agent request waits for its transcript to show it before it is reported as the stream
+/// said it. Measured on the pinned build against three runs of a sub-agent with two requests: the transcript
+/// held a message 48 to 144 ms after the frame that printed it, and the last one up to 47 ms after the frame
+/// that said the sub-agent ended; a second is seven times the longest.
+pub const DEFAULT_CHILD_USAGE_WAIT_MS: u64 = 1_000;
+
 /// How long a process is given to end after its input is closed before it is killed: it has nothing left
 /// to do, so a few seconds are plenty, and a hung one must not hold a session open.
 pub const EXIT_GRACE: Duration = Duration::from_secs(8);
@@ -96,7 +110,7 @@ pub const STDERR_KEPT_LINES: usize = 40;
 pub const FRAME_MAX_BYTES: usize = 64 * 1024 * 1024;
 
 /// How many failed attempts in a row the harness announces before a turn says so to the people watching:
-/// the first retries are routine, the fifth is not.
+/// the first retries are routine, the fifth is not. Profiles can change this default.
 pub const RETRY_NOTICE_ATTEMPT: u64 = 5;
 
 /// What the harness's `fast_mode_state` says when the vendor's limit for the fast mode was reached and the harness went on at
@@ -114,8 +128,8 @@ pub const RAW_FRAME_MAX_BYTES: usize = 256 * 1024;
 pub struct ProfileConfig {
     /// Seconds an idle process stays alive when the harness works through Orch's executor; `0` keeps it.
     pub idle_exit_secs: u64,
-    /// Whether a personal harness may run agents and commands in the background. Managed sessions always
-    /// disable this: a native wake-up has no Orch input or model lease.
+    /// Legacy profile preference; the resolved thread background-wake setting governs conversations.
+    /// Version and provider probes always keep autonomous background work disabled.
     pub background_tasks: bool,
     /// Whether the harness's own to-do tools are offered, which is what a plan is made of.
     pub todo_tools: bool,
@@ -129,6 +143,12 @@ pub struct ProfileConfig {
     /// Seconds the harness may go on trying again, with nothing else between, before the turn is ended and the
     /// process stopped; `0` never.
     pub retry_patience_secs: u64,
+    /// Native retry number at which an error notice appears; zero means the first reported retry.
+    /// Live retry status is always reported, independently of this threshold.
+    pub retry_notice_attempt: u64,
+    /// Milliseconds a due sub-agent request waits for its transcript to show the model's closing usage of it,
+    /// before it is reported with the figures the stream gave; `0` does not wait.
+    pub child_usage_wait_ms: u64,
 }
 
 impl Default for ProfileConfig {
@@ -140,6 +160,8 @@ impl Default for ProfileConfig {
             setting_sources: "project".to_owned(),
             silence_secs: DEFAULT_SILENCE_SECS,
             retry_patience_secs: DEFAULT_RETRY_PATIENCE_SECS,
+            retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
+            child_usage_wait_ms: DEFAULT_CHILD_USAGE_WAIT_MS,
         }
     }
 }
@@ -167,6 +189,12 @@ impl ProfileConfig {
         if let Some(secs) = map.get("retry_patience_secs").and_then(Json::as_u64) {
             options.retry_patience_secs = secs;
         }
+        if let Some(attempt) = map.get("retry_notice_attempt").and_then(Json::as_u64) {
+            options.retry_notice_attempt = attempt;
+        }
+        if let Some(wait) = map.get("child_usage_wait_ms").and_then(Json::as_u64) {
+            options.child_usage_wait_ms = wait;
+        }
         if let Some(sources) = map.get("setting_sources").and_then(Json::as_str) {
             let known = ["user", "project", "local"];
             if !sources.is_empty()
@@ -192,6 +220,12 @@ impl ProfileConfig {
         (self.retry_patience_secs > 0).then(|| Duration::from_secs(self.retry_patience_secs))
     }
 
+    /// How long a due sub-agent request waits for its transcript.
+    #[must_use]
+    pub fn child_usage_wait(&self) -> Duration {
+        Duration::from_millis(self.child_usage_wait_ms)
+    }
+
     /// How long an idle process is kept, `None` for always.
     #[must_use]
     pub fn idle_exit(&self) -> Option<Duration> {
@@ -212,6 +246,38 @@ mod tests {
         assert!(!options.background_tasks);
         assert_eq!(options.silence(), Some(Duration::from_secs(900)));
         assert_eq!(options.retry_patience(), Some(Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn retry_notices_have_a_configurable_default_without_delaying_live_status() {
+        assert_eq!(ProfileConfig::default().retry_notice_attempt, 5);
+        for value in [0, 2, 100] {
+            assert_eq!(
+                ProfileConfig::from_json(&json!({"retry_notice_attempt":value}))
+                    .retry_notice_attempt,
+                value
+            );
+        }
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"retry_notice_attempt":"later"})).retry_notice_attempt,
+            5
+        );
+    }
+
+    #[test]
+    fn the_wait_for_a_sub_agents_transcript_has_a_configurable_default() {
+        assert_eq!(
+            ProfileConfig::default().child_usage_wait(),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"child_usage_wait_ms":0})).child_usage_wait(),
+            Duration::ZERO
+        );
+        assert_eq!(
+            ProfileConfig::from_json(&json!({"child_usage_wait_ms":"long"})).child_usage_wait(),
+            Duration::from_secs(1)
+        );
     }
 
     #[test]

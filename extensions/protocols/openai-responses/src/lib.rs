@@ -7,7 +7,7 @@
 //!
 //! | Module | What it knows |
 //! |--------|---------------|
-//! | [`requests`] | The requests that pass (`POST /responses`, `POST /responses/compact`, `GET /models`) and where the model is (the member `model` of the body) |
+//! | [`requests`] | Response creation, model listing and endpoint-declared native search; the model is the body member `model` |
 //! | [`chat`] | Chat Completions pass-through using the same authorization, model discovery and bounded usage reader |
 //! | [`embeddings`] | The Embeddings format: its pass-through, and the batch of texts Orch turns into vectors to search by meaning |
 //! | [`authorization`] | How the key and the endpoint's headers and query are presented, and the shape of a refusal |
@@ -23,12 +23,23 @@
 
 pub mod authorization;
 pub mod chat;
+pub mod chat_generation;
 pub mod credentials;
 pub mod decimal;
 pub mod embeddings;
+pub mod generation;
 pub mod models;
 pub mod requests;
 pub mod usage;
+/// Feature flags are comma lists, independent of credential/scalar header overrides.
+pub(crate) const JOINED_HEADERS: &[&str] = &["openai-beta"];
+pub(crate) const MODEL_LISTS: &[orch_model_contract::protocol::ModelListField] =
+    &[orch_model_contract::protocol::ModelListField {
+        pointer: "/models",
+        member: None,
+    }];
+
+pub mod web_search;
 
 pub use chat::OpenAiChat;
 pub use embeddings::OpenAiEmbeddings;
@@ -59,6 +70,28 @@ impl OpenAiResponses {
 }
 
 impl WireProtocol for OpenAiResponses {
+    fn generation_request(
+        &self,
+        model: &str,
+        input: &orch_model_contract::generation::GenerationInput,
+        stream: bool,
+    ) -> Option<(Method, &'static str, Bytes)> {
+        Some(generation::request(model, input, stream))
+    }
+
+    fn generation_output(
+        &self,
+        body: &[u8],
+    ) -> Result<orch_model_contract::generation::GenerationOutput, WireError> {
+        generation::output(body)
+    }
+
+    fn generation_stream(
+        &self,
+    ) -> Option<Box<dyn orch_model_contract::generation::GenerationStream>> {
+        Some(Box::new(generation::ResponsesStream::default()))
+    }
+
     fn name(&self) -> &'static str {
         OPENAI_RESPONSES
     }
@@ -89,12 +122,28 @@ impl WireProtocol for OpenAiResponses {
         authorization::present(headers, credential, options, secrets)
     }
 
+    fn joined_headers(&self) -> &'static [&'static str] {
+        JOINED_HEADERS
+    }
+
+    fn model_lists(&self) -> &'static [orch_model_contract::protocol::ModelListField] {
+        MODEL_LISTS
+    }
+
     fn deny(&self, status: StatusCode, code: &str, message: &str) -> Response<Bytes> {
         authorization::deny(status, code, message)
     }
 
     fn usage_observer(&self) -> Box<dyn UsageObserver> {
         Box::new(usage::ResponsesUsage::new())
+    }
+
+    fn native_capability(&self, path: &str) -> Option<&'static str> {
+        (path.split('?').next() == Some("/alpha/search")).then_some("web_search")
+    }
+
+    fn usage_observer_at(&self, path: &str, body: &[u8]) -> Box<dyn UsageObserver> {
+        Box::new(usage::ResponsesUsage::for_request(path, body))
     }
 
     fn models_request(&self) -> Option<(Method, &'static str)> {
@@ -122,7 +171,7 @@ impl WireProtocol for OpenAiResponses {
             Bytes::from(
                 serde_json::json!({
                     "model": model, "instructions": system, "input": input,
-                    "max_output_tokens": max_output_tokens, "stream": false,
+                    "max_output_tokens": max_output_tokens, "stream": false, "store": false,
                 })
                 .to_string(),
             ),

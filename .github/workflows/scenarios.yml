@@ -1,0 +1,129 @@
+name: Deployment scenarios
+
+# The one definition of the job that runs the deployment scenarios, against a package that was made already: nothing
+# of the release is compiled here. The Release workflow calls it after `package`, with the package of its own run,
+# and `assemble` (and so `publish`) waits for it. A Release run dispatched with `scenarios_run_id` calls it alone,
+# against the package of an earlier run, to try the scenarios without packaging again.
+on:
+  workflow_call:
+    inputs:
+      commit:
+        description: The commit whose scenario scripts are run (the commit the package was made from)
+        required: true
+        type: string
+      package_run_id:
+        description: Run whose package-x86_64 artifact is the release to try (the calling run's own when empty)
+        required: false
+        default: ''
+        type: string
+      earlier_run_id:
+        description: Run whose package-x86_64 artifact is an earlier release, for the update scenarios (none when empty)
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    name: Deployment scenarios
+    runs-on: ubuntu-24.04
+    # Measured on a machine of ten cores with its images already built: 25 minutes for the eight scenarios of a fresh
+    # installation (two to eight minutes each). A hosted runner has four cores and starts from nothing: it builds the
+    # database image and the environment image, downloads the harness builds (about 420 MB), builds the shipped image
+    # and compiles the scripted model server once (some twenty minutes without a cache), so expect an hour to an hour
+    # and a half. Four hours is more than twice that, and a stalled scenario cannot hold the job for six.
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit }}
+      # A hosted runner starts with about 85 GB free of 145: the scenarios keep about 3 GB at a time besides the images
+      # (the database, the environment image about 2.5 GB, the shipped image), so the spare toolchains stay.
+      - name: Report the runner's capacity
+        run: |
+          nproc
+          free -h
+          df -h /
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: package-x86_64
+          path: .tmp/package
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.package_run_id || github.run_id }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ inputs.earlier_run_id != '' }}
+        with:
+          name: package-x86_64
+          path: .tmp/earlier-package
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.earlier_run_id }}
+      # The managed scenarios follow a turn on the realtime socket with Node's own WebSocket, which the web application's
+      # pinned version has and an older default may not.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - name: Show the release that is tried
+        run: |
+          ls -l .tmp/package
+          jq '{tag, version, commit}' .tmp/package/version.json
+          git rev-parse HEAD
+      - name: Install the repository toolchain
+        run: rustup show
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: scenarios-mock-llm
+          cache-bin: 'false'
+      # The only program compiled here: the scripted model server of the two scenarios that run an agent. It leaves out
+      # the server programs, so it takes minutes, not hours, and a restored cache makes it seconds.
+      - name: Build the scripted model server
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_INCREMENTAL: '0'
+        run: |
+          cargo build --locked -p orch-testkit --bin orch-mock-llm
+          echo "ORCH_SMOKE_MOCK_LLM=$GITHUB_WORKSPACE/target/debug/orch-mock-llm" >> "$GITHUB_ENV"
+      - name: Run the scenarios of a fresh installation
+        timeout-minutes: 180
+        env:
+          ORCH_SMOKE_RELEASE_A: ${{ github.workspace }}/.tmp/package
+          ORCH_SMOKE_RUN: ci${{ github.run_id }}a${{ github.run_attempt }}
+        run: bash scripts/smoke/run-all.sh fresh
+      # This is the first release, installed fresh: there is no earlier release to carry state over from, and none is
+      # spent on that. The scenarios that prove an update, a rollback or a recovery need two real releases, so they are
+      # reported here and never fail the job. When a second real release exists, move them into the step above
+      # (`run-all.sh` with no set runs both) and drop `continue-on-error`.
+      - name: Run the scenarios that need an earlier release (reported, never failing the job)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        timeout-minutes: 90
+        env:
+          ORCH_SMOKE_RELEASE_A: ${{ github.workspace }}/.tmp/earlier-package
+          ORCH_SMOKE_RELEASE_B: ${{ github.workspace }}/.tmp/package
+          ORCH_SMOKE_RUN: ci${{ github.run_id }}b${{ github.run_attempt }}
+          EARLIER: ${{ inputs.earlier_run_id }}
+        run: |
+          if [ -z "$EARLIER" ]; then
+            echo "::notice::update, rollback, recover and release-distribution were not run: they need the package of an earlier release (earlier_run_id)."
+            exit 0
+          fi
+          bash scripts/smoke/run-all.sh upgrade
+      - name: Report the runner's capacity again
+        if: ${{ always() }}
+        run: |
+          df -h /
+          docker system df
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: scenario-evidence-${{ github.run_attempt }}
+          path: .tmp/deploy-smoke/evidence
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

@@ -103,7 +103,7 @@ function valuesOf(fields: readonly OptionField[], options: unknown): Json {
 }
 
 export const optionLabel = (t: TFunction, key: string): string => {
-  const known = ['models', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
+  const known = ['models', 'services', 'efforts', 'arrangements', 'max_environments', 'storages', 'resources_max', 'sources', 'templates', 'capabilities', 'cpu_millis', 'memory_mb', 'memory_swap_mb', 'blkio_weight', 'pids', 'disk_gb'];
   return known.includes(key) ? t(`access.options.${key}`, { defaultValue: key }) : key.replaceAll('_', ' ').replaceAll('.', ' ');
 };
 const optionChoice=(t:TFunction,value:string)=>offeredChoice(t,'arrangement',value)??offeredChoice(t,'effort',value);
@@ -143,7 +143,7 @@ function Fields({ fields, values, onChange }: { fields: readonly OptionField[]; 
           <Input
             key={field.key}
             label={name}
-            hint={field.key === 'models' ? t('access.options.modelsHint') : field.kind === 'strings' ? t('access.options.listHint') : undefined}
+            hint={field.key === 'models' ? t('access.options.modelsHint') : field.key === 'services' ? t('access.options.servicesHint') : field.kind === 'strings' ? t('access.options.listHint') : undefined}
             type={field.kind === 'integer' ? 'number' : 'text'}
             min={field.kind === 'integer' ? 0 : undefined}
             value={typeof values[field.key] === 'string' ? (values[field.key] as string) : ''}

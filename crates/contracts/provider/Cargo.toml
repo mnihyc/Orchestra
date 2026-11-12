@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 orch-plugin-contract.workspace = true
 orch-types.workspace = true
 async-trait.workspace = true

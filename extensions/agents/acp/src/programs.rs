@@ -88,12 +88,30 @@ pub fn dsh() -> Result<AcpProgram, ProgramError> {
 }
 
 #[cfg(test)]
+mod native_config_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::program::{Variables, render};
     use std::path::PathBuf;
 
-    fn variables(models: &[&str]) -> Variables {
+    #[test]
+    fn the_shipped_image_reader_is_classified_from_its_native_name() {
+        let program = dsh().unwrap();
+        let place = crate::tools::Place {
+            program: &program,
+            directory: "/w",
+            cwd: "/w",
+            servers: &[],
+        };
+        assert_eq!(
+            crate::tools::understand(&place, "read_image", "read_image", "other"),
+            crate::tools::Understood::Family(crate::program::ToolFamily::Image)
+        );
+    }
+
+    pub(super) fn variables(models: &[&str]) -> Variables {
         let mut variables = Variables::new(PathBuf::from("/h/threads/t/s"));
         variables.set("profile_home", "/h");
         variables.set("cwd", "/w/app");
@@ -105,6 +123,11 @@ mod tests {
         variables.set("model", models[0]);
         variables.models = models.iter().map(|model| (*model).to_owned()).collect();
         variables.set("api", "openai-completions");
+        variables.set("protocol", "openai-chat");
+        variables.set(
+            "web_search_url",
+            "http://127.0.0.1:41000/llm/0123456789abcdef0123456789abcdef/v1",
+        );
         variables.set("context_window", "200000");
         let program = dsh().unwrap();
         variables.approval = program.approval(orch_agent_contract::descriptor::ApprovalMode::Ask);
@@ -113,6 +136,100 @@ mod tests {
             variables.approval.permission_mode.clone(),
         );
         variables
+    }
+
+    #[test]
+    fn unbound_native_search_is_off_while_the_ordinary_http_page_reader_stays_on() {
+        let program = dsh().unwrap();
+        let plan = program.plan(&variables(&["scripted"])).unwrap();
+        let patch = String::from_utf8(plan.files[0].content.clone()).unwrap();
+        assert!(patch.contains("- id: tool-web\n  config:\n    search: false\n    fetch: true\n"));
+        assert!(!patch.contains("api.deepseek.com"));
+        for name in ["DEEPSEEK_API_KEY", "DEEPSEEK_SEARCH_BASE_URL"] {
+            assert!(!plan.env.contains_key(name));
+            assert!(!program.inherit.iter().any(|value| value == name));
+        }
+    }
+
+    #[test]
+    fn live_search_uses_only_the_bound_messages_route_and_service_suppresses_it() {
+        let program = dsh().unwrap();
+        let model = "allowed-bound-model";
+        for protocol in program.protocol_order() {
+            for mode in [
+                None,
+                Some("disabled"),
+                Some("live"),
+                Some("cached"),
+                Some("service"),
+            ] {
+                let mut variables = variables(&[model]);
+                variables.set("protocol", protocol.clone());
+                variables.set("api", program.api_of(&protocol).unwrap());
+                let params = mode.map_or_else(|| json!({}), |mode| json!({"web_search":mode}));
+                variables
+                    .select_web_search(&params, Some("disabled"))
+                    .unwrap();
+                let plan = program.plan(&variables).unwrap();
+                let patch = String::from_utf8(plan.files[0].content.clone()).unwrap();
+                let tool = patch
+                    .rsplit("- id: tool-web\n")
+                    .next()
+                    .unwrap()
+                    .split("\n- id: ")
+                    .next()
+                    .unwrap();
+                let enabled = protocol == "anthropic-messages" && mode == Some("live");
+                assert!(
+                    tool.contains(&format!("search: {enabled}\n")),
+                    "{protocol} {mode:?}: {tool}"
+                );
+                assert!(tool.contains("fetch: true\n"));
+                assert!(patch.contains("apiKeyEnv: ORCH_LLM_TOKEN\n"));
+                assert!(patch.contains(
+                    "baseURL: \"http://127.0.0.1:41000/llm/0123456789abcdef0123456789abcdef/v1\""
+                ));
+                assert!(patch.contains(&format!("model: \"{model}\"")));
+                assert!(!patch.contains("api.deepseek.com"));
+                assert!(!plan.env.contains_key("DEEPSEEK_API_KEY"));
+            }
+        }
+        let mut variables = variables(&[model]);
+        assert!(
+            variables
+                .select_web_search(&json!({"web_search":true}), Some("disabled"))
+                .is_err()
+        );
+        assert!(
+            variables
+                .select_web_search(&json!({"web_search":"unknown-mode"}), Some("disabled"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_search_rendering_keeps_the_declared_default_and_service_is_still_explicit() {
+        let program = dsh().unwrap();
+        let mut variables = variables(&["bound-model"]);
+        variables.set("protocol", "anthropic-messages");
+        for params in [json!({}), json!({"web_search":null})] {
+            variables.select_web_search(&params, Some("live")).unwrap();
+            let plan = program.plan(&variables).unwrap();
+            assert!(
+                String::from_utf8(plan.files[0].content.clone())
+                    .unwrap()
+                    .contains("search: true\n")
+            );
+        }
+        variables
+            .select_web_search(&json!({"web_search":"service"}), Some("live"))
+            .unwrap();
+        let plan = program.plan(&variables).unwrap();
+        assert!(
+            !String::from_utf8(plan.files[0].content.clone())
+                .unwrap()
+                .contains("search: true\n")
+        );
     }
 
     #[test]

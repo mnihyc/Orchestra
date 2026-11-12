@@ -15,6 +15,111 @@ use orch_agent_contract::descriptor::ArrangementType;
 use orch_db::Conn;
 use orch_types::Id;
 
+/// The ordinary resource-use policy at its actual home, shared by native and HTTP consumers.
+pub async fn resource_policies(
+    conn: &mut Conn,
+    resource: Id,
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let facts = orch_db::queries::resources::resource_facts(conn, &[resource]).await?;
+    let home = facts.first().and_then(|facts| facts.home_id);
+    let place = home.map_or(orch_settings::Place::System, orch_settings::Place::Node);
+    let shared = orch_settings::get(
+        conn,
+        place,
+        orch_settings_contract::registry::keys::PROVIDERS_SUBSCRIPTION_SHARING,
+    )
+    .await?;
+    let outsiders: Option<bool> = orch_settings::get(
+        conn,
+        place,
+        orch_settings_contract::registry::keys::SHARING_ALLOW_EXTERNAL,
+    )
+    .await?;
+    Ok(orch_authz::usable::Policies::everywhere(
+        orch_authz::usable::ResourcePolicy {
+            owners_name_outsiders: outsiders.unwrap_or(false),
+            shared_subscriptions: shared,
+        },
+    ))
+}
+
+/// The same inherited resource policies for a native-selected set, with shared home reads.
+/// These are snapshot facts, never reusable authority or cached permission outcomes.
+pub async fn resource_policies_among(
+    conn: &mut Conn,
+    resources: &[Id],
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    use orch_authz::usable::{Policies, ResourcePolicy};
+    use orch_settings_contract::registry::keys;
+    let facts = orch_db::queries::resources::resource_facts(conn, resources).await?;
+    let homes = facts
+        .iter()
+        .filter_map(|row| row.home_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let sharing = orch_settings::get_at_nodes::<Vec<String>>(
+        conn,
+        &homes,
+        keys::PROVIDERS_SUBSCRIPTION_SHARING,
+    )
+    .await?;
+    let external =
+        orch_settings::get_at_nodes::<bool>(conn, &homes, keys::SHARING_ALLOW_EXTERNAL).await?;
+    let system = if facts.iter().any(|row| row.home_id.is_none()) {
+        let shared_subscriptions = orch_settings::get(
+            conn,
+            orch_settings::Place::System,
+            keys::PROVIDERS_SUBSCRIPTION_SHARING,
+        )
+        .await?;
+        let owners_name_outsiders = orch_settings::get::<bool>(
+            conn,
+            orch_settings::Place::System,
+            keys::SHARING_ALLOW_EXTERNAL,
+        )
+        .await?
+        .unwrap_or(false);
+        ResourcePolicy {
+            owners_name_outsiders,
+            shared_subscriptions,
+        }
+    } else {
+        ResourcePolicy::default()
+    };
+    let mut policies = Policies::everywhere(system);
+    for home in homes {
+        policies = policies.at_home(
+            home,
+            ResourcePolicy {
+                owners_name_outsiders: external.get(&home).copied().flatten().unwrap_or(false),
+                shared_subscriptions: sharing.get(&home).cloned().flatten(),
+            },
+        );
+    }
+    Ok(policies)
+}
+
+/// Resolve a resource-page gift's existing sharing settings beside its ordinary use policy.
+pub async fn resource_sharing_policies(
+    conn: &mut Conn,
+    resource: Id,
+) -> Result<orch_authz::usable::Policies, crate::EngineError> {
+    let policies = resource_policies(conn, resource).await?;
+    let rows = orch_db::queries::resources::resource_facts(conn, &[resource]).await?;
+    let home = rows.first().and_then(|row| row.home_id);
+    let place = home.map_or(orch_settings::Place::System, orch_settings::Place::Node);
+    let sharing: Option<bool> = orch_settings::get(
+        conn,
+        place,
+        orch_settings_contract::registry::keys::SHARING_ALLOW_HOLDERS,
+    )
+    .await?;
+    let mut policy = policies.at(home).node_policy();
+    policy.holders_share = sharing.unwrap_or(true);
+    Ok(policies.with_sharing(home, policy))
+}
+
 /// The resource side of the access engine could not answer.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AccessFault {
@@ -74,7 +179,8 @@ pub struct ProviderUse<'a> {
 /// A limit that stands in the way of a turn, which somebody may let it past.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Limit {
-    /// The provider's own limit, as its vendor reported it.
+    /// Legacy provider bypass-permission query, retained for implementer compatibility.
+    /// Current inputs bypass only configured caps; vendor quota is not a gate.
     ProviderLimit {
         /// The provider.
         provider: Id,

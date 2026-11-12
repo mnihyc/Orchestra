@@ -35,5 +35,6 @@ test('Help does not describe itself as the current screen', async ({ page }) => 
   await signIn(page);
   await page.goto('/help');
   await expect(page.getByRole('tab', { name: /this screen/i })).toHaveCount(0);
-  await expect(page.getByRole('tab', { name: 'Articles', exact: true })).toBeVisible();
+  // The article tab now includes the catalogue count in its accessible name.
+  await expect(page.getByRole('tab', { name: /^Articles \d+$/ })).toBeVisible();
 });

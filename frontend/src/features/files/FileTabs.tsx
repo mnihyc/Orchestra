@@ -38,6 +38,7 @@ import { chosenViewer, factsOf, rememberChoice, type ReadOnlyReason, useViewerCh
 
 /** What a file tab shows: the environment, the thread it is read through, and the path. */
 export interface FileTabOf {
+  endLine?: string;
   env: string;
   thread: string;
   path: string;
@@ -47,7 +48,7 @@ export interface FileTabOf {
 export function fileOf(tab: Tab): FileTabOf | null {
   const of = tab.of;
   if (tab.view !== 'file' || of?.env === undefined || of.thread === undefined || of.path === undefined) return null;
-  return { env: of.env, thread: of.thread, path: of.path };
+  return { env: of.env, thread: of.thread, path: of.path, ...(of.endLine === undefined ? {} : { endLine: of.endLine }) };
 }
 
 export const baseName = (path: string): string => path.slice(path.lastIndexOf('/') + 1);
@@ -240,7 +241,7 @@ function FileBody({ tab, of, userId, access }: { tab: Tab; of: FileTabOf; userId
 
   const facts = factsOf(head.stat);
   const reason: ReadOnlyReason | null = small ? { kind: 'small_screen' } : whyReadOnly(access.mayManage, environment, access.environment.name, directory?.asOf ?? null, viewer, head.stat.is_text);
-  const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
+  const props: ViewerProps = { door, path: of.path, head, line: jump?.line ?? null, endLine: fileLine(of.endLine), lineRequest: jump?.nonce, tabId: tab.id, whyReadOnly: reason, thread: access.thread, openAs: setOverride };
   const choices = viewersFor(facts);
   const updatesPaused = capacity !== null || directory?.capacity !== undefined && directory.capacity !== null
     || directory?.watch === 'failed' || directory?.invalidated === true;

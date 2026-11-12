@@ -27,5 +27,5 @@ export function RecoveryRuleLink({ rule }: { rule: string }) {
   const { threadId } = useTimelineContext();
   const topic = useThreadPart(threadId, (view) => view.thread?.topic_id);
   const label = t('calls.ruleNamed', { rule });
-  return topic === undefined ? <span>{label}</span> : <a className="focus-inset inline-block max-w-full rounded-sm wrap-anywhere text-accent-text underline underline-offset-2" href={`/topic/${encodeURIComponent(topic)}?tab=settings&section=policies&setting=calls.rules#${encodeURIComponent(rule)}`}>{label}</a>;
+  return topic === undefined ? <span>{label}</span> : <a className="focus-inset inline-block max-w-full rounded-sm wrap-anywhere text-accent-text underline underline-offset-2" href={`/topic/${encodeURIComponent(topic)}?tab=settings&section=defaults&setting=calls.rules#${encodeURIComponent(rule)}`}>{label}</a>;
 }

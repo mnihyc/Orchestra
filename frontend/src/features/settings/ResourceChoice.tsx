@@ -1,14 +1,16 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Template and host settings use authorized names; the containing native row owns every write. */
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { hostQuery, hostsQuery, templateQuery, templatesQuery } from '@/api/resources';
 import type { Host, Template } from '@/generated/api-types';
 import type { ValueControlProps } from '@/features/settings/ValueControl';
 import { holds } from '@/lib/permissions';
 import { ErrorState } from '@/ui/ErrorState';
-import { Select } from '@/ui/Select';
-import { ResourceChip, resourceChoice } from '@/features/resource-facts/ResourceFacts';
+import { ResourceChip } from '@/features/resource-facts/ResourceFacts';
+import { hostChoice, templateChoice } from '@/features/resources/choiceAvailability';
 
 export function isResourceSetting(key: string | undefined): boolean {
   return key === 'env.template_id' || key === 'runtime.template_id' || key === 'env.host_id' || key === 'runtime.host_id';
@@ -16,12 +18,12 @@ export function isResourceSetting(key: string | undefined): boolean {
 
 type ChosenResource = { kind: 'host'; value: Host } | { kind: 'template'; value: Template };
 
-function useChoices(key: string, open: boolean, selected: string) {
+function useChoices(key: string, open: boolean, selected: string, t: TFunction) {
   const template = key.endsWith('.template_id');
   const hosts = useQuery({ ...hostsQuery(null), enabled: open && !template });
   const templates = useQuery({ ...templatesQuery(key.startsWith('env.') ? 'environment' : 'provider', null), enabled: open && template });
-  const rows = template ? templates.data?.map((row) => ({ id: row.id, name: row.name, subject: { kind: 'template' as const, template: row }, available: row.enabled && holds(row.access, 'template.use') }))
-    : hosts.data?.map((row) => ({ id: row.id, name: row.name, subject: { kind: 'host' as const, host: row }, available: row.schedulable && holds(row.access, 'host.use') && row.drivers.some((driver) => driver.creates.includes(key.startsWith('env.') ? 'environment' : 'provider')) }));
+  const rows = template ? templates.data?.map((row) => ({ id: row.id, ...templateChoice(row, t) }))
+    : hosts.data?.map((row) => ({ id: row.id, ...hostChoice(row, t, key.startsWith('env.') ? 'environment' : 'provider') }));
   const host = hosts.data?.find((row) => row.id === selected), entry = templates.data?.find((row) => row.id === selected);
   const initial: ChosenResource | undefined = template
     ? entry === undefined ? undefined : { kind: 'template', value: entry }
@@ -42,23 +44,23 @@ export function ResourceSettingChoice({ settingKey, value, label, onChange, onEd
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const selected = typeof value === 'string' ? value : '';
-  const { rows, query, template, initial } = useChoices(settingKey, open, selected);
+  const { rows, query, template, initial } = useChoices(settingKey, open, selected, t);
   const current = rows?.find((row) => row.id === selected);
   const chosen = useChosen(settingKey, selected, initial);
   // Radix does not accept an empty option value; this sentinel never leaves the control.
   const automatic = '\u0000automatic-host';
   return <div className="flex min-w-0 flex-col gap-2">
-    <Select label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0)} onOpenChange={setOpen}
+    <ResourcePicker pickerKey="settings.ResourceChoice" label={label} hideLabel size="sm" value={selected === '' && !template ? automatic : selected} open={open && !query.isError && !(template && query.isSuccess && rows?.length === 0)} onOpenChange={setOpen}
       valueLabel={selected === '' ? undefined : current?.name ?? chosen.data?.name ?? t(chosen.isError ? 'settings.resourceChoice.unavailable' : 'common.loading')}
       placeholder={open && query.isPending ? t('common.loading') : placeholder ?? t('settings.resourceChoice.choose')}
-      disabled={disabled} error={error}
+      disabled={disabled} error={error} loading={query.isFetching}
       options={[
         ...(!template ? [{ value: automatic, label: t('providerRuntime.autoHost') }] : []),
-        ...(rows ?? []).filter((row) => row.available || row.id === selected).map((row) => ({ value: row.id, label: row.name, ...resourceChoice(row.subject), disabled: !row.available })),
+        ...(rows ?? []),
       ]}
       onValueChange={(next) => { onEdited?.(); onChange(next === automatic ? null : next); }} />
     {query.isError && <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => { setOpen(false); void query.refetch(); }} />}
-    {query.isSuccess && !rows?.some((row) => row.available) && <span className="text-sm text-text-muted">{t(template ? 'settings.resourceChoice.noTemplates' : 'settings.resourceChoice.noHosts')}</span>}
+    {query.isSuccess && !rows?.some((row) => !row.disabled) && <span className="text-sm text-text-muted">{t(template ? 'settings.resourceChoice.noTemplates' : 'settings.resourceChoice.noHosts')}</span>}
   </div>;
 }
 

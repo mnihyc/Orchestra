@@ -119,7 +119,7 @@ export function TurnCostDetails({ threadId, turn }: { threadId: string; turn: Tu
   const hit = cacheHitRate(usage);
   const reviews = reviewsOf(items);
   const reportedModels = detail?.models ?? [];
-  const models = reportedModels.length > 0 ? reportedModels.map((model) => ({ name: model.model, tokens: model.tokens.total_tokens })) : [{ name: turn.model_display, tokens: usage.total_tokens }];
+  const models = reportedModels.length > 0 ? reportedModels.map((model) => ({ name: model.model, tokens: 'tokens_reported' in model && model.tokens_reported === false ? null : model.tokens.total_tokens })) : [{ name: turn.model_display, tokens: usage.total_tokens }];
   const subagentShares = detail?.by_subagent ?? [];
   const contextUsed = detail?.context_used ?? null;
   const contextWindow = detail?.context_window ?? null;
@@ -144,7 +144,7 @@ export function TurnCostDetails({ threadId, turn }: { threadId: string; turn: Tu
       </ul>
       {hit !== null && <p className="text-sm text-text-muted">{t('contextUsage.turn.hitRate', { percent: formatPercent(hit, locale) })}</p>}
       <Section title={t('contextUsage.turn.byModel')}>
-        <ul className="flex flex-col gap-1">{models.map((model) => <Row key={model.name} name={model.name} value={formatTokens(model.tokens, locale)} />)}</ul>
+        <ul className="flex flex-col gap-1">{models.map((model) => <Row key={model.name} name={model.name} value={model.tokens === null ? t('usagePerf.notMeasured') : formatTokens(model.tokens, locale)} />)}</ul>
       </Section>
       {subagentShares.length > 0 && (
         <Section title={t('contextUsage.turn.bySubagent')}>
@@ -166,7 +166,7 @@ export function TurnCostDetails({ threadId, turn }: { threadId: string; turn: Tu
         {cost.isError ? (
           <ErrorAlert error={cost.error} />
         ) : cost.data === undefined ? (
-          <SkeletonRows rows={1} />
+          <SkeletonRows read={cost} rows={1} />
         ) : cost.data.rows.length === 0 ? (
           <p className="text-sm text-text-muted">{t(turn.completed_at === null ? 'contextUsage.turn.priceRunning' : 'contextUsage.turn.priceNone')}</p>
         ) : (
