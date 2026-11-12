@@ -2,10 +2,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { inflateRawSync } from 'node:zlib';
-import type { Document, DocumentRef, NewBlock, DocumentImportResult as ImportResult } from '../../src/generated/api-types.ts';
+import type { Document, DocumentRef, NewBlock, DocumentImportResult as ImportResult, ThreadAttachmentCreateReply } from '../../src/generated/api-types.ts';
 import { comparePositions } from '../../src/features/documents/blocks.ts';
 import { formatOf, IMPORT_ENTRIES_MAX } from '../../src/features/people/imports.ts';
 import { readHtml } from '../../src/features/people/html.ts';
+import { readMarkdown } from './markdown-reader.ts';
 import type { Piece } from '../../src/features/documents/pieces.ts';
 import { plainText } from '../../src/features/documents/blocks.ts';
 import { type Answer, type Person, Refusal, type World } from './world.ts';
@@ -16,6 +17,8 @@ const UPLOAD_CHUNK_BYTES = 1024 * 1024;
 const COPY_BYTES = 64 * 1024 * 1024;
 /** A test upload session has the same one-hour life as the ordinary upload service. */
 const UPLOAD_LIFE_MS = 60 * 60 * 1000;
+/** The native upload filename bound, shared by cleaning and collision reservations. */
+const UPLOAD_NAME_CHARS = 255;
 /** ZIP's signatures and bounded end-record search, from its fixed record format. */
 const ZIP_END = 0x06054b50;
 const ZIP_CENTRAL = 0x02014b50;
@@ -24,43 +27,10 @@ const ZIP_END_BYTES = 22;
 const ZIP_COMMENT_BYTES = 65535;
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
-/** What this double's reader makes of Markdown: headings, bullet items by their indent, and paragraphs. The real reader is the server's; a browser test only needs blocks. */
-function readMarkdownLines(source: string): Piece[] {
-  const out: Piece[] = [];
-  const stack: { indent: number; piece: Piece }[] = [];
-  let paragraph: string[] = [];
-  const flush = () => {
-    if (paragraph.length > 0) out.push({ type: 'paragraph', props: {}, content: [{ type: 'text', text: paragraph.join(' ') }], children: [] });
-    paragraph = [];
-  };
-  for (const line of source.replace(/\r\n?/g, '\n').split('\n')) {
-    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
-    const item = /^(\s*)[-*+]\s+(.*)$/.exec(line);
-    if (heading !== null) {
-      flush();
-      out.push({ type: 'heading', props: { level: (heading[1] ?? '#').length }, content: [{ type: 'text', text: heading[2] ?? '' }], children: [] });
-      stack.length = 0;
-    } else if (item !== null) {
-      flush();
-      const indent = (item[1] ?? '').length;
-      const made: Piece = { type: 'bullet', props: {}, content: [{ type: 'text', text: item[2] ?? '' }], children: [] };
-      while (stack.length > 0 && (stack[stack.length - 1]?.indent ?? 0) >= indent) stack.pop();
-      (stack[stack.length - 1]?.piece.children ?? out).push(made);
-      stack.push({ indent, piece: made });
-    } else if (line.trim() === '') {
-      flush();
-    } else {
-      paragraph.push(line.trim());
-    }
-  }
-  flush();
-  return out;
-}
-
 /** A title supplied by the first heading is stored once, outside the copied block tree, and every block has a fresh id: what the server's import makes, in the small. */
 function importedWriting(name: string, source: string, format: 'markdown' | 'html', freshId: () => string): { title: string; blocks: NewBlock[]; warnings: string[] } {
   const html = format === 'html' ? readHtml(source) : null;
-  const pieces = [...(html?.pieces ?? readMarkdownLines(source))];
+  const pieces = [...(html?.pieces ?? readMarkdown(source))];
   const first = pieces[0];
   const heading = first?.type === 'heading' ? plainText(first.content).trim() : '';
   const title = (heading || name.replace(/^.*\//, '').replace(/\.[^.]+$/, '')).slice(0, 200) || 'Untitled';
@@ -107,6 +77,7 @@ export class PeopleImports {
   readonly world: World;
   sessions = new Map<string, Upload>();
   blobs = new Map<string, Upload>();
+  attachments = new Map<string, { owner: string; file: ThreadAttachmentCreateReply }>();
   copied = new Map<string, Document>();
   made = new Map<string, { document: DocumentRef; warnings: string[] }>();
   constructor(world: World) { this.world = world; }
@@ -140,6 +111,46 @@ export class PeopleImports {
       // The double needs a stable content identity; only the real blob store promises its hash algorithm.
       const blob = createHash('sha256').update(upload.bytes).digest('hex'); this.blobs.set(blob, upload);
       return { status: 200, body: { blob, name: upload.name, size: upload.size, media_type: upload.media_type } };
+    }
+    if (method === 'POST' && (match = /^\/threads\/([^/]+)\/attachments$/.exec(path))) {
+      const thread = match[1] ?? '';
+      const row = this.world.places.rowOf(thread);
+      if (row?.kind !== 'thread' || row.deleted) throw new Refusal(404, 'not_found', 'No such thread');
+      this.world.places.need(person, thread, 'thread.interact');
+      const blob = typeof body.blob === 'string' ? body.blob : '';
+      const upload = this.blobs.get(blob);
+      if (upload?.owner !== person.me.id) throw new Refusal(404, 'not_found', 'No uploaded file');
+      const raw = typeof body.name === 'string' ? body.name.trim() : '';
+      if (raw === '' || /\p{Cc}/u.test(raw) || Array.from(raw).length > UPLOAD_NAME_CHARS) throw new Refusal(400, 'request.invalid', 'A file needs a valid name');
+      const safe = raw.replace(/[\\/:*?"<>|]/gu, '_').replace(/^\.+/u, '') || 'file';
+      let name = safe;
+      if (body.replace !== undefined) {
+        if (typeof body.replace !== 'string') throw new Refusal(400, 'request.invalid', 'An attachment replacement needs its path');
+        const prior = this.attachments.get(`${thread}:${body.replace}`);
+        if (prior?.owner !== person.me.id) throw new Refusal(404, 'not_found', 'No attachment to replace');
+        name = prior.file.name;
+      } else {
+        const dot = safe.lastIndexOf('.');
+        const split = dot > 0 ? dot : safe.length;
+        const bytes = Math.max(Buffer.byteLength(safe, 'utf8'), UPLOAD_NAME_CHARS);
+        // At most the existing reservations plus one candidate are examined, using native suffixes.
+        for (let number = 2; this.attachments.has(`${thread}:.orch/attachments/${name}`); number++) {
+          const suffix = ` (${number})`;
+          // Native filenames count code points and keep a collision suffix inside the byte bound.
+          const stem = Array.from(safe.slice(0, split));
+          const extension = Array.from(safe.slice(split));
+          while (stem.length + suffix.length + extension.length > UPLOAD_NAME_CHARS
+            || Buffer.byteLength(`${stem.join('')}${suffix}${extension.join('')}`, 'utf8') > bytes) {
+            if (stem.length > 1) stem.pop();
+            else if (extension.pop() === undefined) break;
+          }
+          name = `${stem.join('')}${suffix}${extension.join('')}`;
+        }
+      }
+      // Reservation stores only the uploaded blob; the workspace is untouched until delivery.
+      const file: ThreadAttachmentCreateReply = { blob, name, path: `.orch/attachments/${name}`, size: upload.size };
+      this.attachments.set(`${thread}:${file.path}`, { owner: person.me.id, file });
+      return { status: 200, body: file };
     }
     if (method === 'POST' && (match = /^\/nodes\/([^/]+)\/documents\/copy$/.exec(path))) {
       const destination = match[1] ?? ''; const max = this.guard(person, destination);

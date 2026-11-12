@@ -1,5 +1,6 @@
 /** A compact project star updates the saved view from one act and restores the old list when refused. */
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Personal from '@/api/personal';
@@ -8,6 +9,7 @@ import { ProjectStar } from '@/features/project/ProjectStar';
 import { SHIPPED_PROJECT_VIEW } from '@/features/project/viewState';
 import type { Favorite, ProjectView } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { NetworkError } from '@/lib/requests';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<() => Promise<Favorite[]>>(), star: vi.fn<(id: string, view: ProjectView | null) => Promise<void>>(), remove: vi.fn<(id: string) => Promise<void>>() }));
@@ -19,6 +21,16 @@ const view: ProjectView = { ...SHIPPED_PROJECT_VIEW, view: 'board', tag_ids: ['v
 
 beforeEach(() => { vi.clearAllMocks(); calls.star.mockResolvedValue(undefined); calls.remove.mockResolvedValue(undefined); calls.read.mockResolvedValue([]); });
 afterEach(async () => { cleanup(); await setLocale('en'); });
+
+it.each(['en', 'zh-CN'] as const)('keeps cached star state and names a failed refresh in %s', async (locale) => {
+  await setLocale(locale); calls.read.mockRejectedValue(new NetworkError('offline'));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  show(<QueryClientProvider client={client}><ProjectStar projectId="release" name="Release" view={view} readableTags={['visible']} /></QueryClientProvider>);
+  await act(async () => { await client.refetchQueries({ queryKey: ['favorites'] }); });
+  expect(await screen.findByRole('alert')).toBeVisible();
+  expect(screen.getByRole('button', { name: i18n.t('day100.views.starMenu', { name: 'Release' }) })).toHaveAttribute('aria-pressed', 'false');
+  expect(screen.getByRole('button', { name: i18n.t('common.tryAgain') })).toBeVisible();
+});
 
 it.each(['en', 'zh-CN'] as const)('stars a view, clears only the saved view and removes the star without a follow-up read in %s', async (locale) => {
   await setLocale(locale); const user = userEvent.setup();

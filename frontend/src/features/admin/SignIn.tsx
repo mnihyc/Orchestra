@@ -41,7 +41,7 @@ function OrgMaking() {
   const { t } = useTranslation();
   const { settings } = useSystemSettings();
   const change = useSettingChange('orgs.created_by');
-  if (settings.isPending) return <SkeletonRows rows={2} />;
+  if (settings.isPending) return <SkeletonRows read={settings} rows={2} />;
   if (settings.isError) return <ErrorState compact error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />;
   // What was asked is shown while it is on its way, and the old choice comes back if the system refuses.
   const held = MAKERS.find((makers) => makers === change.save.variables.value) ?? null;
@@ -73,7 +73,7 @@ function Registration() {
   const { t } = useTranslation();
   const { settings } = useSystemSettings();
   const change = useSettingChange('registration.mode');
-  if (settings.isPending) return <SkeletonRows rows={2} />;
+  if (settings.isPending) return <SkeletonRows read={settings} rows={2} />;
   if (settings.isError) return <ErrorState compact error={settings.error} retrying={settings.isRefetching} onRetry={() => void settings.refetch()} />;
   // What was asked is shown while it is on its way, and the old choice comes back if the system refuses.
   const held = MODES.find((mode) => mode === change.save.variables.value) ?? null;

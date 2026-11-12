@@ -1,0 +1,5 @@
+# The engine's settling round, its head: the test kit, the adapter's programs, the real-harness program, the rule's cases.
+test -p orch-testkit --lib
+test -p orch-adapter-claude-code --lib --test child_usage --test performance --test recorded_transitions --test turns --test background_wake
+test -p orch-engine --test background_wake_native -- --test-threads=3
+test -p orch-engine --test usage_rows --test preflight --test agent_history --test background_wake

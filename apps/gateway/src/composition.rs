@@ -22,11 +22,9 @@ const KEY_FILE: &str = "service_gateway_key.pem";
 const CERT_FILE: &str = "service_gateway_cert.pem";
 
 /// Runs the service until it is asked to stop.
-pub async fn run(config_path: &Path, secrets_dir: &Path, build: BuildInfo) -> anyhow::Result<()> {
-    let config: ServerConfig = orch_config::load(config_path)
-        .with_context(|| format!("reading {}", config_path.display()))?;
+pub async fn run(config: ServerConfig, secrets_dir: &Path, build: BuildInfo) -> anyhow::Result<()> {
     orch_telemetry::init_logging("gateway", LogFormat::named(&config.log.format));
-    tracing::info!(%build, "starting");
+    tracing::info!(%build, worker_stack_mib = config.gateway.worker_stack_mib, "starting");
 
     let read = |name: &str| {
         std::fs::read_to_string(secrets_dir.join(name)).with_context(|| format!("reading {name}"))

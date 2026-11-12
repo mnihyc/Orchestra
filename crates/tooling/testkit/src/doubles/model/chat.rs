@@ -101,6 +101,7 @@ pub fn stream(segment: &Segment, usage: &Usage, ctx: &Ctx) -> (Vec<Frame>, Endin
     for step in &segment.steps {
         match step {
             Step::Sleep(duration) => wire.wait(*duration),
+            Step::Hold(name) => wire.hold(name),
             Step::Keepalive => wire.comment("keep-alive"),
             Step::Event { name, data } => wire.raw(Some(name), data),
             Step::Garbage(text) => wire.raw(None, text),

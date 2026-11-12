@@ -49,7 +49,7 @@ export function NotificationExceptions() {
     },
   });
   return <Section id="notification-exceptions" title={t('notificationExceptions.title')}>
-    {query.isPending?<SkeletonRows rows={2}/>:query.isError?<ErrorState compact error={query.error} onRetry={()=>void query.refetch()} />:<>
+    {query.isPending?<SkeletonRows read={query} rows={2}/>:query.isError?<ErrorState compact error={query.error} onRetry={()=>void query.refetch()} />:<>
       {query.data.items.length===0?<p className="text-sm text-text-muted">{t(query.data.next_cursor!==null?'notificationExceptions.morePrivate':cursors.length>1?'notificationExceptions.pageEmpty':'notificationExceptions.empty')}</p>:
         <ul aria-label={t('notificationExceptions.title')} className="divide-y divide-border">
           {query.data.items.map((row)=>{
@@ -65,7 +65,7 @@ export function NotificationExceptions() {
             </li>;
           })}
         </ul>}
-      <NamePicker label={t('sharedWithMe.findPlaces')} kinds={['org','project','topic','thread']} chosen={null}
+      <NamePicker pickerKey="settings.personal.NotificationExceptions.sharedWithMe.findPlaces" label={t('sharedWithMe.findPlaces')} kinds={['org','project','topic','thread']} chosen={null}
         placeholder={t('settings.place.placeholder')} nothing={t('settings.place.none')}
         onChoose={(hit)=>{const destination=hit===null?null:destinationOf(hit);if(destination!==null)openPath(pathOf(destination));}} />
       {(cursors.length>1 || nextCursor!==null) && <div className="flex items-center gap-2">

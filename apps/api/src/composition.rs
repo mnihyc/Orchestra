@@ -124,10 +124,11 @@ fn notifiers(config: &ServerConfig, secrets_dir: &Path) -> anyhow::Result<Notifi
 /// The built-in sources of a key's facts this program carries, as the connector's program registers them too:
 /// the API names a provider's default source, offers the built-ins and checks a choice of one from this table.
 fn builtin_sources() -> anyhow::Result<Arc<BuiltinSources>> {
-    Ok(Arc::new(BuiltinSources::new([
-        orch_provider_openrouter::builtin(),
-        orch_provider_deepseek::builtin(),
-    ])?))
+    let mut sources = orch_provider_builtins::sources()?;
+    for (name, declarations) in orch_image_backends::declarations()? {
+        sources.register_capabilities(name, declarations)?;
+    }
+    Ok(Arc::new(sources))
 }
 
 fn web_push(config: &ServerConfig, key_file: &Path) -> anyhow::Result<PushNotifier> {
@@ -140,11 +141,13 @@ fn web_push(config: &ServerConfig, key_file: &Path) -> anyhow::Result<PushNotifi
 }
 
 /// Runs the service until it is asked to stop.
-pub async fn run(launch: &Launch<'_>, build: BuildInfo) -> anyhow::Result<()> {
-    let config: ServerConfig = orch_config::load(launch.config)
-        .with_context(|| format!("reading {}", launch.config.display()))?;
+pub async fn run(
+    launch: &Launch<'_>,
+    build: BuildInfo,
+    config: ServerConfig,
+) -> anyhow::Result<()> {
     orch_telemetry::init_logging("api", LogFormat::named(&config.log.format));
-    tracing::info!(%build, "starting");
+    tracing::info!(%build, worker_stack_mib = config.api.worker_stack_mib, "starting");
     let readings = orch_telemetry::install_metrics().context("keeping measurements")?;
 
     anyhow::ensure!(
@@ -663,18 +666,20 @@ async fn stopped() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orch_provider_contract::choice::{Keeper, SourceElement, builtin, default_source};
+    use orch_provider_contract::choice::{Keeper, SourceElement, default_source};
 
     #[test]
     fn the_program_registers_each_vendor_reader_and_a_key_at_its_address_reads_it_by_default() {
         let table = builtin_sources().unwrap();
         assert_eq!(
             table.iter().map(|entry| entry.name).collect::<Vec<_>>(),
-            builtin::KEY_FACTS
+            ["openrouter", "deepseek", "openai", "anthropic"]
         );
         for (address, name) in [
-            ("https://openrouter.ai/api/v1", builtin::OPENROUTER),
-            ("https://api.deepseek.com/anthropic", builtin::DEEPSEEK),
+            ("https://openrouter.ai/api/v1", "openrouter"),
+            ("https://api.deepseek.com/anthropic", "deepseek"),
+            ("https://api.openai.com/v1", "openai"),
+            ("https://api.anthropic.com", "anthropic"),
         ] {
             let endpoints = [url::Url::parse(address).unwrap()];
             assert_eq!(

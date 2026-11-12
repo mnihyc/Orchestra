@@ -5,15 +5,21 @@
  * person's draft on the server, so another device shows the same; a save that fails keeps the words in
  * the form. The message they make is shown before it is sent, and goes through the ordinary input.
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { CancelledError, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { MessageSquareCode, Pencil, X } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useStore } from 'zustand';
+import type { TFunction } from 'i18next';
 import { choiceOption } from '@/i18n/choices';
 
+import { settingsQuery } from '@/api/settings';
+import { useComposerStore } from '@/features/composer/Draft';
+import { needsPlanDefault, planningFor } from '@/features/composer/planning';
 import { saveReviewComments } from '@/api/source';
+import { client as apiClient } from '@/api/client';
 import { draftQuery, sendInput, threadKeys } from '@/api/threads';
-import type { Draft, ReviewComment, ReviewSide } from '@/generated/api-types';
+import type { Draft, ReviewComment, ReviewSide, Thread } from '@/generated/api-types';
 import { holds } from '@/lib/permissions';
 import { graphemeCount } from '@/lib/grapheme';
 import { newActKey } from '@/lib/requests';
@@ -26,11 +32,27 @@ import { Input } from '@/ui/Input';
 import { RadioGroup } from '@/ui/RadioGroup';
 import { Select } from '@/ui/Select';
 import { Textarea } from '@/ui/Textarea';
+import { DiffView, type DiffLineAddress, type DiffViewProps } from '@/ui/DiffView';
 
 import { hunkRange, hunksOf, reviewedHash, reviewMessage } from './words';
 
 /** The longest comment, in characters: a review note, not a document. */
 const COMMENT_MOST = 4_000;
+
+function reviewUnavailable(thread: Thread | null, t: TFunction): string | undefined {
+  return thread === null ? t('implicitAvailability.threadUnavailable')
+    : !holds(thread.access, 'thread.interact') ? t('implicitAvailability.threadInteract') : undefined;
+}
+
+const readerOf = (state: ReturnType<typeof apiClient.session.getState>): string => JSON.stringify([state.userId, state.readerVersion, state.status]);
+const useReviewReader = () => useStore(apiClient.session, readerOf);
+function useReviewOwner(threadId: string) {
+  const reader = useReviewReader();
+  const [own] = useState({ reader, threadId });
+  const current = () => own.threadId === threadId && own.reader === readerOf(apiClient.session.getState());
+  return { valid: own.threadId === threadId && own.reader === reader, current,
+    ensure: () => { if (!current()) throw new CancelledError({ silent: true }); } };
+}
 
 /** Writes the draft's comments anew from what the server holds now, so that another device's comments are kept. */
 async function withComments(threadId: string, change: (comments: ReviewComment[]) => ReviewComment[], current: Draft | null): Promise<Draft> {
@@ -41,37 +63,62 @@ async function withComments(threadId: string, change: (comments: ReviewComment[]
 /** "Comment on lines…" beside a difference, for whoever may talk to the thread's agent. */
 export function CommentOnLines({ threadId, path, diff, itemId }: { threadId: string; path: string; diff: string; itemId: string | null }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  const reader = useReviewReader();
+  const [opened, setOpened] = useState<{ reader: string; threadId: string; path: string; diff: string; itemId: string | null } | null>(null);
   const thread = useThreadRow(threadId);
   const hunks = hunksOf(diff);
-  if (thread === null || !holds(thread.access, 'thread.interact')) return null;
+  if (opened !== null && (opened.threadId !== threadId || opened.reader !== reader)) setOpened(null);
+  const reason = reviewUnavailable(thread, t) ?? (hunks.length === 0 ? t('implicitAvailability.noChangedLines') : undefined);
   return (
     <>
-      <IconButton size="sm" label={t('source.review.comment')} icon={<MessageSquareCode aria-hidden />} disabled={hunks.length === 0} onClick={() => setOpen(true)} />
-      {open && <CommentDialog threadId={threadId} path={path} diff={diff} itemId={itemId} onClose={() => setOpen(false)} />}
+      <IconButton size="sm" label={t('source.review.comment')} icon={<MessageSquareCode aria-hidden />} blocked={reason !== undefined} reason={reason} onClick={() => setOpened({ reader, threadId, path, diff, itemId })} />
+      {opened !== null && opened.reader === reader && opened.threadId === threadId && <CommentDialog threadId={threadId} path={opened.path} diff={opened.diff} itemId={opened.itemId} onClose={() => setOpened(null)} />}
     </>
   );
 }
 
-function CommentDialog({ threadId, path, diff, itemId, onClose }: { threadId: string; path: string; diff: string; itemId: string | null; onClose: () => void }) {
+/** The same form opens from a hovered diff line, retaining its exact patch if the agent writes again. */
+export function ReviewableDiff({ threadId, path, itemId, mayComment = true, ...props }: Omit<DiffViewProps, 'onCommentLine'> & { threadId: string; path: string; itemId: string | null; mayComment?: boolean }) {
+  const { t } = useTranslation();
+  const reader = useReviewReader();
+  const thread = useThreadRow(threadId);
+  const allowed = mayComment && thread !== null && holds(thread.access, 'thread.interact');
+  const [selected, setSelected] = useState<{ reader: string; thread: string; path: string; itemId: string | null; diff: string; address: DiffLineAddress } | null>(null);
+  if (selected !== null && (selected.reader !== reader || selected.thread !== threadId)) setSelected(null);
+  return <><DiffView {...props} {...(allowed && props.diff !== null ? { onCommentLine: (address: DiffLineAddress) => {
+    if (props.diff !== null) setSelected({ reader, thread: threadId, path, itemId, diff: props.diff, address });
+  } } : {})} />
+    {selected !== null && selected.reader === reader && selected.thread === threadId && <CommentDialog threadId={threadId} path={selected.path} diff={selected.diff} itemId={selected.itemId} initialLine={selected.address} unavailableReason={mayComment ? undefined : t('composer.row.readOnly')} onClose={() => setSelected(null)} />}
+  </>;
+}
+
+function CommentDialog({ threadId, path, diff, itemId, onClose, initialLine, unavailableReason }: { threadId: string; path: string; diff: string; itemId: string | null; onClose: () => void; initialLine?: DiffLineAddress; unavailableReason?: string | undefined }) {
   const { t } = useTranslation();
   const client = useQueryClient();
+  const owner = useReviewOwner(threadId);
+  const thread = useThreadRow(threadId);
+  const reason = unavailableReason ?? reviewUnavailable(thread, t);
   const hunks = hunksOf(diff);
-  const [at, setAt] = useState('0');
-  const [side, setSide] = useState<ReviewSide>('new');
+  const [at, setAt] = useState(() => String(initialLine === undefined ? 0 : Math.max(0, hunks.findIndex((hunk) => {
+    const range = hunkRange(hunk, initialLine.side); return initialLine.line >= range.from && initialLine.line <= range.to;
+  }))));
+  const [side, setSide] = useState<ReviewSide>(initialLine?.side ?? 'new');
   const hunk = hunks[Number(at)] ?? hunks[0];
   const range = hunk === undefined ? { from: 1, to: 1 } : hunkRange(hunk, side);
-  const [from, setFrom] = useState(range.from);
-  const [to, setTo] = useState(range.to);
+  const [from, setFrom] = useState(initialLine?.line ?? range.from);
+  const [to, setTo] = useState(initialLine?.line ?? range.to);
   const [text, setText] = useState('');
   const save = useMutation({
     mutationFn: async () => {
+      owner.ensure();
       if (hunk === undefined) return null;
       const current = await client.query({ ...draftQuery(threadId), staleTime: 0 });
       const comment: ReviewComment = { id: crypto.randomUUID(), path, side, from_line: from, to_line: to, diff_hash: await reviewedHash(diff), item_id: itemId, hunk: hunk.text, text: text.trim() };
+      owner.ensure();
       return withComments(threadId, (comments) => [...comments, comment], current);
     },
     onSuccess: (draft) => {
+      if (!owner.current()) return;
       if (draft !== null) client.setQueryData(threadKeys.draft(threadId), draft);
       onClose();
     },
@@ -90,6 +137,7 @@ function CommentDialog({ threadId, path, diff, itemId, onClose }: { threadId: st
   const bounds = hunk === undefined ? null : hunkRange(hunk, side);
   const inside = bounds !== null && from >= bounds.from && to <= bounds.to && from <= to;
   const ready = inside && text.trim() !== '' && graphemeCount(text) <= COMMENT_MOST;
+  if (!owner.valid) return null;
   return (
     <Dialog
       open
@@ -100,13 +148,13 @@ function CommentDialog({ threadId, path, diff, itemId, onClose }: { threadId: st
       footer={
         <>
           <Button onClick={onClose}>{t('common.cancel')}</Button>
-          <Button action="save" variant="primary" pending={save.isPending} disabled={!ready} onClick={() => save.mutate()}>
+          <Button action="save" variant="primary" pending={save.isPending} disabled={!ready} blocked={reason !== undefined} reason={reason} onClick={() => save.mutate()}>
             {t('source.review.save')}
           </Button>
         </>
       }
     >
-      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (ready) save.mutate(); }}>
+      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (ready && reason === undefined) save.mutate(); }}>
         <Select<string> label={t('source.review.hunk')} value={at} onValueChange={(value) => choose({ at: value })} options={hunks.map((one, index) => ({ value: String(index), label: one.text.split('\n')[0] ?? '' }))} />
         <RadioGroup<ReviewSide>
           variant="list"
@@ -132,14 +180,23 @@ function CommentDialog({ threadId, path, diff, itemId, onClose }: { threadId: st
 
 /** The comments waiting in the draft, above the box: each editable and removable, and Review message… to send them as one. */
 export function ReviewTray({ threadId }: { threadId: string }) {
+  const reader = useReviewReader();
+  return <OwnedReviewTray key={JSON.stringify([threadId, reader])} threadId={threadId} />;
+}
+
+function OwnedReviewTray({ threadId }: { threadId: string }) {
   const { t } = useTranslation();
   const client = useQueryClient();
+  const owner = useReviewOwner(threadId);
   const draft = useQuery({ ...draftQuery(threadId), retry: false });
   const [editing, setEditing] = useState<ReviewComment | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const remove = useMutation({
-    mutationFn: async (id: string) => withComments(threadId, (comments) => comments.filter((comment) => comment.id !== id), await client.query({ ...draftQuery(threadId), staleTime: 0 })),
-    onSuccess: (saved) => client.setQueryData(threadKeys.draft(threadId), saved),
+    mutationFn: async (id: string) => {
+      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      return withComments(threadId, (comments) => comments.filter((comment) => comment.id !== id), current);
+    },
+    onSuccess: (saved) => { if (owner.current()) client.setQueryData(threadKeys.draft(threadId), saved); },
   });
   const comments = draft.data?.review_comments ?? [];
   if (comments.length === 0) return null;
@@ -175,15 +232,21 @@ export function ReviewTray({ threadId }: { threadId: string }) {
 function EditComment({ threadId, comment, onClose }: { threadId: string; comment: ReviewComment; onClose: () => void }) {
   const { t } = useTranslation();
   const client = useQueryClient();
+  const owner = useReviewOwner(threadId);
   const [text, setText] = useState(comment.text);
   const save = useMutation({
-    mutationFn: async () => withComments(threadId, (comments) => comments.map((one) => (one.id === comment.id ? { ...one, text: text.trim() } : one)), await client.query({ ...draftQuery(threadId), staleTime: 0 })),
+    mutationFn: async () => {
+      owner.ensure(); const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      return withComments(threadId, (comments) => comments.map((one) => (one.id === comment.id ? { ...one, text: text.trim() } : one)), current);
+    },
     onSuccess: (saved) => {
+      if (!owner.current()) return;
       client.setQueryData(threadKeys.draft(threadId), saved);
       onClose();
     },
   });
   const ready = text.trim() !== '' && graphemeCount(text) <= COMMENT_MOST;
+  if (!owner.valid) return null;
   return (
     <Dialog open size="md" title={t('source.review.editTitle', { path: comment.path })} onOpenChange={(next) => { if (!next) onClose(); }} footer={<><Button onClick={onClose}>{t('common.cancel')}</Button><Button action="save" variant="primary" pending={save.isPending} disabled={!ready} onClick={() => save.mutate()}>{t('source.review.save')}</Button></>}>
       <div className="flex flex-col gap-3">
@@ -198,19 +261,31 @@ function EditComment({ threadId, comment, onClose }: { threadId: string; comment
 function SendReview({ threadId, comments, onClose }: { threadId: string; comments: ReviewComment[]; onClose: () => void }) {
   const { t } = useTranslation();
   const client = useQueryClient();
+  const owner = useReviewOwner(threadId);
+  const thread = useThreadRow(threadId);
+  const chosen = useComposerStore((state) => state.planning[threadId]);
+  const settings = useQuery({ ...settingsQuery(threadId), enabled: owner.valid && thread?.binding?.plan_mode === true });
+  const planPending = needsPlanDefault(thread, chosen) && !settings.isSuccess;
+  const planning = planningFor(thread, chosen, settings.data);
   const key = useRef(newActKey());
   const text = reviewMessage(t, comments);
   const send = useMutation({
     mutationFn: async () => {
-      const reply = await sendInput(threadId, { content: [{ type: 'text', text }], delivery: 'queue', clientId: key.current });
+      owner.ensure();
+      if (planPending) throw new CancelledError({ silent: true });
+      const reply = await sendInput(threadId, { content: [{ type: 'text', text }], delivery: 'queue', clientId: key.current, plan: planning });
+      owner.ensure();
       threadWriter.apply(threadId, { inputs: [reply.input] });
       // What was sent leaves the draft; comments written meanwhile on another device stay.
       const sent = new Set(comments.map((comment) => comment.id));
-      const saved = await withComments(threadId, (all) => all.filter((comment) => !sent.has(comment.id)), await client.query({ ...draftQuery(threadId), staleTime: 0 }));
+      const current = await client.query({ ...draftQuery(threadId), staleTime: 0 }); owner.ensure();
+      const saved = await withComments(threadId, (all) => all.filter((comment) => !sent.has(comment.id)), current);
+      if (!owner.current()) return;
       client.setQueryData(threadKeys.draft(threadId), saved);
     },
-    onSuccess: onClose,
+    onSuccess: () => { if (owner.current()) onClose(); },
   });
+  if (!owner.valid) return null;
   return (
     <Dialog
       open
@@ -221,7 +296,7 @@ function SendReview({ threadId, comments, onClose }: { threadId: string; comment
       footer={
         <>
           <Button onClick={onClose}>{t('common.cancel')}</Button>
-          <Button action="send" variant="primary" pending={send.isPending} onClick={() => send.mutate()}>
+          <Button action="send" variant="primary" pending={send.isPending} disabled={planPending} reason={planPending ? t('composer.plan.checking') : undefined} onClick={() => send.mutate()}>
             {t('source.review.send')}
           </Button>
         </>
@@ -231,7 +306,8 @@ function SendReview({ threadId, comments, onClose }: { threadId: string; comment
         <pre className="max-h-96 overflow-auto rounded-lg border border-border bg-bg-subtle p-3 font-mono text-xs whitespace-pre-wrap wrap-anywhere" data-review-message>
           {text}
         </pre>
-        {send.error !== null && <ErrorAlert error={send.error} />}
+        {planPending && settings.error !== null && <ErrorAlert error={settings.error} action={<Button onClick={() => void settings.refetch()}>{t('common.tryAgain')}</Button>} />}
+      {send.error !== null && <ErrorAlert error={send.error} />}
       </div>
     </Dialog>
   );

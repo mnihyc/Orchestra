@@ -93,9 +93,9 @@ export function EmbeddingsSummary({ value }: { value: unknown }) {
   const named = [typeof value.model_name === 'string' ? value.model_name : '', typeof value.dimensions === 'number' ? formatNumber(value.dimensions, locale) : '']
     .filter((part) => part !== '')
     .join(' · ');
-  return <ProviderDefaultName value={value[PROVIDER_MEMBER]}>{(provider) => (
+  return <ProviderDefaultName value={value[PROVIDER_MEMBER]}>{(name) => (
     <span className="inline-flex min-w-0 flex-wrap gap-x-1">
-      <span>{provider.name}</span>
+      <span>{name}</span>
       <span>·</span>
       <span>{named}</span>
     </span>

@@ -5,24 +5,38 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use orch_connector_core::tool_tunnels::{ENVIRONMENT_HEADER, ExecMount, ExecScope, SESSION_HEADER};
+#[cfg(target_os = "linux")]
 use orch_executor_orch::server::{ExecConfig, OrchExec};
+#[cfg(target_os = "linux")]
 use orch_link::tunnels::channel::OpenError;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
     EnvAttach, EnvDetach, ExecStart, IndexMode, ProcList, SandboxMode,
 };
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{ExecMessage, ExecOpcode, OpenErrorCode, Service, TicketSource};
+#[cfg(target_os = "linux")]
 use orch_pki::tickets::TicketRequest;
+#[cfg(target_os = "linux")]
 use orch_types::{Id, Json, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::tunnels::{Opener, messages, post};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, PATIENCE, stand_in_executors};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(target_os = "linux")]
 fn orch_exec() -> orch_envhost::environment::ExecutorFactory {
     Arc::new(|| {
         Box::new(OrchExec::with_config(ExecConfig {
@@ -32,6 +46,7 @@ fn orch_exec() -> orch_envhost::environment::ExecutorFactory {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn scope(directory: &std::path::Path) -> ExecScope {
     ExecScope {
         thread_id: "a-thread-the-ticket-overrides".to_owned(),
@@ -45,6 +60,7 @@ fn scope(directory: &std::path::Path) -> ExecScope {
 }
 
 /// One MCP exchange with Orch's own executor through a tunnel of its own.
+#[cfg(target_os = "linux")]
 async fn exchange(
     rig: &EnvRig,
     opener: &Opener,
@@ -72,11 +88,13 @@ async fn exchange(
     Ok(messages(&kind, &body))
 }
 
+#[cfg(target_os = "linux")]
 fn call(tool: &str, arguments: Json) -> Json {
     json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": tool, "arguments": arguments } })
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_its_attribution() {
     let mut rig = EnvRig::new();
@@ -193,6 +211,7 @@ async fn a_command_is_run_through_orch_exec_over_a_tunnel_with_its_output_and_it
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn orch_exec_is_reached_the_same_when_the_ticket_names_it_as_an_exec_service() {
     let mut rig = EnvRig::new();
@@ -240,6 +259,7 @@ async fn orch_exec_is_reached_the_same_when_the_ticket_names_it_as_an_exec_servi
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn what_a_session_says_of_itself_is_held_to_the_environment_and_to_the_machines_policy() {
     let mut rig = EnvRig::new();
@@ -384,6 +404,7 @@ async fn what_a_session_says_of_itself_is_held_to_the_environment_and_to_the_mac
 // ---------------------------------------------------------------------------------------------------------
 // An executor of a harness's own protocol
 
+#[cfg(target_os = "linux")]
 async fn read_message(
     tunnel: &mut orch_link::tunnels::channel::Tunnel,
     inbox: &mut bytes::BytesMut,
@@ -403,6 +424,7 @@ async fn read_message(
     .expect("no message came")
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn the_messages_of_an_executor_with_a_protocol_of_its_own_go_both_ways_through_an_exec_tunnel()
  {

@@ -12,7 +12,7 @@ import type { OpenHow } from '@/features/finder/commands';
 import { describe, type Destination, destinationOf, iconOf, placeKindOf, usernameOf, wayOf } from '@/features/finder/destinations';
 import type { Mode } from '@/features/finder/modes';
 import { markedRanges } from '@/features/finder/ranking';
-import type { AdminAccess, NameHit, ThreadDisplay } from '@/generated/api-types';
+import type { AdminAccess, NameHit, NodeRef, ThreadDisplay } from '@/generated/api-types';
 import { adminAccessOf } from '@/ui/AsAdminMark';
 import { labelOfName } from '@/features/search/labels';
 import type { KnownPlaces } from '@/lib/placeLabel';
@@ -31,6 +31,8 @@ export interface FinderRow {
   group: GroupId;
   title: string;
   adminAccess?: AdminAccess | null;
+  /** Actual root for an all-org content result. */
+  org?: NodeRef | null;
   /** The parts of the title that the letters typed fall on. */
   marks: readonly (readonly [number, number])[];
   /** What stands under the name: what it is, and where it lies or what it is set to. */

@@ -36,6 +36,9 @@ tar -xzf "$HOME/orch-release/orch-deploy-<tag>.tar.gz" -C "$HOME/orch"
 cd "$HOME/orch/deploy"
 install -m 600 .env.example .env  # set the database password
 # Set the public URL and machine gateway in config/orch.toml, and configure the HTTPS front.
+# The machine gateway (gateway.example.com in the file) is an example that no machine is told of: replace it
+# by an address that resolves and answers from outside and from inside the stack, or "Add machine" gives no
+# command and environments cannot connect. The bundled node comes online without it.
 ./update.sh first-start --from "$HOME/orch-release"
 ```
 

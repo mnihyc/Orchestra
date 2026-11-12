@@ -165,7 +165,7 @@ export function SearchResults({ door, state, directory, onOpenPath, onOpenFolder
     }
     return <ErrorState compact className="flex-1" error={query.error} onRetry={() => void query.refetch()} />;
   }
-  if (query.isPending) return <SkeletonRows rows={5} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={5} />;
 
   if (state.mode === 'names') {
     const entries = names.data ?? [];

@@ -113,8 +113,24 @@ export function byGroup(defs: readonly KeyDef[]): { group: SettingsGroup; keys: 
 }
 
 /** Whether a lock on a row of this key changes anything: where a lower scope can only narrow, it does not. */
+const NARROWING: Readonly<Record<SettingDef['merge'], boolean>> = {
+  replace: false,
+  union: false,
+  intersect: true,
+  map: false,
+  append: false,
+  min: true,
+  max: true,
+  all: true,
+  any: true,
+  stricter: true,
+};
+export function narrowsOnly(merge: SettingDef['merge']): boolean {
+  return NARROWING[merge];
+}
+
 export function honoursLocks(def: Pick<SettingDef, 'merge'>): boolean {
-  return def.merge !== 'intersect' && def.merge !== 'min';
+  return !narrowsOnly(def.merge);
 }
 
 // ---------------------------------------------------------------- where the value in force comes from
@@ -163,11 +179,14 @@ type Schema = Record<string, unknown>;
 
 const isSchema = (value: unknown): value is Schema => typeof value === 'object' && value !== null && !Array.isArray(value);
 
+/** A declared display choice that remains outside the currently offered enum. */
+export interface UnavailableChoice { value: string; reason: string }
+
 /** How a value is edited: the shape the control is chosen by. */
 export type Shape =
   | { type: 'bool' }
   | { type: 'int'; min: number | null; max: number | null; unit: string | null }
-  | { type: 'choice'; values: readonly string[] }
+  | { type: 'choice'; values: readonly string[]; unavailable?: readonly UnavailableChoice[] }
   | { type: 'text'; maxLength: number | null; pattern: string | null }
   | { type: 'id' }
   | { type: 'time' }
@@ -206,7 +225,12 @@ export function shapeOf(schema: unknown): Shape {
     case 'integer':
       return { type: 'int', min: numberOrNull(schema.minimum), max: numberOrNull(schema.maximum), unit: typeof schema['x-unit'] === 'string' ? schema['x-unit'] : null };
     case 'string': {
-      if (Array.isArray(schema.enum)) return { type: 'choice', values: schema.enum.filter((entry): entry is string => typeof entry === 'string') };
+      if (Array.isArray(schema.enum)) {
+        const unavailable = Array.isArray(schema['x-unavailable-choices']) ? schema['x-unavailable-choices'].flatMap((entry: unknown) =>
+          isSchema(entry) && typeof entry.value === 'string' && typeof entry.reason === 'string' ? [{ value: entry.value, reason: entry.reason }] : []) : [];
+        return { type: 'choice', values: schema.enum.filter((entry): entry is string => typeof entry === 'string'),
+          ...(unavailable.length === 0 ? {} : { unavailable }) };
+      }
       if (schema.format === 'uuid') return { type: 'id' };
       if (schema.format === 'date-time') return { type: 'time' };
       return { type: 'text', maxLength: numberOrNull(schema.maxLength), pattern: typeof schema.pattern === 'string' ? schema.pattern : null };
@@ -299,8 +323,10 @@ export function emptyOf(shape: Shape): unknown {
     case 'list':
       return [];
     case 'map':
-    case 'object':
       return {};
+    case 'object':
+      // Required controls already display these initial values; submit that same complete object.
+      return Object.fromEntries(shape.members.filter((member) => member.required).map((member) => [member.name, emptyOf(member.shape)]));
     case 'nullable':
       return null;
     case 'json':

@@ -14,7 +14,7 @@ import { show } from './support';
 
 vi.mock('@/features/help/open',()=>({useHelpOpener:()=>vi.fn()}));
 vi.mock('@/features/help/Hint',()=>({Hint:()=>null}));
-const setup:ProviderSetup={machines:[],key_machines:[],subscriptions:[],subscriptions_withheld:[],subscriptions_unshared:[],
+const setup:ProviderSetup={ grouping: [],machines:[],key_machines:[],subscriptions:[],subscriptions_withheld:[],subscriptions_unshared:[],
   http_allowed:false,presets:[],api_arrangements:[],runtime_templates:[],sources:[],
   protocols:[{name:'openai-chat',title:'Chat Completions',agents:[],endpoint_options:[]}],};
 vi.mock('@/api/resources',async(load)=>({...await load<typeof ResourcesApi>(),setProviderKey:vi.fn(),
