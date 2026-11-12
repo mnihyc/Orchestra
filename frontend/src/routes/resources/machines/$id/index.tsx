@@ -9,7 +9,7 @@ import { createFileRoute } from '@tanstack/react-router';
 import { Machine, type MachineTab } from '@/features/resources/machines/Machine';
 import { oneOf } from '@/features/resources/search';
 
-const TABS: readonly MachineTab[] = ['overview', 'registered', 'sessions', 'programs', 'storage', 'policy', 'certificate', 'installation', 'access'];
+const TABS: readonly MachineTab[] = ['overview', 'tools', 'registered', 'sessions', 'programs', 'storage', 'policy', 'certificate', 'installation', 'access'];
 
 export const Route = createFileRoute('/resources/machines/$id/')({
   staticData: { screen: 'page' },

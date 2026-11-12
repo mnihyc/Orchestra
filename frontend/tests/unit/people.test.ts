@@ -7,7 +7,7 @@ import { mergeState } from '@/realtime/stores/chat';
 
 const block = (id: string, text: string, more: Partial<DocumentBlock> = {}): DocumentBlock => ({ id, document_id: 'doc', parent_id: null, position: '1', type: 'paragraph', props: {}, content: [{ type: 'text', text }], removed: false, seq_created: 1, seq_updated: 1, updated_by: null, updated_at: '2026-10-01T00:00:00Z', ...more });
 const changes = (rows: DocumentChanges['blocks']): DocumentChanges => ({ from: 1, to: null, authors: [], blocks: rows, title: null });
-const read = (seq: number, revision: number): RevisedChatState => ({ chat_id: 'chat', level: null, effective_level: 'all', engaged: true, hidden: false, last_read_seq: seq, mentions_unread: 1, read_revision: revision });
+const read = (seq: number, revision: number): RevisedChatState => ({ chat_id: 'chat', org_id: 'org', last_message_seq: 12, level: null, effective_level: 'all', engaged: true, hidden: false, last_read_seq: seq, mentions_unread: 1, read_revision: revision });
 
 describe('putting one shown block back', () => {
   it('keeps exact fractional sibling order and authored identifiers and external links', () => {

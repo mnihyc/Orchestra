@@ -1,9 +1,8 @@
 /** Retained and purged content is inspected under its own restore guard without writes, subscriptions or live workspace work. */
 import { expect, test } from '@playwright/test';
 import { TRACE } from '../doubles/fixtures';
-import { ACME, deny, scenario, signIn, threadHeld } from './support';
+import { ACME, deny, DOUBLE, scenario, signIn, threadHeld, arrived } from './support';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41800'}`;
 interface Recorded { requests: { method: string; path: string; query: Record<string, string> }[]; frames: { op?: string; feed?: string }[] }
 async function recorded(): Promise<Recorded> { return (await fetch(`${DOUBLE}/__double/trace/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json() as Promise<Recorded>; }
 test.beforeEach(async () => { await scenario(); });
@@ -17,7 +16,7 @@ test('a deleted row has its name, person, day and independently guarded content 
 
 test('retained conversation reuses the timeline and sends no read, notification, subscription, input or environment act', async ({ page }) => {
   await signIn(page); const before = await threadHeld(TRACE.thread);
-  const reply = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/threads/${TRACE.thread}/sync`));
+  const reply = arrived(page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/threads/${TRACE.thread}/sync`)));
   await page.goto(`/inspect/thread/${TRACE.thread}`);
   const wire: unknown = await (await reply).json();
   expect(wire).toMatchObject({ thread: { inspection: { readonly: true } } });
@@ -29,7 +28,7 @@ test('retained conversation reuses the timeline and sends no read, notification,
 
 test('retained document uses the block renderer without editing, seen writes or a live document feed', async ({ page }) => {
   await signIn(page);
-  const reply = page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/documents/${TRACE.document}/sync`));
+  const reply = arrived(page.waitForResponse((response) => new URL(response.url()).pathname.endsWith(`/documents/${TRACE.document}/sync`)));
   await page.goto(`/inspect/document/${TRACE.document}`);
   const wire: unknown = await (await reply).json();
   expect(wire).toMatchObject({ document: { inspection: { readonly: true } } });
@@ -45,5 +44,8 @@ test('a deleted folder and topic reuse place content, check their children separ
 
 test('purged content and revoked restoration authority show the safe refusal without old content', async ({ page }) => {
   await signIn(page); await page.goto(`/inspect/thread/${TRACE.purged}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible(); await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
-  await deny('ada', [`topic.manage@${ACME.fixLogin}`]); await page.goto(`/inspect/thread/${TRACE.thread}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible(); await expect(page.getByText('Ask Ada Lovelace')).toBeVisible(); await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
+  await deny('ada', [`topic.manage@${ACME.fixLogin}`]); await page.goto(`/inspect/thread/${TRACE.thread}`); await expect(page.getByText('Could not look at this deleted thing')).toBeVisible();
+  await page.getByRole('button', { name: 'Review access', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Review access', exact: true })).toContainText('Ask Ada Lovelace');
+  await expect(page.locator('[data-stored-timeline]')).toHaveCount(0);
 });

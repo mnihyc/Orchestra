@@ -47,7 +47,7 @@ export function ReplaceRecoveryCodes({ me, returned, onClose, onIssued }: {
   </Dialog>;
   return status.isSuccess ? <ReplacementForm me={me} status={status.data} returned={returned} onClose={onClose} onIssued={onIssued} /> : (
     <Dialog open title={t('security.recovery.replaceTitle')} onOpenChange={(open) => !open && onClose()}>
-      {status.isError ? <ErrorState compact error={status.error} retrying={status.isRefetching} onRetry={() => void status.refetch()} /> : <SkeletonRows rows={2} />}
+      {status.isError ? <ErrorState compact error={status.error} retrying={status.isRefetching} onRetry={() => void status.refetch()} /> : <SkeletonRows read={status} rows={2} />}
     </Dialog>
   );
 }

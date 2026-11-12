@@ -19,7 +19,7 @@ export function placeOf(org: Pick<Org, 'name' | 'owner' | 'access' | 'kind'>): R
 export function Policies({ org }: { org: Org }) {
   const { t } = useTranslation();
   return (
-    <Section id="policies" title={t('day100.names.defaults')}>
+    <Section id="defaults" title={t('day100.names.defaults')}>
       <SettingsEditor target={{ kind: 'node', id: org.id }} scope="org" place={placeOf(org)} secrets />
     </Section>
   );

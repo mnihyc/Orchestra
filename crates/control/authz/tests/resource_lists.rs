@@ -256,7 +256,7 @@ async fn what_a_person_may_use_where_they_stand_is_listed_with_the_options_that_
         .find(|item| item.resource.id == by_name)
         .unwrap();
     assert_eq!(
-        named.granted.provider().models.as_deref(),
+        named.granted.named_together().models.as_deref(),
         Some(&["small".to_owned()][..])
     );
     let work = here
@@ -264,7 +264,7 @@ async fn what_a_person_may_use_where_they_stand_is_listed_with_the_options_that_
         .find(|item| item.resource.id == by_work)
         .unwrap();
     assert_eq!(
-        work.granted.provider(),
+        work.granted.named_together(),
         Default::default(),
         "the work in the project has no limit"
     );
@@ -281,7 +281,7 @@ async fn what_a_person_may_use_where_they_stand_is_listed_with_the_options_that_
     let mine = w.usable_list(ada, "provider", None).await;
     assert!(
         mine.iter()
-            .all(|item| item.granted.provider() == Default::default())
+            .all(|item| item.granted.named_together() == Default::default())
     );
     assert_eq!(mine.len(), 3, "not the disabled one");
     // A new thread can be started in an environment by someone who holds Use.

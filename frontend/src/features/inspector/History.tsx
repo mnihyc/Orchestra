@@ -40,7 +40,7 @@ function History({ thread }: { thread: Thread }) {
       <PersonLocator label={t('threadViews.history.person')} value={person?.id ?? null} person={person} onChoose={setPerson} />
     </div>
     <div className="min-h-0 flex-1 overflow-auto p-3">
-      {query.data === undefined ? query.error === null ? <SkeletonRows rows={5} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} retrying={query.isRefetching} /> : <>
+      {query.data === undefined ? query.error === null ? <SkeletonRows read={query} rows={5} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} retrying={query.isRefetching} /> : <>
       {shown.length === 0 && <EmptyState compact icon={<HistoryIcon aria-hidden />} title={t(person !== null || kind !== '' ? 'threadViews.noMatches' : 'threadViews.history.empty')} />}
       <HistoryLines lines={shown} hasMore={query.hasNextPage} loading={query.isFetchingNextPage} error={query.error} onMore={() => void query.fetchNextPage()} renderDetails={(line) => {
         const other = line.about?.thread;

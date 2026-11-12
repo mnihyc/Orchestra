@@ -15,6 +15,9 @@
 //! holder is cleared by a compare-and-set that only one of them wins.
 
 use super::Given;
+use super::handover_authority::{
+    HandoverAuthority, HandoverCommandAuthority, ReturnSource, refused,
+};
 use super::sharing::Issue;
 use crate::commands::{Outcome, Outgoing};
 use crate::engine::{Engine, lock};
@@ -51,6 +54,17 @@ const SCHEDULE_BATCH: i64 = 100;
 /// What a provider says when its credential was given up.
 const LOST_DETAIL: &str =
     "the credential that was handed over was given up: the provider has to be signed in again";
+
+/// Bookkeeping ownership ends even if the HTTP future is cancelled; durable commands keep their rows.
+struct Returning {
+    engine: Engine,
+    provider: Id,
+}
+impl Drop for Returning {
+    fn drop(&mut self) {
+        lock(&self.engine.inner.credentials).end_return(self.provider);
+    }
+}
 
 /// Why a credential is brought home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,11 +237,23 @@ impl Engine {
     /// Closes the sessions the harness processes of a provider hold open on a machine, so that none is
     /// left on a login that has moved. The harness is not waited for: it may well be gone.
     async fn close_sessions_on(&self, provider: Id, machine: Id) {
+        let _ = self
+            .close_sessions_for_return(provider, machine, None)
+            .await;
+    }
+
+    async fn close_sessions_for_return(
+        &self,
+        provider: Id,
+        machine: Id,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<(), ReturnError> {
         let open = lock(&self.inner.sessions).of_provider(provider);
         for (segment, thread, key) in open {
             if key.machine != machine {
                 continue;
             }
+            self.check_return_authority(authority).await?;
             let command = {
                 match self.db().acquire().await {
                     Ok(mut conn) => {
@@ -261,6 +287,7 @@ impl Engine {
             }
             lock(&self.inner.sessions).closed(segment);
         }
+        Ok(())
     }
 
     // ------------------------------------------------------------ bringing it home
@@ -272,18 +299,50 @@ impl Engine {
     /// leaves the credential where it was, and what the environment gave back is kept sealed for the next
     /// try, so that trying again goes on from where it stopped.
     pub async fn return_credential(&self, provider: Id, why: ReturnWhy) -> Result<(), ReturnError> {
+        self.return_credential_with_authority(provider, why, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn return_credential_with_authority(
+        &self,
+        provider: Id,
+        why: ReturnWhy,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<Option<i64>, ReturnError> {
         if !lock(&self.inner.credentials).begin_return(provider) {
             return Err(ReturnError::Failed(
                 "another return of this credential, or a declaration that it is lost, is under way"
                     .to_owned(),
             ));
         }
-        let done = self.bring_home(provider, why).await;
-        lock(&self.inner.credentials).end_return(provider);
-        done
+        let _returning = Returning {
+            engine: self.clone(),
+            provider,
+        };
+        self.bring_home(provider, why, authority).await
     }
 
-    async fn bring_home(&self, provider: Id, why: ReturnWhy) -> Result<(), ReturnError> {
+    async fn check_return_authority(
+        &self,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<(), ReturnError> {
+        if let Some(authority) = authority {
+            let mut tx = self.inner.db.begin().await?;
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            authority.require(&mut tx, self.inner.clock.time()).await?;
+            tx.commit().await.map_err(orch_db::DbError::from)?;
+        }
+        Ok(())
+    }
+
+    async fn bring_home(
+        &self,
+        provider: Id,
+        why: ReturnWhy,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<Option<i64>, ReturnError> {
+        self.check_return_authority(authority).await?;
         let (state, since) = {
             let mut conn = self.inner.db.acquire().await?;
             (
@@ -297,7 +356,7 @@ impl Engine {
         let (Some(environment_id), Some(since)) = (state.held_by_environment_id, since) else {
             return Err(ReturnError::NotHeld);
         };
-        self.clear_handover_turns(provider, environment_id, why)
+        self.clear_handover_turns(provider, environment_id, why, authority)
             .await?;
         let environment = {
             let mut conn = self.inner.db.acquire().await?;
@@ -308,7 +367,8 @@ impl Engine {
                 "the environment that holds it has no machine to take it back from".to_owned(),
             ));
         };
-        self.close_sessions_on(provider, machine).await;
+        self.close_sessions_for_return(provider, machine, authority)
+            .await?;
         let agent = {
             let mut conn = self.inner.db.acquire().await?;
             rows::harness_agent_on(&mut conn, provider, machine).await?
@@ -317,19 +377,100 @@ impl Engine {
         .ok_or_else(|| {
             ReturnError::Failed("no profile's harness is known to hold the credential".to_owned())
         })?;
-        let keeper = self.provider_machine(&state, why.person()).await?;
+        let keeper = self
+            .provider_machine(&state, why.person(), authority)
+            .await?;
         let custodian = self.machine_key(keeper).await?;
         let kept = lock(&self.inner.credentials).unfinished(provider);
         let stamp = since.timestamp_micros().to_le_bytes();
         let attempt = kept.attempt.to_le_bytes();
+        let return_id = ids::derived(
+            "agent.credential.return",
+            &[provider.as_bytes().as_slice(), &stamp, &attempt],
+        );
+        let source = match (kept.source.as_ref(), kept.sealed.as_ref()) {
+            (Some(source), Some(_)) => {
+                let mut conn = self.inner.db.acquire().await?;
+                if source.provider != provider
+                    || source.holder != environment_id
+                    || source.since != since
+                    || source.custodian != custodian
+                    || !source.current(&mut conn, false).await?
+                {
+                    return Err(refused());
+                }
+                if let Some(authority) = authority {
+                    authority
+                        .require(&mut conn, self.inner.clock.time())
+                        .await?;
+                }
+                Some(source.clone())
+            }
+            (None, Some(_)) => return Err(refused()),
+            (_, None) => {
+                if let Some(source) = self
+                    .inner
+                    .commands
+                    .retained_return_source(return_id)
+                    .await?
+                {
+                    let mut conn = self.inner.db.acquire().await?;
+                    let issuing =
+                        self.inner
+                            .commands
+                            .status(return_id)
+                            .await?
+                            .is_none_or(|status| {
+                                matches!(
+                                    status.stage,
+                                    crate::commands::Stage::Queued | crate::commands::Stage::Sent
+                                )
+                            });
+                    if source.provider != provider
+                        || source.holder != environment_id
+                        || source.since != since
+                        || source.return_command != return_id
+                        || source.custodian != custodian
+                        || !source.current(&mut conn, issuing).await?
+                    {
+                        return Err(refused());
+                    }
+                    Some(source)
+                } else {
+                    // A retained command without its actual incarnation is not a source for a new one.
+                    if self
+                        .inner
+                        .commands
+                        .retained_command(return_id)
+                        .await?
+                        .is_some()
+                    {
+                        return Err(refused());
+                    }
+                    let mut conn = self.inner.db.acquire().await?;
+                    Some(
+                        ReturnSource::capture(
+                            &mut conn,
+                            provider,
+                            environment_id,
+                            since,
+                            agent,
+                            custodian.clone(),
+                            return_id,
+                        )
+                        .await?,
+                    )
+                }
+            }
+        };
+        // A retained accepted result belongs to its actual profile, even if another is now preferred.
+        let agent = source.as_ref().map_or(agent, |source| source.agent);
         let sealed = match kept.sealed {
             Some(sealed) => sealed,
             None => {
-                let command = Outgoing::new(
-                    ids::derived(
-                        "agent.credential.return",
-                        &[provider.as_bytes().as_slice(), &stamp, &attempt],
-                    ),
+                self.check_return_authority(authority).await?;
+                let mut command = Outgoing::new(
+                    return_id,
                     machine,
                     SerialKey::Harness {
                         provider_id: provider,
@@ -342,6 +483,13 @@ impl Engine {
                     },
                 )
                 .map_err(EngineError::from)?;
+                if let Some(source) = source.as_ref() {
+                    command = command.with_login_authority(
+                        crate::provider_setup::LoginCommandAuthority::handover(
+                            HandoverCommandAuthority::returning(authority, source),
+                        ),
+                    );
+                }
                 match crate::commands::run(self.inner.commands.as_ref(), command).await? {
                     Outcome::Succeeded(result) => {
                         serde_json::from_value::<SealedCredential>(result)
@@ -357,14 +505,30 @@ impl Engine {
                 }
             }
         };
-        let accept = Outgoing::new(
-            ids::derived(
-                "provider.credential.accept",
-                &[provider.as_bytes().as_slice(), &stamp, &attempt],
-            ),
+        // Retain actual moved material before any later await or current-authority refusal.
+        if let Some(source) = source.as_ref() {
+            lock(&self.inner.credentials).keep_return(provider, sealed.clone(), source.clone());
+        }
+        if let Err(error) = self.check_return_authority(authority).await {
+            lock(&self.inner.credentials).failed_return(provider, Some(sealed));
+            return Err(error);
+        }
+        if let Some(source) = source.as_ref() {
+            let mut conn = self.inner.db.acquire().await?;
+            if !source.current(&mut conn, false).await? {
+                return Err(refused());
+            }
+        }
+        let accept_id = ids::derived(
+            "provider.credential.accept",
+            &[provider.as_bytes().as_slice(), &stamp, &attempt],
+        );
+        let mut accept = Outgoing::new(
+            accept_id,
             keeper,
             SerialKey::Provider(provider),
             &ProviderCredentialAccept {
+                copy: None,
                 provider_id: provider,
                 form: sealed.form.clone(),
                 credential: sealed.credential.clone(),
@@ -372,6 +536,13 @@ impl Engine {
             },
         )
         .map_err(EngineError::from)?;
+        if let Some(source) = source.as_ref() {
+            accept = accept.with_login_authority(
+                crate::provider_setup::LoginCommandAuthority::handover(
+                    HandoverCommandAuthority::accepting(authority, source, accept_id, &sealed)?,
+                ),
+            );
+        }
         match crate::commands::run(self.inner.commands.as_ref(), accept).await? {
             Outcome::Succeeded(_) => {}
             other => {
@@ -382,10 +553,11 @@ impl Engine {
                 )));
             }
         }
-        self.credential_is_home(provider, environment_id, why)
+        let revision = self
+            .credential_is_home(provider, environment_id, since, why, source.as_ref())
             .await?;
         lock(&self.inner.credentials).forget_return(provider);
-        Ok(())
+        Ok(revision)
     }
 
     /// The provider's runtime is home to the credential: the holder is cleared, the return is written
@@ -394,11 +566,28 @@ impl Engine {
         &self,
         provider: Id,
         environment: Id,
+        since: chrono::DateTime<chrono::Utc>,
         why: ReturnWhy,
-    ) -> Result<(), ReturnError> {
+        source: Option<&ReturnSource>,
+    ) -> Result<Option<i64>, ReturnError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
-        let released = rows::release_credential(&mut tx, provider, environment, now).await?;
+        if let Some(source) = source
+            && !source.current(&mut tx, false).await?
+        {
+            return Err(refused());
+        }
+        // Reconcile a completed native accept even after caller/key loss, only for its exact custody.
+        let released = rows::release_credential_incarnation(
+            &mut tx,
+            provider,
+            environment,
+            since,
+            source.map(|source| source.generation),
+            source.map(|source| source.holder_machine),
+            now,
+        )
+        .await?;
         if released {
             let mut entry = Entry::new(
                 why.person().map_or(Actor::System, Actor::User),
@@ -413,33 +602,64 @@ impl Engine {
             audit::append(&mut tx, &entry, &Origin::default(), now).await?;
         }
         let blocked = rows::blocked_threads_of(&mut tx, provider).await?;
+        // Capture the actual accepted revision in this terminal transaction. Automatic
+        // callers retain their prior unit result even if a removed row has no revision.
+        let revision = rows::state(&mut tx, provider)
+            .await?
+            .map(|state| state.revision);
         tx.commit().await.map_err(orch_db::DbError::from)?;
         for thread in blocked {
             self.wake(thread);
         }
-        Ok(())
+        Ok(revision)
     }
 
     /// Gives a credential up: the environment cannot give it back, and its holder is cleared with the
     /// provider in `needs_setup`; it has to be signed in again, and whatever copy remains in the
     /// environment is no longer Orch's to vouch for. Only for a credential that is away.
     pub async fn declare_credential_lost(&self, provider: Id, by: Id) -> Result<(), ReturnError> {
+        self.declare_credential_lost_with_authority(provider, by, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn declare_credential_lost_with_authority(
+        &self,
+        provider: Id,
+        by: Id,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<Option<i64>, ReturnError> {
         if !lock(&self.inner.credentials).begin_return(provider) {
             return Err(ReturnError::Failed(
                 "a return of this credential is under way".to_owned(),
             ));
         }
-        let done = self.give_up_credential(provider, by).await;
-        lock(&self.inner.credentials).end_return(provider);
-        done
+        let _returning = Returning {
+            engine: self.clone(),
+            provider,
+        };
+        self.give_up_credential(provider, by, authority).await
     }
 
-    async fn give_up_credential(&self, provider: Id, by: Id) -> Result<(), ReturnError> {
+    async fn give_up_credential(
+        &self,
+        provider: Id,
+        by: Id,
+        authority: Option<&HandoverAuthority>,
+    ) -> Result<Option<i64>, ReturnError> {
         let now = self.inner.clock.now();
         let mut tx = self.inner.db.begin().await?;
+        if let Some(authority) = authority {
+            orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+            authority.require(&mut tx, self.inner.clock.time()).await?;
+        }
         let state = rows::lock(&mut tx, provider)
             .await?
             .filter(|state| state.deleted_at.is_none());
+        // The row lock can wait; bind the loss to the accepted custody again after it.
+        if let Some(authority) = authority {
+            authority.require(&mut tx, self.inner.clock.time()).await?;
+        }
         let Some(environment) = state.and_then(|state| state.held_by_environment_id) else {
             return Err(ReturnError::NotHeld);
         };
@@ -459,12 +679,17 @@ impl Engine {
         entry.details = json!({ "environment": environment });
         audit::append(&mut tx, &entry, &Origin::default(), now).await?;
         let blocked = rows::blocked_threads_of(&mut tx, provider).await?;
+        // Capture the actual accepted revision in this terminal transaction. Automatic
+        // callers retain their prior unit result even if a removed row has no revision.
+        let revision = rows::state(&mut tx, provider)
+            .await?
+            .map(|state| state.revision);
         tx.commit().await.map_err(orch_db::DbError::from)?;
         lock(&self.inner.credentials).forget_return(provider);
         for thread in blocked {
             self.wake(thread);
         }
-        Ok(())
+        Ok(revision)
     }
 
     /// The machine of the provider's runtime, started and waited for if it is not up: the credential is
@@ -473,10 +698,12 @@ impl Engine {
         &self,
         state: &rows::State,
         by: Option<Id>,
+        authority: Option<&HandoverAuthority>,
     ) -> Result<Id, ReturnError> {
         let began = tokio::time::Instant::now();
         let mut started = false;
         loop {
+            self.check_return_authority(authority).await?;
             let current = {
                 let mut conn = self.inner.db.acquire().await?;
                 rows::state(&mut conn, state.id).await?
@@ -501,7 +728,10 @@ impl Engine {
             }
             if !started {
                 started = true;
-                match self.start_provider_runtime(current.id, by).await {
+                match self
+                    .start_provider_runtime_for_return(current.id, by, authority)
+                    .await
+                {
                     Ok(_) => {}
                     Err(crate::provider_runtime::RuntimeError::Internal(error)) => {
                         return Err(ReturnError::Internal(error));
@@ -529,6 +759,7 @@ impl Engine {
         provider: Id,
         environment: Id,
         why: ReturnWhy,
+        authority: Option<&HandoverAuthority>,
     ) -> Result<(), ReturnError> {
         let running = {
             let mut conn = self.inner.db.acquire().await?;
@@ -548,9 +779,24 @@ impl Engine {
         };
         for thread in running {
             let mut tx = self.inner.db.begin().await?;
+            if let Some(authority) = authority {
+                orch_db::queries::transaction_guard::lock_action(&mut tx).await?;
+                authority.require(&mut tx, self.inner.clock.time()).await?;
+            }
             let finished = {
                 let mut unit = Unit::new(&mut tx, self.inner.clock.now());
                 if threads::lock(&mut *unit.conn, thread).await?.is_none() {
+                    continue;
+                }
+                if let Some(authority) = authority {
+                    authority
+                        .require(&mut *unit.conn, self.inner.clock.time())
+                        .await?;
+                }
+                if !rows::threads_running_in(&mut *unit.conn, provider, environment)
+                    .await?
+                    .contains(&thread)
+                {
                     continue;
                 }
                 if let Some(turn) = threads::active_turn(&mut *unit.conn, thread).await? {
@@ -566,6 +812,7 @@ impl Engine {
         let wait = self.inner.config.interrupt_force + INTERRUPT_MARGIN;
         let began = tokio::time::Instant::now();
         loop {
+            self.check_return_authority(authority).await?;
             let left = {
                 let mut conn = self.inner.db.acquire().await?;
                 rows::threads_running_in(&mut conn, provider, environment)

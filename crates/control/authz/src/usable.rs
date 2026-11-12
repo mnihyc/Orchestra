@@ -20,6 +20,7 @@ use orch_access_contract::pages::{Entry, Holder, Origin};
 use orch_access_contract::permissions::{
     Arrangement, Options, Permission, ProviderUse, ResourceKind,
 };
+use orch_access_contract::whereabouts::Whereabouts;
 use orch_db::Conn;
 use orch_db::queries::resources as rows;
 use orch_types::{Id, Time};
@@ -144,13 +145,63 @@ pub struct Use {
     /// of the work in a place, in the Use row and in the Manage row. What a cap on the entry is
     /// counted against.
     pub entries: Vec<Id>,
+    /// For a provider: what each entry that lets them in allows, one by one, or one unlimited
+    /// allowance of no entry for an owner, a manager and a system admin. `options` is what they
+    /// name together and describes; this is what decides, since an entry is one grant.
+    pub each: Vec<Allowance>,
+}
+
+/// What one entry in the Use row of a provider allows: it is one grant, so a person may do
+/// something through the provider when a single allowance allows all of it together.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Allowance {
+    /// The entry; none for a use that is held as an owner, as a manager or as a system admin, which
+    /// no entry narrows.
+    pub entry: Option<Id>,
+    /// What it allows.
+    pub provider: ProviderUse,
+    /// How near the entry is to the turn it would be put down to; none without an entry.
+    pub rank: Option<options::Rank>,
 }
 
 impl Use {
-    /// What they may run on a provider.
+    /// What their entries name together, member by member (see `ProviderUse::or`). It describes the
+    /// use; it never decides whether they may do something, since it lets the models of one entry go
+    /// with the type or the place of another: ask [`Use::allows`] instead.
     #[must_use]
-    pub fn provider(&self) -> ProviderUse {
+    pub fn named_together(&self) -> ProviderUse {
         options::of_provider(&self.options)
+    }
+
+    /// The allowances that allow all of what is wanted together.
+    #[must_use]
+    pub fn allowing(&self, wanted: &options::Wanted<'_>) -> Vec<&Allowance> {
+        self.each
+            .iter()
+            .filter(|allowance| options::entry_allows(&allowance.provider, wanted))
+            .collect()
+    }
+
+    /// Whether one entry of theirs allows all of what is wanted together.
+    #[must_use]
+    pub fn allows(&self, wanted: &options::Wanted<'_>) -> bool {
+        self.each
+            .iter()
+            .any(|allowance| options::entry_allows(&allowance.provider, wanted))
+    }
+
+    /// The entry a turn that `allowing` allow is put down to: the nearest of them, and for a use
+    /// that no entry narrows the entry that `entry` names.
+    #[must_use]
+    pub fn entry_among(&self, allowing: &[&Allowance]) -> Option<Id> {
+        if self.each.iter().all(|allowance| allowance.entry.is_none()) {
+            return self.entry;
+        }
+        allowing
+            .iter()
+            .filter_map(|allowance| allowance.rank)
+            .min()
+            .map(|rank| rank.entry())
     }
 }
 
@@ -207,6 +258,7 @@ pub fn access(
                 work: Vec::new(),
                 entry: None,
                 entries: Vec::new(),
+                each: unlimited_each(permission),
             })
         } else {
             Err(Access::None)
@@ -250,7 +302,25 @@ pub fn access(
     let owns = ways
         .iter()
         .any(|way| matches!(way, Through::Owner | Through::SystemAdmin));
+    let mut each = Vec::new();
+    if permission == Permission::ProviderUse && !unlimited {
+        for found in &in_use {
+            each.push(Allowance {
+                entry: Some(found.entry.id),
+                provider: options::of_provider(&options::read(permission, found.entry)?),
+                rank: Some(options::rank(
+                    principal.user(),
+                    work.unwrap_or_default(),
+                    found.entry,
+                )),
+            });
+        }
+    }
+    if each.is_empty() {
+        each = unlimited_each(permission);
+    }
     Ok(Ok(Use {
+        each,
         options: combined,
         through: ways,
         work: works,
@@ -261,6 +331,20 @@ pub fn access(
         },
         entries: entries.iter().map(|entry| entry.id).collect(),
     }))
+}
+
+/// The allowances of a use that no entry narrows: one, of no entry, for a provider; none for a
+/// resource whose options are not decided one entry at a time.
+fn unlimited_each(permission: Permission) -> Vec<Allowance> {
+    if permission == Permission::ProviderUse {
+        vec![Allowance {
+            entry: None,
+            provider: ProviderUse::unlimited(),
+            rank: None,
+        }]
+    } else {
+        Vec::new()
+    }
 }
 
 /// The permission that is the highest level of a resource's area, which holds its Use.
@@ -376,6 +460,88 @@ pub async fn usable(
             Err(Access::None) => Usable::No,
         },
     )
+}
+
+/// The exact `usable` decision and options for native-selected IDs on one current snapshot.
+/// Home policy has two ordinary node-policy forms; each is loaded once for all its sites.
+/// Subscription sharing remains the resource's own home policy at the same `access` call.
+pub async fn usable_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    node: Option<Id>,
+    policies: &Policies,
+) -> Result<HashMap<Id, Usable>, Error> {
+    let mut result = HashMap::new();
+    if ids.is_empty() {
+        return Ok(result);
+    }
+    let mut graph = Graph::default();
+    if let Some(node) = node {
+        graph.extend(conn, &[node]).await?;
+    }
+    let found = read_into(conn, &mut graph, ids).await?;
+    let path = node
+        .and_then(|id| graph.get(id))
+        .map(|node| node.path.clone());
+    for external in [false, true] {
+        let selected: Vec<_> = found
+            .iter()
+            .filter(|resource| policies.at(resource.home).owners_name_outsiders == external)
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        let sites: Vec<_> = selected
+            .iter()
+            .filter_map(|resource| site_of(&graph, resource))
+            .collect();
+        let mut permissions = selected
+            .iter()
+            .filter_map(|resource| use_permission(resource.kind))
+            .collect::<Vec<_>>();
+        permissions.sort_by_key(|permission| permission.as_str());
+        permissions.dedup();
+        let frame = Frame::load(
+            conn,
+            principal,
+            ResourcePolicy {
+                owners_name_outsiders: external,
+                ..ResourcePolicy::default()
+            }
+            .node_policy(),
+            graph.clone(),
+            &sites,
+            &permissions,
+        )
+        .await?;
+        let sites = sites
+            .into_iter()
+            .map(|site| (site.id, site))
+            .collect::<HashMap<_, _>>();
+        for resource in selected {
+            let site = sites
+                .get(&resource.id)
+                .ok_or(Error::NotFound(resource.id))?;
+            let answer = if let Some(unavailable) = resource.unavailable() {
+                Usable::Unavailable(unavailable)
+            } else {
+                match access(
+                    &frame,
+                    resource,
+                    site,
+                    path.as_deref(),
+                    policies.at(resource.home).keeps_to_its_owner(resource),
+                )? {
+                    Ok(granted) => Usable::Yes(Box::new(granted)),
+                    Err(Access::KeptToItsOwner) => Usable::KeptToItsOwner,
+                    Err(Access::None) => Usable::No,
+                }
+            };
+            result.insert(resource.id, answer);
+        }
+    }
+    Ok(result)
 }
 
 /// Of the pairs `pairs` (a thread, and the provider it runs on), those for which the person may
@@ -524,6 +690,7 @@ async fn usable_list_with_environment_right(
                     work: Vec::new(),
                     entry: None,
                     entries: Vec::new(),
+                    each: Vec::new(),
                 })
             } else {
                 access(
@@ -687,6 +854,9 @@ struct Judging<'a> {
     /// Whether the state of the provider and the models is looked at: only for somebody who lacks
     /// nothing else, so that nobody learns of it who would be refused in any case.
     state_matters: bool,
+    /// Where the work is to run, for work that runs in an environment; none for work that runs
+    /// in none, which no entry holds to a place.
+    at: Option<&'a Whereabouts>,
 }
 
 /// Judges the use of a provider for what was chosen, for the person the frame is about.
@@ -702,10 +872,13 @@ async fn judge_provider(
         chosen,
         kept,
         state_matters,
+        at,
     } = *judging;
     let wanted_options = MissingOptions {
+        services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
+        r#where: None,
     };
     let lack = |closed: Option<Closed>, options: MissingOptions| Lacking {
         site: site.clone(),
@@ -754,10 +927,12 @@ async fn judge_provider(
             effort: effort.to_owned(),
         });
     }
-    let mine = granted.provider();
-    let arrangements = options::allowed_arrangements(&provider.arrangements, &mine);
+    // The owners' own list is a limit for everybody: a type they do not allow runs for nobody.
     if let Some(arrangement) = chosen.arrangement
-        && !arrangements.contains(&arrangement)
+        && !provider
+            .arrangements
+            .iter()
+            .any(|allowed| allowed == arrangement.as_str())
     {
         verdict
             .blockers
@@ -766,30 +941,182 @@ async fn judge_provider(
     if !verdict.blockers.is_empty() {
         return Ok(verdict);
     }
-    let my_models = options::allowed_models(&models, &mine, chosen.models_allowed);
-    let my_efforts: Vec<&str> = known
-        .map(|model| options::allowed_efforts(model, &mine))
+    // An entry is one grant: it has to allow the model, the effort and the place together.
+    let groups = known.map_or(&[][..], |model| model.groups.as_slice());
+    let wanted = options::Wanted {
+        model: Some((chosen.model, groups)),
+        effort: chosen.effort,
+        at,
+        ..options::Wanted::default()
+    };
+    let allowing = granted.allowing(&wanted);
+    if allowing.is_empty() {
+        // The place is what is lacking when an entry would allow the rest without it.
+        let outside = at
+            .filter(|_| granted.allows(&options::Wanted { at: None, ..wanted }))
+            .and_then(Whereabouts::name);
+        verdict.lacking.push(lack(
+            None,
+            MissingOptions {
+                r#where: outside.map(|name| vec![name]),
+                ..wanted_options
+            },
+        ));
+        return Ok(verdict);
+    }
+    // And a type, if one is chosen, that the same entry allows.
+    let with_type: Vec<&Allowance> = match chosen.arrangement {
+        Some(arrangement) => allowing
+            .iter()
+            .copied()
+            .filter(|allowance| allowance.provider.allows_arrangement(arrangement))
+            .collect(),
+        None => allowing,
+    };
+    if with_type.is_empty() {
+        if let Some(arrangement) = chosen.arrangement {
+            verdict
+                .blockers
+                .push(Blocker::ArrangementNotAllowed { arrangement });
+        }
+        return Ok(verdict);
+    }
+    // What is offered is what the entries that allow all of it give together.
+    let entries: Vec<&ProviderUse> = with_type
+        .iter()
+        .map(|allowance| &allowance.provider)
+        .collect();
+    let offered_models = options::offered_models(&models, &entries, chosen.models_allowed);
+    let offered_efforts: Vec<&str> = known
+        .map(|model| options::offered_efforts(model, &entries))
         .unwrap_or_default();
-    let narrowed_model = !my_models.contains(&chosen.model);
-    let narrowed_effort = chosen
-        .effort
-        .is_some_and(|effort| !my_efforts.contains(&effort));
-    if narrowed_model || narrowed_effort {
-        verdict.lacking.push(lack(None, wanted_options));
-    } else {
-        verdict.grant = Some(TurnGrant {
-            options: mine.clone(),
-            entry: granted.entry,
-            models: my_models.iter().map(|model| (*model).to_owned()).collect(),
-            efforts: my_efforts
-                .iter()
-                .map(|effort| (*effort).to_owned())
-                .collect(),
-            arrangements,
-            through: granted.through.clone(),
+    verdict.grant = Some(TurnGrant {
+        options: union_of(&entries),
+        entry: granted.entry_among(&with_type),
+        models: offered_models
+            .iter()
+            .map(|model| (*model).to_owned())
+            .collect(),
+        efforts: offered_efforts
+            .iter()
+            .map(|effort| (*effort).to_owned())
+            .collect(),
+        arrangements: options::allowed_arrangements(&provider.arrangements, &entries),
+        through: granted.through.clone(),
+    });
+    Ok(verdict)
+}
+
+/// What the entries name together, member by member. It describes; it decides nothing.
+fn union_of(entries: &[&ProviderUse]) -> ProviderUse {
+    entries
+        .split_first()
+        .map_or_else(ProviderUse::default, |(first, rest)| {
+            rest.iter()
+                .fold((*first).clone(), |together, each| together.or(each))
+        })
+}
+
+/// Where the environment `environment` is: itself, the physical machine it is on now (as the
+/// environment resolver reads it, for a managed environment that of its host) and the host that
+/// machine is the facade of. Every question about where an environment is, is answered from here.
+pub async fn place_of(conn: &mut Conn, environment: Id) -> Result<Whereabouts, Error> {
+    let machine = orch_db::queries::environment_facts::of(conn, environment)
+        .await?
+        .and_then(|facts| facts.machine_id);
+    let host = match machine {
+        Some(machine) => orch_db::queries::environment_facts::machine_host(conn, machine).await?,
+        None => None,
+    };
+    Ok(Whereabouts {
+        environment: Some(environment),
+        host,
+        machine,
+    })
+}
+
+/// Where an environment that is to be made on the host `host` will be: on the host and on its machine.
+pub async fn place_of_host(conn: &mut Conn, host: Id) -> Result<Whereabouts, Error> {
+    Ok(Whereabouts {
+        environment: None,
+        host: Some(host),
+        machine: orch_db::queries::environment_facts::host_machine(conn, host).await?,
+    })
+}
+
+/// Where an environment that is to be made as a directory of the machine `machine` will be.
+pub async fn place_of_machine(conn: &mut Conn, machine: Id) -> Result<Whereabouts, Error> {
+    Ok(Whereabouts {
+        environment: None,
+        host: orch_db::queries::environment_facts::machine_host(conn, machine).await?,
+        machine: Some(machine),
+    })
+}
+
+/// What a person comes to on a provider that is asked about alone, with no model, for work that
+/// runs at `at` (none for work that runs in no environment).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Alone {
+    /// They may: the types in which entries that allow the place let work use the provider.
+    Allowed {
+        /// The arrangement types, within those the owners allow.
+        arrangements: Vec<Arrangement>,
+    },
+    /// No entry of theirs allows the place: what they lack, and who can give it.
+    Refused(Box<Refusal>),
+}
+
+/// Judges the use of a provider that is asked about alone, whatever it would run, for work at `at`:
+/// the entries that allow the place are the ones that count, and the types are theirs.
+pub async fn judge_alone(
+    conn: &mut Conn,
+    principal: &Principal,
+    provider: Id,
+    node: Id,
+    granted: &Use,
+    at: Option<&Whereabouts>,
+    policies: &Policies,
+) -> Result<Alone, Error> {
+    let wanted = options::Wanted {
+        at,
+        ..options::Wanted::default()
+    };
+    let mut graph = Graph::default();
+    graph.extend(conn, &[node]).await?;
+    let found = read_into(conn, &mut graph, &[provider]).await?;
+    let resource = pick(&found, provider, ResourceKind::Provider)?;
+    let allowing = granted.allowing(&wanted);
+    if !allowing.is_empty() {
+        let entries: Vec<&ProviderUse> = allowing
+            .iter()
+            .map(|allowance| &allowance.provider)
+            .collect();
+        return Ok(Alone::Allowed {
+            arrangements: options::allowed_arrangements(&resource.arrangements, &entries),
         });
     }
-    Ok(verdict)
+    let site = site_of(&graph, &resource).ok_or(Error::NotFound(provider))?;
+    let lacking = Lacking {
+        site: site.clone(),
+        permissions: vec![Permission::ProviderUse],
+        options: Some(MissingOptions {
+            r#where: at.and_then(Whereabouts::name).map(|name| vec![name]),
+            ..MissingOptions::default()
+        }),
+        closed: None,
+    };
+    let policy = policies.at(resource.home).node_policy();
+    assemble(
+        conn,
+        principal,
+        policy,
+        graph,
+        &site,
+        &[lacking],
+        Permission::ProviderUse,
+    )
+    .await
+    .map(|refusal| Alone::Refused(Box::new(refusal)))
 }
 
 /// The refusal of something that a token's scopes leave out, which is for nobody to give.
@@ -834,6 +1161,19 @@ pub async fn check_turn(
     author: Author<'_>,
     ask: &TurnAsk<'_>,
     policies: &Policies,
+) -> Result<TurnDecision, Error> {
+    check_turn_at(conn, author, ask, policies, None).await
+}
+
+/// As [`check_turn`], for a turn that runs in the environment at `at`: the entries by which the person
+/// uses the provider have to let work run there, too. A turn that runs in no environment is asked with
+/// `None`, and no entry holds it to a place.
+pub async fn check_turn_at(
+    conn: &mut Conn,
+    author: Author<'_>,
+    ask: &TurnAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
 ) -> Result<TurnDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.thread]).await?;
     let thread = graph
@@ -931,6 +1271,7 @@ pub async fn check_turn(
             chosen: &chosen,
             kept,
             state_matters: lacking.is_empty(),
+            at,
         },
     )
     .await?;
@@ -1101,6 +1442,20 @@ pub async fn check_binding(
     ask: &BindingAsk<'_>,
     policies: &Policies,
 ) -> Result<BindingDecision, Error> {
+    check_binding_at(conn, principal, ask, policies, None).await
+}
+
+/// As [`check_binding`], with the environment the thread is to run in given as `at`; where none is
+/// given, the environment the ask itself chooses (an existing one, or the host or machine a new one
+/// is made on) is where the work is to run. The entries by which the person uses the provider have to
+/// let work run there.
+pub async fn check_binding_at(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &BindingAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+) -> Result<BindingDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.node]).await?;
     let node = graph
         .get(ask.node)
@@ -1195,6 +1550,16 @@ pub async fn check_binding(
         blockers: Vec::new(),
         grant: None,
     };
+    let chosen_place = match (at, &ask.environment) {
+        (Some(_), _) | (None, None) => None,
+        (None, Some(EnvironmentChoice::Existing(id))) => Some(place_of(conn, *id).await?),
+        (None, Some(EnvironmentChoice::New(new))) => Some(match &new.place {
+            crate::environments::Place::Host { host, .. } => place_of_host(conn, *host).await?,
+            crate::environments::Place::Machine { machine } => {
+                place_of_machine(conn, *machine).await?
+            }
+        }),
+    };
     if let (Some(resource), Some(site), Some(choice)) = (&provider, &provider_site, &ask.provider) {
         let chosen = Chosen {
             model: choice.model,
@@ -1212,6 +1577,7 @@ pub async fn check_binding(
                 chosen: &chosen,
                 kept: home_policy.keeps_to_its_owner(resource),
                 state_matters: lacking.is_empty(),
+                at: at.or(chosen_place.as_ref()),
             },
         )
         .await?;

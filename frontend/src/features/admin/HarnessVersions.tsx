@@ -92,7 +92,7 @@ export function HarnessVersions({ kinds, builds, title, catalogue, knownBuilds, 
           <div key={kind} className="flex flex-wrap items-end gap-2" data-harness-version={kind}>
             <VersionChoiceControl kind={kind} label={title(kind)} catalogue={catalogue?.(kind)} choice={choice} builds={known.data} target={{ kind: 'system' }} disabled={!change.writable} onFetch={onFetch} onFollow={onFollow} onChange={(next) => write(kind, next)} />
             <span className="flex min-w-0 flex-wrap items-center gap-2 text-sm" aria-label={t('programVersions.resolved', { name: title(kind) })}>{resolved.length === 0 ? t('programVersions.unavailable') : resolved.map((build) => <span key={`${build.os}/${build.arch}`} className="flex min-w-0 flex-wrap items-center gap-2"><span className="min-w-0 wrap-anywhere font-mono">{build.version}</span>{platforms.length > 1 && <span className="text-text-muted">{build.os}/{build.arch}</span>}<BuildStatus build={build} name={title(kind)} catalogue={catalogue?.(kind)} /></span>)}</span>
-            {usage.isPending ? <SkeletonRows rows={1} /> : used.map((row) => {
+            {usage.isPending ? <SkeletonRows read={usage} rows={1} /> : used.map((row) => {
               const environments=t('programVersions.environmentCount',{count:row.environments.length,number:formatNumber(row.environments.length,locale)});
               const providers=t('programVersions.runtimeCount',{count:row.providers.length,number:formatNumber(row.providers.length,locale)});
               const label=t('programVersions.usage',{version:row.version,environments,providers});

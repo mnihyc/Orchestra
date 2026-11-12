@@ -1,9 +1,7 @@
 /** Ports persona walks and current guards against the single component-double world; actual carrier proof is separate. */
 import { expect, test, type Page } from '@playwright/test';
 import { ACME, id, KIND, RUNS_ON } from '../doubles/fixtures.ts';
-import { deny, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, threadHeld } from './support';
-
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41810'}`;
+import { deny, DOUBLE, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, threadHeld } from './support';
 const ENV = RUNS_ON.sandbox;
 async function control(path: string, body: Record<string, unknown> = {}) {
   const reply = await fetch(`${DOUBLE}/__double/ports${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -46,8 +44,27 @@ test('Internal has no opening act; UDP offers the helper and HTTP is explained; 
   await expect(page.getByRole('dialog').getByText(/--token-stdin/).first()).toBeVisible();
   await expect(page.getByRole('dialog').getByText(/actual local address only after it binds/)).toBeVisible();
   await page.keyboard.press('Escape');
-  await page.getByRole('tab', { name: 'Overview', exact: true }).click(); await page.getByRole('tab', { name: 'Ports', exact: true }).click();
-  await page.goto('/resources/environments'); await page.goto(`/resources/environments/${ENV}`); await expect(page.getByRole('tab', { name: 'Ports', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.getByRole('tab', { name: 'Overview', exact: true }).click();
+  // Ports is a Tools section; a chosen section belongs to its address.
+  await page.getByRole('tab', { name: 'Tools', exact: true }).click();
+  const navigation = page.getByRole('tabpanel', { name: 'Tools', exact: true }).getByRole('navigation', { name: 'Tools', exact: true });
+  await expect(navigation).toBeVisible();
+  const ports = navigation.getByRole('link', { name: 'Ports', exact: true });
+  if (await ports.isVisible()) await ports.click();
+  else {
+    await navigation.getByRole('combobox', { name: 'Tools', exact: true }).click();
+    await page.getByRole('option', { name: 'Ports', exact: true }).click();
+  }
+  await expect(page.getByTestId('ports-panel')).toBeVisible();
+  await expect(page).toHaveURL(/[?&]tab=ports(?:&|$)/);
+  const chosenAddress = page.url();
+  await page.goto('/resources/environments');
+  // A bare resource opens Overview; its chosen Ports address restores the selected tool.
+  await page.goto(`/resources/environments/${ENV}`);
+  await expect(page.getByRole('tab', { name: 'Overview', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await page.goto(chosenAddress);
+  await expect(page.getByRole('tab', { name: 'Tools', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByTestId('ports-panel')).toBeVisible();
 });
 
 test('I show a port to a colleague in the project with its current audience count and no other environment door', async ({ page }) => {
@@ -98,15 +115,23 @@ test('a reviewed host candidate cannot be replaced; pending bind has no live Cop
   await dialog.getByRole('button', { name: 'Review address', exact: true }).click();
   await expect(dialog.getByText('Anybody who reaches host.example:41000 reaches this. Orch does not ask them who they are.')).toBeVisible();
   await control('/race'); await dialog.getByRole('button', { name: 'Publish this address' }).click();
-  await expect(dialog.getByText('The reviewed candidate changed or expired. Review again.')).toBeVisible();
+  // Known conflict codes use the shared localized explanation, not the server's diagnostic text.
+  await expect(dialog.getByRole('alert')).toContainText('Somebody changed this in the meantime. Look at how it stands now and try again.');
+  await expect(dialog.getByRole('button', { name: 'Publish this address', exact: true })).toBeDisabled();
   expect((await control('/state'))?.openings).toHaveLength(0);
   await dialog.getByRole('button', { name: 'Review address', exact: true }).click(); await dialog.getByRole('button', { name: 'Publish this address' }).click();
-  await page.keyboard.press('Escape'); const opening = card(page).getByTestId('opening-host');
+  // Close the completed review explicitly before using the page's refresh control.
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const opening = card(page).getByTestId('opening-host');
   await expect(opening.getByText('Opening…', { exact: true })).toBeVisible(); await expect(opening.getByRole('button', { name: 'Copy address' })).toHaveCount(0);
   await control('/acknowledge'); await page.getByRole('button', { name: 'Refresh', exact: true }).click(); await expect(opening.getByText('host.example:41000', { exact: true })).toBeVisible();
   await control('/connections'); await page.getByRole('button', { name: 'Refresh', exact: true }).click(); await opening.getByText(/Who is connected \(/).click();
   await expect(opening.getByText('Seen inside as 127.0.0.1:48122')).toBeVisible(); await expect(opening.getByText('203.0.113.9:51900',{exact:true})).toBeVisible();
-  await opening.getByRole('button', { name: 'Close opening' }).click(); await page.getByRole('dialog').getByRole('button', { name: 'Close opening' }).click();
+  await opening.getByRole('button', { name: 'Close opening' }).click();
+  const confirmation = page.getByRole('dialog', { name: 'Close this opening?', exact: true });
+  await confirmation.getByRole('button', { name: 'Close opening' }).click();
+  await expect(confirmation).toHaveCount(0);
   expect((await control('/state'))?.openings[0]?.desired).toBe(false);
 });
 
@@ -122,10 +147,17 @@ test('links and openings survive program replacement and environment stop; expir
 test('no domain keeps a helper link; current permission loss clears the projection and opens nothing', async ({ page }) => {
   await control('/set', { scene: 'no_domain' }); await open(page); const dialog = await more(page, 'Link');
   await expect(dialog.getByRole('radio', { name: 'Helper', exact: true })).toBeChecked(); await expect(dialog.getByRole('radio', { name: 'Both', exact: true })).toBeDisabled();
-  await dialog.getByLabel('Expires at', { exact: true }).fill(expiry()); await deny('ada', ['ports.manage']); await dialog.getByRole('button', { name: 'Review address', exact: true }).click();
-  await expect(dialog.getByText('Ports access changed. Ask Ada Lovelace.')).toBeVisible(); expect((await control('/state'))?.openings).toHaveLength(0);
-  await page.keyboard.press('Escape'); await deny('ada', ['ports.view']); await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-  await expect(page.getByTestId('port-3000')).toHaveCount(0); await expect(page.getByText('Ports access changed. Ask Ada Lovelace.')).toBeVisible();
+  await dialog.getByLabel('Expires at', { exact: true }).fill(expiry()); await deny('ada', ['ports.manage']);
+  // Live authority removes the act before another request can be sent.
+  await expect(dialog.getByRole('button', { name: 'Review address', exact: true })).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Create link', exact: true })).toBeDisabled();
+  expect((await control('/state'))?.openings).toHaveLength(0);
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await deny('ada', ['ports.view']);
+  await expect(page.getByTestId('port-3000')).toHaveCount(0);
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Review access', exact: true })).toBeVisible();
 });
 
 test('a phone decides an agent request with the link destination stated before Allow once', async ({ page }) => {
@@ -138,7 +170,7 @@ test('a phone decides an agent request with the link destination stated before A
 });
 
 test('the host form reviews its three explicit proposed fields and affected allocations, without a firewall claim', async ({ page }) => {
-  await control('/set', { scene: 'no_range' }); await signIn(page); await page.goto(`/resources/hosts/${id(KIND.host, 1)}`);
+  await control('/set', { scene: 'no_range' }); await signIn(page); await page.goto(`/resources/hosts/${id(KIND.host, 1)}?tab=ports`);
   const host = page.getByTestId('host-ports'); await expect(host.getByText('No declaration saved')).toBeVisible(); await host.getByRole('button', { name: 'Edit ports…' }).click();
   const dialog = page.getByRole('dialog', { name: 'Host ports', exact: true }); await expect(dialog.getByLabel('Incoming address', { exact: true })).toHaveValue('host.example'); await expect(dialog.getByRole('radio', { name: 'All addresses', exact: true })).toBeChecked(); await expect(dialog.getByLabel('Port ranges', { exact: true })).toHaveValue('41000–41015');
   await dialog.getByRole('button', { name: 'Review changes' }).click(); await expect(dialog.getByText('This does not configure a firewall.')).toBeVisible(); await expect(dialog.getByText('Affected openings')).toBeVisible(); await dialog.getByRole('button', { name: 'Save declaration' }).click();
@@ -156,7 +188,10 @@ test('empty, offline, unsupported, refused and failed reads remain distinct, and
     }
     await expect(page.getByText(wording, { exact: true })).toBeVisible();
   }
-  await control('/set', { scene: 'failed' }); await page.reload(); await expect(page.getByText('The current port snapshot could not be read.')).toBeVisible(); await expect(page.getByTestId('port-3000')).toHaveCount(0);
+  await control('/set', { scene: 'failed' }); await page.reload();
+  // A temporary service failure keeps its native failure category and localized explanation.
+  await expect(page.getByText("The port service is not available. Check the environment's connection and try again.")).toBeVisible();
+  await expect(page.getByTestId('port-3000')).toHaveCount(0);
 });
 
 test('Access gives Ports its sixth area and explains what its current Manage cell gives', async ({ page }) => {
@@ -167,7 +202,11 @@ test('Access gives Ports its sixth area and explains what its current Manage cel
   const grid = dialog.getByRole('table', { name: 'Permissions by area' });
   for (const name of ['Environment', 'Files', 'Terminal', 'Browsers', 'VNC', 'Ports']) await expect(grid.getByRole('rowheader', { name, exact: true })).toBeVisible();
   await expect(grid).toContainText('They let more people in, make a link or publish a host port where policy allows.');
-  await expect(grid.getByRole('columnheader', { name: /Interact|Use/ })).toHaveCount(0);
+  // Environment has a Use level; Ports has only View and Manage.
+  await expect(grid.getByRole('columnheader', { name: 'Use', exact: true })).toBeVisible();
+  const ports = grid.getByRole('row').filter({ has: page.getByRole('rowheader', { name: 'Ports', exact: true }) });
+  await expect(ports.getByRole('cell', { name: 'This area has no such level', exact: true })).toBeVisible();
+  await expect(ports.getByText('They let more people in, make a link or publish a host port where policy allows.', { exact: true })).toBeVisible();
 });
 
 
@@ -178,7 +217,11 @@ test('a program repair on an unlisted target makes no opening and refuses a stal
   await dialog.getByRole('radio', { name: 'HTTPS', exact: true }).click(); await dialog.getByRole('radio', { name: 'Custom host', exact: true }).click();
   await dialog.getByLabel('Expected Host', { exact: true }).fill('localhost:8080'); await dialog.getByRole('checkbox', { name: 'Send a PROXY header' }).check();
   await expect(dialog.getByText('The program must expect this on every TCP connection; give it a port of its own.')).toBeVisible();
-  await dialog.getByRole('button', { name: 'Save program options' }).click(); await expect(dialog).toHaveCount(0); await expect(card(page, 8080).getByText(/HTTPS · localhost:8080/)).toBeVisible(); expect((await control('/state'))?.openings).toHaveLength(0);
+  await dialog.getByRole('button', { name: 'Save program options' }).click(); await expect(dialog).toHaveCount(0);
+  // Program facts now keep protocol and host as distinct named definitions.
+  await expect(card(page, 8080).getByRole('definition').filter({ hasText: /^HTTPS$/ })).toBeVisible();
+  await expect(card(page, 8080).getByRole('definition').filter({ hasText: /^localhost:8080$/ })).toBeVisible();
+  expect((await control('/state'))?.openings).toHaveLength(0);
 });
 
 test('the place administrator sees stopped wider admissions and closes only the selected opening', async ({ page }) => {
@@ -191,9 +234,10 @@ test('the place administrator sees stopped wider admissions and closes only the 
 });
 
 test('the ordinary Approval list and thread show the same port card and a late outcome creates no turn', async ({ page }) => {
-  await control('/request'); await signIn(page); await page.goto('/approvals?kind=port'); const request = page.getByTestId('port-request');
+  await control('/request'); await signIn(page); await page.goto('/approvals?kind=port');
+  const request = page.getByRole('region', { name: 'Others you may decide', exact: true }).getByTestId('port-request');
   await expect(request).toBeVisible(); await expect(request.getByRole('button', { name: 'Grant to this environment', exact: true })).toBeVisible();
-  await page.goto(`/thread/${ACME.repro}`); const inThread = page.getByTestId('port-request'); await expect(inThread).toBeVisible();
+  await page.goto(`/thread/${ACME.repro}`); const inThread = page.locator('[data-screen="thread"]:visible').getByTestId('port-request'); await expect(inThread).toBeVisible();
   const before = await threadHeld(ACME.repro);
   await inThread.getByRole('button', { name: 'Allow port 3000 once', exact: true }).click();
   const timeline = page.getByRole('log', { name: 'Conversation', exact: true });
@@ -209,14 +253,18 @@ test('the ordinary Approval list and thread show the same port card and a late o
 test('a port’s own connections need no opening; managers match both peers and permission loss leaves only counts', async ({ page }) => {
   await control('/own-connections'); await open(page); const port = card(page);
   await port.getByText('Who is connected (2)', { exact: true }).click();
-  await expect(port.getByText('Ada Lovelace · ada · 203.0.113.8:51900', { exact: true })).toBeVisible();
+  // The caller uses its display name; the source and inside tuples still match the same row.
+  const caller = port.locator('p').filter({ hasText: '203.0.113.8:51900' });
+  await expect(caller).toContainText('Ada Lovelace');
+  await expect(caller).toContainText('203.0.113.8:51900');
   await expect(port.getByText('Seen inside as 127.0.0.1:48123', { exact: true })).toBeVisible();
-  await port.getByLabel('Inside peer port').fill('48122');
+  await port.getByRole('spinbutton', { name: /^Port in the environment/ }).fill('48122');
   await expect(port.getByText('Seen inside as 127.0.0.1:48123', { exact: true })).toHaveCount(0);
   expect((await control('/state'))?.openings).toHaveLength(0);
   await deny('ada', ['ports.manage']); await page.reload();
   await expect(card(page).getByText(/2 connections/)).toBeVisible();
-  await expect(page.getByText(/203.0.113.8:51900|48122|Grace Hopper · grace/)).toHaveCount(0);
+  await expect(page.getByText(/203.0.113.8:51900|48122/)).toHaveCount(0);
+  await expect(card(page).getByText('Grace Hopper', { exact: true })).toHaveCount(0);
 });
 
 test('reported UDP loss names its actual reasons and never fabricates a successful zero count', async ({ page }) => {

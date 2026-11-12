@@ -17,11 +17,11 @@ import { createInvitation } from '@/api/users';
 import type { AccessChoice, PermissionPage } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
-import { CopyButton } from '@/ui/CopyButton';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
+import { InvitationResult } from '@/features/org/InvitationResult';
 
 import { holderName } from './holders';
 import { type Catalogue, cellHolders } from './model';
@@ -102,15 +102,11 @@ export function InviteOutsider({
             {make.error !== null && <ErrorAlert error={make.error} />}
           </>
         ) : (
-          <>
+          <InvitationResult reply={made} onAnother={() => { actKey.reset(); make.reset(); }} linkLabel={t('access.outsiders.link')} copyLabel={t('access.outsiders.copyLink')}>
             <InlineAlert tone={made.sent ? 'success' : 'warning'}>
               {made.sent ? t('access.outsiders.sent', { email: address.trim() }) : t('access.outsiders.notSent', { email: address.trim() })}
             </InlineAlert>
-            <div className="flex items-center gap-1">
-              <Input label={t('access.outsiders.link')} hideLabel readOnly value={made.url} fieldClassName="min-w-0 flex-1" mono onFocus={(event) => event.currentTarget.select()} />
-              <CopyButton value={made.url} label={t('access.outsiders.copyLink')} />
-            </div>
-          </>
+          </InvitationResult>
         )}
       </div>
     </Dialog>

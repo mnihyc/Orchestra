@@ -461,6 +461,28 @@ fn refused(code: ErrorCode, key: &str, why: &str) -> CommandError {
     error
 }
 
+fn harness_change_policy(policy: Option<&LocalPolicy>) -> Result<&LocalPolicy, CommandError> {
+    let key = PolicyKey::AgentHarnesses;
+    let policy = policy.ok_or_else(|| {
+        refused(
+            ErrorCode::Unsupported,
+            key.as_str(),
+            "this runtime has no local harness policy",
+        )
+    })?;
+    if !policy.delegates(key) {
+        return Err(refusal_authority(
+            policy,
+            refused(
+                ErrorCode::Unsupported,
+                key.as_str(),
+                "the harness selection is kept locally",
+            ),
+        ));
+    }
+    Ok(policy)
+}
+
 /// Turns the code a check of the policy answers into the error of the command.
 fn check(result: Result<(), ErrorCode>, key: &str, why: &str) -> Result<(), CommandError> {
     result.map_err(|code| refused(code, key, why))
@@ -760,11 +782,22 @@ fn gate_command(policy: &LocalPolicy, command: Command) -> Result<Gated, Command
                 ));
             }
         }
-        Command::McpStart(McpStart::Given(_)) => check(
-            policy.check_mcp_add(),
-            "mcp.add",
-            "this machine lets no tool server be written from outside",
-        )?,
+        Command::McpStart(McpStart::Given(given)) => {
+            if given.preset {
+                if given.server_id.is_none() {
+                    return Err(CommandError::new(
+                        ErrorCode::Unsupported,
+                        "a preset names its registered server",
+                    ));
+                }
+            } else {
+                check(
+                    policy.check_mcp_add(),
+                    "mcp.add",
+                    "this machine lets no tool server be written from outside",
+                )?;
+            }
+        }
         Command::McpImport(_) => check(
             policy.check_mcp_import(),
             "mcp.import",
@@ -1041,6 +1074,56 @@ impl PolicyStore {
         })?;
         *state = next;
         self.changed.send_modify(|count| *count += 1);
+        Ok(())
+    }
+
+    /// Reads the current selection only after the machine authorizes a remote harness change.
+    pub(crate) fn harness_selection(&self, kind: &str) -> Result<Option<String>, CommandError> {
+        let state = self.state();
+        let policy = harness_change_policy(state.policy.as_ref())?;
+        Ok(policy.harness(kind).map(|entry| entry.path.clone()))
+    }
+
+    /// Replaces one kind under the existing policy lock; concurrent changes of other kinds survive.
+    pub(crate) fn change_harness(
+        &self,
+        kind: &str,
+        expected: Option<&str>,
+        replacement: Option<&str>,
+    ) -> Result<(), CommandError> {
+        let mut state = self.state();
+        let mut policy = harness_change_policy(state.policy.as_ref())?.clone();
+        if kind.is_empty() || replacement.is_some_and(str::is_empty) {
+            return Err(CommandError::new(
+                ErrorCode::Unsupported,
+                "a harness kind and program path are required",
+            ));
+        }
+        if policy.harness(kind).map(|entry| entry.path.as_str()) != expected {
+            return Err(CommandError::new(
+                ErrorCode::Conflict,
+                "the harness selection changed; refresh the machine and try again",
+            ));
+        }
+        policy.agent_harnesses.retain(|entry| entry.kind != kind);
+        if let Some(path) = replacement {
+            policy.agent_harnesses.push(PolicyHarness {
+                kind: kind.to_owned(),
+                path: path.to_owned(),
+            });
+        }
+        let before = state.config.policy.values.clone();
+        state.config.policy.values.insert(
+            PolicyKey::AgentHarnesses.as_str().into(),
+            policy.get(PolicyKey::AgentHarnesses),
+        );
+        if let Err(error) = self.commit(&mut state, policy) {
+            state.config.policy.values = before;
+            return Err(CommandError::new(
+                ErrorCode::Internal,
+                format!("the harness selection could not be saved: {error}"),
+            ));
+        }
         Ok(())
     }
 
@@ -1389,15 +1472,70 @@ mod tests {
         );
     }
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn individual_harness_changes_replace_one_kind_and_refuse_stale_captures() {
+        let store = PolicyStore::connected(ConnectorConfig::default(), None).unwrap();
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        assert!(store.harness_selection("codex").is_err());
+        assert!(store.change_harness("codex", None, Some("/one")).is_err());
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        store.change_harness("codex", None, Some("/one")).unwrap();
+        store
+            .change_harness("claude-code", None, Some("/two"))
+            .unwrap();
+        let captured = store.harness_selection("codex").unwrap();
+        store
+            .change_harness("codex", captured.as_deref(), Some("/replacement"))
+            .unwrap();
+        assert!(
+            store
+                .change_harness("codex", captured.as_deref(), None)
+                .is_err()
+        );
+        assert_eq!(store.harness("codex").unwrap().path, "/replacement");
+        store
+            .change_harness("codex", Some("/replacement"), None)
+            .unwrap();
+        assert!(store.harness("codex").is_none());
+        assert_eq!(store.harness("claude-code").unwrap().path, "/two");
+    }
+
+    #[test]
+    fn concurrent_harness_changes_preserve_each_other_and_the_handover() {
+        let store = Arc::new(PolicyStore::connected(ConnectorConfig::default(), None).unwrap());
+        store.offered_roles(&[orch_link_contract::session::Role::Environment]);
+        store.delegate(&["agent.harnesses".into()]).unwrap();
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            for (kind, path) in [("codex", "/one"), ("claude-code", "/two")] {
+                let store = Arc::clone(&store);
+                let ready = Arc::clone(&ready);
+                scope.spawn(move || {
+                    ready.wait();
+                    store.change_harness(kind, None, Some(path)).unwrap();
+                });
+            }
+        });
+        assert_eq!(store.harness("codex").unwrap().path, "/one");
+        assert_eq!(store.harness("claude-code").unwrap().path, "/two");
+        assert!(store.policy().unwrap().delegates(PolicyKey::AgentHarnesses));
+    }
+    #[cfg(unix)]
+    use orch_link_contract::commands::{EnvAttach, IndexMode, SessionOpenMount, TurnStart};
     use orch_link_contract::commands::{
-        EnvAttach, ExecStart, FsMaterialize, FsWrite, IndexMode, LeaseOpen, PtyOpen, SessionMode,
-        SessionOpen, SessionOpenExec, SessionOpenMount, TurnStart,
+        ExecStart, FsMaterialize, FsWrite, LeaseOpen, PtyOpen, SessionMode, SessionOpen,
+        SessionOpenExec,
     };
     use orch_types::new_id;
     use serde_json::json;
 
     fn open(directory: &str, executor: Option<&str>) -> SessionOpen {
         SessionOpen {
+            native_model: None,
+            transport_only: false,
+            turn_changes_require_restart: false,
             agent_id: new_id(),
             thread_id: new_id(),
             segment_id: new_id(),
@@ -1419,6 +1557,9 @@ mod tests {
             instructions: String::new(),
             available_models: vec!["fake-large".to_owned()],
             subagent_limits: Default::default(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
             memory: None,
             arrangement: ArrangementType::Together,
             provider: SessionOpenProvider::Native {
@@ -1687,6 +1828,8 @@ mod tests {
             "a harness's reviewer is not the mode that never asks"
         );
         let turn = TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: new_id(),
             turn_id: new_id(),
@@ -1906,6 +2049,27 @@ mod tests {
         assert_eq!(
             code(gate(&policy, exec("orch-exec")).unwrap_err()),
             "policy.exec_not_offered"
+        );
+    }
+
+    #[test]
+    fn a_registered_preset_does_not_take_the_gate_for_an_environment_owned_definition() {
+        let policy = here();
+        assert!(!policy.mcp_add);
+        let given = |preset, server| {
+            Command::McpStart(McpStart::Given(serde_json::from_value(json!({
+            "preset":preset,"server_id":server,"environment_id":new_id(),"name":"registered-tool",
+            "spec":{"transport":"stdio","command":["tool-server"]},"secrets":{}
+        })).unwrap()))
+        };
+        assert!(gate(&policy, given(true, Some(new_id()))).is_ok());
+        assert_eq!(
+            code(gate(&policy, given(false, Some(new_id()))).unwrap_err()),
+            "policy.mcp_add_disabled"
+        );
+        assert_eq!(
+            code(gate(&policy, given(true, None)).unwrap_err()),
+            "unsupported"
         );
     }
 

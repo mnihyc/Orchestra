@@ -125,8 +125,20 @@ async fn a_provider_whose_successor_lost_its_sign_in_goes_back_to_its_old_unit()
             }))
         });
     let job = replacement(&world, provider).await;
-    let (state, _, error) = wait_over(&world, job.id).await;
-    assert_eq!(state, "failed");
+    let (state, progress, error) = wait_over(&world, job.id).await;
+    assert_eq!(
+        state,
+        "failed",
+        "job={} progress={progress} error={error:?}; native_commands={:?}",
+        job.id,
+        unit.added
+            .machine
+            .handler
+            .executions()
+            .iter()
+            .map(|run| run.kind)
+            .collect::<Vec<_>>()
+    );
     assert_eq!(error.as_ref().unwrap()["code"], "sign_in_lost");
     assert_eq!(error.unwrap()["undone"], true);
     let mut conn = world.pool.acquire().await.unwrap();

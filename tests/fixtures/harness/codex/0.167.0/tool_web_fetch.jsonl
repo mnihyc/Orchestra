@@ -1,0 +1,3 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"item/completed","params":{"threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":5,"item":{"type":"webSearch","id":"tool_web_fetch","query":"","action":{"type":"openPage","url":"https://docs.python.org/"}}}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","error":null,"items":[]}}}}

@@ -32,7 +32,7 @@ export const trailQuery = (scope: TraceScope, filters: TraceSearch) => infiniteQ
 });
 
 /** Pending routes use the ordinary bearer and safe error shape, with the same token renewal as the typed client. */
-export async function traceRequest(path: string, options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown; signal?: AbortSignal; key?: string; headers?: HeadersInit } = {}): Promise<Response> {
+export async function traceRequest(path: string, options: { method?: 'GET' | 'POST' | 'PUT' | 'DELETE'; body?: unknown; signal?: AbortSignal; key?: string; headers?: HeadersInit } = {}): Promise<Response> {
   const transport = api as unknown as PendingTransport;
   const answer = await transport.request((options.method ?? 'GET').toLowerCase(), path, { parseAs: 'stream', ...(options.headers === undefined ? {} : { headers: options.headers }), ...(options.body === undefined ? {} : { body: options.body }), ...(options.signal === undefined ? {} : { signal: options.signal }), ...(options.key === undefined ? {} : repeatable(options.key)) });
   await ok(Promise.resolve(answer));

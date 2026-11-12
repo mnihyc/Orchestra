@@ -15,7 +15,7 @@ export function TargetBuilds({ updates, programs }: { updates: readonly PendingU
   const targets = updates.filter((change) => change.what === 'harness');
   const builds = useQuery({ ...programBuildsQuery, enabled: targets.length > 0 && programs === undefined });
   if (targets.length === 0) return null;
-  if (programs === undefined && builds.isPending) return <SkeletonRows rows={1} />;
+  if (programs === undefined && builds.isPending) return <SkeletonRows read={builds} rows={1} />;
   if (programs === undefined && builds.isError) return <ErrorAlert error={builds.error} />;
   return <div className="flex flex-col gap-1">{targets.map((target) => {
     const build = programs === undefined ? builds.data?.find((build) => build.kind === target.name && build.version === target.to) : programs?.find((program) => program.kind === target.name && program.version === target.to)?.build ?? undefined;

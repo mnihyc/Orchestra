@@ -40,6 +40,9 @@ intact and the unsupported account group absent, rather than reporting zero cred
 See the [credits reference](https://openrouter.ai/docs/api/api-reference/credits/get-remaining-credits).
 Changing budgets or spending a reset is not supported. Model suggestions come from `/api/v1/models`,
 including reported context on offer and exact per-million prices; a manager still enables them.
+Their `origins` map marks only explicitly reported names, context and prices as `vendor` observations.
+A routing-name display fallback or an unreported cache price charged as ordinary input acquires no
+vendor origin. A reported zero price remains an observed zero.
 
 ## Everything needed for a model request
 
