@@ -33,7 +33,8 @@ test('sign-in, recovery and registration on a phone', async ({ page }) => {
 test('sign-in in Chinese, with a wrong password said at its field', async ({ page }) => {
   await page.goto('/login');
   await inChinese(page);
-  await expect(page.getByRole('heading', { name: '登录' })).toBeVisible();
+  // The page is headed by the system's name; signing in is its button.
+  await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.getByLabel('用户名或邮箱地址').fill(PEOPLE.ada.login);

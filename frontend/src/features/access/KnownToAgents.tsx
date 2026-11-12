@@ -16,8 +16,7 @@ import type { AgentShare } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
 import { Skeleton } from '@/ui/Skeleton';
 
-import { AREAS, stepOf } from './agentShares';
-import { AREA_WORDS, stepWords } from './AgentRow';
+import { AgentPartsSummary, CurrentAgentContribution, ViewerReadStanding } from './AgentContribution';
 import { shortDate } from './holders';
 
 /** What was shared, by its name, and the mark of its kind. */
@@ -47,19 +46,20 @@ export function KnownToAgents({ target }: { target: AccessTarget }) {
           {known.data.map((share) => {
             const { name, Icon } = whatOf(share);
             const from = share.to.id === target.id ? null : (share.to.name ?? t('access.place.hidden'));
-            const levels = AREAS.filter((area) => stepOf(area, share.parts) > 0).map((area) => `${t(AREA_WORDS[area])}: ${stepWords(t, area, stepOf(area, share.parts))}`);
             return (
               <li key={share.id} className="flex flex-col gap-1 px-3 py-2 text-sm">
                 <span className="flex min-w-0 items-center gap-2 text-text">
                   <Icon className="shrink-0 text-text-muted" size={16} aria-hidden />
                   <span className="min-w-0 font-medium wrap-anywhere">{name === '' ? t('access.agents.know.unseen') : name}</span>
                 </span>
-                <span className="text-text-muted">
-                  {levels.join(t('startFlow.separator'))}
+                <div className="text-text-muted">
+                  {t('agentContributions.requested')}: <AgentPartsSummary parts={share.parts} />
                   {share.mode === 'snapshot' && <span className="ml-3">{t('access.agents.know.copy')}</span>}
-                </span>
+                </div>
+                {share.mode === 'live' && <CurrentAgentContribution current={share.current} />}
+                <ViewerReadStanding entries={share.viewer_entries} />
                 <span className="text-text-muted">
-                  {from === null ? t('access.agents.know.here') : t('access.agents.know.from', { place: from })}{' '}{t('access.agents.by', { name: share.by.display_name, date: shortDate(locale, share.at) })}
+                  {from === null ? t('access.agents.know.here') : t('access.agents.know.from', { place: from })}{' '}{t('access.agents.by', { name: (share.by?.display_name ?? '').length > 0 ? share.by?.display_name : t('agentContributions.giverUnavailable'), date: shortDate(locale, share.at) })}
                 </span>
               </li>
             );

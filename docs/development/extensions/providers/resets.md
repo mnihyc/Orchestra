@@ -164,8 +164,8 @@ facts page. An unsupported source answers `unsupported` to `resets.spend`.
 | Member | JSON shape | Presence | Meaning |
 |--------|------------|----------|---------|
 | `enabled` | `boolean` | required | Whether extra spending is enabled. |
-| `limit` | `number or null` | may be absent | The spending limit, where known. |
-| `used` | `number or null` | may be absent | What has been used, where known. |
+| `limit` | `string or null or number` | may be absent | The spending limit, as exact decimal text in the source's unit and scale. |
+| `used` | `string or null or number` | may be absent | What has been used, as exact decimal text in the source's unit and scale. |
 | `used_percent` | `number or null` | may be absent | How much is used, in percent. |
 | `unit` | `string or null` | may be absent | The vendor's currency or unit, where supplied. |
 | `decimal_places` | `integer or null` | may be absent | The scale the vendor uses for its amounts. |

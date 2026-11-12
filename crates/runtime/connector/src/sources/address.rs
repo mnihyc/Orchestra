@@ -467,12 +467,20 @@ impl AddressSource {
             .clone()
     }
 
-    fn prepare(&self, descriptor: &SourceDescriptor, mut ask: SourceAsk) -> SourceAsk {
+    fn prepare(
+        &self,
+        descriptor: &SourceDescriptor,
+        mut ask: SourceAsk,
+        element: orch_provider_contract::SourceElement,
+    ) -> SourceAsk {
         if !self.options.address.send_credential || !descriptor.wants_key() {
             ask.credential = None;
         }
-        ask.secrets
-            .retain(|name, _| descriptor.secret_fields().any(|field| field.name == *name));
+        ask.secrets.retain(|name, _| {
+            descriptor
+                .secret_fields_for(element)
+                .any(|field| field.name == *name)
+        });
         ask
     }
 
@@ -500,7 +508,15 @@ impl AddressSource {
             return Err(SourceError::unsupported(method));
         }
         let secrets = Self::protected(&self.options, Some(&ask));
-        let ask = self.prepare(&descriptor, ask);
+        let ask = self.prepare(
+            &descriptor,
+            ask,
+            if method == wire::MODELS_LIST {
+                orch_provider_contract::SourceElement::Models
+            } else {
+                orch_provider_contract::SourceElement::Facts
+            },
+        );
         let used = ask.credential.is_some();
         let params = if let Some(reset) = reset {
             serde_json::to_value(ResetSpendParams {

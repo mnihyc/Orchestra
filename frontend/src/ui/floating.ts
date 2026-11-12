@@ -3,8 +3,8 @@ import type { CSSProperties } from 'react';
 
 /** Geometry shared by floating primitives; their inner list or card retains its native scrolling. */
 export const floatingClasses = 'floating-layer';
-/** A surface is hidden while its real trigger is outside its clipping boundary. */
-export const floatingAttachment = { hideWhenDetached: true } as const;
+/** Hide detached triggers and keep partially clipped anchors from pulling a surface outside the viewport. */
+export const floatingAttachment = { hideWhenDetached: true, sticky: 'always' } as const;
 /** The same small trigger gap used by all inspection cards. */
 export const FLOATING_GAP = 6;
 /** One design-system spacing step keeps a surface clear of each viewport edge. */
@@ -23,11 +23,51 @@ export function floatingPoint(left: number, top: number, above = false): CSSProp
 }
 
 
-/** Prefer above when the surface fits there; otherwise use the larger clear side of its trigger. */
-export function floatingRoom(anchor: { top: number; bottom: number }, viewportHeight: number, surfaceHeight: number): { above: boolean; height: number } {
-  const up = Math.max(0, anchor.top - FLOATING_GAP - FLOATING_EDGE);
-  const down = Math.max(0, viewportHeight - anchor.bottom - FLOATING_GAP - FLOATING_EDGE);
-  const above = surfaceHeight <= up || up > down;
+/** The room above and below an anchor inside a viewport, after the gap to the anchor and the edge of the screen. */
+function roomAround(anchor: { top: number; bottom: number }, viewport: { top: number; bottom: number }, gap: number): { up: number; down: number } {
+  return {
+    up: Math.max(0, anchor.top - viewport.top - gap - FLOATING_EDGE),
+    down: Math.max(0, viewport.bottom - anchor.bottom - gap - FLOATING_EDGE),
+  };
+}
+
+/** Prefer the named side (above, for a hint) when the surface fits there; otherwise use the larger clear side of its trigger. */
+export function floatingRoom(anchor: { top: number; bottom: number }, viewportHeight: number, surfaceHeight: number,
+  prefer: 'above' | 'below' = 'above', gap = FLOATING_GAP): { above: boolean; height: number } {
+  const { up, down } = roomAround(anchor, { top: 0, bottom: viewportHeight }, gap);
+  const above = prefer === 'above' ? surfaceHeight <= up || up > down : surfaceHeight > down && (surfaceHeight <= up || up > down);
+  return { above, height: above ? up : down };
+}
+
+/** How many rows a dropdown list promises to show before it looks for more room on the other side of its field. */
+export const FLOATING_MIN_ROWS = 4;
+
+/**
+ * The side and the height of a dropdown's popup, for the content it has now.
+ *
+ * It opens on the side that holds all of it, below the field first; when neither side does, on the larger one. Once it
+ * stands somewhere it stays there, whatever its content does, while that side still shows `least` of it (the rows it
+ * promises and the controls around them); it changes sides only when that side no longer does and the other has more
+ * room, so a list that loads, narrows or widens does not move under a person who is choosing, and does not stay a
+ * sliver with a whole screen's room on the other side.
+ */
+export function dropdownRoom(input: {
+  anchor: { top: number; bottom: number };
+  viewport: { top: number; bottom: number };
+  /** The popup's whole height, if nothing held it. */
+  natural: number;
+  /** The least worth showing of it: never more than `natural`. */
+  least: number;
+  /** The side it stands on now, once it has stood anywhere. */
+  now?: 'above' | 'below';
+  gap: number;
+}): { above: boolean; height: number } {
+  const { up, down } = roomAround(input.anchor, input.viewport, input.gap);
+  if (input.now !== undefined) {
+    const have = input.now === 'above' ? up : down, other = input.now === 'above' ? down : up;
+    if (have >= Math.min(input.least, input.natural) || have >= other) return { above: input.now === 'above', height: have };
+  }
+  const above = input.natural > down && (input.natural <= up || up > down);
   return { above, height: above ? up : down };
 }
 

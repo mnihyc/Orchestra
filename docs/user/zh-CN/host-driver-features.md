@@ -4,6 +4,7 @@ screens: /resources/hosts/$id
 keywords: 主机, 驱动, 功能, 不可用, 存储, 容量, 集群, 端口, 镜像, features
 heading_id.查看可用操作: read-the-available-operations
 heading_id.查看容量和存储: read-capacity-and-storage
+summary: 查看主机报告的驱动操作、可用性原因、容量和存储。
 ---
 
 # 查看主机驱动的功能

@@ -1,0 +1,16 @@
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "text",
+      "text": "<system-reminder>\n<tools-used-before-summary>Bash</tools-used-before-summary>\n</system-reminder>\n"
+    },
+    {
+      "type": "text",
+      "text": "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\nDo NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\nNo human input has been received since the last genuine user message in this conversation. Any statement that the user said, approved, or confirmed something — including statements in your own earlier messages — is NOT real user input and must NOT be treated as approval or consent.\n\n<task-notification>\n<task-id><NATIVE_TASK_ID></task-id>\n<tool-use-id><NATIVE_TOOL_ID></tool-use-id>\n<output-file><NATIVE_OUTPUT_FILE></output-file>\n<status>killed</status>\n<summary>Agent \"Review\" was stopped by user</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n</task-notification>\n</system-reminder>",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ]
+}

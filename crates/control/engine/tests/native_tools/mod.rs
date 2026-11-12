@@ -18,12 +18,25 @@ use std::time::Duration;
 const SAMPLE: Duration = Duration::from_millis(20);
 const DIAGNOSTIC_BUDGET: Duration = Duration::from_secs(2);
 
-pub async fn wait<F, Fut>(world: &World, thread: Id, phase: &str, mut check: F)
+pub async fn wait<F, Fut>(world: &World, thread: Id, phase: &str, check: F)
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let result = tokio::time::timeout(PATIENCE, async {
+    wait_with_budget(world, thread, phase, PATIENCE, check).await;
+}
+
+async fn wait_with_budget<F, Fut>(
+    world: &World,
+    thread: Id,
+    phase: &str,
+    budget: Duration,
+    mut check: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let result = tokio::time::timeout(budget, async {
         while !check().await {
             tokio::time::sleep(SAMPLE).await;
         }
@@ -45,9 +58,7 @@ where
                 FROM threads t LEFT JOIN segments s ON s.id=t.current_segment_id WHERE t.node_id=$1")
                 .bind(thread).fetch_optional(world.pool.pool()).await
         }).await;
-        panic!(
-            "native tool fixture exceeded {PATIENCE:?} during {phase}; bounded state: {state:?}"
-        );
+        panic!("native tool fixture exceeded {budget:?} during {phase}; bounded state: {state:?}");
     }
 }
 
@@ -246,6 +257,7 @@ pub async fn send(
         .say(
             thread,
             Event::OrchToolCall(OrchToolCall {
+                deadline: None,
                 turn_id: turn,
                 call_ref: call_ref.into(),
                 attempt: None,
@@ -293,15 +305,33 @@ pub fn results(world: &World, thread: Id, call_ref: &str) -> Vec<OrchToolResult>
 }
 
 pub async fn answer(world: &World, thread: Id, call_ref: &str) -> OrchToolResult {
-    wait(
+    answer_with_budget(world, thread, call_ref, PATIENCE).await
+}
+
+/// A scale case can budget its known work without changing admission or cursor deadlines.
+pub async fn answer_with_budget(
+    world: &World,
+    thread: Id,
+    call_ref: &str,
+    budget: Duration,
+) -> OrchToolResult {
+    let started = std::time::Instant::now();
+    wait_with_budget(
         world,
         thread,
         "the result for this thread and exact call reference",
+        budget,
         || {
             let found = !results(world, thread, call_ref).is_empty();
             async move { found }
         },
     )
     .await;
+    if budget != PATIENCE {
+        eprintln!(
+            "native tool fixture result completed: elapsed={:?} budget={budget:?}",
+            started.elapsed()
+        );
+    }
     results(world, thread, call_ref).remove(0)
 }

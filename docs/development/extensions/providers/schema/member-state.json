@@ -6,6 +6,28 @@
       "description": "The source does not declare it, and it was never told."
     },
     {
+      "type": "object",
+      "properties": {
+        "unsupported_because": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "description": "Why this member is not currently offered.",
+              "$ref": "#/$defs/FactUnavailableReason"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "unsupported_because"
+      ],
+      "additionalProperties": false,
+      "description": "Unsupported with a declared, actionable reason, rather than an error or a pending read."
+    },
+    {
       "type": "string",
       "const": "not_read_yet",
       "description": "The source declares it, and it was never told."
@@ -23,5 +45,17 @@
   ],
   "description": "Where a member of a provider's facts stands: one of four, each with its own behaviour of the screens and\nthe engine.",
   "title": "MemberState",
-  "$schema": "https://json-schema.org/draft/2020-12/schema"
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "FactUnavailableReason": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "needs_admin_key",
+          "description": "The source requires its own separate administrative credential."
+        }
+      ],
+      "description": "Reasons a source-declared member cannot currently be offered."
+    }
+  }
 }

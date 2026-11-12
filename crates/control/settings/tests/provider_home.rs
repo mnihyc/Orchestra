@@ -9,7 +9,7 @@ mod support;
 use orch_db::queries::resources::testing::insert_machine;
 use orch_db::queries::settings::testing::insert_provider;
 use orch_driver_contract::runtime::EnvironmentDataSource;
-use orch_settings::{credential_home, provider_home, provider_sign_in};
+use orch_settings::{credential_home, provider_home, provider_sign_in, runtime_home_choice};
 use orch_types::new_id;
 use serde_json::json;
 
@@ -69,6 +69,71 @@ async fn an_unconfigured_harness_retains_its_default_and_permission_uses_the_ada
     );
 }
 use support::World;
+
+#[tokio::test]
+async fn a_unit_owns_its_harness_home_and_a_persons_machine_keeps_its_own() {
+    let w = World::new().await;
+    let mut conn = w.conn().await;
+    let provider = new_id();
+    insert_provider(
+        &mut conn,
+        provider,
+        "Team login",
+        w.ada,
+        w.department,
+        &json!({}),
+    )
+    .await
+    .unwrap();
+    let person = insert_machine(&mut conn, "Person's machine", "connected")
+        .await
+        .unwrap();
+    let unit = insert_machine(&mut conn, "Provider unit", "managed")
+        .await
+        .unwrap();
+    sqlx::query("UPDATE machines SET runtime_id=$2 WHERE id=$1")
+        .bind(unit)
+        .bind(new_id())
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let agent = new_id();
+    sqlx::query("INSERT INTO agents(id,name,owner_id,org_id,home_id,harness_kind,profile) VALUES($1,'Native profile',$2,$3,$3,'fake','{}')")
+        .bind(agent).bind(w.ada).bind(w.department).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE providers SET kind='subscription',harness_kind='fake',agent_id=$3,machine_id=$2,key_machine_id=$2 WHERE id=$1")
+        .bind(provider).bind(unit).bind(agent).execute(&mut *conn).await.unwrap();
+    assert_eq!(
+        runtime_home_choice(&mut conn, provider, unit)
+            .await
+            .unwrap(),
+        Some(EnvironmentDataSource::MadeByOrch),
+        "nothing was chosen, and a unit's home is Orch's to make"
+    );
+    assert_eq!(
+        runtime_home_choice(&mut conn, provider, person)
+            .await
+            .unwrap(),
+        None,
+        "a person's own harness keeps its own home, with the account they signed in with"
+    );
+    sqlx::query("UPDATE providers SET runtime_config=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(json!({"runtime.home":{"kind":"existing_directory","path":"/srv/harness/existing"}}))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    for machine in [unit, person] {
+        assert_eq!(
+            runtime_home_choice(&mut conn, provider, machine)
+                .await
+                .unwrap(),
+            Some(EnvironmentDataSource::ExistingDirectory {
+                path: "/srv/harness/existing".into()
+            }),
+            "a choice that was made stands"
+        );
+    }
+}
 
 #[tokio::test]
 async fn home_ownership_and_policy_are_independent_of_the_machine_or_providers_display_placement() {

@@ -29,13 +29,16 @@ import { me, ACME } from '../doubles/fixtures';
 import { i18n } from '@/i18n';
 
 import type { FloatingKind } from '../e2e/floating-cases';
+/** The matrix's kinds, and a dropdown whose list arrives 300 ms after it has opened (what a picker backed by a server does). */
+export type HarnessKind = FloatingKind | 'late-combobox';
 let root: Root | undefined;
 let host: HTMLDivElement | undefined;
 const ada = me(1, 'ada', 'Ada Lovelace');
 const reference = { kind: 'node', id: ACME.fixLogin } as const;
 
-function Example({ kind, left, top, text }: { kind: FloatingKind; left: number; top: number; text: string }) {
+function Example({ kind, left, top, text }: { kind: HarnessKind; left: number; top: number; text: string }) {
   const [query, setQuery] = useState('');
+  const [arrived, setArrived] = useState(kind !== 'late-combobox');
   const [value, setValue] = useState('1');
   const trigger = <button type="button" data-floating-trigger>Open layer</button>;
   const long = <div className="w-full wrap-anywhere">{Array.from({ length: 90 }, (_, i) => <p key={i}>{text} {i + 1}</p>)}</div>;
@@ -59,6 +62,8 @@ function Example({ kind, left, top, text }: { kind: FloatingKind; left: number; 
     case 'combobox':
     case 'paged-combobox': content = <Combobox label="Layer" hideLabel query={query} onQueryChange={setQuery} groups={[{ id: 'choices', label: '', options }]} onSelect={() => undefined}
       footer={kind === 'paged-combobox' ? <button type="button">Next page</button> : undefined} />; break;
+    case 'late-combobox': content = <Combobox label="Layer" hideLabel query={query} onQueryChange={setQuery} groups={[{ id: 'choices', label: '', options: arrived ? options : [] }]} onSelect={() => undefined}
+      loading={!arrived} onOpenChange={(open) => { if (open) window.setTimeout(() => setArrived(true), 300); }} />; break;
     case 'date': content = <DateField label="Layer" hideLabel value="2026-10-25" onValueChange={() => undefined} />; break;
     case 'avatars': content = <AvatarStack users={Array.from({ length: 80 }, (_, i) => ({ ...ada, id: String(i), display_name: `${text} ${i + 1}` }))} />; break;
     case 'holder': content = <HolderChip name={text.repeat(80)} people={people} />; break;
@@ -70,7 +75,7 @@ function Example({ kind, left, top, text }: { kind: FloatingKind; left: number; 
   return <div data-floating-example style={{ position: 'fixed', left, top, width: kind === 'select' || kind.includes('combobox') ? 800 : 150 }}>{content}</div>;
 }
 
-export async function mountFloating(kind: FloatingKind, left: number, top: number, text: string): Promise<void> {
+export async function mountFloating(kind: HarnessKind, left: number, top: number, text: string): Promise<void> {
   flushSync(() => root?.unmount());
   host?.remove();
   // Let the previous primitive return focus before installing the next independent example.

@@ -263,7 +263,7 @@ export function YourExports() {
   return (
     <PersonalFrame page="exports" lead={t('export.page.lead')}>
       {list.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={list} rows={4} />
       ) : list.isError && rows.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : rows.length === 0 ? (

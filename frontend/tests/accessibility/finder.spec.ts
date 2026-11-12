@@ -50,8 +50,9 @@ test('the card of a person found by name, in both themes', async ({ page }) => {
   await openFinder(page);
   await field(page).pressSequentially('@dora', { delay: 20 });
   await finder(page).getByRole('option', { name: /Dora Developer/ }).click();
-  await expect(finder(page).getByRole('region', { name: 'Dora Developer' })).toBeVisible();
-  await expectAccessibleInBothThemes(page, '[role="dialog"]');
+  // A person who is found opens on their own page.
+  await expect(page.getByRole('tabpanel', { name: 'Dora Developer' }).getByRole('complementary', { name: 'About this person' })).toBeVisible();
+  await expectAccessibleInBothThemes(page);
 });
 
 test('the search page with its results, Filters and a nested picker, in both themes', async ({ page }) => {
@@ -61,17 +62,16 @@ test('the search page with its results, Filters and a nested picker, in both the
   await expect(page.getByRole('region', { name: 'Results' }).getByRole('link').first()).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('button', { name: 'Filters', exact: true }).click();
-  await expectAccessibleInBothThemes(page, '[aria-label="Narrow the search"][role="dialog"]');
-  await page.getByRole('button', { name: /Where: Everything you can read/ }).click();
-  await page.getByPlaceholder('Find a place by name').fill('fix');
-  await expect(page.getByRole('button', { name: /Fix login/ }).first()).toBeVisible();
-  await expectAccessibleInBothThemes(page, '[aria-label="Where"][role="dialog"]');
+  // On a wide screen the filters stand beside the results; a place is found by name in its picker.
+  const narrow = page.getByRole('complementary', { name: 'Narrow the search' });
+  await expect(narrow).toBeVisible();
+  const place = narrow.getByRole('combobox', { name: 'Place' });
+  await place.click();
+  await place.fill('fix');
+  await expect(page.getByRole('option', { name: /Fix login/ }).first()).toBeVisible();
+  await expectAccessibleInBothThemes(page, '[role="listbox"]');
   await page.keyboard.press('Escape');
-
-  await expect(page.getByRole('dialog', { name: 'Narrow the search' })).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('button', { name: 'Filters', exact: true })).toBeFocused();
+  await expect(place).toBeFocused();
 });
 
 test('the search page when it has nothing to show, in both themes', async ({ page }) => {

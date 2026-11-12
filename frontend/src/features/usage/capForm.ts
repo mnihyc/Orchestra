@@ -46,6 +46,8 @@ export interface CapDraft {
   /** A day, for the period `total`; nothing for from the beginning. */
   countedFrom: string;
   models: string[];
+  services: string[];
+  purposes: string[];
   harnessKinds: string[];
   tiers: string[];
   /** A percent, or nothing for no warning. */
@@ -70,6 +72,8 @@ export function emptyDraft(overrides: Partial<CapDraft> = {}): CapDraft {
     period: 'day',
     countedFrom: '',
     models: [],
+    services: [],
+    purposes: [],
     harnessKinds: [],
     tiers: [],
     warn: String(DEFAULT_WARN_PERCENT),
@@ -150,7 +154,7 @@ function normalise(text: string): string {
 // ---------------------------------------------------------------- the rules
 
 /** What is wrong with a draft, by the member of the request it is about. */
-export type Faults = Partial<Record<'subject' | 'amount' | 'counted_from' | 'warn_percent' | 'models' | 'note', string>>;
+export type Faults = Partial<Record<'subject' | 'amount' | 'counted_from' | 'warn_percent' | 'models' | 'services' | 'purposes' | 'note', string>>;
 
 /** The most characters a note holds: the API's. */
 export const NOTE_MOST_CHARS = 500;
@@ -194,6 +198,9 @@ export function check(draft: CapDraft, t: TFunction): Faults {
   }
   const bad = draft.models.find((pattern) => modelPatternFault(pattern) !== null);
   if (bad !== undefined) faults.models = modelPatternFault(bad) === 'group' ? t('caps.form.faults.groupName') : t('caps.form.faults.space');
+  const badService=draft.services.find((pattern)=>modelPatternFault(pattern)!==null);
+  if(badService!==undefined) faults.services=modelPatternFault(badService)==='group'?t('caps.form.faults.groupName'):t('caps.form.faults.space');
+  if(draft.purposes.some((purpose)=>purpose.trim()==='' || /\s/.test(purpose))) faults.purposes=t('caps.form.faults.space');
   if (draft.note.length > NOTE_MOST_CHARS) faults.note = t('caps.form.faults.note', { count: NOTE_MOST_CHARS });
   return faults;
 }
@@ -215,6 +222,8 @@ export function faultTarget(path: string): keyof Faults | null {
       return 'warn_percent';
     case 'models':
       return 'models';
+    case 'services':return 'services';
+    case 'purposes':return 'purposes';
     case 'note':
       return 'note';
     default:
@@ -232,6 +241,8 @@ export function inputOf(draft: CapDraft, target: { nodeId?: string | undefined; 
     subject: subjectOf(draft),
     split: splitOf(draft.who),
     models: draft.models,
+    ...(draft.services.length===0?{}:{services:draft.services}),
+    ...(draft.purposes.length===0?{}:{purposes:draft.purposes}),
     tiers: draft.tiers,
     harness_kinds: draft.harnessKinds,
     meter: draft.meter,
@@ -258,6 +269,8 @@ export function draftOf(cap: UsageCap): CapDraft {
     period: cap.period ?? 'day',
     countedFrom: cap.counted_from ?? '',
     models: [...cap.models],
+    services: [...(cap.services??[])],
+    purposes: [...(cap.purposes??[])],
     harnessKinds: [...cap.harness_kinds],
     tiers: [...cap.tiers],
     warn: cap.warn_percent === null ? '' : String(cap.warn_percent),
@@ -279,6 +292,8 @@ export function updateOf(draft: CapDraft, cap: UsageCap): UsageCapUpdateBody {
     expected_revision: cap.revision,
     ...(amount === cap.amount ? {} : { amount }),
     ...(sameList(draft.models, cap.models) ? {} : { models: draft.models }),
+    ...(sameList(draft.services,cap.services??[])?{}:{services:draft.services}),
+    ...(sameList(draft.purposes,cap.purposes??[])?{}:{purposes:draft.purposes}),
     ...(sameList(draft.tiers, cap.tiers) ? {} : { tiers: draft.tiers }),
     ...(sameList(draft.harnessKinds, cap.harness_kinds) ? {} : { harness_kinds: draft.harnessKinds }),
     ...(running || draft.atLimit === cap.at_limit ? {} : { at_limit: draft.atLimit }),
