@@ -6,11 +6,15 @@
 import { ListChecks } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { runningTurn, useThreadPart } from '@/realtime/stores/thread';
+import { useFormatContext } from '@/lib/appearance';
+import { formatNumber } from '@/lib/format';
+import { runningTurn, threadReadOnly, useThreadPart } from '@/realtime/stores/thread';
 
 export function PlanLine({ threadId, onJump }: { threadId: string; onJump: (itemId: string) => void }) {
   const { t } = useTranslation();
+  const { locale } = useFormatContext();
   const plan = useThreadPart(threadId, (view) => {
+    if (threadReadOnly(view) || view.thread?.archived === true) return undefined;
     const turn = runningTurn(view);
     if (turn === null) return undefined;
     for (let at = view.order.length - 1; at >= 0; at -= 1) {
@@ -23,7 +27,9 @@ export function PlanLine({ threadId, onJump }: { threadId: string; onJump: (item
   const steps = plan.payload.steps;
   if (steps.length === 0) return null;
   const underway = steps.findIndex((step) => step.status === 'in_progress');
-  const index = underway === -1 ? Math.min(steps.length - 1, steps.filter((step) => step.status === 'completed').length) : underway;
+  const index = underway === -1 ? steps.findIndex((step) => step.status === 'pending') : underway;
+  const label = index === -1 ? t('timeline.planLine.done', { count: steps.length, number: formatNumber(steps.length, locale) })
+    : `${t('timeline.planLine.step', { index: formatNumber(index + 1, locale), total: formatNumber(steps.length, locale) })}: ${steps[index]?.text ?? ''}`;
   return (
     <button
       type="button"
@@ -31,9 +37,7 @@ export function PlanLine({ threadId, onJump }: { threadId: string; onJump: (item
       className="flex w-full items-center gap-2 rounded-md px-3 py-1 text-left text-sm text-text-muted hover:bg-bg-muted hover:text-text"
     >
       <ListChecks aria-hidden />
-      <span className="min-w-0 flex-1 truncate">
-        {t('timeline.planLine.step', { index: index + 1, total: steps.length })}: {steps[index]?.text}
-      </span>
+      <span aria-live="polite" aria-atomic="true" className="min-w-0 flex-1 truncate">{label}</span>
     </button>
   );
 }

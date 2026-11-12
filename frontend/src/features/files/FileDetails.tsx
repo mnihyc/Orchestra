@@ -10,7 +10,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
 import { formatSpan } from '@/lib/time';
-import { previewQuery, sourceDownload, sourceHasReference, sourceReference, type FileSource } from './source';
+import { previewQuery, sourceDownload, sourceLink, sourceHasReference, sourceReference, type FileSource } from './source';
 import { FileGlyph, FilePreview, FileState, fileFailure, useFileVisible } from './FilePreview';
 import { defaultViewer } from './viewers';
 import { sourceFacts } from './source';
@@ -30,6 +30,7 @@ export function FileDetails({ source, onOpen, onDone, title = true, showPreview 
   const kind = defaultViewer(sourceFacts(source, data)).id;
   const referenceSource = { ...source, fileId: data?.file_id ?? source.fileId, deliveredPath: data?.path ?? source.deliveredPath };
   const hasReference = sourceHasReference(referenceSource);
+  const link = sourceLink(referenceSource);
   return <span ref={ref} className="flex w-[min(20rem,calc(100vw-4rem))] max-w-full flex-col gap-2" data-file-card="">
     {title && <span className="flex min-w-0 items-center gap-2"><FileGlyph source={source} preview={data} /><span className="min-w-0 font-medium wrap-anywhere">{source.name}</span></span>}
     {showPreview && <button type="button" aria-label={t('fileMedia.openFile', { name: source.name })} disabled={gone} className="focus-inset max-w-full rounded-md text-left" onClick={() => { onOpen(); onDone?.(); }}><FilePreview source={source} details /></button>}
@@ -49,6 +50,7 @@ export function FileDetails({ source, onOpen, onDone, title = true, showPreview 
     <span className="flex flex-wrap gap-2">
       <Button size="sm" variant="primary" disabled={gone} onClick={() => { onOpen(); onDone?.(); }}>{t('fileMedia.open')}</Button>
       <Button size="sm" disabled={gone} pending={downloading} onClick={() => { setDownloadError(null); setDownloading(true); void sourceDownload(source).catch(setDownloadError).finally(() => setDownloading(false)); }}>{t(downloading ? 'fileMedia.downloading' : 'fileMedia.download')}</Button>
+      {link !== null && <Button size="sm" variant="ghost" onClick={() => void copyText(link, t('common.linkCopied'))}>{t('actions.copyLink.label')}</Button>}
       <Button size="sm" variant="ghost" blocked={!hasReference} title={hasReference ? undefined : t('fileMedia.noReference')} aria-description={hasReference ? undefined : t('fileMedia.noReference')} onClick={() => { if (hasReference) void copyText(sourceReference(referenceSource), t('people.reference.copied')); }}>{t('people.reference.copy')}</Button>
       <FileGuideHint section="previews" />
     </span>

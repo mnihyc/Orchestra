@@ -17,19 +17,23 @@ export type TimeChoice = { instant: string } | { error: 'missing' | 'invalid' | 
 /** Adjacent days provide both sides of an offset transition; every candidate must round-trip to the entered calendar minute. */
 export function futureInZone(date: string, time: string, zone: string, now: number): TimeChoice {
   if (date === '' || time === '') return { error: 'missing' };
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return { error: 'invalid' };
+  const candidates = wallInstants(date, time, zone);
+  if (candidates === null || candidates.length === 0) return { error: 'invalid' };
+  if (candidates.length > 1) return { error: 'ambiguous' };
+  const instant = candidates[0];
+  return instant === undefined || instant <= now ? { error: 'future' } : { instant: new Date(instant).toISOString() };
+}
+
+/** Exact matching instants; an empty list is a clock gap, null is invalid input/zone. */
+export function wallInstants(date: string, time: string, zone: string): number[] | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !/^\d{2}:\d{2}$/.test(time)) return null;
   const entered = `${date}T${time}:00.000Z`;
   const wall = Date.parse(entered);
-  if (!Number.isFinite(wall) || new Date(wall).toISOString() !== entered) return { error: 'invalid' };
+  if (!Number.isFinite(wall) || new Date(wall).toISOString() !== entered) return null;
   try {
     const offsets = new Set([-DAY_MS, 0, DAY_MS].map((delta) => wallValue(wall + delta, zone) - (wall + delta)));
-    const candidates = [...offsets].map((offset) => wall - offset).filter((instant) => wallValue(instant, zone) === wall);
-    if (candidates.length === 0) return { error: 'invalid' };
-    if (candidates.length > 1) return { error: 'ambiguous' };
-    const instant = candidates[0];
-    if (instant === undefined || instant <= now) return { error: 'future' };
-    return { instant: new Date(instant).toISOString() };
-  } catch { return { error: 'invalid' }; }
+    return [...new Set([...offsets].map((offset) => wall - offset).filter((instant) => wallValue(instant, zone) === wall))].sort((one, other) => one - other);
+  } catch { return null; }
 }
 
 export function writePause(at: string, zone: string | undefined, locale: string): string {

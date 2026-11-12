@@ -59,6 +59,15 @@ impl Tunnels {
         self.link.open_tunnel(ticket).await
     }
 
+    /// The same signed capability through its API-designated carrier.
+    pub async fn open_with_route(
+        &self,
+        ticket: &str,
+        route: Option<&orch_link_contract::gateways::TunnelPlan>,
+    ) -> Result<Tunnel, OpenError> {
+        self.link.open_tunnel_with_route(ticket, route).await
+    }
+
     /// Opens one socket accepted by the node, without allowing it to supply an Orch identity.
     pub async fn open_host_port(
         &self,

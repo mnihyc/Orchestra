@@ -64,7 +64,7 @@ async fn the_servers_of_a_persons_own_configuration_are_found_read_and_kept_out_
         "[mcp_servers.marker.env]\nPLAIN_SETTING = \"visible\"\nGITHUB_TOKEN = \"gh-value-1\"\n",
     );
     text.push_str(&marking_server("other", &workspace));
-    text.push_str("[mcp_servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\n");
+    text.push_str("[mcp_servers.remote]\nurl = \"http://127.0.0.1:9/mcp\"\nbearer_token_env_var = \"REMOTE_SERVICE_TOKEN\"\nhttp_headers = { \"X-Api-Key\" = \"header-private-value\" }\nenv_http_headers = { \"X-Workspace\" = \"WORKSPACE_NAME\" }\n");
     text.push_str(&format!(
         "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
         workspace.display()
@@ -159,6 +159,7 @@ async fn the_servers_of_a_persons_own_configuration_are_found_read_and_kept_out_
     );
     assert_eq!(read.spec.secret_env, ["GITHUB_TOKEN"]);
     assert_eq!(read.secrets["GITHUB_TOKEN"].expose(), "gh-value-1");
+    assert_eq!(find("marker").digest, read.imported(None).digest);
     assert!(!read.spec.env.contains_key("GITHUB_TOKEN"));
     let from_project = rig
         .adapter
@@ -172,6 +173,43 @@ async fn the_servers_of_a_persons_own_configuration_are_found_read_and_kept_out_
         .await
         .unwrap();
     assert_eq!(from_project.spec.transport, McpTransport::Stdio);
+    assert_eq!(
+        find("project_server").digest,
+        from_project.imported(None).digest
+    );
+    let remote = rig
+        .adapter
+        .read_mcp(McpImportRequest {
+            server_id: new_id(),
+            source: "codex".into(),
+            scope: McpScope::User,
+            name: "remote".into(),
+            directory: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(find("remote").digest, remote.imported(None).digest);
+    let credentials = remote.http_credentials.as_ref().unwrap();
+    assert_eq!(
+        credentials.headers["X-Api-Key"].expose(),
+        "header-private-value"
+    );
+    assert_eq!(credentials.env_headers["X-Workspace"], "WORKSPACE_NAME");
+    assert_eq!(
+        credentials.bearer_token_env_var.as_deref(),
+        Some("REMOTE_SERVICE_TOKEN")
+    );
+    assert!(
+        !serde_json::to_string(&found)
+            .unwrap()
+            .contains("header-private-value")
+    );
+    assert!(
+        !serde_json::to_string(&remote.imported(None))
+            .unwrap()
+            .contains("header-private-value")
+    );
+    assert!(!format!("{remote:?}").contains("header-private-value"));
     let missing = rig
         .adapter
         .read_mcp(McpImportRequest {
@@ -191,33 +229,35 @@ async fn the_servers_of_a_persons_own_configuration_are_found_read_and_kept_out_
     // project's directories are switched off, so the harness starts none of them, while it does start the one
     // the session is given.
     for directory in [&workspace, &nested] {
-        let thread = new_id();
-        let mut spec = rig.spec(thread, SessionMode::New, None);
-        spec.settings.directory = directory.to_string_lossy().into_owned();
-        spec.settings.cwd = spec.settings.directory.clone();
-        spec.mcp = vec!["notes".to_owned()];
-        let key = spec.session_key.clone();
-        let unanswered = rig.adapter.open_session(spec.clone()).await.unwrap_err();
-        assert_eq!(unanswered.code(), "workspace_configuration", "{unanswered}");
-        spec.settings.workspace_configuration = Some(WorkspaceConfiguration {
-            answer: ConfigTrust::KeepOut,
-            files: orch_agent_contract::adapter::AdapterError::configuration_files(
-                &unanswered.detail(),
-            ),
-        });
-        rig.adapter.open_session(spec).await.unwrap();
-        until_reached(&rig, &key, "notes").await;
-        tokio::time::sleep(Duration::from_secs(2)).await;
-        let started: Vec<_> = std::fs::read_dir(&workspace)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with("started-"))
-            .collect();
-        assert!(
-            started.is_empty(),
-            "the harness started what the session is held from: {started:?}"
-        );
+        for answer in [ConfigTrust::KeepOut, ConfigTrust::Trust] {
+            let thread = new_id();
+            let mut spec = rig.spec(thread, SessionMode::New, None);
+            spec.settings.directory = directory.to_string_lossy().into_owned();
+            spec.settings.cwd = spec.settings.directory.clone();
+            spec.mcp = vec!["notes".to_owned()];
+            let key = spec.session_key.clone();
+            let unanswered = rig.adapter.open_session(spec.clone()).await.unwrap_err();
+            assert_eq!(unanswered.code(), "workspace_configuration", "{unanswered}");
+            spec.settings.workspace_configuration = Some(WorkspaceConfiguration {
+                answer,
+                files: orch_agent_contract::adapter::AdapterError::configuration_files(
+                    &unanswered.detail(),
+                ),
+            });
+            rig.adapter.open_session(spec).await.unwrap();
+            until_reached(&rig, &key, "notes").await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let started: Vec<_> = std::fs::read_dir(&workspace)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with("started-"))
+                .collect();
+            assert!(
+                started.is_empty(),
+                "the harness started what the session is held from: {started:?}"
+            );
+        }
     }
     rig.adapter.stop().await.unwrap();
 }

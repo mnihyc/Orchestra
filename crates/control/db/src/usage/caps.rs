@@ -94,7 +94,7 @@ pub mod level {
 }
 
 /// The columns of a cap.
-const CAP_COLUMNS: &str = "id, node_id, provider_id, subject_kind, subject_id, subject_role, split, models,
+const CAP_COLUMNS: &str = "id, node_id, provider_id, subject_kind, subject_id, subject_role, split, models, services, purposes,
         tiers, harness_kinds, meter, period, counted_from, amount::text AS amount, at_limit, warn_percent, uncounted, note,
         enabled, revision, created_by, created_at, updated_at";
 
@@ -125,6 +125,10 @@ pub struct CapRow {
     pub split: String,
     /// The patterns that name the models it covers, among them `@<group>`; none for every model.
     pub models: Vec<String>,
+    /// Explicit service offering patterns, beside model patterns.
+    pub services: Vec<String>,
+    /// The intersecting purpose patterns; empty covers all purposes.
+    pub purposes: Vec<String>,
     /// The service tiers it covers; none for whatever tier a turn runs with.
     pub tiers: Vec<String>,
     /// The harness kinds it covers; none for every agent.
@@ -198,6 +202,10 @@ pub struct NewCap<'a> {
     pub split: &'a str,
     /// The models, as [`normalised`].
     pub models: &'a [String],
+    /// Explicit service offering patterns.
+    pub services: &'a [String],
+    /// Intersecting purpose patterns.
+    pub purposes: &'a [String],
     /// The service tiers, as [`normalised`].
     pub tiers: &'a [String],
     /// The harness kinds, as [`normalised`].
@@ -228,15 +236,14 @@ pub struct NewCap<'a> {
 const SAME_IDENTITY: &str = "node_id IS NOT DISTINCT FROM $1::uuid AND provider_id IS NOT DISTINCT FROM $2::uuid
         AND subject_kind = $3 AND subject_id IS NOT DISTINCT FROM $4::uuid
         AND subject_role IS NOT DISTINCT FROM $5::text AND split = $6 AND models = $7 AND harness_kinds = $8
-        AND meter = $9 AND period IS NOT DISTINCT FROM $10::text AND tiers = $11";
+        AND meter = $9 AND period IS NOT DISTINCT FROM $10::text AND tiers = $11 AND services = $12 AND purposes = $13";
 
-/// Makes a cap, unless one of the same node, provider, subject, split, models, tiers, harness kinds, meter
-/// and period is there: then nothing is made and the answer is none. Two requests that make the same cap at once
-/// make one.
-pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>, DbError> {
+/// Holds the existing native duplicate-identity serialization footprint before an insert.
+/// The fields match the duplicate predicate; this changes no cap and invents no new lock key.
+pub async fn lock_insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<(), DbError> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
-            "usage_cap:{:?}:{:?}:{}:{:?}:{:?}:{}:{:?}:{:?}:{:?}:{}:{:?}",
+            "usage_cap:{:?}:{:?}:{}:{:?}:{:?}:{}:{:?}:{:?}:{:?}:{}:{:?}:{:?}:{:?}",
             new.node_id,
             new.provider_id,
             new.subject_kind,
@@ -247,10 +254,27 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
             new.tiers,
             new.harness_kinds,
             new.meter,
-            new.period
+            new.period,
+            new.services,
+            new.purposes
         ))
         .execute(&mut *conn)
         .await?;
+    Ok(())
+}
+
+/// Makes a cap through the same identity serialization and duplicate check.
+pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>, DbError> {
+    insert_before(conn, new, || Ok(())).await
+}
+
+/// The opaque check runs after the native identity wait, immediately before insertion.
+pub async fn insert_before<E: From<DbError>>(
+    conn: &mut Conn,
+    new: &NewCap<'_>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<Option<CapRow>, E> {
+    lock_insert(conn, new).await?;
     let sql = format!("SELECT id FROM usage_caps WHERE {SAME_IDENTITY}");
     let existing: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(new.node_id)
@@ -264,17 +288,21 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
         .bind(new.meter)
         .bind(new.period)
         .bind(new.tiers)
+        .bind(new.services)
+        .bind(new.purposes)
         .fetch_optional(&mut *conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
     if existing.is_some() {
         return Ok(None);
     }
+    before()?;
     let sql = format!(
         "INSERT INTO usage_caps (id, node_id, provider_id, subject_kind, subject_id, subject_role, split, models,
                 harness_kinds, meter, period, counted_from, amount, at_limit, warn_percent, uncounted, note, created_by,
-                created_at, updated_at, tiers)
+                created_at, updated_at, tiers, services, purposes)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::text::numeric, $14, $15, $16, $17, $18, $19, $19,
-                 $20)
+                 $20, $21, $22)
          RETURNING {CAP_COLUMNS}"
     );
     Ok(Some(
@@ -299,8 +327,11 @@ pub async fn insert(conn: &mut Conn, new: &NewCap<'_>) -> Result<Option<CapRow>,
             .bind(new.created_by)
             .bind(new.at)
             .bind(new.tiers)
+            .bind(new.services)
+            .bind(new.purposes)
             .fetch_one(conn)
-            .await?,
+            .await
+            .map_err(DbError::from)?,
     ))
 }
 
@@ -313,11 +344,25 @@ pub async fn get(conn: &mut Conn, id: Id) -> Result<Option<CapRow>, DbError> {
         .await?)
 }
 
+/// Serializes a native cap change after the same counting lock used by its running limit.
+pub async fn lock(conn: &mut Conn, id: Id) -> Result<Option<CapRow>, DbError> {
+    lock_for_counting(conn, &[id]).await?;
+    let sql = format!("SELECT {CAP_COLUMNS} FROM usage_caps WHERE id=$1 FOR UPDATE");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .fetch_optional(conn)
+        .await?)
+}
+
 /// What is changed in a cap. A member that is none is left alone; one that is `Some(None)` is cleared.
 #[derive(Debug, Clone, Default)]
 pub struct Change<'a> {
     /// New model patterns, as [`normalised`].
     pub models: Option<&'a [String]>,
+    /// New service offering patterns.
+    pub services: Option<&'a [String]>,
+    /// New purpose patterns.
+    pub purposes: Option<&'a [String]>,
     /// New service tiers, as [`normalised`].
     pub tiers: Option<&'a [String]>,
     /// New harness kinds, as [`normalised`].
@@ -359,11 +404,24 @@ pub async fn update(
     change: &Change<'_>,
     at: DateTime<Utc>,
 ) -> Result<Updated, DbError> {
+    update_before(conn, id, expected_revision, change, at, || Ok(())).await
+}
+
+/// The opaque check follows the native row/duplicate preparation and precedes the update.
+pub async fn update_before<E: From<DbError>>(
+    conn: &mut Conn,
+    id: Id,
+    expected_revision: i64,
+    change: &Change<'_>,
+    at: DateTime<Utc>,
+    before: impl FnOnce() -> Result<(), E>,
+) -> Result<Updated, E> {
     let sql = format!("SELECT {CAP_COLUMNS} FROM usage_caps WHERE id = $1 FOR UPDATE");
     let current: Option<CapRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .fetch_optional(&mut *conn)
-        .await?;
+        .await
+        .map_err(DbError::from)?;
     let Some(current) = current else {
         return Ok(Updated::Gone);
     };
@@ -375,11 +433,15 @@ pub async fn update(
         .harness_kinds
         .map_or(current.harness_kinds.as_slice(), |each| each);
     let tiers = change.tiers.map_or(current.tiers.as_slice(), |each| each);
+    let services = change.services.unwrap_or(&current.services);
+    let purposes = change.purposes.unwrap_or(&current.purposes);
     if models != current.models.as_slice()
         || kinds != current.harness_kinds.as_slice()
         || tiers != current.tiers.as_slice()
+        || services != current.services.as_slice()
+        || purposes != current.purposes.as_slice()
     {
-        let sql = format!("SELECT id FROM usage_caps WHERE id <> $12 AND {SAME_IDENTITY}");
+        let sql = format!("SELECT id FROM usage_caps WHERE id <> $14 AND {SAME_IDENTITY}");
         let same: Option<Id> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .bind(current.node_id)
             .bind(current.provider_id)
@@ -392,9 +454,12 @@ pub async fn update(
             .bind(&current.meter)
             .bind(&current.period)
             .bind(tiers)
+            .bind(services)
+            .bind(purposes)
             .bind(id)
             .fetch_optional(&mut *conn)
-            .await?;
+            .await
+            .map_err(DbError::from)?;
         if same.is_some() {
             return Ok(Updated::Exists);
         }
@@ -405,6 +470,12 @@ pub async fn update(
     query.push_bind(at);
     if let Some(models) = change.models {
         query.push(", models = ").push_bind(models.to_vec());
+    }
+    if let Some(services) = change.services {
+        query.push(", services = ").push_bind(services.to_vec());
+    }
+    if let Some(purposes) = change.purposes {
+        query.push(", purposes = ").push_bind(purposes.to_vec());
     }
     if let Some(tiers) = change.tiers {
         query.push(", tiers = ").push_bind(tiers.to_vec());
@@ -440,7 +511,12 @@ pub async fn update(
         .push(" WHERE id = ")
         .push_bind(id)
         .push(format!(" RETURNING {CAP_COLUMNS}"));
-    let changed: CapRow = query.build_query_as().fetch_one(conn).await?;
+    before()?;
+    let changed: CapRow = query
+        .build_query_as()
+        .fetch_one(conn)
+        .await
+        .map_err(DbError::from)?;
     Ok(Updated::Done(Box::new(changed)))
 }
 
@@ -602,6 +678,12 @@ pub struct Used {
     pub provider_id: Id,
     /// The model, by its routing name.
     pub model: String,
+    /// Actual purpose retained before the engine applies its existing pattern matcher.
+    pub purpose: String,
+    /// Recorded service identity/groups; absent for generation offerings.
+    pub service: Option<Json>,
+    /// Service requests whose unit fee could not be priced, distinct from missing token rates.
+    pub unrated_services: i64,
     /// Tokens, input plus output.
     pub total_tokens: i64,
     /// The credits of the rows that had a rate.
@@ -612,8 +694,8 @@ pub struct Used {
 
 /// What the rows of the daily rollup that a cap covers add up to since `since` (the beginning where none),
 /// one model of one provider at a time, the rows at a tier the cap does not name left out. For a cap counted
-/// per person only that person's own use of turns is added, and a summary is left out of it. The models a cap
-/// names are not asked here.
+/// per person only that person's attributed work is added. Purpose and offering patterns are checked
+/// by the engine using the retained purpose; automatic work is unattributed.
 pub async fn used(
     conn: &mut Conn,
     cap: &CapRow,
@@ -622,9 +704,10 @@ pub async fn used(
     at: DateTime<Utc>,
 ) -> Result<Vec<Used>, DbError> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT d.provider_id, d.model, COALESCE(sum(d.total_tokens), 0)::bigint AS total_tokens,
+        "SELECT d.provider_id, d.model, d.purpose, d.service, COALESCE(sum(d.total_tokens), 0)::bigint AS total_tokens,
                 COALESCE(sum(d.credits), 0)::text AS credits,
-                COALESCE(sum(d.unrated_tokens), 0)::bigint AS unrated_tokens
+                COALESCE(sum(d.unrated_tokens), 0)::bigint AS unrated_tokens,
+                COALESCE(sum(d.unrated_services),0)::bigint AS unrated_services
            FROM usage_daily d WHERE true",
     );
     if let Some(since) = since {
@@ -634,7 +717,7 @@ pub async fn used(
         query
             .push(
                 " AND EXISTS (SELECT 1 FROM nodes pn
-                               WHERE pn.id = COALESCE(d.thread_id, d.topic_id) AND ",
+                               WHERE pn.id = CASE WHEN d.purpose='ask' THEN d.org_id ELSE COALESCE(d.work_node_id, d.thread_id, d.topic_id) END AND ",
             )
             .push_bind(node)
             .push(" = ANY(pn.path))");
@@ -655,10 +738,7 @@ pub async fn used(
             .push(")");
     }
     push_subject(&mut query, cap, person, "d.user_id", at);
-    if cap.per_person() {
-        query.push(" AND d.purpose = 'turn'");
-    }
-    query.push(" GROUP BY d.provider_id, d.model");
+    query.push(" GROUP BY d.provider_id, d.model, d.purpose, d.service");
     Ok(query.build_query_as().fetch_all(conn).await?)
 }
 
@@ -726,6 +806,10 @@ pub struct Running {
     pub model: String,
     /// The provider it runs on.
     pub provider_id: Id,
+    /// Actual model-work purpose of the segment that owns this turn.
+    pub purpose: String,
+    /// Actual interface for a control-plane turn; native agents use their descriptor.
+    pub protocol: Option<String>,
     /// The person it is put down to.
     pub user_id: Option<Id>,
     /// The harness kind of its agent.
@@ -754,7 +838,10 @@ pub async fn running(
     at: DateTime<Utc>,
 ) -> Result<Vec<Running>, DbError> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT t.id AS turn_id, t.thread_id, t.model, s.provider_id, i.author_id AS user_id, a.harness_kind,
+        "SELECT t.id AS turn_id, t.thread_id, t.model, s.provider_id,
+                COALESCE(work.purpose,CASE WHEN s.program='orch' THEN 'ask' ELSE 'turn' END) AS purpose,
+                s.program_protocol AS protocol,
+                i.author_id AS user_id, a.harness_kind,
                 t.params, a.descriptor -> 'parameters' AS declared,
                 CASE WHEN t.end_work IS NULL THEN t.usage ELSE t.end_work#>'{snapshot,usage}' END AS usage, t.limit_bypass,
                 COALESCE((SELECT sum(e.total_tokens) FROM usage_events e WHERE e.turn_id = t.id AND e.counted), 0)::bigint
@@ -762,6 +849,7 @@ pub async fn running(
                 COALESCE((SELECT sum(e.credits) FROM usage_events e WHERE e.turn_id = t.id AND e.counted), 0)::text
                     AS counted_credits
            FROM turns t
+           LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true
            JOIN segments s ON s.id = t.segment_id
            LEFT JOIN thread_inputs i ON i.id = t.input_id
            LEFT JOIN agents a ON a.id = s.agent_id
@@ -784,7 +872,7 @@ pub async fn running(
 fn push_running_scope(query: &mut QueryBuilder<Postgres>, cap: &CapRow) {
     if let Some(node) = cap.node_id {
         query
-            .push(" AND EXISTS (SELECT 1 FROM nodes pn WHERE pn.id = t.thread_id AND ")
+            .push(" AND EXISTS (SELECT 1 FROM nodes pn WHERE pn.id = CASE WHEN s.program='orch' THEN (SELECT COALESCE(th.ask_root_org_id,th.program_root_org_id) FROM threads th WHERE th.node_id=t.thread_id) ELSE COALESCE(work.node_id,t.thread_id) END AND ")
             .push_bind(node)
             .push(" = ANY(pn.path))");
     }
@@ -806,12 +894,28 @@ pub async fn running_threads(conn: &mut Conn, cap: &CapRow) -> Result<Vec<Id>, D
     let mut query = QueryBuilder::<Postgres>::new(
         "SELECT DISTINCT t.thread_id
            FROM turns t
+           LEFT JOIN LATERAL usage_work_scope(t.input_id) work ON true
            JOIN segments s ON s.id = t.segment_id
            LEFT JOIN agents a ON a.id = s.agent_id
           WHERE t.state IN ('starting', 'running')",
     );
     push_running_scope(&mut query, cap);
     Ok(query.build_query_scalar().fetch_all(conn).await?)
+}
+
+/// Actual offering and purpose identity before the engine applies its one pattern matcher.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct UsedIdentity {
+    /// Actual captured issuer.
+    pub user_id: Id,
+    /// Paying provider.
+    pub provider_id: Id,
+    /// Actual generation name; empty for a service.
+    pub model: String,
+    /// Actual purpose.
+    pub purpose: String,
+    /// Actual service identity and groups at the call, if this is a service row.
+    pub service: Option<Json>,
 }
 
 /// The people, with the provider and the model of each use, who used something a cap covers since a day:
@@ -821,10 +925,10 @@ pub async fn users_of(
     cap: &CapRow,
     since: Option<NaiveDate>,
     at: DateTime<Utc>,
-) -> Result<Vec<(Id, Id, String)>, DbError> {
+) -> Result<Vec<UsedIdentity>, DbError> {
     let mut query = QueryBuilder::<Postgres>::new(
-        "SELECT DISTINCT d.user_id, d.provider_id, d.model FROM usage_daily d
-          WHERE d.user_id IS NOT NULL AND d.purpose = 'turn'",
+        "SELECT DISTINCT d.user_id, d.provider_id, d.model, d.purpose, d.service FROM usage_daily d
+          WHERE d.user_id IS NOT NULL",
     );
     if let Some(since) = since {
         query.push(" AND d.day >= ").push_bind(since);
@@ -833,7 +937,7 @@ pub async fn users_of(
         query
             .push(
                 " AND EXISTS (SELECT 1 FROM nodes pn
-                               WHERE pn.id = COALESCE(d.thread_id, d.topic_id) AND ",
+                               WHERE pn.id = CASE WHEN d.purpose='ask' THEN d.org_id ELSE COALESCE(d.work_node_id, d.thread_id, d.topic_id) END AND ",
             )
             .push_bind(node)
             .push(" = ANY(pn.path))");
@@ -1163,7 +1267,7 @@ pub async fn siblings(conn: &mut Conn, cap: &CapRow) -> Result<Vec<CapRow>, DbEr
         "SELECT {CAP_COLUMNS} FROM usage_caps
           WHERE enabled AND node_id IS NOT DISTINCT FROM $1::uuid AND provider_id IS NOT DISTINCT FROM $2::uuid
             AND models = $3 AND harness_kinds = $4 AND meter = $5 AND period IS NOT DISTINCT FROM $6::text
-            AND tiers = $7
+            AND tiers = $7 AND services = $8 AND purposes = $9
           ORDER BY created_at, id"
     );
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
@@ -1174,6 +1278,8 @@ pub async fn siblings(conn: &mut Conn, cap: &CapRow) -> Result<Vec<CapRow>, DbEr
         .bind(&cap.meter)
         .bind(&cap.period)
         .bind(&cap.tiers)
+        .bind(&cap.services)
+        .bind(&cap.purposes)
         .fetch_all(conn)
         .await?)
 }

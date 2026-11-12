@@ -1,0 +1,295 @@
+{
+  "title": "Claude Code",
+  "native_switches": {
+    "page_fetch": {
+      "capability": "page_fetch",
+      "values": {
+        "on": true,
+        "off": false
+      }
+    }
+  },
+  "access": {
+    "forwarded": {
+      "interfaces": [
+        "anthropic-messages"
+      ],
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native",
+          "eligible_when": {
+            "type": "object",
+            "required": [
+              "route_kind"
+            ],
+            "properties": {
+              "route_kind": {
+                "const": "native-model"
+              }
+            }
+          }
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native",
+          "eligible_when": {
+            "type": "object",
+            "required": [
+              "route_kind"
+            ],
+            "properties": {
+              "route_kind": {
+                "const": "native-model"
+              }
+            }
+          }
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "live"
+          ],
+          "default_mode": "disabled",
+          "eligible_when": {
+            "type": "object",
+            "required": [
+              "route_kind"
+            ],
+            "properties": {
+              "route_kind": {
+                "const": "native-model"
+              }
+            }
+          }
+        },
+        "page_fetch": {
+          "enabled": true,
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on"
+        },
+        "image_generation": {
+          "enabled": false
+        }
+      },
+      "orch_tools": true,
+      "facts": [
+        {
+          "id": "forwarded-host-betas",
+          "capabilities": [
+            "generation"
+          ],
+          "text": {
+            "en": "Forwarded sessions omit the program-use-case, auto-mode-classifier and side-query beta options.",
+            "zh-CN": "转发会话不携带程序用途、自动模式分类和辅助查询的测试版选项。"
+          }
+        },
+        {
+          "id": "forwarded-cache-keepalive",
+          "capabilities": [
+            "generation"
+          ],
+          "text": {
+            "en": "Claude Code does not keep its prompt cache alive on forwarded connections. Cache lifetime still follows the thread’s setting.",
+            "zh-CN": "Claude Code 不在转发连接上主动保活提示词缓存。缓存时长仍遵循线程设置。"
+          }
+        },
+        {
+          "id": "forwarded-model-catalogue",
+          "capabilities": [
+            "generation"
+          ],
+          "text": {
+            "en": "Claude Code’s hosted model catalogue is unavailable on forwarded connections.",
+            "zh-CN": "转发连接不使用 Claude Code 的托管模型目录。"
+          }
+        },
+        {
+          "id": "forwarded-search-options",
+          "capabilities": [
+            "web_search"
+          ],
+          "text": {
+            "en": "Native WebSearch does not offer its host-only citation and mode options on forwarded connections.",
+            "zh-CN": "转发连接上的原生 WebSearch 不提供仅限原生主机的引用和模式选项。"
+          }
+        }
+      ]
+    },
+    "native": {
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "live"
+          ],
+          "default_mode": "disabled"
+        },
+        "page_fetch": {
+          "enabled": true,
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on"
+        },
+        "image_generation": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": null
+        }
+      },
+      "orch_tools": true,
+      "counters": {
+        "web_search": {
+          "pointer": "/webSearchRequests",
+          "unit": "search",
+          "cumulative": true,
+          "reset_on_decrease": true
+        }
+      }
+    },
+    "shared": {
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "live"
+          ],
+          "default_mode": "disabled"
+        },
+        "page_fetch": {
+          "enabled": true,
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on"
+        },
+        "image_generation": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": null
+        }
+      },
+      "orch_tools": true,
+      "counters": {
+        "web_search": {
+          "pointer": "/webSearchRequests",
+          "unit": "search",
+          "cumulative": true,
+          "reset_on_decrease": true
+        }
+      }
+    },
+    "handover": {
+      "native": {
+        "generation": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "image_input": {
+          "enabled": true,
+          "modes": [
+            "native"
+          ],
+          "default_mode": "native"
+        },
+        "web_search": {
+          "enabled": true,
+          "modes": [
+            "live"
+          ],
+          "default_mode": "disabled"
+        },
+        "page_fetch": {
+          "enabled": true,
+          "modes": [
+            "on"
+          ],
+          "default_mode": "on"
+        },
+        "image_generation": {
+          "enabled": false,
+          "modes": [
+            "on"
+          ],
+          "default_mode": null
+        }
+      },
+      "orch_tools": true,
+      "counters": {
+        "web_search": {
+          "pointer": "/webSearchRequests",
+          "unit": "search",
+          "cumulative": true,
+          "reset_on_decrease": true
+        }
+      }
+    }
+  },
+  "facts": [
+    {
+      "id": "separated-web-fetch-location",
+      "capabilities": [
+        "page_fetch"
+      ],
+      "when": {
+        "type": "object",
+        "required": [
+          "arrangement"
+        ],
+        "properties": {
+          "arrangement": {
+            "const": "separated"
+          }
+        }
+      },
+      "text": {
+        "en": "Native WebFetch reads pages from the provider runtime.",
+        "zh-CN": "原生 WebFetch 从提供方运行时读取网页。"
+      }
+    }
+  ]
+}

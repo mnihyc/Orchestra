@@ -1,0 +1,2 @@
+# The engine's settling round, tenth pass: engine programs that wait for a turn's state through the shared helper.
+test -p orch-engine --test forks --test caps --test connected --test notifications --test orch_tools --test measurement_jobs --test credentials

@@ -4,6 +4,291 @@ import type { SettingDef } from './api-types';
 
 export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
+    "key": "ask.models",
+    "title": "Ask models",
+    "description": "Allowed API model identities for Ask. Child scopes only narrow the list; parent order is retained. The first usable identity is the default. Unset everywhere or empty blocks Ask.",
+    "group": "automation",
+    "schema": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "provider_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider_id",
+          "model"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "intersect",
+    "default": null,
+    "example": [
+      {
+        "provider_id": "019a0000-0000-7000-8000-000000000001",
+        "model": "small"
+      }
+    ],
+    "text_key": "day100.builtin.ask.models",
+    "keywords": []
+  },
+  {
+    "key": "ask.paid_by",
+    "title": "Who pays for Ask",
+    "description": "The person asking, or the writer of this setting. Usage is always attributed to the person asking.",
+    "group": "automation",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "person",
+        "setter"
+      ]
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": "person",
+    "example": "person",
+    "text_key": "day100.builtin.ask.paid_by",
+    "keywords": []
+  },
+  {
+    "key": "ask.retention_days",
+    "title": "Ask history kept",
+    "description": "Days after the last message before permanent deletion, within the root organization's minimum and maximum.",
+    "group": "retention",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "days"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": 30,
+    "example": 30,
+    "text_key": "day100.builtin.ask.retention_days",
+    "keywords": [],
+    "display": {
+      "unit": "days",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.retention_min_days",
+    "title": "Shortest Ask retention",
+    "description": "The minimum history retention chosen by administrators of the conversation's root organization.",
+    "group": "retention",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "days"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "max",
+    "default": 1,
+    "example": 7,
+    "text_key": "day100.builtin.ask.retention_min_days",
+    "keywords": [],
+    "display": {
+      "unit": "days",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.retention_max_days",
+    "title": "Longest Ask retention",
+    "description": "The maximum history retention allowed by administrators of the conversation's root organization.",
+    "group": "retention",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "days"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 3650,
+    "example": 90,
+    "text_key": "day100.builtin.ask.retention_max_days",
+    "keywords": [],
+    "display": {
+      "unit": "days",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_steps",
+    "title": "Ask steps per turn",
+    "description": "The model steps allowed for one question before it asks the person to continue.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 16,
+    "example": 16,
+    "text_key": "day100.builtin.ask.max_steps",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_output_tokens",
+    "title": "Ask answer tokens",
+    "description": "The most output tokens per Ask model request, also reserved before fitting conversation context. The lowest system or organization value applies.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 4096,
+    "example": 4096,
+    "text_key": "day100.builtin.ask.max_output_tokens",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.context_tokens",
+    "title": "Ask context tokens",
+    "description": "Unset uses the chosen model's context window. When set, the smaller value applies to Ask only; output and tool-result reserves must still fit. The lowest system or organization value applies.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": null,
+    "example": 120000,
+    "text_key": "day100.builtin.ask.context_tokens",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.max_tools",
+    "title": "Ask tools per turn",
+    "description": "The read operations allowed for one question before it asks the person to narrow the question.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 32,
+    "example": 32,
+    "text_key": "day100.builtin.ask.max_tools",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.tool_bytes",
+    "title": "Ask source size",
+    "description": "The most bytes from one read result supplied to the model, with a canonical link to the full source.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 65536,
+    "example": 65536,
+    "text_key": "day100.builtin.ask.tool_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
+    "key": "ask.turn_tool_bytes",
+    "title": "Ask sources per turn",
+    "description": "The total read-result bytes supplied while answering one question.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "bytes"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 262144,
+    "example": 262144,
+    "text_key": "day100.builtin.ask.turn_tool_bytes",
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
+  },
+  {
     "key": "calls.rules",
     "title": "Call recovery",
     "description": "Ordered rules for retrying, continuing, failing over or waiting after a model call fails.",
@@ -86,6 +371,23 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
         ]
       },
       {
+        "id": "session-lost",
+        "when": {
+          "kind": "session_lost",
+          "purpose": "agent"
+        },
+        "steps": [
+          {
+            "type": "continue",
+            "times": 1
+          },
+          {
+            "type": "wait",
+            "until": "person"
+          }
+        ]
+      },
+      {
         "id": "other",
         "when": {},
         "steps": [
@@ -162,6 +464,23 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
         ]
       },
       {
+        "id": "session-lost",
+        "when": {
+          "kind": "session_lost",
+          "purpose": "agent"
+        },
+        "steps": [
+          {
+            "type": "continue",
+            "times": 1
+          },
+          {
+            "type": "wait",
+            "until": "person"
+          }
+        ]
+      },
+      {
         "id": "other",
         "when": {},
         "steps": [
@@ -191,7 +510,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 3,
     "example": 3,
     "text_key": "day100.builtin.calls.repeat_limit",
@@ -413,6 +732,74 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "agents.page_fetch",
+    "title": "Page fetch",
+    "description": "Program default when unset. Native uses a supported page reader; Service uses the explicitly selected fetch backend and turns native page fetching off. Web search does not enable this separate capability.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "off",
+            "on",
+            "service"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.agents.page_fetch",
+    "keywords": []
+  },
+  {
+    "key": "agents.image_generation",
+    "title": "Image generation",
+    "description": "Program default when unset. Native uses a supported native image tool; Service uses the explicitly selected backend and turns native image generation off. Availability and current provider Use are checked when it runs.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "off",
+            "on",
+            "service"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": "on",
+    "text_key": "day100.builtin.agents.image_generation",
+    "keywords": []
+  },
+  {
     "key": "agents.harness_versions",
     "title": "Agent program versions",
     "description": "Which build of each agent program new and updated environments get: the one Orch ships, the newest whose check passed, the newest (untested), or an exact version. An agent profile that names its version keeps it.",
@@ -602,6 +989,39 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "agents.prompt_cache_ttl",
+    "title": "Prompt cache lifetime",
+    "description": "An explicit cache lifetime for the agent program's main conversation. Unset uses the program's own default; programs without this control ignore it.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "5m",
+            "1h"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.agents.prompt_cache_ttl",
+    "keywords": []
+  },
+  {
     "key": "agents.subagents_at_once",
     "title": "Sub-agents at once",
     "description": "How many sub-agents the harness may run at once; the shortest value along the hierarchy wins. A harness without this control says it does not apply.",
@@ -714,7 +1134,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.agents.personal_skills",
@@ -754,7 +1174,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.thread.side_threads",
@@ -776,7 +1196,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 4,
     "example": 4,
     "text_key": "day100.builtin.thread.side_max",
@@ -803,7 +1223,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 24,
     "example": 24,
     "text_key": "day100.builtin.thread.side_idle_hours",
@@ -821,9 +1241,9 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "schema": {
       "type": "string",
       "enum": [
+        "allowed",
         "held",
-        "refused",
-        "allowed"
+        "refused"
       ]
     },
     "class": "policy",
@@ -833,7 +1253,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "stricter",
     "default": "held",
     "example": "held",
     "text_key": "day100.builtin.thread.inputs_without_use",
@@ -883,7 +1303,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 80,
     "example": 80,
     "text_key": "day100.builtin.thread.switch_carry_share",
@@ -910,7 +1330,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 33554432,
     "example": 16777216,
     "text_key": "day100.builtin.thread.native_fork_check_bytes",
@@ -937,7 +1357,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 33554432,
     "example": 16777216,
     "text_key": "day100.builtin.thread.read_turn_bytes",
@@ -987,7 +1407,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "stricter",
     "default": "writers",
     "example": "managers",
     "text_key": "day100.builtin.thread.plan_answered_by",
@@ -996,7 +1416,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "thread.goal.max_turns",
     "title": "Goal turns",
-    "description": "The most turns a goal may use here; 0 is no limit. A goal may set its own limit unless a place locks this one. Reaching a limit stops the goal and says which.",
+    "description": "The most turns a goal may use here; 0 is no limit. A goal may set a stricter own limit; it cannot raise a limit set above it. Reaching a limit stops the goal and says which.",
     "group": "collaboration",
     "schema": {
       "type": "integer",
@@ -1009,14 +1429,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 0,
     "example": 30,
     "text_key": "day100.builtin.thread.goal.max_turns",
     "keywords": [],
     "display": {
       "unit": "raw",
-      "zero": null
+      "zero": "no_limit"
     }
   },
   {
@@ -1036,14 +1456,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 0,
     "example": 120,
     "text_key": "day100.builtin.thread.goal.max_minutes",
     "keywords": [],
     "display": {
       "unit": "minutes",
-      "zero": null
+      "zero": "no_limit"
     }
   },
   {
@@ -1062,11 +1482,15 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": "0",
     "example": "5.00",
     "text_key": "day100.builtin.thread.goal.max_credits",
-    "keywords": []
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": "no_limit"
+    }
   },
   {
     "key": "approval.mode",
@@ -1210,6 +1634,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "gpt-6*"
     ],
     "text_key": "day100.builtin.models.allowed",
+    "keywords": []
+  },
+  {
+    "key": "services.allowed",
+    "title": "Allowed services",
+    "description": "Patterns naming enabled provider services that may be used here; every scope that sets a list must admit the service.",
+    "group": "models",
+    "schema": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "intersect",
+    "default": null,
+    "example": [
+      "@web",
+      "image-*"
+    ],
+    "text_key": "day100.builtin.services.allowed",
     "keywords": []
   },
   {
@@ -1925,6 +2376,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "gateways.tunnel_strategy",
+    "title": "Tunnel gateway",
+    "description": "New pairing plans use the lowest combined fresh round trip, or stay on the executor's gateway. Existing tunnels keep their frozen plan and fallback order.",
+    "group": "confinement",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "lowest_combined_rtt",
+        "executor"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread",
+      "environment"
+    ],
+    "merge": "replace",
+    "default": "lowest_combined_rtt",
+    "example": "executor",
+    "text_key": "day100.builtin.gateways.tunnel_strategy",
+    "keywords": []
+  },
+  {
     "key": "network.allowed_hosts",
     "title": "Allowed hosts",
     "description": "Exact other host names a restricted unit may reach; lists intersect and an empty list allows only Orch's own transport.",
@@ -1983,6 +2461,57 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "019a0000-0000-7000-8000-000000000004": true
     },
     "text_key": "day100.builtin.mcp.enabled",
+    "keywords": []
+  },
+  {
+    "key": "exec.version_overrides",
+    "title": "Any agent version",
+    "description": "Machine program versions that an environment manager allows with any agent version.",
+    "group": "environment",
+    "schema": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "by": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "path",
+          "version",
+          "by",
+          "at"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "class": "parameter",
+    "scopes": [
+      "environment"
+    ],
+    "merge": "replace",
+    "default": {},
+    "example": {
+      "codex": {
+        "path": "/usr/local/bin/codex",
+        "version": "0.165.0",
+        "by": "0199c1a0-0000-7000-8000-00000000000a",
+        "at": "2026-10-31T00:00:00Z"
+      }
+    },
+    "text_key": "day100.builtin.exec.version_overrides",
     "keywords": []
   },
   {
@@ -2104,7 +2633,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 120,
     "example": 120,
     "text_key": "day100.builtin.orch_tools.calls_per_minute",
@@ -2115,45 +2644,680 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "sharing.agent_reach",
-    "title": "Agents' reach",
-    "description": "Which other threads the agents here may read without anybody sharing them: none, those of their topic, or those of their project.",
+    "key": "orch_tools.owner_reads",
+    "title": "Personal read tools",
+    "description": "Let this thread use its owner's current read access, including when shared. The audience banner shows who can see or act and warns that personal reads are visible there. Sharing earlier personally read results requires informed confirmation.",
     "group": "agent",
     "schema": {
-      "type": "string",
-      "enum": [
-        "none",
-        "topic",
-        "project"
-      ]
+      "type": "boolean"
     },
     "class": "policy",
     "scopes": [
       "system",
       "org",
       "project",
-      "topic"
+      "topic",
+      "thread"
     ],
     "merge": "replace",
-    "default": "none",
-    "example": "none",
-    "text_key": "day100.builtin.sharing.agent_reach",
+    "default": false,
+    "example": false,
+    "text_key": "day100.builtin.orch_tools.owner_reads",
     "keywords": []
   },
   {
-    "key": "sharing.agent_documents",
-    "title": "Topic documents",
-    "description": "Whether agents may read or also edit and create public documents beside their topic and its main threads; private documents, conversations, chats, management and Export keep their own rules.",
+    "key": "orch_tools.search_query_chars",
+    "title": "Shared search query budget",
+    "description": "The query character budget advertised to this thread's agent and used by shared search. Defaults to 1000; increase it for longer queries.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 1000,
+    "example": 2000,
+    "text_key": "day100.builtin.orch_tools.search_query_chars",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.search_results",
+    "title": "Shared search result budget",
+    "description": "The result budget advertised to this thread's agent and used by shared search. Defaults to 200; byte and time budgets still produce a continuation.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 200,
+    "example": 300,
+    "text_key": "day100.builtin.orch_tools.search_results",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "orch_tools.search_context",
+    "title": "Shared search context budget",
+    "description": "The surrounding-line budget advertised to this thread's agent and used by shared-search snippets. Defaults to 5; increase it for wider context.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 10,
+    "text_key": "day100.builtin.orch_tools.search_context",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.offline_deadline",
+    "title": "Offline turn deadline",
+    "description": "End the active turn after this many offline seconds; none keeps waiting. Each outage retains the setting it began with.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "x-unit": "seconds"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.threads.offline_deadline",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.background_wake",
+    "title": "Background wake",
+    "description": "Wake when background tasks or subagents finish. Off: results of background work arrive with the next input; a program that cannot keep background work without waking is not offered it. Changes apply to the next session.",
     "group": "agent",
     "schema": {
       "type": "string",
       "enum": [
-        "none",
-        "read",
-        "write"
+        "on",
+        "off"
       ]
     },
-    "class": "policy",
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": "on",
+    "example": "on",
+    "text_key": "day100.builtin.threads.background_wake",
+    "keywords": []
+  },
+  {
+    "key": "threads.agent_schedules",
+    "title": "Agent schedules",
+    "description": "Let this thread's agent schedule visible future inputs on its own thread. Off by default; current permissions and provider allowances still apply to every run.",
+    "group": "agent",
+    "schema": {
+      "type": "string",
+      "enum": [
+        "on",
+        "off"
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": "off",
+    "example": "off",
+    "text_key": "day100.builtin.threads.agent_schedules",
+    "keywords": []
+  },
+  {
+    "key": "agents.web_search_backend",
+    "title": "Web search backend",
+    "description": "The provider and enabled native-search model, or enabled provider search/fetch services, used by Orch's managed web tools. Unset offers no paid service implicitly.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "model"
+                  ]
+                },
+                "provider_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "model_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "provider_id",
+                "model_name"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "api"
+                  ]
+                },
+                "provider_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "search_service": {
+                  "type": "string"
+                },
+                "fetch_service": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "provider_id",
+                "search_service"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "anyOf": [
+                {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "route": {
+                          "type": "string"
+                        },
+                        "offering": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "provider": {
+                                  "type": "string",
+                                  "format": "uuid"
+                                },
+                                "offering": {
+                                  "type": "string"
+                                }
+                              },
+                              "required": [
+                                "provider",
+                                "offering"
+                              ],
+                              "additionalProperties": true
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "config": {}
+                      },
+                      "required": [
+                        "route"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "capabilities": {
+                          "type": "object",
+                          "additionalProperties": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "route": {
+                                    "type": "string"
+                                  },
+                                  "offering": {
+                                    "anyOf": [
+                                      {
+                                        "type": "object",
+                                        "properties": {
+                                          "provider": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                          },
+                                          "offering": {
+                                            "type": "string"
+                                          }
+                                        },
+                                        "required": [
+                                          "provider",
+                                          "offering"
+                                        ],
+                                        "additionalProperties": true
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ]
+                                  },
+                                  "config": {}
+                                },
+                                "required": [
+                                  "route"
+                                ],
+                                "additionalProperties": true
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "default": {}
+                      },
+                      "required": [
+                        "capabilities"
+                      ],
+                      "additionalProperties": true
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "org"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.agents.web_search_backend",
+    "keywords": []
+  },
+  {
+    "key": "agents.image_generation_backend",
+    "title": "Image generation backend",
+    "description": "The exact declared route and enabled provider offering for Orch's image tool. Unset selects no paid service. Configuration contains adapter references, never provider credentials.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "route": {
+                  "type": "string"
+                },
+                "offering": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "provider": {
+                          "type": "string",
+                          "format": "uuid"
+                        },
+                        "offering": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "provider",
+                        "offering"
+                      ],
+                      "additionalProperties": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "config": {}
+              },
+              "required": [
+                "route"
+              ],
+              "additionalProperties": true
+            },
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "route": {
+                            "type": "string"
+                          },
+                          "offering": {
+                            "anyOf": [
+                              {
+                                "type": "object",
+                                "properties": {
+                                  "provider": {
+                                    "type": "string",
+                                    "format": "uuid"
+                                  },
+                                  "offering": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "provider",
+                                  "offering"
+                                ],
+                                "additionalProperties": true
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "config": {}
+                        },
+                        "required": [
+                          "route"
+                        ],
+                        "additionalProperties": true
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "default": {}
+              },
+              "required": [
+                "capabilities"
+              ],
+              "additionalProperties": true
+            }
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "class": "parameter",
+    "scopes": [
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": null,
+    "example": null,
+    "text_key": "day100.builtin.agents.image_generation_backend",
+    "keywords": []
+  },
+  {
+    "key": "threads.agent_schedule_hours",
+    "title": "Agent schedule duration",
+    "description": "The default lifetime in hours for an agent's recurring schedule. An explicit end may be later; this is a default, not a cap.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "hours"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 24,
+    "example": 24,
+    "text_key": "day100.builtin.threads.agent_schedule_hours",
+    "keywords": [],
+    "display": {
+      "unit": "hours",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.agent_schedule_runs",
+    "title": "Agent schedule runs",
+    "description": "The default number of occurrences for an agent's recurring schedule. The agent may explicitly choose another positive number; this is a default, not a cap.",
+    "group": "agent",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 20,
+    "example": 20,
+    "text_key": "day100.builtin.threads.agent_schedule_runs",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "threads.agent_access",
+    "title": "Agent access",
+    "description": "The initial access shown when creating a thread: reach and levels for documents, chats and other threads. The creator confirms what they may give. Changes apply to new threads, not existing grants.",
+    "group": "agent",
+    "schema": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "nothing"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {},
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "thread"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {
+                "chat": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "documents": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "edit",
+                    "manage"
+                  ]
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "where": {
+              "type": "string",
+              "enum": [
+                "topic",
+                "project"
+              ]
+            },
+            "parts": {
+              "type": "object",
+              "properties": {
+                "timeline": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "thread_fork": {
+                  "type": "boolean"
+                },
+                "thread_archive": {
+                  "type": "boolean"
+                },
+                "chat": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "write",
+                    "manage"
+                  ]
+                },
+                "documents": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "edit",
+                    "manage"
+                  ]
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "where",
+            "parts"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "class": "parameter",
     "scopes": [
       "system",
       "org",
@@ -2161,9 +3325,40 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "replace",
-    "default": "write",
-    "example": "write",
-    "text_key": "day100.builtin.sharing.agent_documents",
+    "default": {
+      "where": "topic",
+      "parts": {
+        "documents": "edit"
+      }
+    },
+    "example": {
+      "where": "topic",
+      "parts": {
+        "documents": "edit"
+      }
+    },
+    "text_key": "day100.builtin.threads.agent_access",
+    "keywords": []
+  },
+  {
+    "key": "threads.let_viewers_in",
+    "title": "Let thread viewers in",
+    "description": "The initial choice to let a new thread's viewers use its environment. The creator confirms the choice; changing this default grants no access by itself.",
+    "group": "agent",
+    "schema": {
+      "type": "boolean"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "replace",
+    "default": false,
+    "example": false,
+    "text_key": "day100.builtin.threads.let_viewers_in",
     "keywords": []
   },
   {
@@ -2183,7 +3378,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic",
       "thread"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 60,
     "example": 60,
     "text_key": "day100.builtin.broadcast.chat_messages_per_hour",
@@ -2209,7 +3404,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 67108864,
     "example": 67108864,
     "text_key": "day100.builtin.sharing.snapshot_max_bytes",
@@ -2235,7 +3430,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 2147483648,
     "example": 2147483648,
     "text_key": "day100.builtin.export.max_bytes",
@@ -2260,7 +3455,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 10000,
     "example": 10000,
     "text_key": "day100.builtin.export.max_items",
@@ -2317,11 +3512,15 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": null,
     "example": 1073741824,
     "text_key": "day100.builtin.import.max_bytes",
-    "keywords": []
+    "keywords": [],
+    "display": {
+      "unit": "bytes",
+      "zero": null
+    }
   },
   {
     "key": "import.max_items",
@@ -2345,11 +3544,15 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": null,
     "example": 5000,
     "text_key": "day100.builtin.import.max_items",
-    "keywords": []
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
   },
   {
     "key": "workspace.ignore",
@@ -2590,8 +3793,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   },
   {
     "key": "broadcast.wake_idle",
-    "title": "Wake idle threads",
-    "description": "Whether an announcement starts a turn on a thread that is idle.",
+    "title": "Allow waking idle threads",
+    "description": "Whether a send may wake an idle thread here; each announcement or thread message must explicitly choose wake_idle, which is false when omitted.",
     "group": "collaboration",
     "schema": {
       "type": "boolean"
@@ -2603,7 +3806,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "replace",
-    "default": false,
+    "default": true,
     "example": false,
     "text_key": "day100.builtin.broadcast.wake_idle",
     "keywords": []
@@ -2611,7 +3814,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "broadcast.agent_options",
     "title": "Agents' choices",
-    "description": "What an agent may choose for one announcement in place of the values set here.",
+    "description": "Which delivery choices an agent may use for one announcement instead of the configured delivery. Waking is chosen separately for each send.",
     "group": "collaboration",
     "schema": {
       "type": "array",
@@ -2620,8 +3823,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
         "enum": [
           "interrupt",
           "steer",
-          "next_turn",
-          "wake_idle"
+          "next_turn"
         ]
       },
       "uniqueItems": true
@@ -2633,7 +3835,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "intersect",
     "default": [],
     "example": [
       "steer",
@@ -2657,7 +3859,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.terminal.enabled",
@@ -2701,7 +3903,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 480,
     "example": 480,
     "text_key": "day100.builtin.terminal.detached_minutes",
@@ -2727,7 +3929,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 4,
     "example": 4,
     "text_key": "day100.builtin.terminal.max_per_person",
@@ -2753,7 +3955,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 16,
     "example": 16,
     "text_key": "day100.builtin.terminal.max_per_environment",
@@ -2778,7 +3980,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.browser.enabled",
@@ -2799,7 +4001,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.ports.enabled",
@@ -3004,7 +4206,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 4,
     "example": 4,
     "text_key": "day100.builtin.browser.max_per_environment",
@@ -3029,7 +4231,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.vnc.enabled",
@@ -3073,7 +4275,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 4,
     "example": 4,
     "text_key": "day100.builtin.vnc.max_per_environment",
@@ -3294,7 +4496,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "runtime.idle_stop_minutes",
     "title": "Idle stop",
-    "description": "Stop a managed provider's runtime after this many minutes without a session or a lease; 0 never stops it.",
+    "description": "Keep a managed provider's runtime running with 0, the shipped default. A positive number stops it after that many idle minutes without a session or a lease. Scheduled reads leave it stopped until a turn, sign-in, Start, Refresh or renewal starts it again.",
     "group": "provider_runtimes",
     "schema": {
       "type": "integer",
@@ -3310,8 +4512,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "provider"
     ],
     "merge": "replace",
-    "default": 1440,
-    "example": 1440,
+    "default": 0,
+    "example": 0,
     "text_key": "day100.builtin.runtime.idle_stop_minutes",
     "keywords": [],
     "display": {
@@ -3731,6 +4933,118 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
+    "key": "providers.facts_idle_minutes",
+    "title": "Idle facts interval",
+    "description": "Read provider facts this often while no bound thread has worked recently. Defaults to 60 minutes; at least 1 minute.",
+    "group": "provider_runtimes",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "minutes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "provider"
+    ],
+    "merge": "replace",
+    "default": 60,
+    "example": 60,
+    "text_key": "day100.builtin.providers.facts_idle_minutes",
+    "keywords": [],
+    "display": {
+      "unit": "minutes",
+      "zero": null
+    }
+  },
+  {
+    "key": "providers.facts_active_minutes",
+    "title": "Active facts interval",
+    "description": "Read provider facts this often while a bound thread runs, has worked recently, or waits on a used-up plan. Defaults to 5 minutes; at least 1 minute.",
+    "group": "provider_runtimes",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "minutes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "provider"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 5,
+    "text_key": "day100.builtin.providers.facts_active_minutes",
+    "keywords": [],
+    "display": {
+      "unit": "minutes",
+      "zero": null
+    }
+  },
+  {
+    "key": "providers.facts_recent_minutes",
+    "title": "Recent provider activity",
+    "description": "Keep a provider on the active facts interval for this many minutes after a bound thread's turn. Defaults to 15 minutes; at least 1 minute.",
+    "group": "provider_runtimes",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "minutes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "provider"
+    ],
+    "merge": "replace",
+    "default": 15,
+    "example": 15,
+    "text_key": "day100.builtin.providers.facts_recent_minutes",
+    "keywords": [],
+    "display": {
+      "unit": "minutes",
+      "zero": null
+    }
+  },
+  {
+    "key": "providers.facts_refused_minutes",
+    "title": "Refused facts interval",
+    "description": "Read provider facts this often while its credential is refused, to find an external repair. Defaults to 5 minutes; at least 1 minute.",
+    "group": "provider_runtimes",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "x-unit": "minutes"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "provider"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 5,
+    "text_key": "day100.builtin.providers.facts_refused_minutes",
+    "keywords": [],
+    "display": {
+      "unit": "minutes",
+      "zero": null
+    }
+  },
+  {
     "key": "providers.presets",
     "title": "Provider presets",
     "description": "Ready-made API upstreams offered when a provider is added, by name; a lower scope adds one, replaces one, or hides one.",
@@ -3773,6 +5087,28 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
               "dimensions": {
                 "type": "integer",
                 "minimum": 1
+              },
+              "credential_hints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "prefix": {
+                      "type": "string"
+                    },
+                    "role": {
+                      "type": "string"
+                    },
+                    "field": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "prefix",
+                    "role"
+                  ],
+                  "additionalProperties": true
+                }
               }
             },
             "required": [
@@ -3819,11 +5155,35 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": false,
     "example": false,
     "text_key": "day100.builtin.providers.allow_http_upstreams",
     "keywords": []
+  },
+  {
+    "key": "providers.model_groups_max",
+    "title": "Model groups",
+    "description": "The maximum number of named groups per model. The default is 8 and can be raised; 0 allows no new group memberships. Existing memberships are kept.",
+    "group": "providers",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "replace",
+    "default": 8,
+    "example": 8,
+    "text_key": "day100.builtin.providers.model_groups_max",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
   },
   {
     "key": "providers.expiry_notice_days",
@@ -4017,6 +5377,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "message.body_max_chars",
+    "title": "Message length",
+    "description": "How many characters an administrator message may contain; the default can be changed at the system or organization.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org"
+    ],
+    "merge": "min",
+    "default": 20000,
+    "example": 30000,
+    "text_key": "day100.builtin.message.body_max_chars",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
     "key": "notify.operations",
     "title": "Operation notices",
     "description": "Whether Notify starts ticked in an operation: when work is blocked, always, or never. The person confirms the choice; recipients keep their own notification choices.",
@@ -4048,7 +5432,33 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "broadcast.rate_per_hour",
     "title": "Announcements an hour",
-    "description": "How many announcements one thread's agent may send in a rolling hour; 0 allows none.",
+    "description": "How many announcements one thread's agent may send in a rolling hour; default 12, 0 allows none. Thread messages have a separate limit.",
+    "group": "collaboration",
+    "schema": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic"
+    ],
+    "merge": "min",
+    "default": 12,
+    "example": 6,
+    "text_key": "day100.builtin.broadcast.rate_per_hour",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
+  },
+  {
+    "key": "broadcast.thread_messages_per_hour",
+    "title": "Thread messages an hour",
+    "description": "How many messages to individual threads one sending thread's agent may send in a rolling hour; default 60, 0 allows none. Announcements have a separate limit.",
     "group": "collaboration",
     "schema": {
       "type": "integer",
@@ -4062,40 +5472,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic"
     ],
     "merge": "replace",
-    "default": 6,
-    "example": 6,
-    "text_key": "day100.builtin.broadcast.rate_per_hour",
+    "default": 60,
+    "example": 60,
+    "text_key": "day100.builtin.broadcast.thread_messages_per_hour",
     "keywords": [],
     "display": {
       "unit": "raw",
       "zero": null
     }
-  },
-  {
-    "key": "broadcast.agent_scope",
-    "title": "Announcement reach",
-    "description": "How far an agent's announcement may reach: its topic, its project or its nearest org.",
-    "group": "collaboration",
-    "schema": {
-      "type": "string",
-      "enum": [
-        "topic",
-        "project",
-        "org"
-      ]
-    },
-    "class": "policy",
-    "scopes": [
-      "system",
-      "org",
-      "project",
-      "topic"
-    ],
-    "merge": "replace",
-    "default": "topic",
-    "example": "topic",
-    "text_key": "day100.builtin.broadcast.agent_scope",
-    "keywords": []
   },
   {
     "key": "capability.recreate_grace_secs",
@@ -4189,7 +5573,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "intersect",
     "default": [
       "1d",
       "7d",
@@ -4245,7 +5629,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic",
       "thread"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 5,
     "example": 5,
     "text_key": "day100.builtin.tags.max_per_place",
@@ -4734,37 +6118,13 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org",
       "project",
-      "topic"
+      "topic",
+      "thread"
     ],
     "merge": "replace",
     "default": "harness",
     "example": "harness",
     "text_key": "day100.builtin.auto.title",
-    "keywords": []
-  },
-  {
-    "key": "auto.description",
-    "title": "Descriptions",
-    "description": "Whether the summarizer keeps a description as live progress.",
-    "group": "automation",
-    "schema": {
-      "type": "string",
-      "enum": [
-        "off",
-        "summarizer"
-      ]
-    },
-    "class": "parameter",
-    "scopes": [
-      "system",
-      "org",
-      "project",
-      "topic"
-    ],
-    "merge": "replace",
-    "default": "off",
-    "example": "off",
-    "text_key": "day100.builtin.auto.description",
     "keywords": []
   },
   {
@@ -4794,31 +6154,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
-    "key": "auto.topic_rollup",
-    "title": "Topic description",
-    "description": "Whether a topic's description is summed up from those of its threads.",
-    "group": "automation",
-    "schema": {
-      "type": "string",
-      "enum": [
-        "off",
-        "rollup"
-      ]
-    },
-    "class": "parameter",
-    "scopes": [
-      "system",
-      "org",
-      "project",
-      "topic"
-    ],
-    "merge": "replace",
-    "default": "off",
-    "example": "rollup",
-    "text_key": "day100.builtin.auto.topic_rollup",
-    "keywords": []
-  },
-  {
     "key": "summary.handoff_input_share",
     "title": "Summary input share",
     "description": "How much of the summary model's context window a hand-off, a fork or a goal check may fill with the conversation it sends; the newest turns first, older ones as their one-line index.",
@@ -4836,7 +6171,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 50,
     "example": 50,
     "text_key": "day100.builtin.summary.handoff_input_share",
@@ -4868,7 +6203,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org",
       "project",
-      "topic"
+      "topic",
+      "thread"
     ],
     "merge": "replace",
     "default": null,
@@ -4881,7 +6217,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "auto.triggers",
     "title": "Triggers",
-    "description": "When automatic titles and descriptions are written again: after a turn, at a milestone or at intervals, and how often at most.",
+    "description": "When automatic titles, tags and summaries are written again: after a turn, at a milestone or at intervals, and how often at most.",
     "group": "automation",
     "schema": {
       "type": "object",
@@ -4920,7 +6256,8 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org",
       "project",
-      "topic"
+      "topic",
+      "thread"
     ],
     "merge": "replace",
     "default": {
@@ -4939,6 +6276,324 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     },
     "text_key": "day100.builtin.auto.triggers",
     "keywords": []
+  },
+  {
+    "key": "summary.targets",
+    "title": "Summary targets",
+    "description": "Refresh events and input/output defaults by target, off until enabled under the chosen summarizer and shared usage caps. Help and search results use written or existing summaries.",
+    "group": "automation",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "thread": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "turn_completed",
+                  "milestone",
+                  "interval",
+                  "content_changed",
+                  "message_posted",
+                  "child_changed"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "min_interval_secs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-unit": "seconds"
+            },
+            "context_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "output_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "automatic"
+          ],
+          "additionalProperties": false
+        },
+        "topic": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "turn_completed",
+                  "milestone",
+                  "interval",
+                  "content_changed",
+                  "message_posted",
+                  "child_changed"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "min_interval_secs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-unit": "seconds"
+            },
+            "context_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "output_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "automatic"
+          ],
+          "additionalProperties": false
+        },
+        "document": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "turn_completed",
+                  "milestone",
+                  "interval",
+                  "content_changed",
+                  "message_posted",
+                  "child_changed"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "min_interval_secs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-unit": "seconds"
+            },
+            "context_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "output_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "automatic"
+          ],
+          "additionalProperties": false
+        },
+        "chat": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "turn_completed",
+                  "milestone",
+                  "interval",
+                  "content_changed",
+                  "message_posted",
+                  "child_changed"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "min_interval_secs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-unit": "seconds"
+            },
+            "context_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "output_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "automatic"
+          ],
+          "additionalProperties": false
+        },
+        "chat_title": {
+          "type": "object",
+          "properties": {
+            "automatic": {
+              "type": "boolean"
+            },
+            "on": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "turn_completed",
+                  "milestone",
+                  "interval",
+                  "content_changed",
+                  "message_posted",
+                  "child_changed"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "min_interval_secs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "x-unit": "seconds"
+            },
+            "context_tokens": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            },
+            "output_chars": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4294967295
+            }
+          },
+          "required": [
+            "automatic"
+          ],
+          "additionalProperties": false
+        },
+        "help": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        },
+        "search_results": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "map",
+    "default": {},
+    "example": {
+      "thread": {
+        "automatic": true,
+        "on": [
+          "turn_completed",
+          "milestone"
+        ],
+        "output_chars": 600
+      },
+      "document": {
+        "automatic": false
+      }
+    },
+    "text_key": "day100.builtin.summary.targets",
+    "keywords": []
+  },
+  {
+    "key": "summary.follow_interval_secs",
+    "title": "Summary follow interval",
+    "description": "Free reads while a summary is eligible or running; a scheduled future update is followed at its actual due time instead.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295,
+      "x-unit": "seconds"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": 5,
+    "example": 5,
+    "text_key": "day100.builtin.summary.follow_interval_secs",
+    "keywords": [],
+    "display": {
+      "unit": "seconds",
+      "zero": null
+    }
+  },
+  {
+    "key": "summary.read_batch_size",
+    "title": "Summary read batch",
+    "description": "Distinct source targets read in one search-summary window; larger selections continue in further windows.",
+    "group": "automation",
+    "schema": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967295
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 100,
+    "example": 100,
+    "text_key": "day100.builtin.summary.read_batch_size",
+    "keywords": [],
+    "display": {
+      "unit": "raw",
+      "zero": null
+    }
   },
   {
     "key": "capability.policy",
@@ -5011,10 +6666,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.sharing.allow_external",
+    "keywords": []
+  },
+  {
+    "key": "sharing.allow_copy_out",
+    "title": "Copies to other orgs",
+    "description": "Whether things here may be duplicated or moved into another org.",
+    "group": "collaboration",
+    "schema": {
+      "type": "boolean"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org",
+      "project"
+    ],
+    "merge": "all",
+    "default": true,
+    "example": true,
+    "text_key": "day100.builtin.sharing.allow_copy_out",
     "keywords": []
   },
   {
@@ -5059,10 +6734,32 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.sharing.allow_holders",
+    "keywords": []
+  },
+  {
+    "key": "sharing.on_link",
+    "title": "Share viewing on send",
+    "description": "The default viewing-share choice for links sent here. A person can switch this off for themselves.",
+    "group": "collaboration",
+    "schema": {
+      "type": "boolean"
+    },
+    "class": "policy",
+    "scopes": [
+      "system",
+      "org",
+      "project",
+      "topic",
+      "thread"
+    ],
+    "merge": "replace",
+    "default": true,
+    "example": true,
+    "text_key": "day100.builtin.sharing.on_link",
     "keywords": []
   },
   {
@@ -5075,6 +6772,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "additionalProperties": {
         "type": "object",
         "properties": {
+          "web_search_per_call": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$"
+          },
+          "web_fetch_per_call": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$"
+          },
           "input_per_mtok": {
             "type": "string",
             "pattern": "^[0-9]+(\\.[0-9]+)?$"
@@ -5091,7 +6796,22 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
             "type": "string",
             "pattern": "^[0-9]+(\\.[0-9]+)?$"
           },
+          "cache_write_1h_per_mtok": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$"
+          },
+          "cache_write_12h_per_mtok": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]+)?$"
+          },
           "tiers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?$"
+            }
+          },
+          "capacity_tiers": {
             "type": "object",
             "additionalProperties": {
               "type": "string",
@@ -5120,6 +6840,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
                   "pattern": "^[0-9]+(\\.[0-9]+)?$"
                 },
                 "cache_write_per_mtok": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                },
+                "cache_write_1h_per_mtok": {
+                  "type": "string",
+                  "pattern": "^[0-9]+(\\.[0-9]+)?$"
+                },
+                "cache_write_12h_per_mtok": {
                   "type": "string",
                   "pattern": "^[0-9]+(\\.[0-9]+)?$"
                 }
@@ -5262,7 +6990,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.chat.enabled",
@@ -5285,7 +7013,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "stricter",
     "default": "members",
     "example": "members",
     "text_key": "day100.builtin.chat.direct",
@@ -5305,7 +7033,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system"
     ],
     "merge": "replace",
-    "default": 10,
+    "default": 200,
     "example": 10,
     "text_key": "day100.builtin.chat.group_max_members",
     "keywords": [],
@@ -5317,7 +7045,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
   {
     "key": "chat.group_mentions",
     "title": "Role and group mentions",
-    "description": "Who may name role and group audiences among current readers: chat writers, or chat managers; the creator manages a group chat.",
+    "description": "Who may name role and group audiences among current readers: chat writers, or its current managers for a group chat.",
     "group": "chat_documents",
     "schema": {
       "type": "string",
@@ -5334,7 +7062,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "topic",
       "thread"
     ],
-    "merge": "replace",
+    "merge": "stricter",
     "default": "writers",
     "example": "writers",
     "text_key": "day100.builtin.chat.group_mentions",
@@ -5356,14 +7084,14 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 120,
     "example": 120,
     "text_key": "day100.builtin.notifications.person_rate_per_hour",
     "keywords": [],
     "display": {
       "unit": "raw",
-      "zero": "off"
+      "zero": "no_limit"
     }
   },
   {
@@ -5382,7 +7110,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 200,
     "example": 200,
     "text_key": "day100.builtin.notifications.person_note_chars",
@@ -5615,33 +7343,6 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     }
   },
   {
-    "key": "docs.description_chars",
-    "title": "Document description length",
-    "description": "Characters the summarizer may write for a document's description.",
-    "group": "automation",
-    "schema": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 4000
-    },
-    "class": "parameter",
-    "scopes": [
-      "system",
-      "org",
-      "project",
-      "topic"
-    ],
-    "merge": "replace",
-    "default": 200,
-    "example": 200,
-    "text_key": "day100.builtin.docs.description_chars",
-    "keywords": [],
-    "display": {
-      "unit": "raw",
-      "zero": null
-    }
-  },
-  {
     "key": "docs.enabled",
     "title": "Documents",
     "description": "Whether new documents may be made beside the nodes here.",
@@ -5656,7 +7357,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.docs.enabled",
@@ -5708,7 +7409,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 2097152,
     "example": 2097152,
     "text_key": "day100.builtin.docs.max_bytes",
@@ -5734,7 +7435,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 5000,
     "example": 5000,
     "text_key": "day100.builtin.docs.max_blocks",
@@ -5760,7 +7461,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 200,
     "example": 200,
     "text_key": "day100.builtin.docs.versions_kept",
@@ -5787,7 +7488,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 16777216,
     "example": 16777216,
     "text_key": "day100.builtin.docs.history_max_bytes",
@@ -5814,7 +7515,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": null,
     "example": 8589934592,
     "text_key": "day100.builtin.docs.file_max_bytes",
@@ -5841,7 +7542,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 1073741824,
     "example": 1073741824,
     "text_key": "day100.builtin.docs.files_max_bytes",
@@ -6061,7 +7762,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": null,
     "example": 8589934592,
     "text_key": "day100.builtin.chat.attachment_max_bytes",
@@ -6397,7 +8098,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "all",
     "default": false,
     "example": true,
     "text_key": "day100.builtin.search.semantic.enabled",
@@ -6631,11 +8332,15 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 100,
     "example": 60,
     "text_key": "day100.builtin.search.semantic.max_disk_share",
-    "keywords": []
+    "keywords": [],
+    "display": {
+      "unit": "percent",
+      "zero": null
+    }
   },
   {
     "key": "search.semantic.tuning",
@@ -6881,7 +8586,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "project",
       "topic"
     ],
-    "merge": "replace",
+    "merge": "any",
     "default": true,
     "example": true,
     "text_key": "day100.builtin.redaction.mask_secrets",
@@ -7107,6 +8812,24 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "keywords": []
   },
   {
+    "key": "org.terms",
+    "title": "Terms for people who join",
+    "description": "Markdown terms shown before joining this organization or accepting a guest invitation to its places or chats. The root organization's terms come first, then each nearer organization's own terms, separated by one blank line. Empty text adds no terms. Existing members are not asked to accept later edits.",
+    "group": "joining",
+    "schema": {
+      "type": "string"
+    },
+    "class": "policy",
+    "scopes": [
+      "org"
+    ],
+    "merge": "append",
+    "default": "",
+    "example": "Members use this organization's places for its work and keep its documents inside it.",
+    "text_key": "day100.builtin.org.terms",
+    "keywords": []
+  },
+  {
     "key": "invitations.forms",
     "title": "Invitation forms",
     "description": "The forms of invitation that may be made for an org of this tree: a link to share, a personal link for one address, or both.",
@@ -7127,7 +8850,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "intersect",
     "default": [
       "link",
       "email"
@@ -7179,7 +8902,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 720,
     "example": 720,
     "text_key": "day100.builtin.invitations.max_hours",
@@ -7204,7 +8927,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 100,
     "example": 100,
     "text_key": "day100.builtin.invitations.max_uses",
@@ -7231,6 +8954,30 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
     "example": true,
     "text_key": "day100.builtin.mail.shared",
     "keywords": []
+  },
+  {
+    "key": "api.idempotency_window",
+    "title": "Creation replay window",
+    "description": "How many hours a creation key retains its accepted identity; 0 disables replay. This default can be increased.",
+    "group": "system",
+    "schema": {
+      "type": "integer",
+      "minimum": 0,
+      "x-unit": "hours"
+    },
+    "class": "parameter",
+    "scopes": [
+      "system"
+    ],
+    "merge": "replace",
+    "default": 24,
+    "example": 48,
+    "text_key": "day100.builtin.api.idempotency_window",
+    "keywords": [],
+    "display": {
+      "unit": "hours",
+      "zero": null
+    }
   },
   {
     "key": "release.check_days",
@@ -7389,7 +9136,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "intersect",
     "default": [],
     "example": [
       "second_step"
@@ -7414,7 +9161,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "system",
       "org"
     ],
-    "merge": "replace",
+    "merge": "stricter",
     "default": "optional",
     "example": "required",
     "text_key": "day100.builtin.auth.second_step",
@@ -7566,7 +9313,7 @@ export const SETTINGS_REGISTRY: readonly SettingDef[] = [
       "org",
       "project"
     ],
-    "merge": "replace",
+    "merge": "min",
     "default": 21474836480,
     "example": 21474836480,
     "text_key": "day100.builtin.storage.env_cache_quota_bytes",

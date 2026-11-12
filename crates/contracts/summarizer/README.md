@@ -1,8 +1,8 @@
 # orch-summarizer-contract
 
-Summarizer contract for title, description and tag generation.
+Summarizer contract for titles, tags, summary text and handoffs.
 
-The contract of summarizers, which turn the recent activity of a node into the text of one field (a title, a description or tags): the `Summarizer` trait, the descriptor each publishes (its name, the schema of its configuration, the fields it writes) and how `auto.summarizer` splits into the kind and the configuration, the activity it is shown (the latest items, each cut, without tool output, already redacted), and the result with the one rule that holds every result before it is written: one line of at most 200 characters for a description, at most 80 for a title, tags a subset of the offered ones, longer output cut and malformed output discarded with the usage still counted. The back-off after failures doubles up to one hour, and a skip is no failure. A summarizer with no model in the tests stands for an implementation.
+Summarizers turn recent activity into text through the `Summarizer` trait. Each descriptor publishes its name, configuration schema and supported outputs; `auto.summarizer` selects the kind and its configuration. Activity is bounded and redacted before the producer sees it. Results conform to the requested size, titles stay within 80 characters, and tags come from the offered choices. Malformed output is discarded with its actual usage still counted. The engine selects the destination: written descriptions are never automation targets. Failure backoff doubles up to one hour, while a skipped call is no failure. Tests also use producers that need no model.
 
 | Module | Planned responsibility |
 |--------|------------------------|

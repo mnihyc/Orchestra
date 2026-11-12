@@ -12,7 +12,7 @@
 //! enables them, and only then does a thread show the parameter. What a thread starts with of each is the
 //! model's entry's to say, and the parameters take it from there.
 //!
-//! **The context** is the only parameter that belongs to the session and not to the turn. This harness holds
+//! **The context** and native search are applied when a session opens. This harness holds
 //! the threshold at which it shortens a conversation apart from the window of the model, so the adapter tells
 //! it both ([`context_members`]); the threshold follows from the context by a rule (nine tenths, which is the
 //! harness's own) and is set by nobody.
@@ -148,12 +148,79 @@ pub fn definitions() -> Vec<ParameterDef> {
             scopes: vec![ParameterScope::Thread],
             apply: ParameterApply::NextTurn,
             eligible_when: Some(Condition::All(vec![
-                Condition::CredentialPath(CredentialPath::Native),
+                Condition::Any(vec![
+                    Condition::CredentialPath(CredentialPath::Native),
+                    Condition::CredentialPath(CredentialPath::Forwarded),
+                ]),
                 Condition::ModelHas(ModelFeature::AccessPrograms),
             ])),
             feature: Some(CYBER_ACCESS_FEATURE.to_owned()),
         },
+        orch_agent_contract::parameters::managed_web_search_parameter(true),
     ]
+}
+
+/// Native profile keys use the same model limits as the program's ordinary parameters.
+#[must_use]
+pub fn profile_parameters() -> orch_agent_contract::profile_parameters::ProfileParameters {
+    use orch_agent_contract::profile_parameters::{Binding, ProfileParameters};
+    use std::collections::BTreeMap;
+
+    let mut bindings: Vec<_> = definitions()
+        .into_iter()
+        .map(|parameter| {
+            if parameter.key == orch_agent_contract::parameters::WEB_SEARCH_KEY {
+                // A literal SDK profile key cannot select an Orch service.
+                orch_agent_contract::parameters::web_search_parameter(true)
+            } else {
+                parameter
+            }
+        })
+        .filter_map(|parameter| {
+            let (pointer, values) = match parameter.key.as_str() {
+                SERVICE_TIER => (
+                    "/service_tier",
+                    BTreeMap::from([
+                        ("priority".to_owned(), json!("fast")),
+                        ("default".to_owned(), Json::Null),
+                    ]),
+                ),
+                CONTEXT => ("/model_context_window", BTreeMap::new()),
+                REASONING_SUMMARY => ("/model_reasoning_summary", BTreeMap::new()),
+                "web_search" => ("/web_search", BTreeMap::new()),
+                _ => return None,
+            };
+            Some(Binding {
+                pointer: pointer.to_owned(),
+                parameter,
+                values,
+            })
+        })
+        .collect();
+    bindings.push(Binding {
+        pointer: "/model_reasoning_effort".to_owned(),
+        parameter: ParameterDef {
+            key: "effort".to_owned(),
+            title: "Effort".to_owned(),
+            description: "The model's enabled reasoning efforts.".to_owned(),
+            group: ParameterGroup::Model,
+            kind: ParameterType::Enum,
+            options: Some(ParameterOptions::FromModel {
+                from_model: ModelList::Efforts,
+            }),
+            range: None,
+            default: ParameterDefault::Value(Json::Null),
+            scopes: Vec::new(),
+            apply: ParameterApply::NextTurn,
+            eligible_when: None,
+            feature: None,
+        },
+        values: BTreeMap::new(),
+    });
+    ProfileParameters {
+        version: 1,
+        bindings,
+    }
 }
 
 /// The word the harness uses for an approval mode.
@@ -396,9 +463,11 @@ pub fn offered_for(model: &Json) -> Option<Offered> {
         return None;
     }
     Some(Offered {
+        web_search: None,
         service_tiers: (!tiers.is_empty()).then_some(tiers),
         access_programs: (!programs.is_empty()).then_some(programs),
         context_max: larger,
+        ..Offered::default()
     })
 }
 
@@ -420,10 +489,167 @@ pub fn is_inside(path: &str, root: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_search_is_declared_without_primary_native_search_and_requires_an_explicit_service_choice()
+     {
+        use orch_agent_contract::descriptor::{Placement, ProviderKind};
+        use orch_agent_contract::parameters::{Eligibility, Resolution};
+        let search = crate::descriptor::descriptor("0.167.0")
+            .parameters
+            .into_iter()
+            .find(|parameter| parameter.key == "web_search")
+            .unwrap();
+        for model in [
+            json!({}),
+            json!({"offered":{"web_search":["cached","indexed","live"]},
+            "request_options":{"native":{"type":"object","properties":{"web_search":false}}}}),
+        ] {
+            for (credential_path, provider_kind) in [
+                (CredentialPath::Native, ProviderKind::Subscription),
+                (CredentialPath::Forwarded, ProviderKind::Api),
+            ] {
+                let context = Eligibility {
+                    credential_path,
+                    provider_kind,
+                    environment_placement: Placement::Managed,
+                    model: serde_json::from_value(model.clone()).unwrap(),
+                    harness_version: Some("0.167.0".into()),
+                };
+                let features = std::collections::BTreeMap::new();
+                assert!(search.is_shown(&context, &features));
+                assert!(
+                    search
+                        .options_for(&context.model)
+                        .iter()
+                        .any(|option| option.value == "service")
+                );
+                for value in [None, Some(&Json::Null)] {
+                    assert_eq!(
+                        search.resolve(&context, &features, value),
+                        Resolution::SendNothing
+                    );
+                }
+                assert_eq!(
+                    search.resolve(&context, &features, Some(&json!("service"))),
+                    Resolution::Send(json!("service"))
+                );
+                assert_eq!(
+                    search.projection(&context.model)["capability"],
+                    "web_search"
+                );
+                assert_eq!(search.apply, ParameterApply::NewSession);
+            }
+        }
+    }
+
+    #[test]
+    fn managed_search_keeps_each_native_default_and_cannot_leave_a_fixed_native_tool_enabled() {
+        use orch_agent_contract::parameters::{ModelParameters, Resolution};
+        let search = definitions()
+            .into_iter()
+            .find(|parameter| parameter.key == "web_search")
+            .unwrap();
+        for mode in ["disabled", "cached", "indexed", "live"] {
+            let model: ModelParameters = serde_json::from_value(json!({
+                "web_search":["cached","indexed","live"],"default_web_search":mode
+            }))
+            .unwrap();
+            assert_eq!(search.start_for(&model), Some(json!(mode)));
+            assert!(
+                search
+                    .options_for(&model)
+                    .iter()
+                    .any(|option| option.value == "indexed")
+            );
+        }
+        let fixed: ModelParameters = serde_json::from_value(json!({"web_search":["live"],
+            "request_options":{"native":{"type":"object","properties":{"web_search":{"const":"live"}}}}
+        })).unwrap();
+        assert_eq!(
+            search.resolve_value(&fixed, Some(&json!("service"))),
+            Resolution::Stale(json!("service"))
+        );
+        let native_paid_default: ModelParameters =
+            serde_json::from_value(json!({"web_search":["live"],
+                "request_options":{"native":{"properties":{"web_search":{"default":"service"}}}}
+            }))
+            .unwrap();
+        assert_eq!(
+            search.start_for(&native_paid_default),
+            None,
+            "a native default cannot opt into a paid service"
+        );
+    }
+
+    #[test]
+    fn the_actual_profile_search_binding_stays_native_only_after_managed_search_adoption() {
+        use orch_agent_contract::parameters::{ModelParameters, web_search_parameter};
+        use std::collections::BTreeMap;
+        let profile = profile_parameters();
+        let binding = profile
+            .bindings
+            .iter()
+            .find(|binding| binding.pointer == "/web_search")
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&binding.parameter).unwrap(),
+            serde_json::to_value(web_search_parameter(true)).unwrap()
+        );
+        let model: ModelParameters =
+            serde_json::from_value(json!({"web_search":["cached","indexed","live"]})).unwrap();
+        for mode in ["disabled", "cached", "indexed", "live"] {
+            let config = json!({"web_search":mode,"future_switch":{"kept":true}});
+            let before = config.clone();
+            let values = profile.validate(&config, &model, &BTreeMap::new()).unwrap();
+            assert_eq!(values.get("web_search"), Some(&json!(mode)));
+            assert_eq!(config, before);
+        }
+        for model in [model, ModelParameters::default()] {
+            assert!(
+                profile
+                    .validate(&json!({"web_search":"service"}), &model, &BTreeMap::new())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn an_enabled_access_program_is_offered_on_native_and_forwarded_paths_only() {
+        use orch_agent_contract::descriptor::Placement;
+        use orch_agent_contract::parameters::Eligibility;
+        let definition = definitions()
+            .into_iter()
+            .find(|parameter| parameter.key == CYBER_ACCESS_PROGRAM)
+            .unwrap();
+        let mut context = Eligibility {
+            credential_path: CredentialPath::Native,
+            provider_kind: orch_agent_contract::descriptor::ProviderKind::Api,
+            environment_placement: Placement::Managed,
+            model: serde_json::from_value(json!({"access_programs":["daybreakBlue"]})).unwrap(),
+            harness_version: Some("0.167.0".into()),
+        };
+        for path in [CredentialPath::Native, CredentialPath::Forwarded] {
+            context.credential_path = path;
+            assert!(definition.eligible_when.as_ref().unwrap().holds(&context));
+        }
+        for path in [CredentialPath::Shared, CredentialPath::Handover] {
+            context.credential_path = path;
+            assert!(!definition.eligible_when.as_ref().unwrap().holds(&context));
+        }
+        context.credential_path = CredentialPath::Forwarded;
+        context.model =
+            serde_json::from_value(json!({"offered":{"access_programs":["daybreakBlue"]}}))
+                .unwrap();
+        assert!(
+            !definition.eligible_when.as_ref().unwrap().holds(&context),
+            "an offer is not manager enablement"
+        );
+    }
     use orch_agent_contract::parameters::check_parameters;
 
     #[test]
-    fn the_parameters_published_are_consistent_and_five() {
+    fn the_parameters_published_are_consistent_including_native_search() {
         let defs = definitions();
         assert_eq!(check_parameters(&defs), Ok(()));
         let keys: Vec<_> = defs.iter().map(|def| def.key.as_str()).collect();
@@ -433,7 +659,8 @@ mod tests {
                 SERVICE_TIER,
                 CONTEXT,
                 REASONING_SUMMARY,
-                CYBER_ACCESS_PROGRAM
+                CYBER_ACCESS_PROGRAM,
+                "web_search"
             ]
         );
     }
@@ -647,6 +874,7 @@ mod tests {
         assert_eq!(
             offered_for(&model),
             Some(Offered {
+                web_search: None,
                 context_max: Some(1_000_000),
                 ..Offered::default()
             })

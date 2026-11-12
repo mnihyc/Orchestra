@@ -151,6 +151,11 @@ pub enum RpcError {
 /// What the harness says of its own accord.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
+    /// Malformed native bytes, retained as an error observation instead of a silent drop.
+    Malformed {
+        /// Safe bounded frame text and its parse error.
+        detail: String,
+    },
     /// A notification: something happened.
     Notification {
         /// What kind.
@@ -184,6 +189,7 @@ pub enum Incoming {
 
 fn incoming_weight(event: &Incoming) -> usize {
     std::mem::size_of::<Incoming>().saturating_add(match event {
+        Incoming::Malformed { detail } => detail.capacity(),
         Incoming::Notification { method, params } => {
             method.capacity().saturating_add(flow::json_weight(params))
         }
@@ -403,7 +409,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
         let frame: Json = match serde_json::from_slice(&line) {
             Ok(frame) => frame,
             Err(error) => {
-                tracing::warn!(%error, "a line of the harness is not JSON, and is skipped");
+                let detail = format!(
+                    "Malformed ACP frame: {error}: {}",
+                    String::from_utf8_lossy(&line)
+                );
+                if incoming.send(Incoming::Malformed { detail }).await.is_err() {
+                    break "the adapter stopped consuming native errors".into();
+                }
                 continue;
             }
         };
@@ -512,9 +524,16 @@ async fn dispatch(
                 }
             }
         }
-        _ => tracing::warn!(
-            "a frame of the harness is neither a request, a notification nor an answer"
-        ),
+        _ => {
+            incoming
+                .send(Incoming::Malformed {
+                    detail: format!(
+                        "Malformed ACP frame: neither a request, notification nor answer: {frame}"
+                    ),
+                })
+                .await
+                .map_err(|_| ())?;
+        }
     }
     Ok(())
 }
@@ -837,7 +856,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_line_that_is_no_json_is_skipped_and_the_conversation_goes_on() {
+    async fn a_line_that_is_no_json_is_reported_and_the_conversation_goes_on() {
         let (_rpc, mut incoming, _agent_in, mut agent_out) = pair();
         agent_out
             .write_all(
@@ -849,6 +868,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(matches!(
+            incoming.recv().await,
+            Some(Incoming::Malformed { detail }) if detail.contains("plugin printed a banner")
+        ));
         assert!(matches!(
             incoming.recv().await,
             Some(Incoming::Notification { .. })

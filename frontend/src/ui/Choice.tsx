@@ -106,13 +106,16 @@ export function Choice({ name, description, accessory, presentation, help, id, h
     ? <span className="flex min-w-0 flex-auto flex-col gap-0.5 text-left">{words}</span>
     : <label htmlFor={htmlFor} className="flex min-w-0 flex-auto flex-col gap-0.5 text-left">{words}</label>;
   const mark = <CircleQuestionMark size={14} aria-hidden />;
+  const helpContent = !explains ? null : guide(help) ? hidden ? null : renderHelp === undefined
+    ? <button type="button" {...attributes} aria-label={help.label} title={help.label} onClick={help.onOpen}
+        className="focus-inset inline-flex size-6 shrink-0 items-center justify-center rounded-full text-text-subtle hover:bg-bg-muted hover:text-text">{mark}</button>
+    : renderHelp(help, mark, attributes) : help;
   return <span ref={ref} data-choice-layout={mode} className={cx('flex min-w-0 items-center gap-1.5', children !== undefined && 'choice-interactive', className)}>
     {children === undefined ? content : children(content, control)}
     {accessory !== undefined && <span data-choice-accessory className="inline-flex min-w-0 max-w-32 shrink-0">{accessory}</span>}
-    {explains && (guide(help) ? hidden ? null : renderHelp === undefined
-      ? <button type="button" {...attributes} aria-label={help.label} title={help.label} onClick={help.onOpen}
-          className="focus-inset inline-flex size-6 shrink-0 items-center justify-center rounded-full text-text-subtle hover:bg-bg-muted hover:text-text">{mark}</button>
-      : renderHelp(help, mark, attributes) : help)}
+    {hasChoiceDescription(helpContent) && (guide(help) && renderHelp !== undefined ? helpContent
+      // The full Help target centres on one text line, without shifting short or wrapped names.
+      : <span className="inline-flex h-lh shrink-0 self-start items-center empty:hidden">{helpContent}</span>)}
   </span>;
 }
 

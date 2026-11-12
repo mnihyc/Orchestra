@@ -18,6 +18,27 @@ impl Engine {
         allowed: &[ApprovalMode],
         models: &[String],
     ) -> Result<Vec<ApprovalMode>, EngineError> {
+        Box::pin(self.offered_approval_modes_with_binding(
+            conn,
+            environment,
+            descriptor,
+            allowed,
+            models,
+            None,
+        ))
+        .await
+    }
+
+    /// Offer modes for a concrete binding using its exact selected reviewer model.
+    pub async fn offered_approval_modes_with_binding(
+        &self,
+        conn: &mut Conn,
+        environment: Option<Id>,
+        descriptor: &AgentDescriptor,
+        allowed: &[ApprovalMode],
+        models: &[String],
+        binding: Option<(orch_agent_contract::credentials::CredentialPath, &str)>,
+    ) -> Result<Vec<ApprovalMode>, EngineError> {
         let mut modes = Vec::new();
         for mode in &descriptor.approval_modes {
             if !allowed.contains(mode) {
@@ -25,9 +46,13 @@ impl Engine {
             }
             // Auto exists only where the descriptor of the build says so (it keeps the mode only for a build whose
             // check proved it) and declares the reviewer, and only for someone who may use that reviewer's model.
-            if *mode == ApprovalMode::Auto
-                && reviewer_allowed(*mode, Some(descriptor), models).is_err()
-            {
+            let reviewer = match binding {
+                Some((path, model)) => {
+                    reviewer_allowed_for(*mode, Some(descriptor), models, path, model)
+                }
+                None => reviewer_allowed(*mode, Some(descriptor), models),
+            };
+            if *mode == ApprovalMode::Auto && reviewer.is_err() {
                 continue;
             }
             if *mode == ApprovalMode::Bypass {
@@ -244,10 +269,37 @@ pub(crate) fn reviewer_allowed(
     else {
         return Err("Auto is unavailable: this agent program declares no reviewer".to_owned());
     };
-    if !reviewer.settable && !allowed.contains(&reviewer.model) {
+    if !reviewer.settable
+        && !allowed.contains(&reviewer.model)
+        && (reviewer.session_model_paths.is_empty() || allowed.is_empty())
+    {
         return Err(format!(
             "Auto is unavailable: this person may not use the native reviewer model {} on this provider",
             reviewer.model
+        ));
+    }
+    Ok(())
+}
+
+/// Actual startup checks the model selected for its resolved credential path.
+pub(crate) fn reviewer_allowed_for(
+    mode: ApprovalMode,
+    descriptor: Option<&AgentDescriptor>,
+    allowed: &[String],
+    path: orch_agent_contract::credentials::CredentialPath,
+    model: &str,
+) -> Result<(), String> {
+    reviewer_allowed(mode, descriptor, allowed)?;
+    if mode == ApprovalMode::Auto
+        && let Some(reviewer) = descriptor.and_then(|d| d.capabilities.approval_reviewer.as_ref())
+        && !reviewer.settable
+        && !allowed
+            .iter()
+            .any(|allowed| allowed == reviewer.model_for(path, model))
+    {
+        return Err(format!(
+            "Auto is unavailable: this person may not use the native reviewer model {} on this provider",
+            reviewer.model_for(path, model)
         ));
     }
     Ok(())
@@ -269,4 +321,42 @@ pub(crate) fn detail(payload: &Json) -> Option<&Json> {
         && payload.pointer("/raw/name").and_then(Json::as_str) == Some(REVIEW_TOOL))
     .then(|| payload.pointer("/tool/result"))
     .flatten()
+}
+
+#[cfg(test)]
+mod model_policy_tests {
+    use super::*;
+    use orch_agent_contract::credentials::CredentialPath;
+    use orch_agent_contract::descriptor::ApprovalReviewerSupport;
+
+    #[test]
+    fn declared_paths_never_borrow_permission_for_another_reviewer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut descriptor: AgentDescriptor =
+            serde_json::from_value(crate::test_common::descriptor())?;
+        descriptor.capabilities.approval_reviewer = Some(ApprovalReviewerSupport {
+            model: "preferred-reviewer".into(),
+            settable: false,
+            session_model_paths: vec![CredentialPath::Forwarded],
+        });
+        for (path, admitted, permitted) in [
+            (CredentialPath::Native, "preferred-reviewer", true),
+            (CredentialPath::Native, "parent-model", false),
+            (CredentialPath::Forwarded, "preferred-reviewer", false),
+            (CredentialPath::Forwarded, "parent-model", true),
+        ] {
+            assert_eq!(
+                reviewer_allowed_for(
+                    ApprovalMode::Auto,
+                    Some(&descriptor),
+                    &[admitted.into()],
+                    path,
+                    "parent-model"
+                )
+                .is_ok(),
+                permitted,
+            );
+        }
+        Ok(())
+    }
 }

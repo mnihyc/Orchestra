@@ -81,17 +81,31 @@ function markerAuthor(item: Item): string | null {
   return data.by?.id ?? null;
 }
 
+/** A managed service can wait for recovery after its model turn has ended. */
+export function hasPausedService(view: ThreadView): boolean {
+  return view.order.some((id) => {
+    const item = view.items.get(id);
+    if (item?.kind !== 'tool_call' || item.payload.tool.kind !== 'orch') return false;
+    const tool = item.payload.tool;
+    if (tool.tool !== 'web_search' && tool.tool !== 'web_fetch') return false;
+    const result = tool.result;
+    return result !== null && typeof result === 'object' && !Array.isArray(result) && 'state' in result && result.state === 'paused';
+  });
+}
+
 /** What the thread is doing that is no item: it ends the conversation as a line. */
 export function hasStatusLine(thread: Thread | null, view: ThreadView): boolean {
   if (thread === null || threadReadOnly(view)) return false;
   if (thread.state === 'blocked' && thread.blocked?.detail === 'call_recovery') return true;
   // Other blocked reasons belong to the banner above the box.
   if (thread.lock !== null || thread.state === 'starting' || thread.state === 'waiting_approval') return true;
-  return runningTurn(view) !== null;
+  return runningTurn(view) !== null || hasPausedService(view);
 }
 
 export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   const { items, turns } = view;
+  const foldedWork = (item: Item) => isWork(item)
+    || options.detail === 'summary' && item.kind === 'approval' && item.status !== 'pending';
   const contentSources = new Set<string>();
   for (const item of items.values()) {
     if (item.kind !== 'approval' || item.parent_item_id === null) continue;
@@ -109,7 +123,6 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
   const lastOfTurn = new Map<string, {last:number;inputItemId?:string}>();
   const steps = new Map<string, string[]>();
   const contextTurns = new Set<string>();
-  const toolTurns=new Set<string>();
   order.forEach((id, index) => {
     const item = items.get(id);
     const turnId = item?.turn_id ?? null;
@@ -118,11 +131,9 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
     if(entry===undefined){entry={last:index};lastOfTurn.set(turnId,entry);}else entry.last=index;
     if(item.kind==='user_message'&&entry.inputItemId===undefined)entry.inputItemId=item.id;
     if (item.kind === 'marker' && item.payload.marker === 'orch_context') contextTurns.add(turnId);
-    if(item.kind==='tool_call')toolTurns.add(turnId);
-    if(isWork(item)){const group=steps.get(turnId);if(group===undefined)steps.set(turnId,[id]);else group.push(id);}
+    if(foldedWork(item)){const group=steps.get(turnId);if(group===undefined)steps.set(turnId,[id]);else group.push(id);}
   });
-  const hasToolCall = (turnId: string): boolean => toolTurns.has(turnId);
-  const folded = (turnId: string): boolean => hasToolCall(turnId) && foldsByDepth(options.detail, turnId, recent);
+  const folded = (turnId: string): boolean => steps.has(turnId) && foldsByDepth(options.detail, turnId, recent);
 
   // Start markers arrive at the end of the main stream, but carry their actual history boundary.
   // Relocate only to a held turn: a partial history window must not fetch unrelated history or lose
@@ -203,6 +214,10 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
       // still stands as work detail when ordinary history lines are hidden.
       flushMarkers();
       if (item.turn_id === null) rows.push({ kind: 'item', key: id, id });
+    } else if (item.kind === 'marker' && item.payload.marker === 'background_wake') {
+      // A turn's recorded cause precedes its output even when ordinary lifecycle history is hidden.
+      flushMarkers();
+      rows.push({ kind: 'item', key: id, id });
     } else if (item.kind === 'marker') {
       if (!options.hideHistory) {
         const last = pendingMarkers.length > 0 ? items.get(pendingMarkers[pendingMarkers.length - 1] ?? '') : undefined;
@@ -220,7 +235,7 @@ export function buildRows(view: ThreadView, options: RowOptions): Row[] {
       flushMarkers();
       if (hiddenFailureItem(view, item)) {
         // Its footer, or the final native row of this failure, owns the one error line.
-      } else if (isWork(item) && item.turn_id !== null && folded(item.turn_id)) {
+      } else if (foldedWork(item) && item.turn_id !== null && folded(item.turn_id)) {
         if (!foldPlaced.has(item.turn_id)) {
           foldPlaced.add(item.turn_id);
           const open = options.foldOpened.has(item.turn_id);

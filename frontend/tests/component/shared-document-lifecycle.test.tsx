@@ -22,7 +22,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     <a href={Object.entries(params ?? {}).reduce((path, [key, value]) => path.replace(`$${key}`, encodeURIComponent(value)), to)} className={className}>{children}</a>,
 }));
 const document: DocumentRef = {
-  id: id(98, 1), title: 'Shared research', description: '', description_source: 'auto', description_line: '',
+  id: id(98, 1), title: 'Shared research', description: '', description_line: '',
   node: { id: id(98, 2), kind: 'topic', name: null, redacted: true },
   owner: ADA, owners: 1, created_by: ADA, page: 'restricted', seq: 0, block_count: 0, bytes: 0, files_bytes: 0,
   version: 0, open_discussions: 0, updated_at: MADE_AT, updated_by: null, discussion_level: 'involved', seen_seq: null,

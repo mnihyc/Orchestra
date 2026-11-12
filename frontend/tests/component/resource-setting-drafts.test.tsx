@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** Compact resource forms preserve drafts, review competing writes and use only the reviewed revision. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -39,10 +40,10 @@ vi.mock('@/shell/Page', async (load) => ({ ...await load<object>(),
 }));
 
 const access = { permissions: ['agent.view', 'agent.manage', 'template.view', 'template.manage'], administers: false, through: [], admin_only: [], participating: true };
-const agent: Agent = { id: 'profile', name: 'Research', address: 'research', home: null, org_id: null, owner: null,
+const agent: Agent = { ...unjudgedProvenance(), id: 'profile', name: 'Research', address: 'research', home: null, org_id: null, owner: null,
   machine: null, harness_kind: 'codex', harness: harnessName('codex'), profile: { effort: 'low' }, descriptor: {}, descriptor_overridden: [], disabled: false,
   access, revision: 1, created_at: '2026-10-15T12:00:00Z', updated_at: '2026-10-15T12:00:00Z' };
-const template: Template = { id: 'recipe', name: 'Research runtime', address: 'research-runtime', description: 'Original notes',
+const template: Template = { ...unjudgedProvenance(), id: 'recipe', name: 'Research runtime', address: 'research-runtime', description: 'Original notes',
   home: null, org_id: null, owner: null, driver: 'docker', kind: 'environment', enabled: true,
   spec: { image: 'first', plugin: { enabled: true } }, units: 0, access, revision: 1 };
 

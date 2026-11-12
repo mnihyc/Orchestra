@@ -69,16 +69,25 @@ const said = (words: readonly string[] | null | undefined): string | null => (wo
 /** The labels of places that share one name: each with the shortest way to say where it is that no other of them shares. */
 function labelsOfGroup(group: readonly Placed[]): Map<string, string> {
   const ways = group.map(contexts);
+  // Count each form once: a large set of same-name threads must not compare every pair.
+  const compared = ways.map((forms) => forms.map(said));
+  const counts: Map<string, number>[] = [];
+  for (const forms of compared) for (const [form, text] of forms.entries()) {
+    if (text === null) continue;
+    const count = counts[form] ?? new Map<string, number>();
+    counts[form] = count;
+    count.set(text, (count.get(text) ?? 0) + 1);
+  }
+  const byId = new Map(group.map((place, index) => [place.id, { name: place.name, whole: ways[index]?.at(-1) ?? null }]));
   const labels = new Map<string, string>();
   group.forEach((place, index) => {
     const mine = ways[index] ?? [];
     const fallback = mine.at(-1) ?? null;
     let chosen: readonly string[] | null = null;
     for (const [form, words] of mine.entries()) {
-      const text = said(words);
+      const text = compared[index]?.[form] ?? null;
       if (text === null) continue;
-      const shared = ways.some((theirs, other) => other !== index && said(theirs[form]) === text);
-      if (!shared) {
+      if (counts[form]?.get(text) === 1) {
         chosen = words;
         break;
       }
@@ -92,8 +101,8 @@ function labelsOfGroup(group: readonly Placed[]): Map<string, string> {
     const before = seen.get(label);
     if (before !== undefined) {
       for (const id of [before, place.id]) {
-        const whole = contexts(group.find((one) => one.id === id) ?? place).at(-1) ?? null;
-        const name = group.find((one) => one.id === id)?.name ?? place.name;
+        const whole = byId.get(id)?.whole ?? null;
+        const name = byId.get(id)?.name ?? place.name;
         labels.set(id, [name, ...(whole ?? [])].join(LABEL_SEPARATOR));
       }
     }

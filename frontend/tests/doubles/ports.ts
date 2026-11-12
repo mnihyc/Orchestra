@@ -98,7 +98,9 @@ export class PortsWorld implements Part {
   return (['place', 'link', 'host'] as const).map((kind) => {
    const decision = kind === 'link' && !links || kind === 'host' && !publish ? 'deny' as const : 'ask' as const;
    const granted = this.granted(id, kind);
-   return { key: PORT_KEYS[kind], kind, label: PORT_LABELS[kind], risk: kind === 'place' ? 'medium' as const : 'high' as const, offered: true, granted, from_template: false, decision, approver_scope: 'environment' as const, admission: granted && decision !== 'deny' ? this.admission(id, kind) : null, can_grant: manage && !granted && decision !== 'deny', can_revoke: manage && granted };
+   return { key: PORT_KEYS[kind], kind, label: PORT_LABELS[kind], risk: kind === 'place' ? 'medium' as const : 'high' as const, offered: true, granted, from_template: false, decision, approver_scope: 'environment' as const, admission: granted && decision !== 'deny' ? this.admission(id, kind) : null, can_grant: manage && !granted && decision !== 'deny', can_revoke: manage && granted,
+    ...{ grant_unavailable_reason: !manage ? 'manage_required' as const : decision === 'deny' ? 'policy_denied' as const : granted ? 'already_granted' as const : null,
+     revoke_unavailable_reason: !manage ? 'manage_required' as const : !granted ? 'no_grant' as const : null } };
   });
  }
  private guard(person: Person, id: string, port: number, way: PortOpening['way']): void {
@@ -320,7 +322,7 @@ export class PortsWorld implements Part {
   match=/^\/port-openings\/([^/]+)$/.exec(path);
   if(match!==null&&(method==='GET'||method==='DELETE')) {
    const opening=this.openings.get(match[1]??'');if(opening===undefined) refuse(404,'not_found','No such opening.');this.require(person,opening.environment_id,method==='GET'?'ports.view':'ports.manage');
-   if(method==='DELETE'&&opening.state!=='closed'){if(Number(query.get('expected_revision'))!==opening.revision) refuse(409,'conflict.revision','The opening changed. Refresh before closing.');opening.state='closed';opening.desired=false;opening.revision+=1;this.mutations.push({act:'close',body:{id:opening.id,expected_revision:opening.revision-1}});}
+   if(method==='DELETE'&&opening.state!=='closed'){if(body.expected_revision!==opening.revision) refuse(409,'conflict.revision','The opening changed. Refresh before closing.');opening.state='closed';opening.desired=false;opening.revision+=1;this.mutations.push({act:'close',body:{id:opening.id,expected_revision:opening.revision-1}});}
    return {status:200,body:portsWire.opening(opening)};
   }
   if (/^\/hosts\/[^/]+$/.test(path) && method === 'PATCH' && Object.hasOwn(body, 'ports')) {

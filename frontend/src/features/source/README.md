@@ -8,8 +8,9 @@ the first message for Retry.
 An environment that failed to start has one translated blocked-start banner with native Retry and an authorized Run somewhere else.
 It does not simultaneously claim that source preparation is merely waiting. Source-specific failures keep their own Prepare again action.
 
-Where a thread's files come from and where its work goes. What is real: "Restore files…" in a finished turn's footer
-when it names a recorded copy and the reader may restore. Coverage is read only when that action opens,
+Where a thread's files come from and where its work goes. "Restore files…" belongs beside the person's request
+for a finished turn. Its recorded source offers the native whole-directory or file-tool plan; an older turn without
+a retained source says so and offers per-file review. Coverage is read only when that action opens,
 never for closed restore actions or edit rows. A complete copy offers its plan (coverage, each path's action, later changes
 with who made them, the threads that write there, what stops it), a stale plan refused before anything is
 written and planned again with the choices kept, one job followed, and "Undo this restore…" from the state
@@ -25,9 +26,13 @@ for a directory known to have no repository, while a failed turn still appears; 
 branch only for a repository, and the Git view says that it needs one. Observation reasons use
 translated sentences and times use the reader's locale and time zone. The source's preparation
 above the conversation, with Prepare again. Comments on lines of a difference kept in the private draft with
-their hunk, gathered above the box and sent once as one message.
+their exact side, line and frozen hunk, gathered above the box and sent once as one message. The shared
+difference renderer offers a plus at a line; `ReviewableDiff` opens the same comment form as the ordinary
+Comment on lines action. A later live patch does not move that comment. Forms and delayed saves retain
+their original thread and reader; a different reader cannot inherit the private text or receive its late reply.
+Quoted hunks, copied turns and references share one Markdown fence formatter that preserves literal backticks.
 
-Source/worktree creation, suggested links and the shared tree/finder attention facts are served by the native APIs described in the S6 handoff.
+Source/worktree creation, suggested links and the shared tree/finder attention facts use the native APIs.
 
 - `words.ts`: the rules: what can be restored and confirmed, why nothing was recorded, the chips, links, hunks and the review message.
 - `Restore.tsx`, `Publish.tsx`, `Links.tsx`, `Attention.tsx`, `Preparation.tsx`, `Review.tsx`: the screens named above.
