@@ -27,7 +27,7 @@ async function openAcme(page: Page): Promise<void> {
   await page.goto('/org/ada');
   await page.waitForLoadState('networkidle');
   await rail(page).getByRole('link', { name: 'Acme' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(tree(page).getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
 }
 
@@ -56,7 +56,12 @@ test('the tree of an org shows what its threads are doing, and follows them with
   // Something happens on the server: the row follows.
   const blocked = { state: 'blocked', blocked_reason: 'error', pending_approvals: 0, activity_seq: 2, last_activity_at: null };
   await changeTree([{ id: ACME.mainThread, thread: blocked }]);
-  await expect(main.getByRole('img', { name: 'Blocked', exact: true })).toBeVisible();
+  // A blocked thread's mark names its reason beside its state.
+  await expect(main.getByRole('img', { name: 'Blocked · error', exact: true })).toBeVisible();
+  // Contained work has one priority on every place: a decision that waits outranks a block, so the topic keeps saying
+  // that one waits while Repro's approval is open, and shows the block once nothing waits.
+  await expect(fixLogin.getByRole('img', { name: 'Waiting for approval inside', exact: true })).toBeVisible();
+  await changeTree([{ id: ACME.repro, thread: { state: 'idle', blocked_reason: null, pending_approvals: 0, activity_seq: 3, last_activity_at: null } }]);
   await expect(fixLogin.getByRole('img', { name: 'Blocked inside', exact: true })).toBeVisible();
 
   // A project is made, and one is deleted.
@@ -91,7 +96,7 @@ test('a token that ended is renewed behind the reader, who goes on as if nothing
   await rail(page).getByRole('link', { name: 'Acme' }).click();
   expect((await renewed).status()).toBe(200);
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
   await expect(tree(page).getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
 });
 
@@ -110,7 +115,13 @@ test('a session that ended elsewhere leads to the sign-in, and back to where the
   await expect(page).toHaveURL(/\/approvals$/);
 });
 
-test('a thread opens with its conversation in the middle and its other views at the right, each a view that is built', async ({ page }) => {
+/** Conversation, Code and Review are explicit choices from the Layout menu: opening a thread never swaps the device's workspace. */
+const chooseLayout = async (page: Page, name: string): Promise<void> => {
+  await page.getByRole('button', { name: 'Layout', exact: true }).click();
+  await page.getByRole('menuitem', { name, exact: true }).click();
+};
+
+test('a thread is an ordinary tab of the main area, and choosing Conversation puts its other views at the right with Outline in front, each a view that is built', async ({ page }) => {
   await openAcme(page);
   await page.goto(`/thread/${ACME.mainThread}`);
 
@@ -126,10 +137,19 @@ test('a thread opens with its conversation in the middle and its other views at 
   await expect(crumbs.getByRole('button', { name: 'Ancestor places' })).toHaveCount(0);
   if (wide !== null) await page.setViewportSize(wide);
 
-  await expect(tabs(page, 'Main area').getByRole('tab', { name: 'Main thread' })).toHaveAttribute('aria-selected', 'true');
+  const main = tabs(page, 'Main area');
+  await expect(main.getByRole('tab', { name: 'Main thread' })).toHaveAttribute('aria-selected', 'true');
   // The conversation stands in the middle, with the box to write in under it.
   await expect(page.getByRole('region', { name: 'Main area' }).getByRole('textbox', { name: 'Message to the agent' })).toBeVisible();
+  // Opening a thread did not rearrange the device's workspace: its right bar is still the one the person had.
+  await expect(page.locator('[data-workbench-bar="right"]').getByRole('tab', { name: 'Team', exact: true })).toHaveAttribute('aria-selected', 'true');
+  const opened = await main.getByRole('tab').evaluateAll((all) => all.map((tab) => tab.id));
+
+  // Conversation is a choice: it sets that frame's bars and puts the thread's other views at the right, Outline in front.
+  await chooseLayout(page, 'Conversation');
   await expect(page.locator('[data-workbench-bar="right"]').getByRole('button', { name: 'Outline', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  expect(await main.getByRole('tab').evaluateAll((all) => all.map((tab) => tab.id))).toEqual(opened);
+  await expect(main.getByRole('tab', { name: 'Main thread' })).toHaveAttribute('aria-selected', 'true');
   await expect(page.getByTestId('outline-panel')).toBeVisible();
 
   // The row of the thread is marked in the tree, with everything above it open.
@@ -146,6 +166,7 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   await signIn(page);
   await page.goto(`/thread/${ACME.mainThread}`);
   const side = page.locator('[data-workbench-bar="right"]');
+  await chooseLayout(page, 'Conversation');
   const outline = side.getByRole('button', { name: 'Outline', exact: true });
   await outline.focus();
   await page.keyboard.press('Shift+F10');
@@ -154,7 +175,7 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   await expect(current).toHaveAttribute('aria-disabled', 'true');
   await expect(current).toHaveAccessibleDescription(/Right bar/);
   await page.getByRole('menuitem', { name: 'Bottom', exact: true }).press('Enter');
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Outline', exact: true })).toBeVisible();
+  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
   await showWorkbenchView(page, 'Chat');
   const chat = side.getByRole('button', { name: 'Chat', exact: true });
   await chat.focus(); await page.keyboard.press('Space'); await atRest(page);
@@ -164,15 +185,15 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   await chat.focus(); await page.keyboard.press('Shift+F10');
   await page.getByRole('menuitem', { name: 'Move to', exact: true }).press('ArrowRight');
   await page.getByRole('menuitem', { name: 'Main area', exact: true }).press('Enter');
-  await expect(tabs(page, 'Main area').getByRole('tab', { name: 'Chat', exact: true })).toBeVisible();
+  await expect(tabs(page, 'Main area').getByRole('tab', { name: /^Chat\b/ })).toBeVisible();
   await page.waitForTimeout(500);
   await page.reload();
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Outline', exact: true })).toBeVisible();
-  await expect(tabs(page, 'Main area').getByRole('tab', { name: 'Chat', exact: true })).toBeVisible();
+  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
+  await expect(tabs(page, 'Main area').getByRole('tab', { name: /^Chat\b/ })).toBeVisible();
   await page.goto(`/thread/${ACME.repro}`);
-  await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Outline', exact: true })).toBeVisible();
+  await expect(tabs(page, 'Bottom').getByRole('tab', { name: /^Outline\b/ })).toBeVisible();
   await page.goto('/inbox');
-  await expect(page.getByRole('tab', { name: 'Outline', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: /^Outline\b/ })).toHaveCount(0);
   await page.goto(`/thread/${ACME.mainThread}`);
   await page.getByRole('button', { name: 'Layout', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Reset layout', exact: true }).click();
@@ -180,17 +201,38 @@ test('a view is moved from its menu, by keyboard and put back, and the arrangeme
   await expect(tabs(page, 'Bottom')).toHaveCount(0);
 });
 
-test('a thread is arranged for working in the code, with the same views put elsewhere', async ({ page }) => {
+test('choosing Code sets its frame and adds Files without closing or moving the thread, and Reset layout restores the standard frame with the main tabs and their drafts kept', async ({ page }) => {
   await signIn(page);
   await page.goto(`/thread/${ACME.mainThread}`);
-  await page.getByRole('button', { name: 'Layout', exact: true }).click();
-  await page.getByRole('menuitem', { name: 'Code', exact: true }).click();
-  await expect(tabs(page, 'Main area').getByRole('tab', { name: 'Files', exact: true })).toHaveAttribute('aria-selected', 'true');
+  const main = tabs(page, 'Main area');
+  const thread = main.getByRole('tab', { name: /Main thread/ });
+  await expect(thread).toHaveAttribute('aria-selected', 'true');
+  const box = page.getByRole('region', { name: 'Main area' }).getByRole('textbox', { name: 'Message to the agent' });
+  await box.fill('A draft the layouts must keep');
+  const ids = () => main.getByRole('tab').evaluateAll((all) => all.map((tab) => tab.id));
+  const before = await ids();
+
+  // Code is a choice from the Layout menu. It sets that frame's bars and adds its views.
+  await chooseLayout(page, 'Code');
+  await expect(main.getByRole('tab', { name: 'Files', exact: true })).toBeVisible();
   await expect(tabs(page, 'Bottom').getByRole('tab', { name: 'Terminal', exact: true })).toHaveAttribute('aria-selected', 'true');
   const side = page.locator('[data-workbench-bar="right"]');
   await expect(side).toHaveAttribute('data-active-container', 'conversation');
-  await expect(side.getByRole('textbox', { name: 'Message to the agent' })).toBeVisible();
-  await expect(page.locator('[data-workbench-bar="left"] [role="tablist"]')).toHaveCount(0);
+  await expect(side.getByRole('button', { name: 'Outline', exact: true })).toBeVisible();
+  // It can never close or move a tab that is already in the main area: the thread's own tab is still there, in its order, and selected.
+  const after = await ids();
+  expect(after.filter((id) => before.includes(id))).toEqual(before);
+  await expect(thread).toHaveAttribute('aria-selected', 'true');
+  await expect(box).toHaveValue('A draft the layouts must keep');
+
+  // Reset layout restores the standard frame and gathers the existing main tabs, with their content and drafts.
+  await page.getByRole('button', { name: 'Layout', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Reset layout', exact: true }).click();
+  await expect(tabs(page, 'Bottom')).toHaveCount(0);
+  await expect(side.getByRole('button', { name: 'Outline', exact: true })).toHaveAttribute('aria-expanded', 'true');
+  expect(await ids()).toEqual(after);
+  await expect(thread).toHaveAttribute('aria-selected', 'true');
+  await expect(box).toHaveValue('A draft the layouts must keep');
 });
 
 test('the bars are shown and hidden by their keys and by the switches in the title, and a view that was closed is added again', async ({ page }) => {
@@ -241,8 +283,9 @@ test('a path that no route answers shows that there is nothing there, inside the
 
   await expect(page.getByText('There is nothing at this address')).toBeVisible();
   await expect(rail(page)).toBeVisible();
+  // Home leads to where the person signed in: the org they last had in view.
   await page.getByRole('link', { name: 'Home', exact: true }).last().click();
-  await expect(page).toHaveURL(/\/org\/ada$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?list=[^&]*&_list=true)?$/);
 });
 
 test('a preference is the reader\'s own: it shows at once, and is there again on the next visit', async ({ page }) => {
@@ -275,11 +318,13 @@ test('a small screen shows one thing at a time: the screen, the navigation as a 
   const foot = page.getByRole('navigation', { name: 'Orgs and your own places' });
   for (const place of ['Home', 'Inbox', 'Messages', 'Approvals']) await expect(foot.getByRole('link', { name: place })).toBeVisible();
   await expect(foot.getByRole('button', { name: 'Me' })).toBeVisible();
-  // (The strips of the areas; a screen may have tabs of its own, which have names of their own.)
-  await expect(page.getByRole('tablist', { name: /^(Left bar|Main area|Right bar|Bottom)$/ })).toHaveCount(0);
+  // (The strips of the areas: a phone has no bar or bottom to arrange; it keeps one strip of the pages that are open, named for its main area.)
+  await expect(page.getByRole('tablist', { name: /^(Left bar|Right bar|Bottom)$/ })).toHaveCount(0);
+  await expect(page.getByRole('tablist', { name: 'Main area', exact: true })).toHaveCount(1);
 
   // The navigation is a drawer; going somewhere puts it away.
-  await page.getByRole('button', { name: 'Navigation' }).click();
+  // The phone's containers include Resource navigation, which also has the word.
+  await page.getByRole('button', { name: 'Navigation', exact: true }).click();
   const drawer = page.getByRole('dialog', { name: 'Navigation' });
   await expect(drawer.getByRole('treeitem', { name: /Fix login/ })).toBeVisible();
   await drawer.getByRole('link', { name: 'Fix login' }).click();
@@ -289,7 +334,7 @@ test('a small screen shows one thing at a time: the screen, the navigation as a 
 
   // Another view of the topic opens as a sheet over it.
   await page.locator('[data-narrow-containers]').getByRole('button', { name: 'Team', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Team', exact: true }).getByText('No messages yet. Say something to the people on this topic.')).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Team', exact: true }).getByText('Say something to the people on this topic.', { exact: true })).toBeVisible();
 });
 
 async function openAcmeSmall(page: Page): Promise<void> {

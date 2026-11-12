@@ -5,6 +5,7 @@
  * waits for an approval or ends changes its card as the org's tree says so. The announcements and the
  * running jobs of a topic come with the thread data this screen does not read yet.
  */
+import { TopicSchedules } from '@/features/schedules/HumanSchedules';
 import { OutsideOpenings } from '@/features/ports/Outside';
 import { MessagesSquare } from 'lucide-react';
 import { useMemo } from 'react';
@@ -39,7 +40,7 @@ export function TopicOverview({ topic, place }: { topic: Topic; place: PlaceRef 
       <QuickStart node={topic} />
       <Section id="topic-threads" title={t('places.topic.threads')} action={canQuickStart(topic) ? undefined : <NewThreadButton topic={place} allowed={allowed && !topic.archived} owner={topic.owner} />}>
         {!tree.loaded && tree.error === null ? (
-          <SkeletonRows rows={2} />
+          <SkeletonRows read={tree} rows={2} />
         ) : threads.length === 0 ? (
           <EmptyState
             className={boxClasses}
@@ -93,6 +94,7 @@ export function TopicOverview({ topic, place }: { topic: Topic; place: PlaceRef 
           </div>
         </Section>
       </div>
+      <TopicSchedules topic={topic} />
       {topic.access.administers && <OutsideOpenings placeId={topic.id} />}
     </div>
   );

@@ -256,3 +256,141 @@ async fn an_offline_existing_session_is_unknown_and_another_callers_review_is_re
     ));
     assert_eq!(world.commands.issued_of("session.background"), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn end_availability_names_current_interact_support_and_native_target_without_hiding_work() {
+    use orch_api_contract::background::BackgroundEndReason;
+    use orch_db::queries::access::{PageKey, testing as access_testing};
+    use orch_engine::background::{Capture, Source};
+
+    let world = World::new().await;
+    let thread = world.thread("Current end availability").await;
+    world.running_turn(thread, "Start").await;
+    let segment = world.segment_of(thread).await;
+    let viewer = world.person("background-reader").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    access_testing::add_entry(
+        &mut conn,
+        &PageKey::new("node", thread, "live"),
+        "any",
+        "thread.view",
+        ("user", Some(viewer), None),
+        None,
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let owner = Principal::load(&mut conn, Caller::session(world.ada), world.clock.time())
+        .await
+        .unwrap();
+    let viewer = Principal::load(&mut conn, Caller::session(viewer), world.clock.time())
+        .await
+        .unwrap();
+    for (supported, state, machine, expected) in [
+        (true, BackgroundState::Live, true, None),
+        (
+            false,
+            BackgroundState::Live,
+            true,
+            Some(BackgroundEndReason::Unsupported),
+        ),
+        (
+            true,
+            BackgroundState::Offline,
+            true,
+            Some(BackgroundEndReason::Offline),
+        ),
+        (
+            true,
+            BackgroundState::Unavailable,
+            true,
+            Some(BackgroundEndReason::Unavailable),
+        ),
+        (
+            true,
+            BackgroundState::Live,
+            false,
+            Some(BackgroundEndReason::NoCurrentTarget),
+        ),
+        (
+            false,
+            BackgroundState::Unavailable,
+            false,
+            Some(BackgroundEndReason::NoCurrentTarget),
+        ),
+    ] {
+        sqlx::query("UPDATE segments SET machine_id=$2 WHERE id=$1")
+            .bind(segment)
+            .bind(machine.then_some(world.machine_id))
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        let source: Source = sqlx::query_as("SELECT id AS segment_id,machine_id,provider_id,environment_id,native_session_ref FROM segments WHERE id=$1")
+            .bind(segment).fetch_one(&mut *conn).await.unwrap();
+        let capture = Capture {
+            at: world.clock.time(),
+            sessions: vec![(
+                source,
+                NativeBackground {
+                    supported,
+                    as_of: Some(world.clock.time()),
+                    state,
+                    reason: None,
+                    items: vec![native("work")],
+                    next_cursor: None,
+                    total: Some(1),
+                },
+            )],
+        };
+        let prepared = world
+            .engine()
+            .prepare_background_projection(&mut conn, thread, &capture)
+            .await
+            .unwrap();
+        for (reader, reason) in [
+            (&owner, expected),
+            (&viewer, Some(BackgroundEndReason::InteractRequired)),
+        ] {
+            let (roster, _) = world
+                .engine()
+                .render_background_projection(&mut conn, reader, &prepared, &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(roster.end_reason, reason);
+            assert_eq!(roster.can_end, reason.is_none());
+            assert_eq!(
+                roster.items.len(),
+                1,
+                "action refusal keeps readable work visible"
+            );
+            assert_eq!(roster.items[0].end_reason, reason);
+        }
+    }
+    let unknown = Capture {
+        at: world.clock.time(),
+        sessions: Vec::new(),
+    };
+    let prepared = world
+        .engine()
+        .prepare_background_projection(&mut conn, thread, &unknown)
+        .await
+        .unwrap();
+    let (roster, _) = world
+        .engine()
+        .render_background_projection(&mut conn, &owner, &prepared, &HashSet::new())
+        .await
+        .unwrap();
+    assert_eq!(roster.end_reason, Some(BackgroundEndReason::Unavailable));
+    assert_eq!(
+        roster.total, None,
+        "missing observations never become a live zero"
+    );
+    assert!(
+        world
+            .seen
+            .of_kind(CommandKind::SessionBackgroundEnd)
+            .is_empty()
+    );
+    drop(conn);
+    world.shutdown().await;
+}

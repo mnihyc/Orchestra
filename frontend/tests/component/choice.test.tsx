@@ -76,8 +76,8 @@ describe('compact names in the page, explanations inside open pickers', () => {
       environment, { ...node, help: { label: 'Guide to Node', onOpen: guide } },
     ]} />);
     const choice = screen.getByRole('radio', { name: 'Node' });
-    expect(choice).not.toHaveAttribute('aria-describedby');
-    expect(screen.queryByText(node.description)).not.toBeInTheDocument();
+    expect(choice).toHaveAccessibleDescription(node.description);
+    expect(screen.getByText(node.description)).not.toBeVisible();
     expect(screen.queryByRole('button', { name: 'Guide to Node' })).not.toBeInTheDocument();
     expect(guide).not.toHaveBeenCalled();
     expect(choose).not.toHaveBeenCalled();
@@ -266,6 +266,77 @@ it('retains compact radio guidance on keyboard focus and keeps the supplied choi
   await user.keyboard('{Escape}');
   await user.click(screen.getByRole('radio', { name: node.name }));
   expect(choose).toHaveBeenLastCalledWith('node');
+});
+
+describe('a blocked option of a compact radio group', () => {
+  const reason = 'Blocked by machine policy';
+  const blocked = { value: 'machine', name: 'Machine', disabled: reason };
+  const radio = (name: string) => screen.getByRole('radio', { name });
+  // The group chooses the option that an arrow key moves to while the key is down, so the key is held until the focus has moved.
+  const arrow = async (user: ReturnType<typeof userEvent.setup>, key: 'ArrowDown' | 'ArrowUp', to: string) => {
+    await user.keyboard(`{${key}>}`);
+    await waitFor(() => expect(radio(to)).toHaveFocus());
+    await user.keyboard(`{/${key}}`);
+  };
+
+  it('takes the keyboard like the others, shows why on focus, and is chosen by nothing', async () => {
+    const user = userEvent.setup(), choose = vi.fn();
+    show(<RadioGroup presentation="compact" label="Machine roles" value="environment" onValueChange={choose} options={[environment, blocked, node]} />);
+    await user.tab();
+    expect(radio(environment.name)).toHaveFocus();
+    // The arrow keys choose as they move, and the blocked option is a step of them without being chosen.
+    await arrow(user, 'ArrowDown', 'Machine');
+    expect(radio('Machine')).toHaveAttribute('aria-disabled', 'true');
+    expect(radio('Machine')).not.toBeDisabled();
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(reason);
+    expect(radio('Machine')).toHaveAccessibleDescription(reason);
+    expect(choose).not.toHaveBeenCalled();
+    expect(radio(environment.name)).toBeChecked();
+    expect(radio('Machine')).not.toBeChecked();
+    await user.keyboard(' ');
+    await user.keyboard('{Enter}');
+    await user.click(radio('Machine'));
+    expect(choose).not.toHaveBeenCalled();
+    expect(radio(environment.name)).toBeChecked();
+    expect(radio('Machine')).not.toBeChecked();
+    // On to the next option, which the arrow key does choose, and back again to the blocked one.
+    await arrow(user, 'ArrowDown', node.name);
+    expect(choose).toHaveBeenCalledExactlyOnceWith('node');
+    await arrow(user, 'ArrowUp', 'Machine');
+    expect(choose).toHaveBeenCalledOnce();
+  });
+
+  it('is reached from the option after it as well, and by a pointer, which does not choose it', async () => {
+    const user = userEvent.setup(), choose = vi.fn();
+    show(<RadioGroup presentation="compact" label="Machine roles" value="environment" onValueChange={choose} options={[blocked, environment, node]} />);
+    await user.hover(radio('Machine'));
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(reason);
+    await user.unhover(radio('Machine'));
+    await user.tab();
+    expect(radio(environment.name)).toHaveFocus();
+    await arrow(user, 'ArrowUp', 'Machine');
+    expect(choose).not.toHaveBeenCalled();
+    await user.click(radio('Machine'));
+    expect(choose).not.toHaveBeenCalled();
+    expect(radio(environment.name)).toBeChecked();
+  });
+
+  it('stays disabled where nothing says why, where the group is disabled as a whole, and where the reason is written beside it', async () => {
+    const user = userEvent.setup(), choose = vi.fn();
+    const { unmount } = show(<RadioGroup presentation="compact" label="Machine roles" value="environment" onValueChange={choose}
+      options={[environment, { value: 'machine', name: 'Machine', disabled: true }, node]} />);
+    expect(radio('Machine')).toBeDisabled();
+    await user.tab();
+    await arrow(user, 'ArrowDown', node.name);
+    expect(choose).toHaveBeenCalledExactlyOnceWith('node');
+    unmount();
+    const whole = show(<RadioGroup presentation="compact" disabled label="Machine roles" value="environment" onValueChange={choose} options={[environment, blocked]} />);
+    expect(radio('Machine')).toBeDisabled();
+    whole.unmount();
+    show(<RadioGroup label="Machine roles" value="environment" onValueChange={choose} options={[environment, blocked]} />);
+    expect(radio('Machine')).toBeDisabled();
+    expect(screen.getByText(reason)).toBeVisible();
+  });
 });
 
 it('retains compact switch guidance on keyboard focus without changing its name or toggle', async () => {

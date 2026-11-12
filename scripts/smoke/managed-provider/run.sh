@@ -6,7 +6,7 @@
 # unit and its volume. Nothing is asked of a model, and no real credential is given.
 #
 # The stack is the one managed-harness makes (the pinned listener on the Docker bridge's address at the port it listens on
-# inside, the system's own name, the web edge's name as the public address).
+# inside, the system's own name, the public address of its own web edge).
 set -Eeuo pipefail
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=lib.sh
@@ -28,7 +28,7 @@ INSPECTION_UNAVAILABLE=125
 
 sed -i \
   -e "s|^name = \"Orch\"|name = \"$SYSTEM_NAME\"|" \
-  -e "s|^public_url = .*|public_url = \"http://frontend\"|" \
+  -e "s|^url = \"wss://gateway:9443\"|url = \"wss://$BRIDGE:$GATEWAY_PORT\"|" \
   -e "s|wss://gateway.orch.internal:9443|wss://gateway.orch.internal:$GATEWAY_PORT|g" \
   -e "s|wss://gateway:9443|wss://gateway:$GATEWAY_PORT|g" \
   -e "s|^pinned_bind = .*|pinned_bind = \"[::]:$GATEWAY_PORT\"|" \
@@ -189,7 +189,7 @@ life_of() {
   done
   expect "$kind: the job succeeded" "succeeded" "$state"
   [ "$state" = succeeded ] || { printf '%s\n' "$JOB" | jq -c '.error' >&2; return 1; }
-  expect "$kind: it went through the phases of making a provider's unit, in order" "schedule image volumes tools create enroll verify commit" \
+  expect "$kind: it went through the phases of making a provider's unit, in order" "schedule image volumes tools create enroll after_up verify commit" \
     "$(printf '%s' "$JOB" | jq -r '[.progress.phases[].name] | join(" ")')"
   runtime="$(sql "select id from runtimes where provider_id = '$provider' and state = 'running'")"
   unit="$(unit_of "$runtime")"

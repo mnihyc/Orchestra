@@ -1,0 +1,33 @@
+[package]
+name = "orch-provider-builtins"
+description = "The shipped provider source extensions, composed outside core crates."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-provider-contract.workspace = true
+orch-provider-anthropic.workspace = true
+orch-provider-deepseek.workspace = true
+orch-provider-openai.workspace = true
+orch-provider-openrouter.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+orch-db.workspace = true
+orch-model-contract.workspace = true
+orch-protocol-openai-responses.workspace = true
+orch-protocol-anthropic-messages.workspace = true
+orch-testkit.workspace = true
+orch-types.workspace = true
+serde_json.workspace = true
+http.workspace = true
+url.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+orch-plugin-contract.workspace = true

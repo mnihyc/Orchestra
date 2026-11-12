@@ -19,16 +19,19 @@ export function useTabStripReveal(activeId: string | null, tabIds: readonly stri
       // The close/unsaved marks are siblings of the ARIA tab inside its strip root.
       let whole = tab;
       while (whole.parentElement !== null && whole.parentElement !== element) whole = whole.parentElement;
-      const viewport = element.getBoundingClientRect(), box = whole.getBoundingClientRect();
+      const box = whole.getBoundingClientRect();
+      const wrapped = element.clientHeight > 0 && element.scrollHeight > element.clientHeight;
+      const viewport = element.getBoundingClientRect();
       const left = viewport.left + element.clientLeft, right = left + element.clientWidth;
       if (!(box.left < left && box.right > right)) {
         if (box.left < left) element.scrollLeft += box.left - left;
         else if (box.right > right) element.scrollLeft += box.right - right;
       }
-      const top = viewport.top + element.clientTop, bottom = top + element.clientHeight;
-      if (element.clientHeight > 0 && !(box.top < top && box.bottom > bottom)) {
-        if (box.top < top) element.scrollTop += box.top - top;
-        else if (box.bottom > bottom) element.scrollTop += box.bottom - bottom;
+      const top = viewport.top + element.clientTop;
+      if (wrapped) {
+        const rowStart = element.scrollTop + box.top - top;
+        // Interior rows align at the top; the final rows fill the viewport without synthetic space.
+        element.scrollTop = Math.max(0, Math.min(rowStart, element.scrollHeight - element.clientHeight));
       }
     };
     // A strip gesture may browse, drag a tab, or grab its scrollbar; only a new selection resumes reveal.

@@ -15,6 +15,8 @@ export interface StatusValue {
   text: string;
   subject?: ResourceSubject;
   warning?: boolean;
+  /** A short source explanation shown by the existing inspection card. */
+  hint?: string;
   details?: { name: string; value: string }[];
 }
 export interface StatusContext extends TimeContext {
@@ -73,7 +75,7 @@ function tokens(context: StatusContext): StatusValue | null {
   ] };
   const output = estimatedOutput(context);
   if (output === null || output === 0) return usage === null ? null : { text: context.t('statusItems.tokens', { value: formatTokens(usage.total_tokens, context.locale) }) };
-  return { text: usage === null ? `≈${context.t('statusItems.outputTokens', { value: formatTokens(output, context.locale) })}` : `≈${context.t('statusItems.tokens', { value: formatTokens(usage.input_tokens + output, context.locale) })}`, details: [
+  return { hint: context.t('statusItems.textEstimateHint'), text: usage === null ? `≈${context.t('statusItems.outputTokens', { value: formatTokens(output, context.locale) })}` : `≈${context.t('statusItems.tokens', { value: formatTokens(usage.input_tokens + output, context.locale) })}`, details: [
     { name: context.t('statusItems.input'), value: usage === null ? context.t('usagePerf.dash') : formatTokens(usage.input_tokens, context.locale) },
     { name: context.t('statusItems.output'), value: `≈${formatTokens(output, context.locale)}` },
   ] };
@@ -83,7 +85,7 @@ export const STATUS_ITEMS = [
   { id: 'phase', title: 'statusItems.items.phase', places: everyPlace, place: 'live', shown: true,
     read: (c: StatusContext): StatusValue | null => generating(c) ? { text: c.activeLabel ?? c.t('statusItems.generating') } : null },
   { id: 'speed', title: 'statusItems.items.speed', places: everyPlace, place: 'live', shown: true,
-    read: (c: StatusContext): StatusValue | null => { const value = outputSpeed(c); return value === null ? null : { text: `${value.estimated ? '≈' : ''}${c.t('statusItems.speed', { value: formatNumber(value.speed, c.locale, { maximumFractionDigits: 1 }) })}`, details: [{ name: c.t('statusItems.source'), value: c.t(value.estimated ? 'statusItems.streamEstimate' : 'statusItems.reported') }] }; } },
+    read: (c: StatusContext): StatusValue | null => { const value = outputSpeed(c); return value === null ? null : { ...(value.estimated ? { hint: c.t('statusItems.textEstimateHint') } : {}), text: `${value.estimated ? '≈' : ''}${c.t('statusItems.speed', { value: formatNumber(value.speed, c.locale, { maximumFractionDigits: 1 }) })}`, details: [{ name: c.t('statusItems.source'), value: c.t(value.estimated ? 'statusItems.streamEstimate' : 'statusItems.reported') }] }; } },
   { id: 'elapsed', title: 'statusItems.items.elapsed', places: everyPlace, place: 'live', shown: true,
     read: (c: StatusContext): StatusValue | null => { const elapsed = c.turn === null ? null : turnActiveMs(c.turn, c.now); return currentTurn(c) && elapsed !== null ? { text: formatSpan(elapsed, c) } : null; } },
   { id: 'tokens', title: 'statusItems.items.tokens', places: everyPlace, place: 'live', shown: true,

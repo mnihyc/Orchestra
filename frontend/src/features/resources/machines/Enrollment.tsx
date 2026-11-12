@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 
 import { createHostToken, createMachineToken, hostKey, machineEnrollmentInfoQuery, machineKey } from '@/api/resources';
 import { enrollmentProgressQuery } from '@/api/enrollment';
+import { InstallationGateway } from '@/features/gateways/InstallationGateway';
 import { applyRow } from '@/api/cache';
 import { onUserEvent } from '@/realtime/stores/user';
 import type { EnrollmentToken, MachineOs,NewResourceAccess } from '@/generated/api-types';
@@ -42,7 +43,7 @@ export function guessOs(agent: string): MachineOs {
 }
 
 /** Commands already contain the exact choices authenticated by their token. */
-export interface InstallOptions {foreground:boolean;instance:string;node:boolean}
+export interface InstallOptions {foreground:boolean;instance:string;node:boolean;gateway?:string}
 export function commandFor(token: EnrollmentToken, os: MachineOs,options?:InstallOptions): string {
   let command=token.commands[os];
   if(options===undefined) return command;
@@ -53,6 +54,12 @@ export function commandFor(token: EnrollmentToken, os: MachineOs,options?:Instal
     :'"'+root+(instance===''?'':'/instances/'+instance)+'"';
   if(options.foreground) command+=os==='windows'?' -NoService':' --no-service';
   if(!options.node && instance!=='') command+=(os==='windows'?' -DataDir ':' --data-dir ')+data;
+  if(options.gateway!==undefined) {
+    // Catalogue IDs are data even when an operator uses shell metacharacters in one.
+    const gateway=/^[a-zA-Z0-9_-]+$/u.test(options.gateway)?options.gateway
+      : "'"+options.gateway.replaceAll("'",os==='windows'?"''":"'\\''")+"'";
+    command+=(os==='windows'?' -Gateway ':' --gateway ')+gateway;
+  }
   // --no-service remains an install-only switch for scripts. The screen's Foreground choice
   // completes the workflow in this same command, without requiring a second manual step.
   if(options.foreground) {
@@ -91,6 +98,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   const [os, setOs] = useState<MachineOs>(() => guessOs(typeof navigator === 'undefined' ? '' : navigator.userAgent));
   const [foreground,setForeground]=useState(false);
   const [instance,setInstance]=useState('');
+  const [gateway,setGateway]=useState('automatic');
   const info=useQuery(machineEnrollmentInfoQuery);
   const instanceValid=node || instance==='' || /^[a-zA-Z0-9_-]+$/u.test(instance);
   const selection = useMemo<Selection>(() => node
@@ -145,7 +153,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
   }, [arrived, connected, host, machine, navigate, onClose, queryClient, t]);
 
   const mayShow=info.data?.secure===true && !info.isError && valid && instanceValid;
-  const install={foreground,instance,node};
+  const install={foreground,instance,node,gateway};
   const directory=node?'/var/lib/orch-node':os==='windows'?'%LOCALAPPDATA%\\Orch\\connector':os==='macos'?'~/Library/Application Support/Orch/connector':'~/.local/share/orch-connector';
   const data=instance!=='' && !node?`${directory}/instances/${instance}`:directory;
   const bin=os==='windows'?'%LOCALAPPDATA%\\Orch':'~/.local/bin';
@@ -155,9 +163,9 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
     title={title}
     footer={<><TaskGuideLink guide="connect-a-machine" heading={t('machineInstallation.connectHeading')} /><Button variant="secondary" onClick={onClose}>
       {t('common.close')}
-    </Button>{arrived===undefined && (made===undefined || expired) && <Button variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
+    </Button>{arrived===undefined && (made===undefined || expired) && <Button action="show" variant="primary" pending={make.isPending} disabled={!mayShow} onClick={()=>mutate(selection)}>{t('machineInstallation.showCommand')}</Button>}</>}>
     <div className="flex flex-col gap-4 py-2" data-tutorial-target="machine-enrollment">
-      {info.isPending && <SkeletonRows rows={1}/>}
+      {info.isPending && <SkeletonRows read={info} rows={1}/>}
       {info.isError && <ErrorState compact error={info.error} retrying={info.isRefetching} onRetry={()=>void info.refetch()}/>}
       {progress.isError && <ErrorState compact error={progress.error} retrying={progress.isRefetching} onRetry={()=>void progress.refetch()}/>}
       {info.data?.secure===false && <InlineAlert tone="warning" action={<Button size="sm" onClick={()=>void info.refetch()}>{t('machineInstallation.retry')}</Button>}>{t('machineInstallation.configureAddress',{setting:info.data.configure ?? 'public_url'})}</InlineAlert>}
@@ -174,6 +182,7 @@ export function AddMachineDialog({ onClose,initialKind='connector' }: { onClose:
         <Select label={t('machineInstallation.runMode')} value={foreground?'foreground':'service'} onValueChange={(value)=>setForeground(value==='foreground')}
           options={[{value:'service',name:t(node?'machineInstallation.systemService.name':'machineInstallation.userService.name'),description:t(node?'machineInstallation.systemService.description':'machineInstallation.userService.description')},
             {value:'foreground',name:t('machineInstallation.foreground.name'),description:t('machineInstallation.foreground.description')}]}/>
+        <InstallationGateway value={gateway} onChange={setGateway} disabled={make.isPending}/>
         {!node && <Input label={t('machineInstallation.instance')} optional error={!instanceValid?t('machineInstallation.instanceInvalid'):undefined}
           value={instance} onChange={(event)=>setInstance(event.target.value)} autoComplete="off"/>}
         <EnrollmentRoles roles={roles} delegated={delegated} node={node} nodeDelegated={nodeDelegated}

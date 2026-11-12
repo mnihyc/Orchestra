@@ -8,6 +8,10 @@
       "en": "Asks before running a command",
       "zh-CN": "运行命令前请求批准"
     },
+    "auto_review": {
+      "en": "Uses the native approval reviewer",
+      "zh-CN": "使用原生批准审核器"
+    },
     "user_input": {
       "en": "Asks a question and receives its answer",
       "zh-CN": "提出问题并收到回答"
@@ -53,6 +57,10 @@
     "approvals.command": {
       "en": "asking before running commands",
       "zh-CN": "运行命令前请求批准"
+    },
+    "approval_modes.auto": {
+      "en": "automatic approval review",
+      "zh-CN": "自动批准审核"
     },
     "approvals.user_input": {
       "en": "asking questions",

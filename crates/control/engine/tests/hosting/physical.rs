@@ -94,12 +94,12 @@ pub async fn report(
         assert!(written["policy"].is_null());
     }
     let mut tx = world.pool.begin().await.unwrap();
-    // Zero rates are not measurements; the weight has no effect on this report's averages.
+    // No rate samples: the weight has no effect on this report's averages.
     orch_db::queries::resources::set_machine_facts(
         &mut tx,
         machine,
         &written,
-        (0, 0),
+        (None, None),
         1.0,
         world.clock.now(),
     )

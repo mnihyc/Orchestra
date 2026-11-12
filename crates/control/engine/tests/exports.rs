@@ -738,3 +738,83 @@ fn entry_with<'a>(held: &'a BTreeMap<String, Vec<u8>>, head: &str, tail: &str) -
         .find(|(path, _)| path.contains(head) && path.ends_with(tail))
         .map(|(_, bytes)| bytes.as_slice())
 }
+
+#[tokio::test]
+async fn a_prepared_archive_checks_the_writer_cut_before_any_export_or_job_insert() {
+    let world = World::new().await;
+    things(&world).await;
+    let caller = Caller::session(world.ada);
+    let mut tx = world.pool.begin().await.unwrap();
+    let principal = orch_authz::Principal::load(
+        &mut tx,
+        caller.clone(),
+        orch_types::Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    rows::lock_person(&mut tx, caller.user()).await.unwrap();
+    let request = everything();
+    let plan = world
+        .engine()
+        .prepare_export_plan(&mut tx, &principal, world.root, &request)
+        .await
+        .unwrap();
+    let prepared = world
+        .engine()
+        .prepare_export_creation(&mut tx, &principal, &plan, &request)
+        .await
+        .unwrap();
+    let refused = world
+        .engine()
+        .apply_export_creation(
+            &mut tx,
+            &principal,
+            &caller,
+            &Origin::default(),
+            &prepared,
+            || {
+                Err::<(), _>(orch_engine::EngineError::unreadable(
+                    "the current request ended",
+                ))
+            },
+        )
+        .await;
+    assert!(refused.is_err());
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM exports WHERE user_id=$1")
+        .bind(world.ada)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "the writer cut runs before even its first rollbackable row"
+    );
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM jobs WHERE kind='export' AND created_by=$1")
+            .bind(world.ada)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+    let checked = AtomicBool::new(false);
+    let made = world
+        .engine()
+        .apply_export_creation(
+            &mut tx,
+            &principal,
+            &caller,
+            &Origin::default(),
+            &prepared,
+            || {
+                checked.store(true, Ordering::SeqCst);
+                Ok::<(), orch_engine::EngineError>(())
+            },
+        )
+        .await
+        .unwrap();
+    assert!(checked.load(Ordering::SeqCst));
+    assert_eq!(made.export.job_id, Some(made.job.id));
+    assert_eq!(made.job.created_by, Some(world.ada));
+    assert!(rows::get(&mut tx, made.export.id).await.unwrap().is_some());
+    tx.rollback().await.unwrap();
+}

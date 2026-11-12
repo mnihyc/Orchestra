@@ -6,6 +6,7 @@ heading_id.树形与最近: tree-and-recent
 heading_id.在全部内容中展开查看: everything-with-more-room
 heading_id.滑出的侧栏: bars-that-slide-out
 heading_id.固定标签页: pinned-tabs
+summary: 使用树、最近访问和全部视图，并安排侧栏、固定常用标签页。
 ---
 
 # 导航与标签页

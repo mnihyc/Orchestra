@@ -763,6 +763,7 @@ mod tests {
     fn spec(mode: SessionMode) -> SessionSpec {
         SessionSpec {
             settings: SessionSettings {
+                native_model: None,
                 agent_id: orch_types::new_id(),
                 thread_id: orch_types::new_id(),
                 segment_id: orch_types::new_id(),
@@ -781,6 +782,9 @@ mod tests {
                 sandbox_mode: SandboxMode::Workspace,
                 available_models: vec!["fake-large".to_owned()],
                 subagent_limits: Default::default(),
+                prompt_cache_ttl: None,
+                background_wake: true,
+                image_generation: None,
                 instructions: String::new(),
                 memory: None,
                 arrangement: ArrangementType::Together,

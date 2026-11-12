@@ -47,6 +47,10 @@ export interface TimelineContext {
   /** The thread's name, for what is said of other places. */
   threadName: string;
   detail: WorkDetail;
+  /** A live reading opens current tool output; stored/child renderers opt in explicitly. */
+  liveTools?: boolean;
+  /** This screen mounts each waiting decision once above its composer. */
+  pinApprovals?: boolean;
   /** Turns whose work is shown step by step in Steps. */
   recent: ReadonlySet<string>;
   layout: DiffLayout;

@@ -4,12 +4,15 @@ import type { TFunction } from 'i18next';
 import { X } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { EnvironmentSandboxReadiness, SandboxReadiness } from '@/generated/api-types';
+import type { Environment, EnvironmentSandboxReadiness, SandboxReadiness } from '@/generated/api-types';
+import { openChange } from '@/features/change/target';
+import { holds } from '@/lib/permissions';
 import { executorTitle } from '@/features/resources/executorNames';
 import { currentLocale } from '@/i18n';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { HelpHint } from '@/ui/HelpHint';
 import { IconButton } from '@/ui/IconButton';
+import { Button } from '@/ui/Button';
 
 type Mode=SandboxReadiness['requested'];
 const ORDER:Record<Mode,number>={read_only:0,workspace:1,open:2};
@@ -45,25 +48,34 @@ export function sandboxWords(value:EnvironmentSandboxReadiness,t:TFunction):stri
 }
 
 /** Links only offer machine management when the server grants that authority. */
-export function SandboxActions({value}:{value:EnvironmentSandboxReadiness}) {
+export function SandboxActions({value,here=false}:{value:EnvironmentSandboxReadiness;here?:boolean}) {
   const {t}=useTranslation();
   if (value.sandbox.ready) return null;
   const target=needed(value);
   const machine=value.machine;
   const policy=target!==null && ORDER[value.sandbox.machine_limit]<ORDER[target] && value.policy_manage && machine!==null;
   return <div className="flex flex-wrap items-center gap-3 text-sm">
-    {policy && <Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'policy'}} className="text-accent underline">{t('sandboxReadiness.openPolicy',{name:machine.name})}</Link>}
-    <Link to="/resources/environments/$id" params={{id:value.environment.id}} className="text-accent underline">{t('sandboxReadiness.openEnvironment')}</Link>
+    {policy && <Link to="/resources/machines/$id" params={{id:machine.id}} search={{tab:'policy'}} className="min-w-0 wrap-anywhere text-accent underline">{t('sandboxReadiness.openPolicy',{name:machine.name})}</Link>}
+    {!here && <Link to="/resources/environments/$id" params={{id:value.environment.id}} className="min-w-0 wrap-anywhere text-accent underline">{t('sandboxReadiness.openEnvironment')}</Link>}
   </div>;
 }
 
-export function SandboxReadinessNotice({value}:{value:EnvironmentSandboxReadiness}) {
+export function SandboxReadinessNotice({value,here=false,onRecover}:{value:EnvironmentSandboxReadiness;here?:boolean;onRecover?:()=>void}) {
   const {t}=useTranslation();
+  const title=t(value.sandbox.ready?'sandboxReadiness.ready':'sandboxReadiness.blocked',{name:value.environment.name});
   return <InlineAlert tone={value.sandbox.ready?'success':'warning'} title={t(value.sandbox.ready?'sandboxReadiness.ready':'sandboxReadiness.blocked',{name:value.environment.name})}
-    action={<SandboxActions value={value} />}>
-    <p>{sandboxWords(value,t)}</p>
-    {value.sandbox.reason!==null && <p className="text-text-muted">{value.sandbox.reason}</p>}
-  </InlineAlert>;
+    action={<div className="flex flex-wrap items-center gap-2"><HelpHint term={title} what={<>{sandboxWords(value,t)}{value.sandbox.reason===null?null:<p>{value.sandbox.reason}</p>}</>} />
+      <SandboxActions value={value} here={here} />{onRecover!==undefined && <Button size="sm" onClick={onRecover}>{t('change.env.menu.move')}</Button>}</div>} />;
+}
+
+/** The individual environment uses the native comparison, without another read or a self-link. */
+export function EnvironmentReadinessNotice({environment}:{environment:Environment}) {
+  const value=environment.sandbox_readiness;
+  if(value===undefined || value===null || value.sandbox.ready) return null;
+  const manage=holds(environment.access,'environment.manage');
+  return <SandboxReadinessNotice value={value} here {...(manage ? {
+    onRecover:()=>openChange({kind:'environment',id:environment.id,name:environment.name},{kind:'move'}),
+  }:{})} />;
 }
 
 /** One line per environment, outside the machine's tabs. A changed boundary can be shown again;

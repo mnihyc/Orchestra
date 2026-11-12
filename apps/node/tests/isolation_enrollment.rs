@@ -1,5 +1,6 @@
 //! Native runtime enrollment and terminals through the real API, gateway and node. Opt in on a proof daemon
 //! with runc, Kata and both gVisor overlay modes; an explicitly selected proof never passes by skipping a prerequisite.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -60,7 +61,7 @@ async fn declared_runtimes_enroll_run_a_terminal_and_keep_the_same_identity_and_
     for (runtime, _, _) in CLASSES {
         assert!(runtimes.contains_key(runtime), "missing runtime {runtime}");
     }
-    let mut world = World::start(&lab.bridge).await;
+    let mut world = World::start(&lab).await;
     let adjust = lab.adjust();
     let registrations = Registrations::new().register(
         docker::NAME,

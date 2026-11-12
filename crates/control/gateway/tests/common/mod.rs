@@ -27,6 +27,7 @@ use orch_db::{Conn, Db, DbError};
 use orch_gateway_core::{Gateway, GatewayParts, Settings};
 use orch_link::commands::CommandHandler;
 use orch_link::machine::{MachineConfig, MachineLink};
+use orch_link::reconnect::{DialError, Dialer};
 use orch_link::spool::SpoolOptions;
 use orch_link::streams::Delivery;
 use orch_link::tunnels::channel::TunnelOptions;
@@ -210,6 +211,7 @@ pub struct Api {
     pub app: App,
     pub port: u16,
     pub applier: Arc<RecordingApplier>,
+    listener: Option<std::net::TcpListener>,
     stop: CancellationToken,
     task: Option<JoinHandle<std::io::Result<()>>>,
 }
@@ -218,9 +220,22 @@ impl Api {
     pub async fn stop(&mut self) {
         self.stop.cancel();
         self.link.shutdown();
-        if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(15), task).await;
-        }
+        drop(self.listener.take());
+        join_stopped(&mut self.task).await;
+    }
+}
+
+/// A timed-out JoinHandle must be aborted and joined, not detached while it still owns a listener.
+async fn join_stopped<T>(slot: &mut Option<JoinHandle<T>>) {
+    let Some(mut task) = slot.take() else {
+        return;
+    };
+    if tokio::time::timeout(Duration::from_secs(15), &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
     }
 }
 
@@ -235,9 +250,7 @@ pub struct Running {
 impl Running {
     pub async fn stop(&mut self) {
         self.gateway.shutdown();
-        if let Some(task) = self.task.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(15), task).await;
-        }
+        join_stopped(&mut self.task).await;
     }
 }
 
@@ -265,6 +278,12 @@ fn loopback(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
+/// Keep an immediate restart's listening socket reserved; a real outage drops it instead.
+enum ApiListener {
+    Bind(u16),
+    Retained(std::net::TcpListener),
+}
+
 async fn start_api(
     db: &Db,
     clock: &Arc<dyn Clock>,
@@ -272,7 +291,7 @@ async fn start_api(
     config: &Arc<ServerConfig>,
     content: Router<App>,
     master: [u8; 32],
-    port: Option<u16>,
+    listen: ApiListener,
 ) -> Api {
     let link = Link::new(LinkParts {
         db: db.clone(),
@@ -310,9 +329,13 @@ async fn start_api(
     .unwrap();
     // A restart takes the same port back, as the program would: the gateway
     // dials an address it was given.
-    let bind = loopback(port.unwrap_or(0));
-    let listener = bind_with_retry(&bind).await;
+    let listener = match listen {
+        ApiListener::Bind(port) => bind_with_retry(&loopback(port)).await,
+        ApiListener::Retained(listener) => TcpListener::from_std(listener).unwrap(),
+    };
     let port = listener.local_addr().unwrap().port();
+    let retained = listener.into_std().unwrap();
+    let listener = TcpListener::from_std(retained.try_clone().unwrap()).unwrap();
     let stop = CancellationToken::new();
     let task = tokio::spawn(server::serve_tls(listener, tls, router, stop.clone()));
     Api {
@@ -320,6 +343,7 @@ async fn start_api(
         app,
         port,
         applier,
+        listener: Some(retained),
         stop,
         task: Some(task),
     }
@@ -341,8 +365,8 @@ async fn start_gateway(
     world_clock: &Arc<dyn Clock>,
     secrets: &Secrets,
     api_port: u16,
-    pinned: Option<SocketAddr>,
-    edge: Option<SocketAddr>,
+    pinned: TcpListener,
+    edge: TcpListener,
     identity: Option<TlsIdentity>,
 ) -> Running {
     let settings = Settings {
@@ -362,8 +386,6 @@ async fn start_gateway(
         clock: Arc::clone(world_clock),
     })
     .unwrap();
-    let pinned = bind_with_retry(&pinned.map_or_else(|| loopback(0), |a| a.to_string())).await;
-    let edge = bind_with_retry(&edge.map_or_else(|| loopback(0), |a| a.to_string())).await;
     let (pinned_addr, edge_addr) = (pinned.local_addr().unwrap(), edge.local_addr().unwrap());
     let running = gateway.clone();
     let task = tokio::spawn(async move { running.run(pinned, edge).await });
@@ -383,6 +405,14 @@ impl World {
 
     /// As [`World::start`], with something that answers content requests.
     pub async fn start_with(content: Router<App>) -> Self {
+        Self::start_with_config(content, |_| {}).await
+    }
+
+    /// The same real listeners with operator configuration supplied before startup.
+    pub async fn start_with_config(
+        content: Router<App>,
+        configure: impl FnOnce(&mut ServerConfig),
+    ) -> Self {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let secrets = Secrets::compose(clock.as_ref());
         let test_db = TestDb::fresh().await;
@@ -393,11 +423,14 @@ impl World {
                 .await
                 .unwrap()
         };
-        // The ports of the gateway are known before the API is, because the
-        // API tells machines about them when they enroll.
-        let pinned_port = reserve_port();
-        let edge_port = reserve_port();
+        // Own both advertised addresses through API startup and gateway handoff.
+        // Dropping a port probe would let another fixture take the same address.
+        let pinned = bind_with_retry(&loopback(0)).await;
+        let edge = bind_with_retry(&loopback(0)).await;
+        let pinned_port = pinned.local_addr().unwrap().port();
+        let edge_port = edge.local_addr().unwrap().port();
         let mut config = ServerConfig::default();
+        config.gateway.gateway_id = "test-gateway".to_owned();
         // Renewal must issue the same deployment names that the fixture's original services use.
         config.pki.service_dns_names = NAMES.iter().map(|name| (*name).to_owned()).collect();
         config.gateway.endpoints = vec![
@@ -410,6 +443,7 @@ impl World {
                 trust: "public".to_owned(),
             },
         ];
+        configure(&mut config);
         let config = Arc::new(config);
         let mut master = [0u8; 32];
         rand::fill(&mut master[..]);
@@ -420,18 +454,10 @@ impl World {
             &config,
             content.clone(),
             master,
-            None,
+            ApiListener::Bind(0),
         )
         .await;
-        let gateway = start_gateway(
-            &clock,
-            &secrets,
-            api.port,
-            Some(loopback(pinned_port).parse().unwrap()),
-            Some(loopback(edge_port).parse().unwrap()),
-            None,
-        )
-        .await;
+        let gateway = start_gateway(&clock, &secrets, api.port, pinned, edge, None).await;
         gateway.gateway.wait_for_backplane().await;
         Self {
             db,
@@ -454,6 +480,11 @@ impl World {
     /// port, with a link made anew from what the database holds.
     pub async fn restart_api(&mut self) {
         let port = self.api.port;
+        let listen = self
+            .api
+            .listener
+            .take()
+            .map_or(ApiListener::Bind(port), ApiListener::Retained);
         self.api.stop().await;
         self.refused_before += self.api.applier.refused.load(Ordering::SeqCst);
         self.applied_before += self.api.applier.applied.load(Ordering::SeqCst);
@@ -464,9 +495,10 @@ impl World {
             &self.config,
             self.content.clone(),
             self.master,
-            Some(port),
+            listen,
         )
         .await;
+        assert_eq!(self.api.port, port);
     }
 
     /// The API goes away, and the gateway is left holding its sessions.
@@ -486,7 +518,7 @@ impl World {
             &self.config,
             self.content.clone(),
             self.master,
-            Some(port),
+            ApiListener::Bind(port),
         )
         .await;
     }
@@ -495,12 +527,14 @@ impl World {
     pub async fn restart_gateway(&mut self) {
         let (pinned, edge) = (self.gateway.pinned, self.gateway.edge);
         self.gateway.stop().await;
+        let pinned = bind_with_retry(&pinned.to_string()).await;
+        let edge = bind_with_retry(&edge.to_string()).await;
         self.gateway = start_gateway(
             &self.clock,
             &self.secrets,
             self.api.port,
-            Some(pinned),
-            Some(edge),
+            pinned,
+            edge,
             None,
         )
         .await;
@@ -511,12 +545,14 @@ impl World {
     pub async fn restart_gateway_with(&mut self, identity: TlsIdentity) {
         let (pinned, edge) = (self.gateway.pinned, self.gateway.edge);
         self.gateway.stop().await;
+        let pinned = bind_with_retry(&pinned.to_string()).await;
+        let edge = bind_with_retry(&edge.to_string()).await;
         self.gateway = start_gateway(
             &self.clock,
             &self.secrets,
             self.api.port,
-            Some(pinned),
-            Some(edge),
+            pinned,
+            edge,
             Some(identity),
         )
         .await;
@@ -653,14 +689,148 @@ impl World {
         roles: Vec<Role>,
         dir: &Path,
     ) -> Machine {
+        self.start_machine_with_gateway(
+            enrolled,
+            endpoints,
+            roles,
+            dir,
+            Default::default(),
+            Vec::new(),
+        )
+    }
+
+    /// A fixed primary for regional tests; advertisements still contain the full catalogue.
+    pub fn start_machine_on_gateway(
+        &self,
+        enrolled: &Enrolled,
+        gateway: &str,
+        roles: Vec<Role>,
+    ) -> Machine {
+        self.start_machine_with_reachability(enrolled, gateway, roles, Vec::new())
+    }
+
+    /// Block only auxiliary entrances, leaving each side's selected primary intact.
+    pub fn start_machine_with_reachability(
+        &self,
+        enrolled: &Enrolled,
+        gateway: &str,
+        roles: Vec<Role>,
+        denied_tunnel_urls: Vec<String>,
+    ) -> Machine {
+        let catalogue = self.config.gateway.advertised_gateways();
+        let endpoints = catalogue
+            .iter()
+            .find(|entry| entry.id == gateway)
+            .unwrap()
+            .endpoints
+            .iter()
+            .filter(|endpoint| endpoint.trust == Trust::Pinned)
+            .cloned()
+            .collect();
+        let dir = self.machines_dir.path().join(format!(
+            "{}-{}",
+            enrolled.identity.machine_id,
+            orch_types::new_id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        self.start_machine_with_gateway(
+            enrolled,
+            endpoints,
+            roles,
+            &dir,
+            orch_link::gateways::PrimaryGateway {
+                choice: orch_link_contract::gateways::GatewayChoice {
+                    selection: orch_link_contract::gateways::GatewaySelection::Selected,
+                    gateway_id: Some(gateway.to_owned()),
+                },
+                catalogue,
+            },
+            denied_tunnel_urls,
+        )
+    }
+
+    fn start_machine_with_gateway(
+        &self,
+        enrolled: &Enrolled,
+        endpoints: Vec<Endpoint>,
+        roles: Vec<Role>,
+        dir: &Path,
+        gateway: orch_link::gateways::PrimaryGateway,
+        denied_tunnel_urls: Vec<String>,
+    ) -> Machine {
+        self.start_ranked_machine(
+            enrolled,
+            endpoints,
+            roles,
+            dir,
+            gateway,
+            denied_tunnel_urls,
+            None,
+        )
+    }
+
+    /// Actual TLS/proof probes with authored RTT rankings; no claim of a physical WAN delay.
+    pub fn start_automatic_machine(&self, enrolled: &Enrolled, scores: ProbeScores) -> Machine {
+        let catalogue = self.config.gateway.advertised_gateways();
+        let endpoints = catalogue
+            .iter()
+            .flat_map(|gateway| gateway.endpoints.iter())
+            .filter(|endpoint| endpoint.trust == Trust::Pinned)
+            .cloned()
+            .collect();
+        let dir = self
+            .machines_dir
+            .path()
+            .join(format!("{}-automatic", enrolled.identity.machine_id));
+        std::fs::create_dir_all(&dir).unwrap();
+        self.start_ranked_machine(
+            enrolled,
+            endpoints,
+            vec![Role::Agent],
+            &dir,
+            orch_link::gateways::PrimaryGateway {
+                choice: Default::default(),
+                catalogue,
+            },
+            Vec::new(),
+            Some(scores),
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one native machine fixture also permits controlled verified probe rankings"
+    )]
+    fn start_ranked_machine(
+        &self,
+        enrolled: &Enrolled,
+        endpoints: Vec<Endpoint>,
+        roles: Vec<Role>,
+        dir: &Path,
+        gateway: orch_link::gateways::PrimaryGateway,
+        denied_tunnel_urls: Vec<String>,
+        probe_scores: Option<ProbeScores>,
+    ) -> Machine {
         let public = public_client_config(
             root_store(&[self.secrets.ca_certificate()]).unwrap(),
             Arc::clone(&self.clock),
         )
         .unwrap();
-        let dialer = TlsDialer::new(Some(self.pinned_config(enrolled)), Some(public));
+        let pinned = self.pinned_config(enrolled);
+        let prober = orch_connector_core::gateway_selection::HttpsGatewayProber::new(
+            Arc::clone(&pinned),
+            Arc::clone(&public),
+            &self.secrets.ca_certificate(),
+            Arc::clone(&self.clock),
+        )
+        .unwrap();
+        let dialer =
+            TlsDialer::new(Some(pinned), Some(public)).with_gateway_prober(Arc::new(prober));
+        #[cfg(feature = "test-observers")]
+        let observed_buffers = Arc::new(orch_link::tunnels::flow::Gauge::new());
         let link = MachineLink::start(
             MachineConfig {
+                gateway,
                 hosted_endpoints: None,
                 follow_system_endpoints: false,
                 machine_id: enrolled.identity.machine_id,
@@ -684,9 +854,22 @@ impl World {
                 journal_keep: Duration::from_secs(24 * 3_600),
                 connected: true,
                 tunnels: TunnelOptions::default(),
-                tunnel_gauge: None,
+                tunnel_gauge: {
+                    #[cfg(feature = "test-observers")]
+                    {
+                        Some(Arc::clone(&observed_buffers))
+                    }
+                    #[cfg(not(feature = "test-observers"))]
+                    {
+                        None
+                    }
+                },
             },
-            Arc::new(dialer),
+            Arc::new(Reachable {
+                dialer,
+                denied_tunnel_urls,
+                probe_scores,
+            }),
             Arc::clone(&self.clock),
         )
         .unwrap();
@@ -696,6 +879,8 @@ impl World {
             id: enrolled.identity.machine_id,
             link,
             handler,
+            #[cfg(feature = "test-observers")]
+            observed_buffers,
         }
     }
 
@@ -710,6 +895,42 @@ impl World {
         self.api.stop().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         self.db.pool().close().await;
+    }
+}
+
+pub type ProbeScores = Arc<std::sync::Mutex<std::collections::HashMap<String, u64>>>;
+
+struct Reachable {
+    probe_scores: Option<ProbeScores>,
+    dialer: TlsDialer,
+    denied_tunnel_urls: Vec<String>,
+}
+
+#[async_trait]
+impl Dialer for Reachable {
+    async fn dial(&self, endpoint: &Endpoint) -> Result<orch_link::framing::Connection, DialError> {
+        self.dialer.dial(endpoint).await
+    }
+    async fn dial_tunnel(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link::framing::Connection, DialError> {
+        if self.denied_tunnel_urls.contains(&endpoint.url) {
+            return Err(DialError::Connect("fixture entrance is unreachable".into()));
+        }
+        self.dialer.dial_tunnel(endpoint).await
+    }
+    async fn probe(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, DialError> {
+        let mut sample = self.dialer.probe(endpoint).await?;
+        if let Some(scores) = &self.probe_scores
+            && let Some(score) = scores.lock().unwrap().get(&sample.gateway_id)
+        {
+            sample.round_trip_ms = *score;
+        }
+        Ok(sample)
     }
 }
 
@@ -735,6 +956,8 @@ pub struct Machine {
     pub id: Id,
     pub link: MachineLink,
     pub handler: Arc<ScriptedHandler>,
+    #[cfg(feature = "test-observers")]
+    pub observed_buffers: Arc<orch_link::tunnels::flow::Gauge>,
 }
 
 /// A port that nothing holds right now: found by binding and letting go.

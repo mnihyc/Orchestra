@@ -1,4 +1,7 @@
 import { useFrameReady } from '@/shell/FrameReadiness';
+import { MessageCircleQuestionMark } from 'lucide-react';
+import { openAsk } from '@/features/ask/open';
+import { useShownViewOpening } from '@/features/workbench/viewOpening';
 /** Org avatars, the person's own first, the finder, inbox, approvals, resources, help and the user's menu.
  *
  * The one part of the workbench that never moves: the orgs a person belongs to, their own first,
@@ -32,7 +35,7 @@ import { openNodeDialog } from '@/features/navigation/NodeDialogs';
 import { orgColor, orgMarks } from '@/features/navigation/OrgSwitcher';
 import { usePlaceLabels } from '@/features/navigation/placeLabels';
 import { RESOURCES_VIEW } from '@/features/navigation/Resources';
-import { findView, type Layout, move, open, selectContainer, type Target } from '@/features/workbench/layout';
+import { allTabs, findView, type Layout, move, open, selectContainer, type Target } from '@/features/workbench/layout';
 import { spotId, type DropSpot } from '@/features/workbench/MoveView';
 import { containerOf, FALLBACK_CONTAINER_ICON } from '@/features/workbench/containers';
 import { viewOf } from '@/features/workbench/views';
@@ -368,6 +371,9 @@ export function Rail({ onShortcuts }: { onShortcuts: () => void }) {
   const finderKeys = useActionKeys('finder');
   const inboxKeys = useActionKeys('inbox');
   const approvalsKeys = useActionKeys('approvals');
+  const askKeys = useActionKeys('ask');
+  const askId = useWorkbench((state) => allTabs(state.layout).find((tab) => tab.view === 'ask')?.id ?? '');
+  const askOpen = useShownViewOpening(askId === '' ? [] : [askId]) !== null;
   useLeftBarFollows();
 
   return (
@@ -455,6 +461,7 @@ export function Rail({ onShortcuts }: { onShortcuts: () => void }) {
         const active = left.open && left.active === container.name;
         return <ActivityDrop key={container.id} name={container.name} label={name}><Tooltip content={t(active ? 'workbench.bars.hideView' : 'workbench.bars.showView', { name })} side="right"><button type="button" aria-label={name} aria-description={choice.description} aria-pressed={active} data-active-left-view={active ? container.name : undefined} className={cx(STOP, 'aria-pressed:bg-accent-subtle aria-pressed:text-accent-text')} onClick={() => bringToFront(container.name, true)}><Icon size={NAVIGATION_ICON} aria-hidden /></button></Tooltip></ActivityDrop>;
       })}
+      <Tooltip content={t('ask.open')} shortcut={askKeys ?? undefined} side="right"><button type="button" aria-label={t('ask.open')} aria-pressed={askOpen} className={cx(STOP, 'aria-pressed:bg-accent-subtle aria-pressed:text-accent-text')} onClick={openAsk}><MessageCircleQuestionMark size={NAVIGATION_ICON} aria-hidden /></button></Tooltip>
       <RailLink to="/help" label={t('screens.help.title')}>
         <CircleQuestionMark size={NAVIGATION_ICON} aria-hidden />
       </RailLink>

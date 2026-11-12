@@ -44,7 +44,7 @@ states its behavior, tests and any remaining limitations.
 | [orch-provider-contract](../../crates/contracts/provider/README.md) | Provider source contracts: facts, models and credential presentation. |
 | [orch-settings-contract](../../crates/contracts/settings/README.md) | Settings catalogue and resolution data, without evaluation. |
 | [orch-access-contract](../../crates/contracts/access/README.md) | Permission catalogue, roles and permission-page contracts, without access decisions. |
-| [orch-summarizer-contract](../../crates/contracts/summarizer/README.md) | Summarizer contract for title, description and tag generation. |
+| [orch-summarizer-contract](../../crates/contracts/summarizer/README.md) | Summarizer contract for titles, tags, summary text and handoffs. |
 | [orch-notifier-contract](../../crates/contracts/notifier/README.md) | Notification channel contract hosted by the worker. |
 | [orch-blob-contract](../../crates/contracts/blob/README.md) | BlobStore trait seam; local storage is the v0.1 implementation. |
 | [orch-identity-contract](../../crates/contracts/identity/README.md) | IdentityProviderKind trait seam; OIDC is the v0.1 implementation. |
@@ -142,7 +142,7 @@ from the contract crates and checked against their committed forms.
 | [Deploy](../../deploy/README.md) | Compose, proxy, config, updater, installers, the harness build catalogue, and the rate catalogue a release comes with |
 | [Images](../../images/README.md) | Default managed environment image recipe |
 | [Build counters](../../build/README.md) | One build counter for each shipped component |
-| [Deployment scenarios](../../scripts/smoke/README.md) | Isolated first-start, update, rollback, recovery and managed-runtime checks |
+| [Deployment scenarios](../../scripts/smoke/README.md) | Isolated first-start, restore, installer and managed-runtime checks of a fresh installation, and the update, rollback and recovery checks that need an earlier release |
 | [CI](../../.github/workflows/ci.yml) | Rust, web, dependency and deployment checks |
 | [Release](../../.github/workflows/release.yml) | Validated native inputs, package assembly and reviewed release drafts |
 | [Harness canary](../../.github/workflows/harness-canary.yml) | Daily compatibility checks of vendor harness builds with recorded evidence |

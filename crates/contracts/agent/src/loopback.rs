@@ -144,6 +144,9 @@ pub fn parse_path(path: &str) -> Option<Route> {
     }
 }
 
+/// The ordinary Orch tool reply budget, leaving the native harness its existing ten-second margin.
+pub const ORCH_TOOL_RESULT_WAIT_SECONDS: u64 = 50;
+
 #[cfg(test)]
 mod tests {
     use super::*;

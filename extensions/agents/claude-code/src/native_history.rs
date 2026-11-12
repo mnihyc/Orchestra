@@ -619,9 +619,9 @@ mod tests {
 
     #[test]
     fn a_link_never_authorizes_removing_anything_outside_the_home() {
-        let home = tempfile::tempdir().unwrap();
         #[cfg(unix)]
         {
+            let home = tempfile::tempdir().unwrap();
             std::os::unix::fs::symlink(home.path(), home.path().join("projects")).unwrap();
             assert_eq!(
                 manage(home.path(), &Inventory::default(), source(), true)

@@ -9,7 +9,7 @@ import { A, B, projection } from './continuation-fixtures';
 import { applyRows, EMPTY_VIEW, type ThreadView, viewFromRows } from '@/realtime/stores/thread';
 
 import { me, userRef } from '../doubles/fixtures';
-import { approvalItem, harnessApproval, otherTool, agentMessage, command, fileChange, change, marker, plan, reasoning, threadInput, turn, userMessage } from '../doubles/thread-rows';
+import { approvalItem, harnessApproval, otherTool, agentMessage, command, fileChange, change, marker, plan, reasoning, threadInput, toolCall, turn, userMessage } from '../doubles/thread-rows';
 
 const ADA = userRef(me(1, 'ada', 'Ada Lovelace'));
 const GRACE = userRef(me(2, 'grace', 'Grace Hopper'));
@@ -33,6 +33,15 @@ const options = (more: Partial<RowOptions> = {}): RowOptions => ({ detail: 'step
 
 const kinds = (rows: Row[]): string[] => rows.map((row) => row.kind);
 
+it('folds reasoning-only work in Focused while preserving the native inputs, answers and pending question', () => {
+  const pending = approvalItem('pending-question', 'question', { turn: 'focus-turn' });
+  const view = viewOf([userMessage('focus-input', 'Explain this', { author: ADA, turn: 'focus-turn' }), reasoning('only-reasoning', 'Working it out', { turn: 'focus-turn' }),
+    pending, agentMessage('focus-answer', 'Here is why.', { turn: 'focus-turn' })], [turn('focus-turn', { ordinal: 1, state: 'completed', inputId: 'focus-input' })]);
+  const rows = buildRows(view, options({ detail: 'summary' }));
+  expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['focus-input', 'pending-question', 'focus-answer']);
+  expect(rows.find((row) => row.kind === 'fold')).toMatchObject({ turnId: 'focus-turn', ids: ['only-reasoning'], open: false });
+});
+
 it('keeps the live recovery row after a failed turn while other blockers remain in their banner', () => {
   const items = [userMessage('recover-user', 'Keep the work', { author: ADA, turn: 'recover-turn' })];
   const turns = [turn('recover-turn', { ordinal: 1, state: 'failed', inputId: 'recover-input' })];
@@ -40,6 +49,15 @@ it('keeps the live recovery row after a failed turn while other blockers remain 
   expect(buildRows(recovering, options()).at(-1)?.kind).toBe('status');
   const ordinary = viewOf(items, turns, [], { state: 'blocked', current_turn_id: null, blocked: { reason: 'attachments', detail: null } });
   expect(buildRows(ordinary, options()).some((row) => row.kind === 'status')).toBe(false);
+});
+
+it('retains service recovery after a paused web call finishes its turn', () => {
+  const paused = toolCall('paused-search', {
+    kind: 'orch', tool: 'web_search', arguments: { query: 'Example search' }, result: { state: 'paused' },
+  }, { title: 'Search the web', turn: 'paused-turn' });
+  const turns = [turn('paused-turn', { ordinal: 1, state: 'completed', inputId: 'paused-input' })];
+  const view = viewOf([paused], turns, [], { state: 'idle', current_turn_id: null });
+  expect(buildRows(view, options()).at(-1)?.kind).toBe('status');
 });
 
 it('shows the before-Orch band for a failed adoption even when no earlier items exist and history lines are hidden', () => {
@@ -98,13 +116,16 @@ describe('the work of a turn', () => {
     expect(fold?.kind === 'fold' && fold.open).toBe(true);
   });
 
-  it('is not folded when it is only thought and a plan: nothing of it was done', () => {
+  it('folds thought and a plan in Focused while keeping the input and answer visible', () => {
     const view = viewOf(
       [userMessage('u1', 'Think', { author: ADA, turn: 't1' }), reasoning('r1', 'Hmm', { turn: 't1' }), plan('p1', [{ text: 'x', status: 'pending' }], { turn: 't1' }), agentMessage('a1', 'Ok', { turn: 't1' })],
       [turn('t1', { ordinal: 1, state: 'completed', inputId: 'i1' }), turn('t2', { ordinal: 2, state: 'completed', inputId: 'i2' })],
     );
     const rows = buildRows(view, options({ detail: 'summary' }));
-    expect(rows.some((row) => row.kind === 'fold')).toBe(false);
+    expect(rows.filter((row) => row.kind === 'fold')).toHaveLength(1);
+    expect(rows.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'a1']);
+    const opened = buildRows(view, options({ detail: 'summary', foldOpened: new Set(['t1']) }));
+    expect(opened.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual(['u1', 'r1', 'p1', 'a1']);
   });
 
   it('is told by recentTurns and foldsByDepth: the one that runs and the last that is over', () => {
@@ -119,6 +140,31 @@ describe('the work of a turn', () => {
     expect(foldsByDepth('steps', 't3', recent)).toBe(false);
     expect(foldsByDepth('summary', 't3', recent)).toBe(true);
     expect(foldsByDepth('everything', 't1', recent)).toBe(false);
+  });
+
+  it('folds older thought and plans in Steps without folding the last answer or current work', () => {
+    const items = ['old', 'last', 'current'].flatMap((id) => [
+      userMessage(`${id}-input`, `Input ${id}`, { author: ADA, turn: id }),
+      reasoning(`${id}-thought`, `Thought ${id}`, { turn: id }),
+      plan(`${id}-plan`, [{ text: 'Check the result', status: 'pending' }], { turn: id }),
+      agentMessage(`${id}-answer`, `Answer ${id}`, { turn: id }),
+    ]);
+    const view = viewOf(items, [
+      turn('old', { ordinal: 1, state: 'completed', inputId: 'old-input' }),
+      turn('last', { ordinal: 2, state: 'completed', inputId: 'last-input' }),
+      turn('current', { ordinal: 3, state: 'running', inputId: 'current-input' }),
+    ]);
+    const steps = buildRows(view, options());
+    expect(steps.filter((row) => row.kind === 'fold')).toEqual([
+      { kind: 'fold', key: 'fold:old', turnId: 'old', ids: ['old-thought', 'old-plan'], open: false },
+    ]);
+    expect(steps.filter((row) => row.kind === 'item').map((row) => row.id)).toEqual([
+      'old-input', 'old-answer', 'last-input', 'last-thought', 'last-plan', 'last-answer',
+      'current-input', 'current-thought', 'current-plan', 'current-answer',
+    ]);
+    const opened = buildRows(view, options({ foldOpened: new Set(['old']) }));
+    expect(opened.filter((row) => row.kind === 'item').map((row) => row.id)).toContain('old-plan');
+    expect(buildRows(view, options({ detail: 'everything' })).some((row) => row.kind === 'fold')).toBe(false);
   });
 });
 

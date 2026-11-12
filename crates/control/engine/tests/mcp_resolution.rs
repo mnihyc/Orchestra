@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "mcp_reconfiguration/imported.rs"]
+mod imported;
 #[path = "mcp_reconfiguration/proof.rs"]
 mod proof;
 #[path = "mcp_reconfiguration/revisions.rs"]
@@ -118,6 +120,11 @@ async fn the_harness_gets_the_selected_servers_and_only_a_changed_set_reopens_it
     assert_eq!(opened.len(), 1);
     assert_eq!(opened[0]["mcp"][0]["name"], "team-tool");
     assert_eq!(world.commands.issued_of("mcp.start"), 1);
+    assert_eq!(
+        world.commands.issued_bodies("mcp.start")[0].1["preset"],
+        true,
+        "the actual stored preset classification reaches the native command"
+    );
     world
         .engine()
         .submit_input(&Caller::session(world.ada), thread, queued("Same tools"))

@@ -2,7 +2,7 @@
  *
  * Asking for an archive starts a job. The page follows its live rows while it runs, and keeps
  * the ones it follows for a reload of the tab. When a job ends the person is told
- * where they are: a ready archive offers Download, a failed one says why, a cancelled one is simply gone.
+ * where they are: a ready archive offers Download, a failed one says why, and a cancellation is acknowledged.
  * The status bar shows what runs and what has just ended.
  */
 import type { TFunction } from 'i18next';
@@ -109,6 +109,7 @@ function settle(job: Job, t: TFunction): void {
   }
   if (job.state === 'cancelled') {
     change(job.id, () => null);
+    toast({ tone: 'info', title: t('export.job.cancelled'), description: held.place });
     remember();
     return;
   }

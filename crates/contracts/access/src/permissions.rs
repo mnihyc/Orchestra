@@ -20,6 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::roles::{NodeKind, PlaceKind, Role, UnknownName, words};
+use crate::whereabouts::{self, WhereName, Whereabouts};
 
 words! {
     /// A kind of resource: something people bring, that work runs on or in.
@@ -675,11 +676,11 @@ permissions! {
     ProviderView = "provider.view", Provider, View, PROVIDER, NOBODY,
         "View Provider", "See the provider in lists, with its status, plan and limits, and what each thread used of it.";
     ProviderUse = "provider.use", Provider, Use, PROVIDER, NOBODY,
-        "Use Provider", "Run turns on the provider: put a thread on it, and give input to threads that run on it, with the models and efforts the entry allows.";
+        "Use Provider", "Run turns and enabled services on the provider, within the entry's model, service and effort lists.";
     ProviderManage = "provider.manage", Provider, Manage, PROVIDER, NOBODY,
         "Manage Provider", "Sign the provider in and out, rotate its key, say which models and arrangements it allows, run and update its runtime, and enable, disable and delete it.";
     ProviderBypass = "provider.bypass", Provider, Advanced, PROVIDER, NOBODY,
-        "Go past limits", "Let one turn run past a cap on the provider that has no room left, or past the limit of its plan.";
+        "Go past limits", "Let one turn run past a configured Orch usage cap on the provider that has no room left.";
     AgentView = "agent.view", Agent, View, AGENT, NOBODY,
         "View Agent profile", "See the agent profile in lists, with what its adapter declares.";
     AgentUse = "agent.use", Agent, Use, AGENT, NOBODY,
@@ -954,17 +955,20 @@ impl Permission {
     }
 
     /// Whether the agents of a place can be named in its rows: the rows by
-    /// which conversations, chats and documents are read and written, and the
-    /// one by which documents are deleted, moved and brought back (nothing of
-    /// that kind is open to agents for conversations or chats).
+    /// which conversations, chats and documents are read, written and managed.
+    /// Advanced thread acts retain their own rows.
     #[must_use]
     pub const fn shared_with_agents(self) -> bool {
         matches!(
             self,
             Self::ThreadView
                 | Self::ThreadInteract
+                | Self::ThreadManage
+                | Self::ThreadFork
+                | Self::ThreadArchive
                 | Self::ChatView
                 | Self::ChatInteract
+                | Self::ChatManage
                 | Self::DocView
                 | Self::DocEdit
                 | Self::DocManage
@@ -1465,14 +1469,31 @@ words! {
         /// The key stays with the provider and is forwarded.
         KeySeparated = "key_separated",
         /// A copy of the credential is shared.
+        #[schemars(extend("x-credential-leaves" = true))]
         CredentialShared = "credential_shared",
         /// The credential itself is handed over.
+        #[schemars(extend("x-credential-leaves" = true))]
         HandedOver = "handed_over",
     }
 }
 
+impl Arrangement {
+    /// Whether the credential leaves the place it is kept in when work is done in this
+    /// arrangement: a copy of it goes to the holder's environment (`credential_shared`), or the
+    /// credential itself does (`handed_over`). In `separated` the harness stays with its provider
+    /// and in `key_separated` the key stays with it and is only forwarded, so neither lets the
+    /// credential out. The fifth arrangement, everything on one machine, is never chosen and is no
+    /// option here; nothing leaves a machine that already has everything.
+    #[must_use]
+    pub const fn credential_leaves(self) -> bool {
+        matches!(self, Self::CredentialShared | Self::HandedOver)
+    }
+}
+
 /// What an entry in the Use row of a provider lets its holder run. A member
-/// that is left out does not narrow.
+/// that is left out does not narrow, except the arrangement types: an entry
+/// that names none allows only those in which the credential stays where it
+/// is kept, and a type in which it leaves is allowed by naming it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderUse {
@@ -1480,15 +1501,29 @@ pub struct ProviderUse {
     /// of the provider.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<Vec<String>>,
+    /// The enabled service offerings the holder may use, by name, family or group.
+    /// Left out, every enabled service; independent of the model list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
     /// The reasoning efforts the holder may run, by name, on any model that
     /// lists them; left out, every effort a model lists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub efforts: Option<Vec<String>>,
     /// The arrangement types in which work done through this entry may use
-    /// the provider; left out, all that the provider's owners allow. It can
-    /// only narrow what they allow.
+    /// the provider; left out, those in which the credential stays where it is
+    /// kept (`separated` and `key_separated`), among those the provider's
+    /// owners allow. A type in which the credential leaves (`credential_shared`,
+    /// `handed_over`) is allowed only by naming it. It can only narrow what the
+    /// owners allow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangements: Option<Vec<Arrangement>>,
+    /// Where work done through this entry may run: the environments, hosts and
+    /// machines it names, a host or a machine meaning every environment on it,
+    /// those made later included; left out, anywhere. It can only narrow. Work
+    /// that runs in no environment (Ask, summaries, the semantic index) is not
+    /// held to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#where: Option<Vec<WhereName>>,
 }
 
 /// The most that an environment may be given. A member that is left out is
@@ -1589,8 +1624,10 @@ impl Options {
         let parsed = match permission {
             Permission::ProviderUse => Self::ProviderUse(ProviderUse {
                 models: reader.texts("models"),
+                services: reader.texts("services"),
                 efforts: reader.texts("efforts"),
                 arrangements: reader.words::<Arrangement>("arrangements"),
+                r#where: reader.places("where"),
             }),
             Permission::HostUse | Permission::MachineUse => Self::HostUse(HostUse {
                 max_environments: reader.count("max_environments"),
@@ -1685,6 +1722,14 @@ impl<'a> Reader<'a> {
         self.list(name, "is not one of the values it takes", |item| {
             item.as_str().and_then(|text| text.parse().ok())
         })
+    }
+
+    fn places(&mut self, name: &'static str) -> Option<Vec<WhereName>> {
+        self.list(
+            name,
+            "must name an environment, a host or a machine by its kind and identifier",
+            |item| serde_json::from_value(item.clone()).ok(),
+        )
     }
 
     fn count(&mut self, name: &'static str) -> Option<u32> {
@@ -1784,15 +1829,23 @@ fn allowed<T: PartialEq + ?Sized, U: std::borrow::Borrow<T>>(
 }
 
 impl ProviderUse {
-    /// What somebody may run whom this entry and `other` both let use the
-    /// provider. Entries combine permissively: a model, an effort or an
-    /// arrangement type that either allows is allowed.
+    /// What this entry and `other` name together, member by member: a model, an
+    /// effort, an arrangement type or a place that either names. It describes what
+    /// a person's entries name; it never decides whether they may do something,
+    /// since it lets the models of one entry go with the type or the place of
+    /// another. An entry is one grant, and a single entry has to allow all of
+    /// what is asked together (see `orch_authz::options::Wanted`).
     #[must_use]
     pub fn or(&self, other: &Self) -> Self {
         Self {
             models: either(self.models.as_ref(), other.models.as_ref()),
+            services: either(self.services.as_ref(), other.services.as_ref()),
             efforts: either(self.efforts.as_ref(), other.efforts.as_ref()),
-            arrangements: either(self.arrangements.as_ref(), other.arrangements.as_ref()),
+            arrangements: either(
+                Some(&self.arrangements_allowed()),
+                Some(&other.arrangements_allowed()),
+            ),
+            r#where: either(self.r#where.as_ref(), other.r#where.as_ref()),
         }
     }
 
@@ -1808,11 +1861,45 @@ impl ProviderUse {
         allowed(self.efforts.as_ref(), effort)
     }
 
-    /// Whether work done through the entry may use the provider in
-    /// `arrangement`, as far as the entry says.
+    /// The use of a provider that is held as its owner, as a manager or as a system admin, and not
+    /// through an entry: nothing narrows it, so every arrangement type is allowed.
+    #[must_use]
+    pub fn unlimited() -> Self {
+        Self {
+            arrangements: Some(Arrangement::ALL.to_vec()),
+            ..Self::default()
+        }
+    }
+
+    /// The arrangement types in which work done through the entry may use the provider, as far as
+    /// the entry says: the ones it names, or when it names none those in which the credential stays
+    /// where it is kept.
+    #[must_use]
+    pub fn arrangements_allowed(&self) -> Vec<Arrangement> {
+        self.arrangements.clone().unwrap_or_else(|| {
+            Arrangement::ALL
+                .iter()
+                .copied()
+                .filter(|arrangement| !arrangement.credential_leaves())
+                .collect()
+        })
+    }
+
+    /// Whether work done through the entry may use the provider in `arrangement`, as far as the
+    /// entry says.
     #[must_use]
     pub fn allows_arrangement(&self, arrangement: Arrangement) -> bool {
-        allowed(self.arrangements.as_ref(), &arrangement)
+        self.arrangements
+            .as_ref()
+            .map_or(!arrangement.credential_leaves(), |named| {
+                named.contains(&arrangement)
+            })
+    }
+
+    /// Whether work done through the entry may run at `at`, as far as the entry says.
+    #[must_use]
+    pub fn allows_where(&self, at: &Whereabouts) -> bool {
+        whereabouts::allows(self.r#where.as_deref(), at)
     }
 }
 
@@ -2233,8 +2320,12 @@ mod tests {
         for row in [
             P::ThreadView,
             P::ThreadInteract,
+            P::ThreadManage,
+            P::ThreadFork,
+            P::ThreadArchive,
             P::ChatView,
             P::ChatInteract,
+            P::ChatManage,
             P::DocView,
             P::DocEdit,
             P::DocManage,
@@ -2243,14 +2334,15 @@ mod tests {
         }
         assert!(HolderKind::Agents.fits(P::DocEdit, ObjectKind::Document, false));
         assert!(HolderKind::Agents.fits(P::DocManage, ObjectKind::Document, false));
-        // A conversation and a chat are never managed by an agent, whatever was shared.
+        // Management never lends permission administration, ownership or environment access.
         for row in [
             P::DocCreate,
             P::DocComment,
             P::FilesView,
             P::TerminalManage,
-            P::ThreadManage,
-            P::ChatManage,
+            P::AccessManage,
+            P::AccessOwn,
+            P::TopicManage,
         ] {
             assert!(!HolderKind::Agents.fits(row, row.on()[0], false), "{row}");
         }
@@ -2735,7 +2827,13 @@ mod tests {
         };
         assert!(options.allows_model("anything"));
         assert!(options.allows_effort("anything"));
-        assert!(options.allows_arrangement(Arrangement::CredentialShared));
+        assert!(options.allows_arrangement(Arrangement::Separated));
+        assert!(options.allows_arrangement(Arrangement::KeySeparated));
+        assert!(
+            !options.allows_arrangement(Arrangement::CredentialShared)
+                && !options.allows_arrangement(Arrangement::HandedOver),
+            "a type in which the credential leaves is allowed only by naming it"
+        );
         assert_eq!(
             Options::parse(P::ProviderUse, &Json::Null)
                 .unwrap()
@@ -2806,24 +2904,263 @@ mod tests {
     }
 
     #[test]
+    fn service_options_are_independent_and_old_model_only_entries_keep_their_exact_meaning() {
+        let old = json!({"models":["@small"]});
+        let parsed = Options::parse(P::ProviderUse, &old).unwrap();
+        assert_eq!(parsed.to_json(), old);
+        let Options::ProviderUse(model_only) = parsed else {
+            panic!("provider options");
+        };
+        assert!(model_only.services.is_none());
+        let service_json = json!({"services":["@web","image-*"]});
+        let parsed = Options::parse(P::ProviderUse, &service_json).unwrap();
+        assert_eq!(parsed.to_json(), service_json);
+        let Options::ProviderUse(service_only) = parsed else {
+            panic!("provider options");
+        };
+        assert!(service_only.models.is_none());
+        assert!(
+            model_only.or(&service_only).services.is_none(),
+            "an entry without a service restriction still admits every enabled service"
+        );
+        assert!(Options::parse(P::ProviderUse, &json!({"services":[3]})).is_err());
+        assert!(Options::parse(P::ProviderUse, &json!({"service_names":["search"]})).is_err());
+    }
+
+    #[test]
     fn several_entries_combine_permissively() {
         let one = ProviderUse {
             models: Some(vec!["a".into()]),
+            services: Some(vec!["search".into()]),
             efforts: Some(vec!["low".into()]),
             arrangements: None,
+            r#where: None,
         };
         let other = ProviderUse {
             models: Some(vec!["b".into(), "a".into()]),
+            services: Some(vec!["fetch".into()]),
             efforts: None,
             arrangements: Some(vec![Arrangement::Separated]),
+            r#where: Some(vec![WhereName {
+                kind: whereabouts::WhereKind::Host,
+                id: new_id(),
+            }]),
         };
         let both = one.or(&other);
         assert_eq!(both.models, Some(vec!["a".to_owned(), "b".to_owned()]));
+        assert_eq!(both.services, Some(vec!["search".into(), "fetch".into()]));
         assert_eq!(
             both.efforts, None,
             "an entry that names no efforts allows them all"
         );
-        assert_eq!(both.arrangements, None);
+        assert_eq!(
+            both.arrangements,
+            Some(vec![Arrangement::Separated, Arrangement::KeySeparated]),
+            "an entry that names no type allows those in which the credential stays, and the other adds its own"
+        );
+        assert_eq!(
+            both.r#where, None,
+            "an entry that names no places allows everywhere"
+        );
+    }
+
+    fn place(kind: &str, id: Id) -> Json {
+        json!({ "kind": kind, "id": id })
+    }
+
+    fn provider_use(written: &Json) -> ProviderUse {
+        match Options::parse(P::ProviderUse, written).unwrap() {
+            Options::ProviderUse(options) => options,
+            other => panic!("the use of a provider takes options: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_is_read_and_written_back_as_typed_names() {
+        let (environment, host, machine) = (new_id(), new_id(), new_id());
+        let written = json!({
+            "where": [
+                place("environment", environment),
+                place("host", host),
+                place("machine", machine),
+            ],
+            "models": ["gpt-x"],
+        });
+        let options = provider_use(&written);
+        assert_eq!(options.r#where.as_ref().map(Vec::len), Some(3));
+        assert_eq!(Options::ProviderUse(options).to_json(), written);
+    }
+
+    #[test]
+    fn where_left_out_means_everywhere_and_is_not_written() {
+        let options = provider_use(&json!({}));
+        assert_eq!(options.r#where, None);
+        assert!(options.allows_where(&Whereabouts::default()));
+        assert!(options.allows_where(&Whereabouts {
+            environment: Some(new_id()),
+            host: Some(new_id()),
+            machine: Some(new_id()),
+        }));
+        assert_eq!(Options::ProviderUse(options).to_json(), json!({}));
+        assert_eq!(provider_use(&json!({ "where": null })).r#where, None);
+    }
+
+    #[test]
+    fn where_with_a_bad_shape_is_refused_with_the_name_it_is_about() {
+        let id = new_id();
+        let faults = Options::parse(
+            P::ProviderUse,
+            &json!({ "where": [place("environment", id), "just-an-id", place("pool", id), { "kind": "host" }] }),
+        )
+        .unwrap_err();
+        let paths: Vec<_> = faults.iter().map(|fault| fault.path.as_str()).collect();
+        assert_eq!(paths, ["where[1]", "where[2]", "where[3]"]);
+        let faults =
+            Options::parse(P::ProviderUse, &json!({ "where": place("host", id) })).unwrap_err();
+        assert_eq!(faults[0].path, "where");
+        assert_eq!(faults[0].message, "must be a list");
+        let faults = Options::parse(
+            P::ProviderUse,
+            &json!({ "where": [{ "kind": "host", "id": id, "name": "x" }] }),
+        )
+        .unwrap_err();
+        assert_eq!(faults[0].path, "where[0]");
+        // The other uses take no such member: it is no option of a host, a machine or a template.
+        for permission in [P::HostUse, P::MachineUse, P::TemplateUse] {
+            let faults =
+                Options::parse(permission, &json!({ "where": [place("host", id)] })).unwrap_err();
+            assert_eq!(faults[0].path, "where");
+        }
+    }
+
+    #[test]
+    fn where_names_an_environment_a_host_covering_its_environments_and_narrows_only() {
+        let (environment, host, machine) = (new_id(), new_id(), new_id());
+        let on_host = Whereabouts {
+            environment: Some(new_id()),
+            host: Some(host),
+            machine: Some(machine),
+        };
+        let one = provider_use(&json!({ "where": [place("environment", environment)] }));
+        assert!(one.allows_where(&Whereabouts {
+            environment: Some(environment),
+            ..Whereabouts::default()
+        }));
+        assert!(!one.allows_where(&on_host));
+        let covering = provider_use(&json!({ "where": [place("host", host)] }));
+        assert!(covering.allows_where(&on_host));
+        assert!(
+            covering.allows_where(&Whereabouts {
+                environment: None,
+                ..on_host
+            }),
+            "an environment made on the host afterwards is covered"
+        );
+        assert!(!covering.allows_where(&Whereabouts {
+            environment: Some(new_id()),
+            host: Some(new_id()),
+            machine: Some(new_id()),
+        }));
+        // A list of nothing allows nowhere: it narrows, and never widens what the row gives.
+        assert!(!provider_use(&json!({ "where": [] })).allows_where(&on_host));
+    }
+
+    #[test]
+    fn where_of_several_entries_allows_what_either_allows_and_an_entry_without_it_allows_everywhere()
+     {
+        let (a, b) = (new_id(), new_id());
+        let at = |environment| Whereabouts {
+            environment: Some(environment),
+            ..Whereabouts::default()
+        };
+        let one = provider_use(&json!({ "where": [place("environment", a)] }));
+        let other = provider_use(&json!({ "where": [place("environment", b)] }));
+        let open = provider_use(&json!({ "models": ["m"] }));
+        let both = one.or(&other);
+        assert!(
+            both.allows_where(&at(a))
+                && both.allows_where(&at(b))
+                && !both.allows_where(&at(new_id()))
+        );
+        assert_eq!(both.r#where.as_ref().map(Vec::len), Some(2));
+        let widened = one.or(&open);
+        assert_eq!(widened.r#where, None);
+        assert!(widened.allows_where(&at(new_id())));
+        assert_eq!(
+            open.or(&one).r#where,
+            None,
+            "the order of entries does not matter"
+        );
+        assert_eq!(
+            one.or(&one).r#where,
+            one.r#where,
+            "the same name in two entries is one name"
+        );
+    }
+
+    #[test]
+    fn the_schema_of_the_options_marks_the_types_in_which_the_credential_leaves() {
+        let schema = P::ProviderUse.options_schema().unwrap();
+        let variants = schema["$defs"]
+            .as_object()
+            .unwrap()
+            .values()
+            .find_map(|def| {
+                def["oneOf"].as_array().filter(|variants| {
+                    variants
+                        .iter()
+                        .any(|variant| variant["const"] == "separated")
+                })
+            })
+            .unwrap_or_else(|| panic!("the arrangement types are in the schema: {schema}"));
+        for arrangement in Arrangement::ALL {
+            let marked = variants
+                .iter()
+                .find(|variant| variant["const"] == arrangement.as_str())
+                .unwrap_or_else(|| panic!("{arrangement} is in the schema"))
+                .get("x-credential-leaves")
+                .and_then(Json::as_bool)
+                .unwrap_or(false);
+            assert_eq!(
+                marked,
+                arrangement.credential_leaves(),
+                "{arrangement}: the schema and the method say the same"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_two_arrangements_that_let_the_credential_out_are_named_by_an_entry_to_be_allowed() {
+        let leaving: Vec<_> = Arrangement::ALL
+            .iter()
+            .copied()
+            .filter(|arrangement| arrangement.credential_leaves())
+            .collect();
+        assert_eq!(
+            leaving,
+            [Arrangement::CredentialShared, Arrangement::HandedOver]
+        );
+        let none = ProviderUse::default();
+        assert_eq!(
+            none.arrangements_allowed(),
+            [Arrangement::Separated, Arrangement::KeySeparated]
+        );
+        let named = provider_use(&json!({ "arrangements": ["credential_shared"] }));
+        assert!(named.allows_arrangement(Arrangement::CredentialShared));
+        assert!(
+            !named.allows_arrangement(Arrangement::Separated),
+            "an entry that names a type allows that one, and no other"
+        );
+        let both = none.or(&named);
+        assert!(both.allows_arrangement(Arrangement::Separated));
+        assert!(both.allows_arrangement(Arrangement::CredentialShared));
+        assert!(!both.allows_arrangement(Arrangement::HandedOver));
+        assert!(
+            Arrangement::ALL
+                .iter()
+                .all(|arrangement| ProviderUse::unlimited().allows_arrangement(*arrangement)),
+            "an owner's use keeps every type"
+        );
     }
 
     #[test]
@@ -2888,7 +3225,7 @@ mod tests {
             json!({
                 "name": "thread.fork", "area": "thread", "level": "advanced", "with": "thread.manage",
                 "on": ["thread"], "label": "Fork", "allows": P::ThreadFork.allows(), "profiles": true,
-                "holders": ["role", "group", "members", "user"], "options_schema": null
+                "holders": ["role", "group", "members", "user", "agents"], "options_schema": null
             })
         );
         assert_eq!(written["choices"][1]["key"], "full_interact");
