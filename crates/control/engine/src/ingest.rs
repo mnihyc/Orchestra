@@ -31,6 +31,8 @@
 //! transaction; `credential.needed`
 //! is recorded in the log only.
 
+mod observations;
+
 use crate::engine::{Engine, lock};
 use crate::error::EngineError;
 use crate::harnesses::HarnessKey;
@@ -128,9 +130,15 @@ pub async fn add_item(
     {
         return Ok(None);
     }
+    let observed = if spec.kind == "error" {
+        observations::rerouted(unit, spec.thread, spec.segment, spec.turn, spec.payload).await?
+    } else {
+        None
+    };
+    let payload = observed.as_ref().unwrap_or(spec.payload);
     let seq = unit.stamp(spec.thread).await?;
     let now = unit.now();
-    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, spec.payload).await?;
+    let search = indexed_text(&mut *unit.conn, spec.thread, spec.kind, payload).await?;
     let row = threads::insert_item(
         &mut *unit.conn,
         &NewItem {
@@ -143,7 +151,7 @@ pub async fn add_item(
             kind: spec.kind,
             status: spec.status,
             author_id: spec.author,
-            payload: spec.payload,
+            payload,
             native_ref: spec.native_ref,
             search_text: search.as_deref(),
             at: now,
@@ -151,6 +159,13 @@ pub async fn add_item(
         seq,
     )
     .await?;
+    if let Some(row) = &row {
+        if spec.status == "completed" {
+            observations::completed_item(unit, row, payload, None).await?;
+        } else {
+            observations::observed_item(unit, row, payload, None).await?;
+        }
+    }
     if spec.kind == "tool_call"
         && let (Some(item), Some(turn), Some(reference)) = (&row, spec.turn, spec.native_ref)
     {
@@ -408,6 +423,9 @@ fn normalized(kind: &str, payload: &Json) -> Json {
             }
         _ => {}
     }
+    if kind == "tool_call" {
+        crate::tools::capability_service::normalize_item(&mut payload);
+    }
     payload
 }
 
@@ -444,7 +462,10 @@ fn subagent_state_only(kind: &str, payload: &Json, patch: &Json) -> bool {
             .get("tool")
             .and_then(Json::as_object)
             .is_some_and(|tool| {
-                !tool.is_empty() && tool.keys().all(|key| key == "state" || key == "model")
+                !tool.is_empty()
+                    && tool
+                        .keys()
+                        .all(|key| matches!(key.as_str(), "state" | "model" | "name" | "role"))
             })
 }
 
@@ -517,8 +538,8 @@ impl Engine {
         machine: Id,
         delivery: &Delivery,
     ) -> Result<(), EngineError> {
-        self.apply_stream_events(conn, machine, &delivery.stream, &delivery.events)
-            .await
+        // Delivery adapters carry only a pointer to the stream dispatcher's state.
+        Box::pin(self.apply_stream_events(conn, machine, &delivery.stream, &delivery.events)).await
     }
 
     /// Applies the events of a stream, in their order. Applying the same
@@ -719,6 +740,13 @@ impl Engine {
             }
             Event::SessionTitle(title) => self.on_session_title(unit, batch, &title).await,
             Event::SessionLost(lost) => self.on_session_lost(unit, batch, &lost).await,
+            Event::BackgroundTasks(report) => {
+                if let Some(thread) = threads::thread(unit.conn, batch.thread_id).await? {
+                    self.observe_background_tasks(unit, &thread, &batch.segment, &report)
+                        .await?;
+                }
+                Ok(())
+            }
             Event::TurnStarted(started) => self.on_turn_started(unit, batch, &started).await,
             Event::ItemStarted(started) => self.on_item_started(unit, batch, &started).await,
             Event::ItemDelta(delta) => self.on_item_delta(unit, batch, &delta).await,
@@ -910,6 +938,7 @@ impl Engine {
         batch: &Batch,
         lost: &SessionLost,
     ) -> Result<(), EngineError> {
+        crate::background_wake::lost(unit, batch.thread_id, batch.segment.id).await?;
         // A per-conversation CLI can end while its adapter remains able to serve other conversations.
         sqlx::query("UPDATE harnesses SET last_error_at=$4,last_error_detail=$5,updated_at=$4 WHERE provider_id=$1 AND agent_id=$2 AND machine_id=$3")
             .bind(batch.segment.provider_id).bind(batch.segment.agent_id).bind(batch.machine).bind(unit.now()).bind(&lost.reason)
@@ -935,6 +964,18 @@ impl Engine {
             return Ok(());
         }
         let message = format!("The harness lost the session: {}", lost.reason);
+        let mut failure = error_json("session_lost", &message, true);
+        // An unconfirmed start keeps its existing manual decision: the native process
+        // may already have taken that prompt. A confirmed turn uses ordinary recovery.
+        let recovery = if turn.state == turn_state::RUNNING {
+            self.recover_agent_in(unit, &thread, &turn, &failure)
+                .await?
+        } else {
+            None
+        };
+        if let Some(recovery) = recovery.as_ref() {
+            failure["recovery"] = json!({"state":recovery.state,"rule":recovery.rule["id"],"automatic":recovery.state=="scheduled"||recovery.state=="stopped"});
+        }
         add_error_item(
             unit,
             batch.thread_id,
@@ -950,12 +991,8 @@ impl Engine {
             &thread,
             &turn,
             TurnEnd {
-                state: if turn.state == turn_state::RUNNING {
-                    turn_state::INTERRUPTED
-                } else {
-                    turn_state::FAILED
-                },
-                error: Some(error_json("session_lost", &message, true)),
+                state: turn_state::FAILED,
+                error: Some(failure),
                 // With no confirmation that the turn began, its input still needs
                 // a decision. Keep it in the queue and wait for a person before
                 // trying again: the lost session may have taken it already.
@@ -964,13 +1001,16 @@ impl Engine {
                 } else {
                     InputAfter::Keep
                 },
-                then_block: (turn.state == turn_state::STARTING).then(|| Blocked {
+                then_block: (turn.state == turn_state::STARTING).then_some(Blocked {
                     reason: "error",
                     detail: Some(message),
                 }),
             },
         )
         .await?;
+        if let Some(recovery) = recovery {
+            self.hold_call_recovery_in(unit, &thread, &recovery).await?;
+        }
         Ok(())
     }
 
@@ -1029,6 +1069,8 @@ impl Engine {
         if let Some(input) = threads::input(&mut *unit.conn, turn.input_id).await?
             && (moved || input.state == input_state::DELIVERED)
         {
+            self.report_background_with_input(unit, &input, turn.id)
+                .await?;
             add_user_message(unit, thread_id, turn.segment_id, Some(turn.id), &input).await?;
             crate::native_actions::invoked(unit, turn, input.id).await?;
             // Automatic first-input titles use the delivered words; no provider work runs here.
@@ -1140,13 +1182,19 @@ impl Engine {
         let word = match phase.kind {
             TurnPhaseKind::Working => "working",
             TurnPhaseKind::Compacting => "compacting",
+            TurnPhaseKind::Retrying => "retrying",
         };
-        if turn.phase.as_deref() == Some(word) {
+        let attempt = (phase.kind == TurnPhaseKind::Retrying)
+            .then_some(phase.retry_attempt)
+            .flatten()
+            .filter(|attempt| *attempt > 0);
+        if turn.phase.as_deref() == Some(word) && turn.phase_attempt == attempt {
             return Ok(());
         }
         let seq = unit.stamp(batch.thread_id).await?;
         let changed =
-            threads::set_turn_phase(&mut *unit.conn, turn.id, word, phase.at.get(), seq).await?;
+            threads::set_turn_phase(&mut *unit.conn, turn.id, word, attempt, phase.at.get(), seq)
+                .await?;
         // The harness shortens the conversation: where the agent is is told whole again at the next input.
         if changed && word == "compacting" {
             threads::set_context_sent(&mut *unit.conn, turn.segment_id, &json!({ "resend": true }))
@@ -1181,6 +1229,16 @@ impl Engine {
         let Some(turn) = self.turn_of(unit, batch, usage.turn_id).await? else {
             return Ok(());
         };
+        // Counter-only rows explicitly assert no token observation. Preserve both existing totals,
+        // including unknown totals, while merging their independent quantities through the same reader.
+        if usage
+            .report
+            .as_ref()
+            .is_some_and(|report| report.counters_only)
+        {
+            Box::pin(self.keep_usage_report(unit, batch.thread_id, &turn, usage)).await?;
+            return Ok(());
+        }
         let thread = self.thread_row(unit, batch.thread_id).await?;
         // What the program says it reports decides what its adapter's figures mean: an adapter puts zero in the
         // totals of a program that counts nothing, and zero is not a count.
@@ -1190,20 +1248,43 @@ impl Engine {
         } else {
             json!({ "tokens_reported": false })
         };
+        let reported_model = turn
+            .usage_detail
+            .as_ref()
+            .and_then(|detail| detail.get("effective_model"))
+            .and_then(Json::as_str)
+            .filter(|model| !model.is_empty());
+        let model = reported_model.unwrap_or(&turn.model);
         if let Some(window) = usage.context_window {
             orch_db::queries::provider_facts::learn_model_window(
                 &mut *unit.conn,
                 batch.segment.provider_id,
-                &turn.model,
+                model,
                 window,
                 at,
             )
             .await?;
         }
         if let Some(object) = whole.as_object_mut() {
+            if let Some(model) = reported_model {
+                object.insert("context_model".into(), json!(model));
+            }
+            if let Some(display) = turn
+                .usage_detail
+                .as_ref()
+                .and_then(|detail| detail.get("effective_model_display"))
+            {
+                object.insert("context_model_display".into(), display.clone());
+            }
             let previous = thread.usage.as_ref();
             let keep = |member: &str| {
                 previous
+                    .filter(|usage| {
+                        usage
+                            .get("context_model")
+                            .and_then(Json::as_str)
+                            .is_none_or(|previous| previous == model)
+                    })
                     .and_then(|usage| usage.get(member))
                     .cloned()
                     .unwrap_or(Json::Null)
@@ -1279,11 +1360,32 @@ impl Engine {
             batch.segment.agent_id,
         )
         .await?;
-        let descriptor = agent
-            .as_ref()
-            .map(crate::harnesses::descriptor_of)
-            .transpose()?
-            .flatten();
+        let descriptor = if let Some(mut agent) = agent {
+            // Native observations depend only on their reporting declaration. An unrelated
+            // legacy display override must not prevent a later usage report from committing;
+            // terminal accounting still validates the complete profile in its retained work.
+            let reporting = agent.descriptor_overrides.get("capabilities").map(|value| {
+                value.as_object().map_or_else(
+                    || value.clone(),
+                    |members| {
+                        let fields: serde_json::Map<_, _> = ["usage_tokens", "usage_context"]
+                            .into_iter()
+                            .filter_map(|name| {
+                                members
+                                    .get(name)
+                                    .map(|value| (name.to_owned(), value.clone()))
+                            })
+                            .collect();
+                        Json::Object(fields)
+                    },
+                )
+            });
+            agent.descriptor_overrides =
+                reporting.map_or_else(|| json!({}), |value| json!({"capabilities": value}));
+            crate::harnesses::descriptor_of(&agent)?
+        } else {
+            None
+        };
         Ok(descriptor.map_or((true, true), |descriptor| {
             (
                 descriptor.capabilities.usage_tokens,
@@ -1366,12 +1468,12 @@ impl Engine {
             && completed.status == TurnOutcome::Failed
         {
             // What passes (`provider_busy`, `provider_unreachable`) and every failure that no row knows leave
-            // the provider as it was. A limit of the plan closes it until the time the vendor names; a refused
-            // credential puts it in `error`; a limit that covers one family of models or the spending, which
-            // another model may get round, closes nothing.
+            // the provider as it was. Vendor quota remains an observation attached to this
+            // actual failure, never a gate on later requests. A refused credential still
+            // puts the provider in `error` under its existing recovery rules.
             match failure.code.as_str() {
                 "provider_exhausted" if !failure.retryable => {
-                    self.close_provider_by_limit(unit, batch.segment.provider_id, failure)
+                    self.record_provider_limit(unit, batch.segment.provider_id, failure)
                         .await?;
                 }
                 "provider_unauthorized" => {
@@ -1416,18 +1518,7 @@ impl Engine {
         )
         .await?;
         if let Some(recovery) = recovery {
-            let seq = unit.stamp(thread.node_id).await?;
-            threads::set_state(
-                unit.conn,
-                thread.node_id,
-                &[thread_state::IDLE, thread_state::BLOCKED],
-                &threads::StateChange::blocked("error", Some("call_recovery")),
-                seq,
-            )
-            .await?;
-            if recovery.state == "stopped" {
-                crate::calls::notify_stop(unit, &thread, &recovery).await?;
-            }
+            self.hold_call_recovery_in(unit, &thread, &recovery).await?;
         } else if matches!(
             completed.status,
             TurnOutcome::Completed | TurnOutcome::Failed
@@ -1699,6 +1790,7 @@ impl Engine {
             seq,
         )
         .await?;
+        observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
         self.subagent_moved(unit, batch, &item, &payload).await
     }
 
@@ -1751,6 +1843,12 @@ impl Engine {
             return Ok(());
         };
         let mut payload = normalized(&kind, &complete_payload);
+        if let Some(tasks) = existing
+            .as_ref()
+            .and_then(|item| item.payload.get("background_tasks"))
+        {
+            payload["background_tasks"] = tasks.clone();
+        }
         if kind == "plan" {
             if let Some(object) = payload.as_object_mut() {
                 object.remove("decision");
@@ -1842,12 +1940,36 @@ impl Engine {
             payload["tool"]["output"]["blob"] = json!(blob.hash);
             payload["tool"]["output"]["truncated"] = json!(true);
         }
+        if kind == "error" {
+            let turn = existing.as_ref().and_then(|item| item.turn_id);
+            if let Some(observed) =
+                observations::rerouted(unit, batch.thread_id, batch.segment.id, turn, &payload)
+                    .await?
+            {
+                payload = observed;
+            }
+        }
         match existing {
             None => {
                 // The start was lost to a gap; the item is made whole.
-                let turn = threads::active_turn(&mut *unit.conn, batch.thread_id)
-                    .await?
-                    .filter(|turn| turn.segment_id == batch.segment.id);
+                let declared_origin =
+                    if payload.get("marker").and_then(Json::as_str) == Some("harness_changed") {
+                        payload.pointer("/data/turn_id")
+                    } else if kind == "error" {
+                        payload.pointer("/details/turn_id")
+                    } else {
+                        None
+                    };
+                let turn = if let Some(origin) = declared_origin {
+                    match origin.as_str().and_then(|id| id.parse::<Id>().ok()) {
+                        Some(turn) => self.turn_of(unit, batch, turn).await?,
+                        None => None,
+                    }
+                } else {
+                    threads::active_turn(&mut *unit.conn, batch.thread_id)
+                        .await?
+                        .filter(|turn| turn.segment_id == batch.segment.id)
+                };
                 let source_turn = if kind == "tool_call" {
                     orch_db::queries::approvals::content_source_turn(
                         unit.conn,
@@ -1897,6 +2019,12 @@ impl Engine {
                     seq,
                 )
                 .await?;
+                if status == "completed" {
+                    observations::completed_item(unit, &item, &payload, Some(&item.payload))
+                        .await?;
+                } else {
+                    observations::observed_item(unit, &item, &payload, Some(&item.payload)).await?;
+                }
                 // Search: None also clears text that is now excluded; deltas still leave it alone.
                 crate::projections::keep_item_text(
                     &mut *unit.conn,
@@ -1942,6 +2070,39 @@ struct Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_web_results_share_native_action_cards_and_keep_their_whole_raw_payload() {
+        let raw = json!({"name":"web_search","input":{"inline":"{\"query\":\"source\"}"},"output":{"inline":"whole native MCP result"}});
+        let search = json!({"tool":{"kind":"orch","tool":"web_search","arguments":{"query":"source","count":2},
+            "result":{"content":[{"type":"text","text":"{\"query\":\"source\",\"results\":[{\"title\":\"A source\",\"url\":\"https://source.example.invalid/\",\"snippet\":\"native text\"}]}"}]}},"raw":raw});
+        let mapped = normalized("tool_call", &search);
+        assert_eq!(
+            mapped["tool"],
+            json!({"kind":"web_search","action":{"type":"search"},"query":"source","results":[{"title":"A source","url":"https://source.example.invalid/"}]})
+        );
+        assert_eq!(mapped["raw"], search["raw"]);
+        let page = json!({"tool":{"kind":"orch","tool":"web_fetch","arguments":{"url":"https://page.example.invalid/"},"result":{"url":"https://page.example.invalid/","title":"Page","content":"Reported page text","media_type":"text/markdown"}},"raw":{"output":{"inline":"Reported page text"}}});
+        let mapped = normalized("tool_call", &page);
+        assert_eq!(mapped["tool"]["kind"], "web_search");
+        assert_eq!(
+            mapped["tool"]["action"],
+            json!({"type":"open_page","url":"https://page.example.invalid/"})
+        );
+        assert_eq!(mapped["tool"]["results"][0]["title"], "Page");
+        assert_eq!(mapped["raw"], page["raw"]);
+        let failed = json!({"tool":{"kind":"orch","tool":"web_fetch","arguments":{"url":"https://page.example.invalid/"},"result":{"error":"unavailable"}}});
+        assert_eq!(
+            normalized("tool_call", &failed)["tool"]["results"],
+            json!([])
+        );
+        let foreign = json!({"tool":{"kind":"mcp","server":"somewhere","tool":"web_search","arguments":{"query":"source"},"result":null,"error":null}});
+        assert_eq!(
+            normalized("tool_call", &foreign),
+            foreign,
+            "an external server cannot become Orch's managed web tool by sharing its name"
+        );
+    }
 
     #[test]
     fn a_completed_sub_agent_card_takes_its_state_and_model_and_nothing_else() {

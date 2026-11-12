@@ -27,7 +27,7 @@ pub struct Recorded {
     pub params: Value,
 }
 
-type Answer = dyn Fn(&str, &Value) -> (String, bool) + Send + Sync;
+type Answer = dyn Fn(&str, &Value) -> (Vec<Value>, bool) + Send + Sync;
 
 struct Inner {
     tools: BTreeMap<String, Vec<(String, String)>>,
@@ -48,6 +48,18 @@ impl McpServer {
     pub async fn start(
         tools: &[(&str, &[(&str, &str)])],
         answer: impl Fn(&str, &Value) -> (String, bool) + Send + Sync + 'static,
+    ) -> Self {
+        Self::start_content(tools, move |tool, arguments| {
+            let (text, is_error) = answer(tool, arguments);
+            (vec![json!({"type":"text","text":text})], is_error)
+        })
+        .await
+    }
+
+    /// Native MCP content, including images; the text-only constructor uses this same server.
+    pub async fn start_content(
+        tools: &[(&str, &[(&str, &str)])],
+        answer: impl Fn(&str, &Value) -> (Vec<Value>, bool) + Send + Sync + 'static,
     ) -> Self {
         let inner = Arc::new(Inner {
             tools: tools
@@ -150,8 +162,8 @@ async fn handle(
         }
         "tools/call" => {
             let tool = message["params"]["name"].as_str().unwrap_or_default();
-            let (text, is_error) = (inner.answer)(tool, &message["params"]["arguments"]);
-            json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
+            let (content, is_error) = (inner.answer)(tool, &message["params"]["arguments"]);
+            json!({ "content": content, "isError": is_error })
         }
         "ping" => json!({}),
         _ => {

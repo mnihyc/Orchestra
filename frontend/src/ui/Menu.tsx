@@ -5,12 +5,12 @@
  * never differ.
  *
  * An entry the reader may not use, and would look for, stays in the list: greyed, reachable by the
- * arrow keys, with the reason under its name. Entries that destroy come last, apart, in the colour
+ * arrow keys, with the reason under its name or, when explicitly chosen, in a short tooltip. Entries that destroy come last, apart, in the colour
  * of danger. Each entry shows its shortcut.
  */
 import { Check, ChevronRight } from 'lucide-react';
 import { DropdownMenu } from 'radix-ui';
-import { isValidElement, type Ref, type ComponentProps, type ComponentType, type ReactNode } from 'react';
+import { isValidElement, useCallback, useRef, type Ref, type ComponentProps, type ComponentType, type ReactNode } from 'react';
 
 import { ActionIcon, actionForLabel, type ActionId } from '@/ui/actions';
 import { Choice, ChoicePicker, choiceName, hasChoiceDescription, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
@@ -18,9 +18,11 @@ import { cx } from '@/ui/cx';
 import { ChoiceCard } from '@/ui/DetailCard';
 import { Kbd } from '@/ui/Kbd';
 import { cardClasses, floatingAttachment, floatingClasses, useFloatingSubmenu } from '@/ui/Popover';
+import { placeStyle, useLayerRoom } from '@/ui/layerRoom';
 import { useScrolls } from '@/ui/useScrolls';
-import { useTransientLayer } from '@/ui/PromptScope';
+import { handReturnTargetToPrompt, useTransientLayer } from '@/ui/PromptScope';
 import { isInspectionTarget } from '@/ui/inspection';
+import { Tooltip } from '@/ui/Tooltip';
 
 export type MenuEntry =
   | (ChoiceName<string> & ChoiceDetails & {
@@ -36,6 +38,8 @@ export type MenuEntry =
       danger?: boolean;
       /** Why the reader may not use it; the entry is then shown greyed with these words. */
       disabled?: string | false;
+      /** A short, explicitly chosen refusal can stay in a tooltip instead of an explanatory row. */
+      disabledPresentation?: 'tooltip';
       onSelect: () => void;
     })
   | { type: 'separator'; id: string }
@@ -167,26 +171,31 @@ export function MenuEntries({ parts, entries }: { parts: MenuParts; entries: rea
             const off = typeof entry.disabled === 'string';
             const name = choiceName(entry);
             const action = entry.action ?? actionForLabel(name);
-            const description = off ? <span className="flex flex-col gap-0.5">
+            const tooltip = off && entry.disabledPresentation === 'tooltip';
+            const description = off && !tooltip ? <span className="flex flex-col gap-0.5">
               {entry.description !== undefined && <span>{entry.description}</span>}
               {' '}<span>{entry.disabled}</span>
             </span> : entry.description;
             return (
               <Choice presentation="picker" key={entry.id} name={entry.preview?.renderName?.(name) ?? name} description={description} compact
               >{(content, control) => {
-                const row = <>
+                const main = <>
                   <span aria-hidden className={cx('flex size-4 shrink-0 items-center justify-center', !off && entry.danger !== true && 'text-text-muted')}>
                     {action === undefined ? entry.icon : <ActionIcon action={action} />}
                   </span>
                   {content}
-                  {entry.shortcut !== undefined && <Kbd shortcut={entry.shortcut} className="ml-4" />}
                 </>;
-                return <ChoiceCard preview={entry.preview} renderInspect={(button) => <parts.Item asChild onSelect={(event) => event.preventDefault()}>{button}</parts.Item>}><parts.Item {...control} asChild={entry.href !== undefined && !off} textValue={name}
+                const row = <>
+                  {entry.shortcut === undefined ? main : <span className="flex min-w-0 flex-auto items-center gap-2">{main}</span>}
+                  {entry.shortcut !== undefined && <Kbd shortcut={entry.shortcut} className="ml-auto shrink-0" />}
+                </>;
+                const item = <parts.Item {...control} asChild={entry.href !== undefined && !off} textValue={name}
                 {...(off ? { 'aria-disabled': true } : {})}
                 onSelect={(event) => { if (off) event.preventDefault(); else if (entry.href === undefined) entry.onSelect(); }}
-                className={cx(ROW, 'min-w-0 flex-1', off ? 'text-text-muted' : entry.danger === true ? 'text-danger-text data-[highlighted]:bg-danger-subtle' : 'text-text')}>
+                className={cx(ROW, 'min-w-0 flex-1', entry.shortcut !== undefined && 'flex-wrap', off ? 'text-text-muted' : entry.danger === true ? 'text-danger-text data-[highlighted]:bg-danger-subtle' : 'text-text')}>
                 {entry.href !== undefined && !off ? <a href={entry.href}>{row}</a> : row}
-              </parts.Item></ChoiceCard>;
+              </parts.Item>;
+                return <ChoiceCard preview={entry.preview} renderInspect={(button) => <parts.Item asChild onSelect={(event) => event.preventDefault()}>{button}</parts.Item>}>{tooltip ? <Tooltip content={entry.disabled} side="right">{item}</Tooltip> : item}</ChoiceCard>;
               }}</Choice>
             );
           }
@@ -257,21 +266,29 @@ export interface MenuProps {
 
 export function Menu({ trigger, entries = [], content, label, side = 'bottom', align = 'start', open, onOpenChange, onCloseAutoFocus }: MenuProps) {
   const [shown, changeOpen, covered] = useTransientLayer(open, onOpenChange);
-  const { attach, scrollProps } = useScrolls();
+  const { attach: attachScrolls, scrollProps } = useScrolls();
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  // The menu takes the room it has for the entries it has now, not those it opened with.
+  const { place, attach: attachRoom } = useLayerRoom({ shown: shown && !covered, anchor: triggerRef, side, watch: content ?? entries, gap: 4 });
+  const attach = useCallback((node: HTMLElement | null) => { attachScrolls(node); attachRoom(node); }, [attachScrolls, attachRoom]);
   return (
     // A menu lies over the page without closing the page off: a press beside it puts it away and
     // lands where it was aimed, and nothing under it is hidden from a screen reader meanwhile.
     <DropdownMenu.Root modal={false} open={shown} onOpenChange={changeOpen}>
-      <DropdownMenu.Trigger asChild disabled={isValidElement<{ disabled?: boolean }>(trigger) && trigger.props.disabled === true}>{trigger}</DropdownMenu.Trigger>
+      <DropdownMenu.Trigger asChild ref={triggerRef} disabled={isValidElement<{ disabled?: boolean }>(trigger) && trigger.props.disabled === true}>{trigger}</DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
-          onCloseAutoFocus={onCloseAutoFocus}
-          style={covered ? { display: 'none' } : undefined}
+          onCloseAutoFocus={(event) => {
+            onCloseAutoFocus?.(event);
+            // A form the choice opened covers the button, which then cannot take the keyboard: the form returns it there.
+            if (!event.defaultPrevented && triggerRef.current !== null && handReturnTargetToPrompt(triggerRef.current)) event.preventDefault();
+          }}
+          style={covered ? { display: 'none' } : placeStyle(place)}
           onInteractOutside={(event) => { if (covered || isInspectionTarget(event.target)) event.preventDefault(); }}
           ref={attach}
           {...scrollProps}
           aria-label={label} aria-labelledby={undefined}
-          side={side}
+          side={place.side}
           align={align}
           sideOffset={4}
           collisionPadding={8} {...floatingAttachment}

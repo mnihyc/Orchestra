@@ -1,0 +1,2 @@
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"initialize"},"method":"initialize","params":{"capabilities":{"experimentalApi":true,"requiredHumanApproval":true}}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"initialize"},"result":{"userAgent":"orch/0.165.0 (Fake OS 1.0; x86_64) unknown (orch; 0.1.0)","codexHome":{"$replay_ref":"codex-home"},"platformFamily":"unix","platformOs":"linux"}}}

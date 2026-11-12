@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import type { Provider } from '../../src/generated/api-types';
+import { arrived } from './support';
 
 interface ProviderSourcesWalk {
   /** English manager session for a disposable, ready key provider with a running keeper. */
@@ -43,7 +44,7 @@ test.describe('real provider sources', () => {
       await page.getByRole('option',{name:'Program',exact:true}).click();
       await models.getByRole('combobox',{name:'Registered program',exact:true}).click();
       await page.getByRole('option',{name:walk.programLabel,exact:true}).click();
-      const written=page.waitForResponse((response) => response.request().method() === 'PUT' && new URL(response.url()).pathname.endsWith('/providers/' + walk.provider + '/sources'));
+      const written=arrived(page.waitForResponse((response) => response.request().method() === 'PUT' && new URL(response.url()).pathname.endsWith('/providers/' + walk.provider + '/sources')));
       await page.getByRole('button',{name:'Save sources',exact:true}).click();
       const response=await written;
       expect(response.ok()).toBe(true);

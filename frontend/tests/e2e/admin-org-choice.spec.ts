@@ -3,7 +3,7 @@ import { expect, type APIRequestContext, type Locator, type Page, type Request, 
 import type { AuthResult, IdentityProvider, Org, OrgPage } from '../../src/generated/api-types.ts';
 import words from '../../src/i18n/en.json' with { type: 'json' };
 import { asAdmin } from './admin-mode-support.ts';
-import { PEOPLE, scenario, signIn } from './support.ts';
+import { arrived, PEOPLE, scenario, signIn } from './support.ts';
 
 const api = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}/api/v1`;
 const PAGE_SIZE = 50; // Existing api/admin.ts ADMIN_PAGE_SIZE; one extra real org tests continuation.
@@ -72,7 +72,7 @@ async function edit(page: Page, provider: IdentityProvider) {
   return { dialog, field: dialog.getByRole('combobox', { name: words.admin.idp.defaultOrg, exact: true }), area: dialog.locator('[data-admin-org-choice]') };
 }
 function answer(page: Page, path: string, method = 'GET', match: (query: URLSearchParams) => boolean = () => true) {
-  return page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); });
+  return arrived(page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); }));
 }
 async function capture(page: Page, info: TestInfo, name: string, input: Locator) {
   await input.scrollIntoViewIfNeeded(); await page.mouse.move(0, 0);

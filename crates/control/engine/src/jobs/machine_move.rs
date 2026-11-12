@@ -115,6 +115,8 @@ pub struct Recipe {
     source_status: String,
     source_facts: Json,
     source_config: Json,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_is_unit: Option<bool>,
     old_runtime: Option<Id>,
     destination: Destination,
     destination_fingerprint: Hash,
@@ -125,6 +127,50 @@ pub struct Recipe {
 }
 
 impl Recipe {
+    /// The frozen previous unit used by the shared committed cleanup verifier.
+    pub(crate) fn old_runtime(&self) -> Option<Id> {
+        self.old_runtime
+    }
+
+    /// Template units move between hosts; any directory side is a switch with a copy.
+    pub fn transfer_kind(&self) -> orch_api_contract::forks::EnvironmentTransferKind {
+        orch_api_contract::forks::EnvironmentTransferKind::between_units(
+            self.source_is_unit.unwrap_or(self.old_runtime.is_some()),
+            matches!(self.destination, Destination::Unit { .. }),
+        )
+    }
+
+    /// Only an actual retained runtime can be cleaned up as an old unit.
+    pub fn source_has_unit(&self) -> bool {
+        self.old_runtime.is_some()
+    }
+
+    /// The real candidate unit of this native directory-to-unit move, before publication.
+    pub(crate) fn owns_candidate(&self, runtime: &envs::RuntimeFull) -> Result<bool, EngineError> {
+        let Destination::Unit {
+            host,
+            template,
+            driver,
+            definition,
+            ..
+        } = &self.destination
+        else {
+            return Ok(false);
+        };
+        Ok(self.old_runtime.is_none()
+            && runtime.environment_id == Some(self.environment)
+            && runtime.kind == "environment"
+            && runtime.successor_of.is_none()
+            && runtime.generation == self.next_generation
+            && runtime.host_id == *host
+            && runtime.template_id == *template
+            && runtime.driver == *driver
+            && runtime.spec_hash
+                == Hash::of(&serde_json::to_vec(definition)?)
+                    .as_bytes()
+                    .as_slice())
+    }
+
     /// The caller's own host/template access required by the selected destination.
     pub fn destination_access(
         &self,
@@ -174,6 +220,7 @@ impl Recipe {
             })
         };
         self.environment == other.environment
+            && self.transfer_kind() == other.transfer_kind()
             && self.source_machine == other.source_machine
             && self.source_generation == other.source_generation
             && self.source_revision == other.source_revision
@@ -219,6 +266,7 @@ impl Recipe {
 }
 
 /// A machine move before references and visibility are filled by the API.
+#[derive(Clone)]
 pub struct Draft {
     /// The executable recipe, independent of page placement defaults.
     pub recipe: Recipe,
@@ -343,6 +391,16 @@ async fn directory_place(
     }
     Ok(Some((
         MoveMachine {
+            grouping: orch_api_contract::resource_groups::ResourceGrouping {
+                availability: vec![
+                    orch_api_contract::resource_groups::ResourceMachineAvailability {
+                        machine_id: machine,
+                        available: reasons.is_empty(),
+                        reason: (!reasons.is_empty()).then(|| reasons.join(" · ")),
+                    },
+                ],
+                ..Default::default()
+            },
             machine: machine_ref(&row)?,
             host: None,
             usable: reasons.is_empty(),
@@ -416,7 +474,7 @@ pub async fn places(
             continue;
         }
         if let Some((place, _, _)) = directory_place(conn, principal, &state, machine).await? {
-            found.push(EnvironmentMovePlace::Machine(place));
+            found.push(EnvironmentMovePlace::Machine(Box::new(place)));
         }
     }
     Ok(found)
@@ -577,15 +635,17 @@ async fn measure(
     })
     .map_err(EngineError::from)?;
     let subject = json!({"environment_id":environment,"generation":generation});
-    let count = if home {
-        engine
-            .measure_home_in_background(machine, CommandKind::FsDataMeasure, body, subject, by)
-            .await?
-    } else {
-        engine
-            .measure_in_background(machine, CommandKind::FsDataMeasure, body, subject, by)
-            .await?
-    };
+    let count = super::environment_move::preparation::count(
+        engine,
+        machine,
+        CommandKind::FsDataMeasure,
+        body,
+        subject,
+        by,
+        home,
+        None,
+    )
+    .await?;
     if count.unsupported {
         return Err(blocked(
             "home_copy_unavailable",
@@ -649,6 +709,32 @@ impl Engine {
             })?;
         let (target, place, target_hash) =
             destination(self, conn, principal, &state, request).await?;
+        let needs = match &target {
+            Destination::Attach { machine } => vec![(
+                orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Machine,
+                    id: *machine,
+                },
+                orch_access_contract::permissions::Permission::MachineUse,
+            )],
+            Destination::Unit { host, template, .. } => vec![
+                (
+                    orch_access_contract::decisions::ObjectRef {
+                        kind: orch_access_contract::permissions::ObjectKind::Host,
+                        id: *host,
+                    },
+                    orch_access_contract::permissions::Permission::HostUse,
+                ),
+                (
+                    orch_access_contract::decisions::ObjectRef {
+                        kind: orch_access_contract::permissions::ObjectKind::Template,
+                        id: *template,
+                    },
+                    orch_access_contract::permissions::Permission::TemplateUse,
+                ),
+            ],
+        };
+        super::environment_move::preparation::select_destinations(conn, &needs).await?;
         let mut blockers = Vec::new();
         if environment_facts::machine(conn, target.machine(), target.driver())
             .await?
@@ -772,6 +858,7 @@ impl Engine {
             self,
             conn,
             &crate::mount_copies::Ask {
+                preparation: None,
                 choices: request.mounts.as_deref().unwrap_or_default(),
                 check_fingerprints: request.check_fingerprints.unwrap_or(false).then(|| {
                     request
@@ -860,7 +947,10 @@ impl Engine {
             },
         )
         .map_err(EngineError::from)?;
-        let Some(Outcome::Succeeded(value)) = self.ask_bounded(manifest).await? else {
+        let manifest = crate::jobs::lifecycle_commands::planning::observe(self, manifest).await?;
+        let answer = self.ask_bounded(manifest.clone()).await?;
+        crate::jobs::lifecycle_commands::planning::delivered(self, &manifest).await?;
+        let Some(Outcome::Succeeded(value)) = answer else {
             return Err(blocked(
                 "source_unavailable",
                 "The source did not provide its selected workspace listing.",
@@ -901,7 +991,7 @@ impl Engine {
             ));
         }
         let home = if carry_home {
-            measure(
+            let measured = measure(
                 self,
                 source.id,
                 environment,
@@ -909,9 +999,14 @@ impl Engine {
                 state.generation,
                 principal.user(),
             )
-            .await
-            .ok()
-            .map(|(reference, home)| FilesHome {
+            .await;
+            let measured = match measured {
+                Err(updates::UpdateError::Internal(error @ EngineError::BeforeEffect(_))) => {
+                    return Err(error.into());
+                }
+                other => other,
+            };
+            measured.ok().map(|(reference, home)| FilesHome {
                 measurement: Some(reference),
                 measured: home.is_some(),
                 file_count: home.as_ref().map_or(0, |count| count.files),
@@ -981,6 +1076,7 @@ impl Engine {
                 source_status: state.status,
                 source_facts: state.facts,
                 source_config: state.config,
+                source_is_unit: Some(facts.makes_units()),
                 old_runtime: old.map(|r| r.id),
                 destination: target,
                 destination_fingerprint: target_hash,
@@ -999,13 +1095,24 @@ impl Engine {
 }
 
 /// Reserves the common environment/thread holds in the caller's transaction.
-pub async fn queue(
+/// The native queue's exact current lifecycle/thread inputs, selected without mutation or IO.
+#[derive(Clone)]
+pub struct PreparedQueue {
+    recipe: Recipe,
+}
+impl PreparedQueue {
+    /// Actual selected native recipe.
+    pub fn recipe(&self) -> &Recipe {
+        &self.recipe
+    }
+}
+/// Prepare the same ordinary machine/directory placement and held-thread decisions before a write.
+pub async fn prepare_queue(
     conn: &mut Conn,
     principal: &Principal,
     draft: Draft,
-    batch: Option<Id>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<jobs::JobRow, UpdateError> {
+) -> Result<PreparedQueue, UpdateError> {
     if !draft.blockers.is_empty() {
         return Err(UpdateError::Blocked(draft.blockers));
     }
@@ -1109,6 +1216,29 @@ pub async fn queue(
             return Err(UpdateError::Held(job.id));
         }
     }
+    Ok(PreparedQueue { recipe })
+}
+/// The ordinary entrypoint consumes the same native prepared writer.
+pub async fn queue(
+    conn: &mut Conn,
+    principal: &Principal,
+    draft: Draft,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let prepared = prepare_queue(conn, principal, draft, now).await?;
+    queue_prepared(conn, prepared, batch, now, || Ok(())).await
+}
+/// Apply the native queue on its original guarded connection, after the complete preparation.
+pub async fn queue_prepared(
+    conn: &mut Conn,
+    prepared: PreparedQueue,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+    before: impl FnOnce() -> Result<(), UpdateError>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let recipe = prepared.recipe;
+    before()?;
     sqlx::query("UPDATE environments SET data_generation=$2 WHERE id=$1")
         .bind(recipe.environment)
         .bind(i64::from(recipe.next_generation))
@@ -1117,7 +1247,8 @@ pub async fn queue(
         .map_err(DbError::from)?;
     let progress = serde_json::to_value(initial_progress(&super::environment_move::PHASES))
         .map_err(EngineError::from)?;
-    let mut plan = json!({"portable":recipe,"threads":recipe.threads,"options":recipe.options,"mode":"make","fresh":true});
+    let mut plan = json!({"portable":recipe,"threads":recipe.threads,"options":recipe.options,"mode":"make","fresh":true,
+        "transfer_kind":recipe.transfer_kind(),"source_has_unit":recipe.source_has_unit()});
     if let Destination::Unit {
         definition,
         resources,
@@ -1283,8 +1414,18 @@ impl Moving {
         job.check()?;
         let mut tx = job.engine().db().begin().await?;
         orch_db::queries::transaction_guard::lock_authority(&mut tx).await?;
-        let principal =
-            super::source::load_principal(&mut tx, job, self.recipe.by, self.recipe.token).await?;
+        let source_row = job.row().await?;
+        let principal = if super::environment_move::authority::present(&source_row) {
+            super::environment_move::authority::principal(
+                &mut tx,
+                &source_row,
+                job.engine().inner.clock.as_ref(),
+            )
+            .await
+            .map_err(|error| fail("access.denied", error.to_string()))?
+        } else {
+            super::source::load_principal(&mut tx, job, self.recipe.by, self.recipe.token).await?
+        };
         if !updates::may_manage(
             &mut tx,
             &principal,
@@ -1884,8 +2025,18 @@ impl Moving {
         let row = jobs::lock(&mut tx, job.id())
             .await?
             .ok_or_else(|| fail("job_gone", "The move disappeared."))?;
-        let principal =
-            super::source::load_principal(&mut tx, job, self.recipe.by, self.recipe.token).await?;
+        let source_row = job.row().await?;
+        let principal = if super::environment_move::authority::present(&source_row) {
+            super::environment_move::authority::principal(
+                &mut tx,
+                &source_row,
+                job.engine().inner.clock.as_ref(),
+            )
+            .await
+            .map_err(|error| fail("access.denied", error.to_string()))?
+        } else {
+            super::source::load_principal(&mut tx, job, self.recipe.by, self.recipe.token).await?
+        };
         if !updates::may_manage(
             &mut tx,
             &principal,
@@ -1985,6 +2136,8 @@ impl Moving {
             crate::views::environment_ref_json(&mut tx, &before, Time::new(job.now())).await?,
         )
         .map_err(EngineError::from)?;
+        let (from_host, from_machine) =
+            crate::views::environment_location_refs(&mut tx, old.id).await?;
         let machine: Id = serde_json::from_value(row.plan["candidate_machine"].clone())
             .map_err(EngineError::from)?;
         let facts = &row.plan["candidate_facts"];
@@ -2050,15 +2203,29 @@ impl Moving {
         let by: orch_api_contract::users::UserRef =
             serde_json::from_value(crate::views::user_ref_json(&mut tx, self.recipe.by).await?)
                 .map_err(EngineError::from)?;
+        let (to_host, to_machine) =
+            crate::views::environment_location_refs(&mut tx, old.id).await?;
+        let move_notice = super::environment_move::notice::MoveNotice::prepare(
+            &mut tx,
+            &before.facts,
+            &after.facts,
+            &[],
+            self.recipe.files.missing.count,
+        )
+        .await?;
         let marker = orch_api_contract::threads::MarkerPayload::EnvironmentMoved(
             orch_api_contract::threads::MarkerEnvironmentMoved {
+                from_host,
+                from_machine,
+                to_host,
+                to_machine,
                 from,
                 to,
                 path_map: PathMap {
                     from: self.recipe.files.path_map.from.clone(),
                     to: root.into(),
                 },
-                mounts_detached: Vec::new(),
+                mounts_detached: move_notice.detached.clone(),
                 by,
             },
         );
@@ -2090,6 +2257,7 @@ impl Moving {
             self.recipe.by,
             self.recipe.files.home.is_some(),
             false,
+            Some(&move_notice),
         )
         .await?;
         let mut audit = orch_db::audit::Entry::new(
@@ -2131,6 +2299,8 @@ impl Moving {
     async fn cleanup(&self, job: &Job) -> Result<Done, Stop> {
         match self.recipe.old_runtime {
             Some(runtime) => {
+                job.progress(0.0, Some("Finishing the old unit's retirement"))
+                    .await?;
                 let mut conn = job.engine().db().acquire().await?;
                 let old = envs::runtime(&mut conn, runtime)
                     .await?
@@ -2160,6 +2330,11 @@ impl Moving {
                 }
             }
             None => {
+                job.progress(
+                    0.0,
+                    Some("Keeping the source directory and finishing its attachment"),
+                )
+                .await?;
                 self.command(
                     job,
                     self.recipe.source_machine,
@@ -2261,15 +2436,18 @@ impl Moving {
 #[async_trait]
 impl Phased for Moving {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
+        if phase != "cleanup" {
+            super::environment_move::authority::guard(job).await?;
+        }
         match phase {
-            "lock" => self.lock(job).await,
-            "provision" => self.provision(job).await,
-            "copy" => self.copy(job).await,
+            "lock" => Box::pin(self.lock(job)).await,
+            "provision" => Box::pin(self.provision(job)).await,
+            "copy" => Box::pin(self.copy(job)).await,
             "history" => {
                 let plan = job.plan().await?;
                 let machine: Id = serde_json::from_value(plan["candidate_machine"].clone())
                     .map_err(EngineError::from)?;
-                crate::recovery::prepare_histories(
+                Box::pin(crate::recovery::prepare_histories(
                     job,
                     self.recipe.environment,
                     machine,
@@ -2278,13 +2456,13 @@ impl Phased for Moving {
                         .ok_or_else(|| fail("files_missing", "The target root is missing"))?,
                     self.recipe.next_generation,
                     self.recipe.files.home.is_some(),
-                )
+                ))
                 .await
             }
-            "after_up" => super::after_up::run(job).await,
-            "verify" => self.verify(job).await,
-            "commit" => self.commit(job).await,
-            "cleanup" => self.cleanup(job).await,
+            "after_up" => Box::pin(super::after_up::run(job)).await,
+            "verify" => Box::pin(self.verify(job)).await,
+            "commit" => Box::pin(self.commit(job)).await,
+            "cleanup" => Box::pin(self.cleanup(job)).await,
             _ => Err(fail("internal", "The machine move has an unknown phase.")),
         }
     }

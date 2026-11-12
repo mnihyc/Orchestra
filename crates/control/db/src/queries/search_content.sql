@@ -15,7 +15,7 @@ WITH __NODE_VISIBILITY__, __HISTORY__, readable_chats AS NOT MATERIALIZED (
    WHERE $7::uuid IS NULL AND ($8::uuid IS NULL OR d.id=$8) AND d.deleted_at IS NULL
      AND ($6::uuid IS NULL OR n.path @> ARRAY[$6::uuid])
      AND ($31::uuid[] IS NULL OR d.id=ANY($31))
-     AND (($8 IS NOT NULL AND $6 IS NULL) OR t.side_of IS NULL)
+     AND NOT n.unlisted AND (($8 IS NOT NULL AND $6 IS NULL) OR t.side_of IS NULL)
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)
      AND (__CONTENT_CANDIDATES__ OR COALESCE(($5::jsonb->'objects'->d.id::text->>'view')::boolean,false))
      AND (NOT $23 OR COALESCE(($5::jsonb->'objects'->d.id::text->>'participating')::boolean,false))

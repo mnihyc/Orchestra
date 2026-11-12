@@ -7,15 +7,18 @@ test.beforeEach(async () => { await scenario(); });
 
 test('the org, department, project and topic each show their applicable headed lists', async ({ page }) => {
   await signIn(page, PEOPLE.ada);
+  // The settings frame owns the page title; the body no longer repeats it as h2.
   for (const path of ['/org/acme/settings/channels', '/org/acme.research/settings/channels']) {
     await page.goto(path);
-    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true, level: 2 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true })).toHaveCount(1);
     await expect(page.getByRole('heading', { name: 'To people', exact: true, level: 3 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'To a room or a system', exact: true, level: 3 })).toBeVisible();
   }
   for (const path of [`/project/${ACME.web}/settings?section=destinations`, `/topic/${ACME.fixLogin}?tab=settings&section=destinations`]) {
     await page.goto(path);
-    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true, level: 2 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true, level: 1 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Outside Orch', exact: true })).toHaveCount(1);
     await expect(page.getByRole('heading', { name: 'To a room or a system', exact: true, level: 3 })).toBeVisible();
     await expect(page.getByRole('heading', { name: 'To people', exact: true })).toHaveCount(0);
   }

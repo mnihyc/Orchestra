@@ -77,7 +77,7 @@ fn checkpoint(
         let row: Json = serde_json::from_slice(&line)
             .map_err(|_| refused("The native transcript has an incomplete or invalid entry."))?;
         if let Some(version) = row.get("version").and_then(Json::as_str)
-            && version != "2.1.296"
+            && !crate::config::input_prefix_supported(version)
         {
             return Err(AdapterError::Unsupported(
                 "The source transcript was written by a different Claude Code version.".into(),
@@ -163,10 +163,11 @@ impl ClaudeCodeAdapter {
         &mut self,
         source: &NativePrefixSource,
     ) -> Result<(), AdapterError> {
-        if self.started()?.version != "2.1.296" {
-            return Err(AdapterError::Unsupported(
-                "Exact input-prefix preparation requires Claude Code 2.1.296.".into(),
-            ));
+        if !crate::config::input_prefix_supported(&self.started()?.version) {
+            return Err(AdapterError::Unsupported(format!(
+                "Exact input-prefix preparation requires a checked Claude Code build: {}.",
+                crate::config::INPUT_PREFIX_VERSIONS.join(", ")
+            )));
         }
         if let Some(session) = self.sessions.get(&source.thread_id) {
             if session.native_ref != source.native_session_ref
@@ -299,7 +300,7 @@ impl ClaudeCodeAdapter {
                 "Auto approval is not offered by this Claude Code harness.".into(),
             ));
         }
-        crate::review::reviewer(&spec.settings)
+        crate::sessions::approval_reviewer(&self.started()?.setup, spec, &Self::turn_settings(spec))
     }
 
     pub(super) async fn install_session(
@@ -412,7 +413,7 @@ mod tests {
     }
     fn rows() -> Vec<Json> {
         vec![
-            json!({"type":"user","uuid":FIRST,"parentUuid":null,"version":"2.1.296","message":{"role":"user","content":"first"}}),
+            json!({"type":"user","uuid":FIRST,"parentUuid":null,"version":"2.1.319","message":{"role":"user","content":"first"}}),
             json!({"type":"assistant","uuid":RESPONSE,"parentUuid":FIRST,"message":{"role":"assistant","content":[]}}),
             json!({"type":"user","uuid":SECOND,"parentUuid":RESPONSE,"message":{"role":"user","content":"second"}}),
         ]
@@ -473,13 +474,25 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_from_an_unchecked_native_build_stays_unsupported()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut entries = rows();
+        entries[0]["version"] = json!("2.1.320");
+        assert!(matches!(
+            checkpoint(transcript(&entries)?.path(), source(), FIRST),
+            Err(AdapterError::Unsupported(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn queued_inputs_refuse_both_native_identities_without_rounding_to_a_user_turn()
     -> Result<(), Box<dyn std::error::Error>> {
         const QUEUED: &str = "66666666-6666-4666-8666-666666666666";
         const ATTACHMENT: &str = "77777777-7777-4777-8777-777777777777";
         let mut native = rows();
         native.push(json!({"type":"attachment","uuid":ATTACHMENT,"parentUuid":RESPONSE,
-            "sessionId":SESSION,"version":"2.1.296","renderedRole":"system",
+            "sessionId":SESSION,"version":"2.1.319","renderedRole":"system",
             "attachment":{"type":"queued_command","source_uuid":QUEUED,"prompt":[{"type":"text","text":"queued input"}]}}));
         let file = transcript(&native)?;
         for identity in [QUEUED, ATTACHMENT] {

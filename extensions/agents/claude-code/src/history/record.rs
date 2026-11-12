@@ -69,11 +69,15 @@ impl Record {
         settings: Option<MapperSettings>,
         clock: Arc<dyn Clock>,
         cancel: Arc<AtomicBool>,
+        image_outputs: Option<std::path::PathBuf>,
     ) -> Result<Self, HistoryError> {
         let mut rows = match settings {
             Some(settings) => Rows::new(path, settings, clock, true, Arc::clone(&cancel))?,
             None => Rows::for_record(path, clock, Arc::clone(&cancel))?,
         };
+        if let Some(directory) = image_outputs {
+            rows.set_image_outputs(directory);
+        }
         if let Some(version) = rows.version()?
             && crate::descriptor::support_of(&version)
                 == orch_agent_contract::descriptor::HarnessSupport::Unsupported

@@ -42,6 +42,7 @@ import { identityColor } from '@/lib/grapheme';
 
 /** How many of the people that match what is typed the list shows: past that, a few more letters narrow it. */
 const LIST_SHOWN = 8;
+const OWNER_COLUMN = 'owner';
 
 /** The words the screen says of one of the two limits: the switch, and what stays when it is off. */
 type Limit = 'closed' | 'flat';
@@ -175,7 +176,21 @@ export function Organizations({ search, onSearch }: SectionProps) {
     </span>
   );
 
-  const nameCell = (org: Org) => (
+  const ownerCell = (org: Org) => org.owners === 0 ? (
+    <span className="flex flex-col items-start gap-1">
+      <StatusTag tone="warning">{t('admin.orgs.noOwners')}</StatusTag>
+      <Button size="sm" icon={<UserRoundPlus aria-hidden />} onClick={() => setNaming(org)}>
+        {t('admin.orgs.owner.open')}
+      </Button>
+    </span>
+  ) : (
+    <span className="flex min-w-0 flex-col">
+      <UserChip user={org.owner} size={24} />
+      {org.owners > 1 && <span className="text-sm text-text-muted">{t('admin.orgs.andOthers', { count: org.owners - 1, number: formatNumber(org.owners - 1, locale) })}</span>}
+    </span>
+  );
+
+  const nameCell = (org: Org, shown: ReadonlySet<string>, owner = ownerCell(org)) => (
     <span className="flex min-w-0 items-center gap-2">
       <Avatar text={Array.from(org.name)[0]?.toUpperCase() ?? ''} color={identityColor(org.id)} kind={org.org_kind === 'personal' ? 'human' : 'org'} size={28} />
       <span className="flex min-w-0 flex-col">
@@ -185,6 +200,7 @@ export function Organizations({ search, onSearch }: SectionProps) {
           {org.archived && <StatusTag tone="warning">{t('admin.orgs.archived')}</StatusTag>}
         </span>
         <code className="text-sm text-text-subtle">{org.address}</code>
+        {!shown.has(OWNER_COLUMN) && owner}
       </span>
     </span>
   );
@@ -192,23 +208,10 @@ export function Organizations({ search, onSearch }: SectionProps) {
   const columns: Column<Org>[] = [
     { id: 'org', header: t('admin.orgs.org'), cell: nameCell },
     {
-      id: 'owner',
+      id: OWNER_COLUMN,
       header: t('admin.orgs.owners'),
       from: 'sm',
-      cell: (org) =>
-        org.owners === 0 ? (
-          <span className="flex flex-col items-start gap-1">
-            <StatusTag tone="warning">{t('admin.orgs.noOwners')}</StatusTag>
-            <Button size="sm" icon={<UserRoundPlus aria-hidden />} onClick={() => setNaming(org)}>
-              {t('admin.orgs.owner.open')}
-            </Button>
-          </span>
-        ) : (
-          <span className="flex min-w-0 flex-col">
-            <UserChip user={org.owner} size={24} />
-            {org.owners > 1 && <span className="text-sm text-text-muted">{t('admin.orgs.andOthers', { count: org.owners - 1, number: formatNumber(org.owners - 1, locale) })}</span>}
-          </span>
-        ),
+      cell: ownerCell,
     },
     { id: 'size', header: t('admin.orgs.size.title'), from: 'md', cell: size },
     {
@@ -236,8 +239,8 @@ export function Organizations({ search, onSearch }: SectionProps) {
   ];
 
   const deletedColumns: Column<Org>[] = [
-    { id: 'org', header: t('admin.orgs.org'), cell: nameCell },
-    { id: 'owner', header: t('admin.orgs.owners'), from: 'sm', cell: (org) => <UserChip user={org.owner} size={24} /> },
+    { id: 'org', header: t('admin.orgs.org'), cell: (org, shown) => nameCell(org, shown, <UserChip user={org.owner} size={24} />) },
+    { id: OWNER_COLUMN, header: t('admin.orgs.owners'), from: 'sm', cell: (org) => <UserChip user={org.owner} size={24} /> },
     { id: 'size', header: t('admin.orgs.size.title'), from: 'md', cell: size },
     { id: 'when', header: t('admin.orgs.lastChanged'), from: 'md', cell: (org) => <RelativeTime at={org.updated_at} className="text-text-muted" /> },
     {
@@ -278,7 +281,7 @@ export function Organizations({ search, onSearch }: SectionProps) {
         />
         </FilterBar>
         {list.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows read={list} rows={4} />
         ) : list.isError && orgs.length === 0 ? (
           <ErrorState error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         ) : orgs.length === 0 ? (

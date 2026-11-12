@@ -24,7 +24,8 @@ import { participatingTree } from '@/features/access/participation';
 import { type Attention, isUnread, NO_ATTENTION } from '@/features/navigation/attention';
 import type { DocsByNode } from '@/features/navigation/treeDocs';
 import type { TreeOrder } from '@/features/navigation/treeOrder';
-import type { Chat, ChatState, HiddenItem, TreeNode } from '@/generated/api-types';
+import type { Chat } from '@/api/chat-contract';
+import type { ChatState, HiddenItem, TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
 import type { WorkState } from '@/ui/StateChip';
 import { THREAD_URGENCY, isThreadUrgency, threadDisplayState } from '@/ui/ThreadState';
@@ -34,7 +35,7 @@ import type { TreeRow } from '@/ui/Tree';
 export type ChatMark = 'none' | 'quiet' | 'read' | 'unread';
 
 /** What the tree needs of a group chat. */
-export type GroupChat = Pick<Chat, 'id' | 'name' | 'last_message_seq' | 'my'>;
+export type GroupChat = Pick<Chat, 'id' | 'name' | 'last_message_seq' | 'my'> & Partial<Pick<Chat, 'home' | 'visibility' | 'can' | 'org_id' | 'members' | 'managers'>>;
 
 /**
  * What a row of the tree is of.
@@ -49,7 +50,7 @@ export type GroupChat = Pick<Chat, 'id' | 'name' | 'last_message_seq' | 'my'>;
  * and carries its mentions, and the glyph is only the way to the chat.
  */
 export type NavItem =
-  | { type: 'node'; node: TreeNode; urgent: WorkState | null; folder: boolean; waiting: number; unread: boolean; mentions: number; chat: ChatMark; chatMentions: number }
+  | { type: 'node'; node: TreeNode; urgent: WorkState | null; folder: boolean; waiting: number; unread: boolean; mentions: number; chat: ChatMark; chatMentions: number; parentName?: string | null }
   /** A document written beside a place. */
   | { type: 'doc'; doc: DocumentRef; nodeId: string }
   /** The line under a place's documents: that they are on their way, could not be read, or are more than were read. */
@@ -114,7 +115,7 @@ export interface TreeView {
   chatRows?: boolean;
   /** Whether the root org's chat has its row though nothing was said in it yet: it is the way to the team's chat. */
   teamChat?: boolean;
-  /** The org's group chats that the reader is in, where chats have rows: they stand under one row where the tree begins at the org itself. */
+  /** Native discovered groups: under their home, with root/legacy or unavailable-home rows in the org's group section. */
   groups?: readonly GroupChat[];
   /** What the reader typed to narrow the tree: only places and threads with it in their name are shown, each with the way to it. Empty or left out, the tree is whole. */
   filter?: string;
@@ -167,9 +168,80 @@ export interface LayoutMemory {
   shape: Shape | null;
   /** The documents of a place in the order they stand, by the list they were sorted from. */
   sorted: WeakMap<readonly DocumentRef[], { locale: string; docs: readonly DocumentRef[] }>;
+  /** Rows and attention summaries of unchanged branches from the last layout. */
+  layout: Layout | null;
 }
 
-export const newLayoutMemory = (): LayoutMemory => ({ items: new Map(), shape: null, sorted: new WeakMap() });
+interface Layout {
+  nodes: OrgTree['nodes'];
+  order: Shape['order'];
+  rootId: string;
+  expanded: ReadonlySet<string>;
+  locale: string;
+  view: TreeView;
+  rows: readonly TreeRow<NavItem>[];
+  branches: Map<string, { start: number; end: number }>;
+  changed: ReadonlySet<string>;
+  inside: Map<string, Inside>;
+}
+
+export const newLayoutMemory = (): LayoutMemory => ({ items: new Map(), shape: null, sorted: new WeakMap(), layout: null });
+
+/** A caller may assemble the same choices into another object without changing the layout. */
+function sameView(before: TreeView, after: TreeView): boolean {
+  return before === after || (Object.keys({ ...before, ...after }) as (keyof TreeView)[]).every((key) => before[key] === after[key]);
+}
+
+/**
+ * A changed node can change its own row and what the rows above it carry. Placement, ordering,
+ * reader choices and inherited attention changes start a fresh layout instead, since they can
+ * also affect descendants. Comparing immutable node references costs no work inside a branch.
+ */
+function layoutOf(tree: OrgTree, order: Shape['order'], rootId: string, expanded: ReadonlySet<string>, locale: string, view: TreeView, memory: LayoutMemory): Layout {
+  const held = memory.layout;
+  if (view.participating !== true && !(view.filter ?? '').trim() && held !== null
+    && held.order === order && held.rootId === rootId && held.expanded === expanded
+    && held.locale === locale && sameView(held.view, view)) {
+    const changed = new Set<string>();
+    if (held.nodes !== tree.nodes) {
+      for (const [id, node] of tree.nodes) {
+        if (held.nodes.get(id) === node) continue;
+        let at: string | null = id;
+        while (at !== null && !changed.has(at)) {
+          changed.add(at);
+          held.inside.delete(at);
+          at = tree.nodes.get(at)?.parent_id ?? null;
+        }
+      }
+    }
+    return { ...held, nodes: tree.nodes, view, changed };
+  }
+  return { nodes: tree.nodes, order, rootId, expanded, locale, view, rows: [], branches: new Map(), changed: new Set(), inside: new Map() };
+}
+
+/** Content changes leave the ranges intact; opening, hiding or rearranging rows can change them. */
+function sameBranches(before: readonly TreeRow<NavItem>[], after: readonly TreeRow<NavItem>[]): boolean {
+  return before.length === after.length && after.every((row, at) => {
+    const held = before[at];
+    return held === row || (held?.id === row.id && held.depth === row.depth
+      && held.parentId === row.parentId && held.item.type === row.item.type);
+  });
+}
+
+/** Each branch occupies one range of the flat rows, so even a deeply nested tree keeps only linear storage. */
+function branchRanges(rows: readonly TreeRow<NavItem>[]): Layout['branches'] {
+  const ranges: Layout['branches'] = new Map();
+  const parents: { id: string; depth: number; start: number }[] = [];
+  for (const [at, row] of rows.entries()) {
+    while (parents.length > 0 && (parents.at(-1)?.depth ?? -1) >= row.depth) {
+      const parent = parents.pop();
+      if (parent !== undefined) ranges.set(parent.id, { start: parent.start, end: at });
+    }
+    if (row.item.type === 'node') parents.push({ id: row.id, depth: row.depth, start: at });
+  }
+  for (const parent of parents) ranges.set(parent.id, { start: parent.start, end: rows.length });
+  return ranges;
+}
 
 /** Whether a node stands where it stood: under the same node, of the same kind and name, and as much in view. */
 const standsAsBefore = (one: TreeNode, other: TreeNode): boolean =>
@@ -254,6 +326,7 @@ function showsTheSame(held: NavItem, made: NavItem): boolean {
       return (
         held.type === 'node' &&
         held.node === made.node &&
+        held.parentName === made.parentName &&
         held.urgent === made.urgent &&
         held.folder === made.folder &&
         held.waiting === made.waiting &&
@@ -303,12 +376,16 @@ export interface Inside {
 }
 
 /** Works out, once for each node however many rows ask, what lies under it that needs a look: its own chat is not among it. */
-function insideOf(order: Shape['order'], nodes: ReadonlyMap<string, TreeNode>, attention: Attention, chats: ChatStanding): (node: TreeNode) => Inside {
-  const known = new Map<string, Inside>();
+function insideOf(order: Shape['order'], nodes: ReadonlyMap<string, TreeNode>, attention: Attention, chats: ChatStanding, groups: ReadonlyMap<string, readonly GroupChat[]> = new Map(), known = new Map<string, Inside>()): (node: TreeNode) => Inside {
   const inside = (node: TreeNode): Inside => {
     const held = known.get(node.id);
     if (held !== undefined) return held;
     const sum: Inside = { waiting: 0, unread: false, mentions: 0, urgency: URGENCY.length };
+    for (const group of groups.get(node.id) ?? []) {
+      const held = chatStanding({ id: group.id, seq: group.last_message_seq, my: group.my }, chats);
+      if (held.unread) sum.unread = true;
+      sum.mentions += held.mentions;
+    }
     for (const id of order.get(node.id) ?? NOTHING) {
       const child = nodes.get(id);
       if (child === undefined) continue;
@@ -384,6 +461,15 @@ function sortedDocs(docs: readonly DocumentRef[], locale: string, memory: Layout
   return sorted;
 }
 
+function chatsHidden(chat: GroupChat, view: TreeView): boolean {
+  return (view.chats?.states.get(chat.id) ?? chat.my)?.hidden === true || view.participating === true && chat.can?.participating !== true;
+}
+
+/** Keeps displayed sibling order even when the parent itself has no row. */
+export function visibleNodeSiblings(rows: readonly TreeRow<NavItem>[], parentId: string): string[] {
+  return rows.filter((row) => row.item.type === 'node' && row.item.node.parent_id === parentId).map((row) => row.id);
+}
+
 /**
  * Lays the tree out as the rows that are in view, in order. `rootId` is the place the tree begins at: the
  * root org, or the place its reader narrowed it to; the rows are what lies in it. `expanded` holds the ids
@@ -398,12 +484,37 @@ export function buildRows(
   view: TreeView = {},
   memory: LayoutMemory = newLayoutMemory(),
 ): TreeRow<NavItem>[] {
-  const tree = view.participating === true ? participatingTree(source) : source;
+  const visibleGroups = (view.chatRows === true ? view.groups ?? [] : []).filter((chat) => !chatsHidden(chat, view));
+  let tree = view.participating === true ? participatingTree(source) : source;
+  if (view.participating === true && visibleGroups.length > 0) {
+    const nodes = new Map(tree.nodes);
+    for (const group of visibleGroups) {
+      let id = group.home?.id;
+      const seen = new Set<string>();
+      while (id !== undefined && !nodes.has(id) && !seen.has(id)) {
+        seen.add(id);
+        const node = source.nodes.get(id);
+        if (node === undefined) break;
+        nodes.set(id, node); id = node.parent_id ?? undefined;
+      }
+    }
+    if (nodes.size !== tree.nodes.size) tree = { ...tree, nodes };
+  }
+  const rootOrg = [...source.nodes.values()].find((node) => node.kind === 'org' && node.parent_id === null)?.id;
+  const byHome = new Map<string, GroupChat[]>();
+  for (const group of visibleGroups) {
+    const home = group.home?.id ?? rootOrg;
+    if (home !== undefined) {
+      const held = byHome.get(home);
+      if (held === undefined) byHome.set(home, [group]); else held.push(group);
+    }
+  }
   const { order } = shapeOf(tree, locale, view.showArchived === true, memory, view.order);
+  const layout = layoutOf(tree, order, rootId, expanded, locale, view, memory);
   const nodeOf = (id: string): TreeNode | undefined => tree.nodes.get(id);
   const attention = view.attention ?? NO_ATTENTION;
   const chats = view.chats ?? NO_CHATS;
-  const inside = insideOf(order, tree.nodes, attention, chats);
+  const inside = insideOf(order, tree.nodes, attention, chats, byHome, layout.inside);
   const docs = view.docs ?? null;
   const chatRows = view.chatRows === true;
   const threads = view.threads !== false;
@@ -418,6 +529,19 @@ export function buildRows(
   const shown = (node: TreeNode): boolean => (threads || node.kind !== 'thread') && !hiddenAsDone(node, view, inside, chats);
   const typed = (view.filter ?? '').trim();
   const found = typed === '' ? null : foundBy(order, tree.nodes, rootId, typed, shown);
+  if (found !== null) for (const group of visibleGroups) {
+    if (!matchesQuery(typed, group.name ?? '')) continue;
+    let id = group.home?.id ?? rootOrg;
+    const seen = new Set<string>();
+    while (id !== undefined && id !== rootId && !seen.has(id)) {
+      seen.add(id);
+      const node = nodeOf(id);
+      if (node === undefined) break;
+      const before = found.get(id);
+      found.set(id, { match: before?.match ?? false, way: true });
+      id = node.parent_id ?? undefined;
+    }
+  }
 
   /**
    * `inProject`: the nodes among which these stand lie in a project, so that a project among them is a folder. `whole`: these
@@ -425,6 +549,14 @@ export function buildRows(
    */
   const walk = (parentRow: string | null, depth: number, among: readonly string[], inProject: boolean, whole: boolean) => {
     for (const id of among) {
+      const branch = layout.branches.get(id);
+      if (branch !== undefined && !layout.changed.has(id)) {
+        for (let at = branch.start; at < branch.end; at += 1) {
+          const row = layout.rows[at];
+          if (row !== undefined) rows.push(row);
+        }
+        continue;
+      }
       const node = nodeOf(id);
       if (node === undefined || !shown(node)) continue;
       const hit = found === null || whole ? undefined : found.get(id);
@@ -437,9 +569,10 @@ export function buildRows(
       const holdsChat = chatRows && chat.has;
       // Without threads a topic holds no row of its own kind of thing: it opens only for what stands beside it.
       const holdsRows = threads || node.kind !== 'topic' ? below.length > 0 : false;
-      const expandable = holdsRows || holdsDocs || holdsChat;
+      const expandable = holdsRows || holdsDocs || holdsChat || (chatRows && (byHome.get(id)?.length ?? 0) > 0);
       const isThread = node.kind === 'thread';
       const held = isThread ? null : inside(node);
+      const groupHeld = isThread ? inside(node) : null;
       // A row hides what is in it while it is closed; a topic whose threads are out of the tree hides them also while it is open.
       const hides = !open || (!threads && node.kind === 'topic');
       // Its own chat has a row of its own on screen while it is open and chats have rows: until then its glyph speaks for it.
@@ -448,7 +581,8 @@ export function buildRows(
       const folded = !open && !isThread;
       // A thread says what it does itself; a topic what the most urgent of its threads does, open or closed; any other
       // row only what it hides.
-      const urgent: WorkState | null = isThread ? (node.thread === null ? null : threadDisplayState(node.thread.display)) : held !== null ? (URGENCY[held.urgency] ?? null) : null;
+      const urgent: WorkState | null = isThread ? (node.thread === null ? null : threadDisplayState(node.thread.display) ?? null) : held !== null ? (URGENCY[held.urgency] ?? null) : null;
+      const parent = node.parent_id === null ? undefined : source.nodes.get(node.parent_id);
       rows.push({
         id,
         depth,
@@ -459,12 +593,13 @@ export function buildRows(
           {
             type: 'node',
             node,
+            parentName: parent === undefined || parent.deleted ? null : parent.name,
             urgent,
             folder: node.kind === 'project' && inProject,
             waiting: held === null ? (node.thread?.pending_approvals ?? 0) : hides ? held.waiting : 0,
             // A thread says of itself that it is unread; any other row says it of what it hides.
-            unread: held === null ? isUnread(node, tree.nodes, attention) : (hides && held.unread) || (folded && chat.unread),
-            mentions: (held !== null && hides ? held.mentions : 0) + (folded ? chat.mentions : 0),
+            unread: held === null ? isUnread(node, tree.nodes, attention) || (!open && groupHeld?.unread === true) : (hides && held.unread) || (folded && chat.unread),
+            mentions: (held !== null && hides ? held.mentions : 0) + (folded ? chat.mentions : 0) + (isThread && !open ? groupHeld?.mentions ?? 0 : 0),
             chat: !chat.has || chatOnScreen ? 'none' : !chat.followed ? 'quiet' : chat.unread && !folded ? 'unread' : 'read',
             chatMentions: chatOnScreen || folded ? 0 : chat.mentions,
           },
@@ -472,11 +607,20 @@ export function buildRows(
           id,
         ),
       });
-      if (!open) continue;
-      const within = found === null || whole || hit?.match === true;
-      walk(id, depth + 1, below, node.kind === 'project', within);
-      // What stands beside a place is part of what lies in it: on a mere way to something found it is left out.
-      if (within) besideOf(node, id, depth + 1);
+      if (open) {
+        const within = found === null || whole || hit?.match === true;
+        walk(id, depth + 1, below, node.kind === 'project', within);
+        // What stands beside a place is part of what lies in it: on a mere way to something found it is left out.
+        if (within) besideOf(node, id, depth + 1);
+        else groupsBeside(node.id, id, depth + 1, true);
+      }
+    }
+  };
+  const groupsBeside = (home: string, parentRow: string | null, depth: number, narrowed = false) => {
+    for (const group of byHome.get(home) ?? []) {
+      if (narrowed && !matchesQuery(typed, group.name ?? '')) continue;
+      const stood = chatStanding({ id: group.id, seq: group.last_message_seq, my: group.my }, chats);
+      leaf(groupRowId(group.id), depth, parentRow, { type: 'group', chat: group, unread: stood.unread, mentions: stood.mentions, quiet: !stood.followed });
     }
   };
   /** What stands beside a place after what it holds: the documents written beside it, with the line that says more are on their way or to be had, and its chat. */
@@ -488,6 +632,7 @@ export function buildRows(
       if (state !== null) leaf(docsRowId(node.id), depth, parentRow, { type: 'docs', nodeId: node.id, state });
     }
     if (!chatRows) return;
+    if (node.id !== rootOrg) groupsBeside(node.id, parentRow, depth);
     const chat = chatStanding(node.chat, chats);
     const team = view.teamChat === true && node.parent_id === null;
     // A chat nobody wrote in has no row, except the team's: a chat that is only the way to itself is not quiet either.
@@ -498,11 +643,15 @@ export function buildRows(
   // The place the tree begins at is no row of it: what stands beside it stands at the tree's own level, after everything else.
   // A tree that is narrowed by a name shows what was found and nothing beside it.
   if (root !== undefined && found === null) besideOf(root, null, 0);
+  else if (root !== undefined && root.id !== rootOrg && chatRows) groupsBeside(root.id, null, 0, true);
   // The org's group chats lie in the org and in no place inside it: one row holds them, where the tree begins at the org itself.
-  const groups = chatRows && found === null && root?.parent_id === null ? (view.groups ?? []).filter((chat) => chats.states.get(chat.id)?.hidden !== true) : [];
+  const groups = chatRows && root?.parent_id === null ? visibleGroups.filter((chat) => {
+    const home = chat.home?.id ?? rootOrg;
+    return (home === rootOrg || home === undefined || !nodeOf(home)) && (found === null || matchesQuery(typed, chat.name ?? ''));
+  }) : [];
   if (groups.length > 0) {
     const stood = groups.map((chat) => ({ chat, ...chatStanding({ id: chat.id, seq: chat.last_message_seq, my: chat.my }, chats) }));
-    const open = expanded.has(GROUPS_ROW);
+    const open = found !== null || expanded.has(GROUPS_ROW);
     rows.push({
       id: GROUPS_ROW,
       depth: 0,
@@ -522,6 +671,9 @@ export function buildRows(
     const inView = new Set(rows.map((row) => row.id));
     for (const id of memory.items.keys()) if (!inView.has(id)) memory.items.delete(id);
   }
+  if (!sameBranches(layout.rows, rows)) layout.branches = branchRanges(rows);
+  layout.rows = rows;
+  memory.layout = layout;
   return rows;
 }
 
@@ -531,9 +683,9 @@ export function firstExpanded(tree: OrgTree): string[] {
 }
 
 /**
- * The places that are open and say they hold documents, each with how many and the stamp of its row, as `id:count:seq`,
+ * The places that are open and say they hold documents, each with how many and its document namespace stamp, as `id:count:seq`,
  * sorted: what the tree asks the documents of. A document made, renamed, moved or deleted stamps its place, so a new
- * stamp reads them again even where the count stays. The place the tree begins at is always among them where it holds
+ * namespace stamp reads them again even where the count stays. The place the tree begins at is always among them where it holds
  * any: it is no row, and its documents stand at the tree's own level.
  */
 export function placesWithDocs(tree: OrgTree, rootId: string, expanded: ReadonlySet<string>, threads = true): string {
@@ -541,7 +693,7 @@ export function placesWithDocs(tree: OrgTree, rootId: string, expanded: Readonly
   for (const id of new Set([rootId, ...expanded])) {
     const node = tree.nodes.get(id);
     // A thread that is out of the tree shows no documents either.
-    if (node !== undefined && !node.deleted && node.docs > 0 && (threads || node.kind !== 'thread')) wanted.push(`${id}:${node.docs}:${node.tree_seq}`);
+    if (node !== undefined && !node.deleted && node.docs > 0 && (threads || node.kind !== 'thread')) wanted.push(`${id}:${node.docs}:${node.docs_seq}`);
   }
   return wanted.sort().join(',');
 }

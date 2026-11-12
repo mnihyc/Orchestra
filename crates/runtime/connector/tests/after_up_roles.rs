@@ -7,28 +7,33 @@
 
 #[cfg(unix)]
 mod common;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
 #[cfg(unix)]
 use common::Rig;
 #[cfg(unix)]
 use orch_connector_core::roles::provider::{ProviderParts, plug_in};
+#[cfg(target_os = "linux")]
+use orch_link_contract::commands::{EnvAttach, IndexMode, Secret};
 #[cfg(unix)]
 use orch_link_contract::{
-    commands::{AgentStart, EnvAttach, IndexMode, Secret, SerialKey, UnitAfterUp},
+    commands::{AgentStart, SerialKey, UnitAfterUp},
     session::Role,
 };
 #[cfg(unix)]
 use orch_settings_contract::unit::AfterUpCommand;
 #[cfg(unix)]
 use orch_types::new_id;
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use rig_environment::EnvRig;
+#[cfg(target_os = "linux")]
+use std::collections::BTreeMap;
 #[cfg(unix)]
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_managed_environment_uses_the_workspace_and_attached_variables_and_secrets_and_replays_after_connector_restart()
  {
@@ -140,6 +145,7 @@ async fn a_provider_role_runs_in_its_home_before_provider_start_and_does_not_cla
 }
 
 #[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_directory_keeps_commands_off_as_installed_and_can_enable_the_same_commands_locally() {
     let mut rig = EnvRig::new();

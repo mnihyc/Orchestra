@@ -198,7 +198,7 @@ pub async fn header_places(conn: &mut Conn, ids: &[Id]) -> Result<Vec<PlaceRow>,
 /// What lies directly in a node, oldest first, without the side threads that are asides of a thread.
 pub async fn children_of(conn: &mut Conn, parent: Id) -> Result<Vec<PlaceRow>, DbError> {
     Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{PLACE_SELECT} WHERE n.parent_id = $1 AND n.deleted_at IS NULL AND t.side_of IS NULL
+        "{PLACE_SELECT} WHERE n.parent_id = $1 AND n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL
           ORDER BY n.created_at, n.id"
     )))
     .bind(parent)
@@ -242,7 +242,7 @@ pub async fn below_page(
     limit: i64,
 ) -> Result<BelowPage, DbError> {
     let mut items: Vec<PlaceRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
-        "{PLACE_SELECT} WHERE $1 = ANY(n.path) AND n.id <> $1 AND n.deleted_at IS NULL AND t.side_of IS NULL
+        "{PLACE_SELECT} WHERE $1 = ANY(n.path) AND n.id <> $1 AND n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL
           AND ($3::timestamptz IS NULL OR (n.created_at, n.id) < ($3, $4::uuid))
           ORDER BY n.created_at DESC, n.id DESC LIMIT $2"
     )))
@@ -283,7 +283,7 @@ pub async fn root_orgs(conn: &mut Conn, ids: &[Id]) -> Result<Vec<PlaceRow>, DbE
 pub async fn live_threads_among(conn: &mut Conn, ids: &[Id]) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT t.node_id FROM threads t JOIN nodes n ON n.id = t.node_id
-          WHERE t.node_id = ANY($1) AND n.deleted_at IS NULL AND t.side_of IS NULL",
+          WHERE t.node_id = ANY($1) AND n.deleted_at IS NULL AND NOT n.unlisted AND t.side_of IS NULL",
     )
     .bind(ids)
     .fetch_all(conn)
@@ -405,12 +405,14 @@ pub struct PeopleChatRow {
     pub last_message_at: Option<DateTime<Utc>>,
     /// How many messages it holds.
     pub messages: i64,
+    /// Its actual current home, including the legacy root fallback.
+    pub home_id: Id,
 }
 
 /// The direct and group chats `ids`.
 pub async fn people_chats(conn: &mut Conn, ids: &[Id]) -> Result<Vec<PeopleChatRow>, DbError> {
     Ok(sqlx::query_as(
-        "SELECT c.id AS chat_id, c.org_id, c.kind, c.name, c.created_at, c.last_message_at,
+        "SELECT c.id AS chat_id, c.org_id, COALESCE(c.home_id,c.org_id) AS home_id, c.kind, c.name, c.created_at, c.last_message_at,
                 (SELECT count(*) FROM chat_messages m WHERE m.chat_id = c.id) AS messages
            FROM chats c WHERE c.id = ANY($1) AND c.kind <> 'node' ORDER BY c.created_at, c.id",
     )

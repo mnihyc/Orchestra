@@ -1,12 +1,4 @@
-/** Putting a thread's directory back as it was before one of its turns: a plan read before anything is written, one job, and the state it keeps to undo it.
- *
- * A turn whose files were recorded completely offers it from its footer. The plan names the directory and
- * its coverage, what each path would undergo, the paths changed since with who changed them, the threads
- * that write there now, and what stops it. A plan that went stale is refused by the server before anything
- * is written, and a fresh one is asked for; the choices made are kept. The job, once accepted, is followed
- * and never asked for twice; when it is done, "Undo this restore…" plans the way back from the state it
- * kept. Opening the action reads its coverage; an incomplete copy explains why and opens per-file Undo in Changes.
- */
+/** One planned whole-directory or file-tool restore, opened beside the person’s request, with its existing job and undo. */
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Undo2 } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -16,6 +8,7 @@ import { choiceOption } from '@/i18n/choices';
 import { isOver, jobQuery } from '@/api/forks';
 import { planRestore, restoreFiles, snapshotQuery } from '@/api/source';
 import { workspaceDenial } from '@/features/files/door';
+import { Checkbox } from '@/ui/Checkbox';
 import { revealView } from '@/features/workbench/openView';
 import type { ActiveTurn, ChangeOptions, Job, RestorePlan, Thread, Turn } from '@/generated/api-types';
 import { newActKey } from '@/lib/requests';
@@ -35,7 +28,7 @@ import { RelativeTime } from '@/ui/RelativeTime';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Tooltip } from '@/ui/Tooltip';
 
-import { confirmable, planWentStale, restorable, restoreBlocker, restoreResult, unrecordedReason } from './words';
+import { confirmable, planWentStale, restoreBlocker, restoreResult, wholeUnavailableReason } from './words';
 
 /** The longest a restore waits for a turn that writes there, in minutes: a day, as the change wizard bounds it. */
 const WAIT_MOST_MINUTES = 1_440;
@@ -43,17 +36,24 @@ const READ_PERMISSION = 'files.view';
 const WRITE_PERMISSION = 'files.manage';
 
 /** A finished turn's recorded-copy action reads metadata only after the reader opens it. */
-export function RestoreFromTurn({ threadId, turn, compact = false }: { threadId: string; turn: Turn; compact?: boolean }) {
+export function RestoreFromTurn({ threadId, turn, compact = false, hasChanges = false, label, fallback = false, readOnly = false }: { threadId: string; turn: Turn; compact?: boolean; hasChanges?: boolean; label?: string; fallback?: boolean; readOnly?: boolean }) {
   const { t } = useTranslation();
   const thread = useThreadRow(threadId);
   const [open, setOpen] = useState(false);
   const reads = thread?.environment_permissions.includes('files.view') === true;
   const writes = thread?.environment_permissions.includes('files.manage') === true;
   const snapshotId = turn.before_snapshot_id;
-  if (!thread?.environment || !reads || !writes || turn.completed_at === null || snapshotId === null) return null;
+  const reason = readOnly ? t('messageVersions.activeActions') : !thread?.environment ? t('source.restore.noEnvironment')
+    : !reads ? workspaceDenial(t, READ_PERMISSION, thread.environment) : !writes ? workspaceDenial(t, WRITE_PERMISSION, thread.environment)
+    : turn.completed_at === null ? t('thread.turnActions.turnRunning') : snapshotId === null && !hasChanges ? t('thread.turnActions.noCheckpoint') : null;
+  if (reason !== null || thread === null) {
+    if (!fallback) return null;
+    return <IconButton action="restore" size="sm" label={t('source.restore.review')} reason={reason ?? t('thread.turnActions.noCheckpoint')} blocked={!reads || readOnly}
+      onClick={() => revealView('changes', { thread: threadId, scope: 'turn', turn: turn.id })} />;
+  }
   return (
     <>
-      {compact ? <IconButton action="restore" size="sm" label={t('source.restore.open')} title={t('source.restore.titleTurn')} data-restore-turn={turn.id} onClick={() => setOpen(true)} /> : <Tooltip content={t('source.restore.titleTurn')}>
+      {compact ? <IconButton action="restore" size="sm" label={label ?? t('source.restore.open')} title={t('source.restore.titleTurn')} data-restore-turn={turn.id} onClick={() => setOpen(true)} /> : <Tooltip content={t('source.restore.titleTurn')}>
         <Button action="restore" size="sm" variant="ghost" data-restore-turn={turn.id} onClick={() => setOpen(true)}>
           {t('source.restore.open')}
         </Button>
@@ -64,7 +64,7 @@ export function RestoreFromTurn({ threadId, turn, compact = false }: { threadId:
 }
 
 /** One restore from the first plan to the end of its job, and on to its undo. */
-export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: Thread; snapshotId: string; onClose: () => void }) {
+export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: Thread; snapshotId: string | null; onClose: () => void }) {
   const { t } = useTranslation();
   const live = useThreadRow(thread.id) ?? thread;
   const environment = thread.environment;
@@ -74,14 +74,16 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
   const environmentId = environment?.id ?? '';
   const [target, setTarget] = useState({ snapshot: first, undoing: false });
   const [options, setOptions] = useState<ChangeOptions>({});
+  const [overwrite, setOverwrite] = useState<string[]>([]);
   const [attempt, setAttempt] = useState(0);
   const [jobId, setJobId] = useState<string | null>(null);
   const key = useRef<{ plan: string; key: string } | null>(null);
-  const recorded = useQuery({ ...snapshotQuery(target.snapshot), enabled: reads });
+  const recorded = useQuery({ ...snapshotQuery(target.snapshot ?? ''), enabled: reads && target.snapshot !== null });
   const plan = useQuery({
-    queryKey: ['restore-plan', environmentId, target.snapshot, options, attempt],
-    queryFn: () => planRestore(environmentId, target.snapshot, options),
-    enabled: reads && writes && jobId === null && recorded.data !== undefined && restorable(recorded.data),
+    queryKey: ['restore-plan', environmentId, target.snapshot, options, overwrite, attempt],
+    queryFn: () => planRestore(environmentId, target.snapshot ?? '', options, overwrite),
+    enabled: reads && writes && jobId === null && target.snapshot !== null && recorded.data !== undefined,
+    placeholderData: (previous) => previous,
     retry: false,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: 0,
@@ -108,6 +110,7 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
     apply.reset();
     setJobId(null);
     setOptions({});
+    setOverwrite([]);
     setTarget({ snapshot: undoId, undoing: true });
   };
   const shown = plan.data;
@@ -126,7 +129,7 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
         </Button>
       )}
       {!following && writes && shown !== undefined && !stale && (
-        <Button action="restore" variant="primary" pending={apply.isPending} disabled={!confirmable(shown) || plan.isFetching} onClick={() => apply.mutate(shown)}>
+        <Button action="restore" variant="primary" pending={apply.isPending} disabled={!confirmable(shown, overwrite) || plan.isFetching || plan.isError} onClick={() => apply.mutate(shown)}>
           {target.undoing ? t('source.restore.confirmUndo') : t('source.restore.confirm')}
         </Button>
       )}
@@ -154,17 +157,16 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
               {t('source.restore.where', { environment: environment.name })} <code className="wrap-anywhere">{thread.directory === '' ? '/' : thread.directory}</code>
             </p>
             {recorded.error !== null && <ErrorState compact error={recorded.error} onRetry={() => void recorded.refetch()} />}
-            {recorded.data === undefined ? (
-              recorded.error === null && <SkeletonRows rows={2} />
+            {target.snapshot === null ? <InlineAlert tone="warning">
+              {t('source.restore.why.notRecorded')}
+              <Button action="changes" size="sm" variant="ghost" onClick={() => { onClose(); revealView('changes'); }}>{t('source.restore.review')}</Button>
+            </InlineAlert> : recorded.data === undefined ? (
+              recorded.error === null && <SkeletonRows read={recorded} rows={2} />
             ) : (
               <p className="flex flex-wrap gap-x-3 gap-y-1 text-sm text-text-muted">
                 <span>{t('source.restore.coverage', { count: recorded.data.file_count })}</span><RelativeTime at={recorded.data.created_at} />
               </p>
             )}
-            {recorded.data !== undefined && !restorable(recorded.data) && <InlineAlert tone="warning">
-              {unrecordedReason(t, recorded.data)}
-              <Button action="changes" size="sm" variant="ghost" onClick={() => { onClose(); revealView('changes'); }}>{t('source.restore.review')}</Button>
-            </InlineAlert>}
             {!writes && <InlineAlert tone="warning">{workspaceDenial(t, WRITE_PERMISSION, environment)}</InlineAlert>}
             {!following && writes && (
               <>
@@ -201,7 +203,10 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
                   </p>
                 )}
                 {plan.error !== null && !plan.isFetching && <ErrorAlert error={plan.error} action={<Button action="retry" size="sm" onClick={freshPlan}>{t('common.tryAgain')}</Button>} />}
-                {shown !== undefined && !plan.isFetching && <PlanBody plan={shown} />}
+                {shown !== undefined && !plan.isFetching && <PlanBody plan={shown} overwrite={overwrite} chooseOverwrite={(path, checked) => {
+                  apply.reset();
+                  setOverwrite((before) => checked ? [...before.filter((name) => name !== path), path] : before.filter((name) => name !== path));
+                }} />}
               </>
             )}
             {following && <JobBody job={job.data} error={job.error} />}
@@ -214,11 +219,19 @@ export function RestoreDialog({ thread, snapshotId: first, onClose }: { thread: 
 }
 
 /** What a plan would do, as the person reads it before confirming. */
-function PlanBody({ plan }: { plan: RestorePlan }) {
+function PlanBody({ plan, overwrite, chooseOverwrite }: {
+  plan: RestorePlan; overwrite: string[]; chooseOverwrite: (path: string, checked: boolean) => void;
+}) {
   const { t } = useTranslation();
   const later = plan.paths.filter((path) => path.later_change === true).length;
   return (
     <div className="flex flex-col gap-2">
+      <p className="text-sm font-medium" data-restore-form>
+        {plan.form.kind === 'touched_files' ? <>{t('source.restore.touched', { count: plan.form.count })}
+          {plan.form.whole_unavailable !== 'touched_restore' && <> — {t('source.restore.fallback', { reason: wholeUnavailableReason(t, plan.form.whole_unavailable) })}</>}
+        </> : t('source.restore.whole')}
+      </p>
+      {plan.form.kind === 'touched_files' && <InlineAlert tone="warning">{t('source.restore.toolCoverage')}</InlineAlert>}
       {plan.writers.map((writer, index) => (
         <InlineAlert key={writer.thread?.id ?? `hidden-${index}`} tone={writer.active ? 'warning' : 'info'}>
           {writer.thread === null ? t('source.restore.hiddenWriter') : t(writer.active ? 'source.restore.activeWriter' : 'source.restore.sharedWriter', { name: writer.thread.name })}
@@ -245,6 +258,11 @@ function PlanBody({ plan }: { plan: RestorePlan }) {
                   <Badge tone={path.action === 'remove' ? 'warning' : 'neutral'}>{t(`source.restore.action.${path.action}`)}</Badge>
                   <code className="min-w-0 wrap-anywhere">{path.path}</code>
                 </span>
+                {plan.form.kind === 'touched_files' && path.later_change !== false && <Checkbox
+                  label={t('source.restore.overwrite', { path: path.path })}
+                  checked={overwrite.includes(path.path)}
+                  onCheckedChange={(checked) => chooseOverwrite(path.path, checked)}
+                />}
                 {path.later_change !== false && (
                   <span className="text-xs text-text-muted">
                     {path.later_change === null ? t('source.restore.laterUnknown') : path.later_writers.length === 0 ? t('source.restore.laterChanged') : t('source.restore.laterBy', { names: path.later_writers.map((writer) => writer.name).join(', ') })}

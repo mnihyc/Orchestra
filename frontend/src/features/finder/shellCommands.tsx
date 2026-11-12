@@ -95,6 +95,7 @@ import { useWorkbench } from '@/features/workbench/store';
 import type { AdminMode, Density, Me, MeUpdateBody, Theme } from '@/generated/api-types';
 import { LOCALES, type TranslationKey } from '@/i18n';
 import { adoptAppearance, useAppearance } from '@/lib/appearance';
+import { useOrgTreeFeed } from '@/realtime/live';
 import { useNodePath, useTreeNode } from '@/realtime/stores/tree';
 import { leave } from '@/routes/-access';
 import { type KeyActionId, keysAct } from '@/shell/keyActions';
@@ -400,12 +401,23 @@ export function PlaceCommands({ place, settingsPlace }: { place: PlaceRef; setti
   return null;
 }
 
+/**
+ * Follows the tree that holds the place in view for as long as the finder is open. The place's own acts
+ * and settings are read from that tree; a screen without the left bar (a phone) has not followed it.
+ */
+export function useFinderTreeFeed(rootOrg: string | null): void {
+  const finderOpen = useFinder((state) => state.open);
+  useOrgTreeFeed(finderOpen ? rootOrg : null);
+}
+
 /** Stands once in the shell: registers the commands that hold everywhere and those of the place in view. */
 export function ShellCommands() {
   useGlobalCommands();
   const heading = useCurrentHeading();
   const nodeId = heading?.nodeId;
   const { path } = useNodePath(nodeId);
+  const root = (heading?.path ?? path)[0];
+  useFinderTreeFeed(nodeId !== undefined && root?.kind === 'org' ? root.id : null);
   const scope = (heading?.path ?? path).findLast((part) => part.kind === 'project' || part.kind === 'topic');
   const settingsPlace: SettingsPlace | null = scope?.name === null || scope === undefined || (scope.kind !== 'project' && scope.kind !== 'topic') ? null : { id: scope.id, name: scope.name, kind: scope.kind };
   const row = useTreeNode(nodeId);

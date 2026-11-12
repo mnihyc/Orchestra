@@ -73,6 +73,8 @@ pub struct Build {
     pub program: PathBuf,
     /// The version the environment lists for the tool.
     pub listed_version: String,
+    /// Whether this is the machine's confirmed program instead of a held cache build.
+    pub local: bool,
 }
 
 /// Why there is no build to run.
@@ -91,6 +93,24 @@ pub enum Missing {
 
 /// The build of the tool `codex` that the environment holds, and its program.
 pub fn locate(env: &EnvironmentContext) -> Result<Build, Missing> {
+    if env.tools_dir.is_none()
+        && let Some(path) = env.local_programs.get(TOOL)
+    {
+        let program = PathBuf::from(path);
+        if !program.is_absolute() || !program.is_file() {
+            return Err(Missing::NoProgram(path.clone()));
+        }
+        let directory = program
+            .parent()
+            .ok_or_else(|| Missing::NoProgram(path.clone()))?
+            .to_owned();
+        return Ok(Build {
+            directory,
+            program,
+            listed_version: "unknown".into(),
+            local: true,
+        });
+    }
     let listed = env.tool(TOOL).ok_or(Missing::NotListed)?;
     if env.tools_dir.is_none() {
         return Err(Missing::NoToolsDirectory);
@@ -102,6 +122,7 @@ pub fn locate(env: &EnvironmentContext) -> Result<Build, Missing> {
         directory,
         program,
         listed_version: listed.version.clone(),
+        local: false,
     })
 }
 

@@ -1,5 +1,5 @@
 /** An Inbox target reads one exact request, irrespective of the list's first page, and uses its returned decision. */
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { ReactNode } from 'react';
 import type * as Router from '@tanstack/react-router';
@@ -15,7 +15,7 @@ import { useAppearance } from '@/lib/appearance';
 import { me, userRef } from '../doubles/fixtures';
 import { ALLOW_DENY, harnessApproval } from '../doubles/thread-rows';
 import { show } from './support';
-const calls = vi.hoisted(() => ({ read: vi.fn<(_id: string) => Promise<Approval>>(), list: vi.fn(), decide: vi.fn<typeof Approvals.decideApproval>() }));
+const calls = vi.hoisted(() => ({ live: true, read: vi.fn<(_id: string) => Promise<Approval>>(), list: vi.fn(), decide: vi.fn<typeof Approvals.decideApproval>() }));
 const ada = userRef(me(1, 'ada', 'Ada'));
 const request = harnessApproval('beyond-first-page', { threadId: 'thread', itemId: 'item', title: 'Check the redirect', requester: ada,
   request: { request_kind: 'command', detail: { command: 'check redirect', cwd: '/workspace', reason: null }, options: ALLOW_DENY } });
@@ -25,7 +25,7 @@ vi.mock('@/api/approvals', async (original) => ({ ...await original<typeof Appro
   decideApproval: (...args: Parameters<typeof Approvals.decideApproval>) => calls.decide(...args),
 }));
 vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(), meQuery: { queryKey: ['exact-me'], queryFn: () => Promise.resolve(me(1, 'ada', 'Ada')) } }));
-vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useUserFeed: () => undefined, useSocketStatus: () => ({ phase: 'ready' }) }));
+vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useUserFeed: () => undefined, useSocketStatus: () => ({ phase: calls.live ? 'ready' : 'reconnecting' }) }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(), Link: ({ children }: { children: ReactNode }) => <a href="#thread">{children}</a> }));
 vi.mock('@/ui/UserChip', () => ({ UserChip: ({ user }: { user: { display_name: string } }) => <span>{user.display_name}</span> }));
@@ -33,7 +33,7 @@ const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
 const before = useAppearance.getState();
 const themeBefore = document.documentElement.dataset.theme;
 const darkBefore = document.documentElement.classList.contains('dark');
-beforeEach(() => { vi.clearAllMocks(); calls.read.mockResolvedValue(request); calls.decide.mockResolvedValue({ ...request, state: 'approved', decision: { option_id: 'allow_once' }, decided_at: '2026-10-16T00:00:00Z', decided_by: ada }); });
+beforeEach(() => { vi.clearAllMocks(); calls.live = true; calls.read.mockResolvedValue(request); calls.decide.mockResolvedValue({ ...request, state: 'approved', decision: { option_id: 'allow_once' }, decided_at: '2026-10-16T00:00:00Z', decided_by: ada }); });
 afterEach(async () => {
   cleanup(); useAppearance.setState(before); document.documentElement.classList.toggle('dark', darkBefore);
   if (themeBefore === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = themeBefore;
@@ -61,4 +61,15 @@ it.each(modes)('opens the requested card alone and applies one decision without 
   expect(outcome).not.toContainElement(within(settled).getByText('Ada'));
   expect(calls.read).toHaveBeenCalledTimes(1);
   expect(calls.list).not.toHaveBeenCalled();
+});
+
+for (const locale of ['en', 'zh-CN'] as const) it.each(['authority', 'connection'] as const)('explains the unavailable approval '+locale+' %s', async (cause) => {
+  await setLocale(locale);
+  calls.live = cause !== 'connection'; calls.read.mockResolvedValue({ ...request, can_decide: cause !== 'authority' });
+  show(<ApprovalDetail id={request.id} />);
+  const control = await screen.findByRole('button', { name: `${i18n.t('approvals.allowOnce')} · check redirect` }), target = control.parentElement;
+  if (target === null) throw new Error('The disabled approval must have a focusable reason');
+  expect(control).toBeDisabled(); act(() => target.focus());
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t(cause === 'authority' ? 'approvals.cannotAnswer' : 'approvals.waitForLine'));
+  expect(calls.decide).not.toHaveBeenCalled();
 });

@@ -21,8 +21,8 @@ const DESTINATIONS_MAX = 10;
 
 /** The rows of the page that carry each area at each level. */
 const ROWS = {
-  timeline: { read: ['thread.view'], write: ['thread.view', 'thread.interact'] },
-  chat: { read: ['chat.view'], write: ['chat.view', 'chat.interact'] },
+  timeline: { read: ['thread.view'], write: ['thread.view', 'thread.interact'], manage: ['thread.view', 'thread.interact', 'thread.manage'] },
+  chat: { read: ['chat.view'], write: ['chat.view', 'chat.interact'], manage: ['chat.view', 'chat.interact', 'chat.manage'] },
   documents: { read: ['doc.view'], edit: ['doc.view', 'doc.edit'], manage: ['doc.view', 'doc.edit', 'doc.manage'] },
 } as const;
 
@@ -38,6 +38,8 @@ function needed(parts: ShareParts): string[] {
   if (chat !== undefined && chat !== null) for (const name of ROWS.chat[chat]) found.add(name);
   const documents = parts.documents;
   if (documents !== undefined && documents !== null) for (const name of ROWS.documents[documents]) found.add(name);
+  if (parts.thread_fork === true) found.add('thread.fork');
+  if (parts.thread_archive === true) found.add('thread.archive');
   return [...found];
 }
 
@@ -150,8 +152,9 @@ export class Shares {
       const page = this.access.pageFor(thing, target.defaults);
       for (const area of target.areas) {
         const level = parts[area];
-        if (level === undefined || level === null) continue;
-        const names: readonly string[] = (ROWS[area] as Record<string, readonly string[]>)[level] ?? [];
+        const names = level === undefined || level === null ? [] : [...((ROWS[area] as Record<string, readonly string[]>)[level] ?? [])];
+        if (area === 'timeline' && parts.thread_fork === true) names.push('thread.fork');
+        if (area === 'timeline' && parts.thread_archive === true) names.push('thread.archive');
         for (const permission of names) {
           for (const key of this.rowKeys(page, permission)) {
             const row = page.rows.get(key);
@@ -301,8 +304,8 @@ export class Shares {
     const kind = whatKind === 'node' ? this.nodeRef(thing).kind : whatKind;
     const placeAlone = body.inside === false && ['org', 'project', 'topic'].includes(kind);
     const parts: ShareParts = is(body.parts) ? body.parts : whatKind === 'node' ? { timeline: 'read' } : {};
-    if (placeAlone && parts.timeline !== undefined && parts.timeline !== null) throw new Refusal(400, 'request.invalid', 'a place has no conversation of its own', { errors: [{ path: 'parts.timeline', message: 'a place shared by itself has no conversation' }] });
-    if (mode === 'snapshot' && Object.values(parts).includes('write')) throw new Refusal(400, 'request.invalid', 'a copy holds no write', { errors: [{ path: 'parts', message: 'a copy holds no write' }] });
+    if (placeAlone && (parts.timeline !== undefined && parts.timeline !== null || parts.thread_fork === true || parts.thread_archive === true)) throw new Refusal(400, 'request.invalid', 'a place has no conversation of its own', { errors: [{ path: 'parts.timeline', message: 'a place shared by itself has no conversation' }] });
+    if (mode === 'snapshot' && Object.values(parts).some((level) => level === 'write' || level === 'edit' || level === 'manage' || level === true)) throw new Refusal(400, 'request.invalid', 'a copy holds no write', { errors: [{ path: 'parts', message: 'a copy holds no write' }] });
 
     if (whatKind === 'node') this.access.holdingOn(person, thing);
     const destinations = to.map((entry) => [entry.thread_id, entry.node_id].find((value): value is string => typeof value === 'string') ?? '');

@@ -5,32 +5,47 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 
+#[cfg(target_os = "linux")]
 use futures::{SinkExt, StreamExt};
+#[cfg(target_os = "linux")]
 use orch_connector_core::tool_tunnels::ExecScope;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
     ExecStart, McpStart, McpStartGiven, SandboxMode, Secret, SessionOpen,
 };
+#[cfg(target_os = "linux")]
 use orch_link_contract::events::EnvironmentFacts;
+#[cfg(target_os = "linux")]
 use orch_link_contract::session::Role;
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{Service, TicketSource};
+#[cfg(target_os = "linux")]
 use orch_types::{Id, Json, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::tunnels::{Harness, messages};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, PATIENCE, stand_in, stand_in_executors};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use tokio_tungstenite::tungstenite::Message;
 
 /// The program of the tests when it is run as a tool server: no test at all otherwise.
 #[test]
+#[cfg(target_os = "linux")]
 fn stand_in_for_a_tool_server() {
     if std::env::var(stand_in::FLAG).is_ok() {
         stand_in::run();
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn start_executor(rig: &EnvRig, executor: &str) {
     rig.succeed(&ExecStart {
         environment_id: rig.environment,
@@ -39,12 +54,14 @@ async fn start_executor(rig: &EnvRig, executor: &str) {
     .await;
 }
 
+#[cfg(target_os = "linux")]
 async fn tool_message<T>(pending: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(PATIENCE, pending)
         .await
         .expect("the harness tools exchange never finished")
 }
 
+#[cfg(target_os = "linux")]
 fn exec_spec(
     rig: &EnvRig,
     source: Id,
@@ -68,6 +85,7 @@ fn exec_spec(
     })
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_and_a_tunnel() {
     let mut rig = EnvRig::new();
@@ -136,6 +154,8 @@ async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_
 
     // A turn that runs in a stricter sandbox is held to it in the tools: the mode follows the turn.
     let turn = orch_link_contract::commands::TurnStart {
+        native_model: None,
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),
@@ -181,6 +201,7 @@ async fn a_harness_reaches_the_executor_of_another_machine_through_its_listener_
     agent.connector.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_harness_opens_a_websocket_to_its_executor_and_its_messages_go_both_ways() {
     let mut rig = EnvRig::new();
@@ -230,6 +251,7 @@ async fn a_harness_opens_a_websocket_to_its_executor_and_its_messages_go_both_wa
     agent.connector.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     let mut rig = EnvRig::new();
@@ -245,6 +267,7 @@ async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     rig.send_as(
         command,
         &McpStart::Given(Box::new(McpStartGiven {
+            preset: false,
             server_id: None,
             environment_id: rig.environment,
             name: "files".to_owned(),
@@ -293,6 +316,7 @@ async fn a_harness_reaches_a_tool_server_of_another_machine_by_its_name() {
     agent.connector.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_without_a_tunnel() {
     let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
@@ -376,6 +400,7 @@ async fn a_harness_whose_environment_is_on_its_own_machine_reaches_its_tools_wit
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
     let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
@@ -394,6 +419,7 @@ async fn a_local_harness_cannot_call_a_running_server_it_was_not_given() {
             .send_as(
                 command,
                 &McpStart::Given(Box::new(McpStartGiven {
+                    preset: false,
                     server_id: None,
                     environment_id: rig.environment,
                     name: name.to_owned(),

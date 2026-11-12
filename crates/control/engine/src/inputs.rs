@@ -21,27 +21,139 @@
 //! what a pending announcement or share notice adds to the text of a turn is left
 //! out until those parts exist (see `instructions`).
 
-use crate::access::{Limit, ProviderUse};
+use crate::access::ProviderUse;
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::preflight::Outcome as PreflightOutcome;
 use crate::unit::Unit;
 use crate::views::{self, People};
 use orch_access_contract::audit::AuditAction;
-use orch_access_contract::decisions::{Decision, ObjectRef, Refusal, Scopes};
+use orch_access_contract::decisions::{Decision, ObjectRef, Refusal};
 use orch_access_contract::permissions::{ObjectKind, Permission};
 use orch_api_contract::threads::{
     ContentPart, Delivery, INPUT_TEXT_MAX_CHARS, LimitBypassRequest, ThreadInput,
     ThreadInputUpdateBody, ThreadInputUpdateReply,
 };
-use orch_authz::{Act, Caller, Principal, TokenGrant, nodes};
+use orch_authz::{Act, Caller, Principal, nodes};
+use orch_chat::following::BlobOrigin;
 use orch_db::audit::{self, Actor, Origin};
 use orch_db::queries::threads::{
     self, InputChange, InputRow, NewInput, Place, ThreadRow, TurnRow, input_state, thread_state,
 };
-use orch_types::{Id, Json, Seq, Time, new_id};
+use orch_types::{Clock, Hash, Id, Json, Seq, Time, new_id};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+mod agent_schedule;
+mod authority;
+mod authority_work;
+/// Current authority for one actual retained input command before first native publication.
+pub mod native_delivery;
+mod scheduled_source;
+pub(crate) use scheduled_source::scheduled_source_current_callers;
+pub use scheduled_source::{
+    retain_scheduled_source_origin, scheduled_source_authorized, scheduled_source_before_acceptance,
+};
+/// Shared current input effect binding, reused by HTTP and continuing work.
+pub mod operation;
+pub(crate) use authority::{InputAuthority, InputCallers};
+
+/// The actual schedule producer branch, retained as intent rather than inferred from a later edit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledInputDestination {
+    /// The definition selected this existing thread.
+    ExistingThread,
+    /// The ordinary schedule producer created this occurrence's new thread.
+    NewThread,
+}
+
+/// Stable existing row references for one real accepted occurrence. No ancestry or admission is stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledInputOrigin {
+    /// Actual retained definition row.
+    pub schedule_id: Id,
+    /// Actual occurrence inserted before acceptance.
+    pub run_id: Id,
+    /// The producer branch used at acceptance, unaffected by later definition edits.
+    pub destination: ScheduledInputDestination,
+}
+
+/// Actual accepted chat/message/recipient identities for one agent ask. No text, names, ancestry,
+/// or client-chosen strings establish this relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatInputOrigin {
+    /// The posted message's actual chat.
+    pub chat_id: Id,
+    /// The posted message whose ordinary agent ask produced the input.
+    pub message_id: Id,
+    /// The actual recipient of this individual input.
+    pub thread_id: Id,
+    /// The input allocated by that producer; derived work retains this original association.
+    pub input_id: Id,
+}
+
+/// Server-verified identities selected by the ordinary forward preparation. Copied text and names
+/// are not authority, and grouped/nested copies need not have one output part per selected ID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ForwardInputSource {
+    /// Messages verified in this actual chat.
+    Chat {
+        /// The verified source chat.
+        chat_id: Id,
+        /// The exact selected message identities, not IDs reconstructed from nested copies.
+        message_ids: Vec<Id>,
+    },
+    /// Items verified in this actual thread.
+    Thread {
+        /// The thread whose ordinary readable projection supplied the items.
+        thread_id: Id,
+        /// Exact selected item identities; a copied turn may combine several items.
+        item_ids: Vec<Id>,
+    },
+}
+
+/// The original allocated input and exact source selection of one forwarded agent delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ForwardInputOrigin {
+    pub source: ForwardInputSource,
+    pub thread_id: Id,
+    pub input_id: Id,
+}
+
+/// Actual copy/source/recipient identities for its separately accepted authored comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SnapshotCommentOrigin {
+    pub copy_id: Id,
+    pub source: crate::sharing::Subject,
+    pub thread_id: Id,
+    pub input_id: Id,
+}
+
+impl SnapshotCommentOrigin {
+    fn source_of(
+        copy: &orch_db::queries::shares::CopyRow,
+    ) -> Result<crate::sharing::Subject, EngineError> {
+        match copy.object_kind.as_str() {
+            "node" => Ok(crate::sharing::Subject::Node(copy.object_id)),
+            "chat" => Ok(crate::sharing::Subject::Chat(copy.object_id)),
+            "document" => Ok(crate::sharing::Subject::Document(copy.object_id)),
+            _ => Err(EngineError::unreadable(
+                "the retained copy has an unknown source identity",
+            )),
+        }
+    }
+}
+
+pub(crate) enum ForwardAcceptance {
+    New(ForwardInputOrigin),
+    Replay(Id),
+}
 
 /// What a person sends.
 #[derive(Debug, Clone)]
@@ -68,6 +180,14 @@ pub(crate) struct Made<'a> {
     pub source: &'a str,
     /// The goal the input belongs to, with what the goal said of itself in it.
     pub goal: Option<(Id, &'a Json)>,
+    /// The real producer's trigger, independent of the person whose authority authors the input.
+    pub trigger: InputTrigger,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputTrigger {
+    Person,
+    Automatic,
 }
 
 impl Made<'_> {
@@ -75,7 +195,50 @@ impl Made<'_> {
     pub(crate) const USER: Made<'static> = Made {
         source: "user",
         goal: None,
+        trigger: InputTrigger::Person,
     };
+
+    /// A managed occurrence retains its author without claiming a fresh person's gesture.
+    pub(crate) const AGENT_SCHEDULE: Made<'static> = Made {
+        source: "user",
+        goal: None,
+        trigger: InputTrigger::Automatic,
+    };
+}
+
+/// One ordinary writer can accept a direct caller or a checked bundle for exactly this work.
+/// Identity is shared; every permission/content/native check still runs for every origin.
+enum InputExecution<'a> {
+    Direct(&'a Caller),
+    Origins(&'a InputCallers),
+}
+
+impl InputExecution<'_> {
+    fn user(&self) -> Id {
+        match self {
+            Self::Direct(caller) => caller.user(),
+            Self::Origins(callers) => callers.user(),
+        }
+    }
+    fn callers(&self) -> &[Caller] {
+        match self {
+            Self::Direct(caller) => std::slice::from_ref(*caller),
+            Self::Origins(callers) => callers.callers(),
+        }
+    }
+    fn captured(&self) -> Result<Json, EngineError> {
+        match self {
+            Self::Direct(caller) => input_authority(caller),
+            Self::Origins(callers) => serde_json::to_value(callers.captured()).map_err(Into::into),
+        }
+    }
+}
+
+struct PreparedInputWork {
+    serving: Serving,
+    verified: Option<orch_api_contract::native::NativeAction>,
+    bypass: Option<Json>,
+    content: Vec<ContentPart>,
 }
 
 /// An input that was accepted, or found again.
@@ -87,6 +250,118 @@ pub struct Submitted {
     pub seq: Seq,
     /// False when the sender had sent it before.
     pub created: bool,
+}
+
+/// The accepted input identity and outcome, with its full view only when the calling producer
+/// requested disclosure. This is an internal response choice, never input authority.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubmittedProjection {
+    /// The newly accepted or previously accepted input.
+    pub input_id: Id,
+    /// The thread that accepted it.
+    pub thread_id: Id,
+    /// The ordinary view; absent for receipt-only responses.
+    pub input: Option<ThreadInput>,
+    /// The highest number of the thread's sequence so far.
+    pub seq: Seq,
+    /// False when the sender had sent it before.
+    pub created: bool,
+}
+
+impl SubmittedProjection {
+    fn full(self) -> Result<Submitted, InputError> {
+        let input = self.input.ok_or_else(|| {
+            EngineError::unreadable(
+                "an ordinary input producer did not request its full projection",
+            )
+        })?;
+        Ok(Submitted {
+            input,
+            seq: self.seq,
+            created: self.created,
+        })
+    }
+}
+
+/// Trusted current-transaction operands resolved by the shared input operation planner. These
+/// facts carry no independent authority and are never serialized into a request or saved grant.
+#[derive(Debug, Clone)]
+pub struct InputSourceOperands {
+    /// Exact admitted source alternatives for each supplied blob hash.
+    pub blobs: Vec<(Hash, BlobOrigin)>,
+    /// An acceptance found during preparation; it must still be that acceptance in the writer.
+    pub replayed: Option<Id>,
+    /// Actual cap/provider homes whose bypass was admitted at this checkpoint.
+    pub bypass_subjects: Vec<orch_authz::caps::Home>,
+    /// The exact current selected native authority, checked again by the writer before any invocation.
+    pub native_permission: Option<orch_api_contract::native::NativePermission>,
+}
+
+fn bypass_was_prepared(
+    selected: &[orch_authz::caps::Home],
+    reached: orch_authz::caps::Home,
+) -> bool {
+    use orch_authz::caps::Home;
+    // check_pass asks only the provider for a provider-defined cap; its additional node is not
+    // another bypass authority. Node and System homes keep their exact existing meaning.
+    selected.iter().any(|selected| match (*selected, reached) {
+        (Home::Provider { provider: a, .. }, Home::Provider { provider: b, .. }) => a == b,
+        (Home::Node(a), Home::Node(b)) => a == b,
+        (Home::System, Home::System) => true,
+        _ => false,
+    })
+}
+
+/// The existing writer's result before any response content or display identities are constructed.
+struct TakenRow {
+    row: InputRow,
+    seq: Seq,
+    created: bool,
+    interrupt: Option<Id>,
+}
+
+impl TakenRow {
+    async fn project(
+        self,
+        conn: &mut orch_db::Conn,
+        receipt_only: bool,
+    ) -> Result<(SubmittedProjection, Option<Id>), InputError> {
+        self.project_with_people(conn, receipt_only, None).await
+    }
+
+    async fn project_with_people(
+        self,
+        conn: &mut orch_db::Conn,
+        receipt_only: bool,
+        people: Option<Vec<Id>>,
+    ) -> Result<(SubmittedProjection, Option<Id>), InputError> {
+        let input = if receipt_only {
+            None
+        } else {
+            let ids = people.unwrap_or_else(|| {
+                self.row
+                    .author_id
+                    .into_iter()
+                    .chain(self.row.run_as)
+                    .collect()
+            });
+            let people = People::load(conn, ids)
+                .await?
+                .with_approvals(conn, self.row.approval_id)
+                .await?;
+            Some(views::input_view(&self.row, &people)?)
+        };
+        Ok((
+            SubmittedProjection {
+                input_id: self.row.id,
+                thread_id: self.row.thread_id,
+                input,
+                seq: self.seq,
+                created: self.created,
+            },
+            self.interrupt,
+        ))
+    }
 }
 
 /// An input that was taken inside a unit of work, with what is left for after its commit.
@@ -232,6 +507,24 @@ pub(crate) fn validate_literal_input(request: &InputRequest) -> Result<(), Input
     Ok(())
 }
 
+fn validate_request(
+    request: &InputRequest,
+    selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+) -> Result<(), InputError> {
+    if selection.is_none() {
+        validate_literal_input(request)?;
+    }
+    if text_chars(&request.content) > usize::try_from(INPUT_TEXT_MAX_CHARS).unwrap_or(usize::MAX) {
+        return Err(InputError::TooLong);
+    }
+    if request.client_id.trim().is_empty() {
+        return Err(InputError::Invalid(
+            "an input carries the value that makes sending it again safe",
+        ));
+    }
+    Ok(())
+}
+
 fn delivery_word(delivery: Delivery) -> &'static str {
     match delivery {
         Delivery::Queue => "queue",
@@ -253,27 +546,6 @@ pub(crate) enum Serving {
     },
 }
 
-/// Immutable credential boundaries of accepted words; later edits may narrow but never widen them.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct InputAuthority {
-    credentials: Vec<CredentialAuthority>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-enum CredentialAuthority {
-    Session {
-        #[serde(default)]
-        as_admin: bool,
-    },
-    Token {
-        token_id: Option<Id>,
-        scopes: Vec<String>,
-        node_id: Option<Id>,
-    },
-}
-
 /// Accepted authorship and the separately approved execution actor of a derived input.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputProvenance {
@@ -287,13 +559,28 @@ pub struct InputProvenance {
     pub run_as_authority: Option<Json>,
 }
 
+/// A posting record is provenance of native authorless work, not an acting credential.
+pub(crate) fn input_is_authorless(input: &InputRow) -> Result<bool, EngineError> {
+    if input.is_authorless() {
+        return Ok(true);
+    }
+    if input.author_id.is_some() || input.source == "user" {
+        return Ok(false);
+    }
+    Ok(
+        saved_authority(input.submission_authority.as_ref())?.is_some_and(|saved| {
+            saved.announcement_provenance().is_some() && !saved.has_actor_origins()
+        }),
+    )
+}
+
 /// Derives work from its origin without borrowing browser authority. An explicit approver must first
 /// pass the current thread/model checks; automatic producers pass `None` and retain the origin's actor.
 pub fn derived_input_provenance(
     origin: &InputRow,
     approved_by: Option<&Caller>,
 ) -> Result<InputProvenance, EngineError> {
-    if origin.author_id.is_none() && !origin.is_authorless() {
+    if origin.author_id.is_none() && !input_is_authorless(origin)? {
         return Err(EngineError::unreadable(
             "the input's author is no longer available",
         ));
@@ -311,161 +598,57 @@ pub fn derived_input_provenance(
     Ok(provenance)
 }
 
-fn credential_authority(caller: &Caller) -> CredentialAuthority {
-    match caller.grant() {
-        None => CredentialAuthority::Session {
-            as_admin: caller.as_admin(),
-        },
-        Some(grant) => CredentialAuthority::Token {
-            token_id: grant.token(),
-            scopes: grant.scopes().to_strings(),
-            node_id: grant.subtree(),
-        },
-    }
-}
-
-/// Records the accepted caller, rather than reconstructing a browser from their user id later.
+/// Records exact accepted operation and full immutable credential bounds.
 pub(crate) fn input_authority(caller: &Caller) -> Result<Json, EngineError> {
-    Ok(serde_json::to_value(InputAuthority {
-        credentials: vec![credential_authority(caller)],
-    })?)
+    authority::capture(caller)
 }
 
-/// Missing provenance is unknown, not an unrestricted browser submission.
 pub(crate) fn saved_authority(raw: Option<&Json>) -> Result<Option<InputAuthority>, EngineError> {
-    let authority: Option<InputAuthority> = raw.cloned().map(serde_json::from_value).transpose()?;
-    if authority
-        .as_ref()
-        .is_some_and(|authority| authority.credentials.is_empty())
-    {
-        return Err(EngineError::unreadable(
-            "input authority has no credential boundary",
-        ));
-    }
-    Ok(authority)
+    authority::saved(raw)
 }
 
-/// Changing accepted words retains every earlier boundary as well as the current editor's.
 pub(crate) fn narrowed_input_authority(
     raw: Option<&Json>,
     caller: &Caller,
 ) -> Result<Option<Json>, EngineError> {
-    let Some(mut authority) = saved_authority(raw)? else {
-        return Ok(None);
-    };
-    let current = credential_authority(caller);
-    if !authority.credentials.contains(&current) {
-        authority.credentials.push(current);
-    }
-    Ok(Some(serde_json::to_value(authority)?))
+    authority::narrowed(raw, caller)
 }
 
-/// Intersects every accepted boundary with current token restrictions in the admission transaction.
-pub(crate) async fn authority_caller(
-    conn: &mut orch_db::Conn,
-    user: Id,
-    node: Id,
-    now: Time,
+/// Re-resolve the same current materialized work for every exact accepted operation.
+pub(crate) async fn input_authority_callers(
+    unit: &mut Unit<'_>,
+    thread: &ThreadRow,
+    input: &InputRow,
+    actor: Id,
     authority: &InputAuthority,
-) -> Result<Option<Caller>, EngineError> {
-    let mut scopes = Scopes::All;
-    let mut root = None;
-    let mut as_admin = true;
-    let mut is_token = false;
-    let mut kept_out = Vec::new();
-    let mut token_ids = std::collections::BTreeSet::new();
-    let mut synthetic_token = false;
-    for credential in &authority.credentials {
-        match credential {
-            CredentialAuthority::Session { as_admin: selected } => as_admin &= *selected,
-            CredentialAuthority::Token {
-                token_id,
-                scopes: accepted,
-                node_id,
-            } => {
-                is_token = true;
-                let recorded =
-                    TokenGrant::from_stored(accepted, *node_id).map_err(EngineError::unreadable)?;
-                let (current, current_root) = if let Some(token) = token_id {
-                    token_ids.insert(*token);
-                    let current: Option<(Vec<String>, Option<Id>)> = sqlx::query_as(
-                        "SELECT scopes,node_id FROM api_tokens WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL
-                          AND (expires_at IS NULL OR expires_at>$3) FOR SHARE",
-                    ).bind(token).bind(user).bind(now.get()).fetch_optional(&mut *conn)
-                        .await.map_err(orch_db::DbError::from)?;
-                    let Some((current, subtree)) = current else {
-                        return Ok(None);
-                    };
-                    // The final caller combines several credentials, so carry each token's live policy restrictions.
-                    for blocked in orch_db::queries::tokens::blocked(conn, *token).await? {
-                        match (blocked.refused, blocked.org, blocked.max_days) {
-                            (true, Some(org), _) => {
-                                kept_out.push(orch_authz::KeptOut::Refused { org })
-                            }
-                            (false, place, Some(max_days)) => {
-                                kept_out.push(orch_authz::KeptOut::Lifetime { place, max_days })
-                            }
-                            _ => {}
-                        }
-                    }
-                    (
-                        TokenGrant::from_stored(&current, subtree)
-                            .map_err(EngineError::unreadable)?,
-                        subtree,
-                    )
-                } else {
-                    // Synthetic internal callers have no stored credential, but their recorded narrowing still binds.
-                    synthetic_token = true;
-                    (recorded.clone(), *node_id)
-                };
-                scopes = Scopes::Only(
-                    Permission::ALL
-                        .iter()
-                        .copied()
-                        .filter(|permission| {
-                            scopes.allow(*permission)
-                                && recorded.carries(*permission)
-                                && current.carries(*permission)
-                        })
-                        .collect(),
-                );
-                for next in [*node_id, current_root].into_iter().flatten() {
-                    root = match root {
-                        None => Some(next),
-                        Some(previous) if previous == next => Some(previous),
-                        Some(previous) => {
-                            let path: Option<Vec<Id>> =
-                                sqlx::query_scalar("SELECT path FROM nodes WHERE id=$1")
-                                    .bind(node)
-                                    .fetch_optional(&mut *conn)
-                                    .await
-                                    .map_err(orch_db::DbError::from)?;
-                            let Some(path) = path else { return Ok(None) };
-                            match (
-                                path.iter().position(|id| *id == previous),
-                                path.iter().position(|id| *id == next),
-                            ) {
-                                (Some(a), Some(b)) => Some(if a > b { previous } else { next }),
-                                _ => return Ok(None),
-                            }
-                        }
-                    };
-                }
-            }
-        }
-    }
-    Ok(Some(if is_token {
-        let mut grant = TokenGrant::new(scopes, root).kept_out(kept_out);
-        if !synthetic_token
-            && token_ids.len() == 1
-            && let Some(token) = token_ids.first()
-        {
-            grant = grant.for_token(*token);
-        }
-        Caller::token(user, grant)
-    } else {
-        Caller::session(user).with_admin_mode(as_admin)
-    }))
+    clock: &dyn Clock,
+) -> Result<Option<InputCallers>, EngineError> {
+    authority_work::for_input(unit, thread, input, actor, authority, clock).await
+}
+
+pub(crate) async fn input_authority_for_request(
+    unit: &mut Unit<'_>,
+    thread: &ThreadRow,
+    request: &InputRequest,
+    selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+    actor: Id,
+    authority: &InputAuthority,
+    clock: &dyn Clock,
+) -> Result<Option<InputCallers>, EngineError> {
+    authority_work::for_request(unit, thread, request, selection, actor, authority, clock).await
+}
+
+/// Scope preparation only for preflight's ordinary current-person assessment. Execution callers
+/// are obtained separately after the complete materialized footprint is known.
+pub(crate) async fn input_preparation_callers(
+    unit: &mut Unit<'_>,
+    thread: &ThreadRow,
+    input: &InputRow,
+    actor: Id,
+    authority: &InputAuthority,
+    clock: &dyn Clock,
+) -> Result<Option<Vec<Caller>>, EngineError> {
+    authority_work::for_preflight(unit, thread, input, actor, authority, clock).await
 }
 
 /// The recorded execution actor; an explicit approver never replaces the author's original provenance.
@@ -473,15 +656,17 @@ pub(crate) async fn input_caller(
     unit: &mut Unit<'_>,
     thread: &ThreadRow,
     input: &InputRow,
-) -> Result<Option<Caller>, EngineError> {
+    clock: &dyn Clock,
+) -> Result<Option<InputCallers>, EngineError> {
     let (person, raw) = match input.run_as {
         Some(person) => (person, input.run_as_authority.as_ref()),
         None => match input.author_id {
             Some(person) => (person, input.submission_authority.as_ref()),
-            None if input.is_authorless() => {
-                return Ok(Some(
+            None if input_is_authorless(input)? => {
+                return InputCallers::single(
                     Caller::session(thread.owner_id).with_admin_mode(false),
-                ));
+                )
+                .map(Some);
             }
             None => return Ok(None),
         },
@@ -489,8 +674,7 @@ pub(crate) async fn input_caller(
     let Some(authority) = saved_authority(raw)? else {
         return Ok(None);
     };
-    let now = Time::new(unit.now());
-    authority_caller(unit.conn, person, thread.node_id, now, &authority).await
+    input_authority_callers(unit, thread, input, person, &authority, clock).await
 }
 
 /// The author's original boundary, independent of any later model-use approver.
@@ -498,29 +682,208 @@ pub(crate) async fn input_author_caller(
     unit: &mut Unit<'_>,
     node: Id,
     input: &InputRow,
-) -> Result<Option<Caller>, EngineError> {
+    clock: &dyn Clock,
+) -> Result<Option<InputCallers>, EngineError> {
     let Some(author) = input.author_id else {
         return Ok(None);
     };
     let Some(authority) = saved_authority(input.submission_authority.as_ref())? else {
         return Ok(None);
     };
+    let Some(thread) = threads::thread(unit.conn, node).await? else {
+        return Ok(None);
+    };
+    input_authority_callers(unit, &thread, input, author, &authority, clock).await
+}
+
+/// The existing ordinary input/turn driving policy over its supplied resource port.
+/// Publication and Engine writers share one implementation; no origin is substituted.
+pub(crate) async fn check_sender_for_turn(
+    unit: &mut Unit<'_>,
+    caller: &Caller,
+    thread: &ThreadRow,
+    need_provider: bool,
+    turn: Option<&TurnRow>,
+    access: &dyn crate::access::ResourceAccess,
+) -> Result<(), InputError> {
     let now = Time::new(unit.now());
-    authority_caller(unit.conn, author, node, now, &authority).await
+    let principal = Principal::load(&mut *unit.conn, caller.clone(), now).await?;
+    let decision = nodes::check(
+        &mut *unit.conn,
+        &principal,
+        thread.node_id,
+        Permission::ThreadInteract,
+        Act::Use,
+        orch_authz::Policy::default(),
+    )
+    .await
+    .map_err(|error| match error {
+        orch_authz::Error::Suspended { .. } => InputError::Denied(Box::new(Refusal::of(
+            Permission::ThreadInteract,
+            ObjectRef {
+                kind: ObjectKind::Thread,
+                id: thread.node_id,
+            },
+            Vec::new(),
+        ))),
+        other => other.into(),
+    })?;
+    // A refusal is a refusal whether or not it says what is missing.
+    let mut refused = false;
+    let mut missing = Vec::new();
+    if let Decision::Refused(refusal) = decision {
+        refused = true;
+        missing = refusal.missing;
+    }
+    let provider = if let Some(turn) = turn {
+        let segment = threads::segment(&mut *unit.conn, turn.segment_id)
+            .await?
+            .filter(|segment| segment.thread_id == thread.node_id)
+            .ok_or_else(|| EngineError::unreadable("the running turn's provider is unavailable"))?;
+        Some(segment.provider_id)
+    } else {
+        thread.provider_id
+    };
+    if need_provider && let Some(provider) = provider {
+        // The resource supplier asks about the person, model and effort. Preserve
+        // this caller's token narrowing before crossing that person-only boundary.
+        if !caller.permits(Permission::ProviderUse) {
+            return Err(InputError::Denied(Box::new(Refusal::of(
+                Permission::ProviderUse,
+                ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id: provider,
+                },
+                Vec::new(),
+            ))));
+        }
+        let settings = if turn.is_none() {
+            Some(crate::resolved::load(&mut *unit.conn, thread.node_id).await?)
+        } else {
+            None
+        };
+        let answer = access
+            .provider_use(
+                &mut *unit.conn,
+                &ProviderUse {
+                    person: caller.user(),
+                    node: thread.node_id,
+                    provider,
+                    model: turn.map(|turn| turn.model.as_str()).or_else(|| {
+                        settings
+                            .as_ref()
+                            .and_then(|settings| settings.model.as_deref())
+                    }),
+                    effort: turn.map_or_else(
+                        || {
+                            settings
+                                .as_ref()
+                                .and_then(|settings| settings.effort.as_deref())
+                        },
+                        |turn| turn.effort.as_deref(),
+                    ),
+                },
+            )
+            .await
+            .map_err(EngineError::from)?;
+        if let crate::access::Answer::Refused(lacking) = answer {
+            refused = true;
+            missing.extend(lacking);
+        }
+    }
+    if !refused {
+        return Ok(());
+    }
+    Err(InputError::Denied(Box::new(Refusal::of(
+        Permission::ThreadInteract,
+        ObjectRef {
+            kind: ObjectKind::Thread,
+            id: thread.node_id,
+        },
+        missing,
+    ))))
+}
+
+fn steered_input_turn(
+    active: Option<&TurnRow>,
+    queue_locked: bool,
+    delivery: Delivery,
+    plan: bool,
+) -> Option<&TurnRow> {
+    active.filter(|turn| {
+        !queue_locked
+            && delivery == Delivery::Steer
+            && turn.state == threads::turn_state::RUNNING
+            && turn.plan == plan
+    })
 }
 
 impl Engine {
+    /// Checks the ordinary sender policy before resolving fresh input operands. This reads only;
+    /// the accepting writer repeats it under its actual thread lock and first-effect boundary.
+    /// Held inputs still need only Interact, and a steer uses its actual running turn's model.
+    pub async fn check_input_sender_in(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        thread: &ThreadRow,
+        delivery: Delivery,
+        plan: bool,
+    ) -> Result<(), InputError> {
+        let active = threads::active_turn(conn, thread.node_id).await?;
+        let queue_locked =
+            thread.queue_held || crate::locks::held_by(conn, thread.node_id).await?.is_some();
+        let turn = steered_input_turn(active.as_ref(), queue_locked, delivery, plan);
+        let mut unit = Unit::new(conn, self.inner.clock.now());
+        self.check_author_for_turn(&mut unit, caller, thread, turn)
+            .await
+            .map(|_| ())
+    }
+
     pub(crate) async fn check_content(
         &self,
         unit: &mut Unit<'_>,
         caller: &Caller,
         content: &[ContentPart],
     ) -> Result<(), InputError> {
+        self.check_content_from(unit, caller, content, None).await
+    }
+
+    /// A scope-admitted source is a trusted operand, not authority: the ordinary check revalidates
+    /// its association and current readability here rather than switching to an unbound source.
+    async fn check_content_from(
+        &self,
+        unit: &mut Unit<'_>,
+        caller: &Caller,
+        content: &[ContentPart],
+        selected: Option<&[(Hash, BlobOrigin)]>,
+    ) -> Result<(), InputError> {
         let hashes = orch_chat::following::content_blobs(content);
         if hashes.is_empty() {
             return Ok(());
         }
         let principal = Principal::load(unit.conn, caller.clone(), self.inner.clock.time()).await?;
+        if let Some(selected) = selected {
+            for hash in &hashes {
+                let allowed: Vec<_> = selected
+                    .iter()
+                    .filter_map(|(selected_hash, origin)| {
+                        (selected_hash == hash).then_some(*origin)
+                    })
+                    .collect();
+                if orch_chat::following::blob_origin_in(unit.conn, &principal, hash, &allowed)
+                    .await
+                    .map_err(|error| match error {
+                        orch_chat::Error::NotFound => InputError::NotFound,
+                        other => InputError::Internal(EngineError::unreadable(other)),
+                    })?
+                    .is_none()
+                {
+                    return Err(InputError::NotFound);
+                }
+            }
+            return Ok(());
+        }
         orch_chat::following::require_blobs(unit.conn, &principal, &hashes)
             .await
             .map_err(|error| match error {
@@ -576,6 +939,27 @@ impl Engine {
         })
     }
 
+    async fn check_authors_for_turn(
+        &self,
+        unit: &mut Unit<'_>,
+        callers: &InputCallers,
+        thread: &ThreadRow,
+        turn: Option<&TurnRow>,
+    ) -> Result<Serving, InputError> {
+        let mut result = Serving::Own;
+        for caller in callers.callers() {
+            if let Serving::WithoutModel { held } = self
+                .check_author_for_turn(unit, caller, thread, turn)
+                .await?
+            {
+                result = Serving::WithoutModel {
+                    held: held || matches!(result, Serving::WithoutModel { held: true }),
+                };
+            }
+        }
+        Ok(result)
+    }
+
     /// Model approval never replaces the original author's current permission to drive.
     pub(crate) async fn check_input_author_driving(
         &self,
@@ -594,22 +978,28 @@ impl Engine {
             )))
         };
         let Some(author) = input.author_id else {
-            return if input.is_authorless() {
+            return if input_is_authorless(input)? {
                 Ok(())
             } else {
                 Err(denied())
             };
         };
-        let original = match input_author_caller(unit, thread.node_id, input).await? {
-            Some(original) => original,
-            // Unknown historical provenance grants no model use. Its author's current
-            // ordinary driving rights still bind an explicitly approved input.
-            None if input.submission_authority.is_none() => {
-                Caller::session(author).with_admin_mode(false)
-            }
-            None => return Err(denied()),
-        };
-        self.check_sender(unit, &original, thread, false).await
+        let original =
+            match input_author_caller(unit, thread.node_id, input, self.inner.clock.as_ref())
+                .await?
+            {
+                Some(original) => original,
+                // Unknown historical provenance grants no model use. Its author's current
+                // ordinary driving rights still bind an explicitly approved input.
+                None if input.submission_authority.is_none() => {
+                    InputCallers::single(Caller::session(author).with_admin_mode(false))?
+                }
+                None => return Err(denied()),
+            };
+        for caller in original.callers() {
+            self.check_sender(unit, caller, thread, false).await?;
+        }
+        Ok(())
     }
 
     /// What the sender of an input needs, checked and told whole: they drive
@@ -634,106 +1024,15 @@ impl Engine {
         need_provider: bool,
         turn: Option<&TurnRow>,
     ) -> Result<(), InputError> {
-        let now = Time::new(unit.now());
-        let principal = Principal::load(&mut *unit.conn, caller.clone(), now).await?;
-        let decision = nodes::check(
-            &mut *unit.conn,
-            &principal,
-            thread.node_id,
-            Permission::ThreadInteract,
-            Act::Use,
-            orch_authz::Policy::default(),
+        check_sender_for_turn(
+            unit,
+            caller,
+            thread,
+            need_provider,
+            turn,
+            self.inner.access.as_ref(),
         )
         .await
-        .map_err(|error| match error {
-            orch_authz::Error::Suspended { .. } => InputError::Denied(Box::new(Refusal::of(
-                Permission::ThreadInteract,
-                ObjectRef {
-                    kind: ObjectKind::Thread,
-                    id: thread.node_id,
-                },
-                Vec::new(),
-            ))),
-            other => other.into(),
-        })?;
-        // A refusal is a refusal whether or not it says what is missing.
-        let mut refused = false;
-        let mut missing = Vec::new();
-        if let Decision::Refused(refusal) = decision {
-            refused = true;
-            missing = refusal.missing;
-        }
-        let provider = if let Some(turn) = turn {
-            let segment = threads::segment(&mut *unit.conn, turn.segment_id)
-                .await?
-                .filter(|segment| segment.thread_id == thread.node_id)
-                .ok_or_else(|| {
-                    EngineError::unreadable("the running turn's provider is unavailable")
-                })?;
-            Some(segment.provider_id)
-        } else {
-            thread.provider_id
-        };
-        if need_provider && let Some(provider) = provider {
-            // The resource supplier asks about the person, model and effort. Preserve
-            // this caller's token narrowing before crossing that person-only boundary.
-            if !caller.permits(Permission::ProviderUse) {
-                return Err(InputError::Denied(Box::new(Refusal::of(
-                    Permission::ProviderUse,
-                    ObjectRef {
-                        kind: ObjectKind::Provider,
-                        id: provider,
-                    },
-                    Vec::new(),
-                ))));
-            }
-            let settings = if turn.is_none() {
-                Some(crate::resolved::load(&mut *unit.conn, thread.node_id).await?)
-            } else {
-                None
-            };
-            let answer = self
-                .inner
-                .access
-                .provider_use(
-                    &mut *unit.conn,
-                    &ProviderUse {
-                        person: caller.user(),
-                        node: thread.node_id,
-                        provider,
-                        model: turn.map(|turn| turn.model.as_str()).or_else(|| {
-                            settings
-                                .as_ref()
-                                .and_then(|settings| settings.model.as_deref())
-                        }),
-                        effort: turn.map_or_else(
-                            || {
-                                settings
-                                    .as_ref()
-                                    .and_then(|settings| settings.effort.as_deref())
-                            },
-                            |turn| turn.effort.as_deref(),
-                        ),
-                    },
-                )
-                .await
-                .map_err(EngineError::from)?;
-            if let crate::access::Answer::Refused(lacking) = answer {
-                refused = true;
-                missing.extend(lacking);
-            }
-        }
-        if !refused {
-            return Ok(());
-        }
-        Err(InputError::Denied(Box::new(Refusal::of(
-            Permission::ThreadInteract,
-            ObjectRef {
-                kind: ObjectKind::Thread,
-                id: thread.node_id,
-            },
-            missing,
-        ))))
     }
 
     /// Takes an input from a person: queued, steered into the turn that
@@ -784,6 +1083,37 @@ impl Engine {
         .await
     }
 
+    /// The same selected-input writer and commit path, with optional full response projection.
+    /// `receipt_only` comes from the API's admitted operation, never from request data. The caller
+    /// may narrow the response further after this method's guarded commit.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one existing guarded input writer carries its exact request and trusted source/projection operands"
+    )]
+    pub async fn submit_selected_input_projected_guarded(
+        &self,
+        tx: orch_db::Tx,
+        principal: Principal,
+        thread: Id,
+        request: InputRequest,
+        selection: Option<orch_api_contract::input_schedules::NativeInvocation>,
+        receipt_only: bool,
+        operands: Option<&InputSourceOperands>,
+    ) -> Result<SubmittedProjection, InputError> {
+        let caller = principal.caller().clone();
+        self.submit_input_projected_with(
+            tx,
+            &caller,
+            principal.now().get(),
+            thread,
+            request,
+            selection,
+            receipt_only,
+            operands,
+        )
+        .await
+    }
+
     /// Queues ordinary authored work inside the transaction which also owns its schedule occurrence.
     /// The caller commits the transaction and kicks the engine afterwards; no prior held queue is resumed.
     pub async fn submit_scheduled_input(
@@ -828,7 +1158,109 @@ impl Engine {
         Ok(taken.submitted)
     }
 
+    /// Accept a real scheduled occurrence using every captured author-definition origin. The
+    /// controller who merely resumed a schedule is not substituted for its execution author.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one ordinary scheduled producer retains typed origin and exact accepted definition boundaries"
+    )]
+    pub async fn submit_selected_scheduled_input_from_origins(
+        &self,
+        conn: &mut orch_db::Conn,
+        author: Id,
+        origins: &[orch_authz::CapturedOperation],
+        reference: ScheduledInputOrigin,
+        thread: Id,
+        request: &InputRequest,
+        now: chrono::DateTime<chrono::Utc>,
+        selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+    ) -> Result<Submitted, InputError> {
+        if request.delivery != Delivery::Queue {
+            return Err(InputError::Invalid(
+                "a scheduled input uses the ordinary queue",
+            ));
+        }
+        let authority = InputAuthority::for_schedule(author, origins, reference)?;
+        let mut unit = Unit::new(conn, now);
+        let schedule =
+            orch_db::queries::input_schedules::schedule(unit.conn, reference.schedule_id, false)
+                .await?
+                .filter(|row| row.author_id == author)
+                .ok_or(InputError::NotFound)?;
+        let run = orch_db::queries::input_schedules::run_by_id(unit.conn, reference.run_id)
+            .await?
+            .filter(|run| {
+                run.schedule_id == schedule.id
+                    && run.thread_id.is_none_or(|actual| actual == thread)
+            })
+            .ok_or(InputError::NotFound)?;
+        if reference.destination == ScheduledInputDestination::NewThread
+            && thread
+                != crate::ids::derived(
+                    "input-schedule.thread",
+                    &[schedule.id.as_bytes(), run.occurrence.as_bytes()],
+                )
+        {
+            return Err(InputError::NotFound);
+        }
+        let row = threads::lock(unit.conn, thread)
+            .await?
+            .ok_or(InputError::NotFound)?;
+        let callers = input_authority_for_request(
+            &mut unit,
+            &row,
+            request,
+            selection,
+            author,
+            &authority,
+            self.inner.clock.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            InputError::Denied(Box::new(Refusal::of(
+                Permission::ThreadInteract,
+                ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id: thread,
+                },
+                Vec::new(),
+            )))
+        })?;
+        let mut taken = self
+            .submit_with_authority_in(&mut unit, &callers, thread, request, selection, Made::USER)
+            .await?;
+        let finished = unit.finish().await?;
+        if taken.submitted.created {
+            taken.submitted.seq = finished
+                .touched
+                .get(&thread)
+                .copied()
+                .unwrap_or(taken.submitted.seq);
+        }
+        Ok(taken.submitted)
+    }
+
     async fn submit_input_with(
+        &self,
+        tx: orch_db::Tx,
+        caller: &Caller,
+        now: chrono::DateTime<chrono::Utc>,
+        thread_id: Id,
+        request: InputRequest,
+        selection: Option<orch_api_contract::input_schedules::NativeInvocation>,
+    ) -> Result<Submitted, InputError> {
+        self.submit_input_projected_with(
+            tx, caller, now, thread_id, request, selection, false, None,
+        )
+        .await?
+        .full()
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one existing guarded input writer carries its exact request and trusted source/projection operands"
+    )]
+    async fn submit_input_projected_with(
         &self,
         mut tx: orch_db::Tx,
         caller: &Caller,
@@ -836,27 +1268,39 @@ impl Engine {
         thread_id: Id,
         request: InputRequest,
         selection: Option<orch_api_contract::input_schedules::NativeInvocation>,
-    ) -> Result<Submitted, InputError> {
-        let (finished, taken) = {
+        receipt_only: bool,
+        operands: Option<&InputSourceOperands>,
+    ) -> Result<SubmittedProjection, InputError> {
+        let (finished, submitted, interrupt) = {
             let mut unit = Unit::new(&mut tx, now);
-            let mut taken = self
-                .submit_selected_in(&mut unit, caller, thread_id, &request, selection.as_ref())
+            let taken = self
+                .submit_selected_made_row_in(
+                    &mut unit,
+                    InputExecution::Direct(caller),
+                    thread_id,
+                    &request,
+                    selection.as_ref(),
+                    Made::USER,
+                    operands,
+                    None,
+                )
                 .await?;
+            let (mut submitted, interrupt) = taken.project(&mut *unit.conn, receipt_only).await?;
             let finished = unit.finish().await?;
-            if taken.submitted.created {
-                taken.submitted.seq = finished
+            if submitted.created {
+                submitted.seq = finished
                     .touched
                     .get(&thread_id)
                     .copied()
-                    .unwrap_or(taken.submitted.seq);
+                    .unwrap_or(submitted.seq);
             }
-            (finished, taken)
+            (finished, submitted, interrupt)
         };
         self.commit(tx, finished).await?;
-        if taken.interrupt.is_some() {
+        if interrupt.is_some() {
             self.drive_interrupt(thread_id).await?;
         }
-        Ok(taken.submitted)
+        Ok(submitted)
     }
 
     /// Takes an input inside a unit of work whose transaction its owner holds and commits: the same checks and the
@@ -886,18 +1330,312 @@ impl Engine {
             .await
     }
 
-    /// Takes an input that a goal's loop makes in the name of the person who set the goal: every check a person's
-    /// input passes, and the same rows, with the source and the goal it belongs to.
-    pub(crate) async fn submit_made_in(
+    pub(crate) async fn submit_with_authority_in(
+        &self,
+        unit: &mut Unit<'_>,
+        callers: &InputCallers,
+        thread_id: Id,
+        request: &InputRequest,
+        selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+        made: Made<'_>,
+    ) -> Result<Taken, InputError> {
+        let taken = self
+            .submit_selected_made_row_in(
+                unit,
+                InputExecution::Origins(callers),
+                thread_id,
+                request,
+                selection,
+                made,
+                None,
+                None,
+            )
+            .await?;
+        let (submitted, interrupt) = taken.project(unit.conn, false).await?;
+        Ok(Taken {
+            submitted: submitted.full()?,
+            interrupt,
+        })
+    }
+
+    pub(crate) async fn submit_chat_message_in(
         &self,
         unit: &mut Unit<'_>,
         caller: &Caller,
         thread_id: Id,
         request: &InputRequest,
-        made: Made<'_>,
+        reference: ChatInputOrigin,
     ) -> Result<Taken, InputError> {
-        self.submit_selected_made_in(unit, caller, thread_id, request, None, made)
-            .await
+        if reference.thread_id != thread_id {
+            return Err(InputError::Invalid(
+                "the agent ask has a different recipient",
+            ));
+        }
+        let authority = InputAuthority::for_chat(caller, reference)?;
+        let thread = threads::lock(unit.conn, thread_id)
+            .await?
+            .ok_or(InputError::NotFound)?;
+        let callers = input_authority_for_request(
+            unit,
+            &thread,
+            request,
+            None,
+            caller.user(),
+            &authority,
+            self.inner.clock.as_ref(),
+        )
+        .await?
+        .ok_or_else(|| {
+            InputError::Denied(Box::new(Refusal::of(
+                Permission::ThreadInteract,
+                ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id: thread_id,
+                },
+                Vec::new(),
+            )))
+        })?;
+        let taken = self
+            .submit_selected_made_row_in(
+                unit,
+                InputExecution::Origins(&callers),
+                thread_id,
+                request,
+                None,
+                Made::USER,
+                None,
+                Some(reference.input_id),
+            )
+            .await?;
+        if taken.row.id != reference.input_id {
+            return Err(InputError::Invalid(
+                "the accepted input has different provenance",
+            ));
+        }
+        let (submitted, interrupt) = taken.project(unit.conn, false).await?;
+        Ok(Taken {
+            submitted: submitted.full()?,
+            interrupt,
+        })
+    }
+
+    /// The one ordinary input writer, with exact selected source witnesses from the current
+    /// guarded ForwardCreate preparation. Replays keep the original accepted row/provenance.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one shared writer receives trusted origin, source and projection facts"
+    )]
+    pub(crate) async fn submit_forward_create_in(
+        &self,
+        unit: &mut Unit<'_>,
+        caller: &Caller,
+        thread: Id,
+        request: &InputRequest,
+        acceptance: &ForwardAcceptance,
+        receipt_only: bool,
+        selected: &[(Hash, orch_chat::following::BlobOrigin)],
+    ) -> Result<SubmittedProjection, InputError> {
+        let mut operands = InputSourceOperands {
+            blobs: selected.to_vec(),
+            replayed: None,
+            bypass_subjects: Vec::new(),
+            native_permission: None,
+        };
+        let (bundle, allocated) = match acceptance {
+            ForwardAcceptance::New(reference) => {
+                if reference.thread_id != thread {
+                    return Err(InputError::Invalid("the forward has a different recipient"));
+                }
+                // Recheck the concrete receiver through the shared restriction predicate; the
+                // complete source proof and selected witnesses came from the ordinary HTTP guard.
+                let target = crate::operation_scope::targets::node(unit.conn, thread)
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                let plan = crate::operation_scope::Prepared::for_selection("ForwardCreate")
+                    .map_err(EngineError::unreadable)?;
+                let index = plan
+                    .variant()
+                    .facets
+                    .iter()
+                    .position(|facet| {
+                        facet.target
+                            == orch_api_contract::operations::TargetResolver::ResolvedCollection(
+                                "forward_destination_threads",
+                            )
+                    })
+                    .ok_or_else(|| {
+                        EngineError::unreadable("the forward recipient collection is not declared")
+                    })?;
+                if !plan
+                    .permits_binding(
+                        caller,
+                        index,
+                        orch_access_contract::key_scope::KeyTargetKind::Object(ObjectKind::Thread),
+                        &[target],
+                    )
+                    .map_err(EngineError::unreadable)?
+                {
+                    return Err(InputError::Denied(Box::new(Refusal::of(
+                        Permission::ThreadInteract,
+                        ObjectRef {
+                            kind: ObjectKind::Thread,
+                            id: thread,
+                        },
+                        Vec::new(),
+                    ))));
+                }
+                (
+                    Some(InputCallers::accepted_forward(
+                        caller.clone(),
+                        reference.clone(),
+                    )?),
+                    Some(reference.input_id),
+                )
+            }
+            ForwardAcceptance::Replay(id) => {
+                operands.replayed = Some(*id);
+                (None, None)
+            }
+        };
+        let execution = bundle
+            .as_ref()
+            .map_or(InputExecution::Direct(caller), InputExecution::Origins);
+        let taken = self
+            .submit_selected_made_row_in(
+                unit,
+                execution,
+                thread,
+                request,
+                None,
+                Made::USER,
+                Some(&operands),
+                allocated,
+            )
+            .await?;
+        if allocated.is_some_and(|id| taken.row.id != id) {
+            return Err(orch_db::DbError::Retry.into());
+        }
+        let (submitted, interrupt) = taken.project(unit.conn, receipt_only).await?;
+        debug_assert!(
+            interrupt.is_none(),
+            "a forward uses ordinary queued delivery"
+        );
+        Ok(submitted)
+    }
+
+    /// Accept only the separately requested comment after its actual copy row exists. Replay
+    /// keeps the prior input and authority; the comment never becomes a copy-delivery permission.
+    pub(crate) async fn submit_snapshot_comment_in(
+        &self,
+        unit: &mut Unit<'_>,
+        caller: &Caller,
+        copy: &orch_db::queries::shares::CopyRow,
+        request: &InputRequest,
+    ) -> Result<Id, InputError> {
+        if copy.created_by != caller.user() {
+            return Err(InputError::NotTheAuthor);
+        }
+        let prior = threads::input_by_client(
+            unit.conn,
+            copy.thread_id,
+            Some(caller.user()),
+            &request.client_id,
+        )
+        .await?;
+        let replayed = prior.as_ref().map(|input| input.id);
+        let (bundle, allocated) = if prior.is_some() {
+            // The same ordinary idempotency rule returns the original acceptance, without
+            // assigning this caller/copy as new provenance for an unrelated earlier input.
+            (None, None)
+        } else {
+            let reference = SnapshotCommentOrigin {
+                copy_id: copy.id,
+                source: SnapshotCommentOrigin::source_of(copy)?,
+                thread_id: copy.thread_id,
+                input_id: new_id(),
+            };
+            if caller
+                .grant()
+                .and_then(|grant| grant.operation_scope())
+                .is_some()
+            {
+                let target = crate::operation_scope::targets::node(unit.conn, copy.thread_id)
+                    .await
+                    .map_err(EngineError::unreadable)?;
+                let plan = crate::operation_scope::Prepared::for_selection(
+                    "ShareAgentCreate.snapshot_comment",
+                )
+                .map_err(EngineError::unreadable)?;
+                let index = plan
+                    .variant()
+                    .facets
+                    .iter()
+                    .position(|facet| {
+                        facet.target
+                            == orch_api_contract::operations::TargetResolver::ResolvedCollection(
+                                "snapshot_recipient_threads",
+                            )
+                    })
+                    .ok_or_else(|| {
+                        EngineError::unreadable("the snapshot comment recipient is not declared")
+                    })?;
+                if !plan
+                    .permits_binding(
+                        caller,
+                        index,
+                        orch_access_contract::key_scope::KeyTargetKind::Object(ObjectKind::Thread),
+                        &[target],
+                    )
+                    .map_err(EngineError::unreadable)?
+                {
+                    return Err(InputError::Denied(Box::new(Refusal::of(
+                        Permission::ThreadInteract,
+                        ObjectRef {
+                            kind: ObjectKind::Thread,
+                            id: copy.thread_id,
+                        },
+                        Vec::new(),
+                    ))));
+                }
+            }
+            (
+                Some(InputCallers::accepted_snapshot_comment(
+                    caller.clone(),
+                    reference,
+                )?),
+                Some(reference.input_id),
+            )
+        };
+        let execution = bundle
+            .as_ref()
+            .map_or(InputExecution::Direct(caller), InputExecution::Origins);
+        let operands = InputSourceOperands {
+            blobs: Vec::new(),
+            replayed,
+            bypass_subjects: Vec::new(),
+            native_permission: None,
+        };
+        let taken = self
+            .submit_selected_made_row_in(
+                unit,
+                execution,
+                copy.thread_id,
+                request,
+                None,
+                Made::USER,
+                Some(&operands),
+                allocated,
+            )
+            .await?;
+        if allocated.is_some_and(|id| taken.row.id != id) {
+            return Err(orch_db::DbError::Retry.into());
+        }
+        let (submitted, interrupt) = taken.project(unit.conn, true).await?;
+        debug_assert!(
+            interrupt.is_none(),
+            "a snapshot comment uses ordinary queued delivery"
+        );
+        Ok(submitted.input_id)
     }
 
     async fn submit_selected_made_in(
@@ -909,19 +1647,192 @@ impl Engine {
         selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
         made: Made<'_>,
     ) -> Result<Taken, InputError> {
-        if selection.is_none() {
-            validate_literal_input(request)?;
+        let taken = self
+            .submit_selected_made_row_in(
+                unit,
+                InputExecution::Direct(caller),
+                thread_id,
+                request,
+                selection,
+                made,
+                None,
+                None,
+            )
+            .await?;
+        let (submitted, interrupt) = taken.project(&mut *unit.conn, false).await?;
+        Ok(Taken {
+            submitted: submitted.full()?,
+            interrupt,
+        })
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the shared input preparation retains actual current operands and authority"
+    )]
+    async fn prepare_input_work(
+        &self,
+        unit: &mut Unit<'_>,
+        execution: &InputExecution<'_>,
+        thread: &ThreadRow,
+        request: &InputRequest,
+        selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+        operands: Option<&InputSourceOperands>,
+        steered_turn: Option<&TurnRow>,
+    ) -> Result<PreparedInputWork, InputError> {
+        let thread_id = thread.node_id;
+        // Boxed: a message is taken deep in a request's stack. A steer uses
+        // the running turn's recorded provider, model and effort.
+        let mut serving = Serving::Own;
+        for caller in execution.callers() {
+            if let Serving::WithoutModel { held } =
+                Box::pin(self.check_author_for_turn(unit, caller, thread, steered_turn)).await?
+            {
+                serving = Serving::WithoutModel {
+                    held: held || matches!(serving, Serving::WithoutModel { held: true }),
+                };
+            }
         }
-        if text_chars(&request.content)
-            > usize::try_from(INPUT_TEXT_MAX_CHARS).unwrap_or(usize::MAX)
+        if request.plan && !Box::pin(self.agent_plans(unit, thread)).await? {
+            return Err(InputError::PlanUnsupported);
+        }
+        let mut verified = None;
+        for caller in execution.callers() {
+            self.check_content_from(
+                unit,
+                caller,
+                &request.content,
+                operands.map(|prepared| prepared.blobs.as_slice()),
+            )
+            .await?;
+            if let Some(selection) = selection {
+                verified = Some(
+                    crate::native_actions::validate_selected(
+                        unit,
+                        caller,
+                        thread_id,
+                        selection,
+                        request.delivery,
+                    )
+                    .await?,
+                );
+            }
+        }
+        if operands.is_some_and(|prepared| {
+            prepared.native_permission != verified.as_ref().map(|action| action.permission)
+        }) {
+            return Err(orch_db::DbError::Retry.into());
+        }
+        if let Some(selection) = selection {
+            let bytes = serde_json::to_vec(&request.content)
+                .map_err(EngineError::from)?
+                .len()
+                + serde_json::to_vec(selection)
+                    .map_err(EngineError::from)?
+                    .len();
+            if bytes > orch_api_contract::common::MAX_JSON_BYTES {
+                return Err(InputError::TooLong);
+            }
+        }
+        let mut bypass = None;
+        for caller in execution.callers() {
+            let checked = self
+                .bypass_of_from(
+                    unit,
+                    caller,
+                    thread,
+                    Some(execution.user()),
+                    request.bypass.as_ref(),
+                    operands.map(|prepared| prepared.bypass_subjects.as_slice()),
+                )
+                .await?;
+            if bypass.is_none() {
+                bypass = checked;
+            }
+        }
+        if !execution.callers().iter().all(Caller::as_admin)
+            && let Some(entries) = bypass.as_mut().and_then(Json::as_array_mut)
         {
-            return Err(InputError::TooLong);
+            for entry in entries {
+                if let Some(entry) = entry.as_object_mut() {
+                    entry.remove("as_admin");
+                }
+            }
         }
-        if request.client_id.trim().is_empty() {
+        let mut prepared = self
+            .prepare_pastes(unit.conn, thread, &request.content)
+            .await?;
+        self.prepare_attachment_names(unit.conn, thread_id, &mut prepared)
+            .await?;
+        Ok(PreparedInputWork {
+            serving,
+            verified,
+            bypass,
+            content: prepared,
+        })
+    }
+
+    /// The same input writer's ordinary validation/materialization, without queue rows or captured
+    /// execution authority. Schedule creation/resume invokes it inside its existing rollback trial.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "ordinary schedule validation retains the exact selected source operands without manufacturing an execution origin"
+    )]
+    pub async fn validate_selected_scheduled_input(
+        &self,
+        conn: &mut orch_db::Conn,
+        caller: &Caller,
+        thread: Id,
+        request: &InputRequest,
+        now: chrono::DateTime<chrono::Utc>,
+        selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+        operands: Option<&InputSourceOperands>,
+    ) -> Result<(), InputError> {
+        if request.delivery != Delivery::Queue {
             return Err(InputError::Invalid(
-                "an input carries the value that makes sending it again safe",
+                "a scheduled input uses the ordinary queue",
             ));
         }
+        validate_request(request, selection)?;
+        let mut unit = Unit::new(conn, now);
+        let thread = threads::lock(unit.conn, thread)
+            .await?
+            .ok_or(InputError::NotFound)?;
+        if thread.deleted_at.is_some() {
+            return Err(InputError::NotFound);
+        }
+        if thread.archived_at.is_some() {
+            return Err(InputError::Archived);
+        }
+        self.prepare_input_work(
+            &mut unit,
+            &InputExecution::Direct(caller),
+            &thread,
+            request,
+            selection,
+            operands,
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one existing guarded input writer carries its exact request and trusted source/projection operands"
+    )]
+    async fn submit_selected_made_row_in(
+        &self,
+        unit: &mut Unit<'_>,
+        execution: InputExecution<'_>,
+        thread_id: Id,
+        request: &InputRequest,
+        selection: Option<&orch_api_contract::input_schedules::NativeInvocation>,
+        made: Made<'_>,
+        operands: Option<&InputSourceOperands>,
+        allocated_input: Option<Id>,
+    ) -> Result<TakenRow, InputError> {
+        validate_request(request, selection)?;
         let now = unit.now();
         let mut interrupt_turn: Option<Id> = None;
         let thread = threads::lock(&mut *unit.conn, thread_id)
@@ -937,88 +1848,59 @@ impl Engine {
         if let Some(found) = threads::input_by_client(
             &mut *unit.conn,
             thread_id,
-            Some(caller.user()),
+            Some(execution.user()),
             &request.client_id,
         )
         .await?
         {
-            let people = People::load(
-                &mut *unit.conn,
-                found.author_id.into_iter().chain(found.run_as),
-            )
-            .await?;
-            let seq = thread.seq();
-            let people = people
-                .with_approvals(&mut *unit.conn, found.approval_id)
-                .await?;
-            let input = views::input_view(&found, &people)?;
-            return Ok(Taken {
-                submitted: Submitted {
-                    input,
-                    seq,
-                    created: false,
-                },
+            if operands
+                .and_then(|prepared| prepared.replayed)
+                .is_some_and(|id| id != found.id)
+            {
+                return Err(orch_db::DbError::Retry.into());
+            }
+            return Ok(TakenRow {
+                row: found,
+                seq: thread.seq(),
+                created: false,
                 interrupt: None,
             });
         }
+        if operands.and_then(|prepared| prepared.replayed).is_some() {
+            return Err(orch_db::DbError::Retry.into());
+        }
+        if made.trigger == InputTrigger::Person {
+            self.release_background_wakes(unit, thread_id).await?;
+        }
+        let thread = threads::thread(unit.conn, thread_id)
+            .await?
+            .ok_or(InputError::NotFound)?;
         let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
         let queue_locked =
             thread.queue_held || crate::locks::held_by(unit.conn, thread_id).await?.is_some();
-        let steered_turn = active.as_ref().filter(|turn| {
-            !queue_locked
-                && request.delivery == Delivery::Steer
-                && turn.state == threads::turn_state::RUNNING
-                && turn.plan == request.plan
-        });
-        // Boxed: a message is taken deep in a request's stack. A steer uses
-        // the running turn's recorded provider, model and effort.
-        let serving =
-            Box::pin(self.check_author_for_turn(unit, caller, &thread, steered_turn)).await?;
-        // A message that waits for somebody else's access joins the queue: it neither steers nor stops the turn
-        // that runs on another person's access.
-        let without_model = matches!(serving, Serving::WithoutModel { .. });
-        if request.plan && !Box::pin(self.agent_plans(unit, &thread)).await? {
-            return Err(InputError::PlanUnsupported);
-        }
-        self.check_content(unit, caller, &request.content).await?;
-        let verified = match selection {
-            Some(selection) => Some(
-                crate::native_actions::validate_selected(
-                    unit,
-                    caller,
-                    thread_id,
-                    selection,
-                    request.delivery,
-                )
-                .await?,
-            ),
-            None => None,
-        };
-        if let Some(selection) = selection {
-            let bytes = serde_json::to_vec(&request.content)
-                .map_err(EngineError::from)?
-                .len()
-                + serde_json::to_vec(selection)
-                    .map_err(EngineError::from)?
-                    .len();
-            if bytes > orch_api_contract::common::MAX_JSON_BYTES {
-                return Err(InputError::TooLong);
-            }
-        }
-        let bypass = self
-            .bypass_of(
+        let steered_turn = steered_input_turn(
+            active.as_ref(),
+            queue_locked,
+            request.delivery,
+            request.plan,
+        );
+        let PreparedInputWork {
+            serving,
+            verified,
+            bypass,
+            content: prepared,
+        } = self
+            .prepare_input_work(
                 unit,
-                caller,
+                &execution,
                 &thread,
-                Some(caller.user()),
-                request.bypass.as_ref(),
+                request,
+                selection,
+                operands,
+                steered_turn,
             )
             .await?;
-        let mut prepared = self
-            .prepare_pastes(unit.conn, &thread, &request.content)
-            .await?;
-        self.prepare_attachment_names(unit.conn, thread_id, &mut prepared)
-            .await?;
+        let without_model = matches!(serving, Serving::WithoutModel { .. });
         let content = serde_json::to_value(&prepared).map_err(EngineError::from)?;
         // Where it goes, and in what state.
         let (state, place, turn) = if queue_locked {
@@ -1047,15 +1929,31 @@ impl Engine {
             }
         };
         let seq = unit.stamp(thread_id).await?;
-        let input_id = new_id();
-        let authority = input_authority(caller)?;
+        let input_id = allocated_input.unwrap_or_else(new_id);
+        let authority = execution.captured()?;
+        // The business stamp remains fixed. Natural key expiry is checked at this new
+        // acceptance boundary, after all preparation and sequence-lock waits.
+        if execution
+            .callers()
+            .iter()
+            .any(|caller| !caller.key_deadline_allows(self.inner.clock.as_ref()))
+        {
+            return Err(InputError::Denied(Box::new(Refusal::of(
+                Permission::ThreadInteract,
+                ObjectRef {
+                    kind: ObjectKind::Thread,
+                    id: thread_id,
+                },
+                Vec::new(),
+            ))));
+        }
         let inserted = threads::insert_input(
             &mut *unit.conn,
             &NewInput {
                 plan: request.plan,
                 id: input_id,
                 thread_id,
-                author_id: Some(caller.user()),
+                author_id: Some(execution.user()),
                 submission_authority: Some(&authority),
                 run_as: None,
                 run_as_authority: None,
@@ -1133,7 +2031,7 @@ impl Engine {
         }
         // What a goal's loop says is Orch's text of the goal's own words: it follows nobody and mentions nobody.
         if made.source == "user" {
-            crate::notifications::follow_thread(&mut *unit.conn, caller.user(), thread_id, now)
+            crate::notifications::follow_thread(&mut *unit.conn, execution.user(), thread_id, now)
                 .await?;
             crate::notifications::thread_mentions(&mut *unit.conn, &thread, &row, now).await?;
             // A goal that has ended leaves the line at the next person's input, so that it does not linger above new work.
@@ -1149,7 +2047,7 @@ impl Engine {
             Box::pin(self.cancel_source_request(
                 unit,
                 orch_db::queries::notifications::inbox::RequestSource::Plan(plan),
-                Some(caller.user()),
+                Some(execution.user()),
             ))
             .await?;
         }
@@ -1159,13 +2057,13 @@ impl Engine {
             && let Some(turn) = &active
         {
             threads::set_interrupt_cause(&mut *unit.conn, turn.id, "person").await?;
-            threads::mark_interrupted_by(&mut *unit.conn, turn.id, caller.user(), seq).await?;
+            threads::mark_interrupted_by(&mut *unit.conn, turn.id, execution.user(), seq).await?;
             interrupt_turn = Some(turn.id);
         }
-        // A person's new input is an explicit decision to proceed after an attention stop; a goal's loop is not a person.
-        if made.source == "user" {
-            sqlx::query("UPDATE model_call_recovery SET state='completed',due_at=NULL,context=context-'manual_stop'-'manual_request' WHERE node_id=$1 AND purpose='agent' AND state IN ('waiting','stopped')")
-                .bind(thread_id).execute(&mut *unit.conn).await.map_err(orch_db::DbError::from)?;
+        // Explicit new work supersedes an attention stop or a cached quota-reset
+        // wait; a goal loop does not, and ordinary non-quota backoff still binds.
+        if made.trigger == InputTrigger::Person {
+            crate::calls::supersede_for_input(&mut *unit.conn, thread_id).await?;
         }
         // A turn might start: the checks run in this transaction.
         if !row.queue_held
@@ -1175,7 +2073,8 @@ impl Engine {
                 thread_state::IDLE | thread_state::BLOCKED
             )
         {
-            let outcome = match self.preflight_in(unit, thread_id).await {
+            // Keep admission's large future out of the enclosing input state.
+            let outcome = match Box::pin(self.preflight_in(unit, thread_id)).await {
                 Ok(outcome) => outcome,
                 Err(error) if !matches!(error, EngineError::Db(_)) => {
                     tracing::warn!(%error, %thread_id, "pre-flight could not decide; the input waits");
@@ -1189,20 +2088,10 @@ impl Engine {
         let latest = threads::input(&mut *unit.conn, row.id)
             .await?
             .unwrap_or(row);
-        let people = People::load(
-            &mut *unit.conn,
-            latest.author_id.into_iter().chain(latest.run_as),
-        )
-        .await?
-        .with_approvals(&mut *unit.conn, latest.approval_id)
-        .await?;
-        let input = views::input_view(&latest, &people)?;
-        Ok(Taken {
-            submitted: Submitted {
-                input,
-                seq,
-                created: true,
-            },
+        Ok(TakenRow {
+            row: latest,
+            seq,
+            created: true,
             interrupt: interrupt_turn,
         })
     }
@@ -1316,20 +2205,26 @@ impl Engine {
     /// A cap is named by its identifier: one that does not stand in the way of this author's turn, or has
     /// room, is left out without an error; one the sender does not hold the row for refuses the request.
     /// An input that no person sent is never let past a limit.
-    async fn bypass_of(
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the ordinary bypass producer rechecks trusted current operation homes"
+    )]
+    async fn bypass_of_from(
         &self,
         unit: &mut Unit<'_>,
         caller: &Caller,
         thread: &ThreadRow,
         author: Option<Id>,
         asked: Option<&LimitBypassRequest>,
+        selected: Option<&[orch_authz::caps::Home]>,
     ) -> Result<Option<Json>, InputError> {
         let Some(asked) = asked else {
             return Ok(None);
         };
         let named: Vec<Id> = asked.caps.clone().unwrap_or_default();
-        let provider_limit = asked.provider_limit == Some(true);
-        if named.is_empty() && !provider_limit {
+        // Legacy vendor-limit flags are accepted but have no effect. Only named
+        // configured Orch caps can create a bypass action.
+        if named.is_empty() {
             return Ok(None);
         }
         let Some(author) = author else {
@@ -1338,42 +2233,14 @@ impl Engine {
             ));
         };
         let caps = self
-            .caps_to_pass(unit, caller, thread, author, &named)
+            .caps_to_pass(unit, caller, thread, author, &named, selected)
             .await?;
-        if provider_limit {
-            let Some(provider) = thread.provider_id else {
-                return Err(InputError::Invalid(
-                    "a thread with no provider has no limit to pass",
-                ));
-            };
-            let holds = self
-                .inner
-                .access
-                .may_pass(
-                    &mut *unit.conn,
-                    caller.user(),
-                    caller.as_admin(),
-                    &Limit::ProviderLimit { provider },
-                )
-                .await
-                .map_err(EngineError::from)?;
-            if !holds {
-                return Err(InputError::Denied(Box::new(Refusal::of(
-                    Permission::ProviderBypass,
-                    ObjectRef {
-                        kind: ObjectKind::Provider,
-                        id: provider,
-                    },
-                    Vec::new(),
-                ))));
-            }
-        }
-        if caps.is_empty() && !provider_limit {
+        if caps.is_empty() {
             return Ok(None);
         }
         let mut entry = json!({
             "by": caller.user(), "at": views::time_json(self.inner.clock.now()), "caps": caps,
-            "provider_limit": provider_limit,
+            "provider_limit": false,
         });
         // Whether the giver acted with As admin on: a system admin passes a cap of the system only so,
         // and is asked again, as they acted, before the turn starts.
@@ -1385,6 +2252,37 @@ impl Engine {
 
     /// Of the caps named, those that stand in the way of the turn of `author` in this thread and that the
     /// caller may let it past.
+    /// Actual homes affected by an explicit input bypass, using the same applicable/reached
+    /// cap selection as the writer. Facts only: normal bypass permission checks remain in place.
+    pub async fn input_bypass_subjects(
+        &self,
+        conn: &mut orch_db::Conn,
+        thread: &ThreadRow,
+        author: Id,
+        asked: &LimitBypassRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<orch_authz::caps::Home>, InputError> {
+        let mut unit = Unit::new(conn, now);
+        let named = asked.caps.as_deref().unwrap_or_default();
+        let homes: Vec<_> = self
+            .input_caps_to_pass(&mut unit, thread, author, named)
+            .await?
+            .iter()
+            .map(crate::caps::home_of)
+            .collect();
+        Ok(homes)
+    }
+
+    async fn input_caps_to_pass(
+        &self,
+        unit: &mut Unit<'_>,
+        thread: &ThreadRow,
+        author: Id,
+        named: &[Id],
+    ) -> Result<Vec<orch_db::usage::caps::CapRow>, InputError> {
+        operation::caps_to_pass(unit, thread, author, named).await
+    }
+
     async fn caps_to_pass(
         &self,
         unit: &mut Unit<'_>,
@@ -1392,45 +2290,30 @@ impl Engine {
         thread: &ThreadRow,
         author: Id,
         named: &[Id],
+        selected: Option<&[orch_authz::caps::Home]>,
     ) -> Result<Vec<Id>, InputError> {
         if named.is_empty() {
             return Ok(Vec::new());
         }
-        let settings = crate::resolved::load(&mut *unit.conn, thread.node_id).await?;
-        let Some(ask) = self.ask_of_thread(unit, thread, &settings).await? else {
-            return Ok(Vec::new());
-        };
-        let ask = crate::caps::Ask {
-            person: Some(author),
-            ..ask
-        };
-        let now = unit.now();
-        let applied = crate::caps::covering(&mut *unit.conn, &ask, now).await?;
-        let principal = Principal::load(&mut *unit.conn, caller.clone(), Time::new(now)).await?;
-        let mut passes: Vec<Id> = Vec::new();
-        for id in named {
-            if passes.contains(id) {
-                continue;
-            }
-            let Some(each) = applied.iter().find(|each| {
-                each.cap.id == *id && each.replaced_by.is_none() && each.cap.amount.is_some()
-            }) else {
-                continue;
-            };
-            let standing =
-                crate::caps::standing(&mut *unit.conn, &each.cap, Some(author), now).await?;
-            if standing.has_room() {
-                continue;
+        let reached = self.input_caps_to_pass(unit, thread, author, named).await?;
+        let now = Time::new(unit.now());
+        let principal = Principal::load(unit.conn, caller.clone(), now).await?;
+        let mut passes = Vec::with_capacity(reached.len());
+        for cap in reached {
+            if selected
+                .is_some_and(|selected| !bypass_was_prepared(selected, crate::caps::home_of(&cap)))
+            {
+                return Err(orch_db::DbError::Retry.into());
             }
             match orch_authz::caps::check_pass(
-                &mut *unit.conn,
+                unit.conn,
                 &principal,
-                crate::caps::home_of(&each.cap),
+                crate::caps::home_of(&cap),
                 orch_authz::Policy::default(),
             )
             .await?
             {
-                orch_authz::caps::Verdict::Allowed => passes.push(*id),
+                orch_authz::caps::Verdict::Allowed => passes.push(cap.id),
                 orch_authz::caps::Verdict::Refused(refusal) => {
                     return Err(InputError::Denied(refusal));
                 }
@@ -1611,6 +2494,21 @@ impl Engine {
                 }
                 None => false,
             };
+            // These proposed facts drive scope admission; the ordinary writer below still performs
+            // its existing paste/name materialization, which preserves the content's blob identities.
+            if let Some(content) = &content {
+                input.content = serde_json::to_value(content).map_err(EngineError::from)?;
+            }
+            if let Some(selected) = &selection {
+                input.native_action = selected
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(EngineError::from)?;
+            }
+            if let Some(delivery) = delivery {
+                input.delivery = delivery_word(delivery).into();
+            }
             let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
             let steered_turn = active.as_ref().filter(|turn| {
                 delivery == Some(Delivery::Steer)
@@ -1634,9 +2532,16 @@ impl Engine {
                 input.submission_authority = authority;
                 input.run_as = None;
                 input.run_as_authority = None;
-                let serving = match input_author_caller(&mut unit, thread_id, &input).await? {
+                let serving = match input_author_caller(
+                    &mut unit,
+                    thread_id,
+                    &input,
+                    self.inner.clock.as_ref(),
+                )
+                .await?
+                {
                     Some(author) => {
-                        self.check_author_for_turn(&mut unit, &author, &thread, steered_turn)
+                        self.check_authors_for_turn(&mut unit, &author, &thread, steered_turn)
                             .await?
                     }
                     None => Serving::WithoutModel { held: true },
@@ -1688,11 +2593,16 @@ impl Engine {
                         )
                         .await?;
                     }
-                    let author = input_author_caller(&mut unit, thread_id, &input)
-                        .await?
-                        .ok_or(crate::native_actions::NativeError::Unavailable)?;
+                    let author = input_author_caller(
+                        &mut unit,
+                        thread_id,
+                        &input,
+                        self.inner.clock.as_ref(),
+                    )
+                    .await?
+                    .ok_or(crate::native_actions::NativeError::Unavailable)?;
                     Some(
-                        crate::native_actions::validate_selected(
+                        crate::native_actions::validate_for_input(
                             &mut unit,
                             &author,
                             thread_id,
@@ -1739,9 +2649,6 @@ impl Engine {
             let mut interrupt = false;
             let mut steering = false;
             if let Some(delivery) = delivery {
-                let candidate = threads::input(&mut *unit.conn, input_id)
-                    .await?
-                    .ok_or(InputError::NotFound)?;
                 let seq = unit.stamp(thread_id).await?;
                 threads::set_input_delivery(
                     &mut *unit.conn,
@@ -1750,6 +2657,9 @@ impl Engine {
                     seq,
                 )
                 .await?;
+                let candidate = threads::input(&mut *unit.conn, input_id)
+                    .await?
+                    .ok_or(InputError::NotFound)?;
                 if delivery == Delivery::Steer
                     && !without_model
                     && let Some(turn) = active.as_ref().filter(|turn| {
@@ -1763,20 +2673,29 @@ impl Engine {
                             .await?;
                         // Ordering another person's input never lends it the driver's provider
                         // rights. Its original author is checked again at the delivery boundary.
-                        let sender = input_caller(&mut unit, &thread, &candidate)
-                            .await?
-                            .ok_or_else(|| {
-                                InputError::Denied(Box::new(Refusal::of(
-                                    Permission::ProviderUse,
-                                    ObjectRef {
-                                        kind: ObjectKind::Provider,
-                                        id: thread.provider_id.unwrap_or_else(Id::nil),
-                                    },
-                                    Vec::new(),
-                                )))
-                            })?;
-                        self.check_sender_for_turn(&mut unit, &sender, &thread, true, Some(turn))
+                        let sender =
+                            input_caller(&mut unit, &thread, &candidate, self.inner.clock.as_ref())
+                                .await?
+                                .ok_or_else(|| {
+                                    InputError::Denied(Box::new(Refusal::of(
+                                        Permission::ProviderUse,
+                                        ObjectRef {
+                                            kind: ObjectKind::Provider,
+                                            id: thread.provider_id.unwrap_or_else(Id::nil),
+                                        },
+                                        Vec::new(),
+                                    )))
+                                })?;
+                        for caller in sender.callers() {
+                            self.check_sender_for_turn(
+                                &mut unit,
+                                caller,
+                                &thread,
+                                true,
+                                Some(turn),
+                            )
                             .await?;
+                        }
                         let needs_step = if let Some(author) = candidate.author_id {
                             crate::preflight::second_step_missing(
                                 &mut *unit.conn,
@@ -2111,17 +3030,61 @@ impl Engine {
     /// Accepts a proposed plan once and queues one ordinary attributed input in the same transaction.
     pub async fn decide_plan_guarded(
         &self,
-        mut tx: orch_db::Tx,
+        tx: orch_db::Tx,
         principal: Principal,
         thread_id: Id,
         item_id: Id,
         body: &orch_api_contract::threads::ThreadPlanDecideBody,
     ) -> Result<orch_api_contract::threads::ThreadPlanDecideReply, InputError> {
+        let (input, decision) = self
+            .decide_plan_projected_guarded(
+                tx,
+                principal,
+                thread_id,
+                item_id,
+                body,
+                false,
+                || Ok(()),
+            )
+            .await?;
+        Ok(orch_api_contract::threads::ThreadPlanDecideReply {
+            input: input.full()?.input,
+            decision,
+        })
+    }
+
+    /// The same native plan writer, with optional response content from admitted API disclosure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "native operands, disclosure and one transport boundary"
+    )]
+    pub async fn decide_plan_projected_guarded(
+        &self,
+        mut tx: orch_db::Tx,
+        principal: Principal,
+        thread_id: Id,
+        item_id: Id,
+        body: &orch_api_contract::threads::ThreadPlanDecideBody,
+        receipt_only: bool,
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<
+        (
+            SubmittedProjection,
+            orch_api_contract::approvals::RequestDecisionStatus,
+        ),
+        InputError,
+    > {
         let caller = principal.caller().clone();
         let now = principal.now().get();
         let (finished, reply) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let thread = threads::lock(&mut *unit.conn, thread_id)
+            let mut unit = Unit::with_first_effect(&mut tx, now, before_effect);
+            let thread = self
+                .lock_source_control(
+                    unit.conn,
+                    thread_id,
+                    orch_db::queries::notifications::inbox::RequestSource::Plan(item_id),
+                    true,
+                )
                 .await?
                 .ok_or(InputError::NotFound)?;
             let permission = crate::approvals::deciding_permission(
@@ -2214,8 +3177,18 @@ impl Engine {
                 .execute(&mut *unit.conn)
                 .await
                 .map_err(orch_db::DbError::from)?;
-            let taken =
-                Box::pin(self.submit_input_in(&mut unit, &caller, thread_id, &request)).await?;
+            let taken = Box::pin(self.submit_selected_made_row_in(
+                &mut unit,
+                InputExecution::Direct(&caller),
+                thread_id,
+                &request,
+                None,
+                Made::USER,
+                None,
+                None,
+            ))
+            .await?;
+            let (mut submitted, _) = taken.project(unit.conn, receipt_only).await?;
             crate::audit_facts::person(
                 &mut *unit.conn,
                 caller.user(),
@@ -2225,13 +3198,8 @@ impl Engine {
                 now,
             )
             .await?;
-            (
-                unit.finish().await?,
-                orch_api_contract::threads::ThreadPlanDecideReply {
-                    input: taken.submitted.input,
-                    decision,
-                },
-            )
+            submitted.seq = unit.seq_given(thread_id).unwrap_or(submitted.seq);
+            (unit.finish().await?, (submitted, decision))
         };
         self.commit(tx, finished).await?;
         Ok(reply)
@@ -2248,8 +3216,11 @@ impl Engine {
     ) -> Result<ThreadInput, InputError> {
         let tx = self.inner.db.begin().await?;
         let now = self.inner.clock.now();
-        self.run_input_with(tx, caller, now, thread_id, input_id)
-            .await
+        Ok(self
+            .run_input_with(tx, caller, now, thread_id, input_id, false, || Ok(()))
+            .await?
+            .full()?
+            .input)
     }
 
     /// As [`Engine::run_input`], in the transaction of the API's action guard, with its caller and its time.
@@ -2262,10 +3233,44 @@ impl Engine {
     ) -> Result<ThreadInput, InputError> {
         let caller = principal.caller().clone();
         let now = principal.now().get();
-        self.run_input_with(tx, &caller, now, thread_id, input_id)
-            .await
+        Ok(self
+            .run_input_with(tx, &caller, now, thread_id, input_id, false, || Ok(()))
+            .await?
+            .full()?
+            .input)
     }
 
+    /// The same native held-input writer with separately admitted optional response content.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "native operands, disclosure and one transport boundary"
+    )]
+    pub async fn run_input_projected_guarded(
+        &self,
+        tx: orch_db::Tx,
+        principal: Principal,
+        thread: Id,
+        input: Id,
+        receipt_only: bool,
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<SubmittedProjection, InputError> {
+        let now = principal.now().get();
+        self.run_input_with(
+            tx,
+            principal.caller(),
+            now,
+            thread,
+            input,
+            receipt_only,
+            before_effect,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "native operands, disclosure and one transport boundary"
+    )]
     async fn run_input_with(
         &self,
         mut tx: orch_db::Tx,
@@ -2273,24 +3278,37 @@ impl Engine {
         now: chrono::DateTime<chrono::Utc>,
         thread_id: Id,
         input_id: Id,
-    ) -> Result<ThreadInput, InputError> {
+        receipt_only: bool,
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<SubmittedProjection, InputError> {
         let (finished, view) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let thread = threads::lock(&mut *unit.conn, thread_id)
+            let mut unit = Unit::with_first_effect(&mut tx, now, before_effect);
+            let thread = self
+                .lock_source_control(
+                    unit.conn,
+                    thread_id,
+                    orch_db::queries::notifications::inbox::RequestSource::Input(input_id),
+                    true,
+                )
                 .await?
                 .ok_or(InputError::NotFound)?;
             if thread.archived_at.is_some() {
                 return Err(InputError::Archived);
             }
-            let authority = InputAuthority {
-                credentials: vec![credential_authority(caller)],
-            };
-            let current = authority_caller(
-                unit.conn,
+            let input = threads::input(&mut *unit.conn, input_id)
+                .await?
+                .filter(|input| input.thread_id == thread_id)
+                .ok_or(InputError::NotFound)?;
+            let raw_authority = input_authority(caller)?;
+            let authority = saved_authority(Some(&raw_authority))?
+                .ok_or_else(|| EngineError::unreadable("the run approval has no authority"))?;
+            let current = input_authority_callers(
+                &mut unit,
+                &thread,
+                &input,
                 caller.user(),
-                thread_id,
-                Time::new(now),
                 &authority,
+                self.inner.clock.as_ref(),
             )
             .await?
             .ok_or_else(|| {
@@ -2303,12 +3321,9 @@ impl Engine {
                     Vec::new(),
                 )))
             })?;
-            self.check_sender(&mut unit, &current, &thread, true)
-                .await?;
-            let input = threads::input(&mut *unit.conn, input_id)
-                .await?
-                .filter(|input| input.thread_id == thread_id)
-                .ok_or(InputError::NotFound)?;
+            for caller in current.callers() {
+                self.check_sender(&mut unit, caller, &thread, true).await?;
+            }
             if input.continuation_id != thread.active_continuation_id {
                 return Err(InputError::Invalid(
                     "select this message's active history before running it",
@@ -2335,7 +3350,10 @@ impl Engine {
             let seq = unit.stamp(thread_id).await?;
             self.check_input_author_driving(&mut unit, &thread, &input)
                 .await?;
-            let provenance = derived_input_provenance(&input, Some(&current))?;
+            let mut provenance = derived_input_provenance(&input, None)?;
+            provenance.run_as = Some(current.user());
+            provenance.run_as_authority =
+                Some(serde_json::to_value(current.captured()).map_err(EngineError::from)?);
             Box::pin(self.claim_source(
                 &mut unit,
                 &thread,
@@ -2386,18 +3404,16 @@ impl Engine {
             let latest = threads::input(&mut *unit.conn, input_id)
                 .await?
                 .ok_or(InputError::NotFound)?;
-            let people = People::load(
-                &mut *unit.conn,
-                latest
-                    .author_id
-                    .into_iter()
-                    .chain(latest.run_as)
-                    .collect::<Vec<_>>(),
-            )
-            .await?
-            .with_approvals(&mut *unit.conn, latest.approval_id)
+            let seq = unit.seq_given(thread_id).unwrap_or(thread.seq());
+            let (projected, _) = TakenRow {
+                row: latest,
+                seq,
+                created: false,
+                interrupt: None,
+            }
+            .project(unit.conn, receipt_only)
             .await?;
-            (unit.finish().await?, views::input_view(&latest, &people)?)
+            (unit.finish().await?, projected)
         };
         self.commit(tx, finished).await?;
         Ok(view)
@@ -2416,8 +3432,21 @@ impl Engine {
     ) -> Result<ThreadInput, InputError> {
         let tx = self.inner.db.begin().await?;
         let now = self.inner.clock.now();
-        self.bypass_input_with(tx, caller, now, thread_id, input_id, asked)
-            .await
+        Ok(self
+            .bypass_input_with(
+                tx,
+                caller,
+                now,
+                thread_id,
+                input_id,
+                asked,
+                false,
+                None,
+                || Ok(()),
+            )
+            .await?
+            .full()?
+            .input)
     }
 
     /// As [`Engine::bypass_input`], in the transaction of the API's action guard, with its caller and its time.
@@ -2431,10 +3460,58 @@ impl Engine {
     ) -> Result<ThreadInput, InputError> {
         let caller = principal.caller().clone();
         let now = principal.now().get();
-        self.bypass_input_with(tx, &caller, now, thread_id, input_id, asked)
-            .await
+        Ok(self
+            .bypass_input_with(
+                tx,
+                &caller,
+                now,
+                thread_id,
+                input_id,
+                asked,
+                false,
+                None,
+                || Ok(()),
+            )
+            .await?
+            .full()?
+            .input)
     }
 
+    /// The same native bypass writer with trusted current homes and optional full response.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "same native request, trusted cap homes and optional disclosure stay separate"
+    )]
+    pub async fn bypass_input_projected_guarded(
+        &self,
+        tx: orch_db::Tx,
+        principal: Principal,
+        thread: Id,
+        input: Id,
+        asked: &LimitBypassRequest,
+        receipt_only: bool,
+        selected: &[orch_authz::caps::Home],
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<SubmittedProjection, InputError> {
+        let now = principal.now().get();
+        self.bypass_input_with(
+            tx,
+            principal.caller(),
+            now,
+            thread,
+            input,
+            asked,
+            receipt_only,
+            Some(selected),
+            before_effect,
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "same native request, trusted actual cap homes and response disclosure are separate"
+    )]
     async fn bypass_input_with(
         &self,
         mut tx: orch_db::Tx,
@@ -2443,10 +3520,19 @@ impl Engine {
         thread_id: Id,
         input_id: Id,
         asked: &LimitBypassRequest,
-    ) -> Result<ThreadInput, InputError> {
+        receipt_only: bool,
+        selected: Option<&[orch_authz::caps::Home]>,
+        before_effect: impl FnOnce() -> Result<(), EngineError> + Send,
+    ) -> Result<SubmittedProjection, InputError> {
         let (finished, view) = {
-            let mut unit = Unit::new(&mut tx, now);
-            let thread = threads::lock(&mut *unit.conn, thread_id)
+            let mut unit = Unit::with_first_effect(&mut tx, now, before_effect);
+            let thread = self
+                .lock_source_control(
+                    unit.conn,
+                    thread_id,
+                    orch_db::queries::notifications::inbox::RequestSource::Input(input_id),
+                    false,
+                )
                 .await?
                 .ok_or(InputError::NotFound)?;
             if thread.archived_at.is_some() {
@@ -2463,7 +3549,14 @@ impl Engine {
                 });
             }
             let entry = self
-                .bypass_of(&mut unit, caller, &thread, input.author_id, Some(asked))
+                .bypass_of_from(
+                    &mut unit,
+                    caller,
+                    &thread,
+                    input.author_id,
+                    Some(asked),
+                    selected,
+                )
                 .await?;
             let mut kept: Vec<Json> = input
                 .limit_bypass
@@ -2503,22 +3596,25 @@ impl Engine {
             let latest = threads::input(&mut *unit.conn, input_id)
                 .await?
                 .ok_or(InputError::NotFound)?;
-            let people = People::load(
-                &mut *unit.conn,
-                latest
-                    .limit_bypass
-                    .as_ref()
-                    .map(|_| ())
-                    .map_or_else(Vec::new, |()| bypass_authors(&latest))
-                    .into_iter()
-                    .chain(latest.author_id)
-                    .chain(latest.run_as)
-                    .collect::<Vec<_>>(),
-            )
-            .await?
-            .with_approvals(&mut *unit.conn, latest.approval_id)
+            let people = latest
+                .limit_bypass
+                .as_ref()
+                .map(|_| ())
+                .map_or_else(Vec::new, |()| bypass_authors(&latest))
+                .into_iter()
+                .chain(latest.author_id)
+                .chain(latest.run_as)
+                .collect();
+            let seq = unit.seq_given(thread_id).unwrap_or(thread.seq());
+            let (projected, _) = TakenRow {
+                row: latest,
+                seq,
+                created: false,
+                interrupt: None,
+            }
+            .project_with_people(unit.conn, receipt_only, Some(people))
             .await?;
-            (unit.finish().await?, views::input_view(&latest, &people)?)
+            (unit.finish().await?, projected)
         };
         self.commit(tx, finished).await?;
         Ok(view)
@@ -2595,6 +3691,10 @@ impl Engine {
     /// Makes an input of what was announced to a thread, in the transaction of `unit`. It has no author: at
     /// pre-flight the thread's first owner is asked in its place. `id` makes it once; the thread's row must be
     /// locked by the caller.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the native posting retains provenance separately from its authorless model actor"
+    )]
     pub(crate) async fn queue_announcement_input(
         &self,
         unit: &mut Unit<'_>,
@@ -2603,6 +3703,7 @@ impl Engine {
         text: &str,
         files: &[ContentPart],
         arrival: Arrival,
+        posting: Option<(&Caller, Id, &threads::tools::AnnouncementRow)>,
     ) -> Result<(), EngineError> {
         let now = unit.now();
         // What a message to one thread carries goes with it as file parts, which the courier writes before the
@@ -2644,6 +3745,22 @@ impl Engine {
         let Some(made) = made else {
             return Ok(());
         };
+        if let Some((caller, place, announcement)) = posting {
+            let provenance = crate::tools::announce::AnnouncementProvenance::input(
+                caller,
+                place,
+                announcement,
+                &made,
+            )?;
+            let stored = serde_json::to_value(InputAuthority::for_announcement(provenance))?;
+            if !threads::retain_announcement_input_provenance(unit.conn, made.id, &stored, seq)
+                .await?
+            {
+                return Err(EngineError::unreadable(
+                    "the new announcement input lost its birth association",
+                ));
+            }
+        }
         let active = threads::active_turn(&mut *unit.conn, thread_id).await?;
         if !made.queue_held
             && let (Arrival::Interrupt { responsible }, Some(turn)) = (arrival, &active)

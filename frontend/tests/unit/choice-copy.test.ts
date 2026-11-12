@@ -1,6 +1,6 @@
 /** Choice names are short terms; existing explanations and interpolated context stay separately readable. */
 import { describe, expect, it } from 'vitest';
-import { choiceCopy, choiceOption, offeredChoice, settingChoice } from '@/i18n/choices';
+import { choiceCopy, choiceOption, offeredChoice, settingChoice, SETTING_CHOICE_GROUPS } from '@/i18n/choices';
 import { i18n, setLocale } from '@/i18n';
 import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 
@@ -13,6 +13,29 @@ function enumValues(schema: unknown): string[] {
 }
 
 describe('named product choices', () => {
+  it('keeps retired description automation out of both the shipped registry and choice tables', async () => {
+    try {
+      for (const locale of ['en', 'zh-CN'] as const) {
+        await setLocale(locale);
+        for (const key of ['auto.description', 'auto.topic_rollup', 'docs.description_chars']) {
+          expect(SETTINGS_REGISTRY.some((def) => def.key === key), `${locale}:${key}:registry`).toBe(false);
+          expect(SETTING_CHOICE_GROUPS[key], `${locale}:${key}:choices`).toBeUndefined();
+          expect(settingChoice(i18n.t, key, 'off'), `${locale}:${key}:off`).toBeNull();
+          expect(settingChoice(i18n.t, key, 'summarizer'), `${locale}:${key}:summarizer`).toBeNull();
+          expect(i18n.getResource(locale, 'translation', `settingRegistry.${key}`), `${locale}:${key}:catalogue`).toBeUndefined();
+          expect(i18n.getResource(locale, 'translation', `day100.builtin.${key}`), `${locale}:${key}:builtin`).toBeUndefined();
+        }
+        expect(i18n.getResource(locale, 'translation', 'choiceCatalog.automation.rollup')).toBeUndefined();
+        for (const def of SETTINGS_REGISTRY.filter((entry) => ['auto.title', 'auto.tags', 'auto.triggers', 'summary.targets'].includes(entry.key))) {
+          for (const value of enumValues(def.schema)) {
+            const copy = settingChoice(i18n.t, def.key, value);
+            expect(copy?.name, `${locale}:${def.key}:${value}:retained-name`).toBeTruthy();
+            expect(copy?.description, `${locale}:${def.key}:${value}:retained-description`).toBeTruthy();
+          }
+        }
+      }
+    } finally { await setLocale('en'); }
+  });
   it('covers every enum offered by the shipped settings registry, including nested and list choices, in both languages', async () => {
     try {
       for (const locale of ['en', 'zh-CN'] as const) {

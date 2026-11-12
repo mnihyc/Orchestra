@@ -13,6 +13,7 @@ heading_keywords.import-files: 文件夹, zip, 链接, 引用, 图片, notion, l
 heading_keywords.word-files: docx, 标题, 表格, 图片, 样式
 heading_keywords.what-agents-do: 文件, 格式, seq, 块, 地址, 批量, 导入, 检出, 提交, 评论
 heading_keywords.what-a-file-cannot-keep: 丢失, 颜色, 对齐, 合并, 列宽, 空白
+summary: 通过 Orch Markdown、粘贴和文件导入，与人员和代理交换文档。
 ---
 
 # 把文档写成文件

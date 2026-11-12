@@ -61,7 +61,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -229,7 +230,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -247,7 +249,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -265,7 +268,8 @@
       "holders": [
         "role",
         "group",
-        "user"
+        "user",
+        "agents"
       ],
       "options_schema": null
     },
@@ -844,7 +848,7 @@
         "provider"
       ],
       "label": "Use Provider",
-      "allows": "Run turns on the provider: put a thread on it, and give input to threads that run on it, with the models and efforts the entry allows.",
+      "allows": "Run turns and enabled services on the provider, within the entry's model, service and effort lists.",
       "profiles": false,
       "holders": [
         "role",
@@ -865,6 +869,16 @@
               "type": "string"
             },
             "description": "The models the holder may run, by name; left out, every enabled model\nof the provider."
+          },
+          "services": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The enabled service offerings the holder may use, by name, family or group.\nLeft out, every enabled service; independent of the model list."
           },
           "efforts": {
             "type": [

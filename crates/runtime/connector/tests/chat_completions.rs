@@ -137,11 +137,13 @@ async fn a_chat_turn(stream: bool) {
     let seen = server.seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0["authorization"], format!("Bearer {}", p.key));
+    // Omission resolves to the ordinary tier locally, keeping account defaults
+    // inside the lease's provider ceiling. Other request members stay exact.
     assert_eq!(
         seen[0].1,
         json!({"model":MODEL,"messages":[{"role":"user","content":"Hello"}],"stream":stream,
         "stream_options":{"include_usage":true},"tools":[{"type":"function","function":{"name":"local_tool","parameters":{"type":"object","properties":{}}}}],
-        "vendor_option":{"keep":"unchanged"}})
+        "vendor_option":{"keep":"unchanged"},"service_tier":"default"})
     );
     assert!(!p.given.lock().unwrap().join("\n").contains(&p.key));
     let usage = p.wait_provider_event("lease.usage", 1).await;
@@ -200,4 +202,77 @@ async fn a_non_streamed_chat_completions_turn_is_relayed_under_the_existing_leas
 #[tokio::test]
 async fn a_streamed_chat_completions_turn_is_relayed_under_the_existing_lease_policy() {
     a_chat_turn(true).await;
+}
+
+#[tokio::test]
+async fn own_chat_calls_use_the_actual_endpoints_output_limit_without_lending_owned_fields() {
+    use orch_link_contract::commands::{CompletionPurpose, ProviderComplete};
+    for (options, field, absent) in [
+        (json!({}), "max_tokens", "max_completion_tokens"),
+        (
+            json!({"output_limit_field":"max_tokens"}),
+            "max_tokens",
+            "max_completion_tokens",
+        ),
+        (
+            json!({"output_limit_field":"max_completion_tokens"}),
+            "max_completion_tokens",
+            "max_tokens",
+        ),
+    ] {
+        let server = Server::start().await;
+        let p = ProviderRig::build(Options::default(), |rig, _| {
+            rig.config.provider.upstreams.push(server.base.clone())
+        })
+        .await;
+        let started = p
+            .start_provider(&[(CHAT, server.base.clone(), options)])
+            .await;
+        assert!(matches!(started, Progress::Succeeded(_)), "{started:?}");
+        let request = ProviderComplete {
+            provider_id: p.rig.provider,
+            purpose: CompletionPurpose::Summary,
+            protocol: CHAT.to_owned(),
+            model_name: MODEL.to_owned(),
+            system: "Summarize the input".to_owned(),
+            input: "Original material".to_owned(),
+            max_output_tokens: 120,
+            params: None,
+            model_parameters: Some(common::model::enabled_parameters()),
+        };
+        let reply = p.rig.succeed(&p.provider_key(), &request).await;
+        assert_eq!(reply["text"], "Hello local model");
+        assert_eq!(reply["usage"]["input_tokens"], 100);
+        let seen = server.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0["authorization"], format!("Bearer {}", p.key));
+        assert_eq!(seen[0].1[field], 120);
+        assert!(seen[0].1.get(absent).is_none());
+        assert_eq!(seen[0].1["model"], MODEL);
+        assert_eq!(seen[0].1["messages"][0]["content"], request.system);
+        assert_eq!(seen[0].1["messages"][1]["content"], request.input);
+        assert_eq!(seen[0].1["stream"], false);
+        for params in [
+            json!({"max_tokens":999}),
+            json!({"max_completion_tokens":999}),
+            json!({"store":true}),
+        ] {
+            let progress = p
+                .rig
+                .send(
+                    &p.provider_key(),
+                    &ProviderComplete {
+                        params: Some(params),
+                        ..request.clone()
+                    },
+                )
+                .await;
+            assert!(matches!(progress, Progress::Failed(_)), "{progress:?}");
+        }
+        assert_eq!(
+            server.seen.lock().unwrap().len(),
+            1,
+            "owned fields cannot be replaced by use options"
+        );
+    }
 }

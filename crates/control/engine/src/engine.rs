@@ -71,6 +71,7 @@ pub struct Inner {
     pub(crate) woken: Notify,
     pub(crate) stopped: AtomicBool,
     pub(crate) started: AtomicBool,
+    pub(crate) ask_runtime: AtomicBool,
     /// When the indexer of search by meaning last began a turn here, whether one runs, and how many seconds the
     /// system's tuning puts between turns (as last read; the shipped default until then).
     pub(crate) indexed: Mutex<Option<Instant>>,
@@ -80,6 +81,11 @@ pub struct Inner {
     pub(crate) host_services: RwLock<Option<Arc<dyn HostServices>>>,
     /// What answers the four port tools, once the program the engine lives in has attached it.
     pub(crate) port_tools: RwLock<Option<Arc<dyn crate::tools::ports::PortTools>>>,
+    pub(crate) read_tools: RwLock<Option<Arc<dyn crate::tools::read_tools::ReadTools>>>,
+    /// The API's existing scheduled-input producer, reached by the managed schedule tool.
+    pub(crate) schedule_tools: RwLock<Option<Arc<dyn crate::tools::schedule::ScheduleTools>>>,
+    pub(crate) capability_services:
+        RwLock<Option<Arc<orch_provider_contract::builtins::BuiltinSources>>>,
     /// What keeps the files of copies shared with agents, once that has been attached.
     pub(crate) parcels: RwLock<Option<Arc<dyn crate::sharing::Parcels>>>,
     /// What writes the forms of a single export that need the API's views, once that has been attached (the
@@ -180,11 +186,15 @@ impl Engine {
                 woken: Notify::new(),
                 stopped: AtomicBool::new(false),
                 started: AtomicBool::new(false),
+                ask_runtime: AtomicBool::new(false),
                 indexed: Mutex::new(None),
                 indexing: AtomicBool::new(false),
                 index_every: AtomicU64::new(INDEX_EVERY_SECS),
                 host_services: RwLock::new(None),
                 port_tools: RwLock::new(None),
+                read_tools: RwLock::new(None),
+                schedule_tools: RwLock::new(None),
+                capability_services: RwLock::new(None),
                 parcels: RwLock::new(None),
                 forms: RwLock::new(None),
                 reaped: Mutex::new(None),
@@ -367,7 +377,9 @@ impl Engine {
             if recheck {
                 last_recheck = Some(Instant::now());
             }
-            if let Err(error) = self.sweep(recheck).await {
+            // One sweep contains every recovery branch; do not embed it again in
+            // both the supervisor and the task that polls the supervisor.
+            if let Err(error) = Box::pin(self.sweep(recheck)).await {
                 tracing::warn!(%error, "a sweep of the engine failed; the next looks again");
             }
             let pause = if lock(&self.inner.wakes).is_empty() {
@@ -449,6 +461,7 @@ impl Engine {
                     .into_iter()
                     .map(|input| input.thread_id),
             );
+            due.extend(threads::offline::due(&mut conn, self.inner.clock.now(), batch).await?);
             due.extend(
                 threads::interrupted_active_turns(&mut conn, batch)
                     .await?
@@ -647,6 +660,22 @@ impl Engine {
         let blocked = {
             let mut conn = self.inner.db.acquire().await?;
             threads::blocked_threads_of_environment(&mut conn, environment).await?
+        };
+        for thread in &blocked {
+            self.wake(*thread);
+        }
+        Ok(blocked.len())
+    }
+
+    /// Current configuration or committed build facts can release only their waiting binding inputs.
+    pub async fn reevaluate_bindings(
+        &self,
+        machine: Option<Id>,
+        environment: Option<Id>,
+    ) -> Result<usize, EngineError> {
+        let blocked: Vec<Id> = {
+            let mut conn = self.inner.db.acquire().await?;
+            threads::invalid_bindings_of(&mut conn, machine, environment).await?
         };
         for thread in &blocked {
             self.wake(*thread);
