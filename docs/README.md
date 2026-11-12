@@ -14,8 +14,9 @@ reviewing the deployment's current support and validation limits.
 - [Operator guide](operator/README.md) covers deployment and recovery procedures.
 - [Security model](security/README.md) describes controls and their limits.
 
-[`openapi.json`](openapi.json) is generated from the HTTP contract types and
-route declarations. Its matching browser types are generated in the same
-check. The release runner records actual deployment, native harness and browser
+[`openapi.json`](openapi.json) describes the key-authenticated `/openapi/v1` business API.
+Browser `/api/v1` types are generated separately from the same internal Rust contract in the same
+check; browser OpenAPI is not published. [HTTP surfaces and continuations](development/api-surfaces.md)
+describes credential and socket routing. The release runner records actual deployment, native harness and browser
 results; reserved implementations and unrun proofs do not become supported
 merely because an interface is documented.

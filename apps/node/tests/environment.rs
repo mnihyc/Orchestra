@@ -6,6 +6,7 @@
 //! after the runtime it made (`orch-environment-…`, `orch-ws-…`), carries the lab's label because the driver
 //! puts it on all it makes, and is tracked by the name as soon as the runtime's row says what it is called,
 //! so that the lab removes it by that exact name whatever becomes of the test.
+// The engine's futures this fixture awaits are deep; the default query depth does not lay them out.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -236,7 +237,7 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         return;
     };
     let lab = Arc::new(lab);
-    let mut world = World::start(&lab.bridge).await;
+    let mut world = World::start(&lab).await;
     let tracker = track_runtimes(&world, &lab);
 
     // The system as the programs compose it: the engine runs and hears what machines say, and what making
@@ -304,7 +305,9 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the creator's own full environment view");
     assert_eq!(made.base.status, EnvironmentStatus::Provisioning);
     let job = made.job.expect("a job makes the unit").id;
     eventually("the job to end", || async {
@@ -412,7 +415,9 @@ async fn an_environment_made_over_http_is_a_container_whose_connector_enrolls_an
         })
         .send()
         .await
-        .ok();
+        .ok()
+        .into_full()
+        .expect("the creator's own full thread view");
     let thread = thread.base.id;
     let sent = app
         .call(ThreadInputCreate, &[&thread])

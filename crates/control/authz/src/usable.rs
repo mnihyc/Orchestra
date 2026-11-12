@@ -20,6 +20,7 @@ use orch_access_contract::pages::{Entry, Holder, Origin};
 use orch_access_contract::permissions::{
     Arrangement, Options, Permission, ProviderUse, ResourceKind,
 };
+use orch_access_contract::whereabouts::{WhereName, Whereabouts};
 use orch_db::Conn;
 use orch_db::queries::resources as rows;
 use orch_types::{Id, Time};
@@ -378,6 +379,88 @@ pub async fn usable(
     )
 }
 
+/// The exact `usable` decision and options for native-selected IDs on one current snapshot.
+/// Home policy has two ordinary node-policy forms; each is loaded once for all its sites.
+/// Subscription sharing remains the resource's own home policy at the same `access` call.
+pub async fn usable_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    node: Option<Id>,
+    policies: &Policies,
+) -> Result<HashMap<Id, Usable>, Error> {
+    let mut result = HashMap::new();
+    if ids.is_empty() {
+        return Ok(result);
+    }
+    let mut graph = Graph::default();
+    if let Some(node) = node {
+        graph.extend(conn, &[node]).await?;
+    }
+    let found = read_into(conn, &mut graph, ids).await?;
+    let path = node
+        .and_then(|id| graph.get(id))
+        .map(|node| node.path.clone());
+    for external in [false, true] {
+        let selected: Vec<_> = found
+            .iter()
+            .filter(|resource| policies.at(resource.home).owners_name_outsiders == external)
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        let sites: Vec<_> = selected
+            .iter()
+            .filter_map(|resource| site_of(&graph, resource))
+            .collect();
+        let mut permissions = selected
+            .iter()
+            .filter_map(|resource| use_permission(resource.kind))
+            .collect::<Vec<_>>();
+        permissions.sort_by_key(|permission| permission.as_str());
+        permissions.dedup();
+        let frame = Frame::load(
+            conn,
+            principal,
+            ResourcePolicy {
+                owners_name_outsiders: external,
+                ..ResourcePolicy::default()
+            }
+            .node_policy(),
+            graph.clone(),
+            &sites,
+            &permissions,
+        )
+        .await?;
+        let sites = sites
+            .into_iter()
+            .map(|site| (site.id, site))
+            .collect::<HashMap<_, _>>();
+        for resource in selected {
+            let site = sites
+                .get(&resource.id)
+                .ok_or(Error::NotFound(resource.id))?;
+            let answer = if let Some(unavailable) = resource.unavailable() {
+                Usable::Unavailable(unavailable)
+            } else {
+                match access(
+                    &frame,
+                    resource,
+                    site,
+                    path.as_deref(),
+                    policies.at(resource.home).keeps_to_its_owner(resource),
+                )? {
+                    Ok(granted) => Usable::Yes(Box::new(granted)),
+                    Err(Access::KeptToItsOwner) => Usable::KeptToItsOwner,
+                    Err(Access::None) => Usable::No,
+                }
+            };
+            result.insert(resource.id, answer);
+        }
+    }
+    Ok(result)
+}
+
 /// Of the pairs `pairs` (a thread, and the provider it runs on), those for which the person may
 /// use the provider for that thread, as [`usable`] says it for each: the statements are those of
 /// one question, whatever the number of threads. A provider that is switched off or deleted, or
@@ -687,6 +770,9 @@ struct Judging<'a> {
     /// Whether the state of the provider and the models is looked at: only for somebody who lacks
     /// nothing else, so that nobody learns of it who would be refused in any case.
     state_matters: bool,
+    /// Where the work is to run, for work that runs in an environment; none for work that runs
+    /// in none, which no entry holds to a place.
+    at: Option<&'a Whereabouts>,
 }
 
 /// Judges the use of a provider for what was chosen, for the person the frame is about.
@@ -702,10 +788,13 @@ async fn judge_provider(
         chosen,
         kept,
         state_matters,
+        at,
     } = *judging;
     let wanted_options = MissingOptions {
+        services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
+        r#where: None,
     };
     let lack = |closed: Option<Closed>, options: MissingOptions| Lacking {
         site: site.clone(),
@@ -774,8 +863,15 @@ async fn judge_provider(
     let narrowed_effort = chosen
         .effort
         .is_some_and(|effort| !my_efforts.contains(&effort));
-    if narrowed_model || narrowed_effort {
-        verdict.lacking.push(lack(None, wanted_options));
+    let outside = outside_place(&mine, at);
+    if narrowed_model || narrowed_effort || outside.is_some() {
+        verdict.lacking.push(lack(
+            None,
+            MissingOptions {
+                r#where: outside,
+                ..wanted_options
+            },
+        ));
     } else {
         verdict.grant = Some(TurnGrant {
             options: mine.clone(),
@@ -790,6 +886,95 @@ async fn judge_provider(
         });
     }
     Ok(verdict)
+}
+
+/// Where the environment `environment` is: itself, the physical machine it is on now (as the
+/// environment resolver reads it, for a managed environment that of its host) and the host that
+/// machine is the facade of. Every question about where an environment is, is answered from here.
+pub async fn place_of(conn: &mut Conn, environment: Id) -> Result<Whereabouts, Error> {
+    let machine = orch_db::queries::environment_facts::of(conn, environment)
+        .await?
+        .and_then(|facts| facts.machine_id);
+    let host = match machine {
+        Some(machine) => orch_db::queries::environment_facts::machine_host(conn, machine).await?,
+        None => None,
+    };
+    Ok(Whereabouts {
+        environment: Some(environment),
+        host,
+        machine,
+    })
+}
+
+/// Where an environment that is to be made on the host `host` will be: on the host and on its machine.
+pub async fn place_of_host(conn: &mut Conn, host: Id) -> Result<Whereabouts, Error> {
+    Ok(Whereabouts {
+        environment: None,
+        host: Some(host),
+        machine: orch_db::queries::environment_facts::host_machine(conn, host).await?,
+    })
+}
+
+/// Where an environment that is to be made as a directory of the machine `machine` will be.
+pub async fn place_of_machine(conn: &mut Conn, machine: Id) -> Result<Whereabouts, Error> {
+    Ok(Whereabouts {
+        environment: None,
+        host: orch_db::queries::environment_facts::machine_host(conn, machine).await?,
+        machine: Some(machine),
+    })
+}
+
+/// The place that a person's entries leave out, as a refusal names it: none when the work runs in no
+/// environment or the entries let it run there. Every question about the use of a provider for work
+/// in an environment is answered by this one function.
+#[must_use]
+pub fn outside_place(options: &ProviderUse, at: Option<&Whereabouts>) -> Option<Vec<WhereName>> {
+    let at = at.filter(|at| !options.allows_where(at))?;
+    Some(at.name().into_iter().collect())
+}
+
+/// The refusal of a person whose use of a provider (`granted`) leaves out the place `at`, when only the
+/// provider itself is asked about and no model is: what the person lacks, and who can give it; none
+/// when their entries let work run there. A question with a model is answered by [`check_turn_at`]
+/// and [`check_binding_at`], through the same [`outside_place`].
+pub async fn refuse_outside_place(
+    conn: &mut Conn,
+    principal: &Principal,
+    provider: Id,
+    node: Id,
+    granted: &Use,
+    at: &Whereabouts,
+    policies: &Policies,
+) -> Result<Option<Refusal>, Error> {
+    let Some(outside) = outside_place(&granted.provider(), Some(at)) else {
+        return Ok(None);
+    };
+    let mut graph = Graph::default();
+    graph.extend(conn, &[node]).await?;
+    let found = read_into(conn, &mut graph, &[provider]).await?;
+    let resource = pick(&found, provider, ResourceKind::Provider)?;
+    let site = site_of(&graph, &resource).ok_or(Error::NotFound(provider))?;
+    let lacking = Lacking {
+        site: site.clone(),
+        permissions: vec![Permission::ProviderUse],
+        options: Some(MissingOptions {
+            r#where: Some(outside),
+            ..MissingOptions::default()
+        }),
+        closed: None,
+    };
+    let policy = policies.at(resource.home).node_policy();
+    assemble(
+        conn,
+        principal,
+        policy,
+        graph,
+        &site,
+        &[lacking],
+        Permission::ProviderUse,
+    )
+    .await
+    .map(Some)
 }
 
 /// The refusal of something that a token's scopes leave out, which is for nobody to give.
@@ -834,6 +1019,19 @@ pub async fn check_turn(
     author: Author<'_>,
     ask: &TurnAsk<'_>,
     policies: &Policies,
+) -> Result<TurnDecision, Error> {
+    check_turn_at(conn, author, ask, policies, None).await
+}
+
+/// As [`check_turn`], for a turn that runs in the environment at `at`: the entries by which the person
+/// uses the provider have to let work run there, too. A turn that runs in no environment is asked with
+/// `None`, and no entry holds it to a place.
+pub async fn check_turn_at(
+    conn: &mut Conn,
+    author: Author<'_>,
+    ask: &TurnAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
 ) -> Result<TurnDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.thread]).await?;
     let thread = graph
@@ -931,6 +1129,7 @@ pub async fn check_turn(
             chosen: &chosen,
             kept,
             state_matters: lacking.is_empty(),
+            at,
         },
     )
     .await?;
@@ -1101,6 +1300,20 @@ pub async fn check_binding(
     ask: &BindingAsk<'_>,
     policies: &Policies,
 ) -> Result<BindingDecision, Error> {
+    check_binding_at(conn, principal, ask, policies, None).await
+}
+
+/// As [`check_binding`], with the environment the thread is to run in given as `at`; where none is
+/// given, the environment the ask itself chooses (an existing one, or the host or machine a new one
+/// is made on) is where the work is to run. The entries by which the person uses the provider have to
+/// let work run there.
+pub async fn check_binding_at(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &BindingAsk<'_>,
+    policies: &Policies,
+    at: Option<&Whereabouts>,
+) -> Result<BindingDecision, Error> {
     let mut graph = Graph::load(conn, &[ask.node]).await?;
     let node = graph
         .get(ask.node)
@@ -1195,6 +1408,16 @@ pub async fn check_binding(
         blockers: Vec::new(),
         grant: None,
     };
+    let chosen_place = match (at, &ask.environment) {
+        (Some(_), _) | (None, None) => None,
+        (None, Some(EnvironmentChoice::Existing(id))) => Some(place_of(conn, *id).await?),
+        (None, Some(EnvironmentChoice::New(new))) => Some(match &new.place {
+            crate::environments::Place::Host { host, .. } => place_of_host(conn, *host).await?,
+            crate::environments::Place::Machine { machine } => {
+                place_of_machine(conn, *machine).await?
+            }
+        }),
+    };
     if let (Some(resource), Some(site), Some(choice)) = (&provider, &provider_site, &ask.provider) {
         let chosen = Chosen {
             model: choice.model,
@@ -1212,6 +1435,7 @@ pub async fn check_binding(
                 chosen: &chosen,
                 kept: home_policy.keeps_to_its_owner(resource),
                 state_matters: lacking.is_empty(),
+                at: at.or(chosen_place.as_ref()),
             },
         )
         .await?;

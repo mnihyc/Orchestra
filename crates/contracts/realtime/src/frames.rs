@@ -303,9 +303,9 @@ pub struct ReadyFrame {
     pub user_id: Id,
     /// The server's time.
     pub server_time: Time,
-    /// When the token the connection was given expires; the client sends
-    /// `reauth` before.
-    pub access_expires_at: Time,
+    /// The actual credential end; the client sends `reauth` before it. Null for an
+    /// existing API key with no expiry; browser access tokens always have a deadline.
+    pub access_expires_at: Option<Time>,
     /// How often the client pings, in seconds.
     pub heartbeat_secs: u32,
     /// The build of the server. When it differs from the build the page
@@ -1144,5 +1144,23 @@ mod tests {
         // `ping` and `pong` are told apart, and `ready`, `closed` and the rest belong to one side each.
         assert_eq!(sorted.len(), ops.len());
         assert_eq!((ClientFrame::OPS.len(), ServerFrame::OPS.len()), (7, 10));
+    }
+    #[test]
+    fn ready_keeps_an_unbounded_existing_key_deadline_as_null_in_the_same_protocol() {
+        let raw = serde_json::json!({
+            "connection_id":"key-reader", "user_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01",
+            "server_time":"2026-10-08T17:04:05.123Z", "access_expires_at":null,
+            "heartbeat_secs":25, "build":"fixture"
+        });
+        let decoded = serde_json::from_value::<ReadyFrame>(raw.clone());
+        assert!(
+            decoded.is_ok(),
+            "a key with no expiry needs no fabricated session deadline: {decoded:?}"
+        );
+        let decoded = match decoded {
+            Ok(value) => value,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(serde_json::to_value(decoded).ok(), Some(raw));
     }
 }

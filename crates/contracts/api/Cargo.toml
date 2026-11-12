@@ -13,6 +13,7 @@ chrono.workspace = true
 orch-access-contract.workspace = true
 orch-agent-programs.workspace = true
 orch-driver-contract.workspace = true
+orch-plugin-contract.workspace = true
 orch-provider-contract.workspace = true
 orch-types.workspace = true
 schemars.workspace = true

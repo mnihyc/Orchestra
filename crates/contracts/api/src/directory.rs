@@ -6,14 +6,20 @@
 //! them without removing anything of theirs. Tags are the labels that topics
 //! carry, defined by an org or a project.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::access::Role;
 use crate::access::{Holder, HolderInput};
-use crate::auth::{ApiTokenCreateBody, ApiTokenInfo, TokenCreated};
-use crate::common::Page;
+use crate::auth::{ApiTokenCreateBody, ApiTokenInfo, TokenCreateResponse};
+use crate::common::{Page, Revision};
 use crate::nodes::{NodeRef, Tag};
 use crate::routes::Access::{Permission, Rule};
 use crate::users::UserRef;
@@ -23,6 +29,8 @@ use crate::users::UserRef;
 pub struct Group {
     /// The group's identifier.
     pub id: Id,
+    /// Its current revision, including changes to its direct holders.
+    pub revision: Revision,
     /// The org that keeps it.
     pub org_id: Id,
     /// The visible path of the org that keeps it.
@@ -34,6 +42,39 @@ pub struct Group {
     pub description: String,
     /// How many people are in it.
     pub member_count: i64,
+}
+
+/// Adds one direct holder, optionally guarding the group snapshot that was edited.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GroupHolderAddBody {
+    /// The same flat holder fields accepted by earlier clients.
+    #[serde(flatten)]
+    pub holder: HolderInput,
+    /// Refuses an outdated group snapshot; omitted preserves the existing behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_revision: Option<Revision>,
+}
+
+impl<'de> Deserialize<'de> for GroupHolderAddBody {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let fields = value.as_object_mut().ok_or_else(|| {
+            <D::Error as serde::de::Error>::custom("a holder change is an object")
+        })?;
+        let expected_revision = fields
+            .remove("expected_revision")
+            .map(serde_json::from_value::<Option<Revision>>)
+            .transpose()
+            .map_err(<D::Error as serde::de::Error>::custom)?
+            .flatten();
+        let holder =
+            serde_json::from_value(value).map_err(<D::Error as serde::de::Error>::custom)?;
+        Ok(Self {
+            holder,
+            expected_revision,
+        })
+    }
 }
 
 /// A member of a tree of orgs.
@@ -51,6 +92,12 @@ pub struct Member {
     pub is_owner: bool,
     /// Since when they have been a member.
     pub since: Option<Time>,
+    /// SHA-256 of the joining terms they accepted; shown only to member managers.
+    #[serde(default)]
+    pub terms_hash: Option<String>,
+    /// When they accepted those terms; `null` if no terms were required or not disclosed.
+    #[serde(default)]
+    pub terms_accepted_at: Option<Time>,
     /// How many roles they hold by name in the rest of the tree, apart from the one at their
     /// domain.
     pub also: i64,
@@ -157,6 +204,26 @@ pub struct OrgGroupCreateBody {
     pub description: Option<String>,
 }
 
+/// An accepted Group creation without stored Group content or its keeping-org name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GroupCreateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual newly stored Group.
+    pub group_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary created Group or its truthful restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum GroupCreateResponse {
+        /// Native existing content admitted by this operation's Read.
+        Full(Group),
+        /// The creation succeeded without stored content disclosure.
+        Receipt(GroupCreateReceipt),
+    }
+}
+
 /// Changes a group.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -169,6 +236,26 @@ pub struct GroupUpdateBody {
     pub description: Option<String>,
 }
 
+/// The accepted group update without group content or its keeping-org name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct GroupUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual group whose update was accepted.
+    pub group_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary group projection or the same update's restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum GroupUpdateResponse {
+        /// Existing group content admitted by this operation's Read.
+        Full(Group),
+        /// No group metadata or current membership count.
+        Receipt(GroupUpdateReceipt),
+    }
+}
+
 /// Makes a service identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -177,6 +264,26 @@ pub struct OrgServiceAccountCreateBody {
     pub username: String,
     /// The name to show.
     pub display_name: String,
+}
+
+/// An accepted service Account creation without stored account metadata or token counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ServiceAccountCreateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual newly stored service Account.
+    pub service_account_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary created service Account or its truthful restricted acknowledgement.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum ServiceAccountCreateResponse {
+        /// Native account content admitted by this operation's Read.
+        Full(ServiceAccount),
+        /// The creation succeeded without stored content disclosure.
+        Receipt(ServiceAccountCreateReceipt),
+    }
 }
 
 /// Makes a tag.
@@ -201,6 +308,80 @@ pub struct TagUpdateBody {
     /// A new colour.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<u32>,
+}
+
+/// Accepted tag identity with no stored tag or defining-node metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TagCreateReceipt {
+    /// Restricted acknowledgement.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual accepted tag.
+    pub tag_id: Id,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary tag or its content-free creation identity.
+    #[derive(Debug,Clone,PartialEq,Eq,Serialize,Deserialize,JsonSchema)]
+    pub enum TagCreateResponse {Full(Tag),Receipt(TagCreateReceipt),}
+}
+
+/// An accepted tag change without stored tag content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TagUpdateReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual tag changed.
+    pub tag_id: Id,
+}
+
+/// The ordinary tag projection or its accepted change receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum TagUpdateResponse {
+    /// Stored content admitted by this operation's Read.
+    Full(Tag),
+    /// Safe acknowledgement without stored name or colour.
+    Receipt(TagUpdateReceipt),
+}
+
+impl TagUpdateResponse {
+    /// Extract the ordinary projection, preserving a receipt as a distinct outcome.
+    pub fn into_full(self) -> Result<Tag, TagUpdateReceipt> {
+        match self {
+            Self::Full(tag) => Ok(tag),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The accepted membership suspension without existing membership details.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MemberSuspendReceipt {
+    /// Restricted response marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual governing org.
+    pub org_id: Id,
+    /// The supplied subject whose suspension was accepted.
+    pub user_id: Id,
+}
+
+/// The ordinary suspension projection or its accepted receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum MemberSuspendResponse {
+    /// Current stored content admitted by this operation's Read.
+    Full(Box<Suspension>),
+    /// Safe acknowledgement without stored membership or ownership details.
+    Receipt(MemberSuspendReceipt),
+}
+
+impl MemberSuspendResponse {
+    /// Extract only the ordinary projection.
+    pub fn into_full(self) -> Result<Suspension, MemberSuspendReceipt> {
+        match self {
+            Self::Full(suspension) => Ok(*suspension),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// The thing a person from outside reaches.
@@ -347,7 +528,11 @@ pub struct OrgOutsiderRemoveBody {
 crate::endpoints! {
     /// Lists the people who belong to an org at any level, that is everybody who has that org, or
     /// one inside it, as their domain.
-    OrgMemberList: GET "/orgs/{id}/members", Permission("node.view"), query OrgMemberListQuery, none, json Page<Member>, 200;
+    OrgMemberList: GET "/orgs/{id}/members", Permission("node.view"), query OrgMemberListQuery, none, json Page<Member>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::ResolvedCollection("org_members")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("member_domains")),
+        ]);
     /// Lists the people from outside the root tree who reach something of an org now, each with
     /// the first ways they do.
     OrgOutsiderList: GET "/orgs/{id}/outsiders", Permission("members.manage"), query OrgOutsiderListQuery, none, json Page<OutsidePerson>, 200;
@@ -356,59 +541,127 @@ crate::endpoints! {
     /// Plans taking a person from outside out of an org, keeps the plan, and gives its first page.
     OrgOutsiderRemovePreview: POST "/orgs/{id}/outsiders/{user_id}/remove/preview", Permission("members.manage"), none, none, json OutsideRemovalPlan, 200;
     /// Gives the next page of a stored removal plan, to the caller who asked for it.
-    OrgOutsiderRemovePlanGet: GET "/orgs/{id}/outsiders/{user_id}/remove/plans/{plan_id}", Rule("the caller who asked for the plan, with members.manage on the org now"), query OrgOutsiderRemovePlanGetQuery, none, json OutsideRemovalPlan, 200;
+    OrgOutsiderRemovePlanGet: GET "/orgs/{id}/outsiders/{user_id}/remove/plans/{plan_id}", Rule("the caller who asked for the plan, with members.manage on the org now"), query OrgOutsiderRemovePlanGetQuery, none, json OutsideRemovalPlan, 200,
+        operation Op::single(Manage, &[Object(K::Org)], Target::Path("id"));
     /// Takes a person from outside out of an org as a plan read whole says: the entries and roles
     /// naming them go, and a suspension holds them out where something else lets them in.
     OrgOutsiderRemove: POST "/orgs/{id}/outsiders/{user_id}/remove", Permission("members.manage"), none, json OrgOutsiderRemoveBody, json OutsideRemovalResult, 200;
     /// Suspends a member in an org, which closes it and everything inside it to them at once.
-    OrgMemberSuspend: POST "/orgs/{id}/members/{user_id}/suspend", Rule("members.manage; not for an owner of that org, for oneself or for a system admin"), none, json OrgMemberSuspendBody, json Suspension, 200;
+    OrgMemberSuspend: POST "/orgs/{id}/members/{user_id}/suspend", Rule("members.manage; not for an owner of that org, for oneself or for a system admin"), none, json OrgMemberSuspendBody, json MemberSuspendResponse, 200,
+        operation Op::receipt(&Op::returning(Manage, &[Object(K::Org)], Target::Resolved("membership_org")));
     /// Lifts a suspension, so that everything is as it was.
     OrgMemberResume: POST "/orgs/{id}/members/{user_id}/resume", Permission("members.manage"), none, none, none, 204;
     /// Lists everybody who is suspended in an org now.
     OrgSuspensionList: GET "/orgs/{id}/suspensions", Permission("members.manage"), none, none, json Vec<Suspension>, 200;
     /// Lists the groups an org keeps.
-    OrgGroupList: GET "/orgs/{id}/groups", Permission("node.view"), query OrgGroupListQuery, none, json Vec<Group>, 200;
+    OrgGroupList: GET "/orgs/{id}/groups", Permission("node.view"), query OrgGroupListQuery, none, json Vec<Group>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("listed_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("listed_group_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("listed_group_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("listed_group_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("listed_group_threads")),
+        ]);
     /// The groups kept by the nearest org of a visible place, where that org is visible too.
-    NodeGroupList: GET "/nodes/{id}/groups", Permission("node.view"), none, none, json Vec<Group>, 200;
+    NodeGroupList: GET "/nodes/{id}/groups", Permission("node.view"), none, none, json Vec<Group>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("listed_groups")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("listed_group_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("listed_group_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("listed_group_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("listed_group_threads")),
+        ]);
     /// Makes a group in an org.
-    OrgGroupCreate: POST "/orgs/{id}/groups", Permission("members.manage"), none, json OrgGroupCreateBody, json Group, 200;
+    OrgGroupCreate: POST "/orgs/{id}/groups", Permission("members.manage"), none, json OrgGroupCreateBody, json GroupCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::directory_sources::GROUP_CREATE_FACETS));
     /// Renames a group or changes what it is for.
-    GroupUpdate: PATCH "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, json GroupUpdateBody, json Group, 200;
+    GroupUpdate: PATCH "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, json GroupUpdateBody, json GroupUpdateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) }),
+            Facet::response_content(&[Identity(I::Group)], Target::ResolvedCollection("group_payloads")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("group_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("group_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("group_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("group_names_threads")),
+        ]));
     /// Deletes a group, together with the roles it holds and the entries naming it.
-    GroupDelete: DELETE "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204;
+    GroupDelete: DELETE "/groups/{id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Lists the people in a group.
-    GroupMemberList: GET "/groups/{id}/members", Rule("node.view on the org that keeps the group"), none, none, json Vec<UserRef>, 200;
+    GroupMemberList: GET "/groups/{id}/members", Rule("node.view on the org that keeps the group"), none, none, json Vec<UserRef>, 200,
+        operation Op::single(Read, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Direct members as holders, retaining nested groups and source places.
-    GroupHolderList: GET "/groups/{id}/holders", Rule("node.view on the org that keeps the group"), none, none, json Vec<Holder>, 200;
+    GroupHolderList: GET "/groups/{id}/holders", Rule("node.view on the org that keeps the group"), none, none, json Vec<Holder>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) }),
+            Facet::required(Read, &[Identity(I::Group)], Target::ResolvedCollection("group_payloads")),
+            Facet::required(Read, &[Object(K::Org)], Target::ResolvedCollection("group_names_orgs")),
+            Facet::required(Read, &[Object(K::Project)], Target::ResolvedCollection("group_names_projects")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("group_names_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("group_names_threads")),
+        ]);
     /// Adds a holder; nested group cycles and paths deeper than five groups are refused.
-    GroupHolderAdd: PUT "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json HolderInput, none, 204;
+    GroupHolderAdd: PUT "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json GroupHolderAddBody, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Removes only the named direct member, preserving every other path.
-    GroupHolderRemove: DELETE "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json HolderInput, none, 204;
+    GroupHolderRemove: DELETE "/groups/{id}/holders", Rule("members.manage on the org that keeps the group"), none, json HolderInput, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Puts a member of the group's root org into the group.
-    GroupMemberAdd: PUT "/groups/{id}/members/{user_id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204;
+    GroupMemberAdd: PUT "/groups/{id}/members/{user_id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Takes a person out of a group.
-    GroupMemberRemove: DELETE "/groups/{id}/members/{user_id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204;
+    GroupMemberRemove: DELETE "/groups/{id}/members/{user_id}", Rule("members.manage on the org that keeps the group"), none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Group)], Target::TypedPath { parameter: "id", kind: Identity(I::Group) });
     /// Lists the service identities an org keeps.
-    OrgServiceAccountList: GET "/orgs/{id}/service-accounts", Permission("members.manage"), none, none, json Vec<ServiceAccount>, 200;
+    OrgServiceAccountList: GET "/orgs/{id}/service-accounts", Permission("members.manage"), none, none, json Vec<ServiceAccount>, 200,
+        operation Op::single(
+            Manage,
+            &[Identity(I::Account)],
+            Target::ResolvedCollection("org_service_accounts"),
+        );
     /// Makes a service identity in an org.
-    OrgServiceAccountCreate: POST "/orgs/{id}/service-accounts", Permission("members.manage"), none, json OrgServiceAccountCreateBody, json ServiceAccount, 200;
+    OrgServiceAccountCreate: POST "/orgs/{id}/service-accounts", Permission("members.manage"), none, json OrgServiceAccountCreateBody, json ServiceAccountCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::directory_sources::SERVICE_CREATE_FACETS));
     /// Disables a service identity, revokes its tokens, and removes its roles and every entry
     /// naming it.
-    ServiceAccountDelete: DELETE "/service-accounts/{id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204;
+    ServiceAccountDelete: DELETE "/service-accounts/{id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Lists the tokens of a service identity.
-    ServiceAccountTokenList: GET "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), none, none, json Vec<ApiTokenInfo>, 200;
+    /// Reading the account collection requires its Read scope; each returned credential also needs this operation's own Read scope. Account self alone does not reveal its credentials.
+    ServiceAccountTokenList: GET "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), none, none, json Vec<ApiTokenInfo>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Key)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) }),
+            Facet::response_content(&[Identity(I::Key)], Target::ResolvedCollection("listed_keys")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("key_scope_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("key_scope_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("key_scope_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("key_scope_threads")),
+        ]);
     /// Makes a token for a service identity; its secret is shown once.
-    ServiceAccountTokenCreate: POST "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), none, json ApiTokenCreateBody, json TokenCreated, 200;
+    ServiceAccountTokenCreate: POST "/service-accounts/{id}/tokens", Rule("members.manage on the org that keeps the service identity"), none, json ApiTokenCreateBody, json TokenCreateResponse, 200,
+        operation Op::legacy_tokens(&[], &Op::receipt(&Op::returning(Manage, &[Identity(I::Key)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) })));
     /// Revokes a token of a service identity.
-    ServiceAccountTokenDelete: DELETE "/service-accounts/{id}/tokens/{token_id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204;
+    ServiceAccountTokenDelete: DELETE "/service-accounts/{id}/tokens/{token_id}", Rule("members.manage on the org that keeps the service identity"), none, none, none, 204,
+        operation Op::returning(Manage, &[Identity(I::Key)], Target::Resolved("service_owned_key"));
     /// Lists the tags of an org or a project and of the orgs above it.
     NodeTagList: GET "/nodes/{id}/tags", Permission("node.view"), none, none, json Vec<Tag>, 200;
     /// Defines a tag on an org or a project.
-    NodeTagCreate: POST "/nodes/{id}/tags", Permission("node.manage"), none, json NodeTagCreateBody, json Tag, 200;
+    NodeTagCreate: POST "/nodes/{id}/tags", Permission("node.manage"), none, json NodeTagCreateBody, json TagCreateResponse, 200,
+        operation Op::receipt(&Op::returning(Manage,&[Object(K::Org),Object(K::Project),Object(K::Topic),Object(K::Thread)],Target::Path("id")));
     /// Renames a tag or changes its colour.
-    TagUpdate: PATCH "/tags/{id}", Rule("org.manage or project.manage on the tag's node"), none, json TagUpdateBody, json Tag, 200;
+    TagUpdate: PATCH "/tags/{id}", Rule("node.manage on the tag's defining node"), none, json TagUpdateBody, json TagUpdateResponse, 200,
+        operation Op::receipt(&Op::returning(
+            Manage,
+            &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)],
+            Target::Resolved("tag_node"),
+        ));
     /// Deletes a tag, and takes it off every topic.
-    TagDelete: DELETE "/tags/{id}", Rule("org.manage or project.manage on the tag's node"), none, none, none, 204;
+    TagDelete: DELETE "/tags/{id}", Rule("node.manage on the tag's defining node"), none, none, none, 204,
+        operation Op::single(
+            Manage,
+            &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)],
+            Target::Resolved("tag_node"),
+        );
 }
 
 #[cfg(test)]
@@ -428,6 +681,8 @@ mod tests {
             "role": "developer",
             "is_owner": false,
             "since": null,
+            "terms_hash": null,
+            "terms_accepted_at": null,
             "also": 1,
             "suspended": false,
             "second_step": "sso",
@@ -463,5 +718,38 @@ mod tests {
         let rename: GroupUpdateBody =
             serde_json::from_value(json!({ "name": "Reviewers" })).unwrap();
         assert_eq!(rename.description, None);
+    }
+}
+
+#[cfg(test)]
+mod holder_revision_tests {
+    #![allow(clippy::unwrap_used, reason = "a failed contract control panics")]
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_holder_write_keeps_its_flat_legacy_shape_and_can_guard_the_group_revision() {
+        let id = orch_types::new_id();
+        let original = json!({"kind":"user","id":id});
+        let legacy: GroupHolderAddBody = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(legacy.expected_revision, None);
+        assert_eq!(legacy.holder, HolderInput::User { id });
+        assert_eq!(serde_json::to_value(&legacy).unwrap(), original);
+        let guarded: GroupHolderAddBody =
+            serde_json::from_value(json!({"kind":"user","id":id,"expected_revision":4})).unwrap();
+        assert_eq!(guarded.expected_revision, Some(4));
+        assert_eq!(guarded.holder, legacy.holder);
+        assert!(
+            serde_json::from_value::<GroupHolderAddBody>(
+                json!({"kind":"user","id":id,"expected_revision":"4"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GroupHolderAddBody>(
+                json!({"kind":"user","id":id,"unexpected":true})
+            )
+            .is_err()
+        );
     }
 }

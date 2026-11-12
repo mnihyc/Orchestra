@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, changeTree, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
+import { ACME, changeTree, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, mainArea } from '../e2e/support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -19,7 +19,7 @@ const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, top
 test('a project that holds folders as a list, as a board and as Activity, and a folder of its own', async ({ page }) => {
   // A project with folders and no topic of its own: the cards stand above what says that it has no topics.
   await open(page, `/project/${ACME.shop}`);
-  const folders = page.getByTestId('main').getByRole('region', { name: 'Folders' });
+  const folders = mainArea(page).getByRole('region', { name: 'Folders' });
   await expect(folders.getByRole('link', { name: 'Checkout' })).toBeVisible();
   await expect(page.getByText('No topics yet')).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -95,7 +95,7 @@ test('the dialogs of folders, open: a new folder, the list of where to move, a p
 test('a topic that lies in folders, a folder’s menu, and the tree with a row closed over what waits', async ({ page }) => {
   await open(page, `/topic/${ACME.cardFees}`);
   await expect(page.getByRole('heading', { name: 'Card fees' })).toBeVisible();
-  await expect(page.getByTestId('main').getByRole('link', { name: 'Checkout' })).toBeVisible();
+  await expect(mainArea(page).getByRole('link', { name: 'Checkout' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   // On the screen of a place everything above it is open, so the row is closed from a screen that is not below it.
@@ -108,7 +108,7 @@ test('a topic that lies in folders, a folder’s menu, and the tree with a row c
   await expectAccessibleInBothThemes(page);
 
   await tree(page).getByRole('treeitem', { name: /^Checkout/ }).click({ button: 'right' });
-  await expect(page.getByRole('menu', { name: 'Menu of Checkout' })).toBeVisible();
+  await expect(page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'New folder…' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
@@ -131,11 +131,12 @@ test('folders on a small screen, and in Chinese at the compact density', async (
   await page.getByRole('option', { name: '简体中文' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-density', 'compact');
   await page.goto(`/project/${ACME.checkout}`);
-  await expect(page.getByTestId('main').getByRole('region', { name: '文件夹' })).toBeVisible();
-  await expect(page.getByRole('button', { name: '新建文件夹' }).first()).toBeVisible();
+  await expect(mainArea(page).getByRole('region', { name: '文件夹' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('button', { name: '新建文件夹' }).first().click();
+  // A folder is made from the place's own menu.
+  await mainArea(page).getByRole('button', { name: 'Checkout 的操作', exact: true }).click();
+  await page.getByRole('menuitem', { name: '新建文件夹…' }).click();
   await expect(page.getByRole('dialog', { name: '在 Checkout 中新建文件夹' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });

@@ -270,7 +270,13 @@ async fn the_claude_program_matches_the_native_usage_models_and_recorded_rate_li
         &native::usage_answer(&usage, AT.parse().unwrap()).unwrap(),
         &["plan", "windows", "extra_usage", "limit_reached"],
     );
-    assert_eq!(bridge.read_facts(ask("normal")).await.unwrap().0, expected);
+    let mut actual = bridge.read_facts(ask("normal")).await.unwrap().0;
+    // This third-party example still speaks accepted legacy numeric amounts. Compare its
+    // canonical value through the same contract decoder; no driver upgrade is required.
+    let extra: orch_agent_contract::facts::ExtraUsage =
+        serde_json::from_value(actual["extra_usage"].clone()).unwrap();
+    actual["extra_usage"] = serde_json::to_value(extra).unwrap();
+    assert_eq!(actual, expected);
     assert_eq!(
         serde_json::to_value(bridge.list_models(ask("normal")).await.unwrap()).unwrap(),
         json!({"models":native::suggestions_from(&models)})

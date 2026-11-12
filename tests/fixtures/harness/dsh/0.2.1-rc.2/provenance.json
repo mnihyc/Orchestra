@@ -1,0 +1,17 @@
+{
+  "runtime": "deepseek-harness-runtime-bin",
+  "version": "0.2.1rc2",
+  "wheel": "deepseek_harness_runtime_bin-0.2.1rc2-py3-none-manylinux_2_28_x86_64.whl",
+  "wheel_sha256": "0a0a4eb85a22cd9339972e6a5ced77a27ec791353a5b220e3e10b8cdbbdeca39",
+  "source_commit": "687f282e8625c6b8d11ff58211a90524be2e4317",
+  "protocol_package": "@agentclientprotocol/sdk",
+  "protocol_package_version": "1.4.0",
+  "protocol_package_sha256": "57beb0f7705b09406e5bcc984d1f6a141940680b4c42755be026f77f64365a37",
+  "source_files": {
+    "package.json": "4cf5484770fb933a910e938b33015198a1db6284d7669caed4673fb634e869fe",
+    "src/index.ts": "9aa1b4449871f97c99d0757dedc3bead59427317446beefef39c4e8be9fdb82f",
+    "src/updates.ts": "b4c48504777ad309b3b461d92275a39add79914f9202f9d94ff1c29e9e561d0d",
+    "src/content.ts": "ff17c0e4736bba3894ff32c4e3c31a1be1d1843457e96cbe09880f46336e4bb6"
+  },
+  "recorded": false
+}

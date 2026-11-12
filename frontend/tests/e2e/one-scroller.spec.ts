@@ -18,7 +18,7 @@ const SCREENS = [
   '/org/acme',
   '/org/acme/messages',
   '/org/acme/settings/general',
-  '/org/acme/settings/policies',
+  '/org/acme/settings/defaults',
   '/org/acme/settings/members',
   `/project/${ACME.web}`,
   `/project/${ACME.web}?view=board`,

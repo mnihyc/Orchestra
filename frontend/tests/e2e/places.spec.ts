@@ -1,7 +1,7 @@
 /** The places of an org at work: an org made inside an org, a project and a topic in it, a name changed, archiving and bringing back, what a refusal says is missing, the board and its filters, an invitation in both forms, and a role changed. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, deny, mailWorks, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, deny, mailWorks, PEOPLE, scenario, signIn, mainArea } from './support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -33,9 +33,11 @@ test('an org is made inside an org, then a project in it and a topic in that, ea
   // It lies at its address, and the left bar shows it at once.
   await expect(page).toHaveURL(/\/org\/acme\.platform-team$/);
   await expect(page.getByRole('heading', { name: 'Platform Team' })).toBeVisible();
-  await expect(page.getByTestId('main').getByText('acme.platform-team', { exact: true })).toHaveCount(0);
+  await expect(mainArea(page).getByText('acme.platform-team', { exact: true })).toHaveCount(0);
   await expect(tree(page).getByRole('treeitem', { name: /Platform Team/ })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Where this is' })).toContainText('Platform Team');
+  // The path above a screen ends at its parent: the department is the heading, and Acme is the place it lies in.
+  await expect(page.getByRole('navigation', { name: 'Where this is' })).toContainText('Acme');
+  await expect(page.getByRole('navigation', { name: 'Where this is' })).not.toContainText('Platform Team');
 
   // A project in the department.
   await page.getByRole('button', { name: 'New project', exact: true }).first().click();
@@ -45,7 +47,7 @@ test('an org is made inside an org, then a project in it and a topic in that, ea
   await page.getByRole('dialog').getByRole('button', { name: 'Create project' }).click();
   await expect(page).toHaveURL(/\/project\//);
   await expect(page.getByRole('heading', { name: 'Pipelines' })).toBeVisible();
-  await page.getByTestId('main').getByRole('button', { name: 'Description and tags', exact: true }).click();
+  await mainArea(page).getByRole('button', { name: 'Description and tags', exact: true }).click();
   await expect(page.getByText('Builds and releases')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByText('No topics yet')).toBeVisible();
@@ -86,7 +88,7 @@ test('an org is made inside an org, then a project in it and a topic in that, ea
   // The topic is in the project's list without another header count.
   await page.getByRole('navigation', { name: 'Where this is' }).getByRole('link', { name: 'Pipelines' }).click();
   await expect(page.getByRole('link', { name: 'Speed up CI' }).first()).toBeVisible();
-  await expect(page.getByTestId('main').getByRole('table', { name: 'Topics' }).getByRole('link', { name: 'Speed up CI', exact: true })).toBeVisible();
+  await expect(mainArea(page).getByRole('table', { name: 'Topics' }).getByRole('link', { name: 'Speed up CI', exact: true })).toBeVisible();
 });
 
 test('a topic made without a name is called New topic, and a short name that is taken is said beside its field', async ({ page }) => {
@@ -120,7 +122,11 @@ test('a name is changed in a dialog and the screen, the tree and the path all sa
 
   await expect(page.getByRole('heading', { name: 'Upgrade the dependencies' })).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /Upgrade the dependencies/ })).toBeVisible();
-  await expect(page.getByRole('navigation', { name: 'Where this is' })).toContainText('Upgrade the dependencies');
+  // The path above a screen ends at its parent: the places the topic lies in are kept, and neither name is in it.
+  const path = page.getByRole('navigation', { name: 'Where this is' });
+  await expect(path).toContainText('Acme');
+  await expect(path).toContainText('Web');
+  await expect(path).not.toContainText('Upgrade');
   await expect(page.getByRole('dialog')).toHaveCount(0);
 });
 
@@ -165,9 +171,12 @@ test('a deleted topic is found in Recently deleted, with until when, and comes b
   await expect(list.locator('li').filter({ hasText: 'Upgrade deps' }).getByText(/Can be brought back until/)).toBeVisible();
   await list.locator('li').filter({ hasText: 'Upgrade deps' }).getByRole('button', { name: 'Bring it back', exact: true }).click();
   await page.getByRole('dialog', { name: 'Bring back the selected things' }).getByRole('button', { name: 'Bring back', exact: true }).click();
-  // The dialog is modal, so the notices behind it are hidden from the accessibility tree: found by their text.
-  await expect(page.getByText('Upgrade deps is back, archived').first()).toBeVisible();
+  // What was brought back leaves the list at once.
   await expect(list.getByText('Upgrade deps', { exact: true })).toHaveCount(0);
+  // Notices wait while a dialog is open: the one for the place brought back is there once it is closed.
+  await list.getByRole('button', { name: 'Close', exact: true }).last().click();
+  await expect(list).toHaveCount(0);
+  await expect(notices(page).getByText('Upgrade deps is back, archived')).toBeVisible();
 });
 
 test('a refusal says what is missing and whom to ask, beside the act that was refused', async ({ page }) => {
@@ -182,9 +191,13 @@ test('a refusal says what is missing and whom to ask, beside the act that was re
 
   const refusal = page.getByRole('dialog').getByRole('alert');
   await expect(refusal).toContainText('You do not have access to this.');
-  await expect(refusal.getByText('Create topics')).toBeVisible();
-  await expect(refusal).toContainText('on Web');
-  await expect(refusal).toContainText('Ask Ada Lovelace.');
+  // What is missing and whom to ask are the facts of the one Review access action beside the refusal.
+  await refusal.getByRole('button', { name: 'Review access', exact: true }).click();
+  const access = page.getByRole('dialog', { name: 'Review access', exact: true });
+  await expect(access).toContainText('You can’t create topics in Web.');
+  await expect(access).toContainText('Ask Ada Lovelace.');
+  await expect(access.getByText('Ada Lovelace', { exact: true })).toBeVisible();
+  await access.getByRole('button', { name: 'Close', exact: true }).click();
   // Nothing was made.
   await expect(page).toHaveURL(new RegExp(`/project/${ACME.web}$`));
 });
@@ -193,10 +206,10 @@ test('somebody who may only read sees what is off, switched off with what it tak
   await open(page, `/project/${ACME.web}`, PEOPLE.vera);
 
   // The one header action stays discoverable and tells why it is unavailable on focus.
-  const createTopic = page.getByTestId('main').getByRole('button', { name: 'New topic', exact: true });
+  const createTopic = mainArea(page).getByRole('button', { name: 'New topic', exact: true });
   await expect(createTopic).toHaveAttribute('aria-disabled', 'true');
   await createTopic.focus();
-  await expect(page.getByRole('tooltip')).toContainText('You can’t take part in Web. Ask Ada Lovelace, who owns it.');
+  await expect(page.getByRole('tooltip')).toContainText('You can’t create topics in Web. Ask Ada Lovelace, who owns it.');
 
   // The menu of the project (the last of its name: the first is the row in the left bar, which leaves out what is denied)
   // keeps what they would look for, switched off, with the reason.
@@ -235,11 +248,14 @@ test('the left bar offers a row only what its person may do with it, and a perso
   await expect(page.getByText('Nothing here yet')).toBeVisible();
   await expect(page.getByRole('tab', { name: /Members/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'New department', exact: true })).toHaveCount(0);
-  // The document is made at once; its own title is selected before Enter moves into the body.
-  const newDocument = page.getByTestId('main').getByRole('button', { name: 'New document', exact: true });
+  // The screen's own act is the project; a document is made from the "+" of the org in the left bar, at once, and its own
+  // title is selected before Enter moves into the body.
+  await expect(mainArea(page).getByRole('button', { name: 'New project', exact: true })).not.toHaveAttribute('aria-disabled', 'true');
+  await page.getByRole('button', { name: 'New in Vera Rubin' }).click();
+  const newDocument = page.getByRole('menu', { name: 'New in Vera Rubin' }).getByRole('menuitem', { name: 'New document…' });
   await expect(newDocument).not.toHaveAttribute('aria-disabled', 'true');
   await newDocument.click();
-  await expect(page).toHaveURL(/\/doc\/[0-9a-f-]+$/);
+  await expect(page).toHaveURL(/\/doc\/[0-9a-f-]+(\?[^#]*)?$/);
   await expect(page.getByRole('textbox', { name: 'Name' })).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Untitled');
   await expect(page.getByRole('textbox', { name: 'Title' })).toBeFocused();
@@ -286,18 +302,24 @@ test('the “+” of an org and of a project makes what its caller may make ther
   await page.keyboard.press('Escape');
 
   // Where there is a rail, the head of the bar names the org and is no second way to another: an org inside is a row of the tree.
-  await expect(page.getByRole('navigation', { name: 'Navigation' }).getByRole('link', { name: 'Acme', exact: true })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Navigation' }).getByRole('link', { name: 'Acme home', exact: true })).toBeVisible();
   await tree(page).getByRole('link', { name: /^ML( |$)/ }).click();
-  await expect(page).toHaveURL(/\/org\/acme\.research\.ml$/);
+  await expect(page).toHaveURL(/\/org\/acme\.research\.ml(\?list=[^&]*&_list=true)?$/);
   await expect(page.getByRole('heading', { name: 'ML' })).toBeVisible();
 
-  // A small screen has no rail: the head of the bar leads to another org there, and lists the orgs inside this one.
+  // A small screen has no rail: the bar opens as a dialog whose head leads to another org, and the orgs inside this one are rows of its tree.
   await page.setViewportSize({ width: 390, height: 800 });
   await page.getByRole('button', { name: 'Navigation', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Navigation' }).getByRole('button', { name: /Acme/ }).first().click();
-  await expect(page.getByRole('menuitem', { name: 'Research / ML' })).toBeVisible();
-  await page.getByRole('menuitem', { name: 'Research', exact: true }).click();
-  await expect(page).toHaveURL(/\/org\/acme\.research$/);
+  const bar = page.getByRole('dialog', { name: 'Navigation' });
+  const orgs = bar.getByRole('combobox', { name: 'Your orgs' });
+  await expect(orgs).toHaveValue('Acme');
+  await orgs.click();
+  await expect(page.getByRole('option', { name: /Acme/ }).first()).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('option')).toHaveCount(0);
+  await expect(bar.getByRole('link', { name: /^ML( |$)/ })).toBeVisible();
+  await bar.getByRole('link', { name: /^Research( |$)/ }).click();
+  await expect(page).toHaveURL(/\/org\/acme\.research(\?list=[^&]*&_list=true)?$/);
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.getByRole('heading', { name: 'Research' })).toBeVisible();
 
@@ -306,7 +328,7 @@ test('the “+” of an org and of a project makes what its caller may make ther
   await page.getByRole('menuitem', { name: 'New org…' }).click();
   await dialogField(page, /^Name/).fill('Zeta Labs');
   await page.getByRole('dialog').getByRole('button', { name: 'Create org' }).click();
-  await expect(page).toHaveURL(/\/org\/zeta-labs$/);
+  await expect(page).toHaveURL(/\/org\/zeta-labs(\?list=[^&]*&_list=true)?$/);
   await expect(page.getByRole('navigation', { name: 'Orgs and your own places' }).getByRole('link', { name: 'Zeta Labs' })).toBeVisible();
 
   await page.getByRole('button', { name: 'New org or join one' }).click();
@@ -320,19 +342,24 @@ test('the board stands topics by what needs attention, and a card moves to Done 
   await open(page, `/project/${ACME.web}?view=board`);
 
   const column = (name: RegExp) => page.getByRole('region', { name });
-  await expect(column(/Needs attention/).getByRole('link', { name: 'Fix login' })).toBeVisible();
+  // Attention is told apart by what is wanted: Fix login waits for an approval.
+  await expect(column(/Waiting for approval/).getByRole('link', { name: 'Fix login' })).toBeVisible();
   await expect(column(/Idle/).getByRole('link', { name: 'Upgrade deps' })).toBeVisible();
   await expect(column(/Done/).getByRole('link', { name: 'Migrate CI' })).toBeVisible();
-  await expect(column(/Running/).getByText('Nothing here')).toBeVisible();
+  await expect(column(/Running/).getByText('No topics in Running')).toBeVisible();
 
   // Dragging a card into Done sets the status; nothing is moved before the server has answered.
   const card = column(/Idle/).getByRole('listitem').filter({ hasText: 'Upgrade deps' });
+  await card.scrollIntoViewIfNeeded();
   const from = await card.boundingBox();
-  const to = await column(/Done/).boundingBox();
-  if (from === null || to === null) throw new Error('the board is not drawn');
+  if (from === null) throw new Error('the board is not drawn');
   await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
   await page.mouse.down();
   await page.mouse.move(from.x + from.width / 2 + 12, from.y + from.height / 2 + 12, { steps: 4 });
+  // The board deliberately does not scroll by itself during a carry: the destination is brought into view first.
+  await column(/Done/).scrollIntoViewIfNeeded();
+  const to = await column(/Done/).boundingBox();
+  if (to === null) throw new Error('the destination column is not drawn');
   await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 12 });
   await page.mouse.up();
   await expect(notices(page).getByText('Upgrade deps marked done')).toBeVisible();
@@ -359,14 +386,14 @@ test('the list and the board are narrowed by status, tag, attention and a search
   await page.getByRole('radio', { name: 'All' }).click();
   await expect(names).toHaveCount(3);
 
-  await page.getByRole('button', { name: 'Tags' }).click();
+  await page.getByRole('button', { name: 'Tags', exact: true }).click();
   await page.getByRole('checkbox', { name: 'bug' }).click();
   await expect(names).toHaveText(['Fix login']);
   await page.keyboard.press('Escape');
 
   await page.getByRole('button', { name: 'Clear filters' }).click();
-  await page.getByRole('combobox', { name: 'Attention' }).click();
-  await page.getByRole('option', { name: 'Blocked' }).click();
+  await page.getByRole('button', { name: /^Needs attention: / }).click();
+  await page.getByRole('menuitemradio', { name: 'Blocked' }).click();
   await expect(page.getByText('No topic matches')).toBeVisible();
   await page.getByRole('button', { name: 'Clear filters' }).first().click();
 
@@ -482,12 +509,12 @@ test('the Activity of a place lists what was done to it, newest first, and keeps
 
 test('Activity opens at Summary and switching to Every change asks for that depth', async ({ page }) => {
   await open(page, `/project/${ACME.web}?view=activity`);
-  const detail = page.getByRole('group', { name: 'Activity detail' });
-  await expect(detail.getByText('Summary', { exact: true })).toHaveAttribute('data-state', 'on');
+  const detail = page.getByRole('radiogroup', { name: 'Activity detail' });
+  await expect(detail.getByRole('radio', { name: 'Summary', exact: true })).toBeChecked();
   const every = page.waitForResponse((response) => response.url().includes(`/nodes/${ACME.web}/activity`) && new URL(response.url()).searchParams.get('depth') === 'every');
-  await detail.getByText('Every change', { exact: true }).click();
+  await detail.getByRole('radio', { name: 'Every change', exact: true }).click();
   expect((await every).ok()).toBe(true);
-  await expect(detail.getByText('Every change', { exact: true })).toHaveAttribute('data-state', 'on');
+  await expect(detail.getByRole('radio', { name: 'Every change', exact: true })).toBeChecked();
 });
 
 test('a topic’s screen has its overview, its threads from the live tree and its environments, and no tab for a part that is not built', async ({ page }) => {
@@ -508,12 +535,15 @@ test('a topic’s screen has its overview, its threads from the live tree and it
   await expect(page.getByText('Workspace', { exact: true })).toBeVisible();
 
   // The tabs of the topic, not the ones of the right bar that have names of their own: the files of a workspace are a thread's, in the right bar beside it.
-  await expect(page.getByTestId('main').getByRole('tab', { name: 'Files' })).toHaveCount(0);
+  await expect(mainArea(page).getByRole('tab', { name: 'Files' })).toHaveCount(0);
 
-  // The control that starts a thread opens the dialog that makes one, from the defaults of the place.
+  // The starter on the overview makes a thread from the defaults of the place, and its setup opens the dialog that makes one with them chosen.
   await page.getByRole('tab', { name: 'Overview' }).click();
-  await page.getByRole('button', { name: 'New thread', exact: true }).first().click();
-  await expect(page.getByRole('dialog', { name: 'New thread in Fix login' })).toContainText('Choose what the thread runs on and where it works.');
+  await page.getByRole('region', { name: 'Start a thread' }).getByRole('button', { name: 'Thread setup', exact: true }).click();
+  const setup = page.getByRole('dialog', { name: 'New thread in Fix login' });
+  await expect(setup.getByRole('heading', { name: 'Provider Topic default' })).toBeVisible();
+  await expect(setup.getByRole('heading', { name: 'Agent Topic default' })).toBeVisible();
+  await expect(setup.getByRole('button', { name: 'Create thread', exact: true })).toBeVisible();
 });
 
 test('a status and a bell are set from the topic’s header and show at once, and are put back where the server refuses', async ({ page }) => {
@@ -526,11 +556,11 @@ test('a status and a bell are set from the topic’s header and show at once, an
   await expect(tree(page).getByRole('treeitem', { name: /^Upgrade deps topic, done/ })).toBeVisible();
 
   await page.getByRole('button', { name: 'Notifications for this topic' }).click();
-  await page.getByRole('menuitemradio', { name: 'Everything', exact: true }).click();
+  await page.getByRole('menuitemradio', { name: 'All', exact: true }).click();
   // The menu has gone before it is opened again.
   await expect(page.getByRole('menu')).toHaveCount(0);
   await page.getByRole('button', { name: 'Notifications for this topic' }).click();
-  await expect(page.getByRole('menuitemradio', { name: 'Everything', exact: true })).toBeChecked();
+  await expect(page.getByRole('menuitemradio', { name: 'All', exact: true })).toBeChecked();
 });
 
 test('an act that the server is slow to answer shows as waiting before it is answered, and as done only when the server has said so', async ({ page }) => {

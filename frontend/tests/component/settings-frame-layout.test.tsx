@@ -76,7 +76,7 @@ for (const [locale, theme] of modes) it(`keeps one title and one navigation when
 
 it('activates the same real destination from the small-screen picker, retaining its scope and section', async () => {
   const chosen = vi.fn(); const user = userEvent.setup();
-  show(<SectionNav label="Sections" current="general" items={['general', 'policies', 'audit'].map((id) => ({ id, label: id,
+  show(<SectionNav label="Sections" current="general" items={['general', 'defaults', 'audit'].map((id) => ({ id, label: id,
     link: <a href={`/topic/place?tab=settings&section=${id}`} onClick={(event) => { event.preventDefault(); chosen(event.currentTarget.getAttribute('href')); }} />,
   }))} />);
   await user.click(screen.getByRole('combobox', { name: 'Sections' }));
@@ -93,7 +93,7 @@ it('uses the section sidebar for every settings scope while leaving ordinary con
   expect(settingsNavigation('/org/acme/settings/general')).toEqual({ kind: 'org', address: 'acme', current: 'general' });
   expect(settingsNavigation('/org/acme.dep2/settings/members')).toEqual({ kind: 'org', address: 'acme.dep2', current: 'members' });
   expect(settingsNavigation('/project/web/settings')).toEqual({ kind: 'project', id: 'web', current: 'general' });
-  expect(settingsNavigation('/project/web/settings', { section: 'policies' })).toEqual({ kind: 'project', id: 'web', current: 'policies' });
+  expect(settingsNavigation('/project/web/settings', { section: 'defaults' })).toEqual({ kind: 'project', id: 'web', current: 'defaults' });
   expect(settingsNavigation('/topic/login', { tab: 'settings', section: 'audit' })).toEqual({ kind: 'topic', id: 'login', current: 'audit' });
   expect(settingsNavigation('/topic/login', { tab: 'settings' })).toEqual({ kind: 'topic', id: 'login', current: 'general' });
   expect(settingsNavigation('/org/acme')).toBeNull();

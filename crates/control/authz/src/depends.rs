@@ -303,8 +303,10 @@ pub async fn of_thread(
         owner: resource.first_owner,
         permission: Permission::ProviderUse,
         options: Some(MissingOptions {
+            services: None,
             models: Some(vec![model.to_owned()]),
             efforts: effort.map(|effort| vec![effort.to_owned()]),
+            r#where: None,
         }),
         open,
         through,
@@ -480,8 +482,10 @@ async fn of_place_resolved(
                 permission: *permission,
                 options: (*permission == Permission::ProviderUse && model.is_some()).then(|| {
                     MissingOptions {
+                        services: None,
                         models: model.map(|model| vec![model.to_owned()]),
                         efforts: effort.map(|effort| vec![effort.to_owned()]),
+                        r#where: None,
                     }
                 }),
                 open,

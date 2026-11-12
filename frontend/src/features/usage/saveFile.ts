@@ -23,6 +23,6 @@ export function saveFile(text: string, name: string, type = 'text/csv'): void {
 
 /** What a usage file is called: whose use, which days, and what it holds. */
 export function usageFileName(scope: UsageScope, span: Span, what: 'series' | 'records'): string {
-  const whose = scope.kind === 'me' ? 'me' : scope.kind === 'node' ? 'place' : 'provider';
+  const whose = scope.kind === 'system' ? 'system' : scope.kind === 'me' ? 'me' : scope.kind === 'node' ? 'place' : 'provider';
   return `orch-usage-${whose}-${span.from}-to-${span.to}-${what}.csv`;
 }
