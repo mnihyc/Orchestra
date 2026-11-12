@@ -50,7 +50,7 @@ export function SettingReachDetails({ target, def, name, snapshot, onClose }: { 
   const label = name === undefined ? t('settings.reach.label') : t('settings.reach.openFor', { name });
   const close = onClose === undefined ? null : <IconButton size="sm" icon={<X aria-hidden />} label={name === undefined ? t('settings.reach.close') : t('settings.reach.closeFor', { name })} onClick={onClose} />;
   if (last === undefined || refused) return <section aria-label={label} className="flex min-w-0 items-start gap-2">
-    {load.isError ? <ErrorState compact error={load.error} retrying={load.isFetching} onRetry={refresh} /> : <SkeletonRows rows={2} />}{close}
+    {load.isError ? <ErrorState compact error={load.error} retrying={load.isFetching} onRetry={refresh} /> : <SkeletonRows read={load} rows={2} />}{close}
   </section>;
   const overrides = [...new Map<string, NodeRef>((load.data?.pages ?? []).flatMap((page) => page.overrides.items).map((node) => [node.id, node] as const)).values()];
   return <section aria-label={label} className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">

@@ -32,7 +32,7 @@ export function HostLink({ host, label = host.name }: { host: Pick<Host, 'id' | 
   return (
     <span className="flex min-w-0 flex-col gap-0.5"><ResourceName subject={{ kind: 'host', host }} asChild><Link to="/resources/hosts/$id" params={{ id: host.id }} className="truncate font-medium text-text hover:underline">
       {label}
-    </Link></ResourceName><ResourceHint subject={{ kind: 'host', host }} /></span>
+    </Link></ResourceName><ResourceHint subject={{ kind: 'host', host }} wrap /></span>
   );
 }
 

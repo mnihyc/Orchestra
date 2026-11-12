@@ -1,0 +1,1 @@
+, page AS (SELECT id FROM people WHERE visible AND ($7::uuid IS NULL OR id>$7) ORDER BY id LIMIT $8) SELECT jsonb_build_object('ids',COALESCE((SELECT jsonb_agg(id ORDER BY id) FROM page),'[]'::jsonb),'hidden',(SELECT count(*) FROM people WHERE NOT visible))

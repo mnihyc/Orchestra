@@ -14,7 +14,7 @@ use orch_api_contract::nodes::NodeKind;
 use orch_api_contract::package::{
     PackageAccess, PackageHeader, PackageKind, PackageLeftOut, PackageObject, PackagePrincipal,
 };
-use orch_db::queries::imports::OriginRow;
+use orch_db::queries::imports::{OriginRow, Table};
 use orch_types::Id;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -74,6 +74,8 @@ pub struct Opened {
 /// An object that is here and meets an object of the source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Existing {
+    /// The actual native table from which the match was selected.
+    pub table: Table,
     /// Its identifier.
     pub id: Id,
     /// Its name.
@@ -188,6 +190,8 @@ pub struct Plan {
     pub authors: ImportAuthors,
     /// Whether the sharing comes back.
     pub access: ImportAccessPlan,
+    /// Native source objects carrying access entries, indexed once for queue and per-object checks.
+    pub access_objects: std::collections::HashSet<Id>,
     /// What does not come back.
     pub losses: Vec<ImportLoss>,
     /// What the place allows.

@@ -59,6 +59,13 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
         )
         .await
         .unwrap();
+        // Both people belong to this registered machine home. Changing its owner later keeps that home.
+        sqlx::query("UPDATE machines SET home_id=$2,org_id=$2 WHERE id=$1")
+            .bind(machine.id)
+            .bind(org)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
         let environment = access_fixtures::insert_environment(
             &mut conn,
             world.user,
@@ -88,6 +95,7 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
     // command journal, resource page and audit are the actual implementations.
     machine.handler.on(CommandKind::McpImport, |_| {
         Ok(CommandResult::McpImport(McpImportResult {
+            snapshot: None,
             definition_fingerprint: None,
             transport: "stdio".to_owned(),
             digest: "copied".to_owned(),
@@ -101,6 +109,7 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
         scope: McpScope::User,
         directory: None,
         name: "files".to_owned(),
+        as_name: Some("file-tools".to_owned()),
     };
     let answer = tokio::time::timeout(PATIENCE, machine.link.import_mcp(request.clone()))
         .await
@@ -118,6 +127,19 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].owner_id, Some(world.user));
+    assert_eq!(rows[0].home_id, Some(org));
+    assert_eq!(rows[0].org_id, Some(org));
+    assert!(
+        rows[0].enabled,
+        "the local import switches its resource on in the same act"
+    );
+    assert_eq!(rows[0].name, "file-tools");
+    let enabled: bool = sqlx::query_scalar("SELECT COALESCE((config->'mcp.enabled'->>$2)::boolean,false) FROM environments WHERE id=$1")
+        .bind(environment).bind(request.request_id.to_string()).fetch_one(world.db.pool()).await.unwrap();
+    assert!(
+        enabled,
+        "command-line import switches the copied resource on in its environment"
+    );
     assert_eq!(rows[0].machine_id, Some(machine.id));
     assert_eq!(rows[0].spec["imported"]["by"], world.user.to_string());
     assert_eq!(
@@ -207,6 +229,7 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
     // Another server found there: "files" is already imported on this machine under that name, and a
     // second copy of it would take a name that is taken (its page offers Import again instead).
     next.name = "notes".to_owned();
+    next.as_name = Some("note-tools".to_owned());
     let answer = machine.link.import_mcp(next.clone()).await.unwrap();
     assert_eq!(answer.code, None, "{}", answer.detail);
     let owner: orch_types::Id = sqlx::query_scalar("SELECT owner_id FROM mcp_servers WHERE id=$1")
@@ -215,6 +238,17 @@ async fn a_local_import_is_filed_as_the_machine_owner_and_replay_makes_no_second
         .await
         .unwrap();
     assert_eq!(owner, new_owner);
+    let home: (Option<orch_types::Id>, Option<orch_types::Id>) =
+        sqlx::query_as("SELECT home_id,org_id FROM mcp_servers WHERE id=$1")
+            .bind(next.request_id)
+            .fetch_one(world.db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        home,
+        (Some(org), Some(org)),
+        "owner transfer does not silently move the import home"
+    );
     sqlx::query("UPDATE users SET status='suspended' WHERE id=$1")
         .bind(new_owner)
         .execute(world.db.pool())

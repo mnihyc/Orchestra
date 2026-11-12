@@ -2,6 +2,7 @@
 import { expect, type Browser, type BrowserContext, type Page, type Response } from '@playwright/test';
 import { ACTION_MS, READY_MS, type Actor, type CaptureConfig, type CaptureLocale, type CaptureTheme } from './config.ts';
 import { bounded } from './deadline.ts';
+import { arrived } from '../../tests/e2e/support.ts';
 
 type Storage = Awaited<ReturnType<BrowserContext['storageState']>>;
 export function freshStorage(state: Storage): Storage {
@@ -49,7 +50,7 @@ export class CaptureSession {
       await page.getByLabel('Password', { exact: true }).fill(person.password);
       // Subscribe before the click. Do not leave an orphaned response waiter when a control is missing.
       const [answer] = await Promise.all([
-        page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/auth/login', { timeout: READY_MS }),
+        arrived(page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/v1/auth/login', { timeout: READY_MS })),
         page.getByRole('button', { name: 'Sign in', exact: true }).click(),
       ]);
       if (!answer.ok()) throw new Error('A supplied person could not sign in with a password.');

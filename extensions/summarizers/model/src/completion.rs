@@ -5,7 +5,7 @@
 use crate::{descriptor, prompts};
 use async_trait::async_trait;
 use orch_agent_contract::events::TokenUsage;
-use orch_link_contract::commands::{CompletionPurpose, ProviderComplete, ProviderCompleteResult};
+use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult};
 use orch_summarizer_contract::descriptor::{SummarizerDescriptor, SummaryField};
 use orch_summarizer_contract::result::{SummaryResult, UsageEvent};
 use orch_summarizer_contract::summarizer::{SummarizeError, Summarizer, SummaryRequest};
@@ -42,24 +42,31 @@ impl Summarizer for Model {
         descriptor::descriptor()
     }
 
-    async fn summarize(&self, request: SummaryRequest) -> Result<SummaryResult, SummarizeError> {
+    async fn summarize(
+        &self,
+        mut request: SummaryRequest,
+    ) -> Result<SummaryResult, SummarizeError> {
         let config = descriptor::Config::read(&request.config)?;
+        // Handoffs use their existing transcript/share planner; their previous text is not activity.
+        if request.field != SummaryField::Handoff {
+            let budget = crate::context::request_budget(&request, config.context_tokens)?;
+            let total = u64::try_from(request.activity.len()).unwrap_or(u64::MAX);
+            let input = std::mem::take(&mut request.activity)
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| crate::context::InputItem {
+                    key: index.to_string(),
+                    item,
+                })
+                .collect();
+            request.activity = crate::context::fill(input, budget, None, total)?.activity;
+        }
         let (system, input) = prompts::render(&request, &config);
         let answer = self
             .complete
             .complete(
                 request.node.id,
-                ProviderComplete {
-                    params: None,
-                    provider_id: config.provider_id,
-                    purpose: CompletionPurpose::Summary,
-                    // The host replaces this with a protocol this actual provider offers.
-                    protocol: String::new(),
-                    model_name: config.model_name.clone(),
-                    system,
-                    input,
-                    max_output_tokens: config.max_output_tokens,
-                },
+                config.completion(system, input, config.max_output_tokens),
             )
             .await?;
         let tokens: TokenUsage = answer.usage;

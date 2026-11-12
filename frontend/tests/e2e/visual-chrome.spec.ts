@@ -4,13 +4,15 @@ import { expect, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { expectVisualChrome } from './chrome-geometry';
-import { ACME, scenario, signIn } from './support';
+import { ACME, DOUBLE, scenario, signIn } from './support';
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
   test(`one visual chrome scale (${locale}, ${theme})`, async ({ page }, info) => {
     // Thirty-two route visits and four overlay scenes: five seconds per scene is a bounded suite budget.
     test.setTimeout(180_000);
     await scenario();
+    // Populate the existing native library producers so every resource scene exercises a real list.
+    expect((await page.request.post(`${DOUBLE}/__double/request-feeds/fixtures`)).ok()).toBe(true);
     await page.emulateMedia({ colorScheme: theme });
     await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page);

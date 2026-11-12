@@ -17,6 +17,7 @@ import { useStore } from 'zustand';
 import { meQuery } from '@/api/auth';
 import { client } from '@/api/client';
 import { meStateKey, meStateQuery, setMeState } from '@/api/personal';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
 import { readHelpState } from '@/features/help/Dismissed';
 import { forgetCommentDraftDeviceData } from '@/features/documents/commentDrafts';
 import { TUTORIALS as SHIPPED_TUTORIALS, tutorialOf } from '@/help/tutorials';
@@ -32,6 +33,7 @@ import { ConfirmDialog } from '@/ui/ConfirmDialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
+import { linkSharingPreference } from '@/features/sharing/preference';
 
 /** The tutorials that ship, by the name each is kept under when it is finished. */
 export const TUTORIALS = [
@@ -52,7 +54,7 @@ export type Tutorial = (typeof TUTORIALS)[number];
 
 /** The kinds of screen whose layout a device keeps. */
 /** Known storage fields are translated through these catalogue keys, never shown as implementation names. */
-const CHOICE_KINDS = ['global', 'org', 'project', 'topic', 'thread', 'resource-providers', 'resource-agents', 'resource-environments', 'resource-hosts', 'resource-machines', 'resource-templates', 'provider-endpoints', 'chat', 'help', 'search'] as const;
+const CHOICE_KINDS = ['global', 'org', 'project', 'topic', 'thread', 'document', 'page', 'resource-providers', 'resource-agents', 'resource-environments', 'resource-hosts', 'resource-machines', 'resource-templates', 'provider-endpoints', 'chat', 'help', 'search', 'approvals', 'ports', 'storage', 'trace', 'navigation', 'onboarding', 'links', 'import-review', 'import-report', 'usage'] as const;
 const CHOICE_FIELDS = ['tab', 'view', 'rightOpen', 'rightSize', 'mobileView', 'mobileTab', 'listOrigin', 'scope', 'advanced', 'endpointAdvanced', 'part', 'setup', 'filters'] as const;
 
 const SCREEN_KINDS: readonly ScreenKind[] = ['org', 'project', 'topic', 'thread', 'document', 'page'];
@@ -109,16 +111,30 @@ function useStateKey(key: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (change: (held: unknown) => unknown) => {
+      const reader = libraryReader();
       const state = queryClient.getQueryData<Record<string, unknown>>(meStateKey);
       const next = change(entryOf(state, key));
       await setMeState(key, next);
-      return next;
+      return { next, reader };
     },
-    onSuccess: (next) => {
+    onSuccess: ({ next, reader }) => {
+      if (!sameLibraryReader(reader)) return;
       queryClient.setQueryData<Record<string, unknown>>(meStateKey, (state) => ({ ...state, [key]: next }));
     },
     onSettled: (_data, error) => { if (error !== null) void queryClient.invalidateQueries({ queryKey: meStateKey }); },
   });
+}
+
+function LinkSharing({ state }: { state: Record<string, unknown> }) {
+  const { t } = useTranslation();
+  const write = useStateKey('timeline');
+  const checked = linkSharingPreference(state);
+  return <Section id="interface-links" title={t('linkSharing.settingsTitle')}>
+    {checked === null ? <span className="text-sm text-text-muted">{t('linkSharing.unavailable')}</span>
+      : <Switch label={t('linkSharing.preference')} checked={checked} disabled={write.isPending}
+        onCheckedChange={(on) => write.mutate((held) => ({ ...(isRecord(held) ? held : {}), share_on_link: on }))} />}
+    {write.error !== null && <ErrorAlert error={write.error} />}
+  </Section>;
 }
 
 // ---------------------------------------------------------------- what each kind of file opens with
@@ -242,6 +258,31 @@ export interface KeptItem {
   bytes: number;
 }
 
+export interface KeptGroup extends KeptItem {
+  id: string;
+  keys: string[];
+  choice: { kind: string; key: string | null } | null;
+}
+
+/** One named category clears its own choices, including deliberate per-page overrides. */
+export function deviceKeptGroups(userId: string | null, items: readonly KeptItem[]): KeptGroup[] {
+  if (userId === null) return [];
+  const groups = new Map<string, KeptGroup>();
+  for (const item of items) {
+    if (!item.key.startsWith(`orch.${userId}.`)) continue;
+    const choice = viewChoiceKeyDetails(userId, item.key);
+    const known = CHOICE_KINDS.some((kind) => kind === choice?.kind);
+    const id = choice === null ? item.key : known ? `choices:${choice.kind}` : 'choices:other';
+    const before = groups.get(id);
+    if (before === undefined) groups.set(id, { ...item, id, keys: [item.key], choice });
+    else {
+      before.keys.push(item.key); before.bytes += item.bytes;
+      if (before.choice !== null && before.choice.key !== choice?.key) before.choice.key = null;
+    }
+  }
+  return [...groups.values()];
+}
+
 /** What this browser keeps for one person: everything under their identifier, so that two people at one browser never meet. */
 export function keptOnDevice(userId: string, storage: Pick<Storage, 'length' | 'key' | 'getItem'>): KeptItem[] {
   const prefix = `orch.${userId}.`;
@@ -320,16 +361,18 @@ function ThisPersonDevice({ userId }: { userId: string | null }) {
       ) : (
         <>
           <ul className={`${boxClasses} divide-y divide-border`}>
-            {items.filter((item) => userId !== null && item.key.startsWith(`orch.${userId}.`)).map((item) => {
+            {deviceKeptGroups(userId, items).map((item) => {
               const what = userId === null ? null : kindOfKept(userId, item.key);
               const known = what?.kind === 'other' ? knownKept(what.name) : null;
-              const choice = userId === null ? null : viewChoiceKeyDetails(userId, item.key);
+              const choice = item.choice;
               const scope = CHOICE_KINDS.find((kind) => kind === choice?.kind);
               const key = CHOICE_FIELDS.find((key) => key === choice?.key);
-              const choiceName = choice === null ? null : scope === undefined || key === undefined ? t('craftChoiceNames.unknown') : t('craftChoiceNames.scope', { kind: t(`craftChoiceNames.kinds.${scope}`), choice: t(`craftChoiceNames.keys.${key}`) });
+              const choiceName = choice === null ? null : scope === undefined ? t('craftChoiceNames.unknown')
+                : scope === 'page' || key === undefined ? t(`craftChoiceNames.kinds.${scope}`)
+                : t('craftChoiceNames.scope', { kind: t(`craftChoiceNames.kinds.${scope}`), choice: t(`craftChoiceNames.keys.${key}`) });
               const itemName = what?.kind === 'comments' ? t('settings.interface.device.commentDrafts') : what?.kind === 'other' ? what.name : item.key;
               return (
-                <li key={item.key} className="flex items-center gap-3 px-4 py-2">
+                <li key={item.id} className="flex items-center gap-3 px-4 py-2">
                   <HardDrive className="size-4 shrink-0 text-text-subtle" aria-hidden />
                   <span className="min-w-0 flex-1 text-base text-text">
                     {choiceName ?? (what?.kind === 'comments' ? itemName : what?.kind === 'layout'
@@ -338,7 +381,7 @@ function ThisPersonDevice({ userId }: { userId: string | null }) {
                         ? t(`settings.interface.device.names.${known}`)
                         : t('settings.interface.device.other', { name: itemName }))}
                   </span>
-                  <Button action={what?.kind === 'layout' ? 'resetLayout' : known === 'org' ? 'clearOrg' : 'clearChoices'} aria-label={what?.kind === 'layout' ? actionName('resetLayout', what.screen) : known === 'org' ? actionName('clearOrg') : actionName('clearChoices', choiceName ?? itemName)} size="sm" variant="ghost" onClick={() => { forget([item.key]); }}>
+                  <Button action={what?.kind === 'layout' ? 'resetLayout' : known === 'org' ? 'clearOrg' : 'clearChoices'} aria-label={what?.kind === 'layout' ? actionName('resetLayout', what.screen) : known === 'org' ? actionName('clearOrg') : actionName('clearChoices', choiceName ?? itemName)} size="sm" variant="ghost" onClick={() => { forget(item.keys); }}>
                     {what?.kind === 'layout' ? t('settings.interface.device.reset') : known === 'org' ? t('settings.interface.device.forget') : t('craftDevices.clear')}
                   </Button>
                 </li>
@@ -376,7 +419,7 @@ export function InterfaceSettings() {
   return (
     <PersonalFrame page="interface" lead={t('settings.interface.lead')}>
       {state.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={state} rows={4} />
       ) : state.isError ? (
         <ErrorState error={state.error} retrying={state.isRefetching} onRetry={() => void state.refetch()} />
       ) : (
@@ -389,6 +432,7 @@ export function InterfaceSettings() {
             </Section>
           )}
           <Keys />
+          <LinkSharing state={state.data} />
           <Viewers state={state.data} />
           <Tutorials state={state.data} />
           <ThisDevice />

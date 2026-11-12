@@ -93,6 +93,23 @@ impl Lease {
         &self.name
     }
 
+    /// Pin this exact live holder on the caller's page transaction before any page effects.
+    /// Time is sampled after the locking wait; retain the returned deadline through commit.
+    pub async fn fence(
+        &self,
+        conn: &mut Conn,
+        clock: &dyn orch_types::Clock,
+    ) -> Result<Option<DateTime<Utc>>, DbError> {
+        let row: Option<(String, DateTime<Utc>)> =
+            sqlx::query_as("SELECT holder,until FROM job_leases WHERE name=$1 FOR UPDATE")
+                .bind(&self.name)
+                .fetch_optional(conn)
+                .await?;
+        Ok(row
+            .filter(|(holder, until)| holder == &self.holder && *until > clock.now())
+            .map(|(_, until)| until))
+    }
+
     /// Takes it, or renews it, at `now`. Says whether this holder holds it now.
     pub async fn hold(&self, db: &Db, now: DateTime<Utc>) -> Result<bool, DbError> {
         let mut conn = db.acquire().await?;

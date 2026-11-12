@@ -307,6 +307,7 @@ function PolicyRow({ machineId, entry, program,windows=false }: { machineId: str
   const [editing, setEditing] = useState(false);
   const words = keyWords(entry, t);
   const fixed = entry.key === 'policy.delegated';
+  const nextPolicyValue = entry.key === 'mcp.import' && typeof entry.value === 'boolean' ? !entry.value : entry.value;
   const helpContent=<div className="flex flex-col gap-2"><p>{words.description}</p>
       {entry.key === 'exec.offers' && <ArticleGuideLink article="resources" heading="profiles-hosts-and-computers" title={t('help.hint.more')} />}
       <dl className="grid grid-cols-2 gap-2 text-sm">
@@ -314,7 +315,7 @@ function PolicyRow({ machineId, entry, program,windows=false }: { machineId: str
         <div><dt>{t('machines.policy.defaults.cautious')}</dt><dd><ValueText policyKey={entry.key} value={entry.definition.cautious} /></dd></div>
       </dl>
       {fixed?<><p>{t('machines.policy.onlyOnMachine')}</p><CommandBox command={`${program} delegate '*'`} label={t('machines.policy.copy')}/></>:
-        !entry.delegated?<CommandBox command={policyCommand(entry.key,entry.value,program,windows)} label={t('machines.policy.copy')}/>:null}
+        !entry.delegated || entry.key === 'mcp.import'?<CommandBox command={policyCommand(entry.key,nextPolicyValue,program,windows)} label={t('machines.policy.copy')}/>:null}
     </div>;
   const help=entry.key==='drivers'?<DriverPolicyHelp term={words.name} what={helpContent}/>:<HelpHint term={words.name} what={helpContent}/>;
   const reason=t(entry.writable?'machines.policy.source.orch':entry.delegated?'machines.policy.source.manager':'machines.policy.source.local');
@@ -331,7 +332,7 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
   const { t } = useTranslation();
   const [handover, setHandover] = useState<MachinePolicySection | null>(null);
   const policy = useQuery(machinePolicyQuery(machine.id));
-  if (policy.isPending) return <SkeletonRows rows={4} />;
+  if (policy.isPending) return <SkeletonRows read={policy} rows={4} />;
   if (policy.isError) return <ErrorState compact error={policy.error} retrying={policy.isRefetching} onRetry={() => void policy.refetch()} />;
   const { keys, reported_at: reportedAt } = policy.data;
   const program = policyProgram(policy.data);
@@ -383,7 +384,7 @@ export function MachinePolicyTab({ machine }: { machine: Pick<Machine, 'id'> }) 
  */
 export function MachineLimits({ machineId, bounds, id, title, lead, compact = false }: { machineId: string; bounds: 'environment' | 'provider'; id: string; title: string; lead: string; compact?: boolean }) {
   const policy = useQuery({ ...machinePolicyQuery(machineId), retry: false });
-  if (policy.isPending) return <SkeletonRows rows={3}/>;
+  if (policy.isPending) return <SkeletonRows read={policy} rows={3}/>;
   if (policy.isError) return <ErrorState compact error={policy.error} retrying={policy.isRefetching} onRetry={()=>void policy.refetch()}/>;
   const sections:readonly MachinePolicySection[]=bounds==='environment'?['environment','node']:['environment','node','provider'];
   const keys = policy.data.keys.filter((entry) => entry.definition.sections.some((section)=>sections.includes(section)));

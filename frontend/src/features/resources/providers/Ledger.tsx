@@ -38,7 +38,7 @@ export function ProviderCounted({ providerId, onOpen }: { providerId: string; on
   const figures = query.data === undefined ? null : periodFigures(query.data, now);
   return <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4" aria-label={t('providerPlan.ledger')}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-text">{t('providerPlan.ledger')}</h2><Button size="sm" icon={<RefreshCw aria-hidden />} pending={query.isFetching} onClick={() => void query.refetch()}>{t('providers.overview.refresh')}</Button></div>
-    {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : figures === null ? <SkeletonRows rows={3} /> : <>
+    {query.isError ? <ErrorState compact error={query.error} onRetry={() => void query.refetch()} /> : figures === null ? <SkeletonRows read={query} rows={3} /> : <>
       <div className="grid gap-4 sm:grid-cols-3">{PERIODS.map((period) => <div key={period} className="flex flex-col gap-2"><h3 className="text-sm font-medium text-text">{t(`providerPlan.${period}`)}</h3><LedgerFigures figures={figures[period]} /></div>)}</div>
       <p className="text-xs text-text-subtle">{t('providerPlan.ledgerSource')} <RelativeTime at={new Date(query.dataUpdatedAt).toISOString()} /></p>
     </>}
@@ -52,7 +52,7 @@ export function ApplicableLimits({ id, provider = false }: { id: string; provide
   const query = useQuery(planCapsQuery(id, provider));
   return <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4" aria-label={t('providerPlan.limits')}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-text">{t('providerPlan.limits')}</h2><Button size="sm" icon={<RefreshCw aria-hidden />} pending={query.isFetching} onClick={() => void query.refetch()}>{t('providers.overview.refresh')}</Button></div>
-    {query.isError ? <ErrorState compact error={query.error} /> : query.data === undefined ? <SkeletonRows rows={2} /> : query.data.length === 0 ? <EmptyState compact title={t('providerPlan.noLimits')} /> : <ul className="flex flex-col gap-4">{query.data.map((row) => <li key={`${row.cap.id}.${row.person?.id ?? ''}`} className="flex flex-col gap-2">
+    {query.isError ? <ErrorState compact error={query.error} /> : query.data === undefined ? <SkeletonRows read={query} rows={2} /> : query.data.length === 0 ? <EmptyState compact title={t('providerPlan.noLimits')} /> : <ul className="flex flex-col gap-4">{query.data.map((row) => <li key={`${row.cap.id}.${row.person?.id ?? ''}`} className="flex flex-col gap-2">
       <p className="text-sm text-text-muted">{t(`ui.limit.meter.${row.cap.meter}`)}</p>
       {row.cap.amount === null ? <p className="text-sm">{row.cap.note || capTitle(row.cap,t)}</p> : <Meter value={Number(row.used) / Number(row.cap.amount) * 100} label={row.cap.note || capTitle(row.cap,t)} detail={`${row.used} / ${row.cap.amount}`} />}
       {(row.state !== 'ok' || row.period_ends_at !== null) && <p className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-text-muted">{row.state !== 'ok' && <span>{row.state === 'reached' ? t('caps.row.reached') : t('caps.row.warning')}</span>}{row.period_ends_at !== null && <span>{t('providerDetails.resets')} <RelativeTime at={row.period_ends_at} /></span>}</p>}

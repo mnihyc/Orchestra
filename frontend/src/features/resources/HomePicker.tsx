@@ -111,21 +111,23 @@ export interface HomePickerProps {
   compact?: boolean;
   /** Enrollment defaults to the caller's own home, independently of the team currently viewed. */
   preferPersonal?: boolean;
+  /** The server chooses this home at the effect; choosing another entry is an explicit override. */
+  defaultChoice?: string;
   /** An environment may take its settings from the topic or project currently being used. */
   places?: readonly { id: string; name: string }[];
 }
 
 /** A choice of the org a resource belongs to, with the one in view chosen to begin with. */
-export function HomePicker({ value, onChange, label, hint, error, disabled, compact = false, preferPersonal = false, places = [] }: HomePickerProps) {
+export function HomePicker({ value, onChange, label, hint, error, disabled, compact = false, preferPersonal = false, defaultChoice, places = [] }: HomePickerProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
   const { choices, pending, error:readError, retry } = useHomeChoices(places.some((place) => place.id === value) ? '' : value);
   const userId = useStore(client.session, (state) => state.userId);
   const inView = useSelectedOrg((state) => state.orgId) ?? (userId === null ? null : rememberedOrg(userId));
   useEffect(() => {
-    if (value === '' && choices.length > 0) onChange((preferPersonal ? choices.find((choice) => choice.personal)?.id : undefined) ?? defaultHome(choices, inView));
-  }, [value, choices, inView, onChange, preferPersonal]);
-  const options: { value: string; name: string; description?: string }[]=[...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name })),
+    if (defaultChoice === undefined && value === '' && choices.length > 0) onChange((preferPersonal ? choices.find((choice) => choice.personal)?.id : undefined) ?? defaultHome(choices, inView));
+  }, [value, choices, inView, onChange, preferPersonal, defaultChoice]);
+  const options: { value: string; name: string; description?: string }[]=[...(defaultChoice===undefined?[]:[{value:'',name:defaultChoice}]),...places.filter((place) => !choices.some((choice) => choice.id === place.id)).map((place) => ({ value:place.id,name:place.name })),
     ...choices.map((choice)=>({value:choice.id,...(compact?{name:choice.label}:choiceCopy(t,`resourceHome.${choice.personal?'personal':choice.department?'department':'org'}`,{name:choice.label}))}))];
   const words = query.trim().toLocaleLowerCase();
   const found = options.filter((option) => option.name.toLocaleLowerCase().includes(words)).map((option) => ({

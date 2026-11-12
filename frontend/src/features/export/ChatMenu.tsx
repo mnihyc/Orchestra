@@ -4,6 +4,8 @@
  * people in it, and not by an admin who only reads it as one. Where the caller may not, the entry stays,
  * switched off, with the line that says for whom it is and, for a node's chat, Request access.
  */
+import { linkTo } from '@/lib/links';
+import { copyText } from '@/ui/clipboard';
 import { useQuery } from '@tanstack/react-query';
 import { EllipsisVertical } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -53,7 +55,8 @@ export function useChatExportEntries(chat: Chat, me: string | null): MenuEntry[]
 /** The menu of the header of a chat that has none of its own: a chat of a node and a direct chat. */
 export function ChatMenu({ chat, me }: { chat: Chat; me: string | null }) {
   const { t } = useTranslation();
-  const entries = useChatExportEntries(chat, me);
-  if (entries.length === 0) return null;
+  const exporting = useChatExportEntries(chat, me);
+  const entries: MenuEntry[] = [{ id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'),
+    onSelect: () => void copyText(linkTo({ kind: 'chat', id: chat.id }), t('common.linkCopied')) }, ...exporting];
   return <Menu label={t('export.chatMenu')} align="end" entries={entries} trigger={<IconButton size="sm" label={t('export.chatMenu')} icon={<EllipsisVertical aria-hidden />} />} />;
 }

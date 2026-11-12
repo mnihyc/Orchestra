@@ -1,8 +1,10 @@
 ---
+group: access
 title: Who can see and do what
 screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /shared, /inbox, /approvals
 keywords: how do I share, access, permission, permissions, holders, group, role, members, everyone, locator, override, create, make, new, start, project, topic, thread, sharing.allow_external, sharing.allow_holders, access.manage, access.external, capability.policy
 heading_keywords.who-may-make-projects-topics-and-threads: create project, make project, new project, create topic, open topic, new topic, create thread, start thread, new thread, permission, 创建项目, 创建话题, 开始线程, 权限
+summary: Understand access requests, holders, sharing limits and administrative overrides.
 ---
 
 # Who can see and do what
@@ -161,6 +163,18 @@ Sharing a place asks whether you mean the place alone or its contents too;
 the preview states what follows and what remains private. Opening a thread
 does not open a provider, or Files and Terminal. Those doors belong to the
 whole environment, so use separate environments for work that must stay apart.
+
+## Limit where a provider's work runs
+
+A provider's Use entry can narrow more than models and efforts: open the entry's options and set **Where**. Left out, it
+reads **Anywhere**. Name environments, hosts or machines to limit the work to them; a host or machine covers every
+environment on it, those made there later included. **Where** only narrows and never gives Use. An entry that names no **Agent setup** allows only the forms in which the sign-in
+stays where it is kept; a copy or a handover is allowed by naming it. When several entries let
+one person in, an entry that allows the environment is enough, and an entry that names no places allows everywhere. A
+thread that is started, switched, forked or adopted into an environment outside the list is refused with the entry and the
+environment named, and so is a thread that moves to another environment, or whose entry is narrowed, at its next turn; it
+is never moved quietly to another environment or provider. Work that runs in no environment (Ask, summaries, embeddings and
+the semantic index) is not narrowed by **Where** and stays governed by services.
 
 ## Understand an override
 

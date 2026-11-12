@@ -5,30 +5,41 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{
     AgentStart, McpForget, McpImport, McpStart, McpStartLocal, McpStop,
 };
+#[cfg(target_os = "linux")]
 use orch_link_contract::session::Role;
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{Service, TicketSource};
+#[cfg(target_os = "linux")]
 use orch_types::{Json, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::tunnels::{messages, post};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, stand_in};
+#[cfg(target_os = "linux")]
 use serde_json::json;
 
 /// The program of the tests when it is run as a tool server: no test at all otherwise.
 #[test]
+#[cfg(target_os = "linux")]
 fn stand_in_for_a_tool_server() {
     if std::env::var(stand_in::FLAG).is_ok() {
         stand_in::run();
     }
 }
 
+#[cfg(target_os = "linux")]
 const SECRET: &str = "ghp_the_owners_own_token";
 
 /// A rig whose machine plays the agent and the environment roles, and whose scripted harness has a tool
 /// server configured, with a secret in it.
+#[cfg(target_os = "linux")]
 async fn rig_with_a_configured_server() -> (EnvRig, std::path::PathBuf) {
     let mut rig = EnvRig::with_roles(vec![Role::Agent, Role::Environment]);
     rig.with_the_scripted_harness();
@@ -49,10 +60,13 @@ async fn rig_with_a_configured_server() -> (EnvRig, std::path::PathBuf) {
     (rig, workspace)
 }
 
+#[cfg(target_os = "linux")]
 fn import_of(rig: &EnvRig, server_id: orch_types::Id, name: &str) -> McpImport {
     McpImport {
         expected_fingerprint: None,
-        environment_id: rig.environment,
+        stored: None,
+        transfer: None,
+        environment_id: Some(rig.environment),
         server_id,
         source: "fake".to_owned(),
         scope: "user".to_owned(),
@@ -62,6 +76,7 @@ fn import_of(rig: &EnvRig, server_id: orch_types::Id, name: &str) -> McpImport {
 }
 
 /// Every file under a directory whose content holds `needle`.
+#[cfg(target_os = "linux")]
 fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf> {
     let mut found = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
@@ -85,6 +100,7 @@ fn files_holding(dir: &std::path::Path, needle: &str) -> Vec<std::path::PathBuf>
     found
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_copy_and_forgotten()
 {
@@ -109,6 +125,10 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
     // Imported: the answer says what it is and nothing of the definition.
     let server_id = new_id();
     let imported = rig.succeed(&import_of(&rig, server_id, "github")).await;
+    assert_eq!(
+        found[0]["digest"], imported["digest"],
+        "discovery and the stored copy use the same normalized private definition"
+    );
     assert_eq!(imported["transport"], "stdio");
     assert_eq!(imported["tools"], Json::Null);
     assert!(!imported.to_string().contains(SECRET));
@@ -196,6 +216,7 @@ async fn a_server_the_harness_configured_is_found_by_name_imported_run_from_its_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found_where_the_owner_allows_none()
  {
@@ -231,4 +252,220 @@ async fn nothing_is_imported_that_the_harness_does_not_have_and_nothing_is_found
         "policy.mcp_import_disabled"
     );
     closed.stop().await;
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn a_stored_native_duplicate_copies_the_saved_file_and_scrubs_a_nonowners_declared_values() {
+    use orch_link_contract::commands::{McpImportResult, McpStoredCopy, SerialKey};
+    let (mut rig, workspace) = rig_with_a_configured_server().await;
+    rig.attach(&workspace).await;
+    let original = new_id();
+    let reply: McpImportResult =
+        serde_json::from_value(rig.succeed(&import_of(&rig, original, "github")).await).unwrap();
+    let source = rig.data.path().join("mcp").join(format!("{original}.json"));
+    let before = std::fs::read(&source).unwrap();
+    assert!(String::from_utf8_lossy(&before).contains(SECRET));
+    for include_secrets in [true, false] {
+        let target = new_id();
+        let body = McpImport {
+            expected_fingerprint: None,
+            environment_id: None,
+            transfer: None,
+            stored: Some(McpStoredCopy {
+                server_id: original,
+                expected_digest: reply.digest.clone(),
+                include_secrets,
+            }),
+            server_id: target,
+            source: "fake".into(),
+            scope: "user".into(),
+            name: "github".into(),
+            directory: None,
+        };
+        let command = new_id();
+        rig.blobs.open_command(command);
+        rig.controller
+            .issue_with_id(command, &SerialKey::Machine, rig.deadline(), &body);
+        let result = tokio::time::timeout(
+            rig_environment::PATIENCE,
+            rig.controller.wait_command(command),
+        )
+        .await
+        .unwrap();
+        let orch_link::commands::Progress::Succeeded(result) = result else {
+            panic!("the actual stored snapshot copy failed: {result:?}");
+        };
+        let result: McpImportResult = serde_json::from_value(result).unwrap();
+        let actual =
+            std::fs::read(rig.data.path().join("mcp").join(format!("{target}.json"))).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&actual).contains(SECRET),
+            include_secrets
+        );
+        assert_eq!(result.digest == reply.digest, include_secrets);
+        assert_eq!(std::fs::read(&source).unwrap(), before);
+        let definition: orch_agent_contract::discovery::McpDefinition =
+            serde_json::from_slice(&actual).unwrap();
+        definition.check().unwrap();
+        if !include_secrets {
+            assert!(
+                definition
+                    .secrets
+                    .values()
+                    .all(|value| value.expose().is_empty())
+            );
+        }
+    }
+    rig.stop().await;
+}
+
+#[cfg(target_os = "linux")]
+async fn machine_snapshot(rig: &EnvRig, body: &McpImport) -> orch_link::commands::Progress {
+    let id = new_id();
+    rig.blobs.open_command(id);
+    rig.controller.issue_with_id(
+        id,
+        &orch_link_contract::commands::SerialKey::Machine,
+        rig.deadline(),
+        body,
+    );
+    tokio::time::timeout(rig_environment::PATIENCE, rig.controller.wait_command(id))
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+#[cfg(target_os = "linux")]
+async fn a_saved_mcp_snapshot_crosses_only_to_its_sealed_recipient_and_keeps_one_new_native_file() {
+    use orch_link_contract::commands::{
+        MachineKey, McpImportResult, McpSnapshotTransfer, McpStoredCopy, SerialKey,
+    };
+    use std::os::unix::fs::MetadataExt as _;
+    let (mut source, workspace) = rig_with_a_configured_server().await;
+    source.attach(&workspace).await;
+    let mut target = EnvRig::new();
+    target.start().await;
+    let mut other = EnvRig::new();
+    other.start().await;
+    let original = new_id();
+    let original_reply: McpImportResult = serde_json::from_value(
+        source
+            .succeed(&import_of(&source, original, "github"))
+            .await,
+    )
+    .unwrap();
+    let original_path = source
+        .data
+        .path()
+        .join("mcp")
+        .join(format!("{original}.json"));
+    let original_bytes = std::fs::read(&original_path).unwrap();
+    for include_secrets in [true, false] {
+        let created = new_id();
+        let read = McpImport {
+            expected_fingerprint: None,
+            environment_id: None,
+            stored: Some(McpStoredCopy {
+                server_id: original,
+                expected_digest: original_reply.digest.clone(),
+                include_secrets,
+            }),
+            transfer: Some(McpSnapshotTransfer::Issue {
+                recipient: MachineKey {
+                    machine_id: target.machine_id,
+                    public_key: target.recipient.as_ref().unwrap().to_text(),
+                },
+            }),
+            server_id: created,
+            source: "fake".into(),
+            scope: "user".into(),
+            name: "github".into(),
+            directory: None,
+        };
+        let id = new_id();
+        source.blobs.open_command(id);
+        source
+            .controller
+            .issue_with_id(id, &SerialKey::Machine, source.deadline(), &read);
+        let result = tokio::time::timeout(
+            rig_environment::PATIENCE,
+            source.controller.wait_command(id),
+        )
+        .await
+        .unwrap();
+        let orch_link::commands::Progress::Succeeded(value) = result else {
+            panic!("the native read failed: {result:?}");
+        };
+        assert!(!value.to_string().contains(SECRET));
+        let issued: McpImportResult = serde_json::from_value(value).unwrap();
+        assert!(
+            !source
+                .data
+                .path()
+                .join("mcp")
+                .join(format!("{created}.json"))
+                .exists(),
+            "a sealed read is not a new source-machine file"
+        );
+        let receive = McpImport {
+            transfer: Some(McpSnapshotTransfer::Receive {
+                recipient: target.machine_id,
+                snapshot: issued.snapshot.clone().unwrap(),
+            }),
+            ..read.clone()
+        };
+        assert!(
+            matches!(
+                machine_snapshot(&other, &receive).await,
+                orch_link::commands::Progress::Failed(_)
+            ),
+            "a different native key cannot open the snapshot"
+        );
+        let orch_link::commands::Progress::Succeeded(value) =
+            machine_snapshot(&target, &receive).await
+        else {
+            panic!("the actual receiver could not open its own sealed snapshot");
+        };
+        let result: McpImportResult = serde_json::from_value(value).unwrap();
+        assert!(result.snapshot.is_none());
+        assert_eq!(result.digest, issued.digest);
+        let path = target
+            .data
+            .path()
+            .join("mcp")
+            .join(format!("{created}.json"));
+        let before = std::fs::read(&path).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        assert_eq!(
+            String::from_utf8_lossy(&before).contains(SECRET),
+            include_secrets
+        );
+        assert!(matches!(
+            machine_snapshot(&target, &receive).await,
+            orch_link::commands::Progress::Succeeded(_)
+        ));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().ino(),
+            inode,
+            "a replay never replaces its own accepted file"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut wrong = receive.clone();
+        wrong.server_id = new_id();
+        assert!(matches!(
+            machine_snapshot(&target, &wrong).await,
+            orch_link::commands::Progress::Failed(_)
+        ));
+        let mut wrong = receive.clone();
+        wrong.stored.as_mut().unwrap().include_secrets = !include_secrets;
+        assert!(matches!(
+            machine_snapshot(&target, &wrong).await,
+            orch_link::commands::Progress::Failed(_)
+        ));
+        assert_eq!(std::fs::read(&original_path).unwrap(), original_bytes);
+    }
+    source.stop().await;
+    target.stop().await;
+    other.stop().await;
 }

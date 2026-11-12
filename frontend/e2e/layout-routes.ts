@@ -1,29 +1,49 @@
 /** Every shipped route pattern has a concrete fake-world screen; parameterized sections are expanded. */
 import { ACME, id, RUNS_ON, TRACE } from '../tests/doubles/fixtures.ts';
 import type { Scenario } from '../tests/doubles/world.ts';
+import type { ScreenFixture } from '../tests/doubles/screen-gate.ts';
 import { TREE } from '../tests/e2e/document-tree-support.ts';
+import { SKILL_ID } from '../tests/doubles/extra-resources.ts';
+export { SKILL_ID } from '../tests/doubles/extra-resources.ts';
 
-export interface LayoutRoute { pattern: string; url: string; note?: string; scenario?: Scenario; fixture?: 'document-tree' }
+export interface LayoutRoute { pattern: string; url: string; note?: string; scenario?: Scenario; fixture?: 'document-tree' | ScreenFixture }
+export const layoutRouteName = (row: LayoutRoute): string => row.fixture === undefined || row.fixture === 'document-tree' ? row.url : `${row.url} [${row.fixture}]`;
+export const SCREEN_PRESENTATIONS = ([1440, 400] as const).flatMap((width) => (['light', 'dark'] as const).flatMap((theme) =>
+  (['en', 'zh-CN'] as const).map((locale) => ({ width, theme, locale }))));
 const route = (pattern: string, url = pattern): LayoutRoute => ({ pattern, url });
 const sections = (pattern: string, prefix: string, names: readonly string[]) => names.map((name) => route(pattern, `${prefix}${name}`));
 const tabs = (kind: string, resource: string, names: readonly string[]) => names.map((tab) => route(`/resources/${kind}/$id`, `/resources/${kind}/${resource}?tab=${tab}`));
 
 export const MCP_ID = id(0x31, 1);
 export const MOUNT_ID = id(0x32, 1);
-export const SKILL_ID = '0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a62';
-export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'policies', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'];
-export const ADMIN_SECTIONS = ['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search', 'system', 'pki', 'audit'];
+export const ADMIN_MESSAGE_ID = '00000000-0000-4000-8000-000000000321';
+export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'defaults', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'];
+export const ADMIN_SECTIONS = ['overview', 'users', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'gateways', 'runtimes', 'templates', 'mcp', 'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search', 'system', 'pki', 'audit', 'tokens'];
+
+/** State coverage is shared by layout, request budgets and accessibility. */
+export const SCREEN_GATE_ROUTES: LayoutRoute[] = [
+  ...(['background-running', 'background-finished', 'background-off', 'background-lost', 'background-held'] as const).map((fixture) => ({
+    pattern: '/thread/$threadId', url: `/thread/${ACME.mainThread}`, fixture,
+  })),
+  ...(['gateways-catalogue', 'gateways-edit'] as const).map((fixture) => ({ pattern: '/admin/$section', url: '/admin/gateways', fixture })),
+  ...(['gateway-automatic', 'gateway-offline', 'gateway-unreported'] as const).map((fixture) => ({ pattern: '/resources/machines/$id', url: `/resources/machines/${RUNS_ON.laptop}`, fixture })),
+  ...(['tunnel-attached', 'tunnel-unavailable'] as const).map((fixture) => ({ pattern: '/thread/$threadId', url: `/thread/${ACME.mainThread}`, fixture })),
+  ...(['agent-share-ladders', 'agent-access-ladders'] as const).map((fixture) => ({ pattern: '/thread/$threadId', url: `/thread/${ACME.mainThread}`, fixture })),
+  ...(['thread-options-allowed', 'thread-options-fixed'] as const).map((fixture) => ({ pattern: '/thread/$threadId', url: `/thread/${ACME.mainThread}`, fixture })),
+  ...(['provider-search-models', 'provider-search-editor'] as const).map((fixture) => ({ pattern: '/resources/providers/$id', url: `/resources/providers/${RUNS_ON.openAiKey}?tab=models`, fixture })),
+];
 
 export const SIGNED_IN_ROUTES: LayoutRoute[] = [
-  route('/'), route('/admin'), route('/resources'), route('/settings'), route('/workbench'),
+  route('/'), route('/admin'), route('/resources'), route('/settings'), route('/workbench'), route('/storage'),
   route('/org/$slug', '/org/acme'), route('/org/$slug', '/org/acme.research'), route('/org/$slug', '/org/ada'),
   route('/org/$slug/messages', '/org/acme/messages'),
+  route('/messages/$id', `/messages/${ADMIN_MESSAGE_ID}`),
   route('/chat/$chatId', `/chat/${id(9, 1)}`), route('/place-chat/$nodeId', `/place-chat/${ACME.org}`),
   ...sections('/org/$slug/settings/$section', '/org/acme/settings/', ORG_SECTIONS),
   route('/project/$projectId', `/project/${ACME.web}`), route('/project/$projectId', `/project/${ACME.web}?view=board`),
-  ...['general', 'policies', 'tags', 'audit', 'destinations'].map((section) => route('/project/$projectId/settings', `/project/${ACME.web}/settings?section=${section}`)),
+  ...['general', 'defaults', 'tags', 'audit', 'destinations'].map((section) => route('/project/$projectId/settings', `/project/${ACME.web}/settings?section=${section}`)),
   route('/topic/$topicId', `/topic/${ACME.fixLogin}`),
-  ...['general', 'policies', 'audit', 'destinations'].map((section) => route('/topic/$topicId', `/topic/${ACME.fixLogin}?tab=settings&section=${section}`)),
+  ...['general', 'defaults', 'audit', 'destinations'].map((section) => route('/topic/$topicId', `/topic/${ACME.fixLogin}?tab=settings&section=${section}`)),
   route('/thread/$threadId', `/thread/${ACME.mainThread}`),
   route('/doc/$documentId', `/doc/${id(7, 1)}`),
   route('/documents/$nodeId', `/documents/${ACME.web}`),
@@ -32,7 +52,7 @@ export const SIGNED_IN_ROUTES: LayoutRoute[] = [
   route('/trace/$nodeId', `/trace/${ACME.mainThread}`), route('/u/$username', '/u/ada'),
   ...['/inbox', '/approvals', '/everything', '/search', '/shared', '/usage', '/help'].map((path) => route(path)),
   route('/help/$article', '/help/finding-things'),
-  ...['profile', 'security', 'tokens', 'notifications', 'interface', 'exports', 'usage', 'your-page'].map((section) => route(`/settings/${section}`)),
+  ...['profile', 'security', 'tokens', 'notifications', 'interface', 'imports', 'exports', 'usage', 'your-page'].map((section) => route(`/settings/${section}`)),
   ...['providers', 'agents', 'environments', 'hosts', 'machines', 'templates', 'mcp', 'mounts', 'skills'].map((kind) => route(`/resources/${kind}`)),
   ...tabs('providers', RUNS_ON.openAiKey, ['overview', 'models', 'key', 'usage', 'settings', 'activity']),
   ...tabs('agents', RUNS_ON.codex, ['overview', 'parameters', 'profile', 'access']),
@@ -46,6 +66,7 @@ export const SIGNED_IN_ROUTES: LayoutRoute[] = [
   // This address is deliberately a not-found screen in the shipped application, not the development gallery.
   { ...route('/dev/ui'), note: 'Production deliberately excludes the shared-control gallery.' },
   { pattern: '(not found)', url: '/no-such-layout-route', note: 'The routed not-found screen is also part of the product.' },
+  ...SCREEN_GATE_ROUTES,
 ];
 
 export const SIGNED_OUT_ROUTES: LayoutRoute[] = [

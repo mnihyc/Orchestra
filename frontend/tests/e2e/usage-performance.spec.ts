@@ -17,7 +17,10 @@ test('shows measurements, changes chart measure, sorts models, and narrows the s
   await page.getByRole('combobox', { name: 'Measure', exact: true }).click();
   await page.getByRole('option', { name: 'First output', exact: true }).click();
   await expect(page).toHaveURL(/show=first_token/);
-  await expect(page.getByText('Line: median.', { exact: false })).toBeVisible();
+  // The time chart now uses bars; verify the selected measure in its actual series and median figure.
+  const bars = page.getByRole('list', { name: 'What the bars are made of', exact: true });
+  await expect(bars.getByRole('listitem').filter({ hasText: 'fast-model' })).toContainText('0.5 s');
+  await expect(figures.getByRole('listitem').filter({ hasText: 'Median first output' })).toContainText('0.5 s');
   await page.getByRole('button', { name: 'Sort by Median speed', exact: true }).click();
   await expect(table.getByRole('row').nth(1)).toContainText('fast-model');
   await table.getByRole('button', { name: /fast-model/ }).click();

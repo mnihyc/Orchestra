@@ -2,9 +2,9 @@
 //!
 //! The descriptor is what the adapter claims of the harness it found. It is built here from the version the
 //! harness reported, and a claim is made only where the installed Codex does what the claim says (checked
-//! against 0.165.0):
+//! against the shipped 0.167.0 interface by the release conformance suite):
 //!
-//! * the exact pinned harness **0.165.0** is supported; newer versions are **untested** and older ones unsupported;
+//! * the exact pinned harness **0.167.0** is supported; newer versions are **untested** and older ones unsupported;
 //! * it can run in the environment itself (`key_separated`, `together`) or with its provider, reaching the
 //!   tools of the environment through its own executor (`separated`); it needs no copy of a credential to do
 //!   so, which is why it declares neither `credential_shared` nor `handed_over`;
@@ -22,7 +22,6 @@ use orch_agent_contract::descriptor::{
     classify_version,
 };
 use orch_agent_contract::events::HarnessRequestKind;
-use orch_plugin_contract::Extensions;
 
 use crate::{parameters, provider};
 
@@ -34,7 +33,12 @@ pub const ADAPTER_VERSION: u32 = 1;
 
 /// The versions of the harness the adapter has been shown to drive, as a semver range. It is checked by
 /// running the harness of each release in it.
-pub const SUPPORTED_RANGE: &str = "=0.165.0";
+pub const SUPPORTED_RANGE: &str = "=0.167.0";
+
+/// Exact protocol gates follow the same build pin as the public descriptor.
+pub(crate) fn is_pinned_build(version: &str) -> bool {
+    SUPPORTED_RANGE.strip_prefix('=') == Some(version)
+}
 
 /// What a subscription of it is called where one is added or listed, in English and in Chinese.
 pub const PROVIDER_TITLE: &str = "Codex subscription";
@@ -65,17 +69,22 @@ pub fn plans() -> std::collections::BTreeMap<String, String> {
         ("free", "Free"),
         ("go", "Go"),
         ("plus", "Plus"),
-        ("pro", "Pro"),
-        ("prolite", "Pro Lite"),
-        ("promax", "Pro Max"),
+        ("pro", "Pro (More)"),
+        ("prolite", "Pro"),
+        ("promax", "Pro (Max)"),
         ("team", "Team"),
         ("business", "Business"),
         ("self_serve_business_prolite", "Business (Pro Lite)"),
         ("self_serve_business_usage_based", "Business (usage based)"),
+        ("ent26", "Enterprise"),
+        ("enterprise_cbp_automation", "Enterprise (Automation)"),
+        ("enterprise_cbp_usage_based", "Enterprise CBP Usage Based"),
         ("enterprise", "Enterprise"),
         ("edu", "Edu"),
         ("edu_plus", "Edu Plus"),
         ("edu_pro", "Edu Pro"),
+        ("sci", "Academic Researchers"),
+        ("sci_plus", "Academic Researchers Plus"),
     ]
     .into_iter()
     .map(|(id, name)| (id.to_owned(), name.to_owned()))
@@ -88,7 +97,9 @@ pub fn capabilities() -> Capabilities {
     Capabilities {
         steer: true,
         interrupt: true,
-        background_commands: true,
+        background_commands: false,
+        prompt_cache_ttl: false,
+        turn_changes_require_restart: false,
         approvals: vec![
             HarnessRequestKind::Command,
             HarnessRequestKind::FileChange,
@@ -111,6 +122,7 @@ pub fn capabilities() -> Capabilities {
         }),
         reasoning_summary: true,
         input_images: true,
+        image_generation: true,
         effort: EffortSupport::Turn,
         mcp_discovery: true,
         mcp: McpSupport {
@@ -145,6 +157,15 @@ pub fn capabilities() -> Capabilities {
             ProviderFactKind::AvailableResets,
             ProviderFactKind::CredentialVerification,
         ],
+        provider_fact_fields: orch_provider_contract::credit_fields::normalize_reports(
+            [(
+                "balances.plan".to_owned(),
+                ["remaining", "unlimited", "unit"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )]
+            .into(),
+        ),
         model_discovery: true,
         title: false,
         auxiliary_models: AuxiliaryModels::Uncontrolled,
@@ -157,11 +178,12 @@ pub fn capabilities() -> Capabilities {
         instruction_root_marker: true,
         // The adapter hands it the root that holds a thread's skills.
         skills: SkillsSupport::Directory,
-        // The pinned build's reviewer, until a native review reports a model of its own; it can be used only by
-        // someone who may use that model.
+        // A sign-in uses its preferred reviewer. A forwarded catalogue contains only its admitted
+        // session offering, so native review falls back to that model under the same Use policy.
         approval_reviewer: Some(ApprovalReviewerSupport {
             model: crate::review::CODEX_REVIEW_MODEL.to_owned(),
             settable: false,
+            session_model_paths: vec![orch_agent_contract::credentials::CredentialPath::Forwarded],
         }),
     }
 }
@@ -232,10 +254,16 @@ pub fn descriptor(version: &str) -> AgentDescriptor {
         // on the pinned build and loaded configuration; the app server accepting a read-only selection
         // proves no boundary. Until then an aside is refused with why, never opened with writable tools.
         side_thread_modes: Vec::new(),
-        capabilities: capabilities(),
+        capabilities: Capabilities {
+            background_commands: crate::native_schema::pinned_background_control(version),
+            ..capabilities()
+        },
         parameters: parameters::definitions(),
         text: text(),
-        extensions: Extensions::new(),
+        extensions: serde_json::from_value(serde_json::json!({
+            "x_capability_program": serde_json::from_str::<orch_types::Json>(include_str!("capability-program.json")).unwrap_or(orch_types::Json::Null),
+            "x_profile_parameters": crate::parameters::profile_parameters()
+        })).unwrap_or_default(),
     }
 }
 
@@ -266,6 +294,8 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
         ("windows.5h", "5 小时"),
         ("windows.window", "时段"),
         ("native_provider.plans.free", "免费版"),
+        ("native_provider.plans.pro", "Pro（更多）"),
+        ("native_provider.plans.promax", "Pro（Max）"),
         ("native_provider.plans.team", "团队版"),
         ("native_provider.plans.business", "商业版"),
         (
@@ -277,9 +307,20 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
             "商业版（按用量）",
         ),
         ("native_provider.plans.enterprise", "企业版"),
+        ("native_provider.plans.ent26", "企业版"),
+        (
+            "native_provider.plans.enterprise_cbp_automation",
+            "企业版（自动化）",
+        ),
+        (
+            "native_provider.plans.enterprise_cbp_usage_based",
+            "企业 CBP（按用量）",
+        ),
         ("native_provider.plans.edu", "教育版"),
         ("native_provider.plans.edu_plus", "教育版 Plus"),
         ("native_provider.plans.edu_pro", "教育版 Pro"),
+        ("native_provider.plans.sci", "学术研究人员"),
+        ("native_provider.plans.sci_plus", "学术研究人员 Plus"),
         (
             "native_provider.login_methods.device_code.title",
             "使用代码登录",
@@ -349,6 +390,11 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
             "parameters.service_tier.description",
             "模型的更快模式，会更快用完套餐。只提供提供方的管理者为该模型启用的速度。",
         ),
+        ("parameters.web_search.title", "网络搜索"),
+        (
+            "parameters.web_search.description",
+            "选择原生网络搜索，或在可用时选择已启用的托管提供方服务。搜索可能另行计费。",
+        ),
         ("parameters.context.title", "上下文"),
         (
             "parameters.context.description",
@@ -397,6 +443,60 @@ fn text() -> std::collections::BTreeMap<String, std::collections::BTreeMap<Strin
 mod tests {
     use super::*;
     use orch_agent_contract::descriptor::HarnessSupport;
+
+    #[test]
+    fn native_profile_aliases_survive_the_wire_and_cannot_be_removed_by_profile_overrides()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use orch_agent_contract::parameters::ModelParameters;
+        use orch_agent_contract::profile_parameters::{EXTENSION, ProfileParameters};
+        use serde_json::json;
+        let actual = descriptor("0.167.0");
+        let read: AgentDescriptor = serde_json::from_value(serde_json::to_value(&actual)?)?;
+        assert_eq!(
+            read.extensions.get(EXTENSION),
+            actual.extensions.get(EXTENSION)
+        );
+        let overridden = read.with_overrides(&json!({(EXTENSION):null}))?;
+        assert_eq!(
+            overridden.extensions.get(EXTENSION),
+            actual.extensions.get(EXTENSION)
+        );
+        let declared: ProfileParameters = serde_json::from_value(
+            overridden
+                .extensions
+                .get(EXTENSION)
+                .ok_or("declared native profile parameters")?
+                .clone(),
+        )?;
+        let model: ModelParameters = serde_json::from_value(
+            json!({"context_max":64000,"efforts":["low"],
+            "service_tiers":[{"id":"fast","label":"Fast"}], "web_search":["indexed"],
+            "request_options":{"native":{"type":"object", "properties":{"service_tier":{"const":"fast"}}}}}),
+        )?;
+        let config = json!({"service_tier":"priority", "model_context_window":32000,
+            "model_reasoning_summary":"concise", "model_reasoning_effort":"low", "web_search":"indexed", "other_option":true});
+        let values = declared.validate(&config, &model, &std::collections::BTreeMap::new())?;
+        assert_eq!(values.get("service_tier"), Some(&json!("fast")));
+        assert_eq!(values.get("context"), Some(&json!(32000)));
+        assert_eq!(values.get("effort"), Some(&json!("low")));
+        for change in [
+            json!({"model_context_window":128000}),
+            json!({"model_reasoning_effort":"high"}),
+            json!({"service_tier":"flex"}),
+            json!({"web_search":"live"}),
+        ] {
+            let mut invalid = config.clone();
+            let changes = change.as_object().ok_or("a config change")?;
+            let into = invalid.as_object_mut().ok_or("a native config object")?;
+            into.extend(changes.clone());
+            assert!(
+                declared
+                    .validate(&invalid, &model, &std::collections::BTreeMap::new())
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn a_codex_thread_going_into_another_home_is_never_carried_as_a_file() {
@@ -467,11 +567,11 @@ mod tests {
             HarnessSupport::Unsupported
         );
         assert_eq!(
-            descriptor("0.165.0").harness.status,
+            descriptor("0.167.0").harness.status,
             HarnessSupport::Supported
         );
         assert_eq!(
-            descriptor("0.166.0").harness.status,
+            descriptor("0.168.0").harness.status,
             HarnessSupport::Untested
         );
         assert_eq!(
@@ -482,7 +582,7 @@ mod tests {
 
     #[test]
     fn what_the_descriptor_declares_holds_together() {
-        let declared = descriptor("0.165.0");
+        let declared = descriptor("0.167.0");
         assert_eq!(declared.check(), Ok(()));
         assert_eq!(
             declared.forwarded_protocols,
@@ -519,7 +619,7 @@ mod tests {
         assert_eq!(claimed.memory, MemoryKind::Home);
         assert!(claimed.mcp.strict && claimed.telemetry_off);
         assert!(
-            descriptor("0.165.0")
+            descriptor("0.167.0")
                 .capabilities
                 .native_input_prefix
                 .is_none(),
@@ -529,7 +629,7 @@ mod tests {
 
     #[test]
     fn the_descriptor_reads_and_writes_as_json_without_loss() {
-        let declared = descriptor("0.165.0");
+        let declared = descriptor("0.167.0");
         let written = serde_json::to_value(&declared).unwrap();
         let read: AgentDescriptor = serde_json::from_value(written.clone()).unwrap();
         assert_eq!(read, declared);
@@ -541,6 +641,196 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn image_eligibility_uses_the_shared_resolver_and_reported_subscription_facts() {
+        use orch_provider_contract::capabilities::{
+            self as cap, Availability, Declarations, Offering, OfferingRef, Provider, Registry,
+            ThreadContext,
+        };
+        use serde_json::json;
+        let original = descriptor("0.167.0");
+        let descriptor: AgentDescriptor =
+            serde_json::from_value(serde_json::to_value(&original).unwrap()).unwrap();
+        assert_eq!(
+            descriptor.capability_program(),
+            original.capability_program()
+        );
+        let provider = orch_types::new_id();
+        let mut registry = Registry::default();
+        registry
+            .register("common", cap::catalogue().unwrap())
+            .unwrap();
+        let mut declarations = Declarations::default();
+        declarations
+            .programs
+            .insert(KIND.into(), descriptor.capability_program());
+        declarations.providers.insert(
+            provider,
+            Provider {
+                offerings: [(
+                    "model".into(),
+                    Offering {
+                        enabled: true,
+                        ..Offering::default()
+                    },
+                )]
+                .into(),
+                ..Provider::default()
+            },
+        );
+        registry.register("program", declarations).unwrap();
+        let base = ThreadContext {
+            program: KIND.into(),
+            access: "native".into(),
+            current: Some(OfferingRef {
+                provider,
+                offering: "model".into(),
+            }),
+            availability: [(
+                provider,
+                [(
+                    "model".into(),
+                    Availability {
+                        allowed: true,
+                        ..Availability::default()
+                    },
+                )]
+                .into(),
+            )]
+            .into(),
+            ..ThreadContext::default()
+        };
+        for (facts, available) in [
+            (
+                json!({"plan":"pro","credential":{"yields":"login"},"credential_verified":true}),
+                true,
+            ),
+            (
+                json!({"plan":"plus","credential":{"yields":"token"},"credential_verified":true}),
+                true,
+            ),
+            (
+                json!({"plan":"free","credential":{"yields":"login"},"credential_verified":true}),
+                false,
+            ),
+            (
+                json!({"plan":"pro","credential":{"yields":"key"},"credential_verified":true}),
+                false,
+            ),
+            (
+                json!({"plan":null,"credential":{"yields":"login"},"credential_verified":true}),
+                false,
+            ),
+            (
+                json!({"plan":"","credential":{"yields":"login"},"credential_verified":true}),
+                false,
+            ),
+            (
+                json!({"plan":"pro","credential":null,"credential_verified":true}),
+                false,
+            ),
+            (
+                json!({"plan":"pro","credential":{"yields":"login"},"credential_verified":false}),
+                false,
+            ),
+            (json!({"plan":"pro","credential":{"yields":"login"}}), false),
+        ] {
+            let mut context = base.clone();
+            context.facts = facts.clone();
+            let result = registry
+                .resolve(&context)
+                .into_iter()
+                .find(|row| row.capability == "image_generation")
+                .unwrap();
+            assert_eq!(result.route.is_some(), available, "{facts}");
+            assert_eq!(result.modes.iter().any(|mode| mode == "on"), available);
+            assert!(!result.modes.iter().any(|mode| mode == "service"));
+            if let Some(route) = result.route {
+                assert_eq!(route.kind, "native-program");
+                assert!(
+                    route.native_value.is_null(),
+                    "unset preserves the native default"
+                );
+            } else {
+                assert_eq!(
+                    result.detail.as_deref(),
+                    Some("native_image_sign_in_required")
+                );
+            }
+            let mut forwarded = context.clone();
+            forwarded.access = "forwarded".into();
+            let result = registry
+                .resolve(&forwarded)
+                .into_iter()
+                .find(|row| row.capability == "image_generation")
+                .unwrap();
+            assert!(result.route.is_none());
+            assert_eq!(
+                result.detail.as_deref(),
+                Some("native_image_sign_in_required")
+            );
+        }
+        let mut denied = base;
+        denied
+            .availability
+            .get_mut(&provider)
+            .unwrap()
+            .get_mut("model")
+            .unwrap()
+            .allowed = false;
+        let result = registry
+            .resolve(&denied)
+            .into_iter()
+            .find(|row| row.capability == "image_generation")
+            .unwrap();
+        assert_eq!(result.reason.as_deref(), Some("current_authority_refused"));
+        assert!(result.detail.is_none());
+        denied
+            .choices
+            .insert("image_generation".into(), Some("off".into()));
+        let off = registry
+            .resolve(&denied)
+            .into_iter()
+            .find(|row| row.capability == "image_generation")
+            .unwrap();
+        assert_eq!(off.reason.as_deref(), Some("disabled"));
+        assert!(off.detail.is_none() && off.route.is_none());
+    }
+
+    #[test]
+    fn newly_reported_native_plans_keep_their_ids_and_the_names_of_the_program() {
+        let declared = descriptor("0.167.0");
+        let native = declared.native_provider.as_ref().unwrap();
+        for (id, english, chinese) in [
+            ("pro", "Pro (More)", "Pro（更多）"),
+            ("promax", "Pro (Max)", "Pro（Max）"),
+            ("ent26", "Enterprise", "企业版"),
+            (
+                "enterprise_cbp_automation",
+                "Enterprise (Automation)",
+                "企业版（自动化）",
+            ),
+            (
+                "enterprise_cbp_usage_based",
+                "Enterprise CBP Usage Based",
+                "企业 CBP（按用量）",
+            ),
+            ("sci", "Academic Researchers", "学术研究人员"),
+            ("sci_plus", "Academic Researchers Plus", "学术研究人员 Plus"),
+        ] {
+            assert_eq!(native.plans.get(id).map(String::as_str), Some(english));
+            assert_eq!(
+                declared.text_in("zh-CN", &format!("native_provider.plans.{id}")),
+                Some(chinese)
+            );
+        }
+        assert_eq!(native.plans.get("prolite").map(String::as_str), Some("Pro"));
+        assert_eq!(native.plans.len(), 19);
+        let read: AgentDescriptor =
+            serde_json::from_value(serde_json::to_value(&declared).unwrap()).unwrap();
+        assert_eq!(read.native_provider.as_ref().unwrap().plans, native.plans);
     }
 
     #[test]
@@ -601,5 +891,222 @@ mod tests {
             said(format!("parameters.{}.title", parameter.key));
             said(format!("parameters.{}.description", parameter.key));
         }
+    }
+}
+
+#[cfg(test)]
+mod model_metadata_tests {
+    use super::*;
+    use orch_provider_contract::capabilities::{
+        self as cap, Availability, Declarations, Endpoint, NativeSwitch, Offering, OfferingRef,
+        Provider, Registry, ThreadContext,
+    };
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn image_viewing_follows_the_admitted_native_route_and_its_refusals()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (access, images, allowed, choice, expected) in [
+            ("forwarded", Some(true), true, None, true),
+            ("forwarded", Some(false), true, None, false),
+            ("forwarded", None, true, None, false),
+            ("native", Some(true), true, None, true),
+            ("native", Some(false), true, None, false),
+            ("native", None, true, None, true),
+            ("forwarded", Some(true), false, None, false),
+            ("forwarded", Some(true), true, Some("off"), false),
+            ("forwarded", Some(true), true, Some("unknown"), false),
+            ("forwarded", Some(true), true, Some("service"), false),
+        ] {
+            let provider = orch_types::new_id();
+            let mut registry = Registry::default();
+            registry.register("common", cap::catalogue()?)?;
+            let mut declarations = Declarations::default();
+            declarations
+                .programs
+                .insert(KIND.into(), descriptor("0.167.0").capability_program());
+            declarations.providers.insert(
+                provider,
+                Provider {
+                    endpoints: BTreeMap::from([(
+                        "generation".into(),
+                        Endpoint {
+                            interface: "openai-responses".into(),
+                            address: "https://endpoint.example.invalid/v1".into(),
+                            ..Endpoint::default()
+                        },
+                    )]),
+                    offerings: BTreeMap::from([(
+                        "model".into(),
+                        Offering {
+                            enabled: true,
+                            endpoint: "generation".into(),
+                            kind: "model".into(),
+                            parameters: images
+                                .map_or_else(|| json!({}), |images| json!({"input_images":images})),
+                            ..Offering::default()
+                        },
+                    )]),
+                    ..Provider::default()
+                },
+            );
+            registry.register("fixture", declarations)?;
+            let context = ThreadContext {
+                program: KIND.into(),
+                access: access.into(),
+                current: Some(OfferingRef {
+                    provider,
+                    offering: "model".into(),
+                }),
+                choices: choice
+                    .into_iter()
+                    .map(|mode| ("image_input".into(), Some(mode.into())))
+                    .collect(),
+                availability: BTreeMap::from([(
+                    provider,
+                    BTreeMap::from([(
+                        "model".into(),
+                        Availability {
+                            allowed,
+                            ..Availability::default()
+                        },
+                    )]),
+                )]),
+                interfaces: vec!["openai-responses".into()],
+                ..ThreadContext::default()
+            };
+            let resolution = registry
+                .resolve(&context)
+                .into_iter()
+                .find(|row| row.capability == "image_input")
+                .ok_or("the shared registry did not resolve image input")?;
+            assert_eq!(
+                resolution.route.is_some(),
+                expected,
+                "{access} images={images:?} allowed={allowed} choice={choice:?}"
+            );
+            assert_eq!(
+                resolution.native_config.get("features.view_image"),
+                Some(&json!(expected))
+            );
+            let wire = serde_json::to_value(&resolution)?;
+            assert_eq!(wire["native_config"]["features.view_image"], expected);
+            assert!(
+                wire.get("route").is_none(),
+                "only public flags enter the native carrier"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn standalone_search_requirements_use_declared_metadata_and_keep_older_entries_unchanged()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for legacy in [false, true] {
+            for required in [false, true] {
+                for supported in [false, true] {
+                    let provider = orch_types::new_id();
+                    let mut registry = Registry::default();
+                    registry.register("common", cap::catalogue()?)?;
+                    let mut offering = Offering {
+                        enabled: true,
+                        endpoint: "generation".into(),
+                        kind: "model".into(),
+                        parameters: json!({"web_search":["live"]}),
+                        ..Offering::default()
+                    };
+                    if legacy {
+                        offering.parameters["requires_standalone_search"] = json!(required);
+                    } else {
+                        offering.extensions.insert(
+                            "model_metadata".into(),
+                            json!({"codex":{"requires_standalone_search":required}}),
+                        );
+                    }
+                    if supported {
+                        let interfaces = cap::protocol_interfaces()?;
+                        let mut binding = interfaces
+                            .get("openai-responses")
+                            .and_then(|interface| interface.native_tools.get("web_search"))
+                            .cloned()
+                            .ok_or("the test needs its declared native search interface")?;
+                        binding.request.as_object_mut().ok_or("the native request declaration must be an object")?
+                            .insert("forms".into(),json!([{
+                                "paths":["/alpha/search"],
+                                "native_session":{"enabled_setting":"supports_standalone_web_search", "owned_fields":["model","query"],"parameter_fields":[]}
+                            }]));
+                        offering
+                            .native_tools
+                            .insert("web_search".into(), Some(binding));
+                        offering.native_switches.insert(
+                            KIND.into(),
+                            BTreeMap::from([(
+                                "supports_standalone_web_search".into(),
+                                NativeSwitch {
+                                    capability: "web_search".into(),
+                                    value: Some(json!(true)),
+                                    ..NativeSwitch::default()
+                                },
+                            )]),
+                        );
+                    }
+                    let mut declarations = Declarations::default();
+                    declarations
+                        .programs
+                        .insert(KIND.into(), descriptor("0.167.0").capability_program());
+                    declarations.providers.insert(
+                        provider,
+                        Provider {
+                            endpoints: BTreeMap::from([(
+                                "generation".into(),
+                                Endpoint {
+                                    interface: "openai-responses".into(),
+                                    address: "https://endpoint.example.invalid/v1".into(),
+                                    ..Endpoint::default()
+                                },
+                            )]),
+                            offerings: BTreeMap::from([("model".into(), offering)]),
+                            ..Provider::default()
+                        },
+                    );
+                    registry.register("fixture", declarations)?;
+                    let context = ThreadContext {
+                        program: KIND.into(),
+                        access: "forwarded".into(),
+                        current: Some(OfferingRef {
+                            provider,
+                            offering: "model".into(),
+                        }),
+                        choices: BTreeMap::from([("web_search".into(), Some("live".into()))]),
+                        availability: BTreeMap::from([(
+                            provider,
+                            BTreeMap::from([(
+                                "model".into(),
+                                Availability {
+                                    allowed: true,
+                                    ..Availability::default()
+                                },
+                            )]),
+                        )]),
+                        interfaces: vec!["openai-responses".into()],
+                        ..ThreadContext::default()
+                    };
+                    let resolution = registry
+                        .resolve(&context)
+                        .into_iter()
+                        .find(|row| row.capability == "web_search")
+                        .ok_or("the shared registry did not resolve web search")?;
+                    let expected = !required || supported;
+                    assert_eq!(
+                        resolution.route.is_some(),
+                        expected,
+                        "legacy={legacy} required={required} supported={supported}"
+                    );
+                    assert_eq!(resolution.modes.iter().any(|mode| mode == "live"), expected);
+                }
+            }
+        }
+        Ok(())
     }
 }
