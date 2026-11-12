@@ -10,8 +10,9 @@ import { useTranslation } from 'react-i18next';
 import { metaKey, PASSWORD_MIN_CHARS, setUp } from '@/api/auth';
 import { ApiError } from '@/api/client';
 import { AuthCard } from '@/features/auth/Frame';
+import { CreatedAccount } from '@/features/auth/CreatedAccount';
 import { useIdentityRules } from '@/features/auth/identityRules';
-import { useForm } from '@/lib/forms';
+import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
@@ -23,6 +24,7 @@ export function Setup() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const rules = useIdentityRules();
+  const actKey = useActKey();
   const form = useForm(
     { username: '', display_name: '', password: '', email: '' },
     {
@@ -34,8 +36,8 @@ export function Setup() {
   );
 
   const create = useMutation({
-    mutationFn: setUp,
-    onSuccess: () => router.navigate({ to: '/', replace: true }),
+    mutationFn: (body: Parameters<typeof setUp>[0]) => setUp(body, actKey(body)),
+    onSuccess: (result) => result.signedIn ? router.navigate({ to: '/', replace: true }) : undefined,
     onError: (error) => {
       form.refuse(error);
       // Somebody else was quicker: the system has its administrator, and this screen is over.
@@ -46,6 +48,8 @@ export function Setup() {
   const taken = create.error instanceof ApiError && create.error.is('conflict.exists');
   const placed = create.error instanceof ApiError && create.error.faults().some((fault) => fault.path in form.values);
   const username = form.field('username');
+
+  if (create.data?.signedIn === false) return <AuthCard title={t('auth.setup.title')}><CreatedAccount /></AuthCard>;
 
   return (
     <AuthCard title={t('auth.setup.title')} lead={t('auth.setup.lead')}>

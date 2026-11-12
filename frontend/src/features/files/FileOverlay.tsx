@@ -30,10 +30,10 @@ function FileOverlayBody({ source, onClose }: { source: FileSource; onClose: () 
     footer={<><FileGuideHint section="open" /><Button pending={downloading} blocked={head.isError && fileFailure(head.error) === 'private'} onClick={() => { setDownloading(true); setDownloadError(null); void sourceDownload(source).catch(setDownloadError).finally(() => setDownloading(false)); }}>{t(downloading ? 'fileMedia.downloading' : 'fileMedia.download')}</Button><Button onClick={onClose}>{t('common.close')}</Button></>}>
     {downloadError !== null && <FileState state={fileFailure(downloadError)} />}
     <div className="h-[min(65dvh,48rem)] min-h-48 min-w-0" data-file-overlay="">
-      {head.isError ? <FileState state={fileFailure(head.error)} /> : head.data === undefined || Loaded === null ? <SkeletonRows rows={6} /> :
+      {head.isError ? <FileState state={fileFailure(head.error)} /> : head.data === undefined || Loaded === null ? <SkeletonRows read={head} rows={6} /> :
         <FileSourceContext.Provider value={{ ...source, fileId: preview.data?.file_id ?? source.fileId, deliveredPath: preview.data?.path ?? source.deliveredPath }}>
-          <Suspense fallback={<SkeletonRows rows={6} />}><Loaded door={source.workspace?.door ?? { environmentId: '', threadId: null }} path={source.workspace?.path ?? source.url}
-            head={head.data} line={source.line ?? null} tabId={`attachment:${source.url}`} whyReadOnly={{ kind: 'viewer' }} thread={null} openAs={setChoice} /></Suspense>
+          <Suspense fallback={<SkeletonRows read={head} rows={6} />}><Loaded door={source.workspace?.door ?? { environmentId: '', threadId: null }} path={source.workspace?.path ?? source.url}
+            head={head.data} line={source.line ?? null} endLine={source.endLine} tabId={`attachment:${source.url}`} whyReadOnly={{ kind: 'viewer' }} thread={null} openAs={setChoice} /></Suspense>
         </FileSourceContext.Provider>}
     </div>
   </Dialog>;

@@ -1,0 +1,2 @@
+# Where and the type's default, round two: the API's cases.
+test -p orch-api-core --test use_where --test thread_access --test binding_options --test binding_set --test threads_adopt --test access_requests --test page_dependencies --test provider_services --test provider_models --test announcement_scopes --test schedule_operation_scopes --test access_previews --test resource_pages

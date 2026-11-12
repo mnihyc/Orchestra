@@ -112,6 +112,10 @@ pub struct EngineConfig {
     pub soft_delete: Duration,
     /// How often the configured topic/node retention policy is examined (`[schedule] retention`).
     pub retention_every: Duration,
+    /// Whether the engine measures and removes native history by itself: at the reaper's pace, for the sessions that
+    /// were closed, and with the retention run, for all of it. A program of tests that decides when each pass runs
+    /// turns it off, and asks for the passes it needs.
+    pub agent_history_sweeps: bool,
     /// How long the word that `manage_shared` gives with a plan is good for ([`MANAGE_PLAN_KEPT`]).
     pub manage_plan_kept: Duration,
     /// How many archives of one person are written at the same time (`[limits] exports_per_user`).
@@ -154,6 +158,7 @@ impl Default for EngineConfig {
             provider_facts: crate::provider_fact_reads::ReadConfig::default(),
             soft_delete: soft_delete_of(&orch_config::ServerConfig::default()),
             retention_every: Duration::from_secs(3600),
+            agent_history_sweeps: true,
             manage_plan_kept: MANAGE_PLAN_KEPT,
             exports_per_user: orch_config::ServerConfig::default().limits.exports_per_user,
             imports_per_user: orch_config::ServerConfig::default().limits.imports_per_user,

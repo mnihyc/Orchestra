@@ -1,5 +1,5 @@
 /** The complete tree grid as a reader uses it: remembered columns, server sorting, keyboard branches and minimal paths. */
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -66,6 +66,20 @@ afterEach(async () => {
 });
 
 describe('the complete hierarchy', () => {
+  it.each(modes)('shows an org name once without its redundant address in the name cell in %s/%s', async (locale, theme) => {
+    await setLocale(locale); useAppearance.setState({ locale, theme, resolvedTheme: theme });
+    levels.set(null, [inventoryRow({ ...root, place_label: 'acme', path: [{ id: root.id, kind: 'org', name: 'Acme', redacted: false }] })]);
+    show(<EverythingScreen />);
+    const grid = await screen.findByRole('treegrid', { name: i18n.t('everything.tree') });
+    const row = grid.querySelector<HTMLElement>('[data-everything-row="org:acme"]');
+    if (row === null) throw new Error('The org row is missing');
+    const target = within(row).getByRole('link', { name: i18n.t('everything.placedName', { name: 'Acme', place: 'acme' }) });
+    expect(target).toHaveTextContent(/^Acme$/);
+    expect(within(row).getAllByText('Acme', { exact: true })).toHaveLength(1);
+    expect(within(row).queryByText('acme', { exact: true })).not.toBeInTheDocument();
+    expect(target).toHaveAttribute('href', '/org/acme');
+  });
+
   it.each(modes)('leads with the list and mounts its filters only on request in %s/%s', async (locale, theme) => {
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
     document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
@@ -111,10 +125,23 @@ describe('the complete hierarchy', () => {
     const kinds = new Set<string>(CATALOGUE.permissions.flatMap((permission) => permission.on));
     for (const kind of ['org', 'project', 'topic', 'thread', 'document', 'provider', 'agent', 'environment', 'host', 'machine', 'template', 'mcp_server', 'mount', 'chat', 'group', 'a_future_kind']) kinds.add(kind);
     for (const kind of kinds) {
-      const icon = render(<KindIcon row={{ id: kind, kind, path: [] }} />);
+      const icon = show(<KindIcon row={{ id: kind, kind, path: [] }} activity={false} />);
       expect(icon.container.querySelector('svg'), kind).toBeInTheDocument();
       icon.unmount();
     }
+  });
+
+  it('uses supplied thread activity and keeps an absent report distinct from a kind glyph', () => {
+    const row = { id: 'reported-thread', kind: 'thread', path: [] };
+    const view = show(<KindIcon row={{ ...row, thread_display: display('running') }} />);
+    expect(view.container.querySelector('svg')).toBeInTheDocument();
+    expect(view.container.querySelector('[data-work-state="running"]')).toBeInTheDocument();
+    view.rerender(<KindIcon row={row} />);
+    expect(view.container.querySelector('svg')).not.toBeInTheDocument();
+    expect(view.container.querySelector('[data-work-state]')).not.toBeInTheDocument();
+    expect(within(view.container).getByRole('img', { name: i18n.t('threadStates.notReported') })).toBeVisible();
+    view.rerender(<KindIcon row={row} activity={false} />);
+    expect(view.container.querySelector('[data-node-icon="thread"] svg')).toBeInTheDocument();
   });
 
   it.each(['waiting_approval', 'blocked', 'failed', 'running', 'queued', 'held', 'finished', 'idle', 'archived'] as const)('keeps kind, name and the supplied %s activity in a Recent card’s first line', async (state) => {
@@ -356,8 +383,8 @@ describe('the complete hierarchy', () => {
     const user = userEvent.setup();
     levels.set(null, [inventoryRow({ id: 'document', kind: 'document', name: 'Notes', href: '/doc/document', last_opened: new Date().toISOString(), last_activity: new Date().toISOString() })]);
     const view = show(<EverythingBrowser />);
-    await user.click(await screen.findByRole('button', { name: 'Recent' }));
-    expect(screen.getByRole('button', { name: 'Recent' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(await screen.findByRole('button', { name: 'Recent items' }));
+    expect(screen.getByRole('button', { name: 'Recent items' })).toHaveAttribute('aria-pressed', 'true');
     expect(await screen.findByRole('columnheader', { name: 'Where' })).toBeVisible();
     expect(screen.getByRole('columnheader', { name: 'Opened' })).toHaveAttribute('aria-sort', 'descending');
     expect(screen.getByRole('rowheader', { name: 'Today' })).toBeVisible();
@@ -370,7 +397,7 @@ describe('the complete hierarchy', () => {
     view.unmount();
     show(<EverythingBrowser />);
     expect(await screen.findByRole('combobox', { name: 'Recent order' })).toHaveTextContent('Active');
-    expect(screen.getByRole('button', { name: 'Recent' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Recent items' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('carries a narrowed beginning and its kind, archive and done choices in one cross-level request', async () => {
@@ -403,9 +430,9 @@ describe('the complete hierarchy', () => {
     const user = userEvent.setup();
     show(<EverythingBrowser />);
     await screen.findByRole('treegrid');
-    expect(screen.getByRole('button', { name: 'Tree' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Tree view' })).toHaveAttribute('aria-pressed', 'true');
     expect(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all')).toBe(saved);
-    await user.click(screen.getByRole('button', { name: 'Recent' }));
+    await user.click(screen.getByRole('button', { name: 'Recent items' }));
     expect(JSON.parse(readViewChoice(reader.id, 'everything', 'view', '', 'mine:all'))).toMatchObject({ arrangement: 'recent', sort: 'opened' });
   });
 

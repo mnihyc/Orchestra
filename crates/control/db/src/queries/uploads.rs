@@ -9,6 +9,8 @@ use crate::{Conn, DbError};
 use chrono::{DateTime, Utc};
 use orch_types::{Hash, Id};
 
+pub mod inventory;
+
 /// Keeps an authorized personal reference in the upload or copy transaction.
 pub async fn remember(
     conn: &mut Conn,
@@ -23,6 +25,33 @@ pub async fn remember(
     .bind(user)
     .bind(hash.as_bytes().as_slice())
     .bind(at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Retains an actual upload's supplied metadata; an authorized copy invents neither field.
+pub async fn remember_file(
+    conn: &mut Conn,
+    user: Id,
+    hash: &Hash,
+    name: Option<&str>,
+    media_type: Option<&str>,
+    at: DateTime<Utc>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO completed_uploads (user_id, hash, created_at, name, media_type) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, hash) DO UPDATE SET
+           name=COALESCE(completed_uploads.name,EXCLUDED.name),
+           media_type=COALESCE(completed_uploads.media_type,EXCLUDED.media_type)
+         WHERE (completed_uploads.name IS NULL AND EXCLUDED.name IS NOT NULL)
+            OR (completed_uploads.media_type IS NULL AND EXCLUDED.media_type IS NOT NULL)",
+    )
+    .bind(user)
+    .bind(hash.as_bytes().as_slice())
+    .bind(at)
+    .bind(name)
+    .bind(media_type)
     .execute(conn)
     .await?;
     Ok(())

@@ -1,0 +1,11 @@
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"initialize"},"method":"initialize","params":{"capabilities":{"experimentalApi":true,"requiredHumanApproval":true}}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"initialize"},"result":{"userAgent":"orch/0.167.0 (Fake OS 1.0; x86_64) unknown (orch; 0.1.0)","codexHome":{"$replay_ref":"codex-home"},"platformFamily":"unix","platformOs":"linux"}}}
+{"direction":"to_harness","frame":{"method":"initialized"},"subset":true}
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"initial-config"},"method":"config/read","params":{"includeLayers":false}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"initial-config"},"result":{"config":{"model_provider":null},"origins":{}}}}
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"open-config"},"method":"config/read","params":{"includeLayers":false,"cwd":"/fixture/work"}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"open-config"},"result":{"config":{"model_provider":null,"check_for_update_on_startup":true},"origins":{}}}}
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"open"},"method":"thread/start","params":{"model":"mock-large","approvalPolicy":"untrusted"}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"open"},"result":{"thread":{"id":"fixture-thread","sessionId":"fixture-native-session","cliVersion":"0.167.0","createdAt":0,"updatedAt":0,"cwd":"/fixture/work","ephemeral":true,"modelProvider":"fixture-provider","preview":"Fixture conversation","projectId":null,"source":"appServer","status":{"type":"idle"},"turns":[],"path":null},"model":"mock-large","modelProvider":"fixture-provider","approvalPolicy":"untrusted","approvalsReviewer":"user","cwd":"/fixture/work","sandbox":{"type":"dangerFullAccess"}}}}
+{"direction":"to_harness","frame":{"id":{"$replay_capture":"close"},"method":"thread/unsubscribe","params":{"threadId":"fixture-thread"}},"subset":true}
+{"direction":"from_harness","frame":{"id":{"$replay_ref":"close"},"result":{"status":"unloaded"}}}

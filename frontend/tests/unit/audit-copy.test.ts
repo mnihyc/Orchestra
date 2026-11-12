@@ -52,3 +52,10 @@ it.each(['en', 'zh-CN'] as const)('translates a legacy wire-action summary witho
   expect(auditSentence(entry, i18n.t)).not.toContain(entry.action);
   expect(auditSentence({ ...entry, summary: 'A safe server sentence' }, i18n.t)).toBe('A safe server sentence');
 });
+
+it.each(['en','zh-CN'] as const)('names the program and runtime change without copying native bodies in %s',async(locale)=>{
+  await setLocale(locale);
+  const entry={action:'harness.changed',summary:'harness.changed',details:{program:'Codex',change:'model',item_id:'source-item'},actor:{kind:'system'}} as AuditEntry;
+  expect(auditSentence(entry,i18n.t)).toBe(i18n.t('trace.sentenceHarnessChanged',{program:'Codex',setting:i18n.t('harnessChanges.settings.model')}));
+  expect(auditSentence(entry,i18n.t)).not.toContain('harness.changed');
+});

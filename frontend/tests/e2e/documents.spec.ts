@@ -5,7 +5,7 @@
  */
 import { expect, test } from '@playwright/test';
 
-import { ACME, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, PEOPLE, scenario, signIn, mainArea } from './support.ts';
 import {
   actAs,
   block,
@@ -49,7 +49,8 @@ test('a page shows a block of every one of the twenty kinds as it is stored', as
   await expect(page_.locator('video')).toHaveCount(0);
   // The title and the line under it.
   await expect(page.getByRole('textbox', { name: 'Title' })).toHaveValue('Rollout plan');
-  await expect(page.getByText('Ada Lovelace changed this')).toBeVisible();
+  const changed = page.locator('[data-screen="document"] p').filter({ hasText: 'Changed by' });
+  await expect(changed.getByRole('button', { name: 'Ada Lovelace', exact: true })).toBeVisible();
   await expect(page.locator('[data-access-state]').filter({ hasText: 'Uses Fix login permissions' })).toBeVisible();
   // Opening a page writes nothing.
   expect((await held(DOCS.plan)).seq).toBe(1);
@@ -61,7 +62,9 @@ test('one press makes a document and opens its title, then Enter writes its body
   await expect(page.getByRole('link', { name: 'Rollout plan' })).toBeVisible();
   await expect(page.getByRole('link', { name: 'Notes from the canary' })).toBeVisible();
   await page.getByRole('button', { name: 'New document', exact: true }).click();
-  await expect(page).toHaveURL(/\/doc\/[0-9a-f-]+$/);
+  // The page drops its own `new` marker from the address, and a page of lists then writes its marker (`_list`, with the lists' state if any is on screen).
+  await expect(page).toHaveURL((url) => /^\/doc\/[0-9a-f-]+$/u.test(url.pathname) && url.hash === ''
+    && [...url.searchParams.keys()].every((key) => key === '_list' || key === 'list') && (!url.searchParams.has('_list') || url.searchParams.get('_list') === 'true'));
   const title = page.getByRole('textbox', { name: 'Title' });
   await expect(title).toBeFocused();
   await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveCount(0);
@@ -84,7 +87,7 @@ test('one press makes a document and opens its title, then Enter writes its body
   await expect(page.getByRole('textbox', { name: 'Document text' })).not.toBeFocused();
   // It is in the list of its place, newest change first.
   await page.goto(`/topic/${ACME.fixLogin}?tab=documents`);
-  await expect(page.getByRole('link', { name: 'Launch checklist' })).toBeVisible();
+  await expect(mainArea(page).getByRole('link', { name: 'Launch checklist', exact: true })).toBeVisible();
 });
 
 test('what is typed is sent once, as one change to one block, and shown as Saving until it is answered', async ({ page }) => {
@@ -128,9 +131,9 @@ test('Enter ends a block and starts the next of its kind, Backspace turns it bac
   await page.keyboard.press('Backspace');
   await waitUntilSaved(page);
   now = await held(DOCS.plan);
-  const former = now.blocks.find((one) => wordsOf(one) === 'Third, nested')!;
-  expect(former.type).toBe('paragraph');
-  expect(former.parent_id).toBeNull();
+  const former = now.blocks.find((one) => one.id === third.id);
+  expect(former).toMatchObject({ type: 'paragraph', parent_id: null });
+  expect(wordsOf(former!)).toBe('Third, nested');
 });
 
 test('the block menu opens at a slash, narrows as it is typed, and every kind it offers is written and read back', async ({ page }) => {
@@ -140,16 +143,16 @@ test('the block menu opens at a slash, narrows as it is typed, and every kind it
   await editorOf(page).locator('p.oc').first().click();
   await page.keyboard.type('A plain paragraph');
   await page.keyboard.press('Enter');
-  // The menu narrows as it is typed, and offers only what can be made: an image waits for a place to keep it in.
+  // Images now open the document's file picker; retain both positive narrowing and an actual unmatched query.
   await page.keyboard.type('/ima');
   const list = page.getByRole('listbox', { name: 'Blocks' });
+  await expect(list.getByRole('option', { name: 'Image', exact: true })).toBeVisible();
+  const unmatched = 'imazz';
+  await page.keyboard.type(unmatched.slice(3));
   await expect(list.getByText('Nothing matches')).toBeVisible();
   await expect(list.getByRole('option', { name: /Image/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
-  await page.keyboard.press('Backspace');
-  await page.keyboard.press('Backspace');
-  await page.keyboard.press('Backspace');
-  await page.keyboard.press('Backspace');
+  for (let index = 0; index < unmatched.length + 1; index++) await page.keyboard.press('Backspace');
 
   // Each block is made as a person makes it: a slash and its name, its words, and the key that ends it (Enter; Mod+Enter in code).
   const write = async (query: string, words?: string, leave?: string) => {
@@ -202,7 +205,9 @@ test('a film is given as an address and is played from there only when the reade
   await expect(dialog.getByText('Give an address that begins with https://')).toBeVisible();
   await dialog.getByRole('textbox', { name: 'Address' }).fill('https://films.example.org/new.mp4');
   await dialog.getByRole('button', { name: 'Add', exact: true }).click();
-  await expect(editorOf(page).getByText('https://films.example.org/new.mp4')).toBeVisible();
+  // The visible label names host/file; its title retains the complete authored address.
+  await expect(editorOf(page).locator('[title="https://films.example.org/new.mp4"]')).toBeVisible();
+  await expect(editorOf(page).getByRole('button', { name: 'Play video from films.example.org', exact: true })).toBeVisible();
   await expect(editorOf(page).locator('video')).toHaveCount(0);
   await waitUntilSaved(page);
   const stored = (await held(DOCS.plan)).blocks.find((one) => one.props.url === 'https://films.example.org/new.mp4');
@@ -234,7 +239,7 @@ test('two people writing different blocks see each other\'s words arrive, and th
   // The person who wrote is stood beside the block for a moment, on the other's page.
   await expect(page.getByRole('img', { name: 'Dora Developer is writing here' }).first()).toBeVisible();
   // In the page of the document: the chat of the topic beside it says the same of itself.
-  await expect(page.getByTestId('main').getByLabel('Looking now: Dora Developer')).toBeVisible();
+  await expect(mainArea(page).getByLabel('Looking now: Dora Developer')).toBeVisible();
   await doraContext.close();
 });
 

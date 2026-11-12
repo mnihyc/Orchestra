@@ -453,6 +453,15 @@ pub async fn probe(daemon: &Daemon, config: &DockerConfig) -> bool {
     if daemon.facts().rootless || config.egress.dir.is_none() {
         return false;
     }
+    if !crate::egress::parent::probe(
+        config.egress.parent_proxy.as_deref(),
+        config.egress.parent_probe.as_deref(),
+    )
+    .await
+    {
+        tracing::info!("the restricted egress parent did not pass its transport probe");
+        return false;
+    }
     let name = format!("orch-egress-probe-{}", orch_types::new_id().simple());
     let Some(pool) = config.networks.pool() else {
         return false;
@@ -632,6 +641,7 @@ pub async fn write_orders(
     dir: &Path,
     admission: Admission,
     clock: &dyn Clock,
+    parent_proxy: Option<String>,
 ) -> Result<(), DriverError> {
     let io = |error: std::io::Error| {
         DriverError::Internal(format!(
@@ -645,6 +655,7 @@ pub async fn write_orders(
         &Orders {
             admission,
             open: true,
+            parent_proxy,
         },
     )
     .await
@@ -1095,7 +1106,7 @@ pub async fn apply(
 ) -> Result<UnitNetwork, DriverError> {
     let dir = unit_dir(config, unit)?;
     let revision = admission.revision.clone();
-    write_orders(&dir, admission, clock).await?;
+    write_orders(&dir, admission, clock, config.egress.parent_proxy.clone()).await?;
     let deadline = tokio::time::Instant::now() + APPLY_WAIT;
     loop {
         let state: Option<State> = files::read_json(&dir, files::STATE).await;
@@ -1503,7 +1514,13 @@ impl DockerDriver {
         let refused = self.refused_for(&private).await?;
         let admission =
             self.control_admission(reach, &spec.gateway_url, &spec.network_policy, refused)?;
-        write_orders(&dir, admission, self.clock.as_ref()).await?;
+        write_orders(
+            &dir,
+            admission,
+            self.clock.as_ref(),
+            self.config.egress.parent_proxy.clone(),
+        )
+        .await?;
         self.heartbeat.reconcile(&spec.name);
         Ok(private)
     }
@@ -1538,7 +1555,13 @@ impl DockerDriver {
         };
         let admission = self.control_admission(Reach::OnlyOrch, &gateway_url, &policy, refused)?;
         let dir = unit_dir(&self.config, &unit.name)?;
-        write_orders(&dir, admission, self.clock.as_ref()).await?;
+        write_orders(
+            &dir,
+            admission,
+            self.clock.as_ref(),
+            self.config.egress.parent_proxy.clone(),
+        )
+        .await?;
         let image = old
             .config
             .as_ref()
@@ -1671,7 +1694,7 @@ impl DockerDriver {
                 let admission = self.control_admission(reach, &gateway_url, policy, refused)?;
                 // Only a current authenticated request renews this unit's heartbeat after a reconnect.
                 let dir = unit_dir(&self.config, &unit.name)?;
-                write_orders(&dir, admission.clone(), self.clock.as_ref()).await?;
+                write_orders(&dir, admission.clone(), self.clock.as_ref(), self.config.egress.parent_proxy.clone()).await?;
                 self.heartbeat.reconcile(&unit.name);
                 start_proxy(&self.daemon, &self.config, &unit.name, self.clock.as_ref()).await?;
                 let mut applied =

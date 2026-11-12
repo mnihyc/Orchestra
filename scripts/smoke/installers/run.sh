@@ -19,9 +19,10 @@ FRONT_NAME="${PROJECT}-front"
 leave() { docker rm -f "$FRONT_NAME" > /dev/null 2>&1 || true; finish; }
 trap leave EXIT
 WORK="$SMOKE_DIR/installers"
-# Mint only commands whose configured addresses the installers can use.
+# Mint only commands whose configured addresses the installers can use: the installer runs on this host, where the
+# pinned listener is published on the Docker bridge's address (not on loopback).
 sed -i -e "s|^public_url = .*|public_url = \"https://localhost:$FRONT_PORT\"|" \
-  -e "s|^url = \"wss://gateway.example.com:9443\"|url = \"wss://127.0.0.1:$GATEWAY_PORT\"|" "$STACK/config/orch.toml"
+  -e "s|^url = \"wss://gateway:9443\"|url = \"wss://$(bridge_address):$GATEWAY_PORT\"|" "$STACK/config/orch.toml"
 
 step "installer help finishes without enrollment, platform access or installation"
 check "both shell installers explain their lifecycle in English and Chinese" \
@@ -141,7 +142,7 @@ if command -v pwsh > /dev/null 2>&1; then
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/help.ps1"
   check "Windows allows the same loopback addresses and refuses unchecked redirects" \
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/addresses.ps1"
-  check "Windows ARM64 uses the x86-64 build and explains emulation" \
+  check "Windows takes the connector built for its own architecture, the native one on ARM64" \
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/architecture.ps1"
   check "a failed Windows installation cannot start a foreground connector" \
     pwsh -NoProfile -File "$SMOKE_REPO/scripts/smoke/installers/foreground.ps1"

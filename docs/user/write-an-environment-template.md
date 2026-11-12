@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Write an environment template
 screens: /resources/templates/$id, /resources/templates
 keywords: template, environment, image, limits, network, docker, configuration, new template, provider runtime, example, env.template_id, runtime.template_id, 模板, 编写模板, 环境模板, 镜像, 资源限制, 网络, 配置, 示例
+summary: Describe a managed environment’s image, tools and starting settings in a reusable template.
 ---
 
 # Write an environment template

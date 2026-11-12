@@ -213,6 +213,7 @@ impl Engine {
             MakeError::Running(row) => Error::Busy(row),
             MakeError::NoEnvironment => Error::NotFound,
             MakeError::Db(error) => Error::Internal(error.into()),
+            MakeError::Internal(error) => Error::Internal(error),
         })?;
         let mut unit = Unit::new(conn, at.get());
         for thread in affected {
@@ -579,10 +580,10 @@ impl Restarting {
 impl Phased for Restarting {
     async fn run(&self, job: &Job, phase: &str) -> Result<Done, Stop> {
         match phase {
-            "waiting" => self.waiting(job).await?,
-            "stopping" => self.stopping(job).await?,
+            "waiting" => Box::pin(self.waiting(job)).await?,
+            "stopping" => Box::pin(self.stopping(job)).await?,
             "starting" | "enroll" | "attach" | "after_up" => {
-                self.current(job).await?;
+                Box::pin(self.current(job)).await?;
                 if phase == "starting" {
                     job.remember(&json!({"restart_start_requested":true}))
                         .await?;
@@ -591,12 +592,11 @@ impl Phased for Restarting {
                     .run(job, if phase == "starting" { "start" } else { phase })
                     .await?;
             }
-            "commit" => self.commit(job).await?,
+            "commit" => Box::pin(self.commit(job)).await?,
             _ => return Err(failed("the restart has an unknown phase")),
         }
         Ok(Done::Finished)
     }
-
     async fn undo(&self, job: &Job, why: &Stop) -> Undone {
         if super::after_up::record_interrupted(job).await.is_err() {
             tracing::warn!("an interrupted restart command outcome could not be recorded");

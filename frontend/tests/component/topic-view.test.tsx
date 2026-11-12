@@ -41,3 +41,19 @@ it('keeps the last content tab across explicit Settings and follows an explicit 
   expect(view.result.current[0]).toBe('overview');
   const other=renderHook(()=>usePageListSearch('/topic/$topicId/','/topic/other',{},validate));expect(other.result.current).not.toHaveProperty('tab');
 });
+
+it('ignores Settings in stale content-page state while honoring an explicit Settings address', () => {
+  client.session.setState({ userId: 'stale-topic-reader' });
+  writeViewChoice('stale-topic-reader', 'page./topic/legacy', 'state', JSON.stringify({ tab: 'settings' }));
+  const validate = (search: Record<string, unknown>) => typeof search.tab === 'string' ? { tab: search.tab } : {};
+  const initial: { tab: TopicTab | undefined } = { tab: undefined };
+  const view = renderHook(({ tab }: typeof initial) => {
+    const search = usePageListSearch('/topic/$topicId/', '/topic/legacy', tab === undefined ? {} : { tab }, validate);
+    return useTopicView(search.tab as TopicTab | undefined);
+  }, { initialProps: initial });
+  expect(view.result.current[0]).toBe('overview');
+  view.rerender({ tab: 'settings' });
+  expect(view.result.current[0]).toBe('settings');
+  view.rerender({ tab: undefined });
+  expect(view.result.current[0]).toBe('overview');
+});

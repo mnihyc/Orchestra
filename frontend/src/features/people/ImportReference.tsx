@@ -26,7 +26,7 @@ function FolderReference({ id, name, onOpen, scope }: { id: string; name: string
   const [open, setOpen] = useState(false);
   const folder = useQuery({ ...documentTreeEntryQuery({ kind: 'container', id }, cache, false, scope), enabled: open, staleTime: 0, refetchOnMount: 'always' });
   return <Popover open={open} onOpenChange={setOpen} label={name} trigger={<button type="button" title={name} className={REFERENCE_CHIP_CLASS}><Folder aria-hidden className="size-4 shrink-0" /><span className="min-w-0 truncate">{name}</span></button>}>
-    {folder.isPending || folder.isFetching ? <SkeletonRows rows={1} /> : folder.isError ? <ErrorAlert error={folder.error} />
+    {folder.isPending || folder.isFetching ? <SkeletonRows read={folder} rows={1} /> : folder.isError ? <ErrorAlert error={folder.error} />
       : folder.data.directory?.folder?.standing.read === true ? <Button asChild><Link to="/document-folder/$folderId" params={{ folderId: id }} onClick={(event) => { if (isPlainClick(event)) onOpen?.(); }}>{t('importWizard.report.openFolder')}</Link></Button>
       : <StateLine compact message={t('documentFolders.unavailable')} />}
   </Popover>;

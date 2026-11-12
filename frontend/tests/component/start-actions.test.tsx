@@ -44,7 +44,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const phase of ['loading', '
     expect(within(actions).getAllByRole('button')).toHaveLength(2);
     if (phase === 'loading') {
       expect(screen.getAllByText(words.loading)).toHaveLength(1);
-      expect(screen.queryByText(locale === 'en' ? 'Loading…' : '加载中…')).toBeNull();
+      // The access skeleton retains its screen-reader announcement; the visible footer stays specific.
+      expect(screen.getByText(locale === 'en' ? 'Loading…' : '加载中…')).toHaveClass('sr-only');
     } else {
       expect(screen.getByRole('alert')).toBeVisible();
       expect(screen.queryByText(words.failed)).toBeNull();

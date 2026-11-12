@@ -56,7 +56,7 @@ export function Filters({ params, onParams, values }: FiltersProps) {
     </summary>
     <div className="flex min-w-0 flex-col gap-3 pt-2">{children}</div>
   </details>;
-  const person = (field: PersonFilter, label: string) => <NamePicker label={label} kinds={['user']}
+  const person = (field: PersonFilter, label: string) => <NamePicker pickerKey="search.Filters" label={label} kinds={['user']}
     chosen={values.personName(field)} anything={t('search.filters.authorAny')}
     placeholder={t('search.filters.authorFind')} nothing={t('search.filters.authorNothing')}
     onChoose={(hit) => { values.remember(hit); set({ [field]: hit?.id }); }} />;
@@ -85,8 +85,9 @@ export function Filters({ params, onParams, values }: FiltersProps) {
   }
 
   return <div aria-label={t('search.filters.title')} className="flex min-w-0 flex-col gap-3">
-    {group('where', t('search.filters.whereGroup'), <NamePicker
+    {group('where', t('search.filters.whereGroup'), <NamePicker pickerKey="search.Filters.search.filters.place"
       label={t('search.filters.place')} kinds={['org', 'project', 'topic', 'thread', 'document', 'chat']}
+      orgId={params.org === 'all' ? undefined : params.org}
       chosen={values.place} anything={t('search.filters.scopeAll')} placeholder={t('search.filters.scopeFind')}
       nothing={t('search.filters.scopeNothing')}
       onChoose={(hit) => {
