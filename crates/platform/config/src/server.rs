@@ -10,6 +10,24 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+const MIB: usize = 1024 * 1024;
+
+/// Default stack reservation for a service runtime thread; deployments may raise or lower it.
+pub const WORKER_STACK_BYTES: usize = 64 * MIB;
+
+/// The service whose runtime is about to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeComponent {
+    /// The API service.
+    Api,
+    /// The gateway service.
+    Gateway,
+    /// The background worker service.
+    Worker,
+    /// The host node service.
+    Node,
+}
+
 fn s(text: &str) -> String {
     text.to_owned()
 }
@@ -98,12 +116,16 @@ section! {
         name: String = s("Orch"),
         /// The origin a browser opens; used in links and mail.
         public_url: String = s("https://orch.example.com"),
+        /// Other browser origins of this installation, including literal IPs only when declared.
+        alternate_urls: Vec<String> = Vec::new(),
     }
 }
 
 section! {
     /// `[api]`
     Api {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// The browser API, TLS under the system's own CA, reached through the front proxy.
         bind: String = s("0.0.0.0:8443"),
         /// Mutual TLS: the gateway's backplane and certificate renewal.
@@ -174,8 +196,24 @@ section! {
 }
 
 section! {
+    /// One logical gateway advertised in `[[gateway.instances]]`.
+    GatewayInstance {
+        /// Stable identity shared by all this gateway's entrances.
+        id: String = String::new(),
+        /// Operator label shown during installation and on machine pages.
+        label: String = String::new(),
+        /// Operator-described region; no location is inferred from it.
+        region: String = String::new(),
+        /// Pinned/public entrances that all reach this gateway.
+        endpoints: Vec<GatewayEndpoint> = Vec::new(),
+    }
+}
+
+section! {
     /// `[gateway]`
     Gateway {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Machines that present client certificates.
         pinned_bind: String = s("[::]:9443"),
         /// Machines that come through the public front; TLS under the system's CA.
@@ -186,6 +224,8 @@ section! {
         backplane_url: String = s("wss://api:8444/internal/backplane"),
         /// This gateway's name among several.
         gateway_id: String = s("compose-gateway"),
+        /// Labelled logical gateways; empty synthesizes the legacy single-gateway entry.
+        instances: Vec<GatewayInstance> = Vec::new(),
         /// The address given to runtimes the system creates itself.
         managed_endpoint: String = String::new(),
         /// The addresses advertised to connected machines, in order of preference.
@@ -195,9 +235,130 @@ section! {
     }
 }
 
+impl Gateway {
+    /// The operator's catalogue, including legacy single-gateway configuration.
+    #[must_use]
+    pub fn advertised_gateways(&self) -> Vec<orch_link_contract::gateways::GatewayInstance> {
+        let endpoints =
+            |entries: &[GatewayEndpoint]| -> Vec<orch_link_contract::enrollment::Endpoint> {
+                entries
+                    .iter()
+                    .map(|entry| orch_link_contract::enrollment::Endpoint {
+                        url: entry.url.clone(),
+                        trust: if entry.trust == "public" {
+                            orch_link_contract::enrollment::Trust::Public
+                        } else {
+                            orch_link_contract::enrollment::Trust::Pinned
+                        },
+                    })
+                    .collect()
+            };
+        if self.instances.is_empty() {
+            return vec![orch_link_contract::gateways::GatewayInstance {
+                id: self.gateway_id.clone(),
+                label: self.gateway_id.clone(),
+                region: "Unspecified".to_owned(),
+                endpoints: endpoints(&self.endpoints),
+            }];
+        }
+        self.instances
+            .iter()
+            .map(|instance| orch_link_contract::gateways::GatewayInstance {
+                id: instance.id.clone(),
+                label: instance.label.clone(),
+                region: instance.region.clone(),
+                endpoints: endpoints(&instance.endpoints),
+            })
+            .collect()
+    }
+
+    /// The legacy projection of the same catalogue, retaining declared order.
+    #[must_use]
+    pub fn advertised_endpoints(&self) -> Vec<orch_link_contract::enrollment::Endpoint> {
+        self.advertised_gateways()
+            .into_iter()
+            .flat_map(|instance| instance.endpoints)
+            .collect()
+    }
+
+    /// Validate the same operator catalogue at deployment and through administrative updates.
+    pub fn validate_instances(&self) -> Result<(), ConfigError> {
+        let invalid = |message: &str| ConfigError::Invalid {
+            key: "gateway.instances".to_owned(),
+            message: message.to_owned(),
+        };
+        let mut ids = std::collections::HashSet::new();
+        let mut entrances = std::collections::HashMap::new();
+        for instance in &self.instances {
+            if instance.id == "automatic" {
+                return Err(invalid(
+                    "automatic is reserved for the measured primary selection",
+                ));
+            }
+            if instance.id.is_empty()
+                || !instance
+                    .id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+            {
+                return Err(invalid(
+                    "each gateway needs an identity containing letters, digits, dash, underscore or dot",
+                ));
+            }
+            if !ids.insert(&instance.id) {
+                return Err(invalid("gateway identities must be unique"));
+            }
+            if [&instance.label, &instance.region]
+                .iter()
+                .any(|text| text.trim().is_empty() || text.chars().any(char::is_control))
+            {
+                return Err(invalid(
+                    "each gateway needs a nonempty label and region without control characters",
+                ));
+            }
+            if instance.endpoints.is_empty() {
+                return Err(invalid("each gateway needs at least one verified entrance"));
+            }
+            for endpoint in &instance.endpoints {
+                let uri = endpoint
+                    .url
+                    .parse::<http::Uri>()
+                    .map_err(|_| invalid("gateway entrances must be WSS or HTTPS addresses"))?;
+                if !matches!(endpoint.trust.as_str(), "pinned" | "public")
+                    || !matches!(uri.scheme_str(), Some("wss" | "https"))
+                    || uri.host().is_none()
+                    || uri
+                        .authority()
+                        .is_some_and(|authority| authority.as_str().contains('@'))
+                    || uri.query().is_some()
+                    || endpoint.url.contains('#')
+                {
+                    return Err(invalid(
+                        "gateway entrances need WSS/HTTPS, pinned/public trust and no credentials, query or fragment",
+                    ));
+                }
+                let origin = format!(
+                    "{}:{}",
+                    uri.host().unwrap_or_default().to_ascii_lowercase(),
+                    uri.port_u16().unwrap_or(443)
+                );
+                if entrances
+                    .insert(origin, &instance.id)
+                    .is_some_and(|old| old != &instance.id)
+                {
+                    return Err(invalid("one entrance cannot name two different gateways"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 section! {
     /// `[link]`
     Link {
+        /// Close unused tunnel-only sessions after this many seconds; live references protect them.
+        tunnel_session_idle_secs: u64 = 60,
         /// How often each side says it is alive.
         heartbeat_secs: u64 = 20,
         /// Silence after which the other side is taken for gone: three heartbeats.
@@ -238,6 +399,8 @@ section! {
 section! {
     /// `[worker]`
     Worker {
+        /// Stack reservation per runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Plain HTTP for an operator's collector.
         metrics_bind: String = s("0.0.0.0:9102"),
         /// Database connections.
@@ -452,10 +615,14 @@ pub type NodeHooks = orch_link_contract::policy::MachineHooks;
 section! {
     /// `[node]`: the environment host.
     Node {
+        /// Stack reservation per service runtime thread in MiB; an adjustable default, not a cap.
+        worker_stack_mib: usize = WORKER_STACK_BYTES / MIB,
         /// Where it keeps its own state.
         data_dir: String = s("/var/lib/orch-node"),
         /// The gateway it connects to.
         gateway_url: String = String::new(),
+        /// Parent HTTP proxy for restricted units; unset follows this node's HTTPS_PROXY.
+        egress_proxy: Option<String> = None,
         /// The built-in drivers it loads.
         drivers: Vec<String> = list(&["docker"]),
         /// How long a new runtime's connector has to enroll before its creation fails.
@@ -553,14 +720,6 @@ section! {
         stream_flush_ms: u64 = 1_000,
         /// A provider page reads at most once per minute by default.
         provider_facts_page_secs: u64 = 60,
-        /// A provider with recent bound-thread work reads every five minutes.
-        provider_facts_active_secs: u64 = 300,
-        /// Fifteen minutes retain a short working pause on the active cadence.
-        provider_facts_active_recent_secs: u64 = 900,
-        /// Idle providers read hourly, twenty-four times a day.
-        provider_facts_idle_secs: u64 = 3600,
-        /// Refused online providers find externally repaired credentials within five minutes.
-        provider_facts_refused_secs: u64 = 300,
         /// How often the engine looks for what is due for removal.
         reaper_secs: u64 = 30,
         /// The longest pause between two attempts to remove something that will not go.
@@ -663,6 +822,27 @@ fn shares_origin(ports_domain: &str, main_host: &str) -> bool {
             || ports_domain.ends_with(&format!(".{main_host}")))
 }
 
+impl ServerConfig {
+    /// The selected service's stack reservation, checked before a runtime starts.
+    ///
+    /// # Errors
+    /// Returns an error naming the setting when it is zero or its byte count overflows.
+    pub fn worker_stack_bytes(&self, component: RuntimeComponent) -> Result<usize, ConfigError> {
+        let (section, mib) = match component {
+            RuntimeComponent::Api => ("api", self.api.worker_stack_mib),
+            RuntimeComponent::Gateway => ("gateway", self.gateway.worker_stack_mib),
+            RuntimeComponent::Worker => ("worker", self.worker.worker_stack_mib),
+            RuntimeComponent::Node => ("node", self.node.worker_stack_mib),
+        };
+        mib.checked_mul(MIB)
+            .filter(|bytes| *bytes > 0)
+            .ok_or_else(|| ConfigError::Invalid {
+                key: format!("{section}.worker_stack_mib"),
+                message: "must be positive and fit in this platform's address space".to_owned(),
+            })
+    }
+}
+
 impl Validate for ServerConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         let invalid = |key: &str, message: &str| ConfigError::Invalid {
@@ -671,6 +851,48 @@ impl Validate for ServerConfig {
         };
         if self.version != 1 {
             return Err(invalid("version", "this build reads version 1"));
+        }
+        for (key, address) in std::iter::once(("system.public_url", &self.system.public_url)).chain(
+            self.system
+                .alternate_urls
+                .iter()
+                .map(|url| ("system.alternate_urls", url)),
+        ) {
+            if key == "system.public_url" && address.is_empty() {
+                continue;
+            }
+            let message = "must be an HTTP(S) origin without credentials, path, query or fragment";
+            let url = address
+                .parse::<http::Uri>()
+                .map_err(|_| invalid(key, message))?;
+            if !matches!(url.scheme_str(), Some("http" | "https"))
+                || url.host().is_none_or(str::is_empty)
+                || url.authority().is_some_and(|authority| {
+                    let suffix = authority
+                        .as_str()
+                        .strip_prefix(authority.host())
+                        .unwrap_or("");
+                    authority.as_str().contains('@')
+                        || authority.port_u16() == Some(0)
+                        || !suffix.is_empty()
+                            && suffix
+                                .strip_prefix(':')
+                                .is_none_or(|port| port.parse::<u16>().is_err())
+                })
+                || !matches!(url.path(), "" | "/")
+                || url.query().is_some()
+                || address.contains(['#', '\\', '%'])
+            {
+                return Err(invalid(key, message));
+            }
+        }
+        for component in [
+            RuntimeComponent::Api,
+            RuntimeComponent::Gateway,
+            RuntimeComponent::Worker,
+            RuntimeComponent::Node,
+        ] {
+            self.worker_stack_bytes(component)?;
         }
         if self.release.request_timeout_secs == 0 || self.release.manifest_max_bytes == 0 {
             return Err(invalid(
@@ -762,6 +984,7 @@ impl Validate for ServerConfig {
                 "must be longer than link.heartbeat_secs",
             ));
         }
+
         if !matches!(self.log.format.as_str(), "text" | "json") {
             return Err(invalid("log.format", "must be text or json"));
         }
@@ -773,6 +996,7 @@ impl Validate for ServerConfig {
                 ));
             }
         }
+        self.gateway.validate_instances()?;
         for plugin in &self.plugin {
             if !orch_plugin_contract::registration::PluginKind::ALL
                 .iter()
@@ -842,6 +1066,39 @@ impl Plugin {
 }
 
 #[cfg(test)]
+mod provider_read_tests {
+    use super::ServerConfig;
+
+    #[test]
+    fn provider_cadence_config_keys_are_unknown_but_page_refresh_stays_configurable() {
+        for key in [
+            "provider_facts_active_secs",
+            "provider_facts_active_recent_secs",
+            "provider_facts_idle_secs",
+            "provider_facts_refused_secs",
+        ] {
+            let error = crate::loader::load_text::<ServerConfig>(
+                &format!("[engine]\n{key}=600\n"),
+                "orch.toml",
+                |_| None,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("unknown field") && error.to_string().contains(key),
+                "the removed key must be named: {error}"
+            );
+        }
+        let config = crate::loader::load_text::<ServerConfig>(
+            "[engine]\nprovider_facts_page_secs=120\n",
+            "orch.toml",
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(config.engine.provider_facts_page_secs, 120);
+    }
+}
+
+#[cfg(test)]
 mod plugin_tests {
     use super::*;
     use orch_plugin_contract::registration::PluginStart;
@@ -905,6 +1162,48 @@ mod plugin_tests {
         ] {
             assert!(with(shared).is_err(), "{shared}");
         }
+    }
+
+    #[test]
+    fn alternate_browser_urls_are_explicit_http_origins() {
+        let mut config = ServerConfig::default();
+        assert!(config.system.alternate_urls.is_empty());
+        config.system.alternate_urls = vec![
+            "https://inside.example.test:8443".to_owned(),
+            "http://192.0.2.15:8080".to_owned(),
+            "https://[2001:db8::15]/".to_owned(),
+        ];
+        assert!(config.validate().is_ok());
+        for invalid in [
+            "inside.example.test",
+            "wss://inside.example.test/link",
+            "https://person@inside.example.test",
+            "https://inside.example.test/app",
+            "https://inside.example.test?query=1",
+            "https://inside.example.test#section",
+            "https://inside.example.test:0",
+            "https://inside.example.test:99999",
+            "https://inside.example.test:",
+            "https://inside.example.test:not-a-port",
+            "https://[2001:db8::15]:99999",
+        ] {
+            config.system.alternate_urls = vec![invalid.to_owned()];
+            assert!(config.validate().is_err(), "{invalid}");
+            config.system.alternate_urls.clear();
+            config.system.public_url = invalid.to_owned();
+            assert!(config.validate().is_err(), "public {invalid}");
+            config.system.public_url = ServerConfig::default().system.public_url;
+        }
+        let loaded = crate::loader::load_text::<ServerConfig>(
+            "[system]\nalternate_urls=['https://inside.example.test']\n",
+            "orch.toml",
+            |_| None,
+        )
+        .unwrap();
+        assert_eq!(
+            loaded.system.alternate_urls,
+            ["https://inside.example.test"]
+        );
     }
 
     #[test]

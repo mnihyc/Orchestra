@@ -59,7 +59,7 @@ test('a machine chooses its roles and their handover, keeps Node separate, and i
   await expect(command).toContainText("--roles 'environment,agent'");
   await expect(command).not.toContainText('--delegate');
   for (const [name, description] of [
-    ['Environment', 'Let people work in folders of this machine'], ['Agent', 'Run agents here'],
+    ['Environment', 'Work in folders on Linux'], ['Agent', 'Run agents here'],
     ['Provider', 'Keep provider keys here'], ['Node', 'Let Orch make environments here'],
   ] as const) {
     await expect(dialog.getByRole('checkbox', { name, exact: true })).toHaveAccessibleDescription(description);
@@ -331,9 +331,9 @@ test('an environment is made from a template on a host, and its page follows the
   await page.getByRole('menuitem', { name: /Make from a template/ }).click();
   const dialog = page.getByRole('dialog', { name: 'Add environment' });
   // Only a template that is switched on is offered, and only a host that takes new environments with its driver.
-  await expect(dialog.getByRole('combobox', { name: 'Template' })).toContainText('Default');
+  await expect(dialog.getByRole('combobox', { name: 'Template' })).toHaveValue('Default');
   const host = dialog.getByRole('combobox', { name: 'Host', exact: true });
-  await expect(host).toContainText('Automatic');
+  await expect(host).toHaveValue('Automatic');
   await host.click();
   await expect(page.getByRole('option', { name: 'Automatic', exact: true })).toContainText('The one with the most room');
   await page.keyboard.press('Escape');

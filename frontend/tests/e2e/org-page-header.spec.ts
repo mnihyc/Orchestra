@@ -1,5 +1,7 @@
 /** Compact headers, honest department people and personal-space actions in both languages, widths and themes. */
 import { expect, test } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { expectAccessible, scenario, signIn } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
@@ -23,9 +25,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
       reads = []; setupWrites = [];
       await page.goto(`/org/${slug}`);
       const main = page.locator('[data-main-area]');
-      const title = main.getByRole('heading', { name, level: 1, exact: true });
+      const words = locale === 'en' ? english : chinese;
+      const heading = slug === 'ada' ? words.places.org.personalTitle.replace('{{name}}', name) : name;
+      const title = main.getByRole('heading', { name: heading, level: 1, exact: true });
       await expect(title).toBeVisible();
-      const header = main.locator('header').filter({ has: page.getByRole('heading', { name, level: 1, exact: true }) });
+      const header = main.locator('header').filter({ has: page.getByRole('heading', { name: heading, level: 1, exact: true }) });
       await expect(header.getByRole('button')).toHaveCount(3);
       await expect(header.locator('button[aria-pressed]')).toHaveCount(1);
       const menu = header.locator('button[aria-haspopup="menu"]');

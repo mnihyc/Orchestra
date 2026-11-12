@@ -2,7 +2,7 @@
 //!
 //! A reader holds the page it is reading, the turn it has not finished and a short queue of the turn rows ahead, and
 //! whoever asks for turns gets a few at a time. The neutral carry bounds eligible item bytes before a turn is complete;
-//! the ordinary written-form readers still assemble a complete turn, which can span many pages. The turns use their index
+//! the ordinary written-form readers spool a complete turn, which can span many pages. The turns use their index
 //! (their numbers), the items of the main stream from the order the history keeps them (one index range for the live
 //! tables, one for a cut), grouped by the turn they were made in: a history is read by position, a page at a time, and
 //! the index of the items by turn (`items_turn_idx`) is for the counts of a part of a history and the written form of a
@@ -11,6 +11,11 @@
 //! puts them.
 
 use std::collections::VecDeque;
+mod items;
+mod presentation;
+mod text;
+use items::Items;
+pub(crate) use text::Text;
 
 use orch_db::Conn;
 use orch_db::queries::thread_continuations::reading;
@@ -43,7 +48,7 @@ impl Source<'_> {
     async fn items_after(&self, conn: &mut Conn, after: Seq) -> Result<Vec<ItemRow>, EngineError> {
         Ok(match self {
             Self::Live { thread, view } => {
-                reading::items(
+                reading::items_bounded(
                     conn,
                     *thread,
                     *view,
@@ -55,7 +60,8 @@ impl Source<'_> {
                 .await?
             }
             Self::Cut(cut) => {
-                cuts::items_page(conn, cut.id, after, cut.captured_seq, Some("main")).await?
+                cuts::items_page_bounded(conn, cut.id, after, cut.captured_seq, Some("main"), false)
+                    .await?
             }
         })
     }
@@ -68,7 +74,7 @@ impl Source<'_> {
     ) -> Result<Vec<ItemRow>, EngineError> {
         Ok(match self {
             Self::Live { thread, view } => {
-                reading::items(
+                reading::items_bounded(
                     conn,
                     *thread,
                     *view,
@@ -79,7 +85,17 @@ impl Source<'_> {
                 )
                 .await?
             }
-            Self::Cut(cut) => cuts::items_page_back(conn, cut.id, before).await?,
+            Self::Cut(cut) => {
+                cuts::items_page_bounded(
+                    conn,
+                    cut.id,
+                    -1,
+                    before.map_or(i64::MAX, |before| before.saturating_sub(1)),
+                    Some("main"),
+                    true,
+                )
+                .await?
+            }
         })
     }
 
@@ -137,7 +153,7 @@ pub(crate) struct Bundle {
     /// The turn.
     pub turn: TurnRow,
     /// Its items, in the order the history keeps them.
-    pub items: Vec<ItemRow>,
+    pub items: Items,
 }
 
 /// What a reader has read so far: pages and rows, and the most it held at once. A caller (and a test) can see from it that
@@ -224,8 +240,8 @@ pub(crate) struct Forward<'a> {
     trailing: bool,
     reads: Reads,
     queue: Queue,
-    current: Option<(TurnRow, Vec<ItemRow>)>,
-    pending: Vec<ItemRow>,
+    current: Option<(TurnRow, Items)>,
+    pending: Items,
     unread: VecDeque<ItemRow>,
     ready: VecDeque<Bundle>,
     ended: bool,
@@ -252,7 +268,7 @@ impl<'a> Forward<'a> {
             reads: Reads::default(),
             queue: Queue::new(true, range),
             current: None,
-            pending: Vec::new(),
+            pending: Items::default(),
             unread: VecDeque::new(),
             ready: VecDeque::new(),
             ended: false,
@@ -268,16 +284,16 @@ impl<'a> Forward<'a> {
     /// The rows held beside the page being read.
     fn held(&self) -> usize {
         self.queue.rows.len()
-            + self.pending.len()
+            + self.pending.held()
             + self.unread.len()
             + self
                 .current
                 .as_ref()
-                .map_or(0, |(_, items)| items.len() + 1)
+                .map_or(0, |(_, items)| items.held() + 1)
             + self
                 .ready
                 .iter()
-                .map(|bundle| bundle.items.len() + 1)
+                .map(|bundle| bundle.items.held() + 1)
                 .sum::<usize>()
     }
 
@@ -314,7 +330,7 @@ impl<'a> Forward<'a> {
                     // and the turns that follow it made no item.
                     if let Some((_, items)) = self.current.as_mut() {
                         if self.trailing {
-                            items.append(&mut self.pending);
+                            items.append(&mut self.pending)?;
                         } else {
                             self.pending.clear();
                         }
@@ -331,7 +347,7 @@ impl<'a> Forward<'a> {
             };
             let Some(turn) = item.turn_id else {
                 if item.kind != "reasoning" {
-                    self.pending.push(item);
+                    self.pending.push(item)?;
                 }
                 continue;
             };
@@ -344,8 +360,8 @@ impl<'a> Forward<'a> {
                 .is_some_and(|(current, _)| current.id == turn)
             {
                 if let Some((_, items)) = self.current.as_mut() {
-                    items.append(&mut self.pending);
-                    items.push(item);
+                    items.append(&mut self.pending)?;
+                    items.push(item)?;
                 }
                 continue;
             }
@@ -363,13 +379,13 @@ impl<'a> Forward<'a> {
                         if let Some(turn) = self.queue.rows.pop_front() {
                             self.ready.push_back(Bundle {
                                 turn,
-                                items: Vec::new(),
+                                items: Items::default(),
                             });
                         }
                     }
                     if let Some(row) = self.queue.rows.pop_front() {
                         let mut items = std::mem::take(&mut self.pending);
-                        items.push(item);
+                        items.push(item)?;
                         self.current = Some((row, items));
                     }
                 }
@@ -389,7 +405,7 @@ impl<'a> Forward<'a> {
                         };
                         self.ready.push_back(Bundle {
                             turn,
-                            items: Vec::new(),
+                            items: Items::default(),
                         });
                     }
                     self.unread.push_front(item);
@@ -421,7 +437,7 @@ impl<'a> Forward<'a> {
             };
             self.ready.push_back(Bundle {
                 turn,
-                items: Vec::new(),
+                items: Items::default(),
             });
         }
         Ok(())
@@ -435,8 +451,8 @@ pub(crate) struct Backward<'a> {
     trailing: bool,
     reads: Reads,
     queue: Queue,
-    current: Option<(TurnRow, Vec<ItemRow>)>,
-    pending: Vec<ItemRow>,
+    current: Option<(TurnRow, Items)>,
+    pending: Items,
     unread: VecDeque<ItemRow>,
     ready: VecDeque<Bundle>,
     ended: bool,
@@ -469,7 +485,7 @@ impl<'a> Backward<'a> {
             reads: Reads::default(),
             queue: Queue::new(false, range),
             current: None,
-            pending: Vec::new(),
+            pending: Items::default(),
             unread: VecDeque::new(),
             ready: VecDeque::new(),
             ended: false,
@@ -524,16 +540,16 @@ impl<'a> Backward<'a> {
     /// The rows held beside the page being read.
     fn held(&self) -> usize {
         self.queue.rows.len()
-            + self.pending.len()
+            + self.pending.held()
             + self.unread.len()
             + self
                 .current
                 .as_ref()
-                .map_or(0, |(_, items)| items.len() + 1)
+                .map_or(0, |(_, items)| items.held() + 1)
             + self
                 .ready
                 .iter()
-                .map(|bundle| bundle.items.len() + 1)
+                .map(|bundle| bundle.items.held() + 1)
                 .sum::<usize>()
     }
 
@@ -560,7 +576,7 @@ impl<'a> Backward<'a> {
                 self.reads.peak_held = self.reads.peak_held.max(page.len() + self.held());
                 let Some(first) = page.first().map(|item| item.seq_created) else {
                     if let Some((_, items)) = self.current.as_mut() {
-                        items.append(&mut self.pending);
+                        items.append(&mut self.pending)?;
                     }
                     self.finish_current();
                     self.end_with_empty_turns(conn, most).await?;
@@ -577,7 +593,7 @@ impl<'a> Backward<'a> {
                     && (self.neutral_room.is_none() || self.current.is_some() || self.trailing)
                 {
                     if self.admit_neutral(&item, 0) {
-                        self.pending.push(item);
+                        self.pending.push(item)?;
                     }
                     if self.neutral_overflow {
                         break;
@@ -596,8 +612,8 @@ impl<'a> Backward<'a> {
                 if self.admit_neutral(&item, ordinal)
                     && let Some((_, items)) = self.current.as_mut()
                 {
-                    items.append(&mut self.pending);
-                    items.push(item);
+                    items.append(&mut self.pending)?;
+                    items.push(item)?;
                 }
                 if self.neutral_overflow {
                     break;
@@ -616,7 +632,7 @@ impl<'a> Backward<'a> {
                     if let Some((_, items)) = self.current.as_mut() {
                         // Lines between the last item of this turn and the first of the one after it go with the
                         // one after it.
-                        items.append(&mut self.pending);
+                        items.append(&mut self.pending)?;
                     }
                     self.finish_current();
                     // The turns between made no item.
@@ -624,22 +640,22 @@ impl<'a> Backward<'a> {
                         if let Some(turn) = self.queue.rows.pop_front() {
                             self.ready.push_back(Bundle {
                                 turn,
-                                items: Vec::new(),
+                                items: Items::default(),
                             });
                         }
                     }
                     if let Some(row) = self.queue.rows.pop_front() {
                         let ordinal = row.ordinal;
-                        let mut items = Vec::new();
+                        let mut items = Items::default();
                         if starting && self.trailing {
-                            items.append(&mut self.pending);
+                            items.append(&mut self.pending)?;
                         }
                         self.pending.clear();
                         self.current = Some((row, items));
                         if self.admit_neutral(&item, ordinal)
                             && let Some((_, items)) = self.current.as_mut()
                         {
-                            items.push(item);
+                            items.push(item)?;
                         }
                         if self.neutral_overflow {
                             break;
@@ -650,7 +666,7 @@ impl<'a> Backward<'a> {
                     // Before the range: what lies after this line goes with the earliest turn read, and the read
                     // is over.
                     if let Some((_, items)) = self.current.as_mut() {
-                        items.append(&mut self.pending);
+                        items.append(&mut self.pending)?;
                     }
                     self.pending.clear();
                     self.unread.clear();
@@ -660,7 +676,7 @@ impl<'a> Backward<'a> {
                 }
                 None => {
                     if let Some((_, items)) = self.current.as_mut() {
-                        items.append(&mut self.pending);
+                        items.append(&mut self.pending)?;
                     }
                     self.finish_current();
                     while self.ready.len() < most {
@@ -669,7 +685,7 @@ impl<'a> Backward<'a> {
                         };
                         self.ready.push_back(Bundle {
                             turn,
-                            items: Vec::new(),
+                            items: Items::default(),
                         });
                     }
                     self.unread.push_front(item);
@@ -701,7 +717,7 @@ impl<'a> Backward<'a> {
             };
             self.ready.push_back(Bundle {
                 turn,
-                items: Vec::new(),
+                items: Items::default(),
             });
         }
         Ok(())

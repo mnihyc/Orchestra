@@ -2,7 +2,9 @@
 import type { Browser, BrowserContext, Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 
-import { PEOPLE, signIn } from './support.ts';
+import { mainArea, PEOPLE, signIn } from './support.ts';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
@@ -34,11 +36,27 @@ export async function secondReader(
   return { page, context };
 }
 
+/** A Messages page has its own open conversation beside an independently retained team panel. */
+export function chatSurface(page: Page) {
+  if (!new URL(page.url()).pathname.replace(/\/$/, '').endsWith('/messages')) return page;
+  const main = mainArea(page);
+  return main.getByRole('region', { name: english.chat.messages.open, exact: true })
+    .or(main.getByRole('region', { name: chinese.chat.messages.open, exact: true }));
+}
+
+/** Group labels own nested lists; only the leaf list items are actual conversations. */
+export function chatRows(page: Page) {
+  const main = mainArea(page);
+  const lists = main.getByRole('list', { name: english.chat.messages.list, exact: true })
+    .or(main.getByRole('list', { name: chinese.chat.messages.list, exact: true }));
+  return lists.getByRole('listitem').filter({ hasNot: page.getByRole('list') });
+}
+
 /** The box a message is typed in, in a chat's panel or on the Messages screen. */
-export const composer = (page: Page) => page.getByRole('textbox', { name: /^Message / });
+export const composer = (page: Page) => chatSurface(page).getByRole('textbox', { name: /^Message / });
 
 /** One message of the conversation on screen, found by what it says. */
-export const messageSaying = (page: Page, text: string | RegExp) => page.locator('li[data-message]', { hasText: text });
+export const messageSaying = (page: Page, text: string | RegExp) => chatSurface(page).locator('li[data-message]', { hasText: text });
 
 /** Sends a message by typing it and pressing Enter, and waits until it stands in the list. */
 export async function sendMessage(page: Page, text: string): Promise<void> {
@@ -52,6 +70,8 @@ export async function sendMessage(page: Page, text: string): Promise<void> {
 /** The menu of a message: opened from its toolbar, which shows while the pointer rests on the message. */
 export async function openMessageMenu(page: Page, text: string | RegExp): Promise<void> {
   const message = messageSaying(page, text).first();
+  await page.mouse.move(0, 0);
+  if (await page.getByRole('tooltip').count() > 0) await page.keyboard.press('Escape');
   await message.hover();
   await message.getByRole('button', { name: /^Actions/ }).click();
 }

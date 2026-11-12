@@ -1,6 +1,7 @@
 /** Named daily work comes first, stays current, and reads in either language/theme at laptop and phone widths. */
 import { expect, type Request, test } from '@playwright/test';
 
+import { executionDisplay } from '../doubles/thread-display.ts';
 import { acmeTree, me, userRef } from '../doubles/fixtures.ts';
 import { ALLOW_DENY, harnessApproval } from '../doubles/thread-rows.ts';
 import { settleAs } from './inbox-support.ts';
@@ -19,7 +20,7 @@ async function control(path: string, body: Record<string, unknown>) {
 function thread(id: string, state: 'idle' | 'blocked' | 'waiting_approval') {
   const held = acmeTree().find((row) => row.id === id)?.thread;
   if (held === null || held === undefined) throw new Error('the scenario names an existing thread');
-  return { ...held, state };
+  return { ...held, state, display: executionDisplay(state) };
 }
 
 async function dailyWork() {
@@ -113,7 +114,8 @@ test('a decision, rename and removal update the existing home without detail or 
   await settleAs('home-deploy', 'grace');
   await changeTree([{ id: ACME.repro, name: 'Deployment reviewed', thread: thread(ACME.repro, 'idle') }]);
   await expect(row.getByText('Deployment reviewed', { exact: true })).toBeVisible();
-  await expect(row.getByText('Ready to continue', { exact: true })).toBeVisible();
+  // Work reasons use the canonical native display caption shared with the thread icon.
+  await expect(row.locator('[data-thread-reason]')).toHaveText('Idle');
   await expect(row.getByText(/Waiting/)).toHaveCount(0);
   await changeTree([{ id: ACME.repro, deleted: true, name: '', thread: null }]);
   await expect(row).toHaveCount(0);

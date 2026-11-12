@@ -127,7 +127,7 @@ export function Agents() {
         </Button>
       </div>
       {agents.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={agents} rows={3} />
       ) : agents.isError ? (
         <ErrorState error={agents.error} retrying={agents.isRefetching} onRetry={() => void agents.refetch()} />
       ) : agents.data.length === 0 ? (

@@ -6,6 +6,7 @@ import { SourcePreparation } from '@/features/source/Preparation';
 import { BlockedBanner } from '@/features/thread/BlockedBanner';
 import type { Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
+import { failedStart } from './failed-start-fixtures';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ start: vi.fn<(id: string) => Promise<{ id: string }>>(), change: vi.fn() }));
@@ -13,12 +14,13 @@ vi.mock('@/api/environments', async (original) => ({ ...await original<object>()
 vi.mock('@/features/change/target', async (original) => ({ ...await original<object>(), openChange: calls.change }));
 
 function blocked(manager = true): Thread {
-  return { id: 'thread', name: 'Login', state: 'blocked', lock: null, binding: null, pending_inputs: 1,
-    blocked: { reason: 'environment_unavailable', detail: "the environment failed: files: the file job's environment changed", sandbox: null },
-    environment: { id: 'environment', name: 'Main', status: 'failed' }, environment_permissions: manager ? ['environment.manage'] : [],
-    access: { permissions: manager ? ['thread.manage'] : [] }, owner: { display_name: 'Ada' },
-    source: { kind: 'directory', directory: '', state: 'pending', job: null },
-  } as unknown as Thread;
+  const { thread } = failedStart();
+  if (thread.environment === null) throw new Error('The failed-start fixture needs its actual environment');
+  return { ...thread, id: 'thread', name: 'Login', binding: null,
+    environment: { ...thread.environment, id: 'environment' }, environment_permissions: manager ? ['environment.manage'] : [],
+    access: { ...thread.access, permissions: manager ? ['thread.view', 'thread.manage'] : ['thread.view'] },
+    can: { ...thread.can, place: manager },
+  };
 }
 
 beforeEach(() => { vi.clearAllMocks(); calls.start.mockResolvedValue({ id: 'retry-job' }); });
@@ -60,6 +62,18 @@ for (const locale of ['en', 'zh-CN'] as const) {
     show(<BlockedBanner thread={{ ...blocked(), pending_inputs: 0 }} onProceed={() => undefined} />);
     expect(screen.getByText(i18n.t('startRecovery.filesFailed', { environment: 'Main' }))).toBeVisible();
     expect(screen.queryByText(i18n.t('startRecovery.held'))).toBeNull();
+  });
+
+  it(`uses reported placement independently of thread management (${locale})`, async () => {
+    await setLocale(locale);
+    const thread = blocked(false);
+    const view = show(<BlockedBanner thread={{ ...thread, access: { ...thread.access, permissions: ['thread.view', 'thread.manage'] } }} onProceed={() => undefined} />);
+    expect(screen.queryByRole('button', { name: i18n.t('startRecovery.elsewhere') })).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('startRecovery.retry') })).toBeNull();
+    view.rerender(<BlockedBanner thread={{ ...thread, can: { ...thread.can, place: true } }} onProceed={() => undefined} />);
+    await userEvent.click(screen.getByRole('button', { name: i18n.t('startRecovery.elsewhere') }));
+    expect(calls.change).toHaveBeenCalledExactlyOnceWith({ kind: 'thread', id: 'thread', name: 'Login' }, { kind: 'switch', focus: 'environment' });
+    expect(calls.start).not.toHaveBeenCalled();
   });
 
   it(`keeps an escape when the failed environment has disappeared (${locale})`, async () => {

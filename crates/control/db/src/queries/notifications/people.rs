@@ -307,6 +307,22 @@ pub async fn push_subscriptions_of(
     .await?)
 }
 
+/// One actual browser of its person, for validating an already prepared native delivery.
+pub async fn push_subscription(
+    conn: &mut Conn,
+    user: Id,
+    id: Id,
+) -> Result<Option<PushSubscriptionRow>, DbError> {
+    Ok(sqlx::query_as(
+        "SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_ok_at, failed_count
+           FROM push_subscriptions WHERE id = $1 AND user_id = $2",
+    )
+    .bind(id)
+    .bind(user)
+    .fetch_optional(conn)
+    .await?)
+}
+
 /// A browser that takes push, as it is added.
 #[derive(Debug, Clone, Copy)]
 pub struct NewPushSubscription<'a> {
@@ -467,6 +483,37 @@ pub struct Announced {
     pub inbox_seq: i64,
 }
 
+/// The exact ordinary announce receiver/absence predicate, without allocating a sequence.
+/// Sorted locks precede the caller's current HTTP checkpoint; normal announce reuses them.
+pub async fn lock_announce_receivers(
+    conn: &mut Conn,
+    users: &[Id],
+    kind: &str,
+    key: &str,
+) -> Result<(), DbError> {
+    let receivers = super::operations::receivers(conn, users, kind).await?;
+    lock_untold_receivers(conn, &receivers, key).await?;
+    Ok(())
+}
+
+async fn lock_untold_receivers(
+    conn: &mut Conn,
+    receivers: &[Id],
+    key: &str,
+) -> Result<Vec<Id>, DbError> {
+    // Inbox sequence/absence needs a non-key writer lock. Keep it compatible with the
+    // authenticated sender's KEY SHARE when that same person is also a receiver.
+    Ok(sqlx::query_scalar(
+        "SELECT u.id FROM users u WHERE u.id=ANY($1)
+         AND NOT EXISTS(SELECT 1 FROM notifications n WHERE n.user_id=u.id AND n.dedupe_key=$2)
+         ORDER BY u.id FOR NO KEY UPDATE OF u",
+    )
+    .bind(receivers)
+    .bind(key)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// Writes a row to the Inbox of a person and moves their feed on, unless they
 /// have a row with that key already. The database is told that their feed
 /// moved when the transaction ends.
@@ -474,12 +521,61 @@ pub async fn announce(
     conn: &mut Conn,
     new: &NewNotification<'_>,
 ) -> Result<Option<Announced>, DbError> {
+    announce_with(conn, new, None::<fn() -> Result<(), DbError>>).await
+}
+
+/// A bounded delivery batch applies current kind choices once before outward dispatch.
+/// Mandatory Inbox materialization does not grant an external delivery.
+pub async fn outward_kinds(
+    conn: &mut Conn,
+    user: Id,
+    kinds: &[String],
+) -> Result<Vec<String>, DbError> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT k.kind FROM unnest($2::text[]) AS k(kind)
+        JOIN users u ON u.id=$1 AND u.kind='human' AND u.status='active'
+        LEFT JOIN notification_prefs p ON p.user_id=u.id
+        WHERE NOT COALESCE(p.disabled_kinds ? k.kind,false)",
+    )
+    .bind(user)
+    .bind(kinds)
+    .fetch_all(conn)
+    .await?)
+}
+
+/// The same announce producer, with an opaque check after receiver and absence reads.
+/// A deduplicated row consumes no first-effect check. The existing user lock pins absence.
+pub async fn announce_with<E, F>(
+    conn: &mut Conn,
+    new: &NewNotification<'_>,
+    before_effect: Option<F>,
+) -> Result<Option<Announced>, E>
+where
+    E: From<DbError>,
+    F: FnOnce() -> Result<(), E> + Send,
+{
     if super::operations::receivers(conn, &[new.user_id], new.kind)
         .await?
         .is_empty()
     {
         return Ok(None);
     }
+    if let Some(check) = before_effect {
+        if lock_untold_receivers(conn, &[new.user_id], new.dedupe_key)
+            .await?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        check()?;
+    }
+    announce_effect(conn, new).await.map_err(E::from)
+}
+
+async fn announce_effect(
+    conn: &mut Conn,
+    new: &NewNotification<'_>,
+) -> Result<Option<Announced>, DbError> {
     let seq: Option<i64> = sqlx::query_scalar(
         "UPDATE users SET inbox_seq = inbox_seq + 1
           WHERE id = $1 AND NOT EXISTS (SELECT 1 FROM notifications WHERE user_id = $1 AND dedupe_key = $2)

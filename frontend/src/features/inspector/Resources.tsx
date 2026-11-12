@@ -70,7 +70,7 @@ function ResourcesPanel({ access }: { access: WorkspaceAccess }) {
   const query = useQuery(samplesQuery(access.door));
   useStatsFeed(access.door);
   if (query.error !== null && query.data === undefined) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined) return <SkeletonRows rows={4} />;
+  if (query.data === undefined) return <SkeletonRows read={query} rows={4} />;
   const samples = query.data.map((sample) => ({
     ...sample,
     cpu_percent: nonNegative(sample.cpu_percent),
@@ -86,7 +86,8 @@ function ResourcesPanel({ access }: { access: WorkspaceAccess }) {
   const rate = (value: number) => `${formatBytes(value, locale)}/s`;
   const cpuLimit = last.cpu_limit_millis === null ? null : last.cpu_limit_millis / 10;
   return (
-    <div className="h-full overflow-auto" data-testid="resources-panel">
+    // Charts take no keyboard: the panel itself does, so that it can be scrolled without a mouse.
+    <div className="focus-inset h-full overflow-auto" role="region" tabIndex={0} aria-label={t('inspector.resources.region')} data-testid="resources-panel">
       <Chart
         title={t('inspector.resources.cpu')}
         now={percent(last.cpu_percent)}

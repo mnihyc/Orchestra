@@ -1,3 +1,4 @@
+import type * as RouterModule from '@tanstack/react-router';
 /** Examples fill the same abstract provider interface used by a custom GPU adapter. */
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -20,7 +21,7 @@ const navigate = vi.hoisted(() => vi.fn());
 const close = vi.hoisted(() => vi.fn());
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => guide }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));
-vi.mock('@tanstack/react-router', () => ({ useNavigate: () => navigate, Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), useNavigate: () => navigate, Link: ({ children }: { children: ReactNode }) => <a href="#provider">{children}</a> }));
 vi.mock('@/api/machinePrograms',()=>({machineProgramsKey:(id:string)=>['programs',id],changeMachinePrograms:vi.fn(),
   machineProgramsQuery:(id:string)=>({queryKey:['programs',id],queryFn:()=>Promise.resolve({entries:[],can_manage:true,config_file:'/etc/orch.toml',
     capabilities:[{kind:'provider_source',supported:true,remote:true,delegated:true,enabled:true,policy_key:'provider.programs',reason:null}]})})}));
@@ -32,7 +33,7 @@ vi.mock('@/api/resources', async (load) => ({ ...await load<typeof ResourcesApi>
 
 const machine = { id: 'keeper', name: 'GPU machine', online: true, placement: 'connected' as const, platform_os: 'linux' as const };
 const other = { ...machine, id: 'other', name: 'Other machine' };
-const setup: ProviderSetup = {
+const setup: ProviderSetup = { grouping: [],
   machines: [machine, other].map((entry) => ({ machine: entry, directory_runtime: true, roles: ['provider'], harnesses: [], upstreams: ['*'] })),
   subscriptions: [], subscriptions_withheld: [], subscriptions_unshared: [], http_allowed: false,
   protocols: [
@@ -51,11 +52,12 @@ const setup: ProviderSetup = {
   ],
 };
 
-// The labelled trigger identifies the field directly; scope option accessibility to its open list.
+// The labelled trigger identifies the field directly. A grouped machine picker opens a dialog.
 // Repeated whole-dialog role walks dominate cold jsdom runs of this multi-step form.
 async function pick(label: string, option: string, user:ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByLabelText(label, { selector: 'button' }));
-  await user.click(within(screen.getByRole('listbox')).getByRole('option', { name: option }));
+  await user.click(screen.getByRole('combobox', { name: label }));
+  const popup = screen.queryByRole('dialog', { name: label }) ?? screen.getByRole('listbox');
+  await user.click(within(popup).getByRole('option', { name: option }));
 }
 
 // Match this native button directly and still require its full accessible name. Avoid computing
@@ -143,7 +145,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       const group = within(screen.getByRole('group', { name: label }));
       await user.click(group.getByLabelText(label, { selector: 'button' }));
       await user.click(within(screen.getByRole('listbox')).getByRole('option', { name: t('choiceCatalog.sourceKind.program.name') }));
-      await user.click(group.getByLabelText(t('providerSources.registeredProgram'), { selector: 'button' }));
+      await user.click(group.getByRole('combobox', { name: t('providerSources.registeredProgram') }));
       const choices = within(screen.getByRole('listbox'));
       expect(choices.queryByRole('option', { name: 'Other reports' })).not.toBeInTheDocument();
       expect(choices.queryByRole('option', { name: /Python provider/ })).not.toBeInTheDocument();
@@ -180,7 +182,7 @@ for (const language of ['en', 'zh-CN'] as const) for (const theme of ['light', '
       const group = within(screen.getByRole('group', { name: label }));
       await user.click(group.getByLabelText(label, { selector: 'button' }));
       await user.click(within(screen.getByRole('listbox')).getByRole('option', { name: t('choiceCatalog.sourceKind.program.name') }));
-      await user.click(group.getByLabelText(t('providerSources.registeredProgram'), { selector: 'button' }));
+      await user.click(group.getByRole('combobox', { name: t('providerSources.registeredProgram') }));
       await user.click(within(screen.getByRole('listbox')).getByRole('option', { name: t('providerSources.inTemplate', { program: 'acme', template: 'Python provider' }) }));
       expect(group.getByText('python /opt/plan.py')).toBeVisible();
       expect(group.getByText(t('providerSources.reportsUnread'))).toBeVisible();

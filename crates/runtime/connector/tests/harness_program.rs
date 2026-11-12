@@ -18,6 +18,7 @@ fn program(path: &std::path::Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(unix)]
 async fn started_with(p: &ProviderRig, profile: serde_json::Value) -> String {
     let body: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
         "provider_id": p.rig.provider, "agent_id": p.rig.agent, "harness_kind": "fake",

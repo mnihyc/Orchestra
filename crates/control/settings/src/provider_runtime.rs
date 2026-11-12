@@ -27,6 +27,31 @@ pub async fn provider_home_choice(
     profile_home_choice(conn, row.agent_id).await
 }
 
+/// What the harness of a provider is told about its home on `machine`, the machine that is the provider's runtime.
+///
+/// A choice that was made stands. Without one, a machine a person connected keeps the harness's own home and its own
+/// sign-in (a home forced on it would hide the account the person signed in with). A unit the system made owns the
+/// home of the harnesses it runs, the same fact that lets a sign-in be changed there ([`harness_home_owned`]): without a
+/// choice, Orch makes the home, in the unit's private state, one for each provider and profile.
+pub async fn runtime_home_choice(
+    conn: &mut Conn,
+    provider: Id,
+    machine: Id,
+) -> Result<Option<EnvironmentDataSource>, Error> {
+    if let Some(home) = provider_home_choice(conn, provider).await? {
+        return Ok(Some(home));
+    }
+    let unit: Option<bool> =
+        sqlx::query_scalar("SELECT runtime_id IS NOT NULL FROM machines WHERE id=$1")
+            .bind(machine)
+            .fetch_optional(conn)
+            .await
+            .map_err(orch_db::DbError::from)?;
+    Ok(unit
+        .unwrap_or(false)
+        .then_some(EnvironmentDataSource::MadeByOrch))
+}
+
 /// Unit storage needs a concrete source; an unconfigured unit gets its existing owned binding.
 pub async fn provider_home(conn: &mut Conn, provider: Id) -> Result<EnvironmentDataSource, Error> {
     Ok(provider_home_choice(conn, provider)
@@ -44,11 +69,19 @@ pub async fn credential_home(
         .unwrap_or(EnvironmentDataSource::MadeByOrch))
 }
 
-/// The keeper retains its adapter default when neither it nor its profile chose a home.
+/// An explicit fresh keeper home takes precedence; absence retains the existing runtime/profile selection.
 pub async fn credential_home_choice(
     conn: &mut Conn,
     provider: Id,
 ) -> Result<Option<EnvironmentDataSource>, Error> {
+    if let Some(home) = provider_runtime::credential_home(conn, provider).await? {
+        let home: EnvironmentDataSource =
+            serde_json::from_value(home).map_err(|error| Error::NotOfThatType {
+                key: "provider.credential_home".into(),
+                reason: error.to_string(),
+            })?;
+        return Ok(Some(home));
+    }
     let row = provider_runtime::state(conn, provider)
         .await?
         .ok_or(Error::NotFound)?;

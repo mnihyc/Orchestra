@@ -27,6 +27,7 @@ use orch_types::Id;
 /// backplane. While the backplane is down the answer is `busy`, which tells
 /// the machine to try again in a few seconds.
 pub struct BackplaneAuthority {
+    gateway: Gateway,
     backplane: BackplaneHandle,
 }
 
@@ -35,6 +36,7 @@ impl BackplaneAuthority {
     #[must_use]
     pub fn new(gateway: &Gateway) -> Self {
         Self {
+            gateway: gateway.clone(),
             backplane: gateway.inner.backplane.clone(),
         }
     }
@@ -44,9 +46,25 @@ impl BackplaneAuthority {
 impl SessionAuthority for BackplaneAuthority {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let n = query.n;
+        if !query.purpose.is_primary() && self.gateway.inner.sessions.has_primary(query.machine_id)
+        {
+            return AuthReply {
+                tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+                gateways: Vec::new(),
+                endpoints: None,
+                update_permit: None,
+                n,
+                ok: false,
+                code: Some(RejectCode::Busy),
+                cursors: None,
+                placement: None,
+            };
+        }
         match self.backplane.ask(query).await {
             Some(reply) => AuthReply { n, ..reply },
             None => AuthReply {
+                tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+                gateways: Vec::new(),
                 endpoints: None,
                 update_permit: None,
                 n,

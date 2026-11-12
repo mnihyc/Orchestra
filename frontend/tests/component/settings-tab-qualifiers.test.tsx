@@ -133,8 +133,8 @@ it.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']]
 
 it.each(['en', 'zh-CN'] as const)('distinguishes General, Defaults and Audit for the same native place without changing the section UI (%s)', async (language) => {
   await setLocale(language); putNative();
-  const tabs = [tab(`/project/${scene.project.id}/settings`), tab(`/project/${scene.project.id}/settings?section=policies`), tab(`/project/${scene.project.id}/settings?section=audit`), tab(`/topic/${scene.topic.id}?tab=settings&section=policies`), tab(`/topic/${scene.topic.id}?tab=settings&setting=agent.model`)];
-  const sections = ['general', 'policies', 'audit', 'policies', 'policies']; seed(tabs); draw();
+  const tabs = [tab(`/project/${scene.project.id}/settings`), tab(`/project/${scene.project.id}/settings?section=defaults`), tab(`/project/${scene.project.id}/settings?section=audit`), tab(`/topic/${scene.topic.id}?tab=settings&section=defaults`), tab(`/topic/${scene.topic.id}?tab=settings&setting=agent.model`)];
+  const sections = ['general', 'defaults', 'audit', 'defaults', 'defaults']; seed(tabs); draw();
   for (let index = 0; index < tabs.length; index += 1) {
     act(() => state().focus(tabs[index]!.id)); const label = sectionLabel(sections[index]!, i18n.t), place = index < 3 ? 'Web' : 'Fix login';
     await waitFor(() => expect(state().named.get(tabs[index]!.id)?.title).toBe(`${label} · ${place}`));

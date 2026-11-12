@@ -69,7 +69,7 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
   const permissions = environment.access.permissions;
   const mayDrive = permissions.includes('browser.manage');
 
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} message={query.error instanceof BrowserProgramsMissing ? t('browser.programsUnavailable') : undefined} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const data = query.data;
   const browsers = orderBrowsers(data.browsers, threadId);
@@ -120,7 +120,8 @@ export function BrowsersPanel({ environment, threadId }: { environment: Environm
       {look.error !== null && <ErrorAlert error={look.error} message={look.error instanceof BrowserProgramsMissing ? t('browser.programsUnavailable') : undefined} />}
       {data.support.sandbox === false && <p className="text-xs text-text-muted">{t('browser.noSandbox')}</p>}
       {(browsers.length > 0 || idle.length > 0) && (
-        <ul className="flex max-h-48 shrink-0 flex-col overflow-auto rounded-lg border border-border" aria-label={t('browser.list.label')}>
+        // Keep the profile selector short enough that adding a row cannot consume the picture's room.
+        <ul className={cx('flex shrink-0 flex-col overflow-auto rounded-lg border border-border', shown === null ? 'max-h-48' : 'max-h-[min(12rem,25%)]')} aria-label={t('browser.list.label')}>
           {browsers.map((browser) => (
             <li key={browser.id} className={cx('flex items-start gap-2 border-b border-border px-2 py-1 last:border-0', browser.id === shown?.id && 'bg-bg-subtle')} data-browser-row={browser.id}>
               <StatusDot className="h-(--control-sm)" tone={browser.state === 'open' ? 'success' : 'info'} label={t(`browser.state.${browser.state}`)} />

@@ -36,7 +36,7 @@ import {
   WHO,
   updateOf,
 } from '@/features/usage/capForm';
-import { patternWords, placeWords, sentenceOf, whoWords } from '@/features/usage/words';
+import { patternWords, placeWords, purposeLabel, servicePatternWords, sentenceOf, whoWords } from '@/features/usage/words';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
@@ -100,9 +100,11 @@ function knownOf(providers: readonly Pick<Provider, 'models'>[]): Known {
   return { models: [...names].map(([name, display]) => ({ name, display })), groups: [...groups].sort(), tiers: [...tiers].sort() };
 }
 
-function ModelsField({ models, known, onChange, error }: { models: string[]; known: Known; onChange: (models: string[]) => void; error?: string | undefined }) {
+function PatternsField({ models, known, onChange, error, kind='model', emptyLabel }: { models: string[]; known: Known; onChange: (models: string[]) => void; error?: string | undefined;kind?:'model'|'service'|'purpose';emptyLabel?:string }) {
   const { t } = useTranslation();
   const [query, setQuery] = useState('');
+  const words=(pattern:string)=>kind==='purpose'?purposeLabel(pattern,t):kind==='service'?servicePatternWords(pattern,t):patternWords(pattern,t);
+  const field=kind==='model'?'models':kind==='service'?'services':'purposes';
   const typed = modelPattern(query);
   const add = (pattern: string) => {
     const clean = modelPattern(pattern);
@@ -111,28 +113,28 @@ function ModelsField({ models, known, onChange, error }: { models: string[]; kno
   };
   const needle = query.trim().toLowerCase();
   const options: ComboboxOption<string>[] = [
-    ...(typed === '' || models.includes(typed)
+    ...(typed === '' || models.includes(typed) || known.models.some((model)=>model.display.toLowerCase()===needle && model.name.toLowerCase()!==typed)
       ? []
-      : [{ value: typed, label: t('caps.form.useTyped', { text: patternWords(typed, t) }), text: typed, description: typed.startsWith('@') ? t('caps.form.typedGroup') : typed.endsWith('*') ? t('caps.form.typedFamily') : t('caps.form.typedName') }]),
+      : [{ value: typed, label: t('caps.form.useTyped', { text: words(typed) }), text: typed, ...(kind!=='model'?{}:{description:typed.startsWith('@')?t('caps.form.typedGroup'):typed.endsWith('*')?t('caps.form.typedFamily'):t('caps.form.typedName')}) }]),
     ...known.groups
       .filter((group) => `@${group}`.includes(needle) && !models.includes(`@${group}`))
       .map((group) => ({ value: `@${group}`, label: patternWords(`@${group}`, t), text: `@${group}`, description: t('caps.form.groupOf') })),
     ...known.models
       .filter((model) => model.name.toLowerCase().includes(needle) || model.display.toLowerCase().includes(needle))
       .filter((model) => !models.includes(model.name.toLowerCase()))
-      .map((model) => ({ value: model.name.toLowerCase(), label: model.display, text: model.display, description: model.name })),
+      .map((model) => ({ value: model.name.toLowerCase(), label: model.display, text: model.display, ...(kind==='purpose'?{}:{description:model.name}) })),
   ];
-  const groups: ComboboxGroup<string>[] = [{ id: 'models', label: t('caps.form.modelsList'), options }];
+  const groups: ComboboxGroup<string>[] = [{ id: field, label: t(`caps.form.${field}`), options }];
   return (
     <div className="flex min-w-[14rem] flex-1 flex-col gap-1">
       {models.length > 0 && (
-        <ul aria-label={t('caps.form.modelsChosen')} className="flex flex-wrap gap-1">
+        <ul aria-label={kind==='model'?t('caps.form.modelsChosen'):t(`caps.form.${field}`)} className="flex flex-wrap gap-1">
           {models.map((pattern) => (
             <li key={pattern} className="flex items-center gap-1 rounded-full border border-border-strong bg-bg-subtle py-1 pr-1 pl-3 text-sm text-text">
-              <span>{patternWords(pattern, t)}</span>
+              <span>{words(pattern)}</span>
               <button
                 type="button"
-                aria-label={t('caps.form.modelRemove', { name: patternWords(pattern, t) })}
+                aria-label={t('caps.form.patternRemove', { name: words(pattern) })}
                 onClick={() => onChange(models.filter((one) => one !== pattern))}
                 className="flex size-5 items-center justify-center rounded-full text-text-muted hover:bg-bg-muted hover:text-text"
               >
@@ -143,13 +145,13 @@ function ModelsField({ models, known, onChange, error }: { models: string[]; kno
         </ul>
       )}
       <Combobox
-        label={t('caps.form.models')}
+        label={t(`caps.form.${field}`)}
         hideLabel
         query={query}
         onQueryChange={setQuery}
         groups={groups}
         onSelect={(option) => add(option.value)}
-        placeholder={models.length === 0 ? t('caps.form.modelsAll') : t('caps.form.modelsAnother')}
+        placeholder={kind==='service'?t('caps.form.serviceExample'):kind==='purpose'?t('caps.form.purposesAll'):models.length===0?(emptyLabel??t('caps.form.modelsAll')):t('caps.form.modelsAnother')}
         error={error}
         empty={t('caps.form.modelsNone')}
       />
@@ -190,13 +192,14 @@ export function CapDialog({ request, open, onClose }: { request: CapRequest; ope
   const rates = useQuery({ ...ratesQuery(nodeId ?? ''), enabled: nodeId !== undefined && providerId === undefined && editing === undefined, retry: false });
 
   const [draft, setDraft] = useState<CapDraft>(() =>
-    editing === undefined ? emptyDraft({ models: (request.models ?? []).map(modelPattern), tiers: [...(request.tiers ?? [])] }) : draftOf(editing),
+    editing === undefined ? emptyDraft({ models: (request.models ?? []).map(modelPattern), services:(request.services??[]).map(modelPattern),purposes:[...(request.purposes??[])], tiers: [...(request.tiers ?? [])] }) : draftOf(editing),
   );
   const [faults, setFaults] = useState<Faults>({});
   const [typedPerson, setTypedPerson] = useState('');
   const [chosenHolderName, setChosenHolderName] = useState<string | null>(() => editing === undefined ? null : whoWords(editing, t));
   const set = <Name extends keyof CapDraft>(name: Name, value: CapDraft[Name]) => {
     if (name === 'who') { setChosenHolderName(null); setTypedPerson(''); }
+    if(name==='meter' && value!=='credits') setDraft((before)=>({...before,services:[],...(value==='running'?{purposes:[]}:{})}));
     setDraft((before) => ({ ...before, [name]: value }));
     // What a person changes is no longer what was wrong with it.
     setFaults((before) => without(before, name === 'noLimit' ? 'amount' : name === 'countedFrom' ? 'counted_from' : name === 'warn' ? 'warn_percent' : name));
@@ -242,6 +245,8 @@ export function CapDialog({ request, open, onClose }: { request: CapRequest; ope
       period: draft.meter === 'running' ? null : draft.period,
       counted_from: draft.period === 'total' && draft.countedFrom !== '' ? draft.countedFrom : null,
       models: draft.models,
+      services:draft.services,
+      purposes:draft.purposes,
       harness_kinds: draft.harnessKinds,
       tiers: draft.tiers,
       node: whereNode,
@@ -333,7 +338,7 @@ export function CapDialog({ request, open, onClose }: { request: CapRequest; ope
         fieldClassName="w-auto"
       />
     ),
-    models: <ModelsField models={draft.models} known={known} onChange={(next) => set('models', next)} error={faults.models} />,
+    models: <PatternsField models={draft.models} known={known} emptyLabel={draft.meter==='credits'?t(draft.services.length===0?'caps.form.allOfferings':'caps.form.noModels'):t('caps.form.modelsAll')} onChange={(next) => set('models', next)} error={faults.models} />,
     where: <span className="text-text">{whereProvider !== null && whereNode === null ? t('caps.where.provider', { name: whereProvider.name }) : whereNode !== null ? placeWords(whereNode, t) : t('caps.where.system')}</span>,
   };
 
@@ -429,6 +434,15 @@ export function CapDialog({ request, open, onClose }: { request: CapRequest; ope
           </p>
 
           <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
+                {draft.meter==='credits' && <fieldset className="flex min-w-0 flex-col gap-2">
+                  <legend className="text-sm font-medium text-text">{t('caps.form.services')}</legend>
+                  <PatternsField kind="service" models={draft.services} known={{models:[],groups:[],tiers:[]}} onChange={(next)=>set('services',next)} error={faults.services} />
+                </fieldset>}
+                {draft.meter!=='running' && <fieldset className="flex min-w-0 flex-col gap-2">
+                  <legend className="text-sm font-medium text-text">{t('caps.form.purposes')}</legend>
+                  <PatternsField kind="purpose" models={draft.purposes} known={{models:['turn','summary','review','embeddings','web_search','page_fetch','image_generation','ask'].map((name)=>({name,display:purposeLabel(name,t)})),groups:[],tiers:[]}} onChange={(next)=>set('purposes',next)} error={faults.purposes} />
+                </fieldset>}
+
                 <fieldset className="flex flex-col gap-2">
                   <legend className="text-sm font-medium text-text">{t('caps.form.agents')}</legend>
                   <p className="text-sm text-text-muted">{t('caps.form.agentsAbout')}</p>

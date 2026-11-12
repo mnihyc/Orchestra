@@ -22,7 +22,7 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-fn facts(hostname: &str, up_bps: i64, down_bps: i64) -> MachineFacts {
+fn facts(hostname: &str, up_bps: Option<i64>, down_bps: Option<i64>) -> MachineFacts {
     serde_json::from_value(json!({
         "hostname": hostname, "os_version": "Debian 13", "cpus": 8, "memory_bytes": 16_000_000_000u64,
         "harnesses": [], "adapters": [], "plugins": [], "policy": null,
@@ -52,7 +52,7 @@ async fn what_a_machine_says_about_itself_is_kept_beside_what_the_system_keeps_o
         .link
         .publish(
             &Stream::Machine,
-            &Event::MachineFacts(facts("alice-laptop", 1_000, 4_000)),
+            &Event::MachineFacts(facts("alice-laptop", Some(1_000), Some(4_000))),
         )
         .await
         .unwrap();
@@ -60,7 +60,7 @@ async fn what_a_machine_says_about_itself_is_kept_beside_what_the_system_keeps_o
         .link
         .publish(
             &Stream::Machine,
-            &Event::MachineFacts(facts("alice-desktop", 2_000, 0)),
+            &Event::MachineFacts(facts("alice-desktop", Some(2_000), None)),
         )
         .await
         .unwrap();
@@ -88,8 +88,41 @@ async fn what_a_machine_says_about_itself_is_kept_beside_what_the_system_keeps_o
     assert_eq!(
         after.rate_down_bps,
         Some(4_000),
-        "and a rate of 0 is no measurement"
+        "an absent sample preserves the last measured rate"
     );
+    machine
+        .link
+        .publish(
+            &Stream::Machine,
+            &Event::MachineFacts(facts("alice-idle", None, Some(0))),
+        )
+        .await
+        .unwrap();
+    eventually("the real zero sample to be written", || {
+        let db = world.db.clone();
+        async move {
+            let mut conn = db.acquire().await.unwrap();
+            resources::machine(&mut conn, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .facts["hostname"]
+                == "alice-idle"
+        }
+    })
+    .await;
+    let zero = row(&world, id).await;
+    assert_eq!(
+        zero.rate_up_bps,
+        Some(1_250),
+        "an absent upload sample is not zero"
+    );
+    assert_eq!(
+        zero.rate_down_bps,
+        Some(3_000),
+        "a measured zero participates in the same weighted average"
+    );
+    assert_eq!(zero.link().public_key, key_before);
     world.stop().await;
 }
 

@@ -8,7 +8,7 @@ import { labelOfName, labelsAlongPath, labelsOfHits, labelsOfNames } from '@/fea
 import type { NameHit, NodeRef, SearchHit } from '@/generated/api-types';
 
 const node = (id: string, kind: NodeRef['kind'], name: string | null, redacted = false): NodeRef => ({ id, kind, name, redacted });
-const name = (id: string, path: NodeRef[]): NameHit => ({ id, kind: 'project', name: 'web', href: `/project/${id}`, path, color: null, custom_color: null, tag: null, thread_attention: null, address: null, avatar: null, username: null, owner: null, archived: false, recent: false });
+const name = (id: string, path: NodeRef[]): NameHit => ({ home_path: [], id, kind: 'project', name: 'web', href: `/project/${id}`, path, color: null, custom_color: null, tag: null, thread_attention: null, address: null, avatar: null, username: null, owner: null, archived: false, recent: false });
 const named = [name('a-web', [node('acme', 'org', 'Acme')]), name('b-web', [node('beta', 'org', 'Beta')])];
 
 describe('places named by a result', () => {

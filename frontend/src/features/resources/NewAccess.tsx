@@ -15,9 +15,10 @@ export interface NewAccessProps {
   /** Whether "everyone in the home" is a choice: it is not for an environment. */
   allowHome?: boolean;
   disabled?: boolean;
+  label?: string;
 }
 
-export function NewAccess({ value, onChange, home, allowHome = true, disabled = false }: NewAccessProps) {
+export function NewAccess({ value, onChange, home, allowHome = true, disabled = false, label }: NewAccessProps) {
   const { t } = useTranslation();
   const segments = [
     { value: 'only_me' as const, ...choiceOption(t, 'resourceAccess.only_me', { home }), description: t('resources.access.gives.only_me', { home }) },
@@ -25,14 +26,15 @@ export function NewAccess({ value, onChange, home, allowHome = true, disabled = 
     { value: 'defaults' as const, ...choiceOption(t, 'resourceAccess.defaults', { home }), description: t('resources.access.gives.defaults', { home }) },
   ];
   const context = t('resources.access.admins', { home });
+  const caption = label ?? t('resources.access.label');
   return (
     <div className="flex flex-col gap-2">
       <span className="flex items-center gap-1 text-sm font-medium text-text">
-        {t('resources.access.label')}
-        <ChoiceFieldHelp label={t('resources.access.label')} options={segments} context={context} />
+        {caption}
+        <ChoiceFieldHelp label={caption} options={segments} context={context} />
       </span>
       <SegmentedControl
-        label={t('resources.access.label')}
+        label={caption}
         value={value}
         onValueChange={onChange}
         segments={segments.map((segment) => ({ ...segment, disabled, description: <>{segment.description}{' '}{context}</> }))}

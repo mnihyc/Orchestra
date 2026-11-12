@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Choose and check mount copies
 screens: /thread/$threadId, /resources/environments/$id, /resources/mounts, /resources/mounts/$id
 keywords: mount, copy, synced, own data, shared storage, fingerprint, content check, same content, differs, detach, replace, keep both
+summary: Choose mount handling in a change plan and compare dated copies before moving data.
 ---
 
 # Choose and check mount copies

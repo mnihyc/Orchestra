@@ -28,6 +28,9 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "test-observers")]
+pub use orch_link::test_observers;
+
 pub mod after_up;
 pub mod automatic;
 pub mod background;
@@ -37,6 +40,7 @@ pub mod connector;
 pub mod console;
 pub mod content;
 pub mod credentials;
+mod data_inventory;
 pub mod dispatch;
 pub mod display_tunnel;
 pub mod doctor;
@@ -44,6 +48,8 @@ pub mod enrollment;
 pub mod events;
 pub mod facts;
 pub mod forwarder;
+pub mod gateway_selection;
+pub mod gateway_selector;
 pub mod harnesses;
 pub mod host_ports;
 pub mod host_publish;
@@ -53,6 +59,7 @@ pub mod key_facts;
 pub mod leases;
 pub mod ledger;
 pub mod lifecycle;
+pub(crate) mod local_harnesses;
 pub mod local_ports;
 pub mod local_socket;
 pub mod loopback;

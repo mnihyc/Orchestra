@@ -108,7 +108,7 @@ function HarnessSessionList({ harness, showProvider }: { harness: SessionHarness
 
   let body: React.ReactNode;
   if (query.isPending) {
-    body = <SkeletonRows rows={3} />;
+    body = <SkeletonRows read={query} rows={3} />;
   } else if (query.isError) {
     const code = query.error instanceof ApiError ? query.error.code : null;
     body =

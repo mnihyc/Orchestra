@@ -1,5 +1,5 @@
 /** The four release guides, their real setting vocabulary and their short screen walks. */
-import type { TranslationKey } from '@/i18n';
+import type { TranslationKey } from '../i18n';
 
 export type GuideId = 'how-approvals-work' | 'let-agents-open-ports' | 'change-a-running-environment' | 'who-can-see-and-do-what';
 export interface Guidance { id: GuideId; title: TranslationKey; settings: readonly string[]; tutorial: string; words: readonly string[] }

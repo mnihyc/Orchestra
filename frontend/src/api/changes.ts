@@ -12,13 +12,14 @@
  * those who go on talking to a thread; the plans of several environments and of a provider's runtime are
  * written ahead, for the screens that will list them, and no screen asks them yet.
  */
-import { api, ok, repeatable } from '@/api/client';
+import { accepted, api, ok, repeatable } from '@/api/client';
 import { queryOptions } from '@tanstack/react-query';
 import type {
   EnvironmentBatch,
   EnvironmentMoveBatchPlan,
   EnvironmentMovePlan,
   EnvironmentMovePreflightBody,
+  NodeEnvironmentMoveCreateResponse,
   EnvironmentUpdateBatchPlan,
   EnvironmentUpdatePlan,
   ForkCreateBody,
@@ -93,8 +94,8 @@ export function planNodeMoves(nodeId: string, environmentIds: string[], hostId: 
 }
 
 /** Carries the batch of moves out. */
-export function startNodeMoves(nodeId: string, body: ForkCreateBody, key: string): Promise<EnvironmentBatch> {
-  return ok(api.POST('/nodes/{id}/environments/moves', { params: { path: { id: nodeId } }, body, ...repeatable(key) }));
+export function startNodeMoves(nodeId: string, body: ForkCreateBody, key: string): Promise<NodeEnvironmentMoveCreateResponse> {
+  return accepted(api.POST('/nodes/{id}/environments/moves', { params: { path: { id: nodeId } }, body, ...repeatable(key) }));
 }
 
 // ---------------------------------------------------------------- a provider's runtime

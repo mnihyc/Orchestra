@@ -72,6 +72,12 @@ pub struct HostPortPeer {
     pub peer: orch_api_contract::ports::PortConnectionInside,
 }
 
+impl std::hash::Hash for HostPortPeer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&(&self.use_id, &self.peer.address, self.peer.port), state);
+    }
+}
+
 /// Current authority and the recorded ingress of a short-lived port use.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PortTicketClaims {

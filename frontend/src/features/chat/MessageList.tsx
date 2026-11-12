@@ -285,7 +285,7 @@ export function MessageList({ entry, readTo, watching, target, onReached, onRead
 
   return (
     <div data-chat-history className="relative flex min-h-0 flex-1 flex-col">
-      <div ref={scroller} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto py-2 [overflow-anchor:none]">
+      <div ref={scroller} role="region" aria-label={t('chat.messageList')} tabIndex={0} onScroll={onScroll} className="focus-inset min-h-0 flex-1 overflow-y-auto py-2 [overflow-anchor:none]">
         {entry.hasOlder && (
           <div className="flex justify-center py-2 text-xs text-text-muted" role="status">
             {olderError ? (

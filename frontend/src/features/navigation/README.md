@@ -104,7 +104,10 @@ Covered by unit tests of the tree, the menus, what is unread, where the tree beg
 keeps, and by end-to-end, accessibility and performance tests against the fake API. A tree of two
 thousand rows is laid out again at every change of a thread without sorting again (what stands under
 what is kept while no node moves), a row whose item did not change is not drawn again, and the frame is
-not drawn again at every change either (the screens of places watch the stores).
+not drawn again at every change either (the screens of places watch the stores). Duplicate-name qualification indexes each context once. Caption readers observe names and ancestry;
+path readers observe only their own native rows, including current activity and authority. Restored tabs
+qualify only the unopened native pages whose titles still need a cached name. The scale fixture retires
+its small sign-in document before creating the measured tree, so a second abandoned large tree is not counted.
 
 - `Sidebar.tsx`: The orgs inside the selected org, projects, topics, threads, starred and unread state, chat signals and Messages.
 - `currentOrg.ts`: Cache-only destination selection; no remembered-org tree/chat detour before the addressed place is known.
