@@ -13,15 +13,19 @@ class API:
     def __init__(self, edge, token):
         self.edge, self.token = edge, token
 
-    def call(self, method, path, body=None):
+    def call(self, method, path, body=None, timeout=60, include_request_id=False):
         request = urllib.request.Request(self.edge + '/api/v1' + path, method=method,
             data=None if body is None else json.dumps(body).encode(),
             headers={'authorization': 'Bearer ' + self.token, 'content-type': 'application/json'})
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read(8 * 1024 * 1024 + 1)
             if len(raw) > 8 * 1024 * 1024:
                 raise ValueError('the API answer exceeded its bound')
-            return json.loads(raw) if raw else None
+            value = json.loads(raw) if raw else None
+            if include_request_id:
+                # Existing public response metadata only; no request credentials or other headers.
+                return value, response.headers.get('x-request-id')
+            return value
 
 
 def until(description, read, predicate, seconds=180):
@@ -56,7 +60,8 @@ def main():
         'parameters': {'rate': {'input_per_mtok': '0', 'cached_input_per_mtok': '0', 'output_per_mtok': '0'}}})
     agent = next(row['id'] for row in api.call('GET', '/agents') if row['harness_kind'] == 'fake')
     environment = api.call('POST', f'/machines/{machine["id"]}/environments', {
-        'home_id': home, 'home_node_id': project, 'name': 'Release fixture', 'root': '/workspace'})['id']
+        'home_id': home, 'home_node_id': project, 'name': 'Release fixture', 'root': '/workspace',
+        'terminal': True})['id']
     until('the environment did not attach', lambda: api.call('GET', f'/environments/{environment}'),
         lambda row: row['status'] == 'running')
     out = Path(args.out)

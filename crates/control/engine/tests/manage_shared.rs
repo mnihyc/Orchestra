@@ -735,7 +735,7 @@ async fn an_agent_shared_a_place_to_edit_is_refused_as_not_manageable_and_told_w
 }
 
 #[tokio::test]
-async fn a_thread_a_chat_and_a_place_are_refused_whatever_was_shared() {
+async fn thread_and_chat_management_need_their_own_rows_and_places_remain_outside_the_tool() {
     let s = with_documents(&MANAGE).await;
     let repro = s.world.thread_in(s.topic, "Repro").await;
     let chat = chat_of(&s.world, s.topic).await;
@@ -768,27 +768,93 @@ async fn a_thread_a_chat_and_a_place_are_refused_whatever_was_shared() {
         .as_str()
         .unwrap()
         .to_owned();
-    for path in [
-        chat_path,
-        conversation,
-        format!("id:{repro}"),
-        format!("id:{}", s.topic),
-        format!("id:{chat}"),
-    ] {
-        for command in ["delete", "restore"] {
+    say_in_chat(&s.world, chat, s.world.ada, "Keep this message").await;
+    let message: Id =
+        sqlx::query_scalar("SELECT id FROM chat_messages WHERE chat_id=$1 AND kind='message'")
+            .bind(chat)
+            .fetch_one(s.world.pool.pool())
+            .await
+            .unwrap();
+    let before = fingerprint(&s.world).await;
+    for path in [&conversation, &format!("id:{repro}")] {
+        for (command, permission) in [
+            ("archive", "thread.archive"),
+            ("unarchive", "thread.archive"),
+            ("fork", "thread.fork"),
+            ("delete", "thread.manage"),
+        ] {
             let refusal = manage(&s, json!({ "command": command, "paths": [path] })).await;
             let (code, message) = refused(&refusal);
-            assert_eq!(code, "wrong_kind", "{command} {path}");
-            assert!(message.contains("managed by people"), "{path}: {message}");
+            assert_eq!(code, "not_manageable", "{command} {path}: {message}");
+            assert!(message.contains(permission), "{command} {path}: {message}");
         }
     }
-    let moved = manage(
+    for path in [&chat_path, &format!("id:{chat}")] {
+        let refusal = manage(
+            &s,
+            json!({ "command": "delete", "paths": [path], "message_id": message }),
+        )
+        .await;
+        assert_eq!(refused(&refusal).0, "not_manageable");
+        assert!(refused(&refusal).1.contains("chat.manage"));
+        let incomplete = manage(&s, json!({ "command": "delete", "paths": [path] })).await;
+        assert_eq!(refused(&incomplete).0, "wrong_kind");
+        assert!(refused(&incomplete).1.contains("message_id"));
+    }
+    for (path, kind) in [
+        (&chat_path, "chat"),
+        (&conversation, "thread"),
+        (&format!("id:{repro}"), "thread"),
+    ] {
+        for arguments in [
+            json!({ "command": "restore", "paths": [path] }),
+            json!({ "command": "move", "paths": [path], "to": s.docs }),
+        ] {
+            let refusal = manage(&s, arguments).await;
+            assert_eq!(refused(&refusal).0, "wrong_kind");
+            assert!(refused(&refusal).1.contains(kind));
+        }
+    }
+    for command in ["delete", "restore", "archive", "unarchive", "fork"] {
+        let path = format!("id:{}", s.topic);
+        let refusal = manage(&s, json!({ "command": command, "paths": [path] })).await;
+        let (code, message) = refused(&refusal);
+        assert_eq!(code, "wrong_kind", "{command} {path}");
+        assert!(message.contains("managed by people"), "{path}: {message}");
+    }
+    let place_move = manage(
         &s,
-        json!({ "command": "move", "paths": [format!("id:{repro}")], "to": s.docs }),
+        json!({ "command": "move", "paths": [format!("id:{}", s.topic)], "to": s.docs }),
     )
     .await;
-    assert_eq!(refused(&moved).0, "wrong_kind");
-    assert!(!deleted(&s.world, s.plan).await);
+    assert_eq!(refused(&place_move).0, "wrong_kind");
+    assert!(refused(&place_move).1.contains("managed by people"));
+    assert_eq!(fingerprint(&s.world).await, before);
+    let untouched: (bool, bool) =
+        sqlx::query_as("SELECT archived_at IS NULL, deleted_at IS NULL FROM nodes WHERE id=$1")
+            .bind(repro)
+            .fetch_one(s.world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(untouched, (true, true));
+    assert_eq!(
+        s.world
+            .count(
+                "SELECT count(*) FROM chat_messages WHERE id=$1 AND deleted_at IS NOT NULL",
+                message
+            )
+            .await,
+        0
+    );
+    assert_eq!(
+        s.world
+            .count(
+                "SELECT count(*) FROM jobs WHERE node_id=$1 AND kind='thread_fork'",
+                repro
+            )
+            .await,
+        0
+    );
 }
 
 #[tokio::test]
@@ -1173,7 +1239,11 @@ async fn non_destructive_operations_refuse_confirmation_arguments_without_changi
         };
         let answer = manage(&s, arguments).await;
         assert_eq!(refused(&answer).0, "invalid");
-        assert!(refused(&answer).1.contains("Only delete takes confirm"));
+        assert!(
+            refused(&answer)
+                .1
+                .contains("Only delete, archive, unarchive and fork take confirm")
+        );
         assert_eq!(fingerprint(&s.world).await, before);
     }
 }

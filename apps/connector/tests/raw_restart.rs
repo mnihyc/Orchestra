@@ -181,6 +181,7 @@ impl System {
         )));
         *self.enrolled.lock().unwrap() = Some((enrolled.machine_id, controller));
         Ok(EnrollReply {
+            gateways: Vec::new(),
             machine_id: enrolled.machine_id,
             certificate_pem: enrolled.certificate.pem(),
             ca_pem: self.pki.authority().certificate_pem(),

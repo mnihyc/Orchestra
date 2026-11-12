@@ -30,7 +30,7 @@ function People({ thread }: { thread: Thread }) {
   const target = { kind: 'thread' as const, id: thread.id, name: thread.name };
   const query = useQuery(pageQuery(target));
   const presence = useThreadView(thread.id).presence;
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={4} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const page = query.data;
   return <div className="h-full overflow-auto p-3" data-testid="thread-people">
     <div className="flex items-center justify-between gap-2 pb-3"><PresenceStack users={presence} /><Button size="sm" onClick={() => openAccess(target)}>{t('threadViews.people.access')}</Button></div>

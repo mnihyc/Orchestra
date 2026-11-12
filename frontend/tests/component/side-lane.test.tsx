@@ -25,6 +25,7 @@ import { threadViewOf, threadWriter } from '@/realtime/stores/thread';
 import { agentMessage, change, command, fileChange, LOGIN_DIFF, marker, threadInput, turn, userMessage } from '../doubles/thread-rows';
 import { me, userRef } from '../doubles/fixtures';
 import { show } from './support';
+import { audienceReply } from './thread-audience-fixture';
 
 const calls = vi.hoisted(() => ({
   draft: vi.fn<() => Promise<Draft | null>>(), clear: vi.fn<() => Promise<void>>(),
@@ -84,6 +85,11 @@ beforeEach(() => {
   calls.remove.mockReset(); calls.older.mockReset(); calls.sides.mockReset().mockResolvedValue([]); calls.panel.mockClear(); calls.feed.mockClear(); calls.release.mockClear(); calls.ready = true;
   client.session.setState({ userId: ADA.id }); useComposerStore.setState({ text: {}, parts: {}, sending: {}, refused: {} });
   timelineUi.forget(PARENT); threadWriter.evict(PARENT); threadWriter.evict(SIDE); seed();
+  vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const reply = audienceReply(request, aside(), [OTHER]);
+    return reply === null ? Promise.reject(new Error(`Unexpected side fixture request: ${request.url}`)) : Promise.resolve(reply);
+  });
 });
 afterEach(async () => {
   cleanup(); threadWriter.evict(PARENT); threadWriter.evict(SIDE); threadWriter.evict(resultThreadRead(SIDE, 'side-tab')); timelineUi.forget(PARENT);
@@ -108,6 +114,7 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(within(log).getByText('The cookie test also covers expiry.')).toBeVisible();
     expect(threadViewOf(PARENT).items.has('live-answer')).toBe(false);
     await waitFor(() => expect(calls.draft).toHaveBeenCalledTimes(1));
+    expect(await within(lane).findByText(i18n.t('thread.audience.shared', { audience: i18n.t('thread.audience.people', { count: 1, number: '1' }) }))).toBeVisible();
     expect(calls.feed).toHaveBeenCalledExactlyOnceWith(SIDE_READ);
   });
 
@@ -142,7 +149,10 @@ describe.each([['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'd
     expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: i18n.t('side.close') })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: i18n.t('side.keep') })).not.toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent(i18n.t('side.lane.readOnly'));
+    const notice = screen.getByText(i18n.t('side.lane.readOnly'), { exact: true });
+    expect(notice).toBeVisible();
+    expect(notice).toHaveAttribute('role', 'status');
+    expect(screen.getAllByText(i18n.t('side.lane.readOnly'), { exact: true })).toHaveLength(1);
     expect(calls.draft).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: i18n.t('side.lane.openPanel') }));
     expect(calls.panel).toHaveBeenCalledExactlyOnceWith('side-thread', { thread: PARENT, side: SIDE });
@@ -303,4 +313,18 @@ it('keeps the open list current from the parent markers without another list or 
   act(() => threadWriter.apply(PARENT, { items: [{ ...ended, seq_created: 22, seq_updated: 22 }] }));
   expect(screen.queryByRole('button', { name: 'Login (side)' })).not.toBeInTheDocument();
   expect(calls.sides).toHaveBeenCalledTimes(1); expect(calls.feed).not.toHaveBeenCalled(); expect(calls.draft).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('names a side lane’s author with the shared person card and keeps its own running Stop in %s', async (locale) => {
+  await setLocale(locale); seed({}, true);
+  const view = draw();
+  const author = view.container.querySelector('[data-side-started-by]');
+  if (!(author instanceof HTMLElement)) throw new Error('The side lane exposes its author');
+  expect(within(author).getByText(ADA.display_name)).toBeVisible();
+  expect(within(author).getByRole('button')).toBeInTheDocument();
+  expect(within(author).getByText(i18n.t('side.lane.started'))).toBeVisible();
+  expect(screen.getByRole('region', { name: i18n.t('side.lane.label', { name: reference.name }) })).toHaveAttribute('data-side-lane', SIDE);
+  expect(screen.getByRole('button', { name: i18n.t('composer.stop') })).toBeVisible();
+  expect(calls.stop).not.toHaveBeenCalled();
 });

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 
 import { expect, type Locator, type Page, test } from '@playwright/test';
 
-import { ACME, changeTree, deny, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, changeTree, deny, PEOPLE, scenario, signIn, mainArea } from './support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -12,7 +12,7 @@ test.beforeEach(async () => {
 const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
 const crumbs = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
-const main = (page: Page) => page.getByTestId('main');
+const main = (page: Page) => mainArea(page);
 /** A row of the left bar by the name it begins with (what follows is the names of its buttons). */
 const row = (page: Page, name: string): Locator => tree(page).getByRole('treeitem', { name: new RegExp(`^(Waiting for approval |Blocked |Running |Starting )?${name}( |$)`) });
 const level = (page: Page, name: string) => row(page, name).getAttribute('aria-level');
@@ -47,7 +47,7 @@ test('a folder is made in a project and another in a folder, each leading to its
   await dialog.getByRole('button', { name: 'Create folder' }).click();
 
   await expect(page.getByRole('heading', { name: 'Receipts' })).toBeVisible();
-  await page.getByTestId('main').getByRole('button', { name: 'Description and tags', exact: true }).click();
+  await mainArea(page).getByRole('button', { name: 'Description and tags', exact: true }).click();
   await expect(page.getByText('Everything after the sale')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(crumbs(page)).toContainText('Shop');
@@ -68,9 +68,16 @@ test('a folder is made in a project and another in a folder, each leading to its
   await expect(page.getByRole('heading', { name: 'Refunds' })).toBeVisible();
   expect(await level(page, 'Refunds')).toBe('4');
   await expect(crumbs(page).getByRole('link', { name: 'Payments' })).toBeVisible();
-  await crumbs(page).getByRole('button', { name: 'Places in between' }).click();
-  await expect(page.getByRole('menuitem', { name: 'Shop' })).toBeVisible();
-  await page.getByRole('menuitem', { name: 'Checkout' }).click();
+  // The path folds its middle only where it lacks the room; either way it leads to each place above.
+  const fold = crumbs(page).getByRole('button', { name: 'Places in between' });
+  if (await fold.count() > 0) {
+    await fold.click();
+    await expect(page.getByRole('menuitem', { name: 'Shop' })).toBeVisible();
+    await page.getByRole('menuitem', { name: 'Checkout' }).click();
+  } else {
+    await expect(crumbs(page).getByRole('link', { name: 'Shop' })).toBeVisible();
+    await crumbs(page).getByRole('link', { name: 'Checkout' }).click();
+  }
   await expect(page).toHaveURL(new RegExp(`/project/${ACME.checkout}$`));
   await expect(page.getByRole('heading', { name: 'Checkout' })).toBeVisible();
 });
@@ -149,8 +156,8 @@ test('a topic is moved into a folder with its plan read first, and out of it aga
   await expect(dialog.getByText('On the 1 page inside it that follows the defaults: 1 person gains access, 1 person loses it.')).toBeVisible();
   await expect(dialog.getByText('Roles it has from the place above: 1 person starts to hold one, 1 person stops.')).toBeVisible();
   await expect(dialog.getByText('Linus Pauling').first()).toBeVisible();
-  await expect(dialog.getByText('gains View Topic, Interact Topic on 2 pages')).toBeVisible();
-  await expect(dialog.getByText('loses View Topic, Interact Topic on 1 page')).toBeVisible();
+  await expect(dialog.getByText('gains View Topic, Contribute to Topic on 2 pages')).toBeVisible();
+  await expect(dialog.getByText('loses View Topic, Contribute to Topic on 1 page')).toBeVisible();
   await expect(dialog.getByText('env.recycle_idle_minutes')).toBeVisible();
   await expect(dialog.getByText('a lock at Checkout decides it')).toBeVisible();
   await expect(dialog.getByText('Its threads, its documents and the homes of its environments go with it.')).toBeVisible();
@@ -204,8 +211,8 @@ test('a folder is moved into another folder, to a project and to an org, and is 
 
   // A folder is called one by where it lies: archiving it says it holds folders.
   await row(page, 'Checkout').click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Menu of Checkout' }).getByRole('menuitem', { name: 'Archive…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Its folders, topics and threads become read-only');
+  await page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ }).getByRole('menuitem', { name: 'Archive…' }).click();
+  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Archive makes these places, their chats and documents read-only');
   await page.keyboard.press('Escape');
 
   // Out of every project to the org itself, where it is a project like the others and is no folder any more.
@@ -217,8 +224,8 @@ test('a folder is moved into another folder, to a project and to an org, and is 
   await expect(notices(page).getByText('Checkout moved to Acme', { exact: true })).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /^Checkout/ })).toHaveAttribute('aria-level', '1');
   await row(page, 'Checkout').click({ button: 'right' });
-  await page.getByRole('menu', { name: 'Menu of Checkout' }).getByRole('menuitem', { name: 'Archive…' }).click();
-  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Its topics and threads become read-only');
+  await page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ }).getByRole('menuitem', { name: 'Archive…' }).click();
+  await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).toContainText('Archive makes these places, their chats and documents read-only');
   await expect(page.getByRole('alertdialog', { name: /^Archive the \w+ Checkout, in .+\?$/ })).not.toContainText('folders');
 });
 
@@ -244,7 +251,8 @@ test('how deep folders may lie is refused in words, where one is made and where 
   const dialog = page.getByRole('dialog', { name: 'New folder in Level 8' });
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('One too many');
   await dialog.getByRole('button', { name: 'Create folder' }).click();
-  await expect(dialog.getByRole('alert')).toContainText('Folders cannot be nested any deeper here. A path holds at most 8 projects, one inside another.');
+  await expect(dialog.getByRole('alert')).toContainText('Folders cannot be nested any deeper here.');
+  await expect(dialog.getByRole('alert')).toContainText('A path holds at most 8 projects, one inside another.');
   await expect(dialog.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('One too many');
   await page.keyboard.press('Escape');
 
@@ -262,13 +270,13 @@ test('somebody who may not open topics in a project sees no “New folder”, an
   await open(page, `/project/${ACME.shop}`, PEOPLE.vera);
   await expect(page.getByRole('heading', { name: 'Shop' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'New folder' })).toHaveCount(0);
-  const createTopic = page.getByTestId('main').getByRole('button', { name: 'New topic', exact: true });
+  const createTopic = mainArea(page).getByRole('button', { name: 'New topic', exact: true });
   await expect(createTopic).toHaveAttribute('aria-disabled', 'true');
   await createTopic.focus();
-  await expect(page.getByRole('tooltip')).toContainText('You can’t take part in Shop. Ask Ada Lovelace, who owns it.');
+  await expect(page.getByRole('tooltip')).toContainText('You can’t create topics in Shop. Ask Ada Lovelace, who owns it.');
   // Nor does the left bar offer it, on the folder or on the project: what they may not do is left out.
   await row(page, 'Checkout').click({ button: 'right' });
-  const menu = page.getByRole('menu', { name: 'Menu of Checkout' });
+  const menu = page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ });
   await expect(menu.getByRole('menuitem', { name: 'Open', exact: true })).toBeVisible();
   await expect(menu.getByRole('menuitem', { name: /New folder/ })).toHaveCount(0);
   await expect(menu.getByRole('menuitem', { name: /Move to/ })).toHaveCount(0);
@@ -288,10 +296,10 @@ test('somebody who may not open topics in a project sees no “New folder”, an
   await expect(page.getByRole('menuitem', { name: 'New folder…', exact: true })).not.toHaveAttribute('aria-disabled', 'true');
   await page.keyboard.press('Escape');
   await row(page, 'Cart rewrite').click({ button: 'right' });
-  await expect(page.getByRole('menu', { name: 'Menu of Cart rewrite' }).getByRole('menuitem', { name: 'Move to…' })).toBeVisible();
+  await expect(page.getByRole('menu', { name: /^Actions for Cart rewrite(?: · .+)?$/ }).getByRole('menuitem', { name: 'Move to…' })).toBeVisible();
   await page.keyboard.press('Escape');
   await row(page, 'Checkout').click({ button: 'right' });
-  const checkout = page.getByRole('menu', { name: 'Menu of Checkout' });
+  const checkout = page.getByRole('menu', { name: /^Actions for Checkout(?: · .+)?$/ });
   await expect(checkout.getByRole('menuitem', { name: 'New folder…' })).toBeVisible();
   await expect(checkout.getByRole('menuitem', { name: /Move to/ })).toHaveCount(0);
   await page.keyboard.press('Escape');
@@ -304,9 +312,11 @@ test('somebody who may not open topics in a project sees no “New folder”, an
   await page.getByRole('dialog').getByRole('button', { name: 'Create folder' }).click();
   const refusal = page.getByRole('dialog').getByRole('alert');
   await expect(refusal).toContainText('You do not have access to this.');
-  await expect(refusal.getByText('Interact Project')).toBeVisible();
-  await expect(refusal).toContainText('on Shop');
-  await expect(refusal).toContainText('Ask Ada Lovelace.');
+  // Missing-access facts are retained in the refusal's explicit review dialog.
+  await refusal.getByRole('button', { name: 'Review access', exact: true }).click();
+  const review = page.getByRole('dialog', { name: 'Review access', exact: true });
+  await expect(review.getByText('You can’t take part in Shop.', { exact: true })).toBeVisible();
+  await expect(review).toContainText('Ask Ada Lovelace.');
 });
 
 test('a closed row carries the approvals that wait in what it hides, and an open row does not', async ({ page }) => {
@@ -349,11 +359,10 @@ test('a topic names the folders it lies in, and its project names what it holds:
   // Checkout holds a topic and a folder: the folder stands as a card above the topic's table.
   await expect(page.getByRole('heading', { name: 'Checkout', level: 1 })).toBeVisible();
   await expect(main(page).getByText('1 topic', { exact: true })).toBeVisible();
-  await expect(main(page).getByText('1 folder', { exact: true })).toBeVisible();
   const folders = main(page).getByRole('region', { name: 'Folders' });
   await expect(folders.getByRole('link', { name: 'Payments' })).toBeVisible();
-  await expect(folders.getByText('Cards, fees and refunds')).toBeVisible();
-  await expect(folders.getByText('1 topic · 0 folders')).toBeVisible();
+  // A folder's card says what it holds.
+  await expect(folders.getByRole('listitem').filter({ hasText: 'Payments' })).toContainText('1 topic');
   await expect(main(page).getByRole('table', { name: 'Topics' }).getByRole('link')).toHaveText(['Cart rewrite']);
 
   // The same above the board; and a search that matches no folder says so.

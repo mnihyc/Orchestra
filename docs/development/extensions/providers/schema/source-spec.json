@@ -14,7 +14,7 @@
           "type": "null"
         }
       ],
-      "description": "The provider's current name for the source's call context; absent on older commands."
+      "description": "The provider's current name for the source's call context."
     },
     "by": {
       "$ref": "#/$defs/SourceBy",
@@ -49,6 +49,13 @@
         "$ref": "#/$defs/SourceSecret"
       },
       "description": "The values of the source's secret fields, by field."
+    },
+    "secret_source": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Registered recipient of these secrets, fixed by the server when a default source is configured."
     },
     "authorization": {
       "anyOf": [

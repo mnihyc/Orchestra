@@ -1,0 +1,4 @@
+# Where on a Use entry and the type's default: the engine's cases, and every engine test program compiled.
+test -p orch-engine --test use_where --test credentials
+test -p orch-engine --test forks -- use_where
+test -p orch-engine --no-run

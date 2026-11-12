@@ -8,7 +8,9 @@
 mod common;
 
 use common::{World, eventually, queued};
-use orch_api_contract::threads::{ContentPart, Delivery, ImageMediaType};
+use orch_api_contract::threads::{
+    ContentPart, Delivery, Forwarded, ForwardedImage, ForwardedType, ImageMediaType,
+};
 use orch_authz::Caller;
 use orch_blob_contract::store::{BlobStore, stream_of};
 use orch_blob_local::LocalBlobStore;
@@ -474,12 +476,12 @@ async fn images_are_written_as_well_as_passed_and_forwarded_files_get_a_line_eac
     );
 }
 
-async fn image_delivery(model_native: bool, limit: Option<i64>, native_count: usize) {
-    let world = World::new().await;
-    let files = Files::attach(&world).await;
-    let bytes = b"\x89PNG not really";
-    let png = files.keep(&world, bytes).await;
-    let writes = machine_writes(&world, written(1, 15));
+async fn image_capabilities(world: &World, program_native: bool, model_native: bool) {
+    if !program_native {
+        let mut descriptor = common::descriptor();
+        descriptor["capabilities"]["input_images"] = serde_json::json!(false);
+        world.declares(descriptor).await;
+    }
     if !model_native {
         let mut conn = world.pool.acquire().await.unwrap();
         sqlx::query(
@@ -489,6 +491,20 @@ async fn image_delivery(model_native: bool, limit: Option<i64>, native_count: us
         .await
         .unwrap();
     }
+}
+
+async fn image_delivery(
+    program_native: bool,
+    model_native: bool,
+    limit: Option<i64>,
+    native_count: usize,
+) {
+    let world = World::new().await;
+    image_capabilities(&world, program_native, model_native).await;
+    let files = Files::attach(&world).await;
+    let bytes = b"\x89PNG not really";
+    let png = files.keep(&world, bytes).await;
+    let writes = machine_writes(&world, written(1, 15));
     if let Some(limit) = limit {
         world
             .set(
@@ -523,8 +539,17 @@ async fn image_delivery(model_native: bool, limit: Option<i64>, native_count: us
     assert_eq!(
         start.images.len(),
         native_count,
-        "native images follow both the model's capability and the effective byte budget"
+        "native images need both program and model support and the effective byte budget"
     );
+    for image in &start.images {
+        assert!(
+            image
+                .workspace_path
+                .as_ref()
+                .unwrap()
+                .ends_with("/.orch/attachments/shot.png")
+        );
+    }
     let path = ".orch/attachments/shot.png";
     assert!(
         start
@@ -534,6 +559,7 @@ async fn image_delivery(model_native: bool, limit: Option<i64>, native_count: us
         start.text
     );
     assert!(!start.text.contains("omitted"));
+    assert_eq!(writes.all().len(), 1);
     let list = files.list(&writes.all()[0].manifest_blob).await;
     assert_eq!(list.get("attachments/shot.png").unwrap().hash, Some(png));
     assert_eq!(world.count("SELECT jsonb_array_length(attachment_issues)::bigint FROM thread_inputs WHERE id=$1", submitted.input.id).await, 0);
@@ -541,13 +567,226 @@ async fn image_delivery(model_native: bool, limit: Option<i64>, native_count: us
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_model_without_native_images_receives_the_verified_path_kind_and_size() {
-    image_delivery(false, None, 0).await;
+    image_delivery(true, false, None, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_program_without_image_prompts_uses_the_original_file_delivery_before_start() {
+    image_delivery(false, true, None, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn neither_the_program_nor_the_model_needs_vision_for_an_image_file() {
+    image_delivery(false, false, None, 0).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_only_model_gets_direct_and_forwarded_steered_images_after_file_delivery() {
+    for program_native in [true, false] {
+        let world = World::new().await;
+        image_capabilities(&world, program_native, false).await;
+        let files = Files::attach(&world).await;
+        let direct_bytes = b"\x89PNG not really";
+        let relayed_bytes = b"\x89PNG relayed";
+        let direct = files.keep(&world, direct_bytes).await;
+        let relayed = files.keep(&world, relayed_bytes).await;
+        let writes = machine_writes(
+            &world,
+            written(
+                2,
+                i64::try_from(direct_bytes.len() + relayed_bytes.len()).unwrap(),
+            ),
+        );
+        let thread = world.thread("Steering with image files").await;
+        let (_start, _) = world.running_turn(thread, "Start").await;
+        world.machine.handler.hold(CommandKind::FsMaterialize);
+        let request = InputRequest {
+            plan: false,
+            content: vec![
+                ContentPart::Image {
+                    blob: direct,
+                    media_type: ImageMediaType::Png,
+                    name: "direct.png".into(),
+                    path: None,
+                },
+                ContentPart::Forwarded(Box::new(Forwarded {
+                    r#type: ForwardedType::Forwarded,
+                    from: serde_json::from_value(serde_json::json!({
+                        "kind":"thread", "thread":{
+                            "id":thread, "kind":"thread", "name":"Image files", "redacted":false
+                        }
+                    }))
+                    .unwrap(),
+                    source_id: new_id(),
+                    author: None,
+                    at: orch_types::Time::new(world.clock.now()),
+                    text: "Read these files".into(),
+                    images: vec![ForwardedImage {
+                        blob: relayed,
+                        media_type: "image/png".into(),
+                        name: "relayed.png".into(),
+                    }],
+                    attachments: Vec::new(),
+                })),
+            ],
+            delivery: Delivery::Steer,
+            client_id: new_id().to_string(),
+            bypass: None,
+        };
+        let engine = world.engine();
+        let caller = Caller::session(world.ada);
+        let submitting =
+            tokio::spawn(
+                async move { engine.submit_input(&caller, thread, request).await.unwrap() },
+            );
+        eventually("the original image materialization to start", || async {
+            world.began(CommandKind::FsMaterialize) == 1
+        })
+        .await;
+        assert_eq!(
+            world.commands.issued_of(CommandKind::TurnSteer.as_str()),
+            0,
+            "a model without vision still waits for its files before receiving their paths"
+        );
+        world.machine.handler.release();
+        let submitted = submitting.await.unwrap();
+        world.wait_ran(CommandKind::TurnSteer, 1).await;
+        let Command::TurnSteer(steer) = world.seen.of_kind(CommandKind::TurnSteer)[0].clone()
+        else {
+            panic!("the native steer is sent after delivery")
+        };
+        assert!(steer.images.is_empty());
+        let directory = directory_of(&world, thread).await;
+        for (path, size) in [
+            (
+                format!("{directory}/.orch/attachments/direct.png"),
+                direct_bytes.len(),
+            ),
+            (
+                format!(
+                    "{directory}/.orch/uploads/{}/2-relayed.png",
+                    submitted.input.id
+                ),
+                relayed_bytes.len(),
+            ),
+        ] {
+            assert!(
+                steer
+                    .text
+                    .contains(&format!("{path} (image/png; {size} bytes)")),
+                "{}",
+                steer.text
+            );
+        }
+        assert!(!steer.text.contains("omitted"));
+        assert_eq!(writes.all().len(), 1);
+        let manifest = files.list(&writes.all()[0].manifest_blob).await;
+        assert_eq!(
+            manifest.get("attachments/direct.png").unwrap().hash,
+            Some(direct)
+        );
+        assert_eq!(
+            manifest
+                .get(&format!("uploads/{}/2-relayed.png", submitted.input.id))
+                .unwrap()
+                .hash,
+            Some(relayed)
+        );
+        assert_eq!(world.count("SELECT jsonb_array_length(attachment_issues)::bigint FROM thread_inputs WHERE id=$1", submitted.input.id).await, 0);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_text_only_models_steer_keeps_the_image_and_materializes_it_before_delivery() {
+    let world = World::new().await;
+    let files = Files::attach(&world).await;
+    let bytes = b"\x89PNG not really";
+    let blob = files.keep(&world, bytes).await;
+    let writes = machine_writes(&world, written(1, 15));
+    {
+        let mut conn = world.pool.acquire().await.unwrap();
+        sqlx::query(
+            "UPDATE provider_models SET parameters=jsonb_set(parameters,'{input_images}','false')",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    }
+    let thread = world.thread("Image file on a steer").await;
+    let (_start, _) = world.running_turn(thread, "Start").await;
+    let image = ContentPart::Image {
+        blob,
+        media_type: ImageMediaType::Png,
+        name: "shot.png".into(),
+        path: None,
+    };
+    world.machine.handler.hold(CommandKind::FsMaterialize);
+    let engine = world.engine();
+    let caller = Caller::session(world.ada);
+    let request = InputRequest {
+        plan: false,
+        content: vec![image.clone()],
+        delivery: Delivery::Steer,
+        client_id: new_id().to_string(),
+        bypass: None,
+    };
+    let submitting =
+        tokio::spawn(async move { engine.submit_input(&caller, thread, request).await.unwrap() });
+    eventually(
+        "the original text-only image materialization to start",
+        || async { world.began(CommandKind::FsMaterialize) == 1 },
+    )
+    .await;
+    assert_eq!(
+        world.commands.issued_of(CommandKind::TurnSteer.as_str()),
+        0,
+        "the real steer cannot pass its image's held materialization"
+    );
+    world.machine.handler.release();
+    let submitted = submitting.await.unwrap();
+    world.wait_ran(CommandKind::TurnSteer, 1).await;
+    let Command::TurnSteer(body) = world.seen.of_kind(CommandKind::TurnSteer)[0].clone() else {
+        panic!("the original image is delivered on a real steer");
+    };
+    assert!(
+        body.images.is_empty(),
+        "the text-only model receives no image block"
+    );
+    let directory = directory_of(&world, thread).await;
+    assert!(body.text.contains(&format!(
+        "{directory}/.orch/attachments/shot.png (image/png; 15 bytes)"
+    )));
+    assert!(!body.text.contains("omitted"));
+    assert_eq!(writes.all().len(), 1);
+    assert_eq!(writes.all()[0].environment_id, world.environment);
+    let manifest = files.list(&writes.all()[0].manifest_blob).await;
+    assert_eq!(
+        manifest.get("attachments/shot.png").unwrap().hash,
+        Some(blob)
+    );
+    assert_eq!(manifest.get("attachments/shot.png").unwrap().size, 15);
+    let content: serde_json::Value = world
+        .scalar(
+            "SELECT content FROM thread_inputs WHERE id=$1",
+            submitted.input.id,
+        )
+        .await;
+    assert_eq!(
+        content,
+        serde_json::json!([ContentPart::Image {
+            blob,
+            media_type: ImageMediaType::Png,
+            name: "shot.png".into(),
+            path: Some(".orch/attachments/shot.png".into()),
+        }]),
+        "the stored image keeps its original bytes, kind and name with the native attachment path"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_image_size_is_inclusive_and_zero_or_a_larger_file_uses_the_verified_path() {
     for (limit, native_count) in [(0, 0), (14, 0), (15, 1)] {
-        image_delivery(true, Some(limit), native_count).await;
+        image_delivery(true, true, Some(limit), native_count).await;
     }
 }
 

@@ -1,12 +1,14 @@
-//! The options an entry carries: models, efforts and arrangement types on a provider, and the limits of a host and of a template; how several entries combine.
+//! The options an entry carries: models, efforts, arrangement types and the places work may run in on a provider, and the limits of a host and of a template; how several entries combine.
 //!
 //! An entry in the Use row of a provider, a host or a template says what its holder may do with it,
 //! and nothing else takes options. A person is let in by several entries at once (their own, a
 //! group's, a role's, the work in a place), and they combine permissively: a model, an effort, an
-//! arrangement type or a storage that any of them allows is allowed, and of two numbers the
-//! larger counts. An entry that sets nothing allows everything, so one such entry makes the
-//! person's use unlimited. Being an owner, or a system admin on a resource of the system, is
-//! unlimited too.
+//! arrangement type, a place or a storage that any of them allows is allowed, and of two numbers the
+//! larger counts. An entry that sets nothing allows every model, effort, place and storage, so one
+//! such entry makes the person's use unlimited in those; of the arrangement types it allows only
+//! those in which the credential stays where it is kept, and a type in which it leaves is allowed by
+//! an entry that names it. Being an owner, a manager, or a system admin on a resource of the system,
+//! is unlimited in everything, the types included.
 //!
 //! This part also says which of several entries a turn is put down to for the provider's own
 //! reports, and what a provider's models and a person's options leave of the effective allowlist.
@@ -26,7 +28,7 @@ use crate::Error;
 #[must_use]
 pub fn unlimited(permission: Permission) -> Options {
     match permission {
-        Permission::ProviderUse => Options::ProviderUse(ProviderUse::default()),
+        Permission::ProviderUse => Options::ProviderUse(ProviderUse::unlimited()),
         Permission::HostUse => Options::HostUse(HostUse::default()),
         Permission::TemplateUse => Options::TemplateUse(TemplateUse::default()),
         _ => Options::None,
@@ -85,7 +87,7 @@ pub fn combine<'a>(
 pub fn of_provider(options: &Options) -> ProviderUse {
     match options {
         Options::ProviderUse(options) => options.clone(),
-        _ => ProviderUse::default(),
+        _ => ProviderUse::unlimited(),
     }
 }
 
@@ -140,6 +142,24 @@ pub fn allows_model(options: &ProviderUse, model: &str, groups: &[String]) -> bo
         .is_none_or(|patterns| ModelPattern::list_names(patterns, model, groups))
 }
 
+/// One enabled service must satisfy its Use entry and every applying place list.
+/// Model lists never narrow services; the caller supplies the actual offering's groups.
+#[must_use]
+pub fn allows_service(
+    options: &ProviderUse,
+    enabled: bool,
+    service: &str,
+    groups: &[String],
+    place_setting: Option<&[String]>,
+) -> bool {
+    enabled
+        && options
+            .services
+            .as_deref()
+            .is_none_or(|patterns| ModelPattern::list_names(patterns, service, groups))
+        && place_setting.is_none_or(|patterns| ModelPattern::list_names(patterns, service, groups))
+}
+
 /// The models a person may run on a provider: those it has enabled, within the models their
 /// options allow and within the models the thread's place allows (the setting `models.allowed`
 /// resolved at the thread, where one is set). Both are lists of the same kind: names, families
@@ -176,7 +196,9 @@ pub fn allowed_efforts<'m>(model: &'m ModelFacts, options: &ProviderUse) -> Vec<
 }
 
 /// The arrangement types in which work done through an entry may use a provider: those its owner
-/// allows, within those the entry names. The entry can only narrow what the owner allows.
+/// allows, within those the entry names, or where it names none within those in which the credential
+/// stays where it is kept. A use that is held as an owner or a manager (`unlimited`) keeps every type
+/// the owner allows. The entry can only narrow what the owner allows.
 #[must_use]
 pub fn allowed_arrangements(owner_allows: &[String], options: &ProviderUse) -> Vec<Arrangement> {
     owner_allows
@@ -203,6 +225,7 @@ mod tests {
             source: EntrySource::Page,
             created_by: None,
             created_at: at.parse::<Time>().unwrap(),
+            renewed_at: None,
             removed_at: None,
             revision: 1,
         }
@@ -222,6 +245,58 @@ mod tests {
             groups: groups.iter().map(|group| (*group).to_owned()).collect(),
             ..model(name, &[], true)
         }
+    }
+
+    #[test]
+    fn services_require_enablement_and_both_service_lists_while_model_limits_stay_separate() {
+        let groups = vec!["web".into()];
+        let model_only = ProviderUse {
+            models: Some(vec!["@small".into()]),
+            ..ProviderUse::default()
+        };
+        assert!(allows_service(&model_only, true, "search", &groups, None));
+        assert!(!allows_service(&model_only, false, "search", &groups, None));
+        let service_only = ProviderUse {
+            services: Some(vec!["@web".into(), "image-*".into()]),
+            ..ProviderUse::default()
+        };
+        assert!(allows_service(&service_only, true, "search", &groups, None));
+        assert!(allows_service(
+            &service_only,
+            true,
+            "image-large",
+            &[],
+            None
+        ));
+        assert!(!allows_service(&service_only, true, "other", &[], None));
+        assert!(!allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&["images".into()])
+        ));
+        assert!(!allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&[])
+        ));
+        assert!(allows_service(
+            &service_only,
+            true,
+            "search",
+            &groups,
+            Some(&["search".into()])
+        ));
+        let models = [model("large", &[], true)];
+        assert_eq!(allowed_models(&models, &service_only, None), ["large"]);
+        let none = ProviderUse {
+            services: Some(Vec::new()),
+            ..ProviderUse::default()
+        };
+        assert!(!allows_service(&none, true, "search", &groups, None));
     }
 
     #[test]
@@ -299,7 +374,14 @@ mod tests {
         else {
             panic!("combined");
         };
-        assert_eq!(use_, ProviderUse::default());
+        assert_eq!(
+            use_,
+            ProviderUse {
+                arrangements: Some(vec![Arrangement::Separated, Arrangement::KeySeparated]),
+                ..ProviderUse::default()
+            },
+            "nothing is limited but the types in which the credential leaves, which no entry named"
+        );
     }
 
     #[test]
@@ -401,6 +483,58 @@ mod tests {
             allowed_efforts(&models[0], &efforts),
             ["high"],
             "only what the model lists"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_names_no_type_allows_only_those_in_which_the_credential_stays_and_an_owner_keeps_all()
+     {
+        let owner = [
+            "separated".to_owned(),
+            "key_separated".to_owned(),
+            "credential_shared".to_owned(),
+            "handed_over".to_owned(),
+        ];
+        assert_eq!(
+            allowed_arrangements(&owner, &ProviderUse::default()),
+            [Arrangement::Separated, Arrangement::KeySeparated],
+            "left out gives the staying types"
+        );
+        let named = ProviderUse {
+            arrangements: Some(vec![Arrangement::Separated, Arrangement::CredentialShared]),
+            ..ProviderUse::default()
+        };
+        assert_eq!(
+            allowed_arrangements(&owner, &named),
+            [Arrangement::Separated, Arrangement::CredentialShared],
+            "named gives the type that leaves, and nothing else is added"
+        );
+        assert_eq!(
+            allowed_arrangements(&owner, &of_provider(&unlimited(Permission::ProviderUse))),
+            [
+                Arrangement::Separated,
+                Arrangement::KeySeparated,
+                Arrangement::CredentialShared,
+                Arrangement::HandedOver
+            ],
+            "whoever uses the provider as its owner keeps every type it allows"
+        );
+        let entry_of = |options| entry(Holder::Everyone, options, "2026-10-01T00:00:00Z");
+        let left_out = entry_of(json!({}));
+        let sharing = entry_of(json!({ "arrangements": ["credential_shared"] }));
+        let Some(Options::ProviderUse(combined)) =
+            combine(Permission::ProviderUse, [&left_out, &sharing]).unwrap()
+        else {
+            panic!("two entries combine");
+        };
+        assert_eq!(
+            allowed_arrangements(&owner, &combined),
+            [
+                Arrangement::Separated,
+                Arrangement::KeySeparated,
+                Arrangement::CredentialShared
+            ],
+            "an entry that leaves the type out still gives the staying types beside one that names a copy"
         );
     }
 

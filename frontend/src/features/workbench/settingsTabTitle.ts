@@ -4,7 +4,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { orgsQuery } from '@/api/nodes';
 import type { NodeRef } from '@/generated/api-types';
 import { knownPlaces, placeLabel, placedOfPath, type KnownPlaces, type Placed } from '@/lib/placeLabel';
-import { pathTo, useTreeStore } from '@/realtime/stores/tree';
+import { pathTo } from '@/realtime/stores/tree';
+import { useNameTrees } from '@/features/navigation/placeLabels';
 import { settingsScreenTitle } from '@/features/settings/sectionLabels';
 
 export interface SettingsTitlePlace {
@@ -22,7 +23,7 @@ export function settingsTabTitle(section: string, source: SettingsTitlePlace | u
 
 /** Existing authorized metadata only: no query observer, tree load, feed, or extra native read. */
 export function useSettingsTabTitle(section: string, source: SettingsTitlePlace | undefined): string {
-  const trees = useTreeStore((state) => state.byOrg);
+  const trees = useNameTrees(source !== undefined);
   const cache = useQueryClient();
   const subscribe = useCallback((notify: () => void) => cache.getQueryCache().subscribe((event) => {
     const key: unknown = event.query.queryKey, expected = orgsQuery.queryKey;

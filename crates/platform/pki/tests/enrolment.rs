@@ -117,6 +117,7 @@ fn a_token_enrolls_a_machine_with_a_certificate_for_its_own_key_and_the_id_the_s
     assert_eq!(enrolled.certificate.machine_id(), Some(enrolled.machine_id));
     assert_eq!(enrolled.protocol_version, 1);
     let reply = EnrollReply {
+        gateways: Vec::new(),
         machine_id: enrolled.machine_id,
         certificate_pem: enrolled.certificate.pem(),
         ca_pem: system.authority.certificate_pem(),
@@ -234,6 +235,7 @@ fn a_machine_keeps_nothing_from_an_answer_whose_authority_is_not_the_one_its_tok
     let asked = request_for(&issued.token, pending.csr_pem());
     let enrolled = enroll(&intruder, &intruder_ledger, &asked, 365, &system.clock).unwrap();
     let reply = EnrollReply {
+        gateways: Vec::new(),
         machine_id: enrolled.machine_id,
         certificate_pem: enrolled.certificate.pem(),
         ca_pem: intruder.certificate_pem(),
@@ -260,6 +262,7 @@ fn a_certificate_for_another_key_than_the_machines_is_not_accepted() {
         .enroll(&request_for(&token, someone_else.csr_pem()))
         .unwrap();
     let reply = EnrollReply {
+        gateways: Vec::new(),
         machine_id: enrolled.machine_id,
         certificate_pem: enrolled.certificate.pem(),
         ca_pem: system.authority.certificate_pem(),

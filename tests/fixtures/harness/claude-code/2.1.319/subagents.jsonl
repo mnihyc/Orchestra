@@ -1,0 +1,3 @@
+{"direction":"from_harness","frame":{"type":"assistant","parent_tool_use_id":null,"message":{"id":"message","role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"description":"Inspect fixture","prompt":"Read fixture","subagent_type":"general-purpose"}}]}}}
+{"direction":"from_harness","frame":{"type":"assistant","parent_tool_use_id":"agent","message":{"id":"child-message","role":"assistant","content":[{"type":"text","text":"Child result"}],"stop_reason":"end_turn"}}}
+{"direction":"from_harness","frame":{"type":"user","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"agent","content":"Child result"}]}}}

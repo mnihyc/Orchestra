@@ -173,32 +173,67 @@ pub async fn record(
     by: Option<Id>,
     at: Time,
 ) -> Result<Made, SkillError> {
+    let plan = prepare_record(conn, target, prepared, origin, by).await?;
+    match apply_record(
+        conn,
+        by,
+        plan,
+        at,
+        || Ok::<(), std::convert::Infallible>(()),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(never) => match never {},
+    }
+}
+
+/// SQL-only recording operands. The archive and file bytes stay in their original supplier;
+/// this owns only the actual metadata the one existing writer will record.
+pub struct Recording {
+    target: Target,
+    by: Option<Id>,
+    transaction: String,
+    name: String,
+    description: String,
+    archive: Hash,
+    archive_size: i64,
+    manifest: orch_types::Json,
+    size: i64,
+    origin: orch_types::Json,
+    keeps_origin: bool,
+}
+impl Recording {
+    /// The actual native creation or existing-skill intent whose metadata was prepared.
+    #[must_use]
+    pub fn target(&self) -> Target {
+        self.target
+    }
+}
+async fn recording_transaction(conn: &mut Conn) -> Result<String, SkillError> {
+    Ok(sqlx::query_scalar("SELECT pg_current_xact_id()::text")
+        .fetch_one(conn)
+        .await
+        .map_err(DbError::from)?)
+}
+
+/// Acquire the native skill/blob footprint and freeze the original recording metadata without
+/// inserting a skill, registering a blob, pinning an archive or changing the latest version.
+pub async fn prepare_record(
+    conn: &mut Conn,
+    target: Target,
+    prepared: &Prepared,
+    origin: &SkillOrigin,
+    by: Option<Id>,
+) -> Result<Recording, SkillError> {
     let built = &prepared.built;
-    let skill = match target {
-        Target::NewSkill { id, home, owner } => {
+    match target {
+        Target::NewSkill { home, .. } => {
             if rows::named(conn, home, &built.name).await?.is_some() {
                 return Err(SkillError::NameTaken {
                     name: built.name.clone(),
                 });
             }
-            rows::insert(
-                conn,
-                &NewSkill {
-                    id,
-                    home_id: home,
-                    owner_id: owner,
-                    name: built.name.clone(),
-                },
-                at.get(),
-            )
-            .await
-            .map_err(|error| match error {
-                DbError::Unique { .. } => SkillError::NameTaken {
-                    name: built.name.clone(),
-                },
-                other => other.into(),
-            })?;
-            id
         }
         Target::Skill(id) => {
             let skill = rows::lock(conn, id).await?.ok_or(SkillError::Gone)?;
@@ -208,26 +243,117 @@ pub async fn record(
                     found: built.name.clone(),
                 });
             }
+        }
+    }
+    orch_db::queries::uploads::lock_blobs(conn, &[prepared.archive]).await?;
+    Ok(Recording {
+        target,
+        by,
+        transaction: recording_transaction(conn).await?,
+        name: built.name.clone(),
+        description: built.description.clone(),
+        archive: prepared.archive,
+        archive_size: i64::try_from(built.archive.len()).unwrap_or(i64::MAX),
+        manifest: serde_json::to_value(&built.manifest).map_err(EngineError::from)?,
+        size: built.size,
+        origin: serde_json::to_value(origin).map_err(EngineError::from)?,
+        keeps_origin: origin.can_be_taken_again(),
+    })
+}
+
+/// Consume the same native packet and actor on its original transaction. The caller owns the
+/// current source/ordinary admission and retains its deadline through later writes and commit.
+/// The opaque once-only callback is invoked immediately before the actual first recording write.
+pub async fn apply_record<E, F>(
+    conn: &mut Conn,
+    by: Option<Id>,
+    prepared: Recording,
+    at: Time,
+    before: F,
+) -> Result<Result<Made, SkillError>, E>
+where
+    F: FnOnce() -> Result<(), E>,
+{
+    let checked = async {
+        if !orch_db::queries::transaction_guard::in_transaction(conn)
+            || prepared.by != by
+            || recording_transaction(conn).await? != prepared.transaction
+        {
+            return Err(SkillError::Engine(EngineError::unreadable(
+                "the skill recording belongs to another transaction or actor",
+            )));
+        }
+        match prepared.target {
+            Target::NewSkill { home, .. } => {
+                if rows::named(conn, home, &prepared.name).await?.is_some() {
+                    return Err(SkillError::NameTaken {
+                        name: prepared.name.clone(),
+                    });
+                }
+            }
+            Target::Skill(id) => {
+                let skill = rows::lock(conn, id).await?.ok_or(SkillError::Gone)?;
+                if skill.name != prepared.name {
+                    return Err(SkillError::NameChanged {
+                        skill: skill.name,
+                        found: prepared.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(error) = checked {
+        return Ok(Err(error));
+    }
+    before()?;
+    Ok(write_recording(conn, prepared, at).await)
+}
+
+async fn write_recording(
+    conn: &mut Conn,
+    prepared: Recording,
+    at: Time,
+) -> Result<Made, SkillError> {
+    let skill = match prepared.target {
+        Target::NewSkill { id, home, owner } => {
+            rows::insert(
+                conn,
+                &NewSkill {
+                    id,
+                    home_id: home,
+                    owner_id: owner,
+                    name: prepared.name.clone(),
+                },
+                at.get(),
+            )
+            .await
+            .map_err(|error| match error {
+                DbError::Unique { .. } => SkillError::NameTaken {
+                    name: prepared.name.clone(),
+                },
+                other => other.into(),
+            })?;
             id
         }
+        Target::Skill(id) => id,
     };
-    let archive_size = i64::try_from(built.archive.len()).unwrap_or(i64::MAX);
-    // The version's row pins the archive for as long as it exists.
-    storage::register_blob(conn, &prepared.archive, archive_size, at.get()).await?;
+    storage::register_blob(conn, &prepared.archive, prepared.archive_size, at.get()).await?;
     let version = rows::insert_version(
         conn,
         &NewVersion {
             id: orch_types::new_id(),
             skill_id: skill,
-            name: built.name.clone(),
-            description: built.description.clone(),
+            name: prepared.name,
+            description: prepared.description,
             archive: prepared.archive,
-            archive_size,
-            files: serde_json::to_value(&built.manifest).map_err(EngineError::from)?,
-            size: built.size,
-            origin: serde_json::to_value(origin).map_err(EngineError::from)?,
-            keeps_origin: origin.can_be_taken_again(),
-            created_by: by,
+            archive_size: prepared.archive_size,
+            files: prepared.manifest,
+            size: prepared.size,
+            origin: prepared.origin,
+            keeps_origin: prepared.keeps_origin,
+            created_by: prepared.by,
         },
         at.get(),
     )

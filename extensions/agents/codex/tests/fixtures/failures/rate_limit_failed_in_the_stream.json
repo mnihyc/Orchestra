@@ -43,5 +43,5 @@
   {"method":"error","params":{"error":{"message":"rate limit exceeded: Rate limit reached for requests. Please try again later.","codexErrorInfo":"rateLimitExceeded","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-54ac-7322-8f29-7114f8bc804a","turnId":"01a12f91-54f5-7a51-912c-390448f9f170"},"emittedAtMs":1791799422744},
   {"method":"turn/completed","params":{"threadId":"01a12f91-54ac-7322-8f29-7114f8bc804a","turn":{"id":"01a12f91-54f5-7a51-912c-390448f9f170","rootTurnId":"01a12f91-54f5-7a51-912c-390448f9f170","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"rate limit exceeded: Rate limit reached for requests. Please try again later.","codexErrorInfo":"rateLimitExceeded","additionalDetails":null,"misalignment":null},"startedAt":1791799416,"completedAt":1791799422,"durationMs":6692}},"emittedAtMs":1791799422764}
  ],
- "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": true, "resets_at": null, "row": "busy", "said_contains": "rate limit exceeded"}
+ "expect": {"outcome": "failed", "code": "rate_limited", "retryable": true, "incomplete": true, "resets_at": null, "row": "busy", "said_contains": "rate limit exceeded"}
 }

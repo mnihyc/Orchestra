@@ -147,7 +147,7 @@ const pageOf = (rows: PermissionRow[], more: Partial<PermissionPage> = {}): Perm
   depends: [],
   reaches: null,
   covers: null,
-  gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], holders_share: true },
+  gives: { choices: ['full_view', 'full_interact', 'full_manage'], roles: [], agents: ['view', 'edit'], agent_parts: { timeline: 'write', chat: 'write', documents: 'edit' }, holders_share: true },
   rows,
   ...more,
 });
@@ -278,9 +278,15 @@ describe('the change a page makes', () => {
     });
   });
 
-  it('takes a holder out of its rows, preserving the other followed holders there and leaving other rows alone', () => {
-    const named = entry(user(CHEN));
-    const rows = threadRows().map((row) => (['thread.view', 'chat.view'].includes(row.permission) ? { ...row, entries: [named] } : row));
+  it('withdraws direct grants and cuts only rows where the holder is followed', () => {
+    const chen = user(CHEN);
+    const chatGrant = entry(chen);
+    const threadGrant = entry(chen);
+    const rows = threadRows().map((row): PermissionRow => {
+      if (row.permission === 'chat.view') return { ...row, entries: [chatGrant] };
+      if (row.permission === 'thread.view') return { ...row, entries: [threadGrant], inherited: { from: 'system', holders: [role('viewer'), chen] } };
+      return row;
+    });
     const page = pageOf(rows);
     const holder = linesOf(page, catalogue, 'thread').custom.concat(linesOf(page, catalogue, 'thread').view).find((one) => one.holder.kind === 'user');
     expect(holder).toBeDefined();
@@ -288,8 +294,8 @@ describe('the change a page makes', () => {
     expect(removeHolderChange(page, holder)).toEqual({
       expected_revision: 7,
       rows: [
-        { permission: 'chat.view', inherit: false, add: [{ holder: { kind: 'role', role: 'viewer' } }], remove: [named.id] },
-        { permission: 'thread.view', inherit: false, add: [{ holder: { kind: 'role', role: 'viewer' } }], remove: [named.id] },
+        { permission: 'chat.view', remove: [chatGrant.id] },
+        { permission: 'thread.view', inherit: false, add: [{ holder: { kind: 'role', role: 'viewer' } }], remove: [threadGrant.id] },
       ],
     });
   });
@@ -306,7 +312,7 @@ describe('the change a page makes', () => {
 
 describe('the Owners line', () => {
   const second = entry(user(CHEN));
-  const group = entry({ kind: 'group', group: { id: '00000000-0000-4000-8008-000000000001', name: 'Backend', description: '', member_count: 3, org_id: '00000000-0000-4000-8002-000000000064' } });
+  const group = entry({ kind: 'group', group: { revision: 1, id: '00000000-0000-4000-8008-000000000001', name: 'Backend', description: '', member_count: 3, org_id: '00000000-0000-4000-8002-000000000064' } });
 
   it('says which owner is first, and takes out nobody who is the only person there, a group beside them or not', () => {
     const only = pageOf([], { owners: [entry(user(ADA)), group] });

@@ -22,7 +22,7 @@ function thread(id: string, name: string, more: Partial<NonNullable<TreeNode['th
 }
 
 function visit(id: string, more: Partial<NameHit> = {}): NameHit {
-  return { id, kind: 'thread', name: 'A stale name must never be used', address: null, avatar: null, owner: null,
+  return { home_path: [], id, kind: 'thread', name: 'A stale name must never be used', address: null, avatar: null, owner: null,
     username: null, path: [], archived: false, recent: true, tag: null, color: null, custom_color: null, thread_attention: null, ...more };
 }
 

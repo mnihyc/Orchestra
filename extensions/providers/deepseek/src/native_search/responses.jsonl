@@ -1,0 +1,9 @@
+{"event":"response.created","data":{"type":"response.created","response":{"id":"resp_fixture","model":"deepseek-v4-pro","usage":null}}}
+{"event":"response.output_item.added","data":{"type":"response.output_item.added","item":{"id":"ws_fixture","type":"web_search_call","status":"in_progress","action":{"type":"search","query":"Python official website"}}}}
+{"event":"response.web_search_call.in_progress","data":{"type":"response.web_search_call.in_progress","item_id":"ws_fixture"}}
+{"event":"response.web_search_call.searching","data":{"type":"response.web_search_call.searching","item_id":"ws_fixture"}}
+{"event":"response.web_search_call.completed","data":{"type":"response.web_search_call.completed","item_id":"ws_fixture"}}
+{"event":"response.output_item.done","data":{"type":"response.output_item.done","item":{"id":"ws_fixture","type":"web_search_call","status":"completed","action":{"type":"search","queries":["Python official website","Python docs"],"sources":[{"title":"Python","url":"https://www.python.org/"}]}}}}
+{"event":"response.output_item.done","data":{"type":"response.output_item.done","item":{"id":"fetch_fixture","type":"web_search_call","status":"completed","action":{"type":"open_page","url":"https://docs.python.org/"}}}}
+{"event":"response.output_item.done","data":{"type":"response.output_item.done","item":{"id":"client_fixture","type":"tool_search_call","status":"completed","arguments":"{}"}}}
+{"event":"response.completed","data":{"type":"response.completed","response":{"id":"resp_fixture","model":"deepseek-v4-pro","usage":{"input_tokens":3475,"output_tokens":54,"server_tool_use":{"tool_search":3,"tool_fetch":1}}}}}

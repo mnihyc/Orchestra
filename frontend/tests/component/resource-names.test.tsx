@@ -1,5 +1,8 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
+import type * as RouterModule from '@tanstack/react-router';
+import { resourceCardRead } from './resource-card-readers';
 /** MCP and Mounts lists share primary add controls and explain empty and unmatched lists in either language. */
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { AnchorHTMLAttributes } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,10 +18,11 @@ import { me } from '../doubles/fixtures';
 
 import { show } from './support';
 
-const { read, navigate, openAccess } = vi.hoisted(() => ({
+const { read, navigate, openAccess, auxiliaryRead } = vi.hoisted(() => ({
   read: vi.fn<(path: string, options: { params: { query?: { q?: string }; path?: { id: string } } }) => Promise<{ data: { items: EverythingRow[]; next_cursor: null } | McpServer | Mount; response: Response }>>(),
   navigate: vi.fn(),
   openAccess: vi.fn(),
+  auxiliaryRead: vi.fn<(path: string) => void>(),
 }));
 let served: (HiddenItem | McpServer | Mount)[] = [];
 function inventory(value: HiddenItem | McpServer | Mount): EverythingRow {
@@ -31,9 +35,9 @@ vi.mock('@/api/auth', () => ({ meQuery: { queryKey: ['resource-names-reader'], i
 
 vi.mock('@/api/client', async (original) => ({
   ...await original<typeof ClientApi>(),
-  api: { GET: read },
+  api: { GET: (path: string, options: Parameters<typeof read>[1]) => { const auxiliary = resourceCardRead(path, options); if (auxiliary === null) return read(path, options); auxiliaryRead(path); return Promise.resolve(auxiliary); } },
 }));
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),
   useNavigate: () => navigate,
   useRouter: () => ({ state: { location: { pathname: '/resources/mounts' } }, history: { push: navigate } }),
   Link: ({ to, params, children, ...attributes }: AnchorHTMLAttributes<HTMLAnchorElement> & { to: string; params?: { id: string } }) => <a {...attributes} href={to.replace('$id', params?.id ?? '')}>{children}</a>,
@@ -65,7 +69,7 @@ it('shows every readable mount location in the Where column, linked to its machi
   vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(900);
   const person = { id: 'person', username: 'owner', display_name: 'Owner', kind: 'human' as const, avatar: { color: 1, text: 'O' } };
   const location = { kind: 'path' as const, storage: null, source: null, data_kind: null, can_remove: false, created_by: person, created_at: '2026-10-15T03:30:00Z' };
-  const mount: Mount = { id: 'data', name: 'data', address: 'team.data', description: 'Shared data', owner: person, org_id: 'org', home: null,
+  const mount: Mount = { ...unjudgedProvenance(), id: 'data', name: 'data', address: 'team.data', description: 'Shared data', owner: person, org_id: 'org', home: null,
     target: '/mnt/data', read_only: true, enabled: true, default_fate: 'as_is', kept: [], revision: 1, access: { permissions: ['mount.view'], administers: false, participating: true, admin_only: [], through: [] }, locations: [
       { ...location, machine: { id: 'laptop', name: 'Laptop', online: true, platform_os: 'linux', placement: 'connected' }, host: null },
       { ...location, machine: { id: 'node', name: 'Node', online: true, platform_os: 'linux', placement: 'connected' }, host: { id: 'host', name: 'Build host', address: 'team.host' } },
@@ -81,7 +85,7 @@ it('shows every readable mount location in the Where column, linked to its machi
 afterEach(async () => { vi.restoreAllMocks(); await setLocale('en'); });
 
 function readable(kind: 'mcp' | 'mounts'): McpServer | Mount {
-  const base = { id: 'readable', name: 'Readable data', address: 'team.readable', description: 'Ordinary readable content',
+  const base = { ...unjudgedProvenance(), id: 'readable', name: 'Readable data', address: 'team.readable', description: 'Ordinary readable content',
     owner: null, org_id: null, home: null, enabled: true, revision: 1,
     access: { permissions: [kind === 'mcp' ? 'mcp.view' : 'mount.view'], administers: false, participating: true, admin_only: [], through: [] } };
   return kind === 'mcp'
@@ -95,7 +99,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme }); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
     vi.spyOn(Element.prototype, 'clientWidth', 'get').mockReturnValue(900);
     const source = readable('mounts'); if (!('target' in source)) throw new Error('This case needs a mount');
-    const row: Mount = { ...source, name: 'shared-notes-for-team-research', description: 'World 2: shared research notes used across all team environments', access: { ...source.access, permissions: ['mount.view', 'mount.manage'] } };
+    const row: Mount = { ...unjudgedProvenance(), ...source, name: 'shared-notes-for-team-research', description: 'World 2: shared research notes used across all team environments', access: { ...source.access, permissions: ['mount.view', 'mount.manage'] } };
     served = [row]; const user = userEvent.setup(); show(<ResourceNames kind="mounts" />);
     const table = await screen.findByRole('table'); const name = within(table).getByRole('link', { name: row.name });
     expect(name).toHaveAttribute('href', '/resources/mounts/readable');
@@ -110,6 +114,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await user.click(within(table).getByRole('button', { name: i18n.t('resources.act.of', { act: i18n.t('resources.act.editButton'), name: row.name }) }));
     expect(screen.getByRole('dialog', { name: 'Mount editor' })).toBeVisible();
     expect(read.mock.calls.map(([path]) => path)).toEqual(['/everything', '/mounts/{id}']);
+    expect(auxiliaryRead.mock.calls.map(([path]) => path)).toEqual(['/{object}/{id}/permissions', '/permissions']);
   } finally {
     useAppearance.setState(appearance); document.documentElement.classList.toggle('dark', wasDark); if (previousTheme === undefined) delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = previousTheme;
   }
@@ -169,6 +174,12 @@ for (const words of CASES) describe(`QS-033 ${words.kind} (${words.language})`, 
     buttons[0]?.focus();
     expect(buttons).toContain(document.activeElement);
     await user.keyboard('{Enter}');
+    if (words.kind === 'mcp') {
+      expect(screen.getByRole('menuitem', { name: i18n.t('mcpImport.fromMachine') })).toBeVisible();
+      const create = screen.getByRole('menuitem', { name: i18n.t('mcpImport.create') });
+      await waitFor(() => expect(create).toHaveFocus());
+      await user.keyboard('{Enter}');
+    }
     expect(screen.getByRole('dialog', { name: words.kind === 'mcp' ? 'MCP editor' : 'Mount editor' })).toBeVisible();
   });
 

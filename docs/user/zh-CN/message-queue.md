@@ -8,6 +8,7 @@ heading_id.3-决定何时交给代理: 3-decide-when-it-reaches-the-agent
 heading_id.4-调整顺序: 4-put-messages-in-order
 heading_id.5-把未接收的引导消息放回队列: 5-put-an-untaken-steer-back
 heading_id.等待模型或环境使用权的消息: messages-waiting-for-model-or-environment-access
+summary: 编辑并排序等待中的消息，再决定何时交给代理。
 ---
 
 # 消息队列
