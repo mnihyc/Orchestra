@@ -1,37 +1,67 @@
 /** Every dialog of changing where and on what work runs, asked in both themes whether anything on it is a serious barrier, at every step it has: the plan with its choices opened, what stands in its way, the job under way, and the end that worked, failed or was cancelled. */
 import { expect, test } from '@playwright/test';
+import type { CopyDestinationsRequest } from '../../src/api/copyDestinations';
+import type { AgentAccessAvailability, ForkPlan, ForkRequest } from '../../src/generated/api-types';
 
 import { RUNS_ON } from '../doubles/fixtures.ts';
 import { BLOCKED, BUILD_HOST, change, conversation, HOST_ONE, MAIN, openBlocked, openHistory, shot, wizard } from '../e2e/change-support.ts';
-import { ACME, emit, expectAccessibleInBothThemes, scenario, signIn } from '../e2e/support.ts';
+import { ACME, emit, expectAccessibleInBothThemes, playScene, scenario, signIn } from '../e2e/support.ts';
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }) => {
   await scenario();
   await change.mode('manual');
+  // These scenes contain only same-org topic destinations; the native fork plan still settles each choice.
+  // Supply the newer read-only preflights which the original change double predates.
+  await page.route('**/api/v1/copy-destinations/judge', async (route) => {
+    const body = route.request().postDataJSON() as CopyDestinationsRequest;
+    await route.fulfill({ json: { ...body, source_owned: true, destinations: body.destinations.map((destination) => ({
+      destination, cross_root: false, outcome: { state: 'needs_choice', choice: 'fork_plan' },
+    })) } });
+  });
+  await page.route('**/api/v1/threads/*/forks/preflight', async (route) => {
+    const response = await route.fetch();
+    if (!response.ok()) { await route.fulfill({ response }); return; }
+    const plan = await response.json() as ForkPlan;
+    const agent_access: AgentAccessAvailability = { preset: { where: 'topic', parts: { documents: 'edit' } }, choices: [
+      { where: 'nothing', parts: {} }, ...(['thread', 'topic', 'project'] as const).map((where) => ({ where, parts: { documents: 'edit' as const } })),
+    ] };
+    await route.fulfill({ response, json: { ...plan, ...(plan.result === 'new' ? { agent_access } : {}) } });
+  });
 });
 
 test('a switch: the plan with its provider opened, what stands in the way of it, the job under way, and an end that failed', async ({ page }) => {
+  const requested: ForkRequest[] = [];
+  await page.route('**/api/v1/threads/*/forks/preflight', async (route) => {
+    requested.push(route.request().postDataJSON() as ForkRequest);
+    await route.fallback();
+  });
   await openBlocked(page);
   await page.getByRole('button', { name: 'Switch provider…' }).click();
   const dialog = wizard(page, 'Switch “Main thread”');
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
   await expectAccessibleInBothThemes(page);
+  await page.keyboard.press('Escape');
 
   // The editor of what it runs on is open, and the plan says that a model is not offered any more.
   await change.model(RUNS_ON.openAiKey, 'gpt-5.4', false);
-  await dialog.getByRole('button', { name: /^Provider and model/ }).click();
-  await dialog.getByRole('combobox', { name: 'Effort' }).click();
-  await page.getByRole('option', { name: 'high' }).click();
-  await expect(dialog.getByText('Choose a model it offers.')).toBeVisible();
+  // Provider, model, effort and history are inline now; the first audit includes the focused provider picker.
+  const effort = dialog.getByRole('combobox', { name: 'Effort' });
+  // Either supported effort forces a new plan when it differs from the automatically chosen value.
+  const nextEffort = (await effort.innerText()).includes('Low') ? 'Medium' : 'Low';
+  await effort.click();
+  await page.getByRole('option', { name: nextEffort, exact: true }).click();
+  await expect(dialog.getByText('Model not allowed', { exact: true })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeDisabled();
   await expectAccessibleInBothThemes(page);
 
-  // The environment's editor, and the plan once more clear.
+  // The model is changed and the plan is once more clear.
   await dialog.getByRole('combobox', { name: 'Model' }).click();
-  await page.getByRole('option', { name: 'gpt-5.4-mini' }).click();
-  await dialog.getByRole('button', { name: 'Environment', exact: true }).click();
-  await expect(dialog.getByRole('radio', { name: 'New', exact: true })).toBeVisible();
+  // This offered mini model deliberately has no display name; its request still identifies the chosen model.
+  await page.getByRole('option', { name: 'Model name unavailable', exact: true }).click();
+  await expect.poll(() => requested.at(-1)?.to?.model).toBe('gpt-5.4-mini');
+  // Compact provider switching leaves environment choices to the environment dialog audited below.
+  await expect(dialog.getByRole('combobox', { name: 'History', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  await dialog.getByRole('button', { name: 'Environment', exact: true }).click();
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
   // Under way, and failed with what was undone.
@@ -40,7 +70,11 @@ test('a switch: the plan with its provider opened, what stands in the way of it,
   await expect(dialog.getByText('Switching to OpenAI key')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await change.finish();
-  await expect(dialog.getByText('It did not work, in the checks')).toBeVisible();
+  // Compact results put the failed check and rollback together in their alert.
+  const failed = dialog.getByRole('alert');
+  await expect(failed).toContainText('The new side did not pass:');
+  await expect(failed).toContainText('Everything it had made was removed. Main thread is as it was before.');
+  await expect(dialog.getByRole('button', { name: 'Try again', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -71,7 +105,7 @@ test('a switch that is done: the thread held while it is under way, and the thre
   await expect(page.locator('[data-lock]')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await change.finish();
-  await expect(page.getByText('switched this thread to OpenAI key · Codex')).toBeVisible();
+  await expect(page.getByText(/switched to Codex with OpenAI key, carrying \d+ items of the conversation/)).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
@@ -80,20 +114,24 @@ test('a fork: the plan with each of its choices opened, the options, the job, an
   await conversation(page).getByText('The handler reads').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Fork from here…' }).click();
   const dialog = wizard(page, 'Fork “Main thread”');
-  await expect(dialog.getByText('its history up to turn 1')).toBeVisible();
+  // Inline history controls replaced the old summary sentence and radio disclosure.
+  await expect(dialog.getByRole('combobox', { name: 'History', exact: true })).toContainText('Carry through a turn');
+  await expect(dialog.getByRole('spinbutton', { name: 'Last turn to take' })).toHaveValue('1');
   await expectAccessibleInBothThemes(page);
 
-  await dialog.getByRole('button', { name: 'History', exact: true }).click();
-  await expect(dialog.getByRole('radio', { name: 'Up to a turn', exact: true })).toBeChecked();
+  await dialog.getByRole('combobox', { name: 'History', exact: true }).click();
+  await expect(page.getByRole('option', { name: 'Carry through a turn', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
+  await page.keyboard.press('Escape');
 
-  await dialog.getByRole('button', { name: 'Provider and model' }).click();
-  await expect(dialog.getByRole('combobox', { name: 'Provider' })).toBeVisible();
+  await dialog.getByRole('combobox', { name: 'Provider', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: 'Provider', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
+  await page.keyboard.press('Escape');
 
-  await dialog.getByRole('button', { name: 'Environment', exact: true }).click();
-  await dialog.getByRole('radio', { name: 'New', exact: true }).click();
-  await dialog.getByRole('radio', { name: 'Selection', exact: true }).click();
+  await dialog.getByRole('combobox', { name: 'Environment', exact: true }).click();
+  await page.getByRole('option', { name: 'Copy to new', exact: true }).click();
+  await dialog.getByRole('radio', { name: 'By pattern', exact: true }).click();
   await dialog.getByRole('textbox', { name: 'Take these' }).fill('src/**');
   await expect(dialog.getByText(/^Files: \d+ files?, /)).toBeVisible();
   await expectAccessibleInBothThemes(page);
@@ -114,10 +152,10 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
   await openHistory(page);
   await conversation(page).getByText('Please fix it, and run the tests.').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Side thread from here…' }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Which tests cover the redirect?');
   await expectAccessibleInBothThemes(page);
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
 
   const lane = conversation(page).getByRole('region', { name: /^Side thread/ });
   await expect(lane.getByText(/^On the side, about/)).toBeVisible();
@@ -132,9 +170,9 @@ test('a side thread: the dialog that asks, the lane that answers, the limit that
 
   // The limit: the dialog that says how many are open, with a way to close each.
   await change.sides(MAIN, 3);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).click();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
@@ -147,7 +185,9 @@ test('an environment: the update, the move that is cancelled, and what is idle o
   await page.goto(`/resources/environments/${RUNS_ON.sandbox}`);
   await page.getByRole('button', { name: 'Update…' }).click();
   const update = wizard(page, 'Update Sandbox');
-  await expect(update.getByText('Brings image and executor up to date')).toBeVisible();
+  // The plan lists each actual version change instead of the former summary sentence.
+  await expect(update.getByRole('region', { name: 'Changes', exact: true })).toContainText('Image: orch-env-base:0.1.0 → orch-env-base:0.1.1');
+  await expect(update.getByRole('region', { name: 'Changes', exact: true })).toContainText('Exec node: 0.1.0 → 0.1.1');
   await expectAccessibleInBothThemes(page);
   await update.getByRole('button', { name: 'Update', exact: true }).click();
   await expect(update.getByText('Updating Sandbox')).toBeVisible();
@@ -158,10 +198,10 @@ test('an environment: the update, the move that is cancelled, and what is idle o
   await update.getByRole('button', { name: 'Done' }).click();
 
   await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-  await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
   const move = wizard(page, 'Move Sandbox');
-  await move.getByRole('button', { name: 'Host', exact: true }).click();
-  await move.getByRole('radio', { name: /build-host/ }).click();
+  await move.getByRole('combobox', { name: 'Place', exact: true }).click();
+  await page.getByRole('option', { name: /^build-host/ }).click();
   await expect(move.getByText('Moves from host-1 to build-host')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await move.locator('[data-confirm]').click();
@@ -185,10 +225,11 @@ test('several threads at once: the plans with one that is blocked, the batch und
   await change.hold(ACME.repro, RUNS_ON.teamAnthropic);
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
-  await page.getByRole('tree').getByRole('button', { name: 'More about Fix login' }).click();
-  await page.getByRole('menuitem', { name: 'Switch provider for all threads…' }).click();
+  await page.getByRole('tree').getByRole('button', { name: /^Actions for Fix login(?: · .+)?$/ }).click();
+  await page.getByRole('menuitem', { name: 'Switch threads…', exact: true }).click();
   const dialog = wizard(page, 'Switch the threads of “Fix login”');
-  await expect(dialog.getByText('Choose the provider these threads should go on with.')).toBeVisible();
+  // The target is chosen inline now, without the old introductory sentence.
+  await expect(dialog.getByRole('region', { name: 'What they go to', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await dialog.getByRole('combobox', { name: 'Provider' }).click();
   await page.getByRole('option', { name: /^Team Anthropic/ }).click();
@@ -214,18 +255,22 @@ test('in Chinese: the plan of a switch and of a fork, each with its choices open
   await page.goto(`/thread/${BLOCKED}`);
   await page.getByRole('button', { name: '切换提供方…' }).click();
   const dialog = wizard(page, '切换“Main thread”');
-  await expect(dialog.getByRole('group', { name: '将要发生的事' })).toContainText('让此会话在');
   await expect(dialog.getByRole('button', { name: '切换', exact: true })).toBeEnabled();
+  await page.keyboard.press('Escape');
+  // Compact plans use the inline pickers instead of the former summary sentence.
+  await expect(dialog.getByRole('combobox', { name: '代理与提供方', exact: true })).toHaveValue(/OpenAI key/);
   await shot(page, 'zh-switch-1-plan');
   await expectAccessibleInBothThemes(page);
 
-  await dialog.getByRole('button', { name: '提供方与模型' }).click();
-  await expect(dialog.getByRole('combobox', { name: '提供方' })).toBeVisible();
+  await dialog.getByRole('combobox', { name: '代理与提供方', exact: true }).click();
+  await expect(page.getByRole('dialog', { name: '代理与提供方', exact: true })).toBeVisible();
   await shot(page, 'zh-switch-2-editor');
   await expectAccessibleInBothThemes(page);
+  await page.keyboard.press('Escape');
 
   await dialog.getByRole('button', { name: '切换', exact: true }).click();
-  await expect(dialog.getByText('进度')).toBeVisible();
+  // Compact progress names the operation directly instead of drawing the former step heading.
+  await expect(dialog.getByRole('progressbar', { name: '正在切换到 OpenAI key', exact: true })).toBeVisible();
   await change.finish();
   await expect(dialog.getByText('完成', { exact: true }).first()).toBeVisible();
   await shot(page, 'zh-switch-3-done');
@@ -234,11 +279,15 @@ test('in Chinese: the plan of a switch and of a fork, each with its choices open
 
   // A fork of the main thread, its options opened.
   await emit(MAIN, { thread: { state: 'idle' } });
+  await playScene(MAIN, 'history');
   await page.goto(`/thread/${MAIN}`);
-  await page.getByRole('button', { name: '会话菜单' }).click();
-  await page.getByRole('menuitem', { name: '分叉…' }).click();
+  await expect(page.getByRole('log', { name: '对话', exact: true }).getByText('Please fix it, and run the tests.')).toBeVisible();
+  // Visible header actions retain their handler and are omitted from the folded menu.
+  const forkAction = page.locator('[data-thread-header]').getByRole('button', { name: '创建副本到…', exact: true });
+  await expect(forkAction).toBeVisible();
+  await forkAction.click();
   const fork = wizard(page, '分叉“Main thread”');
-  await expect(fork.getByRole('group', { name: '将要发生的事' })).toContainText('分叉此会话，带上');
+  await expect(fork.getByRole('combobox', { name: '历史', exact: true })).toBeVisible();
   await shot(page, 'zh-fork-1-plan');
   await expectAccessibleInBothThemes(page);
   await fork.getByRole('button', { name: /^选项…/ }).click();

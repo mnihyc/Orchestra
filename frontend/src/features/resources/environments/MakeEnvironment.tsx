@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** The dialog that makes an environment from a template on a host: its name, the template, the host or the one with the most room, and who may use it; the job that makes it is followed from the page it opens on.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -14,15 +15,14 @@ import { borrowsData, DataSourcesEditor, madeDataSources } from '@/features/reso
 import { NewAccess } from '@/features/resources/NewAccess';
 import { HomePicker } from '@/features/resources/HomePicker';
 import { Hint } from '@/features/help/Hint';
-import type { Environment, Host, NewEnvironmentAccess, NewResourceAccess } from '@/generated/api-types';
+import type { Environment, NewEnvironmentAccess, NewResourceAccess } from '@/generated/api-types';
 import { useActKey, useForm } from '@/lib/forms';
 import { Button } from '@/ui/Button';
 import { Dialog } from '@/ui/Dialog';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
-import { Select } from '@/ui/Select';
-import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
+import { hostChoice, hostUnavailable, templateChoice, templateUnavailable } from '@/features/resources/choiceAvailability';
 import { RuntimeChoice, defaultRuntime, runtimeOffer } from '@/features/resources/isolation/RuntimeChoice';
 import { classNamed, useIsolationWords } from '@/features/resources/isolation/runtimes';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -31,11 +31,6 @@ import { TemporaryChoice } from './Temporary';
 
 /** The choice of a host that stands for "the one with the most room": a menu cannot hold an empty value. */
 const MOST_ROOM = '\u0000most-room';
-
-/** Whether a host takes new environments from this template: it is open to them, and its driver is the template's and makes environments. */
-function takesFrom(host: Host, driver: string | undefined): boolean {
-  return host.schedulable && host.drivers.some((entry) => entry.name === driver && entry.creates.includes('environment'));
-}
 
 export interface MakeEnvironmentProps {
   onClose: () => void;
@@ -74,10 +69,10 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
   const formElement = useRef<HTMLFormElement>(null);
   const errorElement = useRef<HTMLDivElement>(null);
 
-  const usable = (templates.data ?? []).filter((template) => template.enabled);
-  const template = form.values.template_id === '' ? usable[0] ?? null : usable.find((entry) => entry.id === form.values.template_id) ?? null;
-  const open = (hosts.data ?? []).filter((host) => takesFrom(host, template?.driver));
-  const closed = (hosts.data ?? []).filter((host) => !takesFrom(host, template?.driver));
+  const usable = (templates.data ?? []).filter((entry) => templateUnavailable(entry, t) === null);
+  const template = form.values.template_id === '' ? usable[0] ?? null : templates.data?.find((entry) => entry.id === form.values.template_id) ?? null;
+  const templateAvailable = template !== null && templateUnavailable(template, t) === null;
+  const open = (hosts.data ?? []).filter((host) => hostUnavailable(host, t, 'environment', template?.driver) === null);
   const host = (hosts.data ?? []).find((entry) => entry.id === form.values.host_id) ?? null;
   const hostAvailable = form.values.host_id === MOST_ROOM || host !== null && open.some((entry) => entry.id === host.id);
 
@@ -123,19 +118,19 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
           <Button disabled={make.isPending} onClick={onClose}>
             {t('common.cancel')}
           </Button>
-          <Button variant="primary" type="submit" form="make-environment" pending={make.isPending} blocked={template === null || form.values.home_node_id === '' || !hostAvailable || !sourcesReady}>
+          <Button variant="primary" type="submit" form="make-environment" pending={make.isPending} blocked={!templateAvailable || form.values.home_node_id === '' || !hostAvailable || !sourcesReady}>
             {t('environments.make.submit')}
           </Button>
         </>
       }
     >
-      <form ref={formElement} id="make-environment" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => template !== null && hostAvailable && make.mutate(values.name))}>
+      <form ref={formElement} id="make-environment" className="flex flex-col gap-4 py-2" noValidate onSubmit={form.submit((values) => templateAvailable && hostAvailable && make.mutate(values.name))}>
         {make.error !== null && (!placed || unplaced) && <div ref={errorElement} tabIndex={-1}><ErrorAlert error={make.error} /></div>}
         {loading ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows reads={[templates, hosts]} rows={3} />
         ) : failed !== null ? (
           <ErrorState compact error={failed} retrying={templates.isRefetching || hosts.isRefetching} onRetry={() => void Promise.all([templates.refetch(), hosts.refetch()])} />
-        ) : usable.length === 0 ? (
+        ) : templates.data?.length === 0 ? (
           <InlineAlert tone="warning" title={t('environments.make.noTemplate')}>
             {t('environments.make.noTemplateLead')}
           </InlineAlert>
@@ -144,47 +139,45 @@ export function MakeEnvironmentDialog({ onClose, home, templateId, hostId, forTh
             <HomePicker value={form.values.home_node_id} onChange={(value) => form.set('home_node_id', value)} error={form.field('home_node_id').error}
               places={home === undefined ? [] : [home]} disabled={make.isPending} />
             <Input label={t('environments.make.name')} {...form.field('name')} autoComplete="off" />
-            <Select
+            <ResourcePicker pickerKey="resources.environments.MakeEnvironment.environments.make.template"
               label={t('environments.make.template')}
               help={<Hint id="env-template" />}
               value={template?.id ?? form.values.template_id}
-              error={form.field('template_id').error ?? (template === null ? t('environments.make.templateUnavailable') : undefined)}
+              error={form.field('template_id').error ?? (!templateAvailable ? template === null ? t('environments.make.templateUnavailable') : templateUnavailable(template, t) ?? undefined : undefined)}
               onValueChange={(next) => {
                 form.set('template_id', next);
                 form.set('host_id', hostId ?? MOST_ROOM);
                 setDataSources(madeDataSources());
                 setRuntime('');
               }}
-              options={usable.map((entry) => {
+              options={(templates.data ?? []).map((entry) => {
                 // Each template says what it runs on and under, from what the hosts report of it.
-                const choice = resourceChoice({ kind: 'template', template: entry });
-                const reporters = (hosts.data ?? []).filter((candidate) => takesFrom(candidate, entry.driver));
+                const choice = templateChoice(entry, t);
+                const reporters = (hosts.data ?? []).filter((candidate) => hostUnavailable(candidate, t, 'environment', entry.driver) === null);
                 const offer = runtimeOffer(entry, reporters);
                 const runtimeName = defaultRuntime(offer);
                 const driverTitle = (hosts.data ?? []).flatMap((candidate) => candidate.drivers).find((driver) => driver.name === entry.driver)?.title ?? entry.driver;
                 const title = classNamed(offer.classes, runtimeName)?.title ?? runtimeName;
-                return { value: entry.id, ...choiceOption(t, 'dynamic.resource', { name: entry.name }), ...choice, description: <>{choice.description}<span className="text-text-muted"> · {isolation.pair(driverTitle, title)}</span></> };
+                return { ...choiceOption(t, 'dynamic.resource', { name: entry.name }), ...choice, description: <>{choice.description}<span className="text-text-muted"> · {isolation.pair(driverTitle, title)}</span></> };
               })}
             />
-            <Select
+            <ResourcePicker pickerKey="resources.environments.MakeEnvironment.environments.make.host"
               label={t('environments.make.host')}
               help={<Hint id="env-host" />}
               hint={open.length === 0 ? t('environments.make.noHost') : undefined}
               value={form.values.host_id}
               error={form.field('host_id').error ?? (!hostAvailable ? t('environments.make.hostUnavailable') : undefined)}
-              disabled={open.length === 0}
+              disabled={make.isPending}
               onValueChange={(id) => { form.set('host_id', id); setDataSources(madeDataSources()); setRuntime(''); }}
               options={[
                 { value: MOST_ROOM, ...choiceOption(t, 'placement.automatic'), description: t('environments.make.mostRoom') },
-                ...open.map((entry) => ({ value: entry.id, ...choiceOption(t, 'dynamic.resource', { name: entry.name }), ...resourceChoice({ kind: 'host', host: entry }) })),
-                // A host that takes none from this template is shown and cannot be chosen, with why, and not left out as if it were not there.
-                ...closed.map((entry) => ({ value: entry.id, ...choiceOption(t, 'dynamic.resource', { name: entry.name }), ...resourceChoice({ kind: 'host', host: entry }), description: entry.schedulable ? t('environments.make.hostNoDriver') : t('environments.make.hostClosed'), disabled: true })),
+                ...(hosts.data ?? []).map((entry) => hostChoice(entry, t, 'environment', template?.driver)),
               ]}
             />
-            {template !== null && <RuntimeChoice template={template} hosts={host !== null && hostAvailable ? [host] : open} value={runtime} onChange={setRuntime} policy={runtimePolicy} disabled={make.isPending} />}
-            {template !== null && <DataSourcesEditor machine={host?.machine.id} driver={template.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={make.isPending} />}
+            {templateAvailable && <RuntimeChoice template={template} hosts={host !== null && hostAvailable ? [host] : open} value={runtime} onChange={setRuntime} policy={runtimePolicy} disabled={make.isPending} />}
+            {templateAvailable && <DataSourcesEditor machine={host?.machine.id} driver={template.driver} value={dataSources} onChange={setDataSources} onReady={setSourcesReady} disabled={make.isPending} />}
             <NewAccess value={access} onChange={setAccess} home={t('environments.make.yourPlace')} allowHome={false} />
-            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} />
+            <TemporaryChoice checked={temporary} onChange={setTemporary} disabled={make.isPending} forThread={forThread} />
           </>
         )}
       </form>

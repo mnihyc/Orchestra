@@ -8,7 +8,7 @@
  * `ORCH_MATRIX_CASE=<id>` (see `matrix-kit.ts`). */
 import { expect, type Page, test } from '@playwright/test';
 
-import { askAccess, askCapability } from './inbox-support.ts';
+import { approvalsMade, askAccess, askCapability } from './inbox-support.ts';
 import { cases, title } from './matrix-kit.ts';
 import { ACME, expectAccessible, scenario, signIn } from './support.ts';
 
@@ -46,29 +46,34 @@ for (const each of MATRIX) {
     const locale = each.values.locale as 'en' | 'zh-CN';
     const theme = each.values.theme as 'light' | 'dark';
     const name = `Matrix ${each.id.split('/').slice(1).join(' ')}`;
-    if (request === 'access') {
-      await askAccess({ requester: 'vera', title: name, permissions: ['thread.view'], object: { kind: 'thread', id: ACME.mainThread, name: 'Main thread' } });
-    } else {
-      await askCapability({ requester: 'grace', title: name, risk: request.replace('capability_', '') as 'low' | 'medium' | 'high' | 'critical' });
-    }
+    const approval = request === 'access'
+      ? await askAccess({ requester: 'vera', title: name, permissions: ['thread.view'], object: { kind: 'thread', id: ACME.mainThread, name: 'Main thread' } })
+      : await askCapability({ requester: 'grace', title: name, risk: request.replace('capability_', '') as 'low' | 'medium' | 'high' | 'critical' });
     await page.setViewportSize(SIZES[each.values.screen as keyof typeof SIZES]);
     await page.emulateMedia({ colorScheme: theme });
     await signIn(page);
     await page.goto('/approvals');
     await language(page, locale);
 
-    const approve = locale === 'en' ? `Approve ${name}` : `批准：${name}`;
-    const deny = locale === 'en' ? `Deny ${name}` : `拒绝：${name}`;
-    const card = page.getByRole('region', { name });
+    // Capability cards intentionally name their native subject; the matrix title is fixture metadata.
+    const subject = request === 'access' ? name : 'GPU';
+    const approve = locale === 'en' ? `Approve ${subject}` : `批准：${subject}`;
+    const deny = locale === 'en' ? `Deny ${subject}` : `拒绝：${subject}`;
+    const card = page.locator(`[data-approval="${approval.id}"]`);
+    await expect(card).toHaveCount(1);
     await card.scrollIntoViewIfNeeded();
     await expect(card).toBeVisible();
-    await expect(page.getByRole('button', { name: approve, exact: true })).toBeVisible();
-    await expect(page.getByRole('button', { name: deny, exact: true })).toBeVisible();
+    await expect(card).toHaveAccessibleName(subject);
+    // Access cards keep the full Approve/Deny form behind their explicit decision-details action.
+    if (request === 'access') await card.getByRole('button', { name: locale === 'en' ? 'Other…' : '其他…', exact: true }).click();
+    await expect(card.getByRole('button', { name: approve, exact: true })).toBeVisible();
+    await expect(card.getByRole('button', { name: deny, exact: true })).toBeVisible();
     await expectAccessible(page, theme);
 
     if (request !== 'access') {
-      await page.getByRole('button', { name: approve, exact: true }).click();
-      await expect(page.getByRole('button', { name: approve, exact: true })).toHaveCount(0);
+      await card.getByRole('button', { name: approve, exact: true }).click();
+      await expect(card.getByRole('button', { name: approve, exact: true })).toHaveCount(0);
+      await expect.poll(async () => (await approvalsMade()).find((row) => row.id === approval.id)?.state).toBe('approved');
     }
   });
 }

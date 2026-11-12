@@ -1,7 +1,7 @@
 /** Negative controls prove the rules fail for the owner's classes rather than merely taking screenshots. */
 import { expect, test } from '@playwright/test';
 import { inspectLayout, trackLayoutPointer, type LayoutInput } from './layout-rules-dom.ts';
-import { auditHighlightedOptions, auditHoverIcons, auditPage, duplicateAccessibleNames, pressLayoutKey } from './layout-rules-helpers.ts';
+import { auditHighlightedOptions, auditHoverIcons, auditOpenMenus, auditPage, duplicateAccessibleNames, pressLayoutKey } from './layout-rules-helpers.ts';
 
 const input: LayoutInput = { duplicateAllowList: [], rawValues: ['mock-large', 'on_request'] };
 
@@ -105,6 +105,13 @@ test('a tab owns its named panel region while duplicate controls inside that pan
   expect((await duplicateAccessibleNames(page)).map((fault) => fault.text)).toEqual(['Inspect']);
 });
 
+for (const attribute of ['data-item', 'data-footer', 'data-timeline-row']) test(`timeline authors may recur across actual messages while duplicates in one message still fail: ${attribute}`, async ({ page }) => {
+  await page.setContent(`<main><div role="log"><div ${attribute}="first"><button>Ada Lovelace</button><p>First message</p></div><div ${attribute}="second"><button>Ada Lovelace</button><p>Second message</p></div></div></main>`);
+  expect(await duplicateAccessibleNames(page)).toEqual([]);
+  await page.locator(`[${attribute}="second"]`).evaluate((row) => { row.insertAdjacentHTML('beforeend', '<button>Ada Lovelace</button>'); });
+  expect((await duplicateAccessibleNames(page)).map((fault) => fault.text)).toEqual(['Ada Lovelace']);
+});
+
 test('visibility summaries match direct ancestor checks across clipping axes and changed ancestors', async ({ page }) => {
   await page.setContent('<style>.probe{display:block;width:18px;overflow-wrap:anywhere;font:16px Arial}.window{position:relative;width:40px;height:40px;overflow:clip}.moved-x{position:absolute;left:80px;top:0}.moved-y{position:absolute;left:0;top:80px}.inner{position:absolute;left:80px;top:0;width:40px;height:40px;overflow:clip}.wide{position:absolute;left:-80px;top:0;width:300px}.zero{position:relative;width:0;height:0}.absolute{position:absolute;left:0;top:0}.clipped-label{position:absolute;width:1px;height:1px;clip:rect(0,0,0,0);overflow:hidden}</style><span class="probe" data-case="plain"></span><div style="width:45px"><span class="probe" style="display:inline" data-case="inline-fragments"></span></div><span class="probe" style="display:contents" data-case="contents"></span><span class="probe" style="width:0;height:0;overflow:visible" data-case="zero-box"></span><div hidden><span class="probe" data-case="hidden"></span></div><div inert><span class="probe" data-case="inert"></span></div><div data-opacity style="opacity:0"><span class="probe" data-case="transparent"></span></div><div data-visibility style="visibility:hidden"><span class="probe" style="visibility:visible" data-case="restored-child"></span></div><div class="window"><span class="probe moved-x" data-case="outside-x"></span></div><div class="window"><span class="probe moved-y" data-case="outside-y"></span></div><div class="window"><div class="inner"><span class="probe wide" data-case="disjoint-clips"></span></div></div><div class="zero"><span class="probe absolute" data-case="zero-parent"></span></div><div class="clipped-label"><span class="probe" data-case="accessible-only"></span></div>');
   await page.locator('[data-case]').evaluateAll((elements) => { elements.forEach((element, index) => { element.textContent = 'Probe' + String(index) + 'ExtraordinaryWord'.repeat(8); }); });
@@ -157,6 +164,38 @@ test('floating cards must fit both viewport axes and expose their long content b
   const result = await page.evaluate(inspectLayout, input);
   expect(result.faults.filter((fault) => fault.rule === 'floating-bounds').map((fault) => fault.text)).toEqual(['Outside layer']);
   expect(result.faults.filter((fault) => fault.rule === 'floating-scroll').map((fault) => fault.text)).toEqual(['Clipped layer']);
+});
+
+test('an earlier name inspection closes before the icon walk without hiding a displaced icon', async ({ page }) => {
+  await page.setContent('<style>body{margin:0;background:white;color:black}.row{display:flex;align-items:flex-start;gap:8px;font:16px/24px Arial}button{border:0;padding:0;background:transparent;width:24px;height:24px;transform:translateY(4px)}svg{display:block;width:24px;height:24px}</style><div class="row"><button aria-label="Displaced action"><svg></svg></button><span>First text line</span></div>');
+  const result = await page.evaluate(inspectLayout, input);
+  await page.evaluate(() => {
+    const card = document.createElement('div');
+    card.setAttribute('data-inspection-card', '');
+    card.style.cssText = 'position:fixed;inset:0 auto auto 0;width:80px;height:80px;background:white;z-index:10';
+    card.textContent = 'Earlier name card';
+    document.body.append(card);
+    document.body.setAttribute('data-escapes', '0');
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || !event.isTrusted) return;
+      document.body.setAttribute('data-escapes', String(Number(document.body.getAttribute('data-escapes')) + 1));
+      card.remove();
+    });
+  });
+  expect((await auditHoverIcons(page, result.icons)).filter((fault) => fault.rule === 'icon-centre').map((fault) => fault.text)).toEqual(['Displaced action']);
+  await expect(page.locator('[data-inspection-card]')).toHaveCount(0);
+  await expect(page.locator('body')).toHaveAttribute('data-escapes', '1');
+});
+
+for (const native of [false, true]) test(`modal input walks retain owned portals and the covered page's static rules: ${native ? 'native dialog' : 'shared prompt'}`, async ({ page }) => {
+  await page.setContent(`<style>body{margin:0;background:white;color:black}button{width:28px;height:28px}svg{width:16px;height:16px}.overlay{position:fixed;inset:0;z-index:1;background:white}.prompt{position:fixed;left:100px;top:100px;z-index:2}.portal{position:fixed;left:200px;top:100px;z-index:3}</style><main><span>Repeated caption</span><strong>Repeated caption</strong><button aria-label="Covered action"><svg></svg></button><button aria-label="Covered menu" aria-haspopup="menu"><svg></svg></button></main><div class="overlay"></div><div role="dialog" aria-modal="true" ${native ? '' : 'data-prompt-current="true" data-prompt-id="edit"'} class="prompt"><button aria-label="Current action"><svg></svg></button><button aria-label="Current menu" aria-haspopup="menu"><svg></svg></button></div>${native ? '' : '<div data-prompt-owner="edit" class="portal"><button aria-label="Owned portalled action"><svg></svg></button></div>'}`);
+  const result = await page.evaluate(inspectLayout, input);
+  const names = (selectors: string[]) => page.evaluate((selectors) => selectors.map((selector) => document.querySelector(selector)?.getAttribute('aria-label')), selectors);
+  expect(await names(result.icons)).toEqual(native ? ['Current action', 'Current menu'] : ['Current action', 'Current menu', 'Owned portalled action']);
+  expect(await names(result.menus)).toEqual(['Current menu']);
+  expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Repeated caption']);
+  // Every admitted icon must still receive a real trusted pointer event through the backdrop.
+  expect(await auditHoverIcons(page, result.icons)).toEqual([]);
 });
 
 test('tree items are repeated rows while repeated headings outside them remain a finding', async ({ page }) => {
@@ -276,6 +315,15 @@ test('visible duplicates cross landmarks, while list, table and timeline rows ar
   await page.setContent('<header><span data-user-content>Model</span></header><main><strong>Model</strong><ul><li>Repeated row</li><li>Repeated row</li></ul><table><tr><td>Table value</td></tr><tr><td>Table value</td></tr></table><div data-item="one">Timeline value</div><div data-item="two">Timeline value</div></main>');
   const result = await page.evaluate(inspectLayout, input);
   expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Model']);
+});
+
+test('definition values keep their terms while duplicate values in one pair and repeated controls still fail', async ({ page }) => {
+  await page.setContent('<main><span>Default</span><dl><div><dt>Model</dt><dd><span>Default</span></dd></div><div id="effort"><dt>Effort</dt><dd><span>Default</span></dd></div></dl></main>');
+  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-text')).toEqual([]);
+  await page.locator('#effort dd').evaluate((value) => { value.insertAdjacentHTML('beforeend', '<strong>Default</strong>'); });
+  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Default']);
+  await page.locator('dd').evaluateAll((values) => { for (const value of values) value.insertAdjacentHTML('beforeend', '<button>Change value</button>'); });
+  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'duplicate-action').map((fault) => fault.text)).toEqual(['Change value']);
 });
 
 test('an exact reasoned exception permits just its named occurrences, never a third or a blank reason', async ({ page }) => {
@@ -598,4 +646,170 @@ for (const mode of ['complete', 'unowned hint', 'stolen focus'] as const) test(`
   const faults = (await auditPage(page)).faults.filter((fault) => fault.rule === 'cut-text');
   expect(faults.map((fault) => fault.text)).toEqual(mode === 'complete' ? [] : [value]);
   if (mode === 'complete') await expect(page.locator('#owner')).toBeFocused();
+});
+
+
+test('each clipped value gets a fresh keyboard entry when two values share their actual owner', async ({ page }) => {
+  await page.setContent('<style>.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><button id="owner"><span class="cut">The complete provider name</span><span class="cut">The complete weekly quota status</span></button>');
+  await page.locator('#owner').evaluate((owner) => {
+    const show = (keyboard: boolean) => {
+      let hint = document.getElementById('whole');
+      if (hint === null) { hint = document.createElement('div'); hint.id = 'whole'; hint.setAttribute('role', 'tooltip'); document.body.append(hint); }
+      hint.textContent = owner.textContent;
+      if (keyboard) { owner.setAttribute('aria-describedby', hint.id); owner.dataset.entries = String(Number(owner.dataset.entries ?? '0') + 1); }
+    };
+    owner.addEventListener('pointerover', () => show(false));
+    owner.addEventListener('focus', () => show(true));
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.getElementById('whole')?.remove(); });
+  });
+  expect((await auditPage(page)).faults.filter((fault) => fault.rule === 'cut-text')).toEqual([]);
+  await expect(page.locator('#owner')).toHaveAttribute('data-entries', '2');
+});
+
+for (const broken of [false, true]) test(`menu passes reveal their own values while retaining page rules: ${broken ? 'missing menu hint' : 'complete hints'}`, async ({ page }) => {
+  await page.setContent('<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><main><span>Repeated page caption</span><strong>Repeated page caption</strong><span id="page-value" class="cut" tabindex="0">A complete underlying page value</span></main><div role="menu"><span id="menu-value" class="cut" tabindex="0">A complete value inside the open menu</span></div><div data-inspection-card><span id="card-value" class="cut" tabindex="0">A complete fact inside a portalled inspection</span></div>');
+  await page.locator('main').evaluate((main) => {
+    main.insertAdjacentHTML('beforeend', '<span class="cut" tabindex="-1">An inactive page value without a keyboard stop</span>');
+  });
+  expect((await page.evaluate(inspectLayout, input)).faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text))
+    .toContain('An inactive page value without a keyboard stop');
+  await page.evaluate((broken) => {
+    for (const owner of Array.from(document.querySelectorAll<HTMLElement>('.cut'))) {
+      owner.dataset.visits = '0';
+      const show = () => {
+        owner.dataset.visits = String(Number(owner.dataset.visits) + 1);
+        if (broken && owner.id === 'menu-value') return;
+        let hint = document.getElementById('hint-' + owner.id);
+        if (hint === null) {
+          hint = document.createElement('div');
+          hint.id = 'hint-' + owner.id;
+          hint.setAttribute('role', 'tooltip');
+          document.body.append(hint);
+        }
+        hint.textContent = owner.textContent;
+        owner.setAttribute('aria-describedby', hint.id);
+      };
+      owner.addEventListener('pointerover', show);
+      owner.addEventListener('focus', show);
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') for (const hint of Array.from(document.querySelectorAll('[role="tooltip"]'))) hint.remove();
+    });
+  }, broken);
+  const result = await auditPage(page, '[role="menu"],[data-inspection-card]');
+  await expect(page.locator('#page-value')).toHaveAttribute('data-visits', '0');
+  expect(Number(await page.locator('#menu-value').getAttribute('data-visits'))).toBeGreaterThan(0);
+  expect(Number(await page.locator('#card-value').getAttribute('data-visits'))).toBeGreaterThan(0);
+  expect(result.faults.filter((fault) => fault.rule === 'duplicate-text').map((fault) => fault.text)).toEqual(['Repeated page caption']);
+  expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toEqual(broken ? ['A complete value inside the open menu'] : []);
+});
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  test(`card values are revealed before a menu entrance closes their card in ${locale}`, async ({ page }) => {
+    const menu = locale === 'en' ? 'A complete value in the underlying menu' : '底层菜单中的完整内容';
+    const fact = locale === 'en' ? 'Weekly window 81% · resets tomorrow' : '本周用量 81% · 明天重置';
+    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><div role="menu"><button class="cut" id="menu-value">${menu}</button></div><div data-inspection-card id="card"><button class="cut" id="card-value">${fact}</button></div>`);
+    await page.evaluate(() => {
+      document.body.dataset.cardVisits = '0';
+      for (const owner of Array.from(document.querySelectorAll<HTMLElement>('.cut'))) {
+        const show = () => {
+          if (owner.id === 'menu-value') document.getElementById('card')?.remove();
+          else document.body.dataset.cardVisits = String(Number(document.body.dataset.cardVisits) + 1);
+          let hint = document.getElementById('whole');
+          if (hint === null) { hint = document.createElement('div'); hint.id = 'whole'; hint.setAttribute('role', 'tooltip'); document.body.append(hint); }
+          hint.textContent = owner.textContent; owner.setAttribute('aria-describedby', hint.id);
+        };
+        owner.addEventListener('pointerover', show); owner.addEventListener('focus', show);
+      }
+      document.addEventListener('keydown', (event) => { if (event.key === 'Escape') document.getElementById('whole')?.remove(); });
+    });
+    expect((await auditPage(page, '[role="menu"],[data-inspection-card]')).faults.filter((fault) => fault.rule === 'cut-text')).toEqual([]);
+    expect(Number(await page.locator('body').getAttribute('data-card-visits'))).toBeGreaterThanOrEqual(2);
+    await expect(page.locator('#card')).toHaveCount(0);
+  });
+
+  test(`a disappearing clipped value reports a finding within its reveal budget in ${locale}`, async ({ page }) => {
+    const text = locale === 'en' ? 'The complete value that disappeared' : '已经消失的完整内容';
+    await page.setContent(`<style>body{background:white;color:black}.cut{display:block;width:80px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}</style><button id="owner" class="cut">${text}</button>`);
+    await page.mouse.move(200, 200);
+    await page.evaluate(() => document.addEventListener('pointermove', (event) => {
+      if (event.clientX === 0 && event.clientY === 0) document.getElementById('owner')?.remove();
+    }));
+    const started = Date.now();
+    const result = await auditPage(page);
+    expect(result.faults.filter((fault) => fault.rule === 'cut-text').map((fault) => fault.text)).toContain(text);
+    // Five reveal intervals leave driver/scheduling margin while rejecting a whole-test wait.
+    expect(Date.now() - started).toBeLessThan(10_000);
+  });
+}
+
+test('context-menu audits open a tab menu by keyboard without selecting the tab', async ({ page }) => {
+  await page.setContent('<style>body{background:white;color:black}</style><div role="tablist"><button id="tab" role="tab" aria-selected="true" aria-controls="panel" aria-haspopup="menu">Review</button></div><main id="panel" role="tabpanel" aria-labelledby="tab">Current work</main>');
+  await page.locator('#tab').evaluate((tab) => {
+    tab.setAttribute('data-selections', '0');
+    tab.addEventListener('click', () => { tab.setAttribute('data-selections', String(Number(tab.getAttribute('data-selections')) + 1)); });
+    tab.addEventListener('keydown', (event) => {
+      if (!(event instanceof KeyboardEvent) || !event.isTrusted || !event.shiftKey || event.key !== 'F10') return;
+      event.preventDefault();
+      const menu = document.createElement('div');
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('aria-label', 'Review actions');
+      menu.innerHTML = '<button role="menuitem">Inspect details</button>';
+      document.body.append(menu);
+      menu.querySelector('button')?.focus();
+    });
+    document.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape') return;
+      document.querySelector('[role="menu"]')?.remove();
+      tab.focus();
+    });
+  });
+  expect(await auditOpenMenus(page, ['#tab'])).toEqual([]);
+  await expect(page.locator('#tab')).toHaveAttribute('data-selections', '0');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.locator('#tab')).toBeFocused();
+});
+
+
+test('wrapping filter actions use the control line and keep their own icon centred', async ({ page }) => {
+  await page.setContent('<style>body{margin:0;font:14px/20px Arial}.row{display:flex;flex-wrap:wrap;align-items:flex-end;gap:12px}.field{display:flex;flex-direction:column;gap:4px;width:180px}.value{display:flex;align-items:center;justify-content:center;width:180px;height:28px;line-height:28px}.icon{display:flex;align-items:center;justify-content:center;flex:none;width:28px;height:28px}button{border:0;padding:0;background:transparent;color:black}svg{display:block;width:16px;height:16px}</style><div class="row"><div class="field"><label for="scope">Scope</label><button id="scope" class="value"><span>My storage</span></button></div><button class="icon" aria-label="Refresh"><svg></svg></button></div>');
+  for (const width of [260, 180]) {
+    await page.locator('.row').evaluate((row, size) => { row.style.width = `${size}px`; }, width);
+    const sameLine = await page.locator('.icon').evaluate((button) => (button as HTMLElement).offsetTop === document.querySelector<HTMLElement>('#scope')!.offsetTop);
+    expect(sameLine).toBe(width === 260);
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+    await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = 'translateY(1px)'; });
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Refresh']);
+    await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = ''; });
+  }
+});
+
+test('a wrapped header action does not borrow the previous action line or an outer heading', async ({ page }) => {
+  await page.setContent('<style>body{margin:0;font:14px/28px Arial}.outer{display:flex;flex-wrap:wrap;align-items:center}.row{display:flex;flex-wrap:wrap;align-items:center;gap:4px;width:180px}button{border:0;padding:0;background:transparent;color:black;height:28px;display:flex;align-items:center;justify-content:center}.caption{width:180px;flex:none}.icon{width:28px;flex:none}svg{display:block;width:16px;height:16px}</style><header class="outer"><h2>Current conversation</h2><div class="row"><button class="caption"><span>Thread · Off</span></button><button class="icon" aria-label="Conversation actions"><svg></svg></button></div></header>');
+  expect(await page.locator('.icon').evaluate((button) => (button as HTMLElement).offsetTop > document.querySelector<HTMLElement>('.caption')!.offsetTop)).toBe(true);
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+  await page.locator('.icon svg').evaluate((icon) => { icon.style.transform = 'translateY(1px)'; });
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Conversation actions']);
+});
+
+test('a wrapping row retains its first heading line and cannot hide displaced buttons', async ({ page }) => {
+  await page.setContent('<style>body{margin:0}.row{display:flex;flex-wrap:wrap;align-items:flex-start;gap:8px;width:200px}.words{font:16px/24px Arial;width:130px}button{position:relative;border:0;padding:0;background:transparent;width:28px;height:28px;display:flex;align-items:center;justify-content:center;flex:none}svg{display:block;width:16px;height:16px}</style><div class="row"><span class="words">First heading line and another line</span><button aria-label="Heading actions"><svg></svg></button></div>');
+  const origin = await page.locator('.row').evaluate((row) => {
+    const text = row.querySelector('.words')?.firstChild, icon = row.querySelector('svg');
+    if (text === undefined || text === null || icon === null) throw new Error('Missing first-line fixture.');
+    const range = document.createRange(); range.selectNodeContents(text);
+    const line = range.getClientRects()[0], box = icon.getBoundingClientRect();
+    if (line === undefined) throw new Error('Missing first heading line.');
+    return line.top + line.height / 2 - box.top - box.height / 2;
+  });
+  await page.locator('button').evaluate((button, offset) => { button.style.transform = `translateY(${offset + 0.5}px)`; }, origin);
+  expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults).toEqual([]);
+  for (const displacement of ['one pixel', 'transform', 'margin', 'relative position']) {
+    await page.locator('button').evaluate((button, setup) => {
+      button.style.transform = setup.kind === 'one pixel' ? `translateY(${setup.origin + 1}px)` : setup.kind === 'transform' ? 'translateY(120px)' : '';
+      button.style.marginTop = setup.kind === 'margin' ? '120px' : '';
+      button.style.top = setup.kind === 'relative position' ? '120px' : '';
+    }, { kind: displacement, origin });
+    expect((await page.evaluate(inspectLayout, { ...input, mode: 'icons' as const })).faults.map((fault) => fault.text)).toEqual(['Heading actions']);
+  }
 });

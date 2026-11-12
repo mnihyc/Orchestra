@@ -22,7 +22,7 @@ export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; 
   const { t, i18n } = useTranslation();
   const title = name ?? programNameIn(program, i18n.resolvedLanguage ?? i18n.language) ?? programNameIn(program.build, i18n.resolvedLanguage ?? i18n.language) ?? t('resources.harnessNameUnknown');
   return <div className="flex min-w-0 flex-col gap-1" data-program={program.kind}>
-    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm"><span>{title}</span><span className="min-w-0 wrap-anywhere font-mono">{program.version}</span>
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm"><span className="min-w-0 wrap-anywhere">{title} {program.version}</span>
       {program.build === null ? <span className="text-text-muted">{t('programVersions.unknownCheck')}</span> : <BuildStatus build={program.build} name={title} />}
     </div>
     {program.build !== null && <DisabledBuildFeatures build={program.build} name={title} />}
@@ -32,7 +32,7 @@ export function ProgramBuild({ program, name }: { program: RunningHarnessBuild; 
 export function EnvironmentPrograms({ id, generation, compact = false }: { id: string; generation?: number; compact?: boolean }) {
   const { t } = useTranslation();
   const programs = useQuery(environmentProgramsQuery(id, generation));
-  if (programs.isPending) return <SkeletonRows rows={2} />;
+  if (programs.isPending) return <SkeletonRows read={programs} rows={2} />;
   if (programs.isError) return <ErrorState compact error={programs.error} onRetry={() => void programs.refetch()} />;
   return <section className="flex min-w-0 flex-col gap-2" aria-label={t('programVersions.running')}>
     {!compact && <h3 className="text-sm font-medium text-text-muted">{t('programVersions.running')}</h3>}

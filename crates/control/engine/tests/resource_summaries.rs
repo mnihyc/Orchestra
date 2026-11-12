@@ -1,0 +1,806 @@
+//! Real native summary material, command IO, publication and normalized ledger; no external model.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "test assertions fail by panicking"
+)]
+mod common;
+mod shared;
+use common::{MODEL, World, eventually};
+use orch_api_contract::{
+    routes::Endpoint,
+    summaries::{SummaryRefresh, SummaryRefreshBody, SummaryTarget},
+    summary_sources,
+};
+use orch_authz::{Caller, CapturedOperation, Principal};
+use orch_db::queries::summaries as rows;
+use orch_engine::{operation_scope, summaries::resource};
+use orch_link_contract::commands::{
+    Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderCompleteResult,
+};
+use orch_types::{Id, Time, new_id};
+use serde_json::json;
+use shared::Places;
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
+
+async fn accept(world: &World, target: SummaryTarget) -> Id {
+    accept_as(world, target, world.ada).await
+}
+
+async fn accept_as(world: &World, target: SummaryTarget, issuer: Id) -> Id {
+    let mut tx = world.pool.begin().await.unwrap();
+    let caller = Caller::session(issuer).with_admin_mode(false);
+    let selected = resource::select(
+        &mut tx,
+        &caller,
+        target,
+        None,
+        None,
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    let plan = operation_scope::sources::bind_required(
+        SummaryRefresh::ROUTE,
+        &summary_sources::RESOURCE_REFRESH,
+        &selected.facts(),
+    )
+    .unwrap();
+    let principal = Principal::load(
+        &mut tx,
+        plan.admit(&caller, false).unwrap(),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    resource::require_model(
+        &mut tx,
+        &principal,
+        selected.material.identity.place(),
+        &selected.config,
+    )
+    .await
+    .unwrap();
+    let origin =
+        serde_json::to_value(CapturedOperation::capture(principal.caller()).unwrap()).unwrap();
+    let cache = rows::ensure(&mut tx, target, Some(issuer), world.clock.now())
+        .await
+        .unwrap()
+        .unwrap();
+    let arguments = serde_json::to_value(SummaryRefreshBody {
+        client_id: new_id(),
+        model: None,
+        range: None,
+    })
+    .unwrap();
+    let source = json!({"target":target,"range":selected.material.range,"snapshot":selected.material.snapshot,"policy":selected.policy.fingerprint});
+    let accepted = rows::enqueue(
+        &mut tx,
+        cache.id,
+        rows::Origin::Person {
+            issuer,
+            client_id: serde_json::from_value(arguments["client_id"].clone()).unwrap(),
+            accepted_operation: &origin,
+        },
+        &arguments,
+        &source,
+        world.clock.now(),
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let rows::Enqueued::New(request) = accepted else {
+        panic!("one new original act")
+    };
+    tx.commit().await.unwrap();
+    request.id
+}
+async fn state(world: &World, id: Id) -> String {
+    rows::request(&mut world.pool.acquire().await.unwrap(), id)
+        .await
+        .unwrap()
+        .unwrap()
+        .state
+}
+fn answer(text: &str) -> Result<CommandResult, CommandError> {
+    Ok(CommandResult::ProviderComplete(ProviderCompleteResult {
+        text: text.into(),
+        usage: orch_agent_contract::events::TokenUsage::from_parts(
+            orch_api_contract::threads::TokensReportedApart {
+                input: 1000,
+                output: 0,
+                ..Default::default()
+            },
+        ),
+        request_ref: Some("synthetic-resource-summary".into()),
+        timing: Default::default(),
+    }))
+}
+async fn chosen(world: &World) {
+    world
+        .set(
+            world.topic,
+            "auto.summarizer",
+            json!({"kind":"model","provider_id":world.provider,"model_name":MODEL}),
+        )
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn manual_document_refresh_uses_the_issuer_not_the_setting_writer_and_stops_at_their_weekly_cap()
+ {
+    let world = World::on_a_key("synthetic-resource-summary-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let setter = world.person("different-summary-setter").await;
+    sqlx::query("UPDATE settings SET updated_by=$2 WHERE node_id=$1 AND key='auto.summarizer'")
+        .bind(world.topic)
+        .bind(setter)
+        .execute(world.pool.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE provider_models SET parameters=parameters || jsonb_build_object('rate',$1::jsonb) WHERE provider_id=$2 AND model_name=$3")
+        .bind(json!({"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"2"})).bind(world.provider).bind(MODEL).execute(world.pool.pool()).await.unwrap();
+    sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,purposes,warn_percent,created_by) VALUES($1,$2,'members',$3,'each','credits','week',0.001,ARRAY['summary'],50,$4)")
+        .bind(new_id()).bind(world.project).bind(world.root).bind(world.ada).execute(world.pool.pool()).await.unwrap();
+    let document = world
+        .document_beside(
+            world.topic,
+            "Current plan",
+            &["The implementation is complete; review is next."],
+        )
+        .await;
+    let target = SummaryTarget::Document { id: document };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |command| {
+            let Command::ProviderComplete(request) = command else {
+                return Err(CommandError::new(ErrorCode::Internal, "not a completion"));
+            };
+            assert!(request.input.contains("review is next"));
+            observed.fetch_add(1, Ordering::SeqCst);
+            answer("The implementation is complete. Review is next.")
+        });
+    let first = accept(&world, target).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the original summary publishes", || async {
+        state(&world, first).await == "done"
+    })
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let cache = rows::get(
+        &mut world.pool.acquire().await.unwrap(),
+        target,
+        Some(world.ada),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(cache.text.unwrap().contains("Review is next"));
+    let ledger:(Option<Id>,String,i64)=sqlx::query_as("SELECT user_id,purpose,count(*) OVER() FROM usage_events WHERE request_ref='synthetic-resource-summary'").fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(ledger, (Some(world.ada), "summary".into(), 1));
+    let mut conn = world.pool.acquire().await.unwrap();
+    let authority = orch_db::queries::link::command_authority(&mut conn, first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        authority["kind"], "capability_service",
+        "the native refresh uses the common paid command guard"
+    );
+    assert_eq!(
+        authority.pointer("/authority/origin/attribution/person"),
+        Some(&json!(world.ada))
+    );
+    drop(conn);
+    for _ in 0..2 {
+        world
+            .engine()
+            .reconcile_paid_service_command(first)
+            .await
+            .unwrap();
+    }
+    let once: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM usage_events WHERE id=$1 AND purpose='summary'")
+            .bind(first)
+            .fetch_one(world.pool.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        once, 1,
+        "the common command-id completion path remains idempotent without a consumer ledger write"
+    );
+    let marker: (Option<Id>, serde_json::Value) = sqlx::query_as(
+        "SELECT viewer_id,source_refs FROM resource_summary_model_inputs WHERE request_id=$1",
+    )
+    .bind(first)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(marker, (Some(world.ada), json!([target])));
+    let second = accept(&world, target).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually(
+        "the issuer's exhausted cap refuses another request",
+        || async { state(&world, second).await == "failed" },
+    )
+    .await;
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second act never reaches model IO"
+    );
+    assert_eq!(
+        rows::get(
+            &mut world.pool.acquire().await.unwrap(),
+            target,
+            Some(world.ada)
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .text
+        .as_deref(),
+        Some("The implementation is complete. Review is next.")
+    );
+    let automatic = orch_engine::caps::OwnCapAsk {
+        place: world.topic,
+        provider: world.provider,
+        model: MODEL,
+        tier: None,
+        purpose: "summary",
+        person: None,
+    };
+    assert!(
+        world
+            .engine()
+            .room_for_own_use(&mut world.pool.acquire().await.unwrap(), &automatic)
+            .await
+            .unwrap(),
+        "the person's cap does not become the automatic writer's cap"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refresh_refused_by_a_new_cap_reaches_neither_the_paid_command_nor_the_ledger() {
+    let world = World::on_a_key("synthetic-capped-summary-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let doc = world
+        .document_beside(world.topic, "Capped source", &["This text is readable."])
+        .await;
+    let request = accept(&world, SummaryTarget::Document { id: doc }).await;
+    sqlx::query("INSERT INTO usage_caps(id,node_id,subject_kind,subject_id,split,meter,period,amount,purposes,warn_percent,created_by) VALUES($1,$2,'members',$3,'each','credits','week',0,ARRAY['summary'],50,$4)")
+        .bind(new_id()).bind(world.project).bind(world.root).bind(world.ada).execute(world.pool.pool()).await.unwrap();
+    let called = Arc::new(AtomicUsize::new(0));
+    let seen = called.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            answer("Must not be requested")
+        });
+    world.engine().summarize_resources().await.unwrap();
+    eventually(
+        "the new cap closes the accepted refresh before paid IO",
+        || async { !matches!(state(&world, request).await.as_str(), "queued" | "running") },
+    )
+    .await;
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM commands WHERE id=$1),(SELECT count(*) FROM usage_events WHERE id=$1)")
+        .bind(request).fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(counts, (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removing_the_actual_issuers_provider_use_after_acceptance_records_no_paid_command_or_usage()
+ {
+    use orch_db::queries::access::{self, NewEntry, PageKey};
+    let world = World::on_a_key("synthetic-revoked-summary-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let issuer = world.person("shared-summary-issuer").await;
+    let doc = world
+        .document_beside(
+            world.topic,
+            "Readable shared source",
+            &["This request needs the actual issuer's current Use."],
+        )
+        .await;
+    let grant = new_id();
+    let mut conn = world.pool.acquire().await.unwrap();
+    for (id, page, permission) in [
+        (
+            grant,
+            PageKey::new("provider", world.provider, "live"),
+            "provider.use",
+        ),
+        (new_id(), PageKey::new("document", doc, "live"), "doc.view"),
+    ] {
+        access::insert_entry(
+            &mut conn,
+            &NewEntry {
+                id,
+                page: &page,
+                profile: "any",
+                permission,
+                holder_kind: "user",
+                holder_id: Some(issuer),
+                holder_role: None,
+                options: &json!({}),
+                expires_at: None,
+                note: "summary deciding case",
+                source: "page",
+                created_by: Some(world.ada),
+                at: world.clock.now(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    orch_authz::epoch::bump(&mut conn).await.unwrap();
+    drop(conn);
+    let request = accept_as(&world, SummaryTarget::Document { id: doc }, issuer).await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    assert!(
+        access::remove_entry(&mut conn, grant, world.ada, world.clock.now())
+            .await
+            .unwrap()
+    );
+    orch_authz::epoch::bump(&mut conn).await.unwrap();
+    drop(conn);
+    let called = Arc::new(AtomicUsize::new(0));
+    let seen = called.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            seen.fetch_add(1, Ordering::SeqCst);
+            answer("Must not be requested")
+        });
+    world.engine().summarize_resources().await.unwrap();
+    eventually("current native Use closes the original refresh", || async {
+        !matches!(state(&world, request).await.as_str(), "queued" | "running")
+    })
+    .await;
+    assert_eq!(called.load(Ordering::SeqCst), 0);
+    let counts: (i64, i64) = sqlx::query_as("SELECT (SELECT count(*) FROM commands WHERE id=$1),(SELECT count(*) FROM usage_events WHERE id=$1)")
+        .bind(request).fetch_one(world.pool.pool()).await.unwrap();
+    assert_eq!(counts, (0, 0));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_document_changed_during_model_io_discards_only_the_answer_and_keeps_its_actual_usage() {
+    let world = World::on_a_key("synthetic-resource-source-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let document = world
+        .document_beside(
+            world.topic,
+            "Changing plan",
+            &["Original material before the request."],
+        )
+        .await;
+    let target = SummaryTarget::Document { id: document };
+    let entered = Arc::new(AtomicUsize::new(0));
+    let observed = entered.clone();
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = gate.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &*held;
+            let release = lock.lock().unwrap();
+            let (release, _) = wake
+                .wait_timeout_while(release, Duration::from_secs(10), |release| !*release)
+                .unwrap();
+            assert!(*release, "the fixture releases its native request");
+            answer("An answer about the original material.")
+        });
+    let request = accept(&world, target).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the actual native model request starts", || async {
+        entered.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    // A real document writer must complete while the model is still waiting: no source,
+    // policy, cache, request or transaction lock may span the external call.
+    let changed = tokio::time::timeout(
+        Duration::from_secs(5),
+        world.change_block(
+            document,
+            "Original material",
+            "Changed material after the request.",
+        ),
+    )
+    .await;
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+    changed.expect("native content editing does not wait for model IO");
+    eventually("the old answer is discarded", || async {
+        state(&world, request).await == "discarded"
+    })
+    .await;
+    assert_eq!(
+        rows::get(
+            &mut world.pool.acquire().await.unwrap(),
+            target,
+            Some(world.ada)
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .text,
+        None
+    );
+    let ledger: (Option<Id>, String) = sqlx::query_as(
+        "SELECT user_id,purpose FROM usage_events WHERE request_ref='synthetic-resource-summary'",
+    )
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(ledger, (Some(world.ada), "summary".into()));
+    world.engine().summarize_resources().await.unwrap();
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "a source change is no implicit paid retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_document_events_are_paid_by_the_setter_unattributed_and_keep_the_original_pacing()
+ {
+    let world = World::on_a_key("synthetic-auto-paragraph-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    world
+        .set(
+            world.topic,
+            "summary.targets",
+            json!({"document":{"automatic":true,"min_interval_secs":120}}),
+        )
+        .await;
+    let document = world
+        .document_beside(
+            world.topic,
+            "Automatic paragraph",
+            &["The first current source."],
+        )
+        .await;
+    let target = SummaryTarget::Document { id: document };
+    orch_db::queries::documents::describe(
+        &mut world.pool.acquire().await.unwrap(),
+        document,
+        "A deliberately written description",
+        &orch_documents::versions::Writer::User(world.ada),
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |command| {
+            let Command::ProviderComplete(request) = command else {
+                return Err(CommandError::new(ErrorCode::Internal, "not a completion"));
+            };
+            assert!(!request.input.contains("deliberately written description"));
+            observed.fetch_add(1, Ordering::SeqCst);
+            answer("The current source has been summarized.")
+        });
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the automatic source event publishes", || async {
+        rows::get(&mut world.pool.acquire().await.unwrap(), target, None)
+            .await
+            .unwrap()
+            .is_some_and(|row| row.text.is_some())
+    })
+    .await;
+    let cache = rows::get(&mut world.pool.acquire().await.unwrap(), target, None)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = rows::latest(&mut world.pool.acquire().await.unwrap(), cache.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.origin, "automatic");
+    assert_eq!(first.paying_user, Some(world.ada));
+    assert_eq!(first.requested_by, None);
+    assert_eq!(first.accepted_operation, None);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let issuer: Option<Id> = sqlx::query_scalar(
+        "SELECT user_id FROM usage_events WHERE request_ref='synthetic-resource-summary'",
+    )
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert_eq!(issuer, None);
+    world
+        .change_block(document, "first current source", "A second current source.")
+        .await;
+    world.engine().summarize_resources().await.unwrap();
+    let queued = rows::latest(&mut world.pool.acquire().await.unwrap(), cache.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(queued.id, first.id);
+    assert_eq!(queued.state, "queued");
+    assert_eq!(
+        queued.due_at,
+        first.created_at + chrono::Duration::seconds(120)
+    );
+    let captured = queued.accepted_source.clone();
+    world
+        .change_block(
+            document,
+            "second current source",
+            "A third current source while refresh is paced.",
+        )
+        .await;
+    world.engine().summarize_resources().await.unwrap();
+    let retained = rows::latest(&mut world.pool.acquire().await.unwrap(), cache.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.id, queued.id);
+    assert_eq!(retained.accepted_source, captured);
+    assert_eq!(retained.due_at, queued.due_at);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "pending events do not bypass the configured gap"
+    );
+    let events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_summary_events WHERE kind='document' AND target_id=$1",
+    )
+    .bind(document)
+    .fetch_one(world.pool.pool())
+    .await
+    .unwrap();
+    assert!(
+        events > 0,
+        "the newer source event is retained for after the original claim settles"
+    );
+    assert_eq!(
+        orch_db::queries::documents::get(&mut world.pool.acquire().await.unwrap(), document)
+            .await
+            .unwrap()
+            .unwrap()
+            .description,
+        "A deliberately written description"
+    );
+}
+
+async fn group(world: &World, name: Option<&str>) -> Id {
+    use orch_db::queries::chats;
+    let id = new_id();
+    let mut tx = world.pool.begin().await.unwrap();
+    chats::insert_chat_at(
+        &mut tx,
+        &chats::NewChat {
+            id,
+            kind: chats::KIND_GROUP,
+            org_id: world.root,
+            direct_key: None,
+            name,
+            created_by: world.ada,
+            at: world.clock.now(),
+        },
+        Some(world.topic),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let seq = chats::next_seq(&mut tx, id).await.unwrap().unwrap();
+    chats::add_member(
+        &mut tx,
+        &chats::NewMember {
+            chat_id: id,
+            user_id: world.ada,
+            added_by: Some(world.ada),
+            guest: false,
+            seq,
+            at: world.clock.now(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    id
+}
+async fn message(world: &World, chat: Id, text: &str) -> i64 {
+    use orch_db::queries::chats;
+    let mut tx = world.pool.begin().await.unwrap();
+    chats::lock(&mut tx, chat).await.unwrap().unwrap();
+    let seq = chats::next_seq(&mut tx, chat).await.unwrap().unwrap();
+    chats::insert_message(
+        &mut tx,
+        &chats::NewMessage {
+            id: new_id(),
+            chat_id: chat,
+            kind: chats::MESSAGE,
+            author_id: Some(world.ada),
+            author_thread_id: None,
+            author_agent: None,
+            content: &json!([{"type":"text","text":text}]),
+            reply_to_id: None,
+            mentions: &[],
+            mentions_all: false,
+            client_id: None,
+            search_text: None,
+            seq,
+            at: world.clock.now(),
+        },
+    )
+    .await
+    .unwrap();
+    chats::note_message(&mut tx, chat, seq, world.clock.now())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    seq
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_title_uses_full_chat_material_and_its_own_cache_without_renaming_or_advancing_unread_state()
+ {
+    use orch_db::queries::chats;
+    let world = World::on_a_key("synthetic-chat-title-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    let chat = group(&world, Some("Keep this explicit group name")).await;
+    let last = message(&world, chat, "Deployment checks are ready for review.").await;
+    chats::mark_read(
+        &mut world.pool.acquire().await.unwrap(),
+        world.ada,
+        chat,
+        last,
+    )
+    .await
+    .unwrap();
+    let title = SummaryTarget::ChatTitle { id: chat };
+    let caller = Caller::session(world.ada).with_admin_mode(false);
+    let mut conn = world.pool.acquire().await.unwrap();
+    let selected = resource::select(
+        &mut conn,
+        &caller,
+        title,
+        None,
+        None,
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.policy.limits().max_chars, 80);
+    assert_eq!(selected.material.range.unwrap().after, 0);
+    assert!(
+        !selected.material.activity.is_empty(),
+        "a title is not restricted to unread messages"
+    );
+    let catch_up = resource::select(
+        &mut conn,
+        &caller,
+        SummaryTarget::Chat { id: chat },
+        None,
+        None,
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    assert!(catch_up.material.activity.is_empty());
+    drop(conn);
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |command| {
+            let Command::ProviderComplete(request) = command else {
+                return Err(CommandError::new(ErrorCode::Internal, "not a completion"));
+            };
+            assert!(request.system.contains("Write a title"));
+            assert!(request.input.contains("Deployment checks"));
+            answer("Deployment checks")
+        });
+    let request = accept(&world, title).await;
+    world.engine().summarize_resources().await.unwrap();
+    eventually("the separate chat title publishes", || async {
+        state(&world, request).await == "done"
+    })
+    .await;
+    let cache = rows::get(
+        &mut world.pool.acquire().await.unwrap(),
+        title,
+        Some(world.ada),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(cache.text.as_deref(), Some("Deployment checks"));
+    assert!(
+        rows::get(
+            &mut world.pool.acquire().await.unwrap(),
+            SummaryTarget::Chat { id: chat },
+            Some(world.ada)
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        chats::chat(&mut world.pool.acquire().await.unwrap(), chat)
+            .await
+            .unwrap()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Keep this explicit group name")
+    );
+    assert_eq!(
+        chats::state(&mut world.pool.acquire().await.unwrap(), world.ada, chat)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_read_seq,
+        last
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn automatic_chat_titles_leave_explicit_group_names_and_the_model_budget_untouched() {
+    let world = World::on_a_key("synthetic-kept-chat-name-key").await;
+    world.engine().stop();
+    chosen(&world).await;
+    world
+        .set(
+            world.topic,
+            "summary.targets",
+            json!({"chat_title":{"automatic":true,"min_interval_secs":0}}),
+        )
+        .await;
+    let chat = group(&world, Some("Written group title")).await;
+    message(&world, chat, "An ordinary new message.").await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    world
+        .machine
+        .handler
+        .on(CommandKind::ProviderComplete, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            answer("Do not replace the written title")
+        });
+    world.engine().summarize_resources().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        rows::get(
+            &mut world.pool.acquire().await.unwrap(),
+            SummaryTarget::ChatTitle { id: chat },
+            None
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        orch_db::queries::chats::chat(&mut world.pool.acquire().await.unwrap(), chat)
+            .await
+            .unwrap()
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("Written group title")
+    );
+}

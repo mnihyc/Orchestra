@@ -163,6 +163,10 @@ pub(super) struct Rows {
 }
 
 impl Rows {
+    pub(super) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
+        self.mapper.set_image_outputs(directory);
+    }
+
     pub(super) fn new(
         path: &Path,
         settings: MapperSettings,

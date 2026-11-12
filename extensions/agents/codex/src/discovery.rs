@@ -12,7 +12,7 @@
 //! address or a secret. When one is imported its definition is read out, for the connector to keep on this
 //! machine and nowhere else: a program with its arguments and variables, or an address; the variables whose
 //! names say they hold a secret are kept apart as secrets. A server reached by address with headers of its
-//! own is imported by its address alone, since the definition has no place for the headers.
+//! own keeps those headers and environment references in that same private copy.
 //!
 //! A session is held to the servers it is given, and the harness would otherwise load those of the
 //! configuration it reads ([`servers_to_switch_off`]). The harness is asked what it loads for the session's
@@ -25,9 +25,9 @@ use std::path::Path;
 
 use orch_agent_contract::adapter::AdapterError;
 use orch_agent_contract::discovery::{
-    DEFAULT_STARTUP_TIMEOUT_SECS, McpDefinition, McpFound, McpImportRequest, McpRequires, McpScope,
-    McpServerSpec, McpTransport, McpWorkingDir, NativeSession, RECORD_FORMAT, RECORD_MAX_BYTES,
-    RecordedEntry, SessionRecord, record_lines, record_report,
+    DEFAULT_STARTUP_TIMEOUT_SECS, McpDefinition, McpFound, McpHttpCredentials, McpImportRequest,
+    McpRequires, McpScope, McpServerSpec, McpTransport, McpWorkingDir, NativeSession,
+    RECORD_FORMAT, RECORD_MAX_BYTES, RecordedEntry, SessionRecord, record_lines, record_report,
 };
 use orch_agent_contract::history::{Fidelity, ReportBuilder, SessionArchive};
 use orch_plugin_contract::Secret;
@@ -250,20 +250,24 @@ pub fn record_of(
     ctx: &crate::events::Context<'_>,
     turn_id: impl Fn(&str) -> orch_types::Id,
 ) -> (Option<String>, Option<String>, Vec<Vec<RecordedEntry>>) {
-    let native = named(thread, "id").unwrap_or_default();
-    let config = crate::events::MapperConfig {
-        // No thread of Orch holds the session yet: the entries name nothing of Orch's.
-        thread_id: orch_types::Id::nil(),
-        segment_id: orch_types::Id::nil(),
-        native_thread: native,
-        directory: named(thread, "cwd").unwrap_or_default(),
-    };
+    let config = record_config(thread);
     let entries = crate::events::record(turns, config, ctx, turn_id);
     (
         named(thread, "model"),
         named(thread, "reasoningEffort"),
         entries,
     )
+}
+
+fn record_config(thread: &Json) -> crate::events::MapperConfig {
+    let native = named(thread, "id").unwrap_or_default();
+    crate::events::MapperConfig {
+        // No thread of Orch holds the session yet: the entries name nothing of Orch's.
+        thread_id: orch_types::Id::nil(),
+        segment_id: orch_types::Id::nil(),
+        native_thread: native,
+        directory: named(thread, "cwd").unwrap_or_default(),
+    }
 }
 
 /// Reads what the harness recorded of a thread it holds, for a person who adopts it: what it ran with, from
@@ -277,6 +281,18 @@ pub async fn read_session(
     directory: &Path,
     ctx: &crate::events::Context<'_>,
     turn_id: impl Fn(&str) -> orch_types::Id,
+) -> Result<SessionRecord, AdapterError> {
+    read_session_with_images(rpc, native, write, directory, ctx, turn_id, None).await
+}
+
+pub(crate) async fn read_session_with_images(
+    rpc: &Rpc,
+    native: &str,
+    write: bool,
+    directory: &Path,
+    ctx: &crate::events::Context<'_>,
+    turn_id: impl Fn(&str) -> orch_types::Id,
+    images: Option<crate::viewed_images::Sources>,
 ) -> Result<SessionRecord, AdapterError> {
     let read = rpc
         .call(
@@ -310,7 +326,45 @@ pub async fn read_session(
         });
     }
     let turns = turns_of(rpc, native, "full").await?;
-    let (model, effort, entries) = record_of(&thread, &turns, ctx, turn_id);
+    let (model, effort, entries) = if let Some(mut images) = images {
+        images.observe(&thread);
+        let mut recorder =
+            crate::events::Recorder::new(record_config(&thread), true).with_native_web_results();
+        for page in turns.chunks(
+            usize::try_from(SESSIONS_PAGE)
+                .map_err(|error| AdapterError::Internal(error.to_string()))?,
+        ) {
+            let keys = crate::viewed_images::page_keys(native, page);
+            let web_keys = crate::viewed_images::page_web_keys(native, page);
+            let reported = crate::native_web::page_reported(native, page);
+            if !keys.is_empty() || !web_keys.is_empty() {
+                let mut cancelled =
+                    crate::native_history::CancelOnDrop(Some(images.cancellation()));
+                let outputs = ctx.outputs.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let values = images.prepare(&keys, &outputs);
+                    let web = images.prepare_web_inputs(&web_keys, &reported, &outputs);
+                    (images, values, web)
+                })
+                .await
+                .map_err(|error| {
+                    AdapterError::Internal(format!("the native result reader ended: {error}"))
+                })?;
+                cancelled.disarm();
+                images = prepared.0;
+                recorder.install_view_results(prepared.1);
+                recorder.install_web_results(prepared.2);
+            }
+            recorder.page(page, ctx, &turn_id);
+        }
+        (
+            named(&thread, "model"),
+            named(&thread, "reasoningEffort"),
+            recorder.finish(),
+        )
+    } else {
+        record_of(&thread, &turns, ctx, turn_id)
+    };
     let (text, kept, count, left_out) =
         record_lines(&entries, RECORD_MAX_BYTES).map_err(|error| {
             AdapterError::Internal(format!("the record could not be written: {error}"))
@@ -373,15 +427,19 @@ pub fn transport_of(table: &toml::Table) -> Option<McpTransport> {
     }
 }
 
-/// A digest of an entry that changes when the entry does.
+/// The same normalized definition digest kept by import and the local copy.
 #[must_use]
 pub fn digest_of(table: &toml::Table) -> String {
-    let canonical = serde_json::to_vec(&Json::from(
-        serde_json::to_value(table).unwrap_or(Json::Null),
-    ))
-    .unwrap_or_default();
-    let hash = Hash::of(&canonical).to_string();
-    hash.chars().take(16).collect()
+    match definition(table) {
+        Ok(definition) => definition.digest().to_string(),
+        Err(_) => Hash::of(
+            serde_json::to_value(table)
+                .unwrap_or(Json::Null)
+                .to_string()
+                .as_bytes(),
+        )
+        .to_string(),
+    }
 }
 
 /// The servers of one configuration file, by name; `directory` is the directory it belongs to.
@@ -390,16 +448,18 @@ pub fn found_in(config_text: &str, scope: McpScope, directory: Option<&str>) -> 
     servers_in(config_text)
         .into_iter()
         .filter_map(|(name, table)| {
+            let parsed = definition(&table).ok();
             Some(McpFound {
-                definition_fingerprint: definition(&table)
-                    .ok()
-                    .map(|definition| definition.definition_fingerprint()),
+                definition_fingerprint: parsed.as_ref().map(McpDefinition::definition_fingerprint),
                 name,
                 source: KIND.to_owned(),
                 scope,
                 directory: directory.map(str::to_owned),
                 transport: transport_of(&table)?,
-                digest: digest_of(&table),
+                digest: parsed
+                    .as_ref()
+                    .map(|definition| definition.digest().to_string())
+                    .unwrap_or_else(|| digest_of(&table)),
             })
         })
         .collect()
@@ -501,14 +561,23 @@ fn project_entries(directory: &str, cwd: &str) -> BTreeMap<String, Json> {
 
 /// The servers a session must switch off, each as the entry that does so: those the harness says it loads
 /// (`config/read`, once for each directory of the session, or once for no directory in particular when the
-/// session's tools run elsewhere and `place` is `None`) and, with `project`, those the project configurations of
-/// the session's directories name, whether or not the harness will read them. A configuration of the workspace's
-/// own that the people who manage its environment trusted keeps its servers (`project` false).
+/// session's tools run elsewhere and `place` is `None`) and those the project configurations of the
+/// session's directories name, whether or not the harness will read them. Workspace configuration trust
+/// admits its other settings; it does not import or enable its tool servers.
 pub async fn servers_to_switch_off(
     rpc: &Rpc,
     place: Option<(&str, &str)>,
-    project: bool,
 ) -> Result<BTreeMap<String, Json>, AdapterError> {
+    session_configuration(rpc, place)
+        .await
+        .map(|(servers, _)| servers)
+}
+
+/// Read the same effective configuration once for server isolation and managed-launch observations.
+pub(crate) async fn session_configuration(
+    rpc: &Rpc,
+    place: Option<(&str, &str)>,
+) -> Result<(BTreeMap<String, Json>, Vec<String>), AdapterError> {
     let mut looks: Vec<Json> = Vec::new();
     for directory in place.iter().flat_map(|(directory, cwd)| [*cwd, *directory]) {
         let look = json!({ "includeLayers": false, "cwd": directory });
@@ -520,21 +589,27 @@ pub async fn servers_to_switch_off(
         looks.push(json!({ "includeLayers": false }));
     }
     let mut off = BTreeMap::new();
+    let mut mismatches = Vec::new();
     for look in looks {
         let read = rpc
             .call("config/read", look)
             .await
             .map_err(|error| AdapterError::HarnessError(remote_text(&error)))?;
+        for key in crate::process::managed_pin_mismatches(&read["config"]) {
+            if !mismatches.contains(&key) {
+                mismatches.push(key);
+            }
+        }
         for (name, entry) in switch_off_entries(&read) {
             off.entry(name).or_insert(entry);
         }
     }
-    if let Some((directory, cwd)) = place.filter(|_| project) {
+    if let Some((directory, cwd)) = place {
         for (name, entry) in project_entries(directory, cwd) {
             off.entry(name).or_insert(entry);
         }
     }
-    Ok(off)
+    Ok((off, mismatches))
 }
 
 fn looks_secret(name: &str) -> bool {
@@ -600,7 +675,39 @@ pub fn definition(table: &toml::Table) -> Result<McpDefinition, AdapterError> {
         })
     };
     let working_dir = McpWorkingDir::Workspace;
+    let strings = |key: &str| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_table)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        value.as_str().map(|value| (name.clone(), value.to_owned()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default()
+    };
+    let headers = strings("http_headers")
+        .into_iter()
+        .map(|(name, value)| (name, Secret::new(value)))
+        .collect::<BTreeMap<_, _>>();
+    let env_headers = strings("env_http_headers");
+    let bearer_token_env_var = table
+        .get("bearer_token_env_var")
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned);
+    let http_credentials = (transport == McpTransport::Http
+        && (!headers.is_empty() || !env_headers.is_empty() || bearer_token_env_var.is_some()))
+    .then_some(McpHttpCredentials {
+        headers,
+        env_headers,
+        bearer_token_env_var,
+        ..Default::default()
+    });
     Ok(McpDefinition {
+        http_credentials,
         spec: McpServerSpec {
             transport,
             command: (transport == McpTransport::Stdio)
@@ -722,7 +829,49 @@ args = ["no program"]
         };
         assert_eq!(digest(&one), digest(&same));
         assert_ne!(digest(&one), digest(&changed));
-        assert_eq!(digest(&one).len(), 16);
+        assert_eq!(digest(&one).len(), 64);
+    }
+
+    #[test]
+    fn native_configuration_discovery_and_the_imported_copy_share_the_same_digest() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(CONFIG_FILE), CONFIG).unwrap();
+        for found in found(Some(home.path()), &[]) {
+            let kept = read_definition(
+                Some(home.path()),
+                &McpImportRequest {
+                    server_id: orch_types::new_id(),
+                    source: KIND.to_owned(),
+                    scope: found.scope,
+                    name: found.name.clone(),
+                    directory: found.directory.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(found.digest, kept.imported(None).digest);
+            assert_eq!(
+                found.definition_fingerprint,
+                Some(kept.definition_fingerprint())
+            );
+        }
+        let before = found(Some(home.path()), &[]);
+        std::fs::write(
+            home.path().join(CONFIG_FILE),
+            CONFIG.replace("ghp_secret_value", "different_private_token"),
+        )
+        .unwrap();
+        let after = found(Some(home.path()), &[]);
+        let github = |values: &[McpFound]| {
+            values
+                .iter()
+                .find(|server| server.name == "github")
+                .unwrap()
+                .digest
+                .clone()
+        };
+        assert_ne!(github(&before), github(&after));
+        let public = serde_json::to_string(&after).unwrap();
+        assert!(!public.contains("different_private_token"));
     }
 
     #[test]
@@ -773,6 +922,14 @@ args = ["no program"]
             Some("https://docs.example.test/mcp")
         );
         assert!(read.spec.command.is_none());
+        assert_eq!(
+            read.http_credentials
+                .as_ref()
+                .unwrap()
+                .bearer_token_env_var
+                .as_deref(),
+            Some("DOCS_TOKEN")
+        );
         assert_eq!(read.spec.startup_timeout_secs, DEFAULT_STARTUP_TIMEOUT_SECS);
         let broken = servers_in(CONFIG)
             .into_iter()
@@ -780,6 +937,68 @@ args = ["no program"]
             .unwrap()
             .1;
         assert!(definition(&broken).is_err());
+    }
+
+    #[test]
+    fn imported_http_credentials_keep_headers_and_variable_names_in_the_private_copy() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(CONFIG_FILE),
+            r#"
+[mcp_servers.private_api]
+url = "https://api.example.test/mcp"
+bearer_token_env_var = "PRIVATE_API_TOKEN"
+http_headers = { "X-Api-Key" = "private-header-value" }
+env_http_headers = { "X-Workspace" = "PRIVATE_WORKSPACE" }
+"#,
+        )
+        .unwrap();
+        let found = found(Some(home.path()), &[]).pop().unwrap();
+        let definition = read_definition(
+            Some(home.path()),
+            &McpImportRequest {
+                server_id: orch_types::new_id(),
+                source: KIND.to_owned(),
+                scope: found.scope,
+                name: found.name.clone(),
+                directory: found.directory.clone(),
+            },
+        )
+        .unwrap();
+        let kept: McpDefinition =
+            serde_json::from_slice(&serde_json::to_vec(&definition).unwrap()).unwrap();
+        let credentials = kept.http_credentials.as_ref().unwrap();
+        assert_eq!(
+            credentials.headers["X-Api-Key"].expose(),
+            "private-header-value"
+        );
+        assert_eq!(credentials.env_headers["X-Workspace"], "PRIVATE_WORKSPACE");
+        assert_eq!(
+            credentials.bearer_token_env_var.as_deref(),
+            Some("PRIVATE_API_TOKEN")
+        );
+        assert_eq!(found.digest, kept.imported(None).digest);
+        assert_eq!(
+            found.definition_fingerprint,
+            Some(kept.definition_fingerprint())
+        );
+        assert_eq!(kept.check(), Ok(()));
+        let public = serde_json::to_string(&(found, kept.imported(None), &kept.spec)).unwrap();
+        assert!(!public.contains("private-header-value"));
+        assert!(!public.contains("PRIVATE_API_TOKEN"));
+        assert!(!format!("{kept:?}").contains("private-header-value"));
+        let mut changed = kept.clone();
+        changed
+            .http_credentials
+            .as_mut()
+            .unwrap()
+            .headers
+            .insert("X-Api-Key".into(), Secret::new("replacement-header-value"));
+        assert_ne!(changed.digest(), kept.digest());
+        assert_eq!(
+            changed.definition_fingerprint(),
+            kept.definition_fingerprint()
+        );
     }
 
     #[test]

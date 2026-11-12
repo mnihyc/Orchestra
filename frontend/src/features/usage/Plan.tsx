@@ -1,18 +1,21 @@
-/** The provider's plan, with one card per window and one shared choice between the current window and history. */
+/** One provider usage panel: current source facts and a shared subscription or reported-credit history. */
 import { useEffect,useRef,useState } from 'react';
 import { useQuery,useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { PLAN_PAGE_SIZE,planUsageQuery } from '@/api/planUsage';
+import { PLAN_PAGE_SIZE,creditUsageQuery,planUsageQuery } from '@/api/planUsage';
 import type { PlanProvider } from '@/features/resources/providers/plan';
 import { observedAt, privateProvider,planSectionId } from '@/features/resources/providers/plan';
-import { detailState } from '@/features/resources/providers/details';
+import { ProviderUsageSummary } from '@/features/resources/providers/ProviderUsageCard';
+import { useProviderRefresh } from '@/features/resources/providers/PlanPanel';
+import { RefreshCw } from 'lucide-react';
+import { creditHistoryVisible,detailState,unavailableReason } from '@/features/resources/providers/details';
 import { auditEntryAnchor } from '@/features/trace/params';
 import type { ProviderPlanSeries, UsageBucket, UsageWindow } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber, formatPercent } from '@/lib/format';
 import { DAY_MS, formatSpan, formatTimeOfDay, useNow } from '@/lib/time';
 import { boxClasses, Section } from '@/shell/Page';
-import { ErrorState } from '@/ui/ErrorState';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { HelpHint } from '@/ui/HelpHint';
 import { useHelpOpener } from '@/features/help/open';
 import { SegmentedControl } from '@/ui/SegmentedControl';
@@ -21,6 +24,7 @@ import { Skeleton } from '@/ui/Skeleton';
 import { Button } from '@/ui/Button';
 import { ForecastLine } from './ForecastLine';
 import { PlanChart } from './PlanChart';
+import { CreditChart,creditGroups } from './CreditChart';
 import { bucketAsked, bucketsFor, defaultBucket, type Span, type UsageSearch } from './search';
 
 /** Wire timestamps cover a millisecond, including the database's finer precision within it. */
@@ -30,6 +34,8 @@ export interface PlanProps {
   provider:PlanProvider;
   span:Span;
   mode:'current' | 'history';
+  metric?:'subscription' | 'credits';
+  onMetric?:(metric:'subscription' | 'credits')=>void;
   bucket:UsageSearch['plan_bucket'];
   onMode:(mode:'current' | 'history')=>void;
   onBucket:(bucket:NonNullable<UsageSearch['plan_bucket']>)=>void;
@@ -45,32 +51,75 @@ export function usePlanUsage(provider:PlanProvider | undefined,span:Span,bucket:
   return {offered,chosen,resolved,allowed,query};
 }
 
-export function Plan(props:PlanProps) {
-  return <PlanPage key={JSON.stringify([props.provider.id,props.provider.facts_at,props.span.from,props.span.to,props.bucket])} {...props} />;
+/** A source declaration or an earlier real observation keeps a metric available; unsupported facts do not. */
+export function providerMetrics(provider:PlanProvider):('subscription' | 'credits')[] {
+  if(privateProvider(provider))return [];
+  return [...(detailState(provider,'windows')==='unsupported' ? [] : ['subscription' as const]),...(creditHistoryVisible(provider) ? ['credits' as const] : [])];
 }
 
-function PlanPage({provider,span,mode,bucket,onMode,onBucket}:PlanProps) {
+export function selectedProviderMetric(provider:PlanProvider,metric:'subscription' | 'credits' | undefined):'subscription' | 'credits' {
+  const available=providerMetrics(provider);
+  return metric!==undefined && available.includes(metric) ? metric : available[0] ?? 'subscription';
+}
+
+export function useCreditUsage(provider:PlanProvider | undefined,span:Span,bucket:UsageSearch['plan_bucket'],enabled=true,cursor?:string) {
+  const offered=bucketsFor(span.days);
+  const chosen:NonNullable<UsageSearch['plan_bucket']>=bucket!==undefined && bucket!=='auto' && offered.includes(bucket) ? bucket : 'auto';
+  const resolved=bucketAsked({bucket:chosen},span.days) ?? defaultBucket(span.days);
+  const allowed=enabled && provider!==undefined && providerMetrics(provider).includes('credits');
+  const query=useQuery({...creditUsageQuery(provider?.id ?? '',span.from,span.to,resolved,provider?.facts_at ?? null,cursor),enabled:allowed});
+  return {offered,chosen,resolved,allowed,query};
+}
+
+export function Plan(props:PlanProps) {
+  const refresh=useProviderRefresh(props.provider);
+  const [ownMetric,setOwnMetric]=useState<'subscription' | 'credits'>('subscription');
+  const metric=selectedProviderMetric(props.provider,props.metric ?? ownMetric);
+  return <PlanPage key={JSON.stringify([props.provider.id,props.provider.facts_at,props.span.from,props.span.to,props.bucket,metric])} {...props} metric={metric} onMetric={props.onMetric ?? setOwnMetric} refresh={refresh} />;
+}
+
+function PlanPage({provider,span,mode,metric='subscription',bucket,onMode,onMetric,onBucket,refresh}:PlanProps & {refresh:ReturnType<typeof useProviderRefresh>}) {
   const { t } = useTranslation();
   const openHelp=useHelpOpener();
   const client=useQueryClient();
   const [pages,setPages]=useState<(string | undefined)[]>([undefined]);
-  const {allowed,offered,chosen,resolved,query}=usePlanUsage(provider,span,bucket,true,pages.at(-1));
+  const subscription=usePlanUsage(provider,span,bucket,metric==='subscription',pages.at(-1));
+  const credits=useCreditUsage(provider,span,bucket,metric==='credits',pages.at(-1));
+  const {offered,chosen,resolved,query}=metric==='credits' ? credits : subscription;
+  const available=providerMetrics(provider);
   const retry=()=>{
     if(pages.length===1){void query.refetch();return;}
     // An expired snapshot must read the first page again, even while its source clock is cached.
-    void client.invalidateQueries({queryKey:planUsageQuery(provider.id,span.from,span.to,resolved,provider.facts_at ?? null).queryKey,exact:true});
+    const options=(metric==='credits' ? creditUsageQuery : planUsageQuery)(provider.id,span.from,span.to,resolved,provider.facts_at ?? null);
+    void client.invalidateQueries({queryKey:options.queryKey,exact:true});
     void client.invalidateQueries({queryKey:['provider',provider.id]});
     setPages([undefined]);
   };
-  if(!allowed) return null;
+  if (privateProvider(provider)) return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')}><p className="text-sm text-text-muted" data-provider-usage-state="private">{t('providerCredits.unavailableHere')}</p></Section>;
+  if (!(['windows','balances','spend','extra_usage'] as const).some((member)=>detailState(provider,member)!=='unsupported')) {
+    const needsAdminKey = (['windows','balances','spend','extra_usage'] as const).some((member)=>unavailableReason(provider,member)==='needs_admin_key');
+    return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')}><p className="text-sm text-text-muted" data-provider-usage-state="unsupported">{t(needsAdminKey ? 'providerSources.needsAdminKey' : 'providerCredits.historyUnsupported')}</p></Section>;
+  }
   const known=new Map(provider.facts.windows.map((window)=>[window.id,window]));
-  const windows=query.data===undefined ? provider.facts.windows.filter((window)=>Number.isFinite(window.used_percent)).toSorted((one,other)=>Number(other.is_active===true)-Number(one.is_active===true) || (one.duration_minutes ?? Infinity)-(other.duration_minutes ?? Infinity)).slice(0,PLAN_PAGE_SIZE) : query.data.items.flatMap((series)=>{const window=known.get(series.window_id);return window===undefined ? [] : [window];});
-  return <Section id={planSectionId(provider.id)} title={<span className="inline-flex items-center gap-2">{t('planUsage.title')}<HelpHint term={t('planUsage.forecast')} what={t('planUsage.hint')} guide={{article:'settings-and-usage',heading:'plan-windows-and-forecasts'}} more={{label:t('planUsage.help'),onOpen:()=>openHelp('settings-and-usage','plan-windows-and-forecasts')}} /></span>} className="@container" action={<>
-    <SegmentedControl size="sm" label={t('planUsage.mode')} value={mode} onValueChange={onMode} segments={[{value:'current',name:t('planUsage.current')},{value:'history',name:t('planUsage.history')}]} />
-    {mode==='history' && <Select size="sm" label={t('usage.chart.per')} value={chosen} onValueChange={onBucket} options={[{value:'auto' as const,name:t('usagePerf.choices.buckets.auto.name'),description:t('usagePerf.choices.buckets.auto.description')},...offered.map((value)=>({value,name:t(`usagePerf.choices.buckets.${value}.name`),description:t(`usagePerf.choices.buckets.${value}.description`)}))]} />}
+  const windows=subscription.query.data===undefined ? provider.facts.windows.filter((window)=>Number.isFinite(window.used_percent)).toSorted((one,other)=>Number(other.is_active===true)-Number(one.is_active===true) || (one.duration_minutes ?? Infinity)-(other.duration_minutes ?? Infinity)).slice(0,PLAN_PAGE_SIZE) : subscription.query.data.items.flatMap((series)=>{const window=known.get(series.window_id);return window===undefined ? [] : [window];});
+  return <Section id={planSectionId(provider.id)} title={t('providerCredits.panel')} className="@container" action={<>
+    {available.length>1 && <SegmentedControl size="sm" label={t('providerCredits.metric')} value={metric} onValueChange={(value)=>onMetric?.(value)} segments={available.map((value)=>({value,name:t(value==='credits' ? 'providerCredits.credits' : 'providerCredits.subscription')}))} />}
+    <Button size="sm" icon={<RefreshCw aria-hidden />} pending={refresh.isPending} onClick={()=>refresh.mutate()}>{t(refresh.isPending ? 'providerPlan.reading' : 'providers.overview.refresh')}</Button>
   </>}>
-    {query.isError ? <ErrorState compact error={query.error} onRetry={retry} action={pages.length>1 ? <Button size="sm" onClick={retry}>{t('common.tryAgain')}</Button> : undefined} /> : <div className="grid min-w-0 auto-rows-fr grid-cols-1 gap-4 @min-[640px]:grid-cols-2">{windows.map((window)=><PlanCard key={window.id} provider={provider} window={window} series={query.data?.items.find((series)=>series.window_id===window.id)} loading={query.isPending} mode={mode} span={span} bucket={resolved} />)}</div>}
-    {(pages.length>1 || query.data?.next_cursor!==null && query.data?.next_cursor!==undefined) && <div className="flex justify-end gap-2 pt-2"><Button size="sm" variant="ghost" disabled={pages.length===1 || query.isFetching} onClick={()=>setPages((before)=>before.slice(0,-1))}>{t('planUsage.previousWindows')}</Button><Button size="sm" disabled={query.data?.next_cursor===null || query.data?.next_cursor===undefined || query.isFetching} onClick={()=>{const next=query.data?.next_cursor;if(next!==null && next!==undefined)setPages((before)=>[...before,next]);}}>{t('planUsage.nextWindows')}</Button></div>}
+    <ProviderUsageSummary provider={provider} windows={windows} />
+    {refresh.error!==null && <ErrorAlert error={refresh.error} />}
+    {available.length>0 && <><div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+      <h3 className="text-sm font-medium text-text">{t(metric==='credits' ? 'providerCredits.history' : 'planUsage.title')}</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        {metric==='subscription' && <><HelpHint term={t('planUsage.forecast')} what={t('planUsage.hint')} guide={{article:'settings-and-usage',heading:'plan-windows-and-forecasts'}} more={{label:t('planUsage.help'),onOpen:()=>openHelp('settings-and-usage','plan-windows-and-forecasts')}} /><SegmentedControl size="sm" label={t('planUsage.mode')} value={mode} onValueChange={onMode} segments={[{value:'current',name:t('planUsage.current')},{value:'history',name:t('planUsage.history')}]} /></>}
+        {(metric==='credits' || mode==='history') && <Select size="sm" label={t('usage.chart.per')} value={chosen} onValueChange={onBucket} options={[{value:'auto' as const,name:t('usagePerf.choices.buckets.auto.name'),description:t('usagePerf.choices.buckets.auto.description')},...offered.map((value)=>({value,name:t(`usagePerf.choices.buckets.${value}.name`),description:t(`usagePerf.choices.buckets.${value}.description`)}))]} />}
+      </div>
+    </div>
+    {query.isError ? <ErrorState compact error={query.error} onRetry={retry} action={pages.length>1 ? <Button size="sm" onClick={retry}>{t('common.tryAgain')}</Button> : undefined} /> : metric==='credits' ? credits.query.isPending ? <Skeleton className="h-40 w-full rounded" /> : <div className="flex min-w-0 flex-col gap-4" data-provider-history="credits">
+      <p className="text-sm text-text-muted">{t('providerCredits.observationsOnly')}</p>
+      {credits.query.data?.items.length===0 ? <p className="text-sm text-text-muted">{t('planUsage.noReadings')}</p> : creditGroups(credits.query.data?.items ?? []).map((group)=><CreditChart key={group[0]?.group_id} series={group} from={Date.parse(`${span.from}T00:00:00Z`)} to={Date.parse(`${span.to}T00:00:00Z`)+DAY_MS} />)}
+    </div> : !subscription.allowed ? <p className="text-sm text-text-muted">{t(detailState(provider,'windows')==='not_read_yet' ? 'providerDetails.notReadOnce' : 'providerDetails.empty.windows')}</p> : <div className="grid min-w-0 auto-rows-fr grid-cols-1 gap-4 @min-[640px]:grid-cols-2" data-provider-history="subscription">{windows.map((window)=><PlanCard key={window.id} provider={provider} window={window} series={subscription.query.data?.items.find((series)=>series.window_id===window.id)} loading={subscription.query.isPending} mode={mode} span={span} bucket={resolved} />)}</div>}
+    {(pages.length>1 || query.data?.next_cursor!==null && query.data?.next_cursor!==undefined) && <div className="flex justify-end gap-2 pt-2"><Button size="sm" variant="ghost" disabled={pages.length===1 || query.isFetching} onClick={()=>setPages((before)=>before.slice(0,-1))}>{t(metric==='credits' ? 'providerCredits.previous' : 'planUsage.previousWindows')}</Button><Button size="sm" disabled={query.data?.next_cursor===null || query.data?.next_cursor===undefined || query.isFetching} onClick={()=>{const next=query.data?.next_cursor;if(next!==null && next!==undefined)setPages((before)=>[...before,next]);}}>{t(metric==='credits' ? 'providerCredits.next' : 'planUsage.nextWindows')}</Button></div>}</>}
   </Section>;
 }
 

@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 
 import { humanize, phrase, readDescriptor, versionPin } from '@/features/resources/agents/descriptor';
 import { declaredShare, usedShare } from '@/features/resources/hosts/words';
-import { allowedRoots, formatRate, readMachineFacts, registrableHarnesses } from '@/features/resources/machines/facts';
+import { allowedRoots, formatRate, machineLinkWords, readMachineFacts, registrableHarnesses } from '@/features/resources/machines/facts';
+import { i18n, setLocale } from '@/i18n';
 import { commandFor, guessOs } from '@/features/resources/machines/Enrollment';
 import { commandValue, policyCommand } from '@/features/resources/machines/Policy';
 import { draftOf, endpointFault, upstreamOf } from '@/features/resources/providers/Endpoints';
@@ -48,10 +49,25 @@ describe('the facts a connector reports of its machine', () => {
     expect(facts.cpus).toBe(8);
     expect(facts.memoryBytes).toBeNull();
     expect(facts.harnesses).toEqual([{ kind: 'codex', path: '/usr/bin/codex', version: '0.162.1', daemon: true }]);
-    // A link is something only when all three of its figures are there.
-    expect(facts.link).toBeNull();
+    expect(facts.link).toEqual({ upBps: 1_000_000, downBps: 5_000_000, roundTripMs: null });
     expect(allowedRoots(facts)).toEqual(['/home/ada/work']);
     expect(readMachineFacts(null).harnesses).toEqual([]);
+  });
+
+  it.each(['en', 'zh-CN'] as const)('keeps unknown, partial and measured-zero link facts distinct in %s', async (locale) => {
+    await setLocale(locale);
+    try {
+      const unknown = readMachineFacts({ rates: { up_bps: null, down_bps: null, round_trip_ms: null } });
+      expect(unknown.link).toBeNull();
+      expect(machineLinkWords(unknown.link, i18n.t, locale)).toBe('–');
+      const partial = readMachineFacts({ rates: { round_trip_ms: 16, up_bps: null, down_bps: null } });
+      expect(partial.link).toEqual({ upBps: null, downBps: null, roundTripMs: 16 });
+      const words = machineLinkWords(partial.link, i18n.t, locale);
+      expect(words).toBe(i18n.t('machines.overview.linkPartial', { trip: i18n.t('machines.overview.linkTrip', { value: '16' }), up: '–', down: '–' }));
+      expect(words).not.toContain('0 bit/s');
+      const measured = readMachineFacts({ rates: { round_trip_ms: 0, up_bps: 0, down_bps: 0 } });
+      expect(machineLinkWords(measured.link, i18n.t, locale)).toBe(i18n.t('machines.overview.linkValue', { trip: '0', up: '0 bit/s', down: '0 bit/s' }));
+    } finally { await setLocale('en'); }
   });
 
   it('say which harnesses a profile can be made for: those found there that its connector has an adapter for', () => {
@@ -150,6 +166,22 @@ describe('the endpoints of a provider', () => {
       { name: 'labels', label: 'Labels', type: 'map', required: false },
     ],
   } as unknown as ProviderSetupProtocol;
+
+  it('preserves nested vendor JSON and leaves absent optional request defaults absent', () => {
+    const declared: ProviderSetupProtocol = {
+      ...protocol,
+      endpoint_options: [...protocol.endpoint_options, { name: 'params', label: 'Request defaults', type: 'json', required: false, default: {}, choices: null, help: null, max_bytes: null }],
+    };
+    const params = { extra_body: { google: { thinking_config: { include_thoughts: true }, levels: [1, null, false] } } };
+    const saved = { protocol: 'openai', base_url: 'https://api.example.test/v1', options: { params } };
+    const draft = draftOf(saved, declared);
+    expect(JSON.parse(draft.options.params as string)).toEqual(params);
+    expect(upstreamOf(draft, declared).upstream).toEqual(saved);
+    draft.options.params = JSON.stringify({ ...params, future_vendor_option: { enabled: false } });
+    expect(upstreamOf(draft, declared).upstream.options).toEqual({ params: { ...params, future_vendor_option: { enabled: false } } });
+    const empty = draftOf({ protocol: 'openai', base_url: saved.base_url, options: {} }, declared);
+    expect(upstreamOf(empty, declared).upstream.options).toEqual({});
+  });
 
   it('keep a secret header under its name and send its value beside the endpoint, never in it', () => {
     const draft = draftOf({ protocol: 'openai', base_url: 'https://api.example.test/v1', options: { organization: 'acme', headers: ['x-key'], labels: { team: 'ml' } } }, protocol);

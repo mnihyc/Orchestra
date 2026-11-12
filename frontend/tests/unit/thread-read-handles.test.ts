@@ -194,6 +194,18 @@ it('modern HTTP identity refusal retires just that owner while the active route 
 });
 
 
+it('a change the person made to the thread row (a bell, a star) reaches every held read of that thread, and no other thread', async () => {
+  setup(); serve(); await open(route,null); await open(left,B);
+  const level = (target: typeof route) => threadViewOf(target).thread?.access.subscription ?? null;
+  expect(level(route)).toBeNull(); expect(level(left)).toBeNull();
+  threadWriter.patch(T,(before) => ({ ...before,access: { ...before.access,subscription: 'all',effective_subscription: 'all' } }));
+  // The tab's own read is kept apart from the plain one, and shows the person's choice as well.
+  expect(level(route)).toBe('all'); expect(level(left)).toBe('all');
+  const other = threadViewOf(OTHER);
+  threadWriter.patch(OTHER,(before) => ({ ...before,access: { ...before.access,subscription: 'off' } }));
+  expect(threadViewOf(OTHER)).toBe(other); expect(level(left)).toBe('all');
+});
+
 it('native thread identity and local owner identity are checked separately before row publication', async () => {
   setup(); serve(); await open(route,null); await open(left,B);
   const before = threadViewOf(left), routeRows = stampThreadRows(snapshot(),captureThreadRead(route));

@@ -36,6 +36,26 @@ pub fn declared(facts_source: Option<&SourceDescriptor>, keeper: &[FactMember]) 
     members
 }
 
+/// Applies the source's credential declaration to member states using secret names, never secret values.
+/// A removed credential stops offering its dependent members even if a previous observation is cached.
+pub fn with_credentials(
+    mut states: std::collections::BTreeMap<FactMember, MemberState>,
+    descriptor: Option<&SourceDescriptor>,
+    secrets: &[String],
+) -> std::collections::BTreeMap<FactMember, MemberState> {
+    if let Some(descriptor) = descriptor {
+        for member in descriptor.unavailable_members(secrets) {
+            states.insert(
+                member,
+                MemberState::UnsupportedBecause {
+                    reason: crate::facts::FactUnavailableReason::NeedsAdminKey,
+                },
+            );
+        }
+    }
+    states
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,6 +64,48 @@ mod tests {
 
     fn told_at() -> orch_types::Time {
         "2026-10-15T10:00:00.000Z".parse().unwrap()
+    }
+
+    #[test]
+    fn missing_administrative_credentials_are_not_offered_even_after_an_earlier_read() {
+        let mut descriptor = SourceDescriptor::new("acme", "Acme", "Reads this account.");
+        descriptor.facts = Some(SourceDescriptorFacts {
+            reports: vec![FactMember::Spend, FactMember::Identity],
+            ..Default::default()
+        });
+        descriptor.set_admin_credential(crate::source::AdminCredential {
+            labels: [("en".into(), "Admin key".into())].into(),
+            reports: vec![FactMember::Spend],
+        });
+        let mut facts = ProviderFacts::default();
+        facts.field_times.insert("spend".into(), told_at());
+        let original = facts_state(&facts, descriptor.reports());
+        assert_eq!(original[&FactMember::Spend], MemberState::Empty);
+        let missing = with_credentials(original.clone(), Some(&descriptor), &[]);
+        assert_eq!(
+            serde_json::to_value(missing[&FactMember::Spend]).unwrap(),
+            json!({"unsupported_because":{"reason":"needs_admin_key"}})
+        );
+        assert_eq!(missing[&FactMember::Identity], MemberState::NotReadYet);
+        assert_eq!(missing[&FactMember::Balances], MemberState::Unsupported);
+        assert_eq!(
+            with_credentials(original.clone(), Some(&descriptor), &["admin_key".into()]),
+            original
+        );
+        // A newly declared member is unread, without changing a stored fact or model entry.
+        facts.field_times.clear();
+        assert_eq!(
+            with_credentials(
+                facts_state(&facts, descriptor.reports()),
+                Some(&descriptor),
+                &["admin_key".into()]
+            )[&FactMember::Spend],
+            MemberState::NotReadYet
+        );
+        assert_eq!(
+            serde_json::to_value(MemberState::Told).unwrap(),
+            json!("told")
+        );
     }
 
     #[test]

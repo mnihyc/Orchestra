@@ -1,0 +1,4 @@
+# The engine's settling round: the neighbouring programs and the adapter's programs that run the real harness.
+test -p orch-engine --test agent_history
+test -p orch-engine --test context_fill --test native_capability_counts --test ingest --test background_wake
+test -p orch-adapter-claude-code --test turns --test background_wake
