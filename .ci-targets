@@ -1,0 +1,4 @@
+# One single entry must allow the whole ask: the access contract and the access engine.
+test -p orch-access-contract --lib
+test -p orch-authz --lib
+test -p orch-authz --test use_where --test binding --test kfix_entry_narrowing --test resources --test inputs

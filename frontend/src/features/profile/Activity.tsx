@@ -54,7 +54,7 @@ export function ActivityCalendar({ activity }: { activity: ProfileActivity }) {
 export function Activity({ username }: { username: string }) {
   const { t } = useTranslation();
   const query = useQuery(profileActivityQuery(username));
-  if (query.isPending) return <SkeletonRows rows={3} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={3} />;
   if (query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} compact />;
   return <section aria-label={t('profile.page.work')} className="flex min-w-0 flex-col gap-2"><h2 className="text-lg font-semibold">{t('profile.page.work')}</h2><p className="text-sm text-text-muted">{t('profile.page.visibleWork')}</p><ActivityCalendar activity={query.data} /></section>;
 }

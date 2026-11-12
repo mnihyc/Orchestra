@@ -7,8 +7,10 @@ import { choiceOption } from '@/i18n/choices';
 import { meStateKey, meStateQuery, setMeState } from '@/api/personal';
 import { Select } from '@/ui/Select';
 import { ErrorAlert } from '@/ui/ErrorState';
+import { Button } from '@/ui/Button';
+import { useErrorText } from '@/ui/errorText';
 
-export type Grouping = 'day' | 'place';
+export type Grouping = 'day' | 'place' | 'kind';
 
 export function useInboxGrouping() {
   const client = useQueryClient();
@@ -18,7 +20,7 @@ export function useInboxGrouping() {
   const [saving, setSaving] = useState(false);
   const inbox = state.data?.inbox;
   const held = typeof inbox === 'object' && inbox !== null ? inbox as Record<string, unknown> : {};
-  const value: Grouping = chosen ?? (held.group_by === 'place' ? 'place' : 'day');
+  const value: Grouping = chosen ?? (held.group_by === 'place' || held.group_by === 'kind' ? held.group_by : 'day');
   const choose = (next: Grouping) => {
     if (saving) return;
     setChosen(next); setError(null); setSaving(true);
@@ -27,10 +29,12 @@ export function useInboxGrouping() {
       (failure: unknown) => setError(failure),
     ).finally(() => setSaving(false));
   };
-  return { value, choose, error, saving, loading: state.isPending };
+  return { value, choose, retry: () => choose(value), error, saving, loading: state.isPending };
 }
 
-export function GroupingControl({ value, onChange, disabled, error }: { value: Grouping; onChange: (value: Grouping) => void; disabled: boolean; error: unknown }) {
+export function GroupingControl({ value, onChange, onRetry, disabled, error }: { value: Grouping; onChange: (value: Grouping) => void; onRetry: () => void; disabled: boolean; error: unknown }) {
   const { t } = useTranslation();
-  return <div className="flex flex-col gap-1"><Select label={t('away.inbox.grouping')} value={value} onValueChange={onChange} disabled={disabled} fieldClassName="w-(--field-narrow)" options={[{ value: 'day', ...choiceOption(t, 'inboxGrouping.day') }, { value: 'place', ...choiceOption(t, 'inboxGrouping.place') }]} />{error !== null && <ErrorAlert error={error} message={t('away.inbox.viewSaveFailed')} />}</div>;
+  const describe = useErrorText();
+  return <div className="flex flex-col gap-1"><Select label={t('away.inbox.grouping')} value={value} onValueChange={onChange} disabled={disabled} fieldClassName="w-(--field-narrow)" options={[{ value: 'day', ...choiceOption(t, 'inboxGrouping.day') }, { value: 'place', ...choiceOption(t, 'inboxGrouping.place') }, { value: 'kind', ...choiceOption(t, 'inboxGrouping.kind') }]} />{error !== null && <ErrorAlert error={error} message={t('away.inbox.viewSaveFailed')}
+    action={describe(error).retryable ? <Button size="sm" variant="ghost" disabled={disabled} onClick={onRetry}>{t('common.tryAgain')}</Button> : undefined} />}</div>;
 }

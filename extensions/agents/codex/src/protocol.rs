@@ -142,6 +142,11 @@ pub enum RpcError {
 /// What the harness says of its own accord.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
+    /// Invalid native protocol text, retained for a scoped compatibility error where attribution is safe.
+    Malformed {
+        /// The invalid native text, within the same frame limit as valid protocol input.
+        text: String,
+    },
     /// A notification: something happened.
     Notification {
         /// What kind.
@@ -179,6 +184,7 @@ fn incoming_weight(event: &Incoming) -> usize {
                 .saturating_add(flow::json_weight(params))
         }
         Incoming::Closed { reason } => reason.capacity(),
+        Incoming::Malformed { text } => text.capacity(),
     })
 }
 
@@ -451,7 +457,18 @@ async fn read_loop<R: AsyncRead + Unpin>(
         let frame: Json = match serde_json::from_slice(&line) {
             Ok(frame) => frame,
             Err(error) => {
-                tracing::warn!(%error, "a line of the harness is not JSON, and is skipped");
+                tracing::warn!(%error, "a line of the harness is not JSON");
+                if incoming
+                    .send(Incoming::Malformed {
+                        text: String::from_utf8_lossy(&line)
+                            .trim_end_matches(['\r', '\n'])
+                            .to_owned(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    break "the adapter no longer consumes native events".to_owned();
+                }
                 continue;
             }
         };
@@ -533,9 +550,14 @@ async fn dispatch(
             };
             let _ = waiter.send(answer);
         }
-        _ => tracing::warn!(
-            "a frame of the harness is neither a request, a notification nor an answer"
-        ),
+        _ => {
+            incoming
+                .send(Incoming::Malformed {
+                    text: frame.to_string(),
+                })
+                .await
+                .map_err(|_| ())?;
+        }
     }
     Ok(())
 }
@@ -787,6 +809,24 @@ mod tests {
             RpcError::Remote { method, code: -32600, message, .. }
                 if method == "turn/steer" && message == "no active turn to steer"
         ));
+    }
+
+    #[tokio::test]
+    async fn malformed_text_and_invalid_envelopes_are_reported_before_the_next_valid_frame() {
+        let (_rpc, mut incoming, _harness_in, mut harness_out) = pair();
+        harness_out
+            .write_all(b"{broken fixture\n[]\n{\"method\":\"future/notice\",\"params\":{}}\n")
+            .await
+            .unwrap();
+        assert!(
+            matches!(incoming.recv().await, Some(Incoming::Malformed { text }) if text == "{broken fixture")
+        );
+        assert!(
+            matches!(incoming.recv().await, Some(Incoming::Malformed { text }) if text == "[]")
+        );
+        assert!(
+            matches!(incoming.recv().await, Some(Incoming::Notification { method, .. }) if method == "future/notice")
+        );
     }
 
     #[tokio::test]

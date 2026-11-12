@@ -57,6 +57,8 @@ struct Registry {
 impl SessionAuthority for Registry {
     async fn authorize(&self, query: AuthQuery) -> AuthReply {
         let refuse = |code| AuthReply {
+            tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+            gateways: Vec::new(),
             endpoints: None,
             update_permit: None,
             n: query.n,
@@ -71,6 +73,8 @@ impl SessionAuthority for Registry {
                 refuse(RejectCode::Revoked)
             }
             Some(_) => AuthReply {
+                tunnel_session_idle_secs: orch_link_contract::gateways::TUNNEL_IDLE_SECS,
+                gateways: Vec::new(),
                 endpoints: None,
                 update_permit: None,
                 n: query.n,
@@ -223,6 +227,8 @@ impl World {
 
     fn machine(&self) -> ClientIdentity {
         ClientIdentity {
+            purpose: Default::default(),
+            gateway_id: None,
             hosted_endpoints: None,
             endpoints: None,
             machine_id: self.machine_id,
@@ -481,6 +487,8 @@ fn auth_for(world: &World, nonce: &str, host: &str) -> Auth {
     let sent_at = world.clock.time();
     let signed = auth_signing_input(nonce, world.machine_id, host, sent_at);
     Auth {
+        purpose: Default::default(),
+        capabilities: Vec::new(),
         endpoints: None,
         hosted_endpoints: None,
         machine_id: world.machine_id,

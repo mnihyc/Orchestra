@@ -15,6 +15,7 @@
 //! vector, when the old one is removed. A new generation that the disk share cannot hold beside the old one
 //! waits for an admin's choice, with both sizes and the time it takes.
 
+use super::administration::{self, Work};
 use super::choice::{Choice, Embeddings, choice};
 use super::chunks::{self, CHUNKING, Part};
 use super::embed::EmbedError;
@@ -28,6 +29,11 @@ use orch_settings_contract::registry::keys;
 use orch_types::{Id, new_id};
 use serde_json::json;
 use std::time::Instant;
+
+struct FillBudget {
+    started: Instant,
+    span: std::time::Duration,
+}
 
 /// The texts whose vectors show whether two endpoints serve the same model: a few short sentences of
 /// different scripts and kinds, made with the document prefix and no title.
@@ -296,15 +302,25 @@ impl Engine {
             + chrono::Duration::seconds(i64::from(
                 orch_link_contract::commands::CommandKind::ProviderEmbed.deadline_secs(),
             ));
-        {
-            let mut conn = self.db().acquire().await?;
-            if !rows::claim(&mut conn, org, claimant, now, until).await? {
+        let (chosen, work) = {
+            let mut tx = self.db().begin().await?;
+            let chosen = choice(&mut tx, org).await?;
+            if !chosen.enabled || chosen.embeddings.is_none() {
                 return Ok(());
             }
-        }
+            let work = Work::for_choice(&mut tx, &chosen).await?;
+            administration::before(work.as_ref(), &mut tx, self.inner.clock.as_ref()).await?;
+            if !rows::claim(&mut tx, org, claimant, now, until).await? {
+                return Ok(());
+            }
+            tx.commit().await.map_err(DbError::from)?;
+            (chosen, work)
+        };
         let started = Instant::now();
         let mut rate: Option<f64> = None;
-        let outcome = self.index_turn(chosen, started, budget, &mut rate).await;
+        let outcome = self
+            .index_turn(&chosen, work.as_ref(), started, budget, &mut rate)
+            .await;
         let standing = match outcome {
             Ok(standing) => standing,
             Err(error) => {
@@ -335,6 +351,7 @@ impl Engine {
     async fn index_turn(
         &self,
         chosen: &Choice,
+        work: Option<&Work>,
         started: Instant,
         budget: std::time::Duration,
         rate: &mut Option<f64>,
@@ -343,7 +360,7 @@ impl Engine {
         let Some(named) = chosen.embeddings.as_ref() else {
             return Ok(Standing::idle());
         };
-        let mut conn = self.db().acquire().await?;
+        let mut conn = self.db().begin().await?;
         if let Some(reason) = rows::provider_pause_reason(&mut conn, named.provider_id).await? {
             return Ok(Standing::because(
                 "paused",
@@ -351,6 +368,7 @@ impl Engine {
                 super::embed::pause_detail(reason),
             ));
         }
+        administration::before(work, &mut conn, self.inner.clock.as_ref()).await?;
         if let Err(why) = rows::vectors_ready(&mut conn).await? {
             return Ok(Standing::because(
                 "paused",
@@ -364,7 +382,7 @@ impl Engine {
         let provider_fingerprint = rows::endpoint_fingerprint(&mut conn, named.provider_id)
             .await?
             .unwrap_or_default();
-        drop(conn);
+        conn.commit().await.map_err(DbError::from)?;
         let active = generations
             .iter()
             .find(|generation| generation.state == "active")
@@ -387,7 +405,7 @@ impl Engine {
         } else {
             match active {
                 None => match self
-                    .begin_generation(org, named, "active", chosen.tuning.chunk_tokens)
+                    .begin_generation(org, named, "active", chosen.tuning.chunk_tokens, work)
                     .await
                 {
                     Ok(made) => made,
@@ -396,20 +414,35 @@ impl Engine {
                 Some(active) => match generation_change(&active, &wanted, &provider_fingerprint) {
                     Change::Nothing => {
                         if active.writer_id != named.writer {
-                            let mut conn = self.db().acquire().await?;
+                            let mut conn = self.db().begin().await?;
+                            let generation_work = work.map(|work| work.generation(&active));
+                            administration::before(
+                                generation_work.as_ref(),
+                                &mut conn,
+                                self.inner.clock.as_ref(),
+                            )
+                            .await?;
                             rows::generation_writer(&mut conn, active.id, named.writer).await?;
+                            conn.commit().await.map_err(DbError::from)?;
                         }
                         if let Some(building) = building {
-                            self.drop_generation(building.id).await?;
+                            self.drop_generation_for(building.id, work).await?;
                         }
                         active
                     }
                     Change::Elsewhere => match self
-                        .probe_agrees(org, named, &active, None, chosen)
+                        .probe_agrees(org, named, &active, None, chosen, work)
                         .await
                     {
                         Ok(true) => {
-                            let mut conn = self.db().acquire().await?;
+                            let mut conn = self.db().begin().await?;
+                            let generation_work = work.map(|work| work.generation(&active));
+                            administration::before(
+                                generation_work.as_ref(),
+                                &mut conn,
+                                self.inner.clock.as_ref(),
+                            )
+                            .await?;
                             rows::move_generation(
                                 &mut conn,
                                 active.id,
@@ -419,12 +452,15 @@ impl Engine {
                                 named.writer,
                             )
                             .await?;
+                            conn.commit().await.map_err(DbError::from)?;
                             active
                         }
-                        Ok(false) => match self.rebuild(chosen, named, &active, building).await? {
-                            Ok(target) => target,
-                            Err(standing) => return Ok(standing),
-                        },
+                        Ok(false) => {
+                            match self.rebuild(chosen, named, &active, building, work).await? {
+                                Ok(target) => target,
+                                Err(standing) => return Ok(standing),
+                            }
+                        }
                         Err(error) => return standing_of(error),
                     },
                     Change::Shorter { to } => {
@@ -432,7 +468,7 @@ impl Engine {
                             .dimensions
                             .is_some_and(|length| i64::from(to) < i64::from(length));
                         match self
-                            .probe_agrees(org, named, &active, Some(to), chosen)
+                            .probe_agrees(org, named, &active, Some(to), chosen, work)
                             .await
                         {
                             Ok(true) if shorter => {
@@ -441,6 +477,14 @@ impl Engine {
                                     .map(|vector| vectors::shortened(vector, to as usize))
                                     .collect();
                                 let mut tx = self.db().begin().await?;
+                                rows::lock_vector_tables(&mut tx).await?;
+                                let generation_work = work.map(|work| work.generation(&active));
+                                administration::before(
+                                    generation_work.as_ref(),
+                                    &mut tx,
+                                    self.inner.clock.as_ref(),
+                                )
+                                .await?;
                                 rows::move_generation(
                                     &mut tx,
                                     active.id,
@@ -465,15 +509,17 @@ impl Engine {
                                     .find(|generation| generation.id == active.id)
                                     .unwrap_or(active)
                             }
-                            Ok(_) => match self.rebuild(chosen, named, &active, building).await? {
-                                Ok(target) => target,
-                                Err(standing) => return Ok(standing),
-                            },
+                            Ok(_) => {
+                                match self.rebuild(chosen, named, &active, building, work).await? {
+                                    Ok(target) => target,
+                                    Err(standing) => return Ok(standing),
+                                }
+                            }
                             Err(error) => return standing_of(error),
                         }
                     }
                     Change::Rebuild => {
-                        match self.rebuild(chosen, named, &active, building).await? {
+                        match self.rebuild(chosen, named, &active, building, work).await? {
                             Ok(target) => target,
                             Err(standing) => return Ok(standing),
                         }
@@ -481,8 +527,31 @@ impl Engine {
                 },
             }
         };
-        self.fill(chosen, named, &target, started, budget, rate)
-            .await
+        // A successful native move/shorten changes this same generation's factual recipe.
+        // Subsequent new work uses that committed native result, never an old prepared body.
+        let target = if work.is_some() {
+            let mut conn = self.db().acquire().await?;
+            rows::generations(&mut conn, org)
+                .await?
+                .into_iter()
+                .find(|row| row.id == target.id)
+                .ok_or_else(|| EngineError::unreadable("the native generation disappeared"))?
+        } else {
+            target
+        };
+        let generation_work = work.map(|work| work.generation(&target));
+        self.fill(
+            chosen,
+            named,
+            &target,
+            generation_work.as_ref(),
+            FillBudget {
+                started,
+                span: budget,
+            },
+            rate,
+        )
+        .await
     }
 
     /// Begins a generation made with what is named, its probe texts' vectors made first.
@@ -492,6 +561,7 @@ impl Engine {
         named: &Embeddings,
         state: &'static str,
         chunk_tokens: i64,
+        work: Option<&Work>,
     ) -> Result<rows::GenerationRow, EmbedError> {
         let provider_fingerprint = {
             let mut conn = self.db().acquire().await?;
@@ -500,13 +570,15 @@ impl Engine {
                 .unwrap_or_default()
         };
         let probe: Vec<String> = PROBE.iter().map(|text| named.document("", text)).collect();
-        let made = self.embed_texts(org, named, probe).await?;
+        let made = self.embed_texts_for(org, named, probe, work).await?;
         let length = made.first().map_or(0, Vec::len);
         let length =
             i32::try_from(length).map_err(|error| EngineError::unreadable(error.to_string()))?;
         let id = new_id();
         let mut tx = self.db().begin().await?;
         let chunking = format!("{CHUNKING}:{chunk_tokens}");
+        rows::lock_vector_tables(&mut tx).await?;
+        administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
         rows::insert_generation(
             &mut tx,
             &rows::NewGeneration {
@@ -515,6 +587,7 @@ impl Engine {
                 provider_id: named.provider_id,
                 provider_fingerprint: &provider_fingerprint,
                 writer_id: named.writer,
+                administration_id: work.map(Work::request_id),
                 model_name: &named.model_name,
                 asked_dimensions: named
                     .dimensions
@@ -548,9 +621,13 @@ impl Engine {
         stored: &rows::GenerationRow,
         to: Option<u32>,
         chosen: &Choice,
+        work: Option<&Work>,
     ) -> Result<bool, EmbedError> {
         let probe: Vec<String> = PROBE.iter().map(|text| named.document("", text)).collect();
-        let fresh = self.embed_texts(org, named, probe).await?;
+        let generation_work = work.map(|work| work.generation(stored));
+        let fresh = self
+            .embed_texts_for(org, named, probe, generation_work.as_ref())
+            .await?;
         let kept: Vec<Vec<f32>> = probe_of(stored)
             .iter()
             .map(|vector| match to {
@@ -569,6 +646,7 @@ impl Engine {
         named: &Embeddings,
         active: &rows::GenerationRow,
         building: Option<rows::GenerationRow>,
+        work: Option<&Work>,
     ) -> Result<Result<rows::GenerationRow, Standing>, EngineError> {
         let wanted = wanted_of(named, chosen.tuning.chunk_tokens);
         let provider_fingerprint = {
@@ -583,7 +661,7 @@ impl Engine {
             {
                 return Ok(Ok(building));
             }
-            self.drop_generation(building.id).await?;
+            self.drop_generation_for(building.id, work).await?;
         }
         let mut conn = self.db().acquire().await?;
         let sizes = rows::sizes(
@@ -614,7 +692,13 @@ impl Engine {
             )));
         }
         match self
-            .begin_generation(chosen.org, named, "building", chosen.tuning.chunk_tokens)
+            .begin_generation(
+                chosen.org,
+                named,
+                "building",
+                chosen.tuning.chunk_tokens,
+                work,
+            )
             .await
         {
             Ok(made) => Ok(Ok(made)),
@@ -624,7 +708,28 @@ impl Engine {
 
     /// Removes a generation with its vectors and index.
     pub(crate) async fn drop_generation(&self, generation: Id) -> Result<(), EngineError> {
+        self.drop_generation_for(generation, None).await
+    }
+
+    async fn drop_generation_for(
+        &self,
+        generation: Id,
+        work: Option<&Work>,
+    ) -> Result<(), EngineError> {
         let mut tx = self.db().begin().await?;
+        rows::lock_vector_tables(&mut tx).await?;
+        let generation_work = if let Some(work) = work {
+            let row = rows::generations(&mut tx, work.org())
+                .await?
+                .into_iter()
+                .find(|row| row.id == generation)
+                .ok_or_else(|| EngineError::unreadable("the native generation disappeared"))?;
+            Some(work.generation(&row))
+        } else {
+            None
+        };
+        administration::before(generation_work.as_ref(), &mut tx, self.inner.clock.as_ref())
+            .await?;
         rows::drop_generation(&mut tx, generation).await?;
         tx.commit().await.map_err(DbError::from)?;
         Ok(())
@@ -636,14 +741,19 @@ impl Engine {
         chosen: &Choice,
         named: &Embeddings,
         target: &rows::GenerationRow,
-        started: Instant,
-        budget: std::time::Duration,
+        work: Option<&Work>,
+        budget: FillBudget,
         rate: &mut Option<f64>,
     ) -> Result<Standing, EngineError> {
+        let FillBudget {
+            started,
+            span: budget,
+        } = budget;
         let org = chosen.org;
         let tuning = chosen.tuning;
         {
             let mut tx = self.db().begin().await?;
+            administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
             rows::forget_gone(&mut tx, org).await?;
             tx.commit().await.map_err(DbError::from)?;
         }
@@ -679,6 +789,7 @@ impl Engine {
                     bytes: i32::try_from(piece.text.len()).unwrap_or(i32::MAX),
                 })
                 .collect();
+            administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
             rows::save_cut(&mut tx, source, org, target.id, &pieces, stored).await?;
             let generations = rows::generations(&mut tx, org)
                 .await?
@@ -832,7 +943,7 @@ impl Engine {
                     .map(|piece| named.document(&title, &piece.text))
                     .collect();
                 let asked = Instant::now();
-                match self.embed_texts(org, named, texts).await {
+                match self.embed_texts_for(org, named, texts, work).await {
                     Ok(made) => {
                         let seconds = asked.elapsed().as_secs_f64();
                         if seconds > 0.0 {
@@ -846,6 +957,7 @@ impl Engine {
                             .map(|(piece, vector)| (piece.chunk, piece.hash.clone(), vector))
                             .collect();
                         let mut tx = self.db().begin().await?;
+                        administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
                         rows::put_vectors(&mut tx, target.id, &stored).await?;
                         tx.commit().await.map_err(DbError::from)?;
                         sizes.used = sizes.used.saturating_add(adding);
@@ -877,14 +989,17 @@ impl Engine {
             )
             .await?;
             if missing.is_empty() {
+                let mut tx = self.db().begin().await?;
+                administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
                 rows::mark_embedded(
-                    &mut conn,
+                    &mut tx,
                     &source.kind,
                     source.source_id,
                     source.marker,
                     target.id,
                 )
                 .await?;
+                tx.commit().await.map_err(DbError::from)?;
             }
         }
         if target.state == "building" {
@@ -893,9 +1008,11 @@ impl Engine {
             let uncut = rows::changed_sources(&mut conn, org, target.id, 1).await?;
             if left.is_empty() && uncut.is_empty() {
                 let mut tx = self.db().begin().await?;
+                administration::before(work, &mut tx, self.inner.clock.as_ref()).await?;
                 let retired =
                     rows::activate(&mut tx, org, target.id, self.inner.clock.now()).await?;
                 tx.commit().await.map_err(DbError::from)?;
+                // These exact retired IDs are accepted activation cleanup, not new work.
                 for old in retired {
                     self.drop_generation(old).await?;
                 }
@@ -934,6 +1051,7 @@ mod tests {
             provider_id: Id::from_u128(3),
             provider_fingerprint: vec![1],
             writer_id: None,
+            administration_id: None,
             model_name: "m".into(),
             asked_dimensions: None,
             dimensions: Some(2),

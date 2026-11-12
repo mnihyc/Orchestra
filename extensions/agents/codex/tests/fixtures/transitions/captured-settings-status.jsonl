@@ -1,0 +1,6 @@
+{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","status":"starting","error":null,"failureReason":null,"name":"Source catalog"}}
+{"method":"thread/settings/updated","params":{"threadId":"thr_1","threadSettings":{"model":"gpt-6.1-sol","effort":"low","approvalPolicy":"never","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"},"collaborationMode":{"mode":"default","settings":{"model":"gpt-6.1-sol","reasoning_effort":"low"}}}}}
+{"method":"thread/status/changed","params":{"threadId":"thr_1","status":{"type":"active","activeFlags":[]}}}
+{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","status":"ready","error":null,"failureReason":null,"name":"Source catalog"}}
+{"method":"mcpServer/startupStatus/updated","params":{"threadId":"thr_1","status":"ready","error":null,"failureReason":null,"name":"Source catalog"}}
+{"method":"thread/status/changed","params":{"threadId":"thr_1","status":{"type":"idle"}}}

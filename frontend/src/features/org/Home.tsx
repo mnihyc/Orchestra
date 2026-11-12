@@ -2,8 +2,8 @@
  *
  * One screen serves every org, a root org and a department alike, at the address of its short name or
  * of its path. Under the name and what can be done with the org it has three sections: the overview,
- * with this person's waiting and recent threads first, a shared filter immediately before the orgs
- * and projects inside it as compact rows, then guidance and context; its members, with invitations;
+ * with unfinished first steps before this person's waiting and recent threads, a shared filter immediately before the orgs
+ * and projects inside it as compact rows, then context; its members, with invitations;
  * and Activity. Description and tags open on demand from the header.
  *
  * A person's own org begins empty and says what it is. What the reader may not do stays on the
@@ -20,10 +20,11 @@ import { FilterBar } from '@/ui/FilterBar';
 import { useStore } from 'zustand';
 
 import { client } from '@/api/client';
+import { orgOverviewQuery } from '@/api/orgOverview';
 import { childrenQuery, orgBySlugQuery } from '@/api/nodes';
 import { PlaceReadme } from '@/features/documents/Readme';
 import { ActivityFeed, OrgActivity } from '@/features/org/Activity';
-import { UsageSection } from '@/features/usage/Board';
+import { UsageSection, useUsageBoardParams } from '@/features/usage/Board';
 import { Members } from '@/features/settings/org/Members';
 import { DepartmentCard, ProjectCard } from '@/features/org/ProjectCards';
 import { OrgWork } from '@/features/org/Work';
@@ -51,7 +52,7 @@ import { ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { PermissionGate } from '@/ui/PermissionGate';
 import { Pagination } from '@/ui/Pagination';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { Tabs } from '@/ui/Tabs';
 
 export type OrgTab = 'overview' | 'members' | 'activity';
@@ -59,10 +60,10 @@ export type OrgTab = 'overview' | 'members' | 'activity';
 /** How many lines of Activity the overview shows before the Activity tab. */
 const ACTIVITY_SHOWN = 5;
 
-function HomeSkeleton() {
+function HomeSkeleton(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -80,11 +81,18 @@ function HomeSkeleton() {
 
 function Overview({ org, onTab }: { org: Org; onTab: (tab: OrgTab) => void }) {
   const [participating, setParticipating] = useState(false);
+  const usage = useUsageBoardParams(org.id);
+  // The aggregate owns this opening. Later control changes use their native
+  // keyed reader and must not reset another section's already loaded pages.
+  const [initial] = useState(() => ({ participating: false, usage }));
+  const opening = useQuery(orgOverviewQuery(org.id, initial));
+  if (opening.isPending) return <SkeletonRows read={opening} rows={4} />;
+  if (opening.isError) return <ErrorState compact error={opening.error} retrying={opening.isRefetching} onRetry={() => void opening.refetch()} />;
   return <div className="flex flex-col gap-6">
+    <Checklist org={org} />
     <OrgWork key={org.id} org={org} />
     <FilterBar participation={<ParticipationFilter checked={participating} onCheckedChange={setParticipating} />} />
     <OverviewRows org={org} onTab={onTab} participating={participating} />
-    <Checklist org={org} />
     {org.readme !== null && <PlaceReadme readme={org.readme} />}
   </div>;
 }
@@ -101,7 +109,7 @@ function OverviewRows({ org, onTab, participating }: { org: Org; onTab: (tab: Or
   const mayMakeProject = holds(org.access, 'org.interact');
   const pagination = <Pagination hasMore={children.hasNextPage} loading={children.isFetchingNextPage} error={children.isFetchNextPageError ? children.error : undefined} onMore={() => void children.fetchNextPage()} />;
 
-  if (children.isPending) return <SkeletonRows rows={4} />;
+  if (children.isPending) return <SkeletonRows read={children} rows={4} />;
   if (children.isError && items.length === 0) {
     return <ErrorState compact error={children.error} retrying={children.isRefetching} onRetry={() => void children.refetch()} />;
   }
@@ -207,7 +215,7 @@ export function OrgHome({ slug, tab, onTab }: OrgHomeProps) {
 
   return (
     <>
-    {query.isPending && <HomeSkeleton />}
+    {query.isPending && <HomeSkeleton read={query} />}
     <Activity key={JSON.stringify([userId, data.id])} mode={query.isSuccess ? 'visible' : 'hidden'}>
     <Page>
       <PageHeader

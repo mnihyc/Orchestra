@@ -12,7 +12,7 @@ use orch_api_contract::threads::Delivery;
 use orch_authz::{Act, Caller, Policy, Principal};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{SerialKey, SessionNativeActions};
-use orch_types::{Id, new_id};
+use orch_types::{Clock, Id, new_id};
 
 /// A selected action is never silently replaced with an ordinary text input.
 #[derive(Debug, thiserror::Error)]
@@ -47,10 +47,11 @@ impl jsonschema::Retrieve for LocalOnly {
     }
 }
 
-/// Validates current binding, opaque id, declared authority/path and arguments in the input transaction.
-pub async fn validate_selected(
-    unit: &mut Unit<'_>,
-    caller: &Caller,
+/// Resolves the actual currently available selector from the stored session catalogue and
+/// verifies its binding, revision and delivery path. This supplies operation facts, not authority;
+/// the ordinary permission and argument checks still run in `validate_selected`.
+pub async fn selected_action(
+    conn: &mut Conn,
     thread: Id,
     selection: &NativeInvocation,
     delivery: Delivery,
@@ -58,7 +59,7 @@ pub async fn validate_selected(
     let stored: Option<(Option<Id>, Option<orch_types::Json>)> =
         sqlx::query_as("SELECT current_segment_id,native_catalog FROM threads WHERE node_id=$1")
             .bind(thread)
-            .fetch_optional(&mut *unit.conn)
+            .fetch_optional(&mut *conn)
             .await
             .map_err(DbError::from)
             .map_err(EngineError::from)?;
@@ -90,6 +91,18 @@ pub async fn validate_selected(
     if !action.delivery_modes.contains(&mode) {
         return Err(NativeError::Unavailable);
     }
+    Ok(action)
+}
+
+/// Validates current binding, opaque id, declared authority/path and arguments in the input transaction.
+pub async fn validate_selected(
+    unit: &mut Unit<'_>,
+    caller: &Caller,
+    thread: Id,
+    selection: &NativeInvocation,
+    delivery: Delivery,
+) -> Result<NativeAction, NativeError> {
+    let action = selected_action(unit.conn, thread, selection, delivery).await?;
     let now = orch_types::Time::new(unit.now());
     let principal = Principal::load(&mut *unit.conn, caller.clone(), now)
         .await
@@ -123,36 +136,46 @@ pub async fn validate_selected(
     Ok(action)
 }
 
+/// Each accepted input origin must still pass the same ordinary native-action check.
+/// Retain only the checked materialized action, never one caller chosen from the bundle.
+pub(crate) async fn validate_for_input(
+    unit: &mut Unit<'_>,
+    authority: &crate::inputs::InputCallers,
+    thread: Id,
+    selection: &NativeInvocation,
+    delivery: Delivery,
+) -> Result<NativeAction, NativeError> {
+    let mut checked = None;
+    for caller in authority.callers() {
+        checked = Some(validate_selected(unit, caller, thread, selection, delivery).await?);
+    }
+    checked.ok_or(NativeError::Unavailable)
+}
+
 /// A queued stale/unavailable selection keeps its prompt and arguments until its author changes it.
 pub(crate) async fn hold_invalid(
     unit: &mut Unit<'_>,
     thread: Id,
     input: &orch_db::queries::threads::InputRow,
+    clock: &dyn Clock,
 ) -> Result<bool, EngineError> {
     let Some(raw) = &input.native_action else {
         return Ok(false);
     };
     let selection: NativeInvocation = serde_json::from_value(raw.clone())?;
-    let Some(author) = input.author_id else {
+    if input.author_id.is_none() {
         return Ok(true);
-    };
+    }
     let delivery = match input.delivery.as_str() {
         "steer" => Delivery::Steer,
         "interrupt" => Delivery::Interrupt,
         _ => Delivery::Queue,
     };
-    let caller = crate::inputs::input_author_caller(unit, thread, input)
-        .await?
-        .unwrap_or_else(|| {
-            Caller::token(
-                author,
-                orch_authz::TokenGrant::new(
-                    orch_access_contract::decisions::Scopes::Only(Default::default()),
-                    None,
-                ),
-            )
-        });
-    match validate_selected(unit, &caller, thread, &selection, delivery).await {
+    let validation = match crate::inputs::input_author_caller(unit, thread, input, clock).await? {
+        Some(authority) => validate_for_input(unit, &authority, thread, &selection, delivery).await,
+        None => Err(NativeError::Unavailable),
+    };
+    match validation {
         Ok(action) => {
             sqlx::query("UPDATE thread_inputs SET native_action_info=$2 WHERE id=$1")
                 .bind(input.id).bind(serde_json::json!({"action_id":action.id,"kind":action.kind,"origin":action.origin}))

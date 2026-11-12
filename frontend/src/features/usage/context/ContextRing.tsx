@@ -8,8 +8,9 @@ import type { TFunction } from 'i18next';
 import type { ComponentPropsWithRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { modelDisplayName } from '@/features/models/names';
 import { ContextPanel } from '@/features/usage/context/ContextPanel';
-import { type ContextTone, type Ring, ringOf } from '@/features/usage/context/fill';
+import { type ContextTone, type Ring, ringOf, contextModelName } from '@/features/usage/context/fill';
 import type { Thread } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatPercent, formatTokens } from '@/lib/format';
@@ -94,7 +95,9 @@ export function ContextRing({ thread, side = 'bottom' }: { thread: Thread; side?
   const { locale } = useFormatContext();
   const ring = ringOf(thread.usage);
   if (ring === null) return null;
-  const words = ringWords(ring, t, locale);
+  const context=ringWords(ring,t,locale);
+  const reportedModel=contextModelName(thread);
+  const words=reportedModel===null ? context : t('contextUsage.ring.modelLabel',{model:modelDisplayName(reportedModel,t),context});
   return (
     <Popover
       label={t('contextUsage.panel.title')}

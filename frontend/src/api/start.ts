@@ -13,10 +13,13 @@ import { queryOptions } from '@tanstack/react-query';
 import { environmentsKey } from '@/api/environments';
 import { api, ok } from '@/api/client';
 import { resourceRows } from '@/api/listed';
-import type { BindingOptions, Environment, ResolvedSetting, Topic } from '@/generated/api-types';
+import type { BindingOptions, Environment, NewNodeAccess, ResolvedSetting, ThreadAccess, Topic } from '@/generated/api-types';
 
 /** What a thread of a place could be bound to, as `GET /nodes/{id}/binding/options` answers. */
-export type StartOptions = BindingOptions;
+export type StartOptions = BindingOptions & {
+  /** Emitted by the creation reader; the explicit shape also covers the pending contracts regeneration. */
+  viewer_default?: { value: boolean; source: ResolvedSetting['source'] } | null;
+};
 
 /** The environments the person manages: the ones a thread can join. */
 export const managedEnvironmentsQuery = queryOptions({
@@ -26,26 +29,33 @@ export const managedEnvironmentsQuery = queryOptions({
 
 export const startOptionsKey = ['start-options'] as const;
 
+/** The exact existing audience controls whose prospective page the server assesses. */
+export interface CreationAccessContext { topicAccess?: NewNodeAccess; threadAccess?: ThreadAccess }
+
 /**
  * What a thread of a topic, or of a topic made in a project, could be bound to. The arrangements are judged against
  * the environment named, or against the one the server would take when none is.
  */
-export const startOptionsQuery = (nodeId: string, environmentId: string | null) =>
-  queryOptions({
-    queryKey: [...startOptionsKey, nodeId, environmentId ?? ''] as const,
-    queryFn: ({ signal }): Promise<StartOptions> =>
+export const startOptionsQuery = (nodeId: string, environmentId: string | null, context?: CreationAccessContext) => {
+  const audience = { ...(context?.topicAccess === undefined || context.topicAccess === 'defaults' ? {} : { topic_access: context.topicAccess }),
+    ...(context?.threadAccess === undefined || context.threadAccess === 'defaults' ? {} : { thread_access: JSON.stringify(context.threadAccess) }) };
+  return queryOptions({
+    queryKey: Object.keys(audience).length === 0 ? [...startOptionsKey, nodeId, environmentId ?? ''] as const : [...startOptionsKey, nodeId, environmentId ?? '', audience] as const,
+    // A bounded read belongs to the query cache across view remounts. Reader changes
+    // still fence its response through the shared API client and cache lifecycle.
+    queryFn: (): Promise<StartOptions> =>
       ok(
         api.GET('/nodes/{id}/binding/options', {
-          signal,
           params: {
             path: { id: nodeId },
             query: environmentId === 'new'
-              ? { environment_new: true }
-              : { environment_new: false, ...(environmentId === null ? {} : { environment_id: environmentId }) },
+              ? { environment_new: true, ...audience }
+              : { environment_new: false, ...(environmentId === null ? {} : { environment_id: environmentId }), ...audience },
           },
         }),
       ),
   });
+};
 
 /** Tells the server that a topic's default environment is to be this one: for the person who manages the topic. */
 export function setDefaultEnvironment(topicId: string, environmentId: string | null): Promise<Topic> {

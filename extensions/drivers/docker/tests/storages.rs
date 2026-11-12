@@ -71,6 +71,20 @@ async fn a_volume_lives_in_the_directory_of_its_storage_and_goes_with_the_volume
     let state = spec.volumes[&VolumeRole::State].name.clone();
     let workspace = spec.volumes[&VolumeRole::Workspace].name.clone();
     let unit = lab.run(&spec).await;
+    assert_eq!(
+        lab.wait_read(&unit, "/var/lib/orch/state.txt", |text| text
+            == "in-state\n")
+            .await
+            .as_deref(),
+        Some("in-state\n")
+    );
+    assert_eq!(
+        lab.wait_read(&unit, "/workspace/workspace.txt", |text| text
+            == "in-workspace\n")
+            .await
+            .as_deref(),
+        Some("in-workspace\n")
+    );
     let in_state = lab.dir.path().join("fast").join(&state);
     let in_workspace = lab.dir.path().join("bulk").join(&workspace);
     assert_eq!(
