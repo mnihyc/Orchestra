@@ -1,0 +1,3 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"item/completed","params":{"threadId":"fixture-thread","turnId":"fixture-turn","completedAtMs":5,"item":{"type":"mcpToolCall","id":"fixture-mcp","server":"fixture-source","tool":"lookup","arguments":{"query":"fixture"},"status":"completed","result":{"content":[{"type":"text","text":"Native result"}],"structuredContent":null,"_meta":null},"error":null,"durationMs":5}}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","error":null,"items":[]}}}}

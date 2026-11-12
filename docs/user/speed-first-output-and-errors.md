@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Speed, first output and errors
 screens: /usage, /thread/$threadId, /resources/providers/$id
 keywords: performance, requests, speed, latency, first token, first output, errors, tokens per second, thinking
+summary: Compare request performance, find timing in a turn and understand unavailable measurements.
 ---
 
 # Speed, first output and errors
@@ -78,6 +80,24 @@ while its request log shows only the records you may read. Access is checked aga
 A status-bar part appears only when the provider of the thread in view has at least ten requests and
 at least 20 percent errors in fifteen minutes, or its median first output exceeds three times its own
 seven-day median, with at least ten measured first-output samples in both windows. It opens that provider's failed requests and disappears when the condition clears.
+
+## Web actions
+
+A web step says whether the program searched the web, opened a page or looked for text within a page.
+Its details link the reported page; an address the program did not report stays unavailable.
+Links open only when you choose them. The step's original call remains in its source view.
+These work-step counts are separate from the provider's measured search usage.
+
+## Returned images
+
+Images returned by a tool appear beside that tool's step. Open an image to use the ordinary viewer;
+the tool's text remains in its details. If a part has no usable image bytes or cannot be saved,
+**The returned image could not be retained** marks that part. This does not turn a successful text
+reply into a failed turn or claim that the provider's plan has run out.
+
+In a step's original call, **Full input** and **Full output** open retained text through the same
+file card and viewer. A copy action on a shortened excerpt says **Copy shown input** or
+**Copy shown output**; use the full file to inspect or download everything that was retained.
 
 ## Built-in programs
 

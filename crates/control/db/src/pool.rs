@@ -439,6 +439,14 @@ impl Db {
 
     /// Notes how long a caller waited for a connection.
     fn measure(&self, waited: Duration) {
+        tracing::debug!(
+            target: "orch_db::pool",
+            phase = "acquire",
+            elapsed_secs = waited.as_secs_f64(),
+            pool_size = self.pool.size(),
+            pool_idle = self.pool.num_idle(),
+            "database connection acquired"
+        );
         metrics::histogram!(metrics_names::ACQUIRE_SECONDS).record(waited.as_secs_f64());
         if waited > ACQUIRE_BAR {
             metrics::counter!(metrics_names::ACQUIRE_OVER_BAR).increment(1);

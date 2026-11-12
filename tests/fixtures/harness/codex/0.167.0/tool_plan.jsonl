@@ -1,0 +1,3 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"turn/plan/updated","params":{"threadId":"fixture-thread","turnId":"fixture-turn","explanation":"Follow the native plan","plan":[{"step":"Read","status":"completed"},{"step":"Change","status":"inProgress"}]}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"completed","error":null,"items":[]}}}}

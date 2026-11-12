@@ -134,6 +134,39 @@ impl crate::Engine {
                 by,
             )
             .await?;
+        self.file_host_inventory(host, machine, count).await
+    }
+    /// The initial Host preview uses its explicit native preparation source, never only a user id.
+    pub async fn host_custody_inventory_prepared(
+        &self,
+        source: &crate::jobs::lifecycle_commands::host_inventory::Preparation,
+    ) -> Result<
+        (
+            Option<ResourceInventory>,
+            orch_api_contract::forks::Measurement,
+        ),
+        EngineError,
+    > {
+        let request = source.request();
+        let preparation = source.measurement()?;
+        let count = self
+            .measure_with_preparation(request.clone(), &preparation)
+            .await?;
+        self.file_host_inventory(source.host(), request.machine, count)
+            .await
+    }
+    async fn file_host_inventory(
+        &self,
+        host: Id,
+        machine: Id,
+        count: crate::jobs::measurement::Count,
+    ) -> Result<
+        (
+            Option<ResourceInventory>,
+            orch_api_contract::forks::Measurement,
+        ),
+        EngineError,
+    > {
         let inventory: Option<ResourceInventory> =
             count.result.map(serde_json::from_value).transpose()?;
         if let Some(inventory) = &inventory {

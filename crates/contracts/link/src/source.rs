@@ -420,6 +420,9 @@ pub struct FsRecordPruneResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FsRestorePlan {
+    /// Actual file-tool coverage when whole-directory recording is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touched: Option<orch_api_contract::source::TouchedRestore>,
     /// The owning environment.
     pub environment_id: Id,
     /// The target complete recorded state.
@@ -440,6 +443,10 @@ pub struct FsRestorePlan {
 /// A machine's file plan, before the API adds visible writer names and permission checks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct FsRestorePlanResult {
+    #[serde(default)]
+    pub form: orch_api_contract::source::RestoreForm,
+    #[serde(default)]
+    pub blockers: Vec<String>,
     /// The complete stored plan, with namespace and ignore fingerprints.
     pub plan_blob: Hash,
     /// Every planned path effect, with unknown later comparisons left null.
@@ -457,6 +464,9 @@ pub struct FsRestore {
     /// The running job's reporting and configured time allowance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<crate::commands::WorkReport>,
+    /// Reconciles only the matching existing journal; never starts a new restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_only: Option<bool>,
     /// The owning environment.
     pub environment_id: Id,
     /// The durable restore job.

@@ -4,7 +4,7 @@ import type { AuthResult, CreateProvider, EverythingRowPage, Provider, ProviderW
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { ACME, PEOPLE, deny, scenario, signIn } from './support.ts';
+import { ACME, PEOPLE, deny, replySent, scenario, signIn } from './support.ts';
 
 const double = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const api = `${double}/api/v1`, KEY = 'agent.default_provider_id';
@@ -58,13 +58,33 @@ async function writes(page: Page) { return await page.evaluate(() => (window as 
 function answer(page: Page, path: string, method = 'GET', match: (query: URLSearchParams) => boolean = () => true) {
   return page.waitForResponse((response) => { const url = new URL(response.url()); return response.request().method() === method && url.pathname === path && match(url.searchParams); });
 }
+async function inventoryBodies(page: Page) {
+  const bodies = new Map<string, { status: number; data: unknown }>();
+  await page.route('**/api/v1/everything?**', async (route) => {
+    // Retain the native bytes before forwarding them unchanged; Chromium can retire its own response body.
+    const response = await route.fetch(), id = response.headers()['x-request-id'];
+    if (id === undefined) throw new Error('The native inventory answer needs its request identity');
+    bodies.set(id, { status: response.status(), data: await response.json() as unknown });
+    await route.fulfill({ response });
+  });
+  return bodies;
+}
+function bodyAnswer(page: Page, path: string, method = 'GET', match: (query: URLSearchParams) => boolean = () => true, bodies?: ReadonlyMap<string, { status: number; data: unknown }>) {
+  return answer(page, path, method, match).then(async (response) => {
+    if (bodies === undefined) return { response, data: await replySent(response) };
+    const native = bodies.get(response.headers()['x-request-id'] ?? '');
+    if (native?.status !== response.status()) throw new Error('The browser inventory answer must match its native receipt');
+    return { response, data: native.data };
+  });
+}
 async function prepare(page: Page, request: APIRequestContext, locale: 'en' | 'zh-CN', width: number, theme: 'light' | 'dark') {
-  await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme }); await signIn(page);
+  await page.setViewportSize({ width, height: 900 }); await page.emulateMedia({ colorScheme: theme });
   expect((await request.post(`${double}/__double/first-steps/appearance`, { data: { locale, theme: 'system' } })).ok()).toBe(true);
-  await page.goto(`/project/${ACME.web}/settings?section=policies&setting=${KEY}`);
+  await signIn(page);
+  await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=${KEY}`);
   await expect(page.locator('html')).toHaveAttribute('lang', locale); await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   const words = locale === 'en' ? english : chinese;
-  const row = page.locator(`[data-setting="${KEY}"]`), field = row.getByRole('combobox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });
+  const row = page.locator(`[data-setting="${KEY}"]`), field = row.getByRole('combobox', { name: words.settingRegistry.agent.default_provider_id.title, exact: true });
   await expect(field).toBeVisible(); return { row, field, words };
 }
 async function capture(page: Page, info: TestInfo, name: string, input: Locator) {
@@ -107,35 +127,43 @@ async function capture(page: Page, info: TestInfo, name: string, input: Locator)
 }
 
 test('provider default searches and pages the native usable inventory, then saves and undoes one explicit choice (1440/en/light)', async ({ page, request }, info) => {
-  const held = await fixture(request, true); await watchWrites(page); const seen = observe(page);
+  const held = await fixture(request, true); await watchWrites(page); const seen = observe(page), bodies = await inventoryBodies(page);
   try {
     const { row, field, words } = await prepare(page, request, 'en', 1440, 'light');
-    await expect(field).toHaveValue(held.current.name); expect(seen.choices()).toHaveLength(0);
-    const firstRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('resource_view') === 'usable');
-    await field.click(); const firstReply = await firstRead; expect(firstReply.status()).toBe(200); const first = await firstReply.json() as EverythingRowPage;
+    // An unopened filtered setting keeps its selected identity opaque until its picker is visited.
+    await expect(field).toHaveValue(words.places.providerDefault.selected); expect(seen.choices()).toHaveLength(0);
+    const firstRead = bodyAnswer(page, '/api/v1/everything', 'GET', (q) => q.get('resource_view') === 'usable', bodies);
+    await field.click(); const firstReply = await firstRead; expect(firstReply.response.status()).toBe(200); const first = firstReply.data as EverythingRowPage;
     expect(first.items).toHaveLength(PAGE_SIZE); expect(first.next_cursor).not.toBeNull(); expect(first.items.some((item) => item.id === held.late.id)).toBe(false);
-    const list = page.getByRole('listbox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });
+    const list = page.getByRole('dialog', { name: words.settingRegistry.agent.default_provider_id.title, exact: true });
+    await expect(list.getByRole('option', { name: held.current.name, exact: true })).toBeVisible();
     await expect(list.getByRole('option')).toHaveCount(first.items.length + (first.items.some((item) => item.id === held.current.id) ? 0 : 1));
     expect(seen.choices()[0]?.query).toEqual(nativeArgs); await capture(page, info, 'provider-default-browse-1440-en-light', field);
-    const searchRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && !q.has('cursor'));
-    await field.fill('Default locator'); const searchReply = await searchRead; expect(searchReply.status()).toBe(200); const matching = await searchReply.json() as EverythingRowPage;
+    const searchRead = bodyAnswer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && !q.has('cursor'), bodies);
+    await field.fill('Default locator'); const searchReply = await searchRead; expect(searchReply.response.status()).toBe(200); const matching = searchReply.data as EverythingRowPage;
     expect(matching.items).toHaveLength(PAGE_SIZE); expect(matching.next_cursor).not.toBeNull(); await expect(list.getByRole('option')).toHaveCount(PAGE_SIZE);
-    const more = page.getByRole('dialog', { name: words.day100.builtin.agent.default_provider_id.title, exact: true }).getByRole('button', { name: words.ui.pagination.more, exact: true });
-    await field.press('Tab'); await expect(more).toBeFocused();
-    const nextRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && q.get('cursor') === matching.next_cursor);
-    await more.press('Enter'); const next = await nextRead; expect(next.status()).toBe(200); expect((await next.json() as EverythingRowPage).next_cursor).toBeNull();
+    const more = page.getByRole('dialog', { name: words.settingRegistry.agent.default_provider_id.title, exact: true }).getByRole('button', { name: words.ui.pagination.more, exact: true });
+    // Native rows retain their owner actions before the pager in the keyboard sequence.
+    const stops = await list.locator('button,a[href],[tabindex="0"]').count();
+    for (let step = 0; step <= stops && !await more.evaluate((element) => element === document.activeElement); step += 1) await page.keyboard.press('Tab');
+    await expect(more).toBeFocused();
+    const nextRead = bodyAnswer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === 'Default locator' && q.get('cursor') === matching.next_cursor, bodies);
+    await more.press('Enter'); const next = await nextRead; expect(next.response.status()).toBe(200); expect((next.data as EverythingRowPage).next_cursor).toBeNull();
     await expect(more).toHaveCount(0); await expect(field).toBeFocused(); await expect(field).toHaveAttribute('aria-expanded', 'true');
     await expect(list.getByRole('option')).toHaveCount(PAGE_SIZE + 1); const active = await field.getAttribute('aria-activedescendant'); await field.press('ArrowDown');
     await expect(field).not.toHaveAttribute('aria-activedescendant', active ?? ''); await page.waitForTimeout(OBSERVE_MS);
     expect(seen.choices()).toHaveLength(3); expect(await writes(page)).toEqual([]); await capture(page, info, 'provider-default-final-page-1440-en-light', field);
     const exactRead = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === held.late.name && !q.has('cursor'));
     await field.fill(held.late.name); expect((await exactRead).status()).toBe(200); await expect(list.getByRole('option')).toHaveCount(1);
-    await expect(list.getByRole('option', { name: held.late.name, exact: true })).toHaveAccessibleDescription(words.choiceCatalog.dynamic.resource.description);
+    // Shared resource rows now report the provider's native availability instead of a generic invitation.
+    expect(['ready', 'exhausted']).not.toContain(held.late.status);
+    await expect(list.getByRole('option', { name: held.late.name, exact: true })).toHaveAccessibleDescription(words.resourceFacts.unavailable);
+    await expect(list.getByRole('option', { name: held.late.name, exact: true })).not.toHaveAttribute('aria-disabled', 'true');
     expect(await writes(page)).toEqual([]); await capture(page, info, 'provider-default-name-search-1440-en-light', field);
-    const savedRead = answer(page, settingPath, 'PUT'); await field.press('Enter'); const savedReply = await savedRead; expect(savedReply.status()).toBe(200);
-    const saved = await savedReply.json() as ResolvedSetting; await expect(field).toHaveValue(held.late.name); await expect(field).toHaveAttribute('aria-expanded', 'false');
+    const savedRead = bodyAnswer(page, settingPath, 'PUT'); await field.press('Enter'); const savedReply = await savedRead; expect(savedReply.response.status()).toBe(200); const saved = savedReply.data as ResolvedSetting;
+    await expect(field).toHaveValue(held.late.name); await expect(field).toHaveAttribute('aria-expanded', 'false');
     await expect.poll(async () => (await writes(page)).length).toBe(1); expect((await writes(page))[0]).toEqual({ value: held.late.id, expected_revision: held.before.own!.revision });
-    const undone = answer(page, settingPath, 'PUT'); await row.getByRole('button', { name: words.settings.compact.undoNamed.replace('{{name}}', words.day100.builtin.agent.default_provider_id.title), exact: true }).click();
+    const undone = answer(page, settingPath, 'PUT'); await row.getByRole('button', { name: words.settings.compact.undoNamed.replace('{{name}}', words.settingRegistry.agent.default_provider_id.title), exact: true }).click();
     expect((await undone).status()).toBe(200); await expect(field).toHaveValue(held.current.name); await expect.poll(async () => (await writes(page)).length).toBe(2);
     expect((await writes(page))[1]).toEqual({ value: held.current.id, locked: held.before.own!.locked, expected_revision: saved.own!.revision });
     await page.waitForTimeout(OBSERVE_MS); expect(seen.choices()).toHaveLength(4);
@@ -155,15 +183,23 @@ test('provider default retains its current identity through pending/error recove
       title: 'Private provider diagnostic', detail: 'Private provider diagnostic', request_id: 'provider-default-browser' } });
   });
   try {
-    const { row, field, words } = await prepare(page, request, 'zh-CN', 400, 'dark'); await arrived;
+    const { row, field, words } = await prepare(page, request, 'zh-CN', 400, 'dark');
+    await expect(field).toHaveValue(words.places.providerDefault.selected);
+    expect(seen.calls.filter((call) => call.path === currentPath)).toHaveLength(0);
+    expect(seen.choices()).toHaveLength(0);
+    // Opening admits both independent readers. Dismissing the list keeps the pending name and its recovery.
+    const initialBrowse = answer(page, '/api/v1/everything', 'GET', (q) => q.get('resource_view') === 'usable');
+    await field.click(); await arrived; expect((await initialBrowse).status()).toBe(200);
+    await field.press('Escape'); await expect(field).toHaveAttribute('aria-expanded', 'false');
     await expect(field).toHaveValue(words.places.providerDefault.loading); await capture(page, info, 'provider-default-pending-400-zh-dark', field);
     release(); const area = row.locator('[data-provider-default]'); await expect(area.getByRole('alert')).toBeVisible();
     await expect(field).toHaveValue(words.places.providerDefault.unavailable); await expect(area).not.toContainText('Private provider diagnostic'); await expect(area).not.toContainText(held.current.id);
     await capture(page, info, 'provider-default-current-error-400-zh-dark', field);
     const retried = answer(page, currentPath); await area.getByRole('button', { name: words.common.tryAgain, exact: true }).click(); expect((await retried).status()).toBe(200);
     await expect(field).toHaveValue(held.current.name); await expect(field).toBeFocused(); await expect(field).toHaveAttribute('aria-expanded', 'false');
-    await page.waitForTimeout(OBSERVE_MS); expect(seen.calls.filter((call) => call.path === currentPath)).toHaveLength(2); expect(seen.choices()).toHaveLength(0);
-    const browse = answer(page, '/api/v1/everything', 'GET', (q) => q.get('resource_view') === 'usable'); await field.click(); expect((await browse).status()).toBe(200);
+    await page.waitForTimeout(OBSERVE_MS); expect(seen.calls.filter((call) => call.path === currentPath)).toHaveLength(2); expect(seen.choices()).toHaveLength(1);
+    await field.click();
+    await expect(page.getByRole('listbox', { name: words.settingRegistry.agent.default_provider_id.title, exact: true }).getByRole('option', { name: held.current.name, exact: true })).toBeVisible();
     await capture(page, info, 'provider-default-recovered-400-zh-dark', field);
     let failSearch = true;
     await page.route('**/api/v1/everything?**', async (route) => {
@@ -174,16 +210,16 @@ test('provider default retains its current identity through pending/error recove
         title: 'Private provider search diagnostic', detail: 'Private provider search diagnostic', request_id: 'provider-search-browser' } });
     });
     const failed = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === held.current.name); await field.fill(held.current.name); expect((await failed).status()).toBe(500);
-    const popup = page.getByRole('dialog', { name: words.day100.builtin.agent.default_provider_id.title, exact: true });
+    const popup = page.getByRole('dialog', { name: words.settingRegistry.agent.default_provider_id.title, exact: true });
     await expect(popup.getByRole('alert')).toBeVisible(); await expect(popup).not.toContainText('Private provider search diagnostic');
     await capture(page, info, 'provider-default-search-error-400-zh-dark', field);
     const retry = answer(page, '/api/v1/everything', 'GET', (q) => q.get('q') === held.current.name); await popup.getByRole('button', { name: words.common.tryAgain, exact: true }).click();
-    expect((await retry).status()).toBe(200); await expect(field).toBeFocused(); await expect(page.getByRole('listbox', { name: words.day100.builtin.agent.default_provider_id.title, exact: true }).getByRole('option', { name: held.current.name, exact: true })).toBeVisible();
+    expect((await retry).status()).toBe(200); await expect(field).toBeFocused(); await expect(page.getByRole('listbox', { name: words.settingRegistry.agent.default_provider_id.title, exact: true }).getByRole('option', { name: held.current.name, exact: true })).toBeVisible();
     await page.waitForTimeout(OBSERVE_MS); expect(seen.choices()).toHaveLength(3); expect(seen.choices().map((call) => call.query)).toEqual([nativeArgs, { ...nativeArgs, q: held.current.name }, { ...nativeArgs, q: held.current.name }]);
     await field.fill(''); await field.press('Escape'); await expect(field).toHaveValue(held.current.name); await field.press('Enter'); await expect(field).toHaveAttribute('aria-expanded', 'false');
-    await row.getByRole('button', { name: words.settings.editor.menuOf.replace('{{name}}', words.day100.builtin.agent.default_provider_id.title), exact: true }).click();
+    await row.getByRole('button', { name: words.settings.editor.menuOf.replace('{{name}}', words.settingRegistry.agent.default_provider_id.title), exact: true }).click();
     await page.getByRole('menuitem', { name: words.settings.editor.showDetails, exact: true }).click();
-    await expect(row.getByLabel(words.settings.editor.detailsOf.replace('{{name}}', words.day100.builtin.agent.default_provider_id.title), { exact: true })).toBeVisible();
+    await expect(row.getByLabel(words.settings.editor.detailsOf.replace('{{name}}', words.settingRegistry.agent.default_provider_id.title), { exact: true })).toBeVisible();
     await page.waitForTimeout(OBSERVE_MS); expect(seen.choices()).toHaveLength(3); expect(await writes(page)).toEqual([]);
     await capture(page, info, 'provider-default-details-400-zh-dark', field);
   } finally { release(); seen.stop(); await info.attach('native-provider-default-recovery-calls', { body: JSON.stringify({ calls: seen.calls, writes: await writes(page) }, null, 2), contentType: 'application/json' }); }

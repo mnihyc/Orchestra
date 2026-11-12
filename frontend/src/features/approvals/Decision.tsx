@@ -24,11 +24,18 @@ export interface DecisionState {
   lost: Approval | null;
 }
 
-type Reader = Pick<ReturnType<typeof client.session.getState>, 'userId' | 'readerVersion' | 'status'>;
-interface Call { approvalId: string; decision: ApprovalDecision; reader: Reader }
-function ownsReader(call: Call): boolean {
+export type DecisionReader = Pick<ReturnType<typeof client.session.getState>, 'userId' | 'readerVersion' | 'status'>;
+export function decisionReader(): DecisionReader {
+  const { userId, readerVersion, status } = client.session.getState();
+  return { userId, readerVersion, status };
+}
+export function ownsDecisionReader(reader: DecisionReader): boolean {
   const now = client.session.getState();
-  return call.reader.userId === now.userId && call.reader.readerVersion === now.readerVersion && call.reader.status === now.status;
+  return reader.userId === now.userId && reader.readerVersion === now.readerVersion && reader.status === now.status;
+}
+interface Call { approvalId: string; decision: ApprovalDecision; reader: DecisionReader }
+function ownsReader(call: Call): boolean {
+  return ownsDecisionReader(call.reader);
 }
 
 export function useDecision(approvalId: string, handlers: { onDecided?: (approval: Approval) => void; onLost?: (approval: Approval) => void } = {}): DecisionState {
@@ -65,8 +72,7 @@ export function useDecision(approvalId: string, handlers: { onDecided?: (approva
   const lost = shown?.lost ?? null;
   return {
     decide: (decision, label) => {
-      const { userId, readerVersion, status } = client.session.getState();
-      const call = { approvalId, decision, reader: { userId, readerVersion, status } };
+      const call = { approvalId, decision, reader: decisionReader() };
       setFeedback({ call, pressed: label ?? null, lost: null });
       mutation.mutate(call);
     },

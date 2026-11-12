@@ -109,7 +109,16 @@ async fn repeated_changes_keep_first_position_and_last_data_while_immutable_repl
         Some((baseline + 2, 2))
     );
     let mut tx = db.begin().await?;
-    sqlx::query("INSERT INTO usage_events SELECT * FROM usage_events WHERE id=$1 ON CONFLICT(id) DO NOTHING").bind(next).execute(&mut *tx).await?;
+    // Replay source columns; PostgreSQL derives service from measurement_states.
+    let duplicate = sqlx::query(
+        "INSERT INTO usage_events(id,change_seq,at,origin,purpose,scope,counted,org_id,project_id,topic_id,provider_id,model,input_tokens,total_tokens,credits,measurement_states)
+         SELECT id,change_seq,at,origin,purpose,scope,counted,org_id,project_id,topic_id,provider_id,model,input_tokens,total_tokens,credits,measurement_states
+         FROM usage_events WHERE id=$1 ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(next)
+    .execute(&mut *tx)
+    .await?;
+    assert_eq!(duplicate.rows_affected(), 0);
     sqlx::query("UPDATE usage_events SET credits=credits+0.0000 WHERE id=$1")
         .bind(next)
         .execute(&mut *tx)

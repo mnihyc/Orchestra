@@ -69,7 +69,7 @@ function EditPage({ initial }: { initial: UserProfile }) {
 function OwnPage({ username }: { username: string }) {
   const { t } = useTranslation();
   const profile = useQuery(profileQuery(username));
-  if (profile.isPending) return <SkeletonRows rows={5} />;
+  if (profile.isPending) return <SkeletonRows read={profile} rows={5} />;
   if (profile.isError) return <ErrorState error={profile.error} onRetry={() => void profile.refetch()} />;
   return <><a className="text-accent-text hover:underline" href={`/u/${encodeURIComponent(username)}`}>{t('profile.page.open')}</a><EditPage initial={profile.data} /></>;
 }
@@ -77,5 +77,5 @@ function OwnPage({ username }: { username: string }) {
 export function ProfileSettingsPage() {
   const { t } = useTranslation();
   const me = useQuery(meQuery);
-  return <PersonalFrame page="yourPage" lead={t('profile.page.settingsLead')}>{me.isPending ? <SkeletonRows rows={5} /> : me.isError ? <ErrorState error={me.error} onRetry={() => void me.refetch()} /> : <OwnPage username={me.data.username} />}</PersonalFrame>;
+  return <PersonalFrame page="yourPage" lead={t('profile.page.settingsLead')}>{me.isPending ? <SkeletonRows read={me} rows={5} /> : me.isError ? <ErrorState error={me.error} onRetry={() => void me.refetch()} /> : <OwnPage username={me.data.username} />}</PersonalFrame>;
 }

@@ -38,7 +38,6 @@ for(const kind of ['provider','model','agent','environment'] as const)for(const 
     });
     await page.goto(source.path);await screenReady(page,locale,theme);
     if(kind==='model'&&act==='disable')await page.getByRole('switch',{name:caption('@providers.models.enabledLabel',locale).replace('{{name}}',source.name),exact:true}).click();
-    else if(act==='disable'&&kind==='provider')await page.getByRole('button',{name:caption('@providers.danger.disable',locale),exact:true}).click();
     else{
       await page.getByRole('button',{name:caption(kind==='model'?'@providers.models.menuOf':'@resources.act.menuOf',locale).replace('{{name}}',source.name),exact:true}).click();
       await page.getByRole('menuitem',{name:caption(act==='disable'?'@resources.act.disable':'@resources.act.delete',locale),exact:true}).click();

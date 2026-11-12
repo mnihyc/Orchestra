@@ -113,7 +113,7 @@ function SectionView({ section, bar, renderView, merged = false }: { section: Se
   return <section id={merged ? sectionElementId(section.tab.id) : undefined} aria-label={merged ? details.title : undefined} tabIndex={merged ? -1 : undefined}
     className="focus-inset flex h-full min-h-0 min-w-0 flex-col overflow-hidden" data-section-view={section.tab.view}>
     {!merged && <SectionHeader section={section} bar={bar} details={details} />}
-    <div id={`section-body-${section.tab.id}`} aria-labelledby={merged ? undefined : sectionElementId(section.tab.id)} hidden={!merged && !section.open} className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div id={`section-body-${section.tab.id}`} role={merged ? undefined : 'group'} aria-labelledby={merged ? undefined : sectionElementId(section.tab.id)} hidden={!merged && !section.open} className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
       {(merged || section.open) && renderView(section.tab)}
     </div>
   </section>;

@@ -41,18 +41,60 @@ fn references(value: &Value, waiting: &mut Vec<String>) {
     }
 }
 
+/// Keep the exact runtime interface observation beside the existing native schema proof.
+/// Published stable schemas can omit controls behind the initialized experimental API.
+fn terminal_declarations(schema: &Value) -> Value {
+    let mut methods = BTreeMap::new();
+    let mut waiting = Vec::new();
+    for method in [
+        "thread/backgroundTerminals/list",
+        "thread/backgroundTerminals/terminate",
+    ] {
+        let declared = schema
+            .pointer("/definitions/ClientRequest/oneOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|variant| {
+                variant
+                    .pointer("/properties/method/enum")
+                    .and_then(Value::as_array)
+                    .is_some_and(|names| names.iter().any(|name| name.as_str() == Some(method)))
+            })
+            .cloned()
+            .unwrap_or(Value::Null);
+        references(&declared, &mut waiting);
+        methods.insert(method, declared);
+    }
+    waiting.extend([
+        "v2/ThreadBackgroundTerminalsListResponse".into(),
+        "v2/ThreadBackgroundTerminalsTerminateResponse".into(),
+    ]);
+    let mut seen = HashSet::new();
+    let mut definitions = BTreeMap::new();
+    while let Some(name) = waiting.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let definition = schema
+            .pointer(&format!("/definitions/{name}"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        references(&definition, &mut waiting);
+        definitions.insert(name, definition);
+    }
+    serde_json::json!({
+        "fixture_image":common::image(),
+        "client_request_present":schema.pointer("/definitions/ClientRequest/oneOf").is_some_and(Value::is_array),
+        "methods":methods,
+        "definitions":definitions,
+    })
+}
+
 #[tokio::test]
 async fn the_generated_protocol_preserves_the_request_events_the_adapter_measures() {
-    let mut captured: Value =
-        serde_json::from_str(include_str!("fixtures/performance/protocol.json")).unwrap();
-    // Supply this optional schema member synthetically; the captured request fixture carries no reset data.
-    let image_failure =
-        &mut captured["definitions"]["ImageGenerationFailure"]["oneOf"][0]["properties"];
-    assert!(
-        image_failure.get("resetsAt").is_none(),
-        "the optional reset schema belongs to synthetic setup"
-    );
-    image_failure["resetsAt"] = serde_json::json!({"format":"int64","type":["integer","null"]});
+    let captured: Value =
+        serde_json::from_str(include_str!("../schema/0.167.0/request-boundaries.json")).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let guard = Container(format!(
         "orchprobe-performance-schema-{}",
@@ -82,15 +124,12 @@ async fn the_generated_protocol_preserves_the_request_events_the_adapter_measure
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // Keep all generator writes inside the container, then copy only its completed schema.
+    // Keep all generator writes inside the container, then copy its completed schema outputs.
     let copied = tokio::time::timeout(
         common::WAIT,
         tokio::process::Command::new("docker")
             .arg("cp")
-            .arg(format!(
-                "{0}:/tmp/out/codex_app_server_protocol.v2.schemas.json",
-                guard.0
-            ))
+            .arg(format!("{0}:/tmp/out/.", guard.0))
             .arg(directory.path())
             .output(),
     )
@@ -101,6 +140,39 @@ async fn the_generated_protocol_preserves_the_request_events_the_adapter_measure
         copied.status.success(),
         "{}",
         String::from_utf8_lossy(&copied.stderr)
+    );
+    let complete: Value = serde_json::from_slice(
+        &std::fs::read(
+            directory
+                .path()
+                .join("codex_app_server_protocol.schemas.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Only public interface declarations, never a session, account, token or native frame body.
+    let terminals = terminal_declarations(&complete);
+    eprintln!("native_terminal_method_declarations={}", terminals);
+    let recorded: Value =
+        serde_json::from_str(include_str!("../schema/0.167.0/experimental-controls.json")).unwrap();
+    let recorded_methods: BTreeMap<_, _> = recorded["definitions"]["ClientRequest"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|variant| {
+            (
+                variant["properties"]["method"]["enum"][0]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+                variant.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        terminals["methods"],
+        serde_json::to_value(recorded_methods).unwrap(),
+        "the native control gate must match this exact initialized experimental interface"
     );
     let generated: Value = serde_json::from_slice(
         &std::fs::read(

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The supported connector targets and their distribution file names.
-pub const TARGETS: [(&str, &str, &str, &str); 5] = [
+pub const TARGETS: [(&str, &str, &str, &str); 6] = [
     (
         "x86_64-unknown-linux-musl",
         "linux",
@@ -42,6 +42,12 @@ pub const TARGETS: [(&str, &str, &str, &str); 5] = [
         "windows",
         "x86_64",
         "orch-connector-windows-x86_64.exe",
+    ),
+    (
+        "aarch64-pc-windows-msvc",
+        "windows",
+        "aarch64",
+        "orch-connector-windows-aarch64.exe",
     ),
 ];
 
@@ -221,13 +227,19 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
             "orch-connector"
         });
     let said = capture(Command::new(&program).arg("version"))?;
-    if !said.starts_with(&format!("connector {} (build ", release.version))
-        || !said.contains(&format!("[{tag}]"))
+    let identity = identity_line(&said);
+    if !identity.starts_with(&format!("connector {} (build ", release.version))
+        || !identity.contains(&format!("[{tag}]"))
     {
         return Err(invalid(format!(
-            "{} reports another release: {said}",
-            program.display()
+            "{} reports another release: expected version {:?}, tag {tag:?}; got identity line {identity:?}; complete version output {said:?}",
+            program.display(),
+            release.version
         )));
+    }
+    if std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value.eq_ignore_ascii_case("true")) {
+        let counter = orch_build_support::take_build_number("connector")?;
+        check_ci_identity(&said, &release.version, &tag, counter)?;
     }
     let path = out.join(name);
     fs::copy(&program, &path).map_err(io(&path))?;
@@ -272,6 +284,27 @@ pub fn build(root: &Path, out: &Path, target: &str) -> Result<(), ReleaseError> 
         harness_builds: Vec::new(),
     }
     .write(out)
+}
+
+// The version command prints the compiled identity first, then the adapter inventory.
+fn identity_line(said: &str) -> &str {
+    said.lines().next().unwrap_or_default()
+}
+
+fn check_ci_identity(
+    said: &str,
+    version: &str,
+    tag: &str,
+    counter: u64,
+) -> Result<(), ReleaseError> {
+    let expected = format!("connector {version} (build {counter}) [{tag}]");
+    let identity = identity_line(said);
+    if identity != expected {
+        return Err(invalid(format!(
+            "the native connector identity differs from the committed CI identity: expected identity line {expected:?}, got {identity:?}; complete version output {said:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Reads verified connector builds of this exact release, refusing mixed commits, duplicate targets or damaged bytes.
@@ -349,6 +382,63 @@ pub fn require_all(names: &BTreeSet<String>) -> Result<(), ReleaseError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_ci_requires_the_committed_component_identity_not_a_fresh_sandbox_counter() {
+        let said =
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.3", "42").to_string();
+        check_ci_identity(&said, "1.2.3", "v1.2.3", 42).unwrap();
+        for wrong in [
+            orch_build_info::BuildInfo::new("node", "1.2.3", "v1.2.3", "42"),
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.3", "1"),
+            orch_build_info::BuildInfo::new("connector", "1.2.2", "v1.2.3", "42"),
+            orch_build_info::BuildInfo::new("connector", "1.2.3", "v1.2.2", "42"),
+        ] {
+            assert!(check_ci_identity(&wrong.to_string(), "1.2.3", "v1.2.3", 42).is_err());
+            assert!(
+                check_ci_identity(
+                    &format!("{wrong}\nadapters: scripted"),
+                    "1.2.3",
+                    "v1.2.3",
+                    42
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn native_ci_accepts_the_reported_identity_with_the_connector_adapter_inventory() {
+        let identity =
+            orch_build_info::BuildInfo::new("connector", "0.1.2", "v0.1.2", "1").to_string();
+        for ending in ["\n", "\r\n"] {
+            let report = format!("{identity}{ending}adapters: scripted, fixture{ending}");
+            check_ci_identity(&report, "0.1.2", "v0.1.2", 1).unwrap();
+        }
+        assert!(
+            check_ci_identity(
+                &format!("adapters: scripted\n{identity}"),
+                "0.1.2",
+                "v0.1.2",
+                1
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn native_ci_identity_mismatch_exposes_whitespace_and_the_complete_output() {
+        let identity =
+            orch_build_info::BuildInfo::new("connector", "0.1.2", "v0.1.2", "1").to_string();
+        let report = format!("{identity} \nadapters: scripted");
+        let error = check_ci_identity(&report, "0.1.2", "v0.1.2", 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("expected identity line \"connector 0.1.2 (build 1) [v0.1.2]\""));
+        assert!(error.contains("got \"connector 0.1.2 (build 1) [v0.1.2] \""));
+        assert!(error.contains("\\nadapters: scripted"));
+        assert!(!error.contains('\n'));
+    }
+
     fn input(dir: &Path, name: &str, bytes: &[u8]) {
         let path = dir.join(name);
         fs::write(&path, bytes).unwrap();
@@ -394,6 +484,38 @@ mod tests {
         assert_eq!(
             fs::read(&files[0].1).unwrap(),
             b"\xcf\xfa\xed\xfe connector"
+        );
+    }
+
+    #[test]
+    fn windows_arm_connector_is_required_and_has_its_own_verified_download() {
+        let mut names = TARGETS
+            .iter()
+            .chain(NODE_TARGETS.iter())
+            .map(|(_, _, _, name)| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert!(require_all(&names).is_ok());
+        names.remove("orch-connector-windows-aarch64.exe");
+        assert!(
+            require_all(&names)
+                .unwrap_err()
+                .to_string()
+                .contains("orch-connector-windows-aarch64.exe")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        input(
+            dir.path(),
+            "orch-connector-windows-aarch64.exe",
+            b"MZ native Windows ARM connector",
+        );
+        let files = read(&[dir.path().to_owned()], "1.2.3", "v1.2.3", &"a".repeat(40)).unwrap();
+        assert_eq!(
+            download_path(&files[0].0).as_deref(),
+            Some("/api/v1/downloads/connector/windows/aarch64")
+        );
+        assert_eq!(
+            fs::read(&files[0].1).unwrap(),
+            b"MZ native Windows ARM connector"
         );
     }
 

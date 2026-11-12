@@ -49,16 +49,21 @@ export class Requests {
     return typeof found === 'string' ? { id, kind: 'org', name: null, redacted: true } : found;
   }
 
-  /** Whether the person may decide it: they manage the page and hold what is asked. */
-  mayDecide(person: Person, record: Stored): boolean {
-    if (record.told !== undefined) return record.approval.state === 'pending' && record.told.deciders.has(person.me.username);
+  /** List membership retains who receives the request after its decision; it grants no further act. */
+  sentTo(person: Person, record: Stored): boolean {
+    if (record.told !== undefined) return record.told.deciders.has(person.me.username);
     const here = this.access.holdingOn(person, record.object.id, record.path);
-    return record.approval.state === 'pending' && here.manages && record.asked.every((name) => here.held.has(name));
+    return here.manages && record.asked.every((name) => here.held.has(name));
+  }
+
+  /** Only a pending request can still be decided. */
+  mayDecide(person: Person, record: Stored): boolean {
+    return record.approval.state === 'pending' && this.sentTo(person, record);
   }
 
   /** Whether the person could decide it, as the list of everything they could decide counts. */
   couldDecide(person: Person, record: Stored): boolean {
-    return this.mayDecide(person, record) || record.told?.also.has(person.me.username) === true;
+    return this.sentTo(person, record) || record.told?.also.has(person.me.username) === true;
   }
 
   shape(person: Person, record: Stored): Approval {
@@ -178,12 +183,12 @@ export class Requests {
     const kind = query.get('kind');
     let found = this.records;
     if (scope === 'requested') found = found.filter((record) => record.requester.me.id === person.me.id);
-    else if (scope === 'others') found = found.filter((record) => this.couldDecide(person, record) && !this.mayDecide(person, record));
+    else if (scope === 'others') found = found.filter((record) => this.couldDecide(person, record) && !this.sentTo(person, record));
     else if (scope.startsWith('node:')) {
       const node = scope.slice('node:'.length);
       this.access.holdingOn(person, node);
       found = found.filter((record) => [record.object.id, ...this.access.ancestorsOf(record.object.id)].includes(node));
-    } else found = found.filter((record) => this.mayDecide(person, record));
+    } else found = found.filter((record) => query.get('all') === 'true' ? this.couldDecide(person, record) : this.sentTo(person, record));
     found = found.filter((record) => (state === 'pending' ? record.approval.state === 'pending' : record.approval.state !== 'pending') && (kind === null || record.approval.kind === kind));
     return { status: 200, body: { items: found.map((record) => this.shape(person, record)), next_cursor: null } };
   }
