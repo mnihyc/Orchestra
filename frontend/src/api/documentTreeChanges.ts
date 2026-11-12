@@ -1,13 +1,14 @@
 /** Apply current document-operation projections and repair only affected visible directories. */
+import type { DocumentTreeOperationRequest } from '@/api/documentMove';
 import type { QueryClient } from '@tanstack/react-query';
 import { record } from '@/api/cache';
 import { ApiError, client } from '@/api/client';
 import { documentDirectoryQuery, documentTreeEntryQuery, type DocumentDirectoryRequest } from '@/api/documentTree';
 import { retireDocumentDirectory } from '@/api/documentTreeCache';
-import type { DocumentDirectory, DocumentTreeItem, DocumentTreeOperationBody, DocumentTreePage, DocumentTreeRead, DocumentTreeReceipt } from '@/generated/api-types';
+import type { DocumentDirectory, DocumentTreeItem, DocumentTreePage, DocumentTreeRead, DocumentTreeReceipt } from '@/generated/api-types';
 
 export interface DocumentDirectoryChange { documentDirectories: readonly DocumentDirectory[] }
-export interface DocumentTreeChange { documentTree: { receipt: DocumentTreeReceipt; input: DocumentTreeOperationBody } }
+export interface DocumentTreeChange { documentTree: { receipt: DocumentTreeReceipt; input: DocumentTreeOperationRequest } }
 interface Observer { request: DocumentDirectoryRequest; reset: (request: DocumentDirectoryRequest) => void }
 const observers = new WeakMap<QueryClient, Set<Observer>>();
 const entryObservers = new WeakMap<QueryClient, Set<{ item: DocumentTreeItem; reset: () => void }>>();
@@ -37,9 +38,9 @@ export function isDocumentDirectory(value: unknown): value is DocumentDirectory 
   return record(value) && (value.kind === 'node_docs' || value.kind === 'container') && typeof value.id === 'string';
 }
 
-export function isDocumentTreeOperation(value: unknown): value is DocumentTreeOperationBody {
+export function isDocumentTreeOperation(value: unknown): value is DocumentTreeOperationRequest {
   return record(value) && typeof value.client_id === 'string' && typeof value.command === 'string'
-    && ['create_folder', 'copy', 'move', 'rename', 'delete', 'restore', 'restore_version'].includes(value.command)
+    && ['create_folder', 'copy', 'move', 'move_out', 'rename', 'delete', 'restore', 'restore_version'].includes(value.command)
     && Array.isArray(value.items) && (value.to === null || isDocumentDirectory(value.to));
 }
 
@@ -82,7 +83,8 @@ export async function repairDocumentDirectories(cache: QueryClient, selected: re
 
 /** Durable entry IDs identify changed objects. Only receipt.view may supply current visible metadata. */
 export async function applyDocumentTreeChange(cache: QueryClient, { receipt, input }: DocumentTreeChange['documentTree']): Promise<void> {
-  const changed = new Set(receipt.entries.map((entry) => identity(entry.item)));
+  const removed = input.command !== 'move_out' ? [] : input.deletion_plan !== null && 'entries' in input.deletion_plan ? input.deletion_plan.entries : [];
+  const changed = new Set([...receipt.entries.map((entry) => identity(entry.item)), ...(input.command === 'move_out' ? input.items.map(identity) : []), ...removed.map((entry) => identity(entry.item))]);
   for (const observer of entryObservers.get(cache) ?? []) if (changed.has(identity(observer.item))) observer.reset();
   const repairs: Promise<unknown>[] = [];
   for (const query of cache.getQueryCache().getAll()) {
@@ -105,7 +107,7 @@ export async function applyDocumentTreeChange(cache: QueryClient, { receipt, inp
     }
   }
   repairs.push(repairDocumentDirectories(cache, [
-    ...(input.to === null ? [] : [input.to]), ...receipt.view.entries.map((row) => row.entry.parent),
+    ...(input.to === null ? [] : [input.to]), ...receipt.view.entries.map((row) => row.entry.parent), ...removed.map((entry) => entry.parent),
   ], changed, new Map(receipt.view.entries.filter((row) => row.entry.item.kind === 'container').map((row) => [row.entry.item.id, row.entry.node]))));
   // The operation already committed. A failed repair belongs to its reader, not a second write.
   await Promise.allSettled(repairs);

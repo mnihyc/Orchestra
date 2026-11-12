@@ -335,7 +335,7 @@ export function Profile() {
   return (
     <PersonalFrame page="profile" lead={t('profile.lead')}>
       {me.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={me} rows={4} />
       ) : me.isError ? (
         <ErrorState error={me.error} retrying={me.isRefetching} onRetry={() => void me.refetch()} />
       ) : (

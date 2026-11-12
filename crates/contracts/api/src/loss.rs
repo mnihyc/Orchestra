@@ -1,5 +1,8 @@
 //! Explicit permanent loss and independent recovery plans for environments and their machines.
 
+use crate::operations::OperationSpec as Op;
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -75,17 +78,27 @@ impl LossTarget {
     /// The resource identifier.
     #[must_use]
     pub const fn id(self) -> Id {
-        match self {
-            Self::Host { id } | Self::Environment { id } | Self::Machine { id } => id,
-        }
+        self.object().id
     }
     /// The resource kind used by its permission page.
     #[must_use]
     pub const fn kind(self) -> &'static str {
+        self.object().kind.as_str()
+    }
+
+    /// The native typed business subject, independent of a permission or response shape.
+    #[must_use]
+    pub const fn object(self) -> orch_access_contract::decisions::ObjectRef {
         match self {
-            Self::Host { .. } => "host",
-            Self::Environment { .. } => "environment",
-            Self::Machine { .. } => "machine",
+            Self::Host { id } => orch_access_contract::decisions::ObjectRef { kind: K::Host, id },
+            Self::Environment { id } => orch_access_contract::decisions::ObjectRef {
+                kind: K::Environment,
+                id,
+            },
+            Self::Machine { id } => orch_access_contract::decisions::ObjectRef {
+                kind: K::Machine,
+                id,
+            },
         }
     }
 }
@@ -144,6 +157,64 @@ pub struct LossPlan {
     pub jobs: i64,
     /// Measured retained data, or null when any retained size is unknown.
     pub kept_bytes: Option<i64>,
+}
+
+/// A saved native loss review without existing target or dependency metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LossPreflightReceipt {
+    /// Restricted successful projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual native review inserted by the planner.
+    pub preflight_id: Id,
+    /// The new review's native expiry.
+    pub expires_at: Time,
+}
+
+/// A successful preview retains its receipt when current content cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LossPreflightResponse {
+    /// The unchanged native preview when independently readable.
+    Full(Box<LossPlan>),
+    /// The actual saved review without stored content.
+    Receipt(LossPreflightReceipt),
+}
+impl LossPreflightResponse {
+    /// Keep ordinary full-content assertions distinct from restricted successful persistence.
+    pub fn into_full(self) -> Result<LossPlan, LossPreflightReceipt> {
+        match self {
+            Self::Full(plan) => Ok(*plan),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
+}
+
+/// The actual confirmed native operation without its existing inventory or names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LossDeclareReceipt {
+    /// Restricted successful projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The reviewed operation accepted by the native cascade.
+    pub preflight_id: Id,
+}
+
+/// A confirmed loss preserves its original full plan or its accepted-effect receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum LossDeclareResponse {
+    /// The unchanged reviewed plan with independent current content Read.
+    Full(Box<LossPlan>),
+    /// The actual committed declaration without existing content.
+    Receipt(LossDeclareReceipt),
+}
+impl LossDeclareResponse {
+    /// Extract ordinary content while keeping restricted successful effects explicit.
+    pub fn into_full(self) -> Result<LossPlan, LossDeclareReceipt> {
+        match self {
+            Self::Full(plan) => Ok(*plan),
+            Self::Receipt(receipt) => Err(receipt),
+        }
+    }
 }
 
 /// Requests a permanent-loss plan without changing anything.
@@ -414,6 +485,70 @@ pub struct HostDeletePlan {
     /// Whether all selected cascades can run.
     pub executable: bool,
 }
+/// A native reviewed Host cascade without existing dependency content or protected names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostDeletePreflightReceipt {
+    /// Generated review acknowledgement only.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual selected Host.
+    pub host_id: Id,
+    /// Stored native review.
+    pub preflight_id: Id,
+    /// The native review expiry.
+    pub expires_at: Time,
+    /// Whether the observed native plan had blockers.
+    pub executable: bool,
+}
+/// Native full review or its same-operation generated acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum HostDeletePreflightResponse {
+    /// Existing native plan wire shape.
+    Full(Box<HostDeletePlan>),
+    /// Generated id/expiry/outcome without existing data.
+    Receipt(HostDeletePreflightReceipt),
+}
+impl HostDeletePreflightResponse {
+    /// Require the unchanged full native body explicitly.
+    pub fn into_full(self) -> Result<HostDeletePlan, HostDeletePreflightReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
+/// A generated acknowledgement of the accepted native Host cascade.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostDeleteCreateReceipt {
+    /// Receipt projection without existing job or dependency content.
+    pub projection: crate::common::ReceiptProjection,
+    /// The selected Host.
+    pub host_id: Id,
+    /// The generated parent job.
+    pub job_id: Id,
+}
+/// Current native job content or the same accepted cascade's acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum HostDeleteCreateResponse {
+    /// Unchanged ordinary native job shape.
+    Full(Box<crate::workspace::Job>),
+    /// The accepted generated job identity.
+    Receipt(HostDeleteCreateReceipt),
+}
+impl HostDeleteCreateResponse {
+    /// Require the current full job explicitly.
+    pub fn into_full(self) -> Result<crate::workspace::Job, HostDeleteCreateReceipt> {
+        match self {
+            Self::Full(value) => Ok(*value),
+            Self::Receipt(value) => Err(value),
+        }
+    }
+}
+
 /// One typed consent for a volume mount's data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -452,23 +587,65 @@ pub struct HostDeleteCreateBody {
     pub data_confirmations: Vec<HostDataConfirmation>,
 }
 
+/// A saved independent recovery review, without existing environment content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentRecoverPreflightReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The newly saved review.
+    pub preflight_id: Id,
+    /// When it expires.
+    pub expires_at: Time,
+    /// How many independent acts this review can execute.
+    pub executable: i64,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary recovery review or its restricted acknowledgement.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum EnvironmentRecoverPreflightResponse { Full(EnvironmentRecoveryPlan), Receipt(EnvironmentRecoverPreflightReceipt), }
+}
+/// Only the independent jobs newly created by this accepted recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EnvironmentRecoverCreateReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The accepted recovery batch.
+    pub batch_id: Id,
+    /// Its newly queued jobs.
+    pub job_ids: Vec<Id>,
+}
+crate::common::full_or_receipt! {
+    /// The ordinary recovery batch or its restricted acknowledgement.
+    #[derive(Debug,Clone,PartialEq,Serialize,Deserialize,JsonSchema)]
+    pub enum EnvironmentRecoverCreateResponse { Full(crate::environment::EnvironmentBatch), Receipt(EnvironmentRecoverCreateReceipt), }
+}
+
 crate::endpoints! {
     /// Plans the selected cascades before removing a host.
-    HostDeletePreflight: POST "/hosts/{id}/delete/preflight", Rule("the host's managers"), none, json HostDeletePreflightBody, json HostDeletePlan, 200;
+    HostDeletePreflight: POST "/hosts/{id}/delete/preflight", Rule("the host's managers"), none, json HostDeletePreflightBody, json HostDeletePreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::host_delete_sources::FACETS));
     /// Runs the reviewed cascades and finally revokes and removes the host registration.
-    HostDeleteCreate: POST "/hosts/{id}/delete", Rule("the host's managers"), none, json HostDeleteCreateBody, json crate::workspace::Job, 202;
+    HostDeleteCreate: POST "/hosts/{id}/delete", Rule("the host's managers"), none, json HostDeleteCreateBody, json HostDeleteCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::host_delete_sources::FACETS));
     /// Names visible to the caller in their own unexpired operation preview.
-    OperationRecipientsGet: GET "/operations/{id}/recipients", Rule("the operation preview's creator"), query crate::common::PageQuery, none, json OperationRecipients, 200;
+    OperationRecipientsGet: GET "/operations/{id}/recipients", Rule("the operation preview's creator"), query crate::common::PageQuery, none, json OperationRecipients, 200,
+        operation Op::facets(&crate::environment_sources::RECIPIENTS_FACETS);
     /// Lists everything affected by declaring an unreachable resource lost.
-    LossPreflight: POST "/loss/preflight", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json LossPlan, 200;
+    LossPreflight: POST "/loss/preflight", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json LossPreflightResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::loss_sources::PREFLIGHT_FACETS));
     /// Declares the reviewed resource permanently lost without contacting its machine.
-    LossDeclare: POST "/loss", Rule("host managers, environment managers, or the machine owner"), none, json LossDeclareBody, json LossPlan, 200;
+    LossDeclare: POST "/loss", Rule("host managers, environment managers, or the machine owner"), none, json LossDeclareBody, json LossDeclareResponse, 200,
+        operation Op::receipt(&Op::facets(&crate::loss_sources::DECLARE_FACETS));
     /// Lists the caller's manageable environments on a living or lost resource.
-    LossRecoveryList: POST "/loss/recovery", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json RecoverySources, 200;
+    LossRecoveryList: POST "/loss/recovery", Rule("host managers, environment managers, or the machine owner"), none, json LossPreflightBody, json RecoverySources, 200,
+        operation Op::facets(&crate::environment_sources::LOSS_RECOVERY_FACETS);
     /// Plans independent moves, re-creations and switches of selected environments.
-    EnvironmentRecoverPreflight: POST "/environments/recover/preflight", Rule("managers of each selected environment"), none, json EnvironmentRecoverPreflightBody, json EnvironmentRecoveryPlan, 200;
+    EnvironmentRecoverPreflight: POST "/environments/recover/preflight", Rule("managers of each selected environment"), none, json EnvironmentRecoverPreflightBody, json EnvironmentRecoverPreflightResponse, 200,
+        operation Op::receipt(&Op::facets(crate::environment_sources::lifecycle::FACETS));
     /// Executes the reviewed independent recovery plans under the common batch limit.
-    EnvironmentRecoverCreate: POST "/environments/recover", Rule("managers of each selected environment"), none, json crate::forks::ForkCreateBody, json crate::environment::EnvironmentBatch, 202;
+    EnvironmentRecoverCreate: POST "/environments/recover", Rule("managers of each selected environment"), none, json crate::forks::ForkCreateBody, json EnvironmentRecoverCreateResponse, 202,
+        operation Op::receipt(&Op::facets(crate::environment_sources::lifecycle::FACETS));
     /// Reads the currently visible members of an independent environment batch.
-    EnvironmentRecoverGet: GET "/environments/recover/{batch_id}", Rule("the batch creator or a reader of an affected environment"), none, none, json crate::environment::EnvironmentBatch, 200;
+    EnvironmentRecoverGet: GET "/environments/recover/{batch_id}", Rule("the batch creator or a reader of an affected environment"), none, none, json crate::environment::EnvironmentBatch, 200,
+        operation Op::facets(&crate::environment_sources::RECOVERY_GET_FACETS);
 }

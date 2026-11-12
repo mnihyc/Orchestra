@@ -17,19 +17,20 @@ the updater (`update.sh first-start --from`), `orchctl doctor` passes, the first
    agent that says where it works, asks for a command (the template lets it through), runs one, edits a file and
    answers, the items arriving on the realtime socket through the web edge; then the environment is stopped and
    started again, it is the same unit, and what was written in its workspace is still there; then, with its
-   thread gone, it is removed, and its container and its volumes are gone.
+   thread gone, it is removed: its container goes, its volumes are kept, and when the removal is purged on the confirmation
+   of its name and revision they are gone too.
 
 The scripted agent only simulates what it runs and edits (it drives no harness), so the file the scenario looks
 for after the restart is one the scenario writes into the workspace of the unit with `docker exec`, as the
 operator can, which is what shows that the workspace outlives the unit's stop. A thread cannot be deleted by
-itself yet, and an environment with a thread bound to it is not removed, so the thread goes with its topic; the
-environment's home is the project, which stays.
+itself yet, so the thread goes with its topic; an environment with a thread bound to it is removed all the same;
+the environment's home is the project, which stays.
 
-The stack is the shipped one with three changes an operator makes for a host like this one: the pinned listener
+The stack is the shipped one with two changes an operator makes for a host like this one: the pinned listener
 has the same port inside and outside (the one machines of the stack's network and the managed units find it by,
-through the name the system advertises), the system's name is made to be its own, so that what the node makes
-for it can be found, and the public address is the web edge's name inside the stack, because the node downloads
-the unit's connector from the address people reach the system at.
+through the name the system advertises), and the system's name is made to be its own, so that what the node makes
+for it can be found. Its public address is its own web edge on the loopback, which the node downloads the unit's
+connector from through its own connection, and which is an address a machine's token may be minted for.
 
 ```sh
 scripts/smoke/managed-environment/run.sh
@@ -37,6 +38,7 @@ scripts/smoke/managed-environment/run.sh
 
 It uses ports 41250 (the web edge, on the loopback), 41251 (the pinned listener, on the Docker bridge's address)
 and 41252 (the scripted model server, on the bridge's address). Besides what the other scenarios need it needs
-`jq` and `node`, and builds `orch-mock-llm` with the toolchain it packages with. At the end it takes down the
+`jq` and `node`, and builds `orch-mock-llm` with the toolchain it packages with (or takes the program
+`ORCH_SMOKE_MOCK_LLM` names). At the end it takes down the
 stack, the machine of the person and the model server, removes the units the node made for it and their
 volumes, and the directory it worked in.

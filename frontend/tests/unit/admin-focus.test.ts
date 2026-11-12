@@ -7,10 +7,10 @@ import { readParams, filtersOf, mergeParams } from '@/features/search/params';
 import { namesKey, searchKey } from '@/api/search';
 import type { TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
+import { treeNode } from '../doubles/tree-node';
 
 function node(id: string, parent_id: string | null, participating: boolean): TreeNode & { participating: boolean } {
-  return { id, parent_id, participating, kind: parent_id === null ? 'org' : 'project', name: id, address: null,
-    color: null, archived: false, deleted: false, restricted: false, tree_seq: 1, topic: null, thread: null, chat: { id: `chat-${id}`, seq: 0 }, docs: 0 };
+  return treeNode({ id, parent_id, participating, kind: parent_id === null ? 'org' : 'project', tree_seq: 1 });
 }
 
 it('reads the participation fact, rather than treating an administered thing as personal participation', () => {

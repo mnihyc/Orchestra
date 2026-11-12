@@ -2,8 +2,8 @@
 import { expect, type APIRequestContext, type Page, test } from '@playwright/test';
 import { contrast } from '../accessibility/contrast';
 import { ACME, bodySent, PEOPLE, scenario, signIn } from './support';
-import { detailMcp, detailMount } from '../component/resource-detail-fixtures';
 import { inventoryRow } from '../doubles/everything-row';
+import { resources } from './library-fixtures';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 
@@ -36,14 +36,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await scenario(); await signIn(page); await preference(request, locale, theme);
     const words = locale === 'en' ? english : chinese;
     // This geometry case requires a row in every kind. The default double has
-    // no MCP/mount inventory; supply the same typed rows used by detail proofs.
+    // no MCP/mount/skill inventory; reuse their typed library records.
     await page.route('**/api/v1/everything?*', async (route) => {
       const query = new URL(route.request().url()).searchParams;
       const kind = query.get('kinds');
-      if (query.get('resource_details') !== 'true' || (kind !== 'mcp_server' && kind !== 'mount')) { await route.continue(); return; }
-      const row = kind === 'mcp_server'
-        ? inventoryRow({ id: detailMcp.id, kind: 'mcp_server', name: detailMcp.name, owner: detailMcp.owner, my_access: 'manage', resource: { kind: 'mcp_server', value: detailMcp } })
-        : inventoryRow({ id: detailMount.id, kind: 'mount', name: detailMount.name, owner: detailMount.owner, my_access: 'manage', resource: { kind: 'mount', value: detailMount } });
+      const resource = kind === 'mcp_server' ? resources.mcp : kind === 'mount' ? resources.mounts : kind === 'skill' ? resources.skills : undefined;
+      if (query.get('resource_details') !== 'true' || resource === undefined) { await route.continue(); return; }
+      const row = inventoryRow({ id: resource.value.id, kind: resource.kind, name: resource.value.name, owner: resource.value.owner, my_access: 'manage', resource });
       const response = await route.fetch(); expect(response.ok()).toBe(true);
       await route.fulfill({ response, json: { items: [row], next_cursor: null } });
     });
@@ -54,15 +53,16 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
       const bar = page.locator('[data-filter-bar]');
       await expect(bar).toHaveCount(1); await expect(bar.getByRole('searchbox')).toBeVisible();
-      await expect(bar.getByRole('switch')).toHaveCount(0); await expect(bar.getByRole('combobox')).toHaveCount(0);
-      await expect(bar.getByRole('button')).toHaveCount(2);
-      await expect(bar.getByRole('button', { name: words.resources.controls.filter, exact: true })).toBeVisible();
-      await expect(bar.getByRole('button', { name: words.resources.controls.sort, exact: true })).toBeVisible();
+      // The bar now includes the native view, its help and saved grouping controls.
+      await expect(bar.getByRole('switch')).toHaveCount(0); await expect(bar.getByRole('combobox')).toHaveCount(1);
+      await expect(bar.getByRole('button')).toHaveCount(4);
+      const ordinary = [bar.getByRole('searchbox'), bar.getByRole('combobox', { name: words.library.show, exact: true }),
+        ...[words.resources.controls.filter, words.resources.controls.sort, words.resourceGroups.label].map((name) => bar.getByRole('button', { name, exact: true }))];
+      for (const control of ordinary) await expect(control).toBeVisible();
       const action = page.locator('[data-resource-kind="machines"]').getByRole('button'); await expect(action).toHaveCount(1); await expect(action).toBeVisible();
       await expect(bar.locator('[data-filter-action]')).toHaveCount(0);
-      const controls = await bar.locator('input:not([type="checkbox"]), button:not([role]), button[role="combobox"], [data-choice-selector] [role="radiogroup"]').evaluateAll((elements) => elements
-        .filter((element) => element.getClientRects().length > 0).map((element) => ({ name: element.getAttribute('aria-label') ?? element.textContent, height: element.getBoundingClientRect().height })));
-      for (const control of controls) expect(Math.abs(control.height - 28), control.name).toBeLessThan(MAX_DRIFT);
+      // The help hint has its own icon size; ordinary fields/actions share the small control height.
+      for (const control of ordinary) expect(Math.abs(await control.evaluate((element) => element.getBoundingClientRect().height) - 28)).toBeLessThan(MAX_DRIFT);
       const centres = await action.evaluate((element) => {
         const icon = element.querySelector('svg'); const walk = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
         let words = walk.nextNode(); while (words !== null && (words.textContent ?? '').trim() === '') words = walk.nextNode();
@@ -74,21 +74,18 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       expect(centres).toBeLessThan(MAX_DRIFT); await fits(page);
       await capture(page, `machines-${width}-${locale}-${theme}`);
 
-      for (const kind of ['providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts']) {
+      for (const kind of ['providers', 'agents', 'machines', 'environments', 'templates', 'hosts', 'mcp', 'mounts', 'skills']) {
         await page.goto(`/resources/${kind}`);
         const list = page.getByRole('table').first(); await expect(list).toBeVisible();
         await expect(list.locator('thead [data-table-column="select"]')).toBeVisible();
-        const first = list.locator('tbody tr').first();
+        // Group headings are table rows too; audit the first actual resource.
+        const first = list.locator('tbody tr').filter({ has: page.locator('[data-table-column="name"]') }).first();
         await expect(first.locator('[data-table-column="name"]')).toBeVisible();
         // Before hover, the row's primary action must be visible even on a touch-width screen.
         await expect(first.locator('[data-table-column="primary"]').getByRole('button')).toBeVisible();
         await expect(page.locator(`[data-resource-kind="${kind}"]`).getByRole('button').first()).toBeVisible();
-        const aligned = await page.locator('[data-filter-bar]').getByRole('searchbox').evaluate((input) => {
-          const top = input.getBoundingClientRect().top;
-          const buttons = input.closest('[data-filter-bar]')?.querySelectorAll('button');
-          return buttons === undefined ? false : Array.from(buttons).every((button) => Math.abs(button.getBoundingClientRect().top - top) < 1);
-        });
-        expect(aligned, `${kind}: search, Filter and Sort stay on one row`).toBe(true);
+        const top = await bar.getByRole('searchbox').evaluate((input) => input.getBoundingClientRect().top);
+        for (const control of ordinary) expect(Math.abs(await control.evaluate((element) => element.getBoundingClientRect().top) - top), `${kind}: ordinary list controls stay on one row`).toBeLessThan(MAX_DRIFT);
         const filter = page.locator('[data-filter-bar]').getByRole('button', { name: words.resources.controls.filter, exact: true });
         const sort = page.locator('[data-filter-bar]').getByRole('button', { name: words.resources.controls.sort, exact: true });
         const filterPanel = page.locator('[data-resource-filter-panel]'), sortPanel = page.locator('[data-resource-sort-panel]');
@@ -150,11 +147,22 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
           if (target.name === '') throw new Error('The actual section link lost its name');
           const before = page.url();
           await select.focus(); await expect(page.getByRole('listbox')).toBeVisible();
-          if (path.startsWith('/admin/')) await expect(page.getByRole('option')).toHaveCount(21);
+          // The complete Management catalogue now has 24 destinations.
+          if (path.startsWith('/admin/')) await expect(page.getByRole('option')).toHaveCount(24);
           await select.fill(target.name);
           await expect(page.getByRole('option', { name: target.name, exact: true })).toBeVisible();
           await expect(page.getByRole('option')).toHaveCount(1); expect(page.url()).toBe(before);
-          await select.press('Enter'); await expect(page).toHaveURL(target.href);
+          await select.press('Enter');
+          // Saved list choices accompany the same section; every other address part stays exact.
+          await expect(page).toHaveURL((address) => {
+            const actual = new URL(address), expected = new URL(target.href);
+            if (actual.searchParams.has('list') !== actual.searchParams.has('_list')
+              || actual.searchParams.has('_list') && actual.searchParams.get('_list') !== 'true') return false;
+            for (const url of [actual, expected]) {
+              url.searchParams.delete('list'); url.searchParams.delete('_list'); url.searchParams.sort();
+            }
+            return actual.href === expected.href;
+          });
           await expect(page.getByRole('listbox')).toHaveCount(0);
           await expect(sections.locator('[aria-current="page"]')).toHaveCount(1);
           await expect(sections.getByRole('combobox')).toHaveValue(target.name);
@@ -181,6 +189,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
           const original = await name.inputValue();
           const accepted = page.waitForResponse(async (response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname.endsWith('/me') && ((await bodySent(response.request())) as { display_name?: string }).display_name === 'Release reviewer');
           await name.fill('Release reviewer');
+          await name.press('Enter');
           expect((await accepted).ok()).toBe(true);
           const undo = page.getByRole('button', { name: /^(Undo the change to|撤销对)/ }); await expect(undo).toBeVisible();
           const undone = page.waitForResponse(async (response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname.endsWith('/me') && ((await bodySent(response.request())) as { display_name?: string }).display_name === original);

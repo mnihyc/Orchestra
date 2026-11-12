@@ -2,13 +2,24 @@
 import type { Item, Turn, TurnError } from '@/generated/api-types';
 import type { ThreadView } from '@/realtime/stores/thread';
 
-export function failureKey(error: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }): string {
-  return JSON.stringify([error.code, error.reason ?? null, error.code === 'harness_error' ? error.message : null]);
+type FailureIdentity = Pick<TurnError, 'code' | 'message'> & { reason?: string | null; window?: string | null; resets_at?: string | null; details?: unknown };
+
+function reasonOf(error: FailureIdentity): string | null {
+  if (typeof error.reason === 'string') return error.reason;
+  const details = error.details;
+  return typeof details === 'object' && details !== null && 'reason' in details && typeof details.reason === 'string' ? details.reason : null;
+}
+
+export function failureKey(error: FailureIdentity): string {
+  if (error.code === 'image_generation_limit') return JSON.stringify([error.code, error.window ?? null, error.resets_at ?? null]);
+  return JSON.stringify([error.code, reasonOf(error), error.code === 'harness_error' ? error.message : null]);
 }
 
 /** Native error rows may omit the terminal turn's more specific refusal reason. */
-export function sameFailure(a: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }, b: Pick<TurnError, 'code' | 'message'> & { reason?: string | null }): boolean {
-  return a.code === b.code && (a.reason === null || a.reason === undefined || b.reason === null || b.reason === undefined || a.reason === b.reason)
+export function sameFailure(a: FailureIdentity, b: FailureIdentity): boolean {
+  if (a.code === 'image_generation_limit' || b.code === 'image_generation_limit') return failureKey(a) === failureKey(b);
+  const first = reasonOf(a), second = reasonOf(b);
+  return a.code === b.code && (first === null || second === null || first === second)
     && (a.code !== 'harness_error' || a.message === b.message);
 }
 

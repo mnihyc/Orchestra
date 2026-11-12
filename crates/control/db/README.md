@@ -227,6 +227,7 @@ memory and have no durable traffic table.
 | [queries/shares](src/queries/shares.rs) | What agents were given: copies with their delivery and revocation, and live shares by area. |
 | [queries/resources](src/queries/resources.rs) | Machines, hosts with their owners, load and storages, providers with their endpoints, profiles, harnesses, and models with their two names and what each has enabled. |
 | [queries/provider_facts](src/queries/provider_facts.rs) | Durable provider observation timing, discovered model contexts and confirmed reset receipts. |
+| [queries/provider_credits](src/queries/provider_credits.rs) | Exact provider-level credit observations, current source generations, bounded group history and existing metrics retention; no ledger arithmetic. |
 | [queries/provider_plan](src/queries/provider_plan.rs) | Plan-window measurements and early start-overs, kept with provider observations and read with their audit markers. |
 | [queries/search](src/queries/search.rs) | Search candidates, readable content scopes, stable pages and repair of stored text projections. |
 | [queries/semantic](src/queries/semantic.rs) | Search by meaning: the sources an org's index cuts, their pieces, the generations of vectors and where indexing stands. |

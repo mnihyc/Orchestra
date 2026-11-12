@@ -18,7 +18,7 @@ WITH wanted AS MATERIALIZED (
    WHERE sub.user_id=$1 AND sub.level='all' AND __PEOPLE_FOLLOW_LEVEL__<>'off'
   UNION ALL
   SELECT 'chat',COALESCE(c.node_id,c.id),n.path,true,false
-    FROM chat_states s JOIN chats c ON c.id=s.chat_id JOIN nodes n ON n.id=COALESCE(c.node_id,c.org_id)
+    FROM chat_states s JOIN chats c ON c.id=s.chat_id JOIN nodes n ON n.id=COALESCE(c.node_id,c.home_id,c.org_id)
     LEFT JOIN notification_prefs p ON p.user_id=s.user_id
    WHERE s.user_id=$1 AND c.kind='node' AND __NODE_FOLLOW_LEVEL__<>'off'
   UNION ALL

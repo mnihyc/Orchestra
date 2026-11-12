@@ -200,7 +200,7 @@ function Detail({ doc, entry, onShow }: { doc: Document; entry: DocumentVersion;
       </div>
       {reviewCurrent && <p role="status" className="text-sm text-text-muted">{t('people.reviewCurrent')}</p>}
       <FileChanges files={files} />
-      {changes.isPending ? <SkeletonRows rows={3} /> : changes.isError ? <ErrorState compact error={changes.error} onRetry={() => void changes.refetch()} /> : (files.length === 0 || changes.data.blocks.length > 0 || changes.data.title !== null) && <ChangesView key={`${reviewCurrent}:${changes.data.to}`} changes={changes.data} doc={doc} columns={columns === '2' ? 2 : 1} onStale={() => { refreshDocument(doc.id); setReviewCurrent(true); void changes.refetch(); }} />}
+      {changes.isPending ? <SkeletonRows read={changes} rows={3} /> : changes.isError ? <ErrorState compact error={changes.error} onRetry={() => void changes.refetch()} /> : (files.length === 0 || changes.data.blocks.length > 0 || changes.data.title !== null) && <ChangesView key={`${reviewCurrent}:${changes.data.to}`} changes={changes.data} doc={doc} columns={columns === '2' ? 2 : 1} onStale={() => { refreshDocument(doc.id); setReviewCurrent(true); void changes.refetch(); }} />}
       <ConfirmDialog
         open={putting}
         onOpenChange={setPutting}
@@ -233,7 +233,7 @@ function Detail({ doc, entry, onShow }: { doc: Document; entry: DocumentVersion;
 export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Document; open: boolean; onOpenChange: (open: boolean) => void; onShow?: (version: number) => void }) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
-  const [author, setAuthor] = useListChoice<string>('document-history', 'author', 'all');
+  const [author, setAuthor] = useListChoice<string>('document-history', 'author', 'all', 'address', open);
   const [chosen, setChosen] = useState<number | 'open' | null>(null);
   const say = (key: 'changed' | 'added' | 'removed', count: number): string => t(`documents.history.${key}` as 'documents.history.changed', { count });
   const sayFile = (kind: FileChange['kind'], count: number): string => t(FILE_COUNTS[kind], { count });
@@ -272,7 +272,7 @@ export function HistoryDrawer({ doc, open, onOpenChange, onShow }: { doc: Docume
           options={[{ value: 'all', ...choiceOption(t, 'statusFilter.any'), description: t('documents.history.everybody') }, ...authors.map(([key, one]) => ({ value: key, ...choiceOption(t, 'dynamic.value', { name: authorName(one), context: t('documents.history.everybody') }) }))]}
         />
         {list.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows read={list} rows={4} />
         ) : list.isError ? (
           <ErrorState compact error={list.error} onRetry={() => void list.refetch()} />
         ) : entries.length === 0 ? (

@@ -7,8 +7,9 @@
 # naming a file that holds OPENROUTER_API_KEY, each harness also makes one small request to a real model.
 #
 # The stack is the one managed-environment makes (the pinned listener on the Docker bridge's address at the port it
-# listens on inside, the system's own name, the web edge's name as the public address), beside it a machine of a person
-# that holds only the provider role, and the scripted model server on the host.
+# listens on inside, the system's own name, the public address of its own web edge), beside it a machine of a person
+# that holds the provider role (and the agent role, which registering a provider there asks for), and the scripted model
+# server on the host.
 set -Eeuo pipefail
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=lib.sh
@@ -35,7 +36,7 @@ TODAY="$(date -u +%F)"
 
 sed -i \
   -e "s|^name = \"Orch\"|name = \"$SYSTEM_NAME\"|" \
-  -e "s|^public_url = .*|public_url = \"http://frontend\"|" \
+  -e "s|^url = \"wss://gateway:9443\"|url = \"wss://$BRIDGE:$GATEWAY_PORT\"|" \
   -e "s|wss://gateway.orch.internal:9443|wss://gateway.orch.internal:$GATEWAY_PORT|g" \
   -e "s|wss://gateway:9443|wss://gateway:$GATEWAY_PORT|g" \
   -e "s|^pinned_bind = .*|pinned_bind = \"[::]:$GATEWAY_PORT\"|" \
@@ -143,9 +144,15 @@ PROJECT_ID="$(call POST "/orgs/$ORG/projects" '{"name":"Web"}' | jq -r .id)"
 TOPIC="$(call POST "/projects/$PROJECT_ID/topics" '{"name":"Landing page"}' | jq -r .id)"
 check "they were made" test -n "$ORG" -a -n "$PROJECT_ID" -a -n "$TOPIC"
 
-step "the scripted model server, and a machine of the person that holds the provider and nothing else"
-(cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
-MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+step "the scripted model server, and a machine of the person that holds the provider"
+# The scripted model server is built from the tree, or is the program ORCH_SMOKE_MOCK_LLM names (to run where no toolchain is).
+if [ -n "${ORCH_SMOKE_MOCK_LLM:-}" ]; then
+  MOCK="$ORCH_SMOKE_MOCK_LLM"
+  [ -x "$MOCK" ] || abort "ORCH_SMOKE_MOCK_LLM does not name a program: $MOCK"
+else
+  (cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
+  MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+fi
 mkdir -p "$WORK/lab/data"
 MODEL_KEY="$(openssl rand -hex 16)"
 printf '%s\n' "$MODEL_KEY" > "$WORK/lab/model.key"; chmod 600 "$WORK/lab/model.key"
@@ -154,10 +161,20 @@ printf '%s\n' "$MODEL_KEY" > "$WORK/lab/model.key"; chmod 600 "$WORK/lab/model.k
 MODEL_PID=$!
 model_answers() { curl -fsS -H "authorization: Bearer $MODEL_KEY" "http://$BRIDGE:$MODEL_PORT/v1/models" > /dev/null; }
 wait_for 20 "the scripted model server answers with the key" model_answers
-CONNECTOR="$(find "$A" -maxdepth 1 -name 'orch-connector-linux-*-musl' | head -n 1)"
-printf '[connector]\nroles = ["provider"]\n' > "$WORK/lab/data/config.toml"
+CONNECTOR="$(find "$A" -maxdepth 1 -name "orch-connector-linux-$(uname -m)-musl" -print -quit)"
+[ -n "$CONNECTOR" ] || abort "the release has no Linux connector for $(uname -m)"
+# The release's files are downloads and carry no execute permission: the machine of the person runs a copy that has it.
+mkdir -p "$WORK/lab/bin"
+cp "$CONNECTOR" "$WORK/lab/bin/orch-connector"
+chmod 755 "$WORK/lab/bin/orch-connector"
+# A connector keeps a lock file beside its data directory, as the shipped Compose file gives the node one; the account
+# of the machine cannot make one in the root of the container.
+: > "$WORK/lab/data.orch-instance-lock"
+# A provider is registered from a machine that declares a directory service, which the agent role does; no harness is set up there.
+printf '[connector]\nroles = ["agent", "provider"]\n' > "$WORK/lab/data/config.toml"
 docker run -d --name "$LAB" --network "${PROJECT}_control" --user "$(id -u):$(id -g)" \
-  -v "$WORK/lab/data:/data" -v "$CONNECTOR:/usr/local/bin/orch-connector:ro" \
+  -v "$WORK/lab/data:/data" -v "$WORK/lab/data.orch-instance-lock:/data.orch-instance-lock" \
+  -v "$WORK/lab/bin/orch-connector:/usr/local/bin/orch-connector:ro" \
   debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 sleep infinity > /dev/null || abort "the machine of the person did not start"
 MACHINE_TOKEN="$(call POST /machines/enrollment-tokens '{"name_hint":"lab"}' | jq -r .token)"
 lab() { docker exec "$LAB" orch-connector --data-dir /data "$@"; }
@@ -206,7 +223,7 @@ while [ "$SECONDS" -lt "$deadline" ]; do
   sleep 2
 done
 expect "the job succeeded" "succeeded" "$(printf '%s' "$JOB" | jq -r .state)"
-expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach verify commit" \
+expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach files after_up verify commit" \
   "$(printf '%s' "$JOB" | jq -r '[.progress.phases[].name] | join(" ")')"
 ENV="$(call GET "/environments/$ENV_ID")"
 expect "the environment is running" "running" "$(printf '%s' "$ENV" | jq -r .status)"
@@ -314,31 +331,35 @@ for pair in "codex:$CODEX_THREAD" "claude-code:$CLAUDE_THREAD"; do
   kind="${pair%%:*}"; thread="${pair#*:}"
   rows="$(usage_of "$thread" | jq -c '[.items[]]')"
   say "INFO $kind: the ledger counted $(printf '%s' "$rows" | jq length) requests for the thread"
-  check "$kind: the ledger has rows for the thread, with tokens, counted on the model it ran on" jq -e 'length > 0 and all(.[]; .tokens.input_tokens > 0 and .model == "mock-large" and .harness_kind == "'"$kind"'")' <<< "$rows"
+  # A request that ended without an answer is counted with no tokens (one per thread, after its turn finished); the others carry them.
+  say "INFO $kind: $(printf '%s' "$rows" | jq '[.[] | select(.tokens.input_tokens == 0)] | length') of them carry no tokens"
+  check "$kind: the ledger has rows for the thread, with tokens, counted on the model it ran on" jq -e 'any(.[]; .tokens.input_tokens > 0) and all(.[]; .model == "mock-large" and .harness_kind == "'"$kind"'")' <<< "$rows"
   expect "$kind: they were counted by the forwarder on the arrangement the thread has" "forwarder key_separated" \
     "$(printf '%s' "$rows" | jq -r '[.[].origin] | unique | join(",")') $(printf '%s' "$rows" | jq -r '[.[].arrangement] | unique | join(",")')"
 done
 
 step "the harnesses were started as their adapters say, and wrote where they declare"
 docker exec -i "$UNIT" sh -s -- "$BRIDGE:$GATEWAY_PORT" < "$HERE/inspect-unit.sh" > "$WORK/unit-inspection.txt" 2> "$WORK/unit-inspection.err" || true
-inspection() { grep -- "$1" "$WORK/unit-inspection.txt" > /dev/null; }
+inspection() { grep -E -- "$1" "$WORK/unit-inspection.txt" > /dev/null; }
 check "Codex was started as an app-server on its standard streams" inspection '^codex-args:.*app-server --listen stdio://'
 check "Claude Code was started with its own configuration directory and no other setting source than the project's" inspection '^claude-args:.*--setting-sources project'
 for variable in DISABLE_TELEMETRY DISABLE_ERROR_REPORTING DISABLE_FEEDBACK_COMMAND DISABLE_UPDATES CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL; do
   check "Claude Code has $variable=1" inspection "^claude-env: $variable=1\$"
 done
-check "Claude Code keeps its home where the connector put it, in the data directory" inspection '^claude-env: CLAUDE_CONFIG_DIR=/var/lib/orch/'
-check "Codex keeps its home where the connector put it, in the data directory" inspection '^codex-env: CODEX_HOME=/var/lib/orch/'
-check "the home of Codex says it does not look for an update" inspection '^codex-config: check_for_update_on_startup = false$'
+# The programs of the two harnesses place their homes by the program's own rule: each harness keeps its own default home, in
+# the account's home (a volume of the unit), and is given its settings on its command line and in its environment.
+check "Claude Code keeps its own home in the account's, not in a directory the connector made" inspection '^home-entry: /home/agent/\.claude$'
+check "Codex keeps its own home in the account's, not in a directory the connector made" inspection '^home-entry: /home/agent/\.codex$'
+check "Codex is told on its command line that it does not look for an update" inspection '^codex-args:.* check_for_update_on_startup=false( |$)'
 for table in analytics feedback; do
-  check "the home of Codex switches $table off" bash -c "grep -A1 '^codex-config: \[$table\]\$' '$WORK/unit-inspection.txt' | grep -q 'enabled = false'"
+  check "Codex is told to switch $table off" inspection "^codex-args:.* $table.enabled=false( |\$)"
 done
 for exporter in exporter metrics_exporter trace_exporter; do
-  check "the home of Codex sends no $exporter anywhere" inspection "^codex-config: $exporter = \"none\"\$"
+  check "Codex is told to send no $exporter anywhere" inspection "^codex-args:.* otel.$exporter=\"none\"( |\$)"
 done
-check "and keeps no memory of its own" inspection '^codex-config: memories = false$'
-# The files an account is given by its image are not a harness's.
-check "nothing of either harness is in the account's home" bash -c "! grep '^home-entry:' '$WORK/unit-inspection.txt' | grep -v -E '/home/agent/\.(bash_logout|bashrc|profile)\$'"
+check "and to keep no memory of its own" inspection '^codex-args:.* memories\.generate_memories=false .*memories\.use_memories=false( |$)'
+# The files an account is given by its image, the harnesses' own homes, and what the connector and the browser keep.
+check "nothing else is in the account's home" bash -c "! grep '^home-entry:' '$WORK/unit-inspection.txt' | grep -v -E '^home-entry: /home/agent/(\.bash_logout|\.bashrc|\.profile|\.codex(/.*)?|\.claude(/.*)?|\.claude\.json|\.orch(/.*)?|\.cache(/.*)?|\.config(/.*)?)\$'"
 check "the unit made no connection but its link to the gateway and the ones inside it" bash -c "! grep -q '^outside-connection:' '$WORK/unit-inspection.txt'"
 # What the daemon records of the unit's own layer: the places it mounted things at, and temporary places. The volumes are not in it.
 docker diff "$UNIT" > "$WORK/unit.diff" 2> /dev/null || true
@@ -423,11 +444,18 @@ if [ "${ORCH_SMOKE_KEEP:-0}" = 1 ]; then
   exit 0
 fi
 
-step "the environment is removed, and its container goes"
+step "the environment is removed, its container goes, and its volumes are kept until they are purged"
 check "the topic is deleted, and its threads with it" api DELETE "/nodes/$TOPIC"
 check "the removal is accepted" api DELETE "/environments/$ENV_ID?confirm=Main"
 container_gone() { [ -z "$(docker ps -aq --filter "label=orch.system=$SYSTEM_NAME")" ]; }
 wait_for 120 "the container is gone" container_gone
+# A removed environment is no longer read by its own address: its kept files are listed at its home. They stay for the
+# days the removal froze, until a home admin confirms their permanent removal with the name and the revision.
+kept_removal() { call GET "/nodes/$PROJECT_ID/environments/deleted" | jq -r --arg env "$ENV_ID" '[.items[] | select(.environment.id == $env)][0].removal'; }
+files_are_kept() { [ "$(kept_removal | jq -r '"\(.phase) \(.can_purge)"')" = "kept true" ]; }
+wait_for 120 "its files are kept, and a home admin may purge them" files_are_kept
+check "the purge is accepted when it names the environment and the revision of its removal" \
+  api DELETE "/environments/$ENV_ID/purge?confirm=Main&expected_revision=$(kept_removal | jq -r .revision)"
 volumes_gone() { [ -z "$(docker volume ls -q | grep -F -e "$ENV_ID" -e "$UNIT" || true)" ]; }
-wait_for 60 "so are its volumes" volumes_gone
+wait_for 120 "its volumes are gone" volumes_gone
 expect "the errors the API logged in all this" "0" "$(compose logs --no-color api 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c ' ERROR ' || true)"

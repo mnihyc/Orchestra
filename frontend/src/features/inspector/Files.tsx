@@ -15,7 +15,7 @@ import { client } from '@/api/client';
 import { useViewInstance } from '@/features/workbench/instance';
 import { useTranslation } from 'react-i18next';
 
-import type { DirEntry, Environment, EnvironmentIndexReason } from '@/generated/api-types';
+import type { DirEntry, Environment } from '@/generated/api-types';
 import { directoryKey } from '@/realtime/stores/environment';
 import type { ViewProps } from '@/features/workbench/views';
 import { formatDateTime } from '@/lib/time';
@@ -44,16 +44,8 @@ import { openFile, parentOf } from '../files/FileTabs';
 import { useFileActions, whyNoWrite } from '../files/FileMenu';
 import { NO_SEARCH, SearchBox, SearchResults, type SearchState } from '../files/SearchInFiles';
 
-/** The Files panel's reason for a live tree, with an honest fallback for an older connector. */
-export function liveIndexReasonKey(reason: EnvironmentIndexReason | null | undefined): 'largeTree.reasons.chosen' | 'largeTree.reasons.entries' | 'largeTree.reasons.watches' | 'largeTree.reasons.scan_time' | 'largeTree.reasons.unknown' {
-  switch (reason) {
-    case 'chosen': return 'largeTree.reasons.chosen';
-    case 'entries': return 'largeTree.reasons.entries';
-    case 'watches': return 'largeTree.reasons.watches';
-    case 'scan_time': return 'largeTree.reasons.scan_time';
-    default: return 'largeTree.reasons.unknown';
-  }
-}
+import { liveIndexReason } from '../files/indexWords';
+export { liveIndexReasonKey } from '../files/indexWords';
 
 interface RetainedSource {
   reader: number | undefined;
@@ -357,7 +349,7 @@ function FilesPanelContents({ access, environment, failed, binding, paused }: {
         <StatusDot tone={allLive ? 'success' : 'idle'} label={allLive ? t('files.panel.live') : t('files.panel.snapshot')} showLabel />
         {directory !== undefined && <DirectoryPager window={directory} path={root} navigate={(path, action) => { if (current.current) tree.navigate(path, action); }} />}
         {others > 0 && <span className="min-w-0 flex-1 truncate" title={t('files.panel.shared', { name: access.environment.name, count: others })}>{t('files.panel.sharedCount', { count: others })}</span>}
-        {liveOnly && <Tooltip content={`${t(liveIndexReasonKey(environment.index_reason))} ${t('largeTree.mountSuggestion')}`}><span tabIndex={0} className="ml-auto inline-flex" aria-label={t(liveIndexReasonKey(environment.index_reason))}><Info aria-hidden /></span></Tooltip>}
+        {liveOnly && <Tooltip content={`${liveIndexReason(t, environment.index_reason, environment.facts)} ${t('largeTree.liveCost')} ${t('largeTree.mountSuggestion')}`}><span tabIndex={0} className="ml-auto inline-flex" aria-label={liveIndexReason(t, environment.index_reason, environment.facts)}><Info aria-hidden /></span></Tooltip>}
       </div>
       {!paused && actions.picking}
       {!paused && actions.dialogs}
