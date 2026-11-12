@@ -20,7 +20,6 @@ import type { ChatPart, ContentPart } from '@/generated/api-types';
 import type { QueuedUpload } from '@/lib/useUploads';
 import { ByteSize } from '@/ui/ByteSize';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { InlineAlert } from '@/ui/InlineAlert';
 import { formatBytes, formatNumber } from '@/lib/format';
 import { useAppearance } from '@/lib/appearance';
 import { pasteDisplayKey, pasteKey, rememberedPaste, type PastedTextPart } from '@/lib/pastedText';
@@ -28,6 +27,7 @@ import { SegmentedControl } from '@/ui/SegmentedControl';
 import type { CodeViewHandle } from '@/ui/CodeView';
 import { useViewShown } from '@/features/workbench/viewOpening';
 import { Button } from '@/ui/Button';
+import { Badge } from '@/ui/Badge';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { cx } from '@/ui/cx';
 import { UploadHelp } from '@/features/composer/UploadHelp';
@@ -95,7 +95,7 @@ function QueuedAttachment({ row, queue }: { row: QueuedUpload; queue: UploadQueu
         {row.phase === 'failed' && <ErrorAlert error={row.error} />}
         {row.phase === 'stopping' && row.error !== undefined && <ErrorAlert error={row.error} action={<Button size="sm" onClick={() => queue.remove(row.id)}>{t('common.tryAgain')}</Button>} />}
         {open && paste !== undefined && <div className="h-[30dvh] min-h-24 min-w-0">
-          {text.isError ? <ErrorAlert error={text.error} action={<Button size="sm" onClick={() => void text.refetch()}>{t('common.tryAgain')}</Button>} /> : text.data === undefined ? <SkeletonRows rows={3} /> : <Suspense fallback={<SkeletonRows rows={3} />}><CodeView ref={editor} text={text.data} version={row.id} label={t('uploads.pastedText')} wrap flushOnUnmount
+          {text.isError ? <ErrorAlert error={text.error} action={<Button size="sm" onClick={() => void text.refetch()}>{t('common.tryAgain')}</Button>} /> : text.data === undefined ? <SkeletonRows read={text} rows={3} /> : <Suspense fallback={<SkeletonRows read={text} rows={3} />}><CodeView ref={editor} text={text.data} version={row.id} label={t('uploads.pastedText')} wrap flushOnUnmount
             onEdit={() => paste.dirty(row.id)} onSettled={(words) => paste.edit(row.id, words)} /></Suspense>}
         </div>}
       </li>;
@@ -131,7 +131,7 @@ export function AttachmentChips({ parts, onRemove, imageIncompatible = false, im
     <ul aria-label={t('uploads.ready')} className="flex flex-wrap gap-1">
       {parts.map((part, index) => !('type' in part) || (part.type !== 'image' && part.type !== 'file' && part.type !== 'attachment' && part.type !== 'pasted_text') ? null : <ReadyAttachment key={part.type === 'pasted_text' ? pastedIdentity(part) : index} part={part} index={index} onRemove={onRemove} {...options} />)}
     </ul>
-    {imageIncompatible && (imageReason !== undefined ? <InlineAlert tone="warning">{imageReason}</InlineAlert> : <span role="status" className="inline-flex flex-wrap items-center gap-1 text-sm text-text-muted">{t('fileMedia.imageByPath')}{onChangeModel !== undefined && <> · <button type="button" onClick={onChangeModel} className="underline">{t('uploads.changeModel')}</button></>}<FileGuideHint section="agent" /></span>)}
+    {imageIncompatible && <span role="status" className="inline-flex flex-wrap items-center gap-1 text-sm text-text-muted"><span>{t('fileMedia.imageByPath')}</span>{imageReason !== undefined && <> · <span>{imageReason}</span></>}{onChangeModel !== undefined && <> · <button type="button" onClick={onChangeModel} className="underline">{t('uploads.changeModel')}</button></>}<FileGuideHint section="agent" /></span>}
   </div>;
 }
 
@@ -156,18 +156,21 @@ function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPast
       return local !== undefined ? Promise.resolve(local) : readPaste?.(part) ?? Promise.reject(new Error('Pasted text unavailable'));
     },
   });
-  const path = destination?.(part);
+  const path = part.type === 'pasted_text' && part.delivery === 'inline' ? null : destination?.(part);
   const name = part.type === 'pasted_text' ? t('uploads.pastedText') : part.name;
   const characterLabel = part.type === 'pasted_text' ? t('uploads.characters', { count: part.characters, number: formatNumber(part.characters, locale) }) : null;
   const estimatedTokens = part.type === 'pasted_text' ? pasteTokens?.(part) : null;
-  const inlinePaste = part.type === 'pasted_text' ? pasteMode?.(part) : undefined;
+  const inlinePaste = part.type === 'pasted_text' ? part.delivery === 'inline' ? true : part.delivery === 'file' ? false : pasteMode?.(part) : undefined;
   return <li className={cx('flex max-w-full min-w-0 flex-col gap-1 rounded-md border border-border px-2 py-1 text-sm', part.type === 'pasted_text' && open && 'w-full')}>
     <div className={cx('flex min-w-0 flex-wrap items-center gap-y-1', part.type === 'pasted_text' ? 'gap-x-1' : 'gap-x-2')}>
       {part.type === 'pasted_text' ? <div className="flex w-full min-w-0 items-center gap-1"><FileText aria-hidden className="size-4 shrink-0 text-text-muted" /><button type="button" className="focus-inset min-w-0 truncate text-left" aria-expanded={open} onClick={() => setOpen(!open)}>{name}</button><UploadHelp topic="pasted-text" />
         <span className="min-w-0 flex-1 truncate text-text-muted tabular-nums" title={characterLabel ?? undefined}>{characterLabel}</span>
         {onRemove !== undefined && <IconButton size="sm" label={t('uploads.remove', { name })} icon={<X aria-hidden />} onClick={() => onRemove(index)} />}</div> : part.blob === null ? part.type === 'file' && <FilePathAttachment path={part.path} name={part.name} size={part.size} /> : <FileAttachment source={blobSource('upload', '', part.blob, part.name, 'size' in part ? part.size : undefined, 'media_type' in part ? part.media_type : undefined)} />}
-      {part.type === 'pasted_text' && onPasteDelivery !== undefined && <SegmentedControl size="sm" label={t('uploads.pasteDelivery')} value={part.delivery ?? (inlinePaste === true ? 'inline' : 'file')}
-        onValueChange={(value) => onPasteDelivery(part, value)} segments={[{value:'inline',name:t('uploads.inMessage')},{value:'file',name:t('uploads.asFile')}]} />}
+      {part.type === 'pasted_text' && onPasteDelivery !== undefined && <>
+        <SegmentedControl<'inline' | 'file'> size="sm" label={t('uploads.pasteDelivery')} value={part.delivery ?? (inlinePaste === undefined ? null : inlinePaste ? 'inline' : 'file')}
+          onValueChange={(value) => onPasteDelivery(part, value)} segments={[{value:'inline',name:t('uploads.inMessage')},{value:'file',name:t('uploads.asFile')}]} />
+        {(part.delivery === undefined || part.delivery === null) && inlinePaste !== undefined && <Badge>{t('uploads.pasteSuggested')}</Badge>}
+      </>}
       {part.type === 'pasted_text' && onPasteAsText !== undefined && <Button size="sm" variant="ghost" disabled={text.isFetching} onClick={() => {
         const local = editor.current?.getText() ?? edited ?? rememberedPaste(part.blob);
         if (local !== undefined) onPasteAsText(index, local);
@@ -181,7 +184,7 @@ function ReadyAttachment({ part, index, onRemove, destination, readPaste, onPast
     {saving?.phase === 'failed' && <ErrorAlert error={saving.error} action={<Button size="sm" onClick={() => pasteQueue?.retry(saving.id)}>{t('common.tryAgain')}</Button>} />}
     {part.type === 'pasted_text' && !draftDirty && saving === undefined && edited === undefined && inlinePaste !== undefined && <span className="text-sm text-text-muted">{t(inlinePaste ? 'uploads.pasteInline' : 'uploads.pasteFile')}{estimatedTokens !== null && estimatedTokens !== undefined && <> · {t('uploads.estimatedTokens', { count: estimatedTokens, number: formatNumber(estimatedTokens, locale) })}</>}</span>}
     {part.type === 'pasted_text' && open && <div className="h-[30dvh] min-h-24 min-w-0">
-      {text.isError ? <ErrorAlert error={text.error} action={<Button size="sm" onClick={() => void text.refetch()}>{t('common.tryAgain')}</Button>} /> : text.data === undefined ? <SkeletonRows rows={3} /> : <Suspense fallback={<SkeletonRows rows={3} />}><CodeView ref={editor} text={text.data} version={part.blob} label={t('uploads.pastedText')} wrap readOnly={onEditPaste === undefined} flushOnUnmount={onEditPaste !== undefined}
+      {text.isError ? <ErrorAlert error={text.error} action={<Button size="sm" onClick={() => void text.refetch()}>{t('common.tryAgain')}</Button>} /> : text.data === undefined ? <SkeletonRows read={text} rows={3} /> : <Suspense fallback={<SkeletonRows read={text} rows={3} />}><CodeView ref={editor} text={text.data} version={part.blob} label={t('uploads.pastedText')} wrap readOnly={onEditPaste === undefined} flushOnUnmount={onEditPaste !== undefined}
         overlay={edited === undefined ? undefined : { version: part.blob, text: edited }}
         onEdit={onEditPaste === undefined ? undefined : (dirty) => onPasteDirty?.(part, dirty)}
         onSettled={onEditPaste === undefined ? undefined : (words) => { if (words !== text.data) onEditPaste(index, words); }} /></Suspense>}

@@ -416,6 +416,8 @@ mod tests {
         assert!(!takes_uploads(CommandKind::FsWrite));
         assert!(serves_downloads(CommandKind::FsWrite));
         assert!(serves_downloads(CommandKind::TurnStart));
+        assert!(serves_downloads(CommandKind::NodeTemplateImport));
+        assert!(!takes_uploads(CommandKind::NodeTemplateImport));
         assert!(!serves_downloads(CommandKind::FsList));
         assert!(!takes_uploads(CommandKind::FsList));
     }

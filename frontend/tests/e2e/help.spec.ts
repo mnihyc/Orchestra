@@ -1,4 +1,4 @@
-/** Hints and help at work: the "?" beside a term with its card, the help view beside the screen in front (`F1`) and as a page of its own, the articles of the guide with their anchors, and the tip of the finder that is closed for good. */
+/** Hints and help at work: a term's card, the docked F1 view and standalone guide, article anchors, and the finder's explicit controls. */
 import { expect, type Page, test } from '@playwright/test';
 
 import { ACME, scenario, signIn } from './support.ts';
@@ -14,38 +14,40 @@ const helpView = (page: Page) => rightBar(page).getByRole('region', { name: 'Hel
 const atRest = (page: Page): Promise<void> =>
   page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestIdleCallback(() => resolve(), { timeout: 2_000 }))));
 
-test('a hint is a "?" beside a term, and its card says what it is, which one to take, and leads to the article', async ({ page }) => {
+test('a search hint explains its combined results and leads to the matching article heading', async ({ page }) => {
   await signIn(page);
   await page.goto('/search');
-  await page.getByRole('button', { name: 'Help: Where to search' }).click();
+  await page.getByRole('button', { name: 'Help: Search results' }).click();
 
-  const card = page.getByRole('dialog', { name: 'Where to search' });
+  const card = page.getByRole('dialog', { name: 'Search results' });
   await expect(card).toBeVisible();
   await expect(card.getByText('What this is')).toBeVisible();
-  await expect(card.getByText(/looks through everything you may read/)).toBeVisible();
-  await expect(card.getByText('Which one for me')).toBeVisible();
-  await expect(card.getByText(/two characters/)).toBeVisible();
+  await expect(card.getByText('Words and similar meaning arrive in one list; Show more continues it.')).toBeVisible();
+  // The unified search hint intentionally has only What; optional choice advice remains covered by HelpHint's component cases.
+  await expect(card.getByText('Which one for me')).toHaveCount(0);
 
-  // More: the article, beside what the person is doing, at the heading that treats it.
+  // A hint's prompt may use the temporary reading view; F1's docked behavior is checked separately below.
   await card.getByRole('button', { name: 'Read more' }).click();
   await expect(card).toHaveCount(0);
-  await expect(helpView(page).getByRole('heading', { name: 'Finding things', level: 1 })).toBeVisible();
-  await expect(helpView(page).locator('[id="search"]')).toBeInViewport();
+  await expect(page.getByRole('heading', { name: 'Finding things', level: 1 })).toBeVisible();
+  await expect(page.locator('[id="words-and-similar-meaning"]')).toBeInViewport();
 });
 
-test('related search controls share one guide question and their distinct explanations stay in This screen', async ({ page }) => {
+test('related search controls share one guide question and their mounted explanations stay in This screen', async ({ page }) => {
   await signIn(page);
   await page.goto('/search');
-  await expect(page.locator('[data-help-article="finding-things"][data-help-heading="search"]')).toHaveCount(1);
+  await expect(page.locator('[data-help-article="finding-things"][data-help-heading="words-and-similar-meaning"]')).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Help: Dates' })).toHaveCount(0);
-  await page.getByRole('button', { name: 'Help: Where to search' }).click();
-  const card = page.getByRole('dialog', { name: 'Where to search' });
+  await page.getByRole('button', { name: 'Help: Search results' }).click();
+  const card = page.getByRole('dialog', { name: 'Search results' });
   await expect(card.getByText('What this is')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(card).toHaveCount(0);
   await atRest(page);
   await page.keyboard.press('F1');
-  await expect(helpView(page).getByText('Dates', { exact: true })).toBeVisible();
+  // This screen lists the questions actually mounted; File type is the current distinct filter hint.
+  await expect(helpView(page).getByRole('region', { name: 'Hints on this screen' })).toContainText('File type');
+  await expect(helpView(page).getByRole('region', { name: 'Hints on this screen' })).toContainText('Some conversation files have no recorded type. Choose Any to include them.');
 });
 
 test('F1 opens the help of the screen in front, beside it: what it is for, its hints, the articles that belong to it', async ({ page }) => {
@@ -59,7 +61,7 @@ test('F1 opens the help of the screen in front, beside it: what it is for, its h
   const view = helpView(page);
   await expect(view.getByRole('heading', { name: 'What this screen is for' })).toBeVisible();
   // The hints that are on this screen are listed with what they say.
-  await expect(view.getByText('Where to search', { exact: true })).toBeVisible();
+  await expect(view.getByRole('region', { name: 'Hints on this screen' })).toContainText('Search results');
   // And the article whose front matter names this route.
   await view.getByRole('button', { name: 'Finding things' }).click();
   await expect(view.getByRole('heading', { name: 'Finding things', level: 1 })).toBeVisible();
@@ -88,7 +90,7 @@ test('the help is searched by title and heading, and the keys listed are the one
 test('the help is a page of its own, and an article has an address with an anchor', async ({ page }) => {
   await signIn(page);
   await page.goto('/help');
-  await expect(page.getByRole('region', { name: 'Help' })).toBeVisible();
+  await expect(page.getByRole('searchbox', { name: 'Search the help' })).toBeVisible();
   await page.getByRole('tab', { name: /Articles/ }).click();
   await page.getByRole('button', { name: /Finding things/ }).click();
   await expect(page).toHaveURL(/\/help\/finding-things$/);
@@ -101,19 +103,19 @@ test('the help is a page of its own, and an article has an address with an ancho
   await expect(page.getByText('There is no article at this address')).toBeVisible();
 });
 
-test('a tip is shown unasked, closed for good, and brought back from the help', async ({ page }) => {
+test('the finder keeps explicit mode controls after reload and resetting closed tips without an unsolicited note', async ({ page }) => {
   await signIn(page);
   await page.goto(`/org/acme`);
   await expect(page.getByRole('button', { name: 'Find anything' })).toBeVisible();
   await atRest(page);
   await page.keyboard.press('Control+k');
   const tip = page.getByRole('note').filter({ hasText: 'Type > for commands' });
-  await expect(tip).toBeVisible();
-  await tip.getByRole('button', { name: 'Got it, do not show this again' }).click();
+  // The finder deliberately retired this first-use tip; its explicit mode controls remain the way on.
   await expect(tip).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Find' }).getByRole('group', { name: 'Keep the finder to' }).getByRole('button', { name: 'Commands', exact: true })).toBeVisible();
   await page.keyboard.press('Escape');
 
-  // It stays closed, also after the page is loaded anew.
+  // Reload and the generic tip reset do not restore a retired note.
   await page.reload();
   await expect(page.getByRole('button', { name: 'Find anything' })).toBeVisible();
   await atRest(page);
@@ -125,7 +127,8 @@ test('a tip is shown unasked, closed for good, and brought back from the help', 
   await page.keyboard.press('F1');
   await helpView(page).getByRole('button', { name: 'Show closed tips again' }).click();
   await page.keyboard.press('Control+k');
-  await expect(page.getByRole('note').filter({ hasText: 'Type > for commands' })).toBeVisible();
+  await expect(tip).toHaveCount(0);
+  await expect(page.getByRole('dialog', { name: 'Find' }).getByRole('group', { name: 'Keep the finder to' }).getByRole('button', { name: 'Commands', exact: true })).toBeVisible();
 });
 
 test('on every screen that has a route, F1 opens the help with something for it', async ({ page }) => {

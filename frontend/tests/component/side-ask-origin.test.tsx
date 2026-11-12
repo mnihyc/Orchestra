@@ -107,9 +107,9 @@ it('an inherited content owner receives the exact side reveal while another hist
 it('the global dialog retains its real opener, uses that held native view without a default GET, and opens only its source', async () => {
   calls.start.mockResolvedValue(reply()); render(<Shell><SideAskHost /><Ui read={one} name="one" /><Ui read={other} name="other" /></Shell>);
   act(() => openSideAsk({ threadId: PARENT, threadName: parent.name, toTurn: null, text: 'An exact side question', read: one }));
-  const dialog = await screen.findByRole('dialog', { name: 'Ask on the side' });
+  const dialog = await screen.findByRole('dialog', { name: 'Side thread' });
   expect(calls.node).not.toHaveBeenCalled(); expect(useSideAsk.getState().current?.read).toEqual(one);
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Ask' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Start side thread' }));
   await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   expect(screen.getByTestId('one')).toHaveAttribute('data-open', 'true'); expect(screen.getByTestId('other')).toHaveAttribute('data-open', 'false');
   expect(useComposerStore.getState().text[PARENT]).toBe('Unsent parent words'); expect(calls.node).not.toHaveBeenCalled();
@@ -118,9 +118,9 @@ it('the global dialog retains its real opener, uses that held native view withou
 it('a global question whose captured source changed cannot submit fresh work or borrow the other window', async () => {
   render(<Shell><SideAskHost /></Shell>);
   act(() => openSideAsk({ threadId: PARENT, threadName: parent.name, toTurn: null, text: 'An exact side question', read: one }));
-  const dialog = await screen.findByRole('dialog', { name: 'Ask on the side' });
+  const dialog = await screen.findByRole('dialog', { name: 'Side thread' });
   act(() => selectThreadContinuation(one, B));
-  expect(within(dialog).getByRole('button', { name: 'Ask' })).toBeDisabled();
+  expect(within(dialog).getByRole('button', { name: 'Start side thread' })).toBeDisabled();
   fireEvent.keyDown(within(dialog).getByRole('textbox'), { key: 'Enter' }); expect(calls.start).not.toHaveBeenCalled();
   expect(threadViewOf(other).read?.selection).toBe(B); expect(opened(other)).toBe(false);
 });

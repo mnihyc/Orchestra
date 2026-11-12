@@ -11,6 +11,7 @@ CREATE TABLE exports (
     bytes bigint,
     counts jsonb DEFAULT '{}'::jsonb NOT NULL,
     left_out jsonb DEFAULT '[]'::jsonb NOT NULL,
+    manifest jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     ready_at timestamp with time zone,
     expires_at timestamp with time zone,

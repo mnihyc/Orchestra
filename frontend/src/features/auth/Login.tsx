@@ -16,6 +16,7 @@ import { EmailCode } from '@/features/auth/EmailCode';
 import { IdentityProviders } from '@/features/auth/IdentityProviders';
 import { AuthCard } from '@/features/auth/Frame';
 import { IdentityCallback } from '@/features/auth/IdentityCallback';
+import { SessionEndedNotice } from '@/features/auth/SessionEnded';
 import { recoveryCodeUsed } from '@/features/auth/recoveryCode';
 import type { AuthLoginBody, Meta } from '@/generated/api-types';
 import { useAppearance } from '@/lib/appearance';
@@ -26,6 +27,7 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input, PasswordInput } from '@/ui/Input';
 import { linkButtonClasses, linkClasses } from '@/ui/link';
+import { Tooltip } from '@/ui/Tooltip';
 
 /** The proofs that were right so far, kept in this screen's memory alone. */
 interface Proofs {
@@ -135,6 +137,7 @@ export function Login({ onward, callbackError }: LoginProps) {
         )
       }
     >
+      <SessionEndedNotice />
       {stage.at === 'first' && (
         <FirstStep
           meta={meta}
@@ -295,11 +298,11 @@ function FirstStep({
             // A password that was refused was emptied to be typed again: that it was wrong is what there is to say.
             error={wrong && password.value === '' ? t('auth.login.wrong') : (password.error ?? (wrong ? t('auth.login.wrong') : undefined))}
           />
-          {meta.mail && <Link to="/recover" className={`${linkClasses} self-end text-sm`}>
+          <Link to="/recover" className={`${linkClasses} self-end text-sm`}>
             {t('auth.links.forgot')}
-          </Link>}
+          </Link>
           <Refusal error={wrong ? null : refused} meta={meta} way="password" login={form.values.login.trim()} />
-          <Button type="submit" variant="primary" block pending={pending} disabled={asking}>
+          <Button type="submit" variant="primary" block pending={pending} disabled={asking} reason={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}>
             {t('auth.login.submit')}
           </Button>
         </form>
@@ -318,7 +321,7 @@ function FirstStep({
       {showForm && meta.mail && meta.email_code_login && (
         <>
         {codeError !== null && <ErrorAlert error={codeError} />}
-        <button
+        <Tooltip content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}><span className="inline-flex self-start" tabIndex={asking || pending ? 0 : undefined}><button
           type="button"
           className={`${linkButtonClasses} self-start text-sm`}
           disabled={asking || pending}
@@ -333,7 +336,7 @@ function FirstStep({
           }}
         >
           {asking ? t('auth.code.sending') : t('auth.login.mailCode')}
-        </button>
+        </button></span></Tooltip>
         </>
       )}
 
@@ -386,9 +389,9 @@ function SecondStep({ stage, meta, pending, asking, refused, codeError, failures
   const account = <p className="text-sm wrap-anywhere text-text-muted">{t('auth.second.account', { account: stage.proofs.login })}</p>;
 
   const switches = others.map((method) => (
-    <button key={method} type="button" className={linkButtonClasses} disabled={asking || pending} onClick={() => onUse(method)}>
+    <Tooltip key={method} content={asking ? t('auth.code.sending') : pending ? t('ui.unavailable.signingIn') : undefined}><span className="inline-flex" tabIndex={asking || pending ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={asking || pending} onClick={() => onUse(method)}>
       {t(`auth.second.use.${method}`)}
-    </button>
+    </button></span></Tooltip>
   ));
 
   if (stage.using === 'email_code') {
@@ -554,14 +557,14 @@ function Refusal({ error, meta, way, login }: RefusalProps) {
         message={!meta.mail ? t('auth.verify.noMail') : again.isSuccess ? t('auth.verify.resent') : undefined}
         action={
           !meta.mail || again.isSuccess ? undefined : (
-            <button
+            <Tooltip content={again.isPending ? t('ui.unavailable.sendingEmail') : undefined}><span className="inline-flex" tabIndex={again.isPending ? 0 : undefined}><button
               type="button"
               className={linkButtonClasses}
               disabled={again.isPending}
               onClick={() => again.mutate(login)}
             >
               {t('auth.verify.resend')}
-            </button>
+            </button></span></Tooltip>
           )
         }
       />

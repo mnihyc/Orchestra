@@ -8,6 +8,10 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+test-observers = ["orch-api-core/test-observers"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
@@ -18,12 +22,14 @@ orch-build-info.workspace = true
 orch-config.workspace = true
 orch-db.workspace = true
 orch-identity-oidc.workspace = true
+orch-image-backends.workspace = true
 orch-notifier-email.workspace = true
 orch-notifier-push.workspace = true
 orch-notifier-telegram.workspace = true
 orch-notifier-webhook.workspace = true
 orch-pki.workspace = true
 orch-provider-contract.workspace = true
+orch-provider-builtins.workspace = true
 orch-provider-deepseek.workspace = true
 orch-provider-openrouter.workspace = true
 orch-telemetry.workspace = true

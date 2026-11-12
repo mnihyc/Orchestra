@@ -9,14 +9,18 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bytes::Bytes;
+#[cfg(target_os = "linux")]
+use orch_conformance::driver;
 use orch_conformance::report::{Outcome, Report};
-use orch_conformance::{driver, summarizer, translator, transport};
+use orch_conformance::{summarizer, translator, transport};
+#[cfg(target_os = "linux")]
 use orch_driver_contract::runtime::RuntimeSpec;
 use orch_model_contract::credentials::Credential;
 use orch_model_contract::protocol::WireProtocol;
 use orch_model_contract::translator::{
     ProtocolTranslator, TranslateError, TranslatedRequest, UpstreamSide,
 };
+#[cfg(target_os = "linux")]
 use orch_plugin::bridges::driver::DriverBridge;
 use orch_plugin::bridges::summarizer::SummarizerBridge;
 use orch_plugin::bridges::translator::TranslatorBridge;

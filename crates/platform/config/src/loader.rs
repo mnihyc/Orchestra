@@ -157,7 +157,7 @@ fn overlay(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ServerConfig;
+    use crate::{RuntimeComponent, ServerConfig};
 
     fn none(_: &str) -> Option<String> {
         None
@@ -170,6 +170,74 @@ mod tests {
         assert_eq!(config.auth.login_failure_limit, 8);
         assert_eq!(config.database.slow_statement_ms, 1_000);
         assert_eq!(config.database.slow_acquire_ms, 1_000);
+    }
+
+    #[test]
+    fn runtime_worker_stacks_default_to_64_mib_and_accept_smaller_and_larger_overrides() {
+        let components = [
+            RuntimeComponent::Api,
+            RuntimeComponent::Gateway,
+            RuntimeComponent::Worker,
+            RuntimeComponent::Node,
+        ];
+        let defaults: ServerConfig = load_text("", "test", none).unwrap();
+        for component in components {
+            assert_eq!(
+                defaults.worker_stack_bytes(component).unwrap(),
+                64 * 1024 * 1024
+            );
+        }
+        let configured: ServerConfig = load_text(
+            "[api]\nworker_stack_mib = 2\n[gateway]\nworker_stack_mib = 96\n\
+             [worker]\nworker_stack_mib = 8\n[node]\nworker_stack_mib = 128\n",
+            "test",
+            none,
+        )
+        .unwrap();
+        let environment: ServerConfig = load_text("", "test", |name| {
+            match name {
+                "ORCH_API_WORKER_STACK_MIB" => Some("4"),
+                "ORCH_GATEWAY_WORKER_STACK_MIB" => Some("192"),
+                "ORCH_WORKER_WORKER_STACK_MIB" => Some("3"),
+                "ORCH_NODE_WORKER_STACK_MIB" => Some("256"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        })
+        .unwrap();
+        for ((component, file_mib), env_mib) in components
+            .into_iter()
+            .zip([2_usize, 96, 8, 128])
+            .zip([4_usize, 192, 3, 256])
+        {
+            assert_eq!(
+                configured.worker_stack_bytes(component).unwrap(),
+                file_mib * 1024 * 1024
+            );
+            assert_eq!(
+                environment.worker_stack_bytes(component).unwrap(),
+                env_mib * 1024 * 1024
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_worker_stack_zero_and_byte_overflow_are_named_before_start() {
+        let overflow_mib = usize::MAX / (1024 * 1024) + 1;
+        for section in ["api", "gateway", "worker", "node"] {
+            for mib in [0, overflow_mib] {
+                let error = load_text::<ServerConfig>(
+                    &format!("[{section}]\nworker_stack_mib = {mib}\n"),
+                    "test",
+                    none,
+                )
+                .unwrap_err();
+                assert!(
+                    matches!(&error, ConfigError::Invalid { key, .. } if key == &format!("{section}.worker_stack_mib")),
+                    "{error}"
+                );
+            }
+        }
     }
 
     #[test]

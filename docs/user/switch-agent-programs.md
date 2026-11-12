@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Switch agent programs with history
 screens: /thread/$threadId, /resources/environments/$id
 keywords: switch, fork, Carry, Summary, None, history, turns, handoff, transcript, context, agent program
+summary: Review a switch or fork with its provider, agent, history and file choices.
 ---
 
 # Switch agent programs with history

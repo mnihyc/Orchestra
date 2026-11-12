@@ -1,4 +1,6 @@
 /** A compact identity and the acts available beside a person. */
+import { linkTo } from '@/lib/links';
+import { copyText } from '@/ui/clipboard';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ChevronDown } from 'lucide-react';
 import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
@@ -66,11 +68,11 @@ function ContextActions({ user, thing, message }: { user: UserRef; thing: Person
   const begin = (next: 'notify' | 'give') => setMode(next);
   const status = actions.data?.can_view;
   return <>
-    {actions.isPending ? <SkeletonRows rows={1} /> : actions.isError ? <ErrorState error={actions.error} onRetry={() => void actions.refetch()} compact /> : <>
+    {actions.isPending ? <SkeletonRows read={actions} rows={1} /> : actions.isError ? <ErrorState error={actions.error} onRetry={() => void actions.refetch()} compact /> : <>
       {status !== null && status !== undefined && <p className="text-sm text-text-muted">{t(status ? 'people.quick.canView' : 'people.quick.noAccess')}</p>}
       {mode === 'acts' && <div className="flex flex-wrap items-center gap-1">
-        {actions.data.can_notify && <Button size="sm" onClick={() => begin('notify')}>{t('people.quick.notify')}</Button>}
-        {actions.data.gives.length > 0 && <Button size="sm" onClick={() => begin('give')}>{t('people.quick.giveAccess')} <ChevronDown size={14} aria-hidden /></Button>}
+        {actions.data.can_notify && <Button data-card-entry size="sm" onClick={() => begin('notify')}>{t('people.quick.notify')}</Button>}
+        {actions.data.gives.length > 0 && <Button data-card-entry size="sm" onClick={() => begin('give')}>{t('people.quick.giveAccess')} <ChevronDown size={14} aria-hidden /></Button>}
         {message}
       </div>}
       {mode === 'notify' && <form ref={form} tabIndex={-1} className="flex flex-col gap-2" onSubmit={(event) => { event.preventDefault(); event.currentTarget.focus(); if (!sent.isPending) sent.mutate(); }}>
@@ -92,15 +94,17 @@ function ContextActions({ user, thing, message }: { user: UserRef; thing: Person
 }
 
 export function PersonQuickCard({ user, thing, identity = true }: { user: UserRef; thing?: PersonThing | undefined; identity?: boolean }) {
+  const { t } = useTranslation();
   const me = useStore(apiClient.session, (state) => state.userId);
   const profile = useQuery({ ...profileQuery(user.username), enabled: user.kind === 'human' && user.username !== '' && me !== user.id });
   const isSelf = me === user.id || profile.data?.is_me === true;
   const isOther = !isSelf && (me !== null || profile.data?.is_me === false);
   if (isSelf && !identity) return null;
-  const message = isOther && profile.data !== undefined && profile.data.can_message ? <ProfileMessage compact profile={profile.data} /> : null;
+  const message = isOther && profile.data?.can_message === true ? <ProfileMessage compact profile={profile.data} /> : null;
   return <div className="flex max-w-[min(20rem,calc(100vw-2rem))] flex-col gap-2 p-3 text-text">
     {identity && <div className="flex min-w-0 items-center gap-2"><Avatar text={user.avatar.text} color={user.avatar.color} kind={user.kind === 'service' ? 'service' : 'human'} size={32} />
       <div className="min-w-0"><div className="truncate font-semibold">{user.display_name}</div>{user.username !== '' && <div className="truncate text-sm text-text-muted">@{user.username}</div>}</div></div>}
+    {identity && user.username !== '' && <Button size="sm" variant="ghost" onClick={() => void copyText(linkTo({ kind: 'person', id: user.id, username: user.username }), t('common.linkCopied'))}>{t('actions.copyLink.label')}</Button>}
     {isOther && (thing === undefined ? message : <ContextActions user={user} thing={thing} message={message} />)}
   </div>;
 }

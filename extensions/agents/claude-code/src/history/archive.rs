@@ -582,6 +582,7 @@ mod tests {
 
     #[test]
     fn scale_a_million_native_items_round_trip_with_page_sized_reads() {
+        let version = crate::config::SUPPORTED_RANGE.trim_start_matches('=');
         let home = tempfile::tempdir().unwrap();
         let project = home.path().join("projects/orch");
         std::fs::create_dir_all(&project).unwrap();
@@ -591,7 +592,7 @@ mod tests {
         for item in 0..1_000_000 {
             writeln!(out, "{{\"type\":\"assistant\",\"item\":{item},\"text\":\"native bytes remain unchanged across a move\"}}").unwrap();
         }
-        writeln!(out, "{{\"version\":\"2.1.312\"}}").unwrap();
+        writeln!(out, "{{\"version\":{}}}", serde_json::json!(version)).unwrap();
         out.flush().unwrap();
         let into = tempfile::tempdir().unwrap();
         let cancel = AtomicBool::new(false);
@@ -601,7 +602,7 @@ mod tests {
             target.path(),
             true,
             Path::new(&archive.path),
-            "2.1.312",
+            version,
             &cancel,
         )
         .unwrap();

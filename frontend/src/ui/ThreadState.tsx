@@ -1,5 +1,6 @@
 /** The server's one thread presentation, shared by icons, tabs, rows and state chips. */
 import { forwardRef, useMemo } from 'react';
+import { MessageSquareText } from 'lucide-react';
 import type { LucideIcon, LucideProps } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -7,22 +8,24 @@ import type { TFunction } from 'i18next';
 import type { ThreadDisplay, ThreadDisplayState } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatNumber } from '@/lib/format';
+import { useServerNow } from '@/lib/serverClock';
 import { formatRelative, formatSpan, useNow, useRunningClock, type TimeContext } from '@/lib/time';
 import { useTreeNode, useTreeStore } from '@/realtime/stores/tree';
 import { useThreadPart } from '@/realtime/stores/thread';
 import { containedThreadStates, currentThreadDisplay } from '@/lib/threadDisplay';
 export { THREAD_URGENCY, isThreadUrgency } from '@/lib/threadDisplay';
-import { NodeIcon } from '@/ui/NodeIcon';
 import { StateChip, StateIcon, type StateIconProps } from '@/ui/StateChip';
+import { Tooltip } from '@/ui/Tooltip';
+import { cx } from '@/ui/cx';
 
 /** The display state is supplied by the server; missing metadata never infers private work. */
-export const threadDisplayState = (display: ThreadDisplay | null | undefined): ThreadDisplayState => display?.state ?? 'idle';
+export const threadDisplayState = (display: ThreadDisplay | null | undefined): ThreadDisplayState | undefined => display?.state;
 
 // Stored guard windows use seconds; the shared duration formatter takes milliseconds.
 const SECOND_MS = 1_000;
 
 /** A short localized fragment with only the safe particulars the server supplied. */
-export function threadStateLabel(display: ThreadDisplay, t: TFunction, context: TimeContext, now: number): string {
+export function threadStateLabel(display: ThreadDisplay, t: TFunction, context: TimeContext, now: number | null): string {
   const recovery = display.recovery;
   if (recovery !== undefined && recovery !== null) {
     const kind = t(`calls.kinds.${recovery.failure_kind}`);
@@ -35,7 +38,7 @@ export function threadStateLabel(display: ThreadDisplay, t: TFunction, context: 
       return recovery.stop_reason === null ? kind : t(`calls.details.${recovery.stop_reason}`);
     }
     if (display.state === 'queued') {
-      const phrase = recovery.due_at === null ? t('state.queued') : t(
+      const phrase = recovery.stop_reason === 'machine_offline' ? t('calls.details.machine_offline') : recovery.due_at === null || now === null ? t('state.queued') : t(
         recovery.step === 'wait' ? 'threadStates.waitIn' : recovery.step === 'failover' ? 'threadStates.failoverIn' : recovery.continuing ? 'threadStates.continueIn' : 'threadStates.retryIn',
         { time: formatSpan(Math.max(0, Date.parse(recovery.due_at) - now), context, 'short') },
       );
@@ -50,7 +53,7 @@ export function threadStateLabel(display: ThreadDisplay, t: TFunction, context: 
   if (display.state === 'waiting_approval' && display.waiting_for_answer) return t('thread.header.waitingForAnswer');
   if (display.state === 'blocked' && display.blocked_reason === 'unbound') return t('thread.header.needsSetup');
   if (display.state === 'blocked' && display.blocked_reason !== null) return t('threadStates.blocked', { reason: t(`thread.blockedWhy.${display.blocked_reason}`) });
-  if (display.state === 'finished' && display.finished_at !== null) return t('threadStates.finished', { time: formatRelative(display.finished_at, context, now) });
+  if (display.state === 'finished' && display.finished_at !== null && now !== null) return t('threadStates.finished', { time: formatRelative(display.finished_at, context, now) });
   return t(`state.${display.state}`);
 }
 
@@ -61,7 +64,16 @@ export function useThreadStateLabel(display: ThreadDisplay | null | undefined): 
   const recovery = display?.recovery;
   const countdown = display?.state === 'queued' && recovery !== undefined && recovery !== null && recovery.due_at !== null;
   const seconds = useRunningClock(countdown);
-  return display === null || display === undefined ? undefined : threadStateLabel(display, t, context, countdown ? seconds : now);
+  const serverNow = useServerNow(seconds);
+  return display === null || display === undefined ? '—' : threadStateLabel(display, t, context, countdown ? serverNow : now);
+}
+
+/** An old or incomplete row is not evidence that its work is idle. */
+function UnreportedThreadState({ className }: { className?: string | undefined }) {
+  const { t } = useTranslation();
+  const hint = t('threadStates.notReported');
+  return <Tooltip content={hint}><span role="img" aria-label={hint} tabIndex={0}
+    className={cx('inline-flex shrink-0 text-text-muted', className)}>—</span></Tooltip>;
 }
 
 /** The small state record carried with a thread's existing heading and tab name. */
@@ -75,18 +87,20 @@ export function threadIconFacts(thread: { id: string; display?: ThreadDisplay | 
 
 type Props = Omit<StateIconProps, 'state'> & { display: ThreadDisplay | null | undefined };
 
-/** No request or feed is acquired by a thread icon. A reader without metadata keeps the plain glyph. */
+/** A reference without a state payload stays a kind glyph. A known visible thread uses null while
+ * its observation is missing; it never invents idle work or consults a private cached row. */
 export function ThreadStateIcon({ display, label, className, glyphRef }: Props) {
   const words = useThreadStateLabel(display);
-  if (display === null || display === undefined) return <NodeIcon kind="thread" {...(className === undefined ? {} : { className })} />;
+  if (display === undefined) return <MessageSquareText ref={glyphRef} aria-hidden className={cx('size-4 shrink-0 text-text-muted', className)} />;
+  if (display === null) return <UnreportedThreadState className={className} />;
   return <StateIcon state={display.state} label={label ?? words} className={className} glyphRef={glyphRef} />;
 }
 
 /** The same presentation with its readable words where there is room. */
 export function ThreadStateChip({ display, className }: Pick<Props, 'display' | 'className'>) {
   const label = useThreadStateLabel(display);
-  if (display === null || display === undefined) return <ThreadStateIcon display={display} className={className} />;
-  return <StateChip state={threadDisplayState(display)} {...(label === undefined ? {} : { label })} {...(className === undefined ? {} : { className })} />;
+  if (display === null || display === undefined) return <UnreportedThreadState className={className} />;
+  return <StateChip state={display.state} {...(label === undefined ? {} : { label })} {...(className === undefined ? {} : { className })} />;
 }
 
 /** A visible tab reads already held live facts even while its content reader is paused. */
@@ -94,7 +108,7 @@ export function LiveThreadStateIcon({ display, threadId, className, glyphRef }: 
   const row = useTreeNode(threadId);
   const cached = useThreadPart(threadId ?? '', (view) => view.closed === null ? view.thread?.display : null);
   const latest = cached === null ? undefined : currentThreadDisplay(cached, currentThreadDisplay(row?.thread?.display, display ?? undefined));
-  return <ThreadStateIcon display={latest} className={className} glyphRef={glyphRef} />;
+  return <ThreadStateIcon display={latest ?? null} className={className} glyphRef={glyphRef} />;
 }
 
 /** Cached, unopened tabs already have a tree state and need no reader of their own. */

@@ -119,7 +119,7 @@ test('what waits, of the three kinds, with its controls', async ({ page }) => {
     options: { models: ['claude-opus', 'claude-sonnet'], efforts: ['medium', 'high'] },
   });
   await open(page, '/approvals');
-  await expect(page.getByRole('region', { name: 'GPU for Training box' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'GPU', exact: true })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Dora Developer asks for access to 2 things' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
@@ -129,12 +129,17 @@ test('a request decided meanwhile, a decided line opened, and the requested and 
   const first = await askCapability({ requester: 'dora', title: 'GPU for Training box', reason: 'Training needs it.' });
   await askAccess({ requester: 'dora', title: 'Access to Repro', object: { kind: 'thread', id: REPRO, name: 'Repro' }, permissions: ['thread.view'] });
   await open(page, '/approvals');
-  await expect(page.getByRole('region', { name: 'GPU for Training box' }).getByRole('button', { name: 'Approve', exact: true })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'GPU', exact: true }).getByRole('button', { name: 'Approve GPU', exact: true })).toBeVisible();
   await settleAs(first.id, 'grace', 'approved');
-  await expect(page.getByText('Already answered by Grace Hopper')).toBeVisible();
+  // Decided meanwhile by somebody else: the card becomes the request's line, with who answered and that it is decided.
+  const decided = page.getByRole('region', { name: 'GPU for Training box' });
+  await expect(decided).toContainText('Already decided');
+  const attribution = decided.getByRole('status').filter({ has: page.getByRole('button', { name: 'Grace Hopper', exact: true }) });
+  await expect(attribution).toContainText(/Approved\s*by/);
+  await expect(attribution.getByRole('button', { name: 'Grace Hopper', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('region', { name: 'GPU for Training box' }).getByRole('button', { name: /Approved by Grace Hopper/ }).click();
+  await decided.getByRole('button', { name: 'GPU Approved' }).click();
   await expect(page.getByText('Training needs it.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
@@ -168,29 +173,29 @@ test('nothing waits, in each tab', async ({ page }) => {
 
 test('the notification settings with every card, switched on and off', async ({ page }) => {
   await open(page, '/settings/notifications');
-  await expect(page.getByRole('region', { name: 'Mail · this system' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mail (this system)' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
-  const mail = page.getByRole('region', { name: 'Mail · this system' });
-  await mail.getByRole('switch', { name: 'Mail · this system' }).click();
-  await expect(mail.getByRole('switch', { name: 'Mail · this system' })).toBeChecked();
+  const mail = page.getByRole('region', { name: 'Mail (this system)' });
+  await mail.getByRole('switch', { name: 'Mail (this system)' }).click();
+  await expect(mail.getByRole('switch', { name: 'Mail (this system)' })).toBeChecked();
   await mail.getByRole('checkbox', { name: 'Only what I have not read after' }).click();
-  await mail.getByRole('radio', { name: 'Only these kinds' }).click();
+  await mail.getByRole('radiogroup', { name: 'Send' }).getByRole('radio', { name: 'Selected', exact: true }).click();
   await expectAccessibleInBothThemes(page);
 });
 
 test('the kinds list of a route, open', async ({ page }) => {
   await open(page, '/settings/notifications');
-  const mail = page.getByRole('region', { name: 'Mail · this system' });
-  await mail.getByRole('switch', { name: 'Mail · this system' }).click();
-  await mail.getByRole('radio', { name: 'Only these kinds' }).click();
+  const mail = page.getByRole('region', { name: 'Mail (this system)' });
+  await mail.getByRole('switch', { name: 'Mail (this system)' }).click();
+  await mail.getByRole('radiogroup', { name: 'Send' }).getByRole('radio', { name: 'Selected', exact: true }).click();
   await mail.getByRole('button', { name: 'Choose kinds' }).click();
-  await expect(page.getByRole('checkbox', { name: 'Approval needed' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: 'Choose kinds', exact: true }).getByRole('checkbox', { name: 'Approval needed', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });
 
 test('the dialog that connects a bot, and the one that makes a webhook', async ({ page }) => {
   await open(page, '/settings/notifications');
-  await page.getByRole('region', { name: "Telegram · Acme's bot" }).getByRole('button', { name: 'Connect Telegram…' }).click();
+  await page.getByRole('region', { name: "Telegram (Acme's bot)" }).getByRole('button', { name: 'Connect Telegram…' }).click();
   const connect = page.getByRole('dialog', { name: 'Connect Telegram' });
   await expect(connect.getByRole('img', { name: 'QR code of the link' })).toBeVisible();
   await expectAccessibleInBothThemes(page, '[role="dialog"]');
@@ -228,6 +233,6 @@ test('the counters and the pages on a small screen', async ({ page }) => {
   await expect(page.getByRole('region', { name: 'Run npm install left-pad' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.goto('/settings/notifications');
-  await expect(page.getByRole('region', { name: 'Mail · this system' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Mail (this system)' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 });

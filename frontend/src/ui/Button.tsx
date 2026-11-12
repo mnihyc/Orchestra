@@ -14,6 +14,7 @@ import { cloneElement, isValidElement, type ButtonHTMLAttributes, type MouseEven
 import { ActionIcon, actionForLabel, actionName, type ActionId } from '@/ui/actions';
 import { cx } from '@/ui/cx';
 import { AdminActTooltip, type AdminActSpec } from '@/ui/AdminAct';
+import { Tooltip } from '@/ui/Tooltip';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-ghost';
 export type ButtonSize = 'sm' | 'md';
@@ -34,8 +35,12 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
    * so that the reason can be read where the button is.
    */
   blocked?: boolean;
+  /** The action's explanation, including why it is unavailable, on hover, focus and touch. */
+  reason?: string | undefined;
   /** Takes the whole width of what it stands in. */
   block?: boolean;
+  /** A narrow cell may cut the words of the button: the wrapper that carries its reason stays within what the button stands in. */
+  bounded?: boolean;
   /** Gives the look of a button to the one child, which is then what is rendered: a link, as a rule. */
   asChild?: boolean;
   ref?: Ref<HTMLButtonElement>;
@@ -93,7 +98,9 @@ export function Button({
   icon,
   pending = false,
   blocked = false,
+  reason,
   block = false,
+  bounded = false,
   asChild = false,
   disabled = false,
   type = 'button',
@@ -107,14 +114,16 @@ export function Button({
   const sign = act === undefined ? icon : <ActionIcon action={act} />;
   const words = children ?? (act === undefined ? null : actionName(act));
   const classes = cx(buttonClasses({ variant, size, block, disabled: disabled || blocked, pending }), className);
+  const explain = (content: ReactNode) => reason === undefined ? content
+    : <Tooltip content={reason}><span className={cx('inline-flex', block && 'w-full', bounded && 'min-w-0 max-w-full')} tabIndex={disabled ? 0 : undefined}>{content}</span></Tooltip>;
 
   if (asChild) {
     const child = isValidElement<{ children?: ReactNode }>(children) && typeof children.props.children === 'string' ? children : null;
     const childAct = child === null ? undefined : action ?? actionForLabel(child.props.children);
     const childSign = childAct === undefined ? icon : <ActionIcon action={childAct} />;
     const content = child !== null && childSign !== undefined ? cloneElement(child, { children: <>{childSign}{child.props.children}</> }) : children;
-    return (
-      <AdminActTooltip spec={admin}><Slot.Root ref={ref} className={classes} data-action={childAct ?? act} {...rest}>
+    return explain(
+      <AdminActTooltip spec={admin}><Slot.Root ref={ref} className={classes} data-action={childAct ?? act} aria-description={reason ?? rest['aria-description']} {...rest}>
         {content}
       </Slot.Root></AdminActTooltip>
     );
@@ -129,7 +138,7 @@ export function Button({
     onClick?.(event);
   };
 
-  return (
+  return explain(
     <AdminActTooltip spec={admin}><button
       ref={ref}
       type={type}
@@ -138,6 +147,7 @@ export function Button({
       aria-disabled={pending || blocked || undefined}
       data-action={act}
       aria-busy={pending || undefined}
+      aria-description={reason ?? rest['aria-description']}
       onClick={press}
       {...rest}
     >
