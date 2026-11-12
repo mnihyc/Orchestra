@@ -3,7 +3,7 @@
 //! Literal queries use the same words-in-any-order and quoted-phrase grammar as people's search. With `regex`
 //! the query is a regular expression in the
 //! syntax of the Rust `regex` crate, which has no look-around and no back-references and is matched in time linear
-//! in what it reads, and which ignores case unless it says `(?-i)`. A pattern longer than a thousand characters, or
+//! in what it reads, and which ignores case unless it says `(?-i)`. A pattern beyond the resolved query budget, or
 //! one that does not compile within the crate's default size limit, is refused with the reason.
 //!
 //! **What is looked at first.** The names of places, threads and documents, and the text the database holds
@@ -34,7 +34,8 @@ mod related;
 
 use crate::engine::Engine;
 use crate::error::EngineError;
-use crate::tools::definitions::{CONTEXT_MAX, Code, QUERY_MAX_CHARS, RESULTS_MAX, Refusal};
+use crate::tools::definitions::{Code, Refusal};
+use crate::tools::search_budgets::SearchBudgets;
 use crate::tools::shared::audit_by_agent;
 use crate::tools::tree::{FoundEntry, Pattern};
 use crate::tools::{Answer, CallContext};
@@ -422,6 +423,7 @@ impl Engine {
         &self,
         call: &CallContext,
         thread: &ThreadRow,
+        budgets: &SearchBudgets,
     ) -> Result<Answer, EngineError> {
         let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
             Ok(arguments) => arguments,
@@ -436,7 +438,7 @@ impl Engine {
         if let Some(source) = arguments.referenced_by.as_deref() {
             return match tokio::time::timeout(
                 TIME_LIMIT,
-                self.referenced_by_call(thread, &arguments, source),
+                self.referenced_by_call(thread, &arguments, source, budgets),
             )
             .await
             {
@@ -451,7 +453,7 @@ impl Engine {
         if let Some(source) = arguments.related_to.as_deref() {
             return match tokio::time::timeout(
                 TIME_LIMIT,
-                self.related_shared_call(thread, &arguments, source),
+                self.related_shared_call(thread, &arguments, source, budgets),
             )
             .await
             {
@@ -463,9 +465,12 @@ impl Engine {
                 .into()),
             };
         }
-        if arguments.query.trim().is_empty() || arguments.query.chars().count() > QUERY_MAX_CHARS {
+        if arguments.query.trim().is_empty()
+            || arguments.query.chars().count() > budgets.query_chars
+        {
             return Ok(Refusal::invalid(format!(
-                "\"query\" is from 1 to {QUERY_MAX_CHARS} characters."
+                "\"query\" is from 1 to {} characters.",
+                budgets.query_chars
             ))
             .into());
         }
@@ -508,15 +513,13 @@ impl Engine {
         let limit = usize::try_from(
             arguments
                 .max_results
-                .unwrap_or(HITS_DEFAULT)
-                .clamp(1, RESULTS_MAX),
+                .unwrap_or(HITS_DEFAULT.min(budgets.results)),
         )
         .unwrap_or(1);
         let context = usize::try_from(
             arguments
                 .context
-                .unwrap_or(CONTEXT_DEFAULT)
-                .clamp(0, CONTEXT_MAX),
+                .unwrap_or(CONTEXT_DEFAULT.min(budgets.context)),
         )
         .unwrap_or(1);
         let snippets = arguments.snippets == Some(true);

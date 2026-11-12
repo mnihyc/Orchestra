@@ -13,6 +13,9 @@ import { useSocketStatus } from '@/realtime/live';
 import { Button } from '@/ui/Button';
 import { Checkbox } from '@/ui/Checkbox';
 import { InlineAlert } from '@/ui/InlineAlert';
+import { ErrorState } from '@/ui/ErrorState';
+import { SkeletonRows } from '@/ui/Skeleton';
+import { StateLine } from '@/ui/StateLine';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { OnceLink, PortEntries } from './Entries';
 import { PortFault } from './Fault';
@@ -77,11 +80,13 @@ export function PortApprovalCard({ approval, live, onSettled }: { approval: Port
  return <PortRequestCard request={requestView(approval)} live={live} onSettled={(request) => { if (request.approval !== undefined) onSettled?.(request.approval); }} />;
 }
 export function PortRequests({ environment, onChanged }: { environment: Environment; onChanged: () => void }) {
+  const { t } = useTranslation();
   const live = useSocketStatus().phase === 'ready';
   const query = useQuery({ ...portRequestsQuery(environment.id), enabled: environment.access.permissions.includes('ports.manage') });
   const [settled, setSettled] = useState<ReadonlyMap<string, PortRequest>>(new Map());
-  if (!environment.access.permissions.includes('ports.manage') || query.isPending) return null;
-  if (query.isError) return <PortFault error={query.error} />;
+  if (!environment.access.permissions.includes('ports.manage')) return <StateLine compact message={t('implicitAvailability.portsManage')} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={2} />;
+  if (query.isError) return <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const cards = [...query.data, ...[...settled.values()].filter((request) => !query.data.some((row) => row.id === request.id))];
-  return cards.length === 0 ? null : <div className="flex flex-col gap-3">{cards.map((request) => <PortRequestCard key={request.id} request={request} live={live} onChanged={onChanged} onSettled={(safe) => setSettled((old) => new Map(old).set(safe.id, safe))} />)}</div>;
+  return cards.length === 0 ? <StateLine compact message={t('implicitAvailability.noPortRequests')} /> : <div className="flex flex-col gap-3">{cards.map((request) => <PortRequestCard key={request.id} request={request} live={live} onChanged={onChanged} onSettled={(safe) => setSettled((old) => new Map(old).set(safe.id, safe))} />)}</div>;
 }

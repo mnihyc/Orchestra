@@ -8,6 +8,7 @@
  * or closed is opened again from a banner, a chip or a card by naming the job.
  */
 import { create } from 'zustand';
+import type { Environment } from '@/generated/api-types';
 
 /** What is done to the thing named. */
 export type ChangeKind =
@@ -39,7 +40,7 @@ export type ChangeTarget =
   | { kind: 'model'; providerId: string; id: string; name?: string }
   | { kind: 'environment'; id: string; name?: string }
   /** Several environments of one place, listed. */
-  | { kind: 'environments'; ids: string[]; node?: string }
+  | { kind: 'environments'; ids: string[]; node?: string; selection?: { reader: number; rows: readonly Environment[] } }
   | { kind: 'machine'; id: string; name?: string }
   | { kind: 'host'; id: string; name?: string }
   /** A place with environments in it: an org, a project or a topic. */

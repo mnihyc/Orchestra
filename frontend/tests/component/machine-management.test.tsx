@@ -1,3 +1,4 @@
+import type * as RouterModule from '@tanstack/react-router';
 /** Personal-machine management reviews an audited named grant before any administrative act. */
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -8,7 +9,7 @@ import type * as Auth from '@/api/auth';
 import type * as Resources from '@/api/resources';
 import { useMachineManagement } from '@/features/resources/machines/Management';
 import { MachineRoles } from '@/features/resources/machines/Roles';
-import type { Machine, MachineRolesChange, Me, PageChange, PagePreview, PermissionPage } from '@/generated/api-types';
+import type { Machine, Me, PageChange, PagePreview, PermissionPage } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { Button } from '@/ui/Button';
 import { enrollmentMachine } from '../doubles/enrollment-row';
@@ -21,10 +22,10 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn<(_target: { id: string }, _change: PageChange) => Promise<PagePreview>>(),
   change: vi.fn<(_target: { id: string }, _change: PageChange) => Promise<PermissionPage>>(),
   act: vi.fn(),
-  roles: vi.fn<(_id: string, _roles: readonly string[]) => Promise<MachineRolesChange>>(),
+  roles: vi.fn<typeof Resources.setMachineRoles>(),
 }));
 vi.mock('@/features/help/open', () => ({ useHelpOpener: () => vi.fn() }));
-vi.mock('@tanstack/react-router', () => ({ Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/personal?tab=policy">{children}</a> }));
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(), Link: ({ children }: { children: ReactNode }) => <a href="/resources/machines/personal?tab=policy">{children}</a> }));
 vi.mock('@/api/resources', async (load) => ({ ...await load<typeof Resources>(), setMachineRoles: mocks.roles }));
 vi.mock('@/api/auth', async (load) => ({ ...await load<typeof Auth>(), meQuery: { queryKey: ['management-caller'], queryFn: () => mocks.me() } }));
 vi.mock('@/api/access', async (load) => {
@@ -38,7 +39,7 @@ const administrator = me(99, 'admin', 'Current administrator', { is_system_admin
 function page(): PermissionPage {
   return { object: { kind: 'machine', id: 'personal', name: 'build-vm' }, page: 'live', owner: null, owners: [], owners_writable: false,
     external: true, admins: { count: 1, of: ['system'] }, rows: [], state: 'follows', followers: null,
-    gives: { choices: [], roles: [], agents: [], holders_share: true }, covers: null, depends: [], reaches: null, revision: 7 };
+    gives: { choices: [], roles: [], agents: [], agent_parts: {}, holders_share: true }, covers: null, depends: [], reaches: null, revision: 7 };
 }
 function machine(): Machine {
   return { ...enrollmentMachine('personal', false), access: { administers: true, permissions: ['machine.view', 'access.manage'], through: [], admin_only: ['machine.view', 'access.manage'], admin_place: 'system' } };
@@ -104,5 +105,5 @@ it('uses that same reviewed grant before the actual role editor can dispatch a c
   expect(screen.queryByRole('checkbox', { name: 'Provider' })).not.toBeInTheDocument(); expect(mocks.roles).not.toHaveBeenCalled();
   await user.click(confirm);
   await user.click(await screen.findByRole('checkbox', { name: 'Provider' })); await user.click(screen.getByRole('button', { name: 'Save' }));
-  await waitFor(() => expect(mocks.roles).toHaveBeenCalledExactlyOnceWith('personal', ['environment', 'agent', 'provider']));
+  await waitFor(() => expect(mocks.roles).toHaveBeenCalledExactlyOnceWith('personal', ['environment', 'agent', 'provider'], value.revision));
 });

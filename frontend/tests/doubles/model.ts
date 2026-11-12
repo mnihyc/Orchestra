@@ -212,15 +212,39 @@ export interface ThreadChoices {
 
 const SOURCE_DEFAULT: SettingSource = { scope: 'default', node: null };
 
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Native declarations expose resolved choices and the same provider constraint carried by dispatch. */
+export function projectNativeParameter(def: Record<string, unknown> & { key: string }, model: ModelParameters): Record<string, unknown> | null {
+  const native = record(model.request_options) ? model.request_options.native : undefined;
+  const properties = record(native) && record(native.properties) ? native.properties : {};
+  const rule = properties[def.key];
+  if (rule === false) return null;
+  const from = record(def.options) ? def.options.from_model : undefined;
+  const search = from === 'web_search' || from === 'live_web_search';
+  if (search && (model.web_search ?? []).length === 0) return null;
+  const options: readonly unknown[] | null = search ? ['disabled', ...(model.web_search ?? []).filter((mode) => mode !== 'disabled' && (from !== 'live_web_search' || mode === 'live'))]
+    .map((value) => ({ value, label: value === 'disabled' ? 'Disabled' : value })) : Array.isArray(def.options) ? def.options : null;
+  const defaultFrom = record(def.default) ? def.default.from_model : undefined;
+  const start = typeof defaultFrom === 'string' ? (model as Record<string, unknown>)[defaultFrom] ?? (defaultFrom === 'default_web_search' ? 'disabled' : null) : def.default ?? null;
+  const resolved = record(rule) && Object.hasOwn(rule, 'const') ? rule.const : record(rule) && Object.hasOwn(rule, 'default') ? rule.default : start;
+  return { ...def, resolved_default: resolved,
+    ...(options === null ? {} : { resolved_options: options.filter((option) => {
+      const value = record(option) ? option.value : undefined;
+      return !record(rule) || (!Object.hasOwn(rule, 'const') || value === rule.const) && (!Array.isArray(rule.enum) || rule.enum.includes(value));
+    }) }),
+    ...(record(rule) ? { provider_constraint: { type: def.type === 'enum' ? 'string' : def.type, title: def.title, ...rule, 'x-orch-source': 'provider' }, constraint_source: 'provider' } : {}),
+  };
+}
+
 /** The parameters of the thread's agent that exist for its model, each with the thread's own choice. */
 export function parameterViews(model: ModelParameters, choices: ThreadChoices): ParameterView[] {
-  const source: SettingSource = Object.keys(choices.own).length > 0 ? { scope: 'thread', node: null } : SOURCE_DEFAULT;
   const lockedBy = choices.lockedBy === undefined || choices.lockedBy === null ? null : { scope: choices.lockedBy.scope, node: { id: ACME.org, kind: 'org' as const, name: choices.lockedBy.name, redacted: false } };
   const view = (def: { key: string; apply: ParameterView['apply'] }): ParameterView => ({
     key: def.key,
     def,
     value: choices.own[def.key] ?? null,
-    source,
+    source: Object.hasOwn(choices.own, def.key) ? { scope: 'thread', node: null } : SOURCE_DEFAULT,
     locked_by: lockedBy,
     writable: choices.writable && lockedBy === null,
     apply: def.apply,
@@ -230,4 +254,20 @@ export function parameterViews(model: ModelParameters, choices: ThreadChoices): 
   if ((model.access_programs ?? []).length > 0 && choices.features[ACCESS_FEATURE] === true) views.push(view(ACCESS_DEF));
   if (typeof model.context_max === 'number' && model.context_max > 0) views.push(view(CONTEXT_DEF));
   return views;
+}
+
+/** Factual wire forms for browser fixtures; runtime option validation is covered by native tests. */
+export function providerOptionViews(model: ModelParameters, choices: ThreadChoices): ParameterView[] {
+  const schemas = record(model.request_options) ? model.request_options : {};
+  return Object.entries(schemas).flatMap(([interfaceId, schema]): ParameterView[] => {
+    if (interfaceId === 'native' || !record(schema) || !record(schema.properties) || Object.keys(schema.properties).length === 0) return [];
+    const key = `provider_options:${interfaceId}`;
+    return [{ key, apply: 'next_turn', value: choices.own[key] ?? null,
+      source: Object.hasOwn(choices.own, key) ? { scope: 'thread', node: null } : SOURCE_DEFAULT,
+      locked_by: choices.lockedBy === undefined || choices.lockedBy === null ? null : { scope: choices.lockedBy.scope, node: { id: ACME.org, kind: 'org', name: choices.lockedBy.name, redacted: false } },
+      writable: choices.writable && (choices.lockedBy === null || choices.lockedBy === undefined),
+      def: { title: interfaceId, type: 'object', group: 'provider', provider_interface: interfaceId,
+        provider_constraint: { ...schema, properties: Object.fromEntries(Object.entries(schema.properties).map(([key, field]) => [key, record(field) ? { ...field, 'x-orch-source': 'provider' } : field])) } },
+    }];
+  });
 }

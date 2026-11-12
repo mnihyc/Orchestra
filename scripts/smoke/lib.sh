@@ -23,6 +23,8 @@
 #   ORCH_SMOKE_KEEP=1  leave the stack up at the end, to look at it.
 #   ORCH_SMOKE_PROJECT_PREFIX  what the name of the Compose project begins with
 #       (default orchsmoke and the run's name); the scenario's name follows it.
+#   ORCH_SMOKE_MOCK_LLM  a built orch-mock-llm (the scripted model server of the two managed
+#       scenarios that use one), in place of building it from the tree with cargo.
 
 set -Eeuo pipefail
 
@@ -34,6 +36,8 @@ case "$SMOKE_RUN" in
 esac
 SMOKE_RELEASES="$SMOKE_BASE/releases"
 SMOKE_DIR="$SMOKE_BASE/runs/$SMOKE_RUN"
+python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" validate --repo "$SMOKE_REPO" \
+  --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name preflight
 mkdir -p "$SMOKE_DIR"
 FAILED=0
 CHECKED=0
@@ -55,8 +59,10 @@ expect() {
   if [ "$2" = "$3" ]; then pass "$1"; else fail "$1: expected '$2', got '$3'"; fi
 }
 
-# says PATTERN COMMAND...: the command prints a line with PATTERN in it.
-says() { local pattern="$1"; shift; "$@" 2>&1 | grep -q -- "$pattern"; }
+# says PATTERN COMMAND...: the command prints a line with PATTERN in it. (grep reads all of it:
+# with -q it would leave at the first match and, under pipefail, fail the pipe now and then
+# when the command was still writing.)
+says() { local pattern="$1"; shift; "$@" 2>&1 | grep -- "$pattern" > /dev/null; }
 
 # refuses WHAT COMMAND...: the command fails.
 refuses() {
@@ -130,13 +136,18 @@ bridge_address() { docker network inspect bridge --format '{{(index .IPAM.Config
 new_stack() {
   local name="$1" port="${ORCH_SMOKE_PORT:-$2}" release="$3" tag
   tag="$(release_tag "$release")"
-  STACK="$SMOKE_DIR/$name/deploy"
+  SMOKE_SCENARIO="$name"
   PROJECT="${ORCH_SMOKE_PROJECT_PREFIX:-orchsmoke$SMOKE_RUN}$name"
   EDGE_PORT="$port"; GATEWAY_PORT=$((port + 1))
   EDGE="http://127.0.0.1:$EDGE_PORT"
   if docker ps -aq --filter "label=com.docker.compose.project=$PROJECT" | grep -q .; then abort "the project $PROJECT has containers still"; fi
-  rm -rf "${SMOKE_DIR:?}/$name"
-  mkdir -p "$SMOKE_DIR/$name"
+  # Refuse stale files instead of deleting them at startup. Prepare the exact
+  # literal absolute cleanup command before any stack or credential is created.
+  python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" prepare --repo "$SMOKE_REPO" \
+    --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$name"
+  SMOKE_STACK_PREPARED=1
+  STACK="$SMOKE_DIR/$name/deploy"
+  SMOKE_COMPOSE_FILES="$STACK/compose.yml"
   tar -xzf "$release/orch-deploy-$tag.tar.gz" -C "$SMOKE_DIR/$name"
   cp "$STACK/.env.example" "$STACK/.env"
   {
@@ -146,34 +157,34 @@ new_stack() {
     printf 'COMPOSE_PROJECT_NAME=%s\n' "$PROJECT"
   } >> "$STACK/.env"
   # The edge of this stack is its own web edge, without a front: the public
-  # address is its own, and the advertised public endpoint is the web edge's
-  # service name inside the stack, which is where the checks run from.
+  # address is its own, and the one endpoint the release advertises (a pinned one,
+  # at a placeholder name) is the gateway's service name inside the stack, which is
+  # where the checks run from and where the pinned listener answers.
   sed -i \
     -e "s|^public_url = .*|public_url = \"$EDGE\"|" \
-    -e 's|^url = "wss://orch.example.com/link"|url = "ws://frontend/link"|' \
+    -e 's|^url = "wss://gateway.example.com:9443"|url = "wss://gateway:9443"|' \
     "$STACK/config/orch.toml"
 }
 
 # update_sh ARGS...: update.sh of the stack.
-# Managed scenarios use the edge's Docker name for connector downloads. The
-# updater still checks the actual published edge from the host.
-update_sh() { (cd "$STACK" && ORCH_READY_URL="${ORCH_READY_URL:-$EDGE}" ./update.sh "$@"); }
+# The updater checks the actual published edge from the host.
+update_sh() { (cd "$STACK" && COMPOSE_PROJECT_NAME="$PROJECT" COMPOSE_FILE="$STACK/compose.yml" ORCH_READY_URL="${ORCH_READY_URL:-$EDGE}" ./update.sh "$@"); }
 
 # compose ARGS...: docker compose in the stack.
-compose() { (cd "$STACK" && docker compose "$@"); }
+compose() { (cd "$STACK" && COMPOSE_PROJECT_NAME="$PROJECT" COMPOSE_FILE="$SMOKE_COMPOSE_FILES" docker compose "$@"); }
 
 # doctor ARGS...: orchctl doctor in the API's container.
 doctor() { compose exec -T api /opt/orchctl/orchctl doctor "$@"; }
 
 # node_online: the bundled node has a session. It enrolls on its first start after the
 # administrator exists, which takes up to a minute or two; a system that is used has long had it.
-node_online() { doctor --only node | grep -q '^ok'; }
+node_online() { doctor --only node | grep '^ok' > /dev/null; }
 
 # doctor_fails_on ID...: orchctl doctor fails and names each of the checks.
 doctor_fails_on() {
   local output id
   output="$(doctor 2>&1 || true)"
-  for id in "$@"; do printf '%s\n' "$output" | grep -q "^FAIL  $id " || return 1; done
+  for id in "$@"; do grep -q "^FAIL  $id " <<< "$output" || return 1; done
 }
 
 # ready TAG: every service is up and reports the release.
@@ -181,14 +192,33 @@ ready() { doctor --expect-version "${1#v}"; }
 
 # finish: takes the stack down, removes it, and exits by what failed.
 finish() {
+  SMOKE_CLEANUP_COMPLETE=0
   stop_site
   if [ "${ORCH_SMOKE_KEEP:-0}" = 1 ]; then
     say "kept: $STACK (docker compose -p $PROJECT; down -v and remove the directory to clean up)"
   else
-    compose down -v > /dev/null 2>&1 || true
-    rm -rf "$(dirname "$STACK")"
-    # The run's own directory goes with its last stack; another run's is never touched.
-    rmdir "$SMOKE_DIR" 2> /dev/null || true
+    if ! compose down -v; then
+      fail "owned Compose cleanup failed; retained $STACK for exact cleanup"
+      return 1
+    fi
+    local remaining kind
+    for kind in container network volume; do
+      case "$kind" in
+        container) remaining="$(docker ps -aq --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+        network) remaining="$(docker network ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+        volume) remaining="$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT")" || return 1 ;;
+      esac
+      if [ -n "$remaining" ]; then
+        fail "owned $kind remains after Compose cleanup; retained $STACK"
+        return 1
+      fi
+    done
+    if declare -F smoke_cleanup_owned_image > /dev/null; then
+      smoke_cleanup_owned_image || return 1
+    fi
+    python3 "$SMOKE_REPO/scripts/smoke/cleanup.py" execute --repo "$SMOKE_REPO" \
+      --base "$SMOKE_BASE" --run "$SMOKE_RUN" --name "$SMOKE_SCENARIO" || return 1
+    SMOKE_CLEANUP_COMPLETE=1
   fi
   printf '\n%s: %d checks, %d failed\n' "$(basename "$0")" "$CHECKED" "$FAILED"
   [ "$FAILED" -eq 0 ]
@@ -208,22 +238,30 @@ json_field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }
 ADMIN_NAME=ada
 ADMIN_PASSWORD='correct horse battery'
 
-# setup_admin: makes the first administrator through the edge; sets TOKEN.
+# admin_mode_on: the session of TOKEN acts as an administrator, as the browser's administrator switch
+# does. A session starts with the switch off, and what is the system's to administer (/admin/...)
+# answers 403 until it is on; a new sign-in is a new session.
+admin_mode_on() {
+  curl -fsS -X PUT -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{"as_admin":true}' \
+    "$EDGE/api/v1/me/admin-mode" > /dev/null
+}
+
+# setup_admin: makes the first administrator through the edge; sets TOKEN, with the administrator switch on.
 setup_admin() {
   local reply
   reply="$(curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/setup" \
     -d "{\"username\":\"$ADMIN_NAME\",\"display_name\":\"Ada\",\"password\":\"$ADMIN_PASSWORD\"}")" || return 1
   TOKEN="$(printf '%s' "$reply" | json_field access_token)"
-  [ -n "$TOKEN" ]
+  [ -n "$TOKEN" ] && admin_mode_on
 }
 
-# sign_in: signs the administrator in through the edge; sets TOKEN.
+# sign_in: signs the administrator in through the edge; sets TOKEN, with the administrator switch on.
 sign_in() {
   local reply
   reply="$(curl -fsS -H 'content-type: application/json' -X POST "$EDGE/api/v1/auth/login" \
     -d "{\"login\":\"$ADMIN_NAME\",\"password\":\"$ADMIN_PASSWORD\"}")" || return 1
   TOKEN="$(printf '%s' "$reply" | json_field access_token)"
-  [ -n "$TOKEN" ]
+  [ -n "$TOKEN" ] && admin_mode_on
 }
 
 # sql QUERY: one value from the stack's database.
@@ -251,7 +289,8 @@ has_security_headers() {
   local headers
   headers="$(curl -sS -D - -o /dev/null "$EDGE$1")"
   for name in content-security-policy x-content-type-options x-frame-options referrer-policy permissions-policy; do
-    printf '%s' "$headers" | grep -qi "^$name:" || return 1
+    # Not through a pipe: under pipefail, a printf that grep -q has left behind fails the pipe now and then.
+    grep -qi "^$name:" <<< "$headers" || return 1
   done
 }
 

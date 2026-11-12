@@ -1,3 +1,4 @@
+import { selectContentTab } from '@/features/workbench/contentNavigation';
 import { EmptyMain } from '@/features/workbench/EmptyMain';
 import { useFrameReady } from '@/shell/FrameReadiness';
 /** Phone navigation chooses the same containers in the same order, with single-view sheets for main and bottom tabs. */
@@ -87,7 +88,7 @@ export function useNarrowWorkbench(pending = false, focusMode = false) {
     primary,
     mainTabs: groups.flatMap((group) => group.tabs),
     primaryGroup: group?.id ?? null,
-    selectMain: (id: string) => { close(); setNavigation(false); useWorkbench.getState().focus(id); },
+    selectMain: (id: string) => { close(); setNavigation(false); selectContentTab(id); },
     // A phone sheet covers the page. Removing its slot pauses the kept page's readers and effects.
     main: pending || !focusMode && (navigation || container !== undefined || viewer !== null) ? null
       : primary === null ? <EmptyMain groupId={group?.id ?? null} /> : <ViewSlot tab={primary} primary />,

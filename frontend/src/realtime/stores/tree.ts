@@ -8,8 +8,8 @@
  *
  * Components read through the hooks at the end. The writers are for the live connection alone.
  */
-import { useMemo } from 'react';
 import { create } from 'zustand';
+import { useStoreWithEqualityFn } from 'zustand/traditional';
 
 import { currentThreadDisplay } from '@/lib/threadDisplay';
 import type { HiddenItem, TreeNode, ThreadDisplay } from '@/generated/api-types';
@@ -169,8 +169,13 @@ export function pathTo(tree: OrgTree, nodeId: string): TreeNode[] {
 
 /** The path to a node, and the root org whose tree holds it. */
 export function useNodePath(nodeId: string | null | undefined): NodePath {
-  const byOrg = useTreeStore((state) => state.byOrg);
-  return useMemo(() => findPath(byOrg, nodeId ?? null), [byOrg, nodeId]);
+  return useStoreWithEqualityFn(useTreeStore, (state) => findPath(state.byOrg, nodeId ?? null), samePath);
+}
+
+/** Every native row of this path stays current; an unrelated thread cannot redraw its readers. */
+function samePath(before: NodePath, after: NodePath): boolean {
+  return before.orgId === after.orgId && before.path.length === after.path.length
+    && before.path.every((node, index) => node === after.path[index]);
 }
 
 export interface NodePath {

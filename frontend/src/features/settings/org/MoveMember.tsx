@@ -176,7 +176,7 @@ export function MoveMember({ org, member, onClose }: MoveMemberProps) {
           />
         </div>
         {to !== '' && preview.isPending && (
-          <SkeletonGroup className="flex flex-col gap-2">
+          <SkeletonGroup read={preview} className="flex flex-col gap-2">
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-4 w-2/3" />
           </SkeletonGroup>

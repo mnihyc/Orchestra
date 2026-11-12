@@ -8,6 +8,11 @@ rust-version.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# The API dependency is dev-only; this graph is selected by the dedicated test command.
+test-observers = ["orch-link/test-observers", "orch-api-core/test-observers"]
+
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
@@ -35,6 +40,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+orch-settings.workspace = true
 orch-access-contract.workspace = true
 orch-api-contract.workspace = true
 orch-connector-core.workspace = true

@@ -106,7 +106,7 @@ describe.each(kinds)('%s across attachment surfaces', (name, media, isText, view
       : place === 'search' || place === 'inbox' ? <MessageFiles files={[source]} />
       : <FileAttachment source={source} />);
     expect(calls.request).not.toHaveBeenCalled();
-    if (place !== 'document') await userEvent.click(screen.getByRole('button', { name }));
+    if (place !== 'document') await userEvent.click(screen.getByRole(place === 'chat' ? 'link' : 'button', { name }));
     reveal();
     await waitFor(() => expect(document.querySelector('[data-file-card]')).toBeInTheDocument());
     expect(await screen.findByRole('button', { name: 'Open' })).toBeInTheDocument();
@@ -148,7 +148,7 @@ it.each(['unavailable', 'too_large'] as const)('names the same %s state and reta
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'photo.png')} />);
   reveal();
   expect(await screen.findByText(i18n.t(state === 'too_large' ? 'fileMedia.tooLarge' : 'fileMedia.unavailable'))).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'photo.png' })).toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'photo.png' })).toBeInTheDocument();
 });
 
 it('does not keep an attachment name or card after a current read refuses permission', async () => {
@@ -170,7 +170,7 @@ it('keeps a gone original distinct from a broken decoder', async () => {
 it('names a gone file once in its card and disables its reads', async () => {
   calls.request.mockRejectedValue(new ApiError({ status: 404, code: 'not_found', title: '', detail: '', type: '', request_id: '' }, null));
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'gone.txt')} />);
-  await userEvent.click(screen.getByRole('button', { name: 'gone.txt' }));
+  await userEvent.click(screen.getByRole('link', { name: 'gone.txt' }));
   reveal();
   expect(await screen.findAllByText('File no longer exists')).toHaveLength(1);
   expect(screen.getByRole('button', { name: 'Open' })).toBeDisabled();
@@ -180,7 +180,7 @@ it('names a gone file once in its card and disables its reads', async () => {
 it('shows a ready archive count as its preview without an unavailable warning', async () => {
   calls.request.mockImplementation(() => Promise.resolve(Response.json({ ...preview('application/zip'), entry_count: 3 })));
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'source.zip', 128, 'application/zip')} />);
-  await userEvent.click(screen.getByRole('button', { name: 'source.zip' }));
+  await userEvent.click(screen.getByRole('link', { name: 'source.zip' }));
   reveal();
   expect(await screen.findByText('3 entries')).toBeInTheDocument();
   expect(screen.queryByText('Preview unavailable')).not.toBeInTheDocument();
@@ -220,16 +220,16 @@ it('keeps all three sizes in one family and uses Medium for a Large choice in a 
   show(<><FileAttachment source={blobSource('chat', 'chat', HASH, 'small.txt', 128)} presentation={{ size: 'small' }} />
     <FileAttachment source={blobSource('chat', 'chat', HASH, 'medium.txt', 128)} />
     <FileAttachment source={blobSource('chat', 'chat', HASH, 'compact.txt', 128)} presentation={{ place: 'compact' }} /></>);
-  expect(screen.getByRole('button', { name: 'small.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'small');
-  expect(screen.getByRole('button', { name: 'medium.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'medium');
-  expect(screen.getByRole('button', { name: 'compact.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'medium');
+  expect(screen.getByRole('link', { name: 'small.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'small');
+  expect(screen.getByRole('link', { name: 'medium.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'medium');
+  expect(screen.getByRole('link', { name: 'compact.txt' }).closest('[data-chip-size]')).toHaveAttribute('data-chip-size', 'medium');
   expect(calls.request).not.toHaveBeenCalled();
 });
 
 it('offers Show as by the same context menu and writes the document choice instead of a reader preference', async () => {
   const change = vi.fn();
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'doc.txt', 128)} presentation={{ document: true, place: 'document', size: 'small', onSizeChange: change }} />);
-  fireEvent.contextMenu(screen.getByRole('button', { name: 'doc.txt' }));
+  fireEvent.contextMenu(screen.getByRole('link', { name: 'doc.txt' }));
   await userEvent.hover(await screen.findByRole('menuitem', { name: 'Show as' }));
   await userEvent.click(await screen.findByRole('menuitemradio', { name: 'Large' }));
   expect(change).toHaveBeenCalledWith('large');
@@ -250,7 +250,7 @@ describe.each(['compact', 'prose', 'document'] as const)('chip presentation in %
 
 it.each([{ key: 'ContextMenu' }, { key: 'F10', shiftKey: true }])('opens Show as with $key and stores a reader choice', async (key) => {
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'notes.txt', 128)} presentation={{ place: 'compact' }} />);
-  const trigger = screen.getByRole('button', { name: 'notes.txt' });
+  const trigger = screen.getByRole('link', { name: 'notes.txt' });
   trigger.focus();
   fireEvent.keyDown(trigger, key);
   await userEvent.hover(await screen.findByRole('menuitem', { name: 'Show as' }));
@@ -261,7 +261,7 @@ it.each([{ key: 'ContextMenu' }, { key: 'F10', shiftKey: true }])('opens Show as
 
 it('offers the stored sizes with an edit reason in a read-only document', async () => {
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'notes.txt', 128)} presentation={{ place: 'document', size: 'small', document: true }} />);
-  fireEvent.contextMenu(screen.getByRole('button', { name: 'notes.txt' }));
+  fireEvent.contextMenu(screen.getByRole('link', { name: 'notes.txt' }));
   await userEvent.hover(await screen.findByRole('menuitem', { name: 'Show as' }));
   for (const name of ['Small', 'Medium', 'Large']) expect(await screen.findByRole('menuitem', { name: new RegExp(name) })).toHaveAttribute('aria-disabled', 'true');
   expect(useWorkbench.getState().chipSizes).toEqual({});
@@ -269,7 +269,7 @@ it('offers the stored sizes with an edit reason in a read-only document', async 
 
 it('offers Show as on a touch long press', async () => {
   show(<FileAttachment source={blobSource('chat', 'chat', HASH, 'notes.txt', 128)} />);
-  const trigger = screen.getByRole('button', { name: 'notes.txt' });
+  const trigger = screen.getByRole('link', { name: 'notes.txt' });
   fireEvent.pointerDown(trigger, { pointerType: 'touch', clientX: 20, clientY: 20 });
   expect(await screen.findByRole('menuitem', { name: 'Show as' })).toBeVisible();
   fireEvent.pointerUp(trigger, { pointerType: 'touch' });
@@ -282,7 +282,7 @@ it('keeps a file row selection modifier and makes its native menu only when open
   show(<ContextMenu label="Row actions" entries={[{ id: 'outer', label: 'Row actions', onSelect: () => undefined }]}>
     <div><FileChip source={blobSource('chat', 'chat', HASH, 'notes.txt', 128)} presentation={{ place: 'compact' }} onOpen={open} menuEntries={menu} /></div>
   </ContextMenu>);
-  const trigger = screen.getByRole('button', { name: 'notes.txt' });
+  const trigger = screen.getByRole('link', { name: 'notes.txt' });
   fireEvent.click(trigger, { shiftKey: true });
   expect(open.mock.calls[0]?.[0]).toMatchObject({ shiftKey: true });
   expect(menu).not.toHaveBeenCalled();

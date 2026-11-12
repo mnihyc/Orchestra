@@ -7,14 +7,14 @@
  */
 import { Link, useNavigate } from '@tanstack/react-router';
 import { Boxes, LayoutGrid, MoreHorizontal, Share2 } from 'lucide-react';
-import { createContext, useContext, useMemo, useState } from 'react';
+import { createContext, type MouseEvent, useContext, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { screenBuilt } from '@/shell/availability';
 
 import type { Org, TreeNode } from '@/generated/api-types';
 import { graphemes, identityColor } from '@/lib/grapheme';
-import { usePlaceLabels } from '@/features/navigation/placeLabels';
-import { pathTo, useOrgTree } from '@/realtime/stores/tree';
+import { useNameTrees, usePlaceLabels } from '@/features/navigation/placeLabels';
+import { pathTo } from '@/realtime/stores/tree';
 import { Avatar } from '@/ui/Avatar';
 import { Menu, type MenuEntry } from '@/ui/Menu';
 import { IconButton } from '@/ui/IconButton';
@@ -88,14 +88,21 @@ export interface OrgSwitcherProps {
   orgs: readonly Org[];
   /** The root org in view. */
   current: Org | null;
+  /** Choices have not arrived yet; this is not an empty organization list. */
+  loading?: boolean;
+  /**
+   * Whether the head is the way to another org. Only a small screen, which has no rail, needs it: beside a rail the head is
+   * the org in view, leading to its home, and the rail's icons are the way to another org.
+   */
+  choose?: boolean;
 }
 
-export function OrgSwitcher({ orgs, current }: OrgSwitcherProps) {
+export function OrgSwitcher({ orgs, current, loading = false, choose = true }: OrgSwitcherProps) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const leaveDrawer = useContext(LeaveDrawer);
-  const tree = useOrgTree(current?.id ?? null);
-  const inside = useMemo(() => (current === null ? [] : departmentsOf(tree.nodes, current.id)), [tree.nodes, current]);
+  const tree = useNameTrees().get(current?.id ?? '');
+  const inside = useMemo(() => (current === null || tree === undefined ? [] : departmentsOf(tree.nodes, current.id)), [tree, current]);
   // Two orgs of one name are told apart by their addresses, as on the rail.
   const placed = useMemo(() => orgs.map((org) => ({ id: org.id, name: org.name, above: [], address: org.address })), [orgs]);
   const labels = usePlaceLabels(placed, { trees: false });
@@ -138,15 +145,28 @@ export function OrgSwitcher({ orgs, current }: OrgSwitcherProps) {
       },
     },
   );
+  const home = (event: MouseEvent, org: Org) => {
+    if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) { selectOrg(client.session.getState().userId, org.org_id); leaveDrawer(); }
+  };
+  if (!choose) return (
+    <div className="flex h-full min-w-0 flex-1 items-center px-1">
+    {current !== null && <Link to="/org/$slug" params={{ slug: current.address }} title={t('workbench.orgActions.homeName', { name: current.name })}
+      className="focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 hover:bg-bg-muted" onClick={(event) => home(event, current)}>
+      <Avatar text={orgInitial(current)} color={orgColor(current)} kind={current.org_kind === 'personal' ? 'human' : 'org'} size={24} />
+      <span className="min-w-0 truncate font-medium text-text">{t('navigation.orgHome', { name: labels.get(current.id) ?? current.name })}</span>
+    </Link>}
+    </div>
+  );
   return (
     <div className="flex h-full min-w-0 flex-1 items-center gap-1 px-2">
     {current !== null && <Link to="/org/$slug" params={{ slug: current.address }} title={t('workbench.orgActions.homeName', { name: current.name })} aria-label={t('workbench.orgActions.homeName', { name: current.name })}
       className="focus-inset flex size-(--control-sm) shrink-0 items-center justify-center rounded-md hover:bg-bg-muted"
-      onClick={(event) => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) { selectOrg(client.session.getState().userId, current.org_id); leaveDrawer(); } }}>
+      onClick={(event) => home(event, current)}>
       <Avatar text={orgInitial(current)} color={orgColor(current)} kind={current.org_kind === 'personal' ? 'human' : 'org'} size={24} />
     </Link>}
     <Combobox label={t('navigation.orgs')} hideLabel fieldClassName="min-w-0 flex-1" query={query} onQueryChange={setQuery}
-      displayValue={current === null ? '' : labels.get(current.id) ?? current.name} placeholder={t('navigation.chooseOrg')} groups={groups}
+      displayValue={current === null ? loading ? t('common.loading') : '' : labels.get(current.id) ?? current.name}
+      loading={loading} placeholder={t(loading && orgs.length === 0 ? 'common.loading' : 'navigation.chooseOrg')} groups={groups}
       onSelect={(choice) => {
         const target = [...roots, ...departments].find((option) => option.value === choice.value);
         if (target === undefined) return;

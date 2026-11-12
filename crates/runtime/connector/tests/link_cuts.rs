@@ -5,25 +5,37 @@
     reason = "a test fails by panicking"
 )]
 
+#[cfg(target_os = "linux")]
 mod rig_environment;
 
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use orch_link::machine::LinkStatus;
+#[cfg(target_os = "linux")]
 use orch_link_contract::commands::{FsFetch, FsList, FsWrite, PtyOpen, WatchSet};
+#[cfg(target_os = "linux")]
 use orch_link_contract::tunnels::{Service, TicketSource};
+#[cfg(target_os = "linux")]
 use orch_testkit::doubles::link::LinkShape;
+#[cfg(target_os = "linux")]
 use orch_types::{Hash, new_id};
+#[cfg(target_os = "linux")]
 use rig_environment::{EnvRig, PATIENCE};
+#[cfg(target_os = "linux")]
 use serde_json::json;
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[cfg(target_os = "linux")]
 fn pattern(size: usize) -> Vec<u8> {
     (0..size)
         .map(|n| ((n * 31 + n / 251) % 251) as u8)
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_file_that_goes_up_while_the_content_line_fails_goes_on_from_where_it_stopped() {
     let mut rig = EnvRig::new();
@@ -66,6 +78,7 @@ async fn a_file_that_goes_up_while_the_content_line_fails_goes_on_from_where_it_
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_file_that_comes_down_while_the_session_is_cut_is_written_whole_and_the_command_answers_once()
  {
@@ -122,6 +135,7 @@ async fn a_file_that_comes_down_while_the_session_is_cut_is_written_whole_and_th
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_shell_goes_on_while_the_link_is_cut_and_is_taken_up_again_with_what_it_printed_meanwhile()
  {
@@ -197,6 +211,7 @@ async fn a_shell_goes_on_while_the_link_is_cut_and_is_taken_up_again_with_what_i
     rig.stop().await;
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn what_the_host_measures_and_watches_goes_beside_the_streams_as_reports() {
     let mut rig = EnvRig::new();

@@ -137,3 +137,23 @@ it('does not treat an unknown session mode as authority for a protected director
     expect(cache.getQueryData(key)).toBeUndefined();
   } finally { stop(); cache.clear(); }
 });
+
+
+it.each(['granted', 'removed'] as const)('retakes shown reference authority when access is %s and expires unopened metadata without reading it', async (state) => {
+  const cache = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ['reference-preview', 'document', 'shown'];
+  const hidden = ['reference-preview', 'document', 'unopened'];
+  const unrelated = ['provider', 'unchanged'];
+  const before = state === 'granted' ? { unavailable: { permission: 'doc.view' }, title: '' } : { title: 'Readable title' };
+  const after = state === 'granted' ? { title: 'New authorized title' } : { unavailable: { permission: 'doc.view' }, title: '' };
+  cache.setQueryData(key, before); cache.setQueryData(hidden, before); cache.setQueryData(unrelated, 'Existing provider');
+  const read = vi.fn(() => Promise.resolve(after));
+  const stop = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity }).subscribe(() => undefined);
+  try {
+    expect(read).not.toHaveBeenCalled();
+    await repairPeople(cache);
+    expect(read).toHaveBeenCalledOnce(); expect(cache.getQueryData(key)).toEqual(after);
+    expect(cache.getQueryData(hidden)).toBeUndefined();
+    expect(cache.getQueryData(unrelated)).toBe('Existing provider');
+  } finally { stop(); cache.clear(); }
+});

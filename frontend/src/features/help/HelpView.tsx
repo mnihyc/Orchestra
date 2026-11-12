@@ -10,11 +10,14 @@
 import { useViewLocation, useViewNavigate } from '@/features/workbench/pageContext';
 import { useMatches, useRouter } from '@tanstack/react-router';
 import { BookOpen, GraduationCap, Keyboard, Lightbulb, SearchX, SlidersHorizontal, Newspaper } from 'lucide-react';
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useId, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { answer, helpEntries } from '@/features/finder/local';
 import { ArticleView } from '@/features/help/Article';
+import { HelpResult } from '@/features/help/HelpResult';
+import { askAboutHelp } from '@/features/help/ask';
+import { SummaryText } from '@/features/summaries/SummaryText';
 import { GuideSettings } from '@/features/help/GuideSettings';
 import { SettingEntry } from '@/features/help/SettingEntry';
 import { TutorialList } from '@/features/help/Tutorial';
@@ -28,24 +31,30 @@ import { useHelpState, setHelpQuery, showArticle } from '@/features/help/state';
 import { useDismissed } from '@/features/help/Dismissed';
 import { type Article, belongsTo, type Guide } from '@/help';
 import { useLocalizedGuide as useGuide } from '@/help/localized';
-import { articleAvailable, articleMatchesLanguage } from '@/help/guide';
+import { ARTICLE_GROUPS, articleAvailable, articlePreview, articleMatchesLanguage } from '@/help/guide';
 import { useViewChoice } from '@/lib/viewChoices';
 import type { TranslationKey } from '@/i18n';
 import { EmptyState } from '@/ui/EmptyState';
 import { HelpPanel } from '@/ui/HelpPanel';
 import { Input } from '@/ui/Input';
 import { SkeletonRows } from '@/ui/Skeleton';
+import { ScrollArea } from '@/ui/ScrollArea';
 import { Button } from '@/ui/Button';
 import { PageHeader } from '@/shell/Page';
 import { usePromptOpen } from '@/ui/PromptScope';
 import { helpSection, type HelpSection } from '@/features/help/navigation';
 import { screenAbout } from '@/features/help/screenWords';
 
+const BROWSABLE_ARTICLE_GROUPS = [...ARTICLE_GROUPS, 'other'] as const;
+
 type Part = 'screen' | HelpSection;
 
 /** The route of the screen in view, as the table of routes writes it (`/thread/$threadId`). */
 export function useScreenRoute(): string {
-  const id = useMatches({ select: (matches) => matches.at(-1)?.routeId }) ?? '/';
+  const id = useMatches({ select: (matches): string | undefined => {
+    const route: unknown = matches.at(-1)?.routeId;
+    return typeof route === 'string' ? route : undefined;
+  } }) ?? '/';
   return id.length > 1 ? id.replace(/\/$/, '') : id;
 }
 
@@ -99,13 +108,13 @@ function HelpDocument({ page = false, article: routed = null, heading: routedHea
   };
   const dock = useMemo(() => createTutorialDock(), []);
 
-  const wanted = page ? routed : state.article;
+  const wanted = page ? (pageQuery.trim() === '' ? routed : null) : state.article;
   const wantedHeading = page ? routedHeading : state.heading;
   const chosen = guide?.articles.find((candidate) => candidate.id === wanted && articleAvailable(candidate));
   const entries = useMemo(() => helpEntries(guide?.articles ?? []), [guide]);
   const query = queryText.trim();
   const allArticles = () => { setQuery(''); selectPart('articles'); if (!ownPage) open(null); };
-  const found = useMemo(() => (query === '' ? [] : answer(entries, query).slice(0, 30)), [entries, query]);
+  const found = useMemo(() => (query === '' ? [] : answer(entries, query)), [entries, query]);
   const settingDefs = settingHelpEntries(i18n);
   const settingKey = settingKeyOf(wanted);
   const settingDef = settingDefs.find((def) => def.key === settingKey);
@@ -159,24 +168,21 @@ function HelpDocument({ page = false, article: routed = null, heading: routedHea
       found.length === 0 && matchingSettings.length === 0 ? (
         <EmptyState compact icon={<SearchX aria-hidden />} title={t('help.search.nothing', { query })} description={t('help.search.nothingAbout')} />
       ) : (
-        <ul className="flex flex-col p-2">
-          {matchingSettings.map((def) => <li key={`setting:${def.key}`}><button type="button" className="focus-inset flex w-full flex-col items-start rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => { setQuery(''); open(settingArticle(def.key)); }}><span className="text-base text-text">{def.title}</span><span className="text-sm text-text-muted">{def.description}</span></button></li>)}
-          {found.map(({ item }) => (
-            <li key={`${item.article.id}#${item.heading?.id ?? ''}`}>
-              <button
-                type="button"
-                className="focus-inset flex w-full flex-col items-start rounded-md px-2 py-2 text-left hover:bg-bg-muted"
-                onClick={() => {
-                  setQuery('');
-                  open(item.article.id, item.heading?.id ?? null);
-                }}
-              >
-                <span className="text-base text-text">{item.heading?.text ?? item.article.title}</span>
-                <span className="text-sm text-text-muted">{item.heading === undefined ? t('help.search.article') : item.article.title}</span>
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex shrink-0 justify-end border-b border-border px-3 py-1"><Button size="sm" variant="ghost" onClick={() => askAboutHelp(t('summaryBox.askResults'), [
+            ...matchingSettings.map((def) => ({ article: settingArticle(def.key), title: def.title, summary: def.description })),
+            ...found.map(({ item }) => ({ article: item.article.id, heading: item.heading?.id ?? null,
+              title: item.heading === undefined ? item.article.title : `${item.article.title} · ${item.heading.text}`,
+              ...(item.article.summary === undefined ? {} : { summary: item.article.summary }) })),
+          ])}>{t('summaryBox.askResults')}</Button></div>
+          <ScrollArea className="flex-1 focus-inset" tabIndex={0} role="region" aria-label={t('help.search.results')}><ul className="flex flex-col p-2">
+            {matchingSettings.map((def) => <li key={`setting:${def.key}`}><button type="button" className="focus-inset flex w-full flex-col items-start rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => { setQuery(''); open(settingArticle(def.key)); }}><span className="text-base text-text">{def.title}</span><span className="text-sm text-text-muted">{def.description}</span></button></li>)}
+            {found.map(({ item }) => <HelpResult key={`${item.article.id}#${item.heading?.id ?? ''}`} {...item} onOpen={() => {
+              setQuery('');
+              open(item.article.id, item.heading?.id ?? null);
+            }} />)}
+          </ul></ScrollArea>
+        </div>
       );
   }
 
@@ -236,13 +242,7 @@ function ThisScreen({ about, articles, onArticle }: { about: TranslationKey; art
       <section aria-label={t('help.screen.articles')} className="flex flex-col gap-2">
         <h2 className="text-md font-semibold text-text">{t('help.screen.articles')}</h2>
         <ul className="flex flex-col">
-            {articles.map((article) => (
-              <li key={article.id}>
-                <button type="button" className="focus-inset w-full rounded-md px-2 py-2 text-left text-base text-accent-text hover:bg-bg-muted" onClick={() => onArticle(article.id)}>
-                  {article.title}
-                </button>
-              </li>
-            ))}
+            {articles.map((article) => <HelpResult key={article.id} article={article} onOpen={() => onArticle(article.id)} />)}
         </ul>
       </section>
       <Button size="sm" variant="ghost" className="self-start" onClick={() => dismissed.reopenAll()}>
@@ -254,18 +254,32 @@ function ThisScreen({ about, articles, onArticle }: { about: TranslationKey; art
 
 /** Every article of the guide. */
 export function Articles({ guide, onArticle, section }: { guide: Guide | undefined; onArticle: (id: string) => void; section?: 'build-your-own' }) {
+  const { t } = useTranslation();
+  const id = useId();
+  const articles = useMemo(() => (guide?.articles ?? []).filter((article) => articleAvailable(article) && article.section === section)
+    .map((article) => ({ article, preview: articlePreview(article) })), [guide, section]);
   if (guide === undefined) return <SkeletonRows rows={4} className="p-3" />;
-  return (
-    <ul className="flex flex-col p-2">
-      {guide.articles.filter((article) => articleAvailable(article) && article.section === section).map((article) => (
+  const list = (items: typeof articles) => <ul className="flex flex-col">
+      {items.map(({ article, preview }) => (
         <li key={article.id}>
-          <button type="button" className="focus-inset flex w-full flex-col items-start rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => onArticle(article.id)}>
-            <span className="text-base text-text">{article.title}</span>
+          <button type="button" aria-label={article.title} aria-describedby={preview === '' ? undefined : `${id}-article-${article.id}`}
+            className="focus-inset flex w-full min-w-0 flex-col items-start gap-1 rounded-md px-2 py-2 text-left hover:bg-bg-muted" onClick={() => onArticle(article.id)}>
+            <span className="text-base wrap-anywhere text-text">{article.title}</span>
+            <SummaryText inline id={`${id}-article-${article.id}`} text={preview} />
           </button>
         </li>
       ))}
-    </ul>
-  );
+    </ul>;
+  if (section === 'build-your-own') return <div className="p-2">{list(articles)}</div>;
+  return <div className="flex flex-col gap-6 p-4">{BROWSABLE_ARTICLE_GROUPS.map((group) => {
+    const items = articles.filter(({ article }) => (article.group ?? 'other') === group);
+    if (items.length === 0) return null;
+    const heading = `${id}-${group}`;
+    return <section key={group} aria-labelledby={heading} className="flex flex-col gap-2">
+      <h2 id={heading} className="text-base font-semibold text-text">{t(`help.articleGroups.${group}`)}</h2>
+      {list(items)}
+    </section>;
+  })}</div>;
 }
 
 /** The help as a view of the workbench. */

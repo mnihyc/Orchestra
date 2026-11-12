@@ -7,6 +7,12 @@
 //! shown to anybody who holds the token as an [`InvitationPreview`] before it
 //! is accepted.
 
+use crate::operations::{FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -286,6 +292,9 @@ pub struct InvitationPreviewWhat {
 /// What an invitation shows to whoever holds its token, before it is accepted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InvitationPreview {
+    /// Current effective organization terms, or null for no terms and system invitations.
+    #[serde(default)]
+    pub terms: Option<InvitationTerms>,
     /// What it invites to.
     pub kind: InvitationKind,
     /// The org, for an org invitation.
@@ -302,6 +311,15 @@ pub struct InvitationPreview {
     pub email_bound: bool,
     /// When it stops being good.
     pub expires_at: Time,
+}
+
+/// Exact joined Markdown shown to the invitee, and its SHA-256 acknowledgement identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvitationTerms {
+    /// The effective text, root organization first, joined by the ordinary setting resolver.
+    pub text: String,
+    /// Lowercase hexadecimal SHA-256 of the UTF-8 bytes of exactly text.
+    pub hash: String,
 }
 
 /// Searches for people by the start of a username or a part of a display name
@@ -359,12 +377,44 @@ pub struct InvitationCreateReply {
     /// The invitation.
     pub invitation: Invitation,
     /// The secret of the link, shown once.
-    pub token: String,
+    pub token: Option<String>,
     /// The address of the link to give out.
-    pub url: String,
+    pub url: Option<String>,
     /// True when a personal link went out by mail. It is false where the org cannot send mail, and
     /// then the caller hands the link on.
     pub sent: bool,
+    /// A completed repeat has no retrievable secret or link.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub already_created: bool,
+}
+
+/// The authorized new capability without existing invitation or destination content.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvitationCreateReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The offer that was created.
+    pub invitation_id: Id,
+    /// The newly generated secret, shown once.
+    pub token: Option<String>,
+    /// The generated capability link.
+    pub url: Option<String>,
+    /// Whether the native mail intent was accepted.
+    pub sent: bool,
+    /// A completed repeat has no retrievable secret or link.
+    #[serde(default, skip_serializing_if = "crate::common::is_false")]
+    pub already_created: bool,
+}
+
+crate::common::full_or_receipt! {
+    /// The ordinary creation projection or its restricted generated-capability receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum InvitationCreateResponse {
+        /// Existing invitation and destination content admitted by this operation's Read.
+        Full(InvitationCreateReply),
+        /// Generated capability and safe acknowledgement only.
+        Receipt(InvitationCreateReceipt),
+    }
 }
 
 /// The invitations of a place.
@@ -380,6 +430,9 @@ pub struct InvitationListQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvitationAcceptBody {
+    /// SHA-256 from the effective terms displayed before this acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_terms_hash: Option<String>,
     /// The secret of the link.
     pub token: String,
 }
@@ -393,6 +446,26 @@ pub struct InvitationAcceptReply {
     pub node: Option<NodeRef>,
     /// The chat they may open after a group or chat-only node invitation.
     pub chat: Option<ChatRef>,
+}
+
+/// One committed acceptance, without reading its existing destination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InvitationAcceptReceipt {
+    /// Restricted acknowledgement marker.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual offer that was used.
+    pub invitation_id: Id,
+}
+
+crate::common::full_or_receipt! {
+    /// The native destination projection or the same acceptance's restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum InvitationAcceptResponse {
+        /// The native readable destination after the committed grant.
+        Full(InvitationAcceptReply),
+        /// No existing destination content.
+        Receipt(InvitationAcceptReceipt),
+    }
 }
 
 /// Who may open a person's page, subject to recorded member-management inspection.
@@ -595,29 +668,86 @@ pub enum UserShare {
 
 crate::endpoints! {
     /// Opens a person's page with only the pins and places this reader may view.
-    ProfileGet: GET "/profiles/{username}", User, none, none, json UserProfile, 200;
+    ProfileGet: GET "/profiles/{username}", User, none, none, json UserProfile, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::Resolved("account_by_username")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document)], Target::ResolvedCollection("profile_pins")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent), Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template), Object(K::McpServer), Object(K::Mount), Object(K::Skill)], Target::ResolvedCollection(crate::account_sources::PROFILE_CONTEXT_ROLE)),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("profile_places")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("profile_document_names")),
+        ]);
     /// Reads work by day in threads this reader may view.
-    ProfileActivityGet: GET "/profiles/{username}/activity", User, none, none, json ProfileActivity, 200;
+    ProfileActivityGet: GET "/profiles/{username}/activity", User, none, none, json ProfileActivity, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Account)], Target::Resolved("account_by_username")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("profile_activity_threads")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("profile_activity_topics")),
+        ]);
     /// Changes the signed-in person's page.
-    MeProfileUpdate: PATCH "/me/profile", User, none, json MeProfileUpdateBody, json UserProfile, 200;
+    MeProfileUpdate: PATCH "/me/profile", User, none, json MeProfileUpdateBody, json UserProfile, 200,
+        operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Replaces the signed-in person's ordered pins.
-    MeProfilePinsSet: PUT "/me/profile/pins", User, none, json MeProfilePinsSetBody, json UserProfile, 200;
+    MeProfilePinsSet: PUT "/me/profile/pins", User, none, json MeProfilePinsSetBody, json UserProfile, 200,
+        operation Op::returning(Write, &[Identity(I::Account)], Target::CurrentAccount);
     /// Finds people by the start of a name, or by an exact username or address.
-    UserSearch: GET "/users/search", User, query UserSearchQuery, none, json Vec<UserRef>, 200;
+    UserSearch: GET "/users/search", User, query UserSearchQuery, none, json Vec<UserRef>, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::ResolvedCollection("results"));
     /// Reads one person as others see them.
-    UserGet: GET "/users/{id}", User, none, none, json UserRef, 200;
+    UserGet: GET "/users/{id}", User, none, none, json UserRef, 200,
+        operation Op::single(Read, &[Identity(I::Account)], Target::TypedPath { parameter: "id", kind: Identity(I::Account) });
     /// Lists current direct shares between these two people, cut to both people's View before paging, ordered by kind and identifier.
-    UserSharesGet: GET "/users/{id}/shares", User, query PageQuery, none, json Page<UserShare>, 200;
+    UserSharesGet: GET "/users/{id}/shares", User, query PageQuery, none, json Page<UserShare>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread), Object(K::Document), Object(K::DocumentContainer), Identity(I::Chat)], Target::ResolvedCollection("results")),
+            Facet::response_content(&[Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread)], Target::ResolvedCollection("shared_document_names")),
+        ]);
     /// Creates an invitation, either a link to share or a personal link bound to one address.
-    InvitationCreate: POST "/invitations", Rule("members.manage on the org, a system admin for the system, or what naming an outsider needs on a node or chat"), none, json InvitationCreateBody, json InvitationCreateReply, 200;
+    InvitationCreate: POST "/invitations", Rule("members.manage on the org, a system admin for the system, or what naming an outsider needs on a node or chat"), none, json InvitationCreateBody, json InvitationCreateResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Invitation)], Target::Resolved("invitation_destination")),
+            Facet::response_content(&[Identity(I::Invitation)], Target::Resolved("invitation_payload")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("invitation_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("invitation_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("invitation_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
+        ]));
     /// Lists the invitations of a place, newest first.
-    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Vec<Invitation>, 200;
+    InvitationList: GET "/invitations", Rule("the same as making one"), query InvitationListQuery, none, json Vec<Invitation>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Invitation)], Target::ResolvedCollection("invitation_destinations")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("invitation_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("invitation_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("invitation_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
+        ]);
     /// Takes an invitation back.
-    InvitationDelete: DELETE "/invitations/{id}", Rule("the same as making one"), none, none, none, 204;
+    InvitationDelete: DELETE "/invitations/{id}", Rule("the same as making one"), none, none, none, 204,
+        operation Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Invitation)], Target::Resolved("invitation_destination")),
+            Facet::response_content(&[Identity(I::Invitation)], Target::Resolved("invitation_payload")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("invitation_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("invitation_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("invitation_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
+        ]);
     /// Shows what a link would give, before it is accepted.
-    InvitationLookup: GET "/invitations/lookup/{token}", Public, none, none, json InvitationPreview, 200;
+    InvitationLookup: GET "/invitations/lookup/{token}", Public, none, none, json InvitationPreview, 200,
+        operation Op::protocol();
     /// Accepts an invitation as the signed-in person.
-    InvitationAccept: POST "/invitations/accept", User, none, json InvitationAcceptBody, json InvitationAcceptReply, 200;
+    InvitationAccept: POST "/invitations/accept", User, none, json InvitationAcceptBody, json InvitationAcceptResponse, 200,
+        operation Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Invitation)], Target::Resolved("invitation_destination")),
+            Facet::response_content(&[Identity(I::Invitation)], Target::Resolved("invitation_payload")),
+            Facet::response_content(&[Identity(I::Chat)], Target::ResolvedCollection("invitation_chats")),
+            Facet::response_content(&[Object(K::Document)], Target::ResolvedCollection("invitation_documents")),
+            Facet::response_content(&[Object(K::Org)], Target::ResolvedCollection("invitation_names_orgs")),
+            Facet::response_content(&[Object(K::Project)], Target::ResolvedCollection("invitation_names_projects")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("invitation_names_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("invitation_names_threads")),
+        ]));
 }
 
 #[cfg(test)]

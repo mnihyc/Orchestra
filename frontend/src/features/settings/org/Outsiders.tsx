@@ -174,7 +174,7 @@ function TakeOut({ org, person, onClose }: { org: Org; person: OutsidePerson; on
     >
       <div className="flex flex-col gap-4 py-2">
         {read.isPending ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows read={read} rows={3} />
         ) : read.isError ? (
           <ErrorState compact error={read.error} retrying={read.isRefetching} onRetry={() => void read.refetch()} />
         ) : plan !== null ? (
@@ -241,7 +241,7 @@ export function Outsiders({ org }: { org: Org }) {
         autoComplete="off"
       />
       {list.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError && people.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : people.length === 0 ? (

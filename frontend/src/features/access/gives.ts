@@ -10,6 +10,7 @@ import type { TFunction } from 'i18next';
 import type { AccessChoice, PermissionPage, Role } from '@/generated/api-types';
 
 import { CHOICE_ORDER, middleOf, ROLE_ORDER } from './model';
+import { canGiveToAgents } from './agentShares';
 
 /** The role that goes with a choice when it is given on a place with what is in it: the one whose work the choice names. Admin is given among the place's People. */
 export const ROLE_OF_CHOICE: Record<AccessChoice, Role> = { full_view: 'viewer', full_interact: 'interactor', full_manage: 'developer' };
@@ -41,7 +42,7 @@ export function highestRole(page: PermissionPage): Role | null {
 }
 
 /** Whether the reader may give nothing at all here, whichever the way: no choice, no role, nothing to agents. */
-export const givesNothing = (page: PermissionPage): boolean => page.gives.choices.length === 0 && page.gives.roles.length === 0 && page.gives.agents.length === 0;
+export const givesNothing = (page: PermissionPage): boolean => page.gives.choices.length === 0 && page.gives.roles.length === 0 && !canGiveToAgents(page);
 
 /** Whether the place keeps sharing to a thing's owners and to whoever manages its page, and this reader is neither: the field is theirs only to ask about. */
 export const sharingIsKept = (page: PermissionPage): boolean => !page.gives.holders_share && givesNothing(page);

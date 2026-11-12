@@ -14,6 +14,7 @@ heading_id.指定正确的持有者: name-the-holder-you-mean
 heading_id.在自己的权限内共享: share-within-your-authority
 heading_id.理解越权: understand-an-override
 heading_keywords.who-may-make-projects-topics-and-threads: create project, make project, new project, create topic, open topic, new topic, create thread, start thread, new thread, permission, 创建项目, 创建话题, 开始线程, 权限
+summary: 了解访问申请、权限持有者、共享限制和管理员覆盖。
 ---
 
 # 谁能看和做什么

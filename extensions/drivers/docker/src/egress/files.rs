@@ -25,12 +25,28 @@ pub const STATE: &str = "state.json";
 pub const HEARTBEAT: &str = "heartbeat";
 
 /// What the node tells a unit's proxy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Orders {
     /// What it admits.
     pub admission: Admission,
     /// Whether outward flows may run at all: false until the policy is known to be the current one.
     pub open: bool,
+    /// Trusted operator parent for admitted connections, never a unit's proxy environment.
+    #[serde(default)]
+    pub parent_proxy: Option<String>,
+}
+
+impl std::fmt::Debug for Orders {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Orders")
+            .field("admission", &self.admission)
+            .field("open", &self.open)
+            .field(
+                "parent_proxy",
+                &self.parent_proxy.as_ref().map(|_| "[private]"),
+            )
+            .finish()
+    }
 }
 
 /// What a unit's proxy answers of itself.
@@ -52,6 +68,11 @@ pub struct State {
 pub async fn write(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let partial = dir.join(format!(".{name}.partial"));
     tokio::fs::write(&partial, bytes).await?;
+    #[cfg(unix)]
+    if name == ORDERS {
+        use std::os::unix::fs::PermissionsExt as _;
+        tokio::fs::set_permissions(&partial, std::fs::Permissions::from_mode(0o600)).await?;
+    }
     tokio::fs::rename(&partial, dir.join(name)).await
 }
 
@@ -98,9 +119,22 @@ mod tests {
                 ..Admission::default()
             },
             open: true,
+            parent_proxy: None,
         };
         write_json(dir.path(), ORDERS, &orders).await.unwrap();
         assert_eq!(read_json::<Orders>(dir.path(), ORDERS).await, Some(orders));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(dir.path().join(ORDERS))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         beat(dir.path(), 1_760_000_000).await.unwrap();
         assert_eq!(last_beat(dir.path()).await, Some(1_760_000_000));
         let names: Vec<String> = std::fs::read_dir(dir.path())

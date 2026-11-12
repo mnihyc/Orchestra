@@ -23,7 +23,9 @@ import { isForwarded } from '@/lib/content';
 import { AttachmentChips } from '@/features/composer/Attachments';
 import { PersonThingProvider } from '@/features/people/personContext';
 import { readPastedText } from '@/lib/pastedText';
-import { ItemFrame } from '@/features/timeline/ItemActions';
+import { ItemFrame, itemText } from '@/features/timeline/ItemActions';
+import { RestoreFromTurn } from '@/features/source/Restore';
+import { useTurnChanges } from '@/features/timeline/TurnFiles';
 import { useTimelineContext } from '@/features/timeline/context';
 import { PromptEditForm } from '@/features/timeline/PromptEditForm';
 import { PromptNavigation } from '@/features/timeline/PromptNavigation';
@@ -35,16 +37,20 @@ import { FilePathAttachment } from '@/features/files/FileLink';
 import { Markdown } from '@/ui/Markdown';
 import { TimeOfDay } from '@/ui/TimeOfDay';
 import { IconButton } from '@/ui/IconButton';
+import { CopyButton } from '@/ui/CopyButton';
 import { CallHelp } from '@/features/calls/Help';
 import { GoalTurnBlock } from '@/features/goal/TurnBlock';
 import { Tooltip } from '@/ui/Tooltip';
+import { ScheduleWakeMarker } from '@/features/schedules/WakeMarker';
+import { useViewShown } from '@/features/workbench/viewOpening';
 
 type UserItem = Extract<Item, { kind: 'user_message' }>;
 
 /** One part of what was said. */
-export function Part({ part, owner, updatedAt }: { part: ContentPart; owner?: Author | undefined; updatedAt?: string | undefined }) {
+export function Part({ part, owner, updatedAt, thread: sourceThread }: { part: ContentPart; owner?: Author | undefined; updatedAt?: string | undefined; thread?: string }) {
   const { t } = useTranslation();
-  const { threadId } = useTimelineContext();
+  const context = useTimelineContext();
+  const threadId = sourceThread ?? context.threadId;
   if (isForwarded(part)) {
     const source = part.from.kind === 'chat' ? (part.from.chat.name ?? t('timeline.user.aChat')) : (part.from.thread.name ?? t('timeline.user.aThread'));
     return (
@@ -111,12 +117,16 @@ function HumanMessage({ item }: { item: UserItem }) {
   const format=useFormatContext();
   const context = useTimelineContext();
   const { threadId } = context;
+  const shown = useViewShown();
+  const inputClient = useThreadPart(threadId, (view) => item.payload.input_id === null ? null : view.inputs.get(item.payload.input_id)?.client_id);
   const read = useThreadReadRef(threadId);
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   const { parts, delivery } = item.payload;
   const summary = useThreadPart(threadId, (view) => item.payload.input_id === null ? undefined : view.promptSummaries.get(item.payload.input_id));
   const currentTurn = useThreadPart(threadId, (view) => view.thread?.current_turn_id ?? null);
+  const ownTurn = useThreadPart(threadId, (view) => item.turn_id === null ? undefined : view.turns.get(item.turn_id));
+  const fileChanges = useTurnChanges(threadId, item.turn_id ?? '');
   const [editing, setEditing] = useState(false);
   const [preparationError, setPreparationError] = useState<Error | null>(null);
   const edit = useMutation({
@@ -141,12 +151,17 @@ function HumanMessage({ item }: { item: UserItem }) {
   if (author === null) return null;
   return (
     <PersonThingProvider thing={{ kind: 'thread', id: threadId, ...(item.turn_id === null ? {} : { anchor: { turn: item.turn_id } }) }}><ItemFrame item={item} label={t('timeline.user.menu')} extra={mine ? [{ id: 'edit-message', label: t('messageVersions.edit'),
-      icon: <Pencil aria-hidden />, disabled: unavailable ?? false, onSelect: begin }] : []}>
+      icon: <Pencil aria-hidden />, disabled: unavailable ?? false, onSelect: begin }] : []} messageActions={editing ? undefined : <>
+        {mine && <IconButton size="sm" label={t('messageVersions.edit')} icon={<Pencil aria-hidden />} blocked={unavailable !== null} reason={unavailable ?? undefined} onClick={begin} />}
+        <CopyButton value={itemText(item)} label={t('timeline.actions.copy')} />
+        {ownTurn !== undefined && <RestoreFromTurn threadId={threadId} turn={ownTurn} compact fallback hasChanges={fileChanges.files.length > 0} readOnly={context.readOnly === true} label={t('thread.turnActions.restoreBefore')} />}
+      </>}>
       <div className="flex items-start gap-3">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
             <UserChip user={author} size={28} />
             <TimeOfDay at={item.created_at} className="text-xs text-text-subtle" />
+            <ScheduleWakeMarker thread={threadId} input={item.payload.input_id} turn={item.turn_id} clientId={inputClient} enabled={shown && context.inspection === undefined && context.readOnly !== true} />
             {delivery !== 'queue' && <span className="text-xs text-text-subtle">· {delivery === 'steer' ? t(item.status === 'in_progress' ? 'composer.queue.steering' : 'composer.queue.steered') : t(`timeline.user.delivery.${delivery}`)}</span>}
             {item.payload.automatic !== null && item.payload.automatic !== undefined && <span className="inline-flex min-w-0 max-w-full items-baseline gap-1"><Tooltip content={t('calls.automaticDetail', { rule: item.payload.automatic.rule_id, attempt: formatNumber(item.payload.automatic.attempt, format.locale) })}><span tabIndex={0} className="focus-inset min-w-0 rounded-sm wrap-anywhere text-sm text-text-muted" data-automatic-input>{t('calls.automatic')}</span></Tooltip><CallHelp section="automatic" /></span>}
           </p>
@@ -173,8 +188,6 @@ function HumanMessage({ item }: { item: UserItem }) {
           </div>}
           {!editing && context.inspection === undefined && (mine || (summary?.total ?? 0) > 1) && <div className="flex flex-wrap items-center gap-1">
             {summary !== undefined && <PromptNavigation threadId={threadId} prompt={summary} onSelect={context.onVersionSelect} />}
-            {mine && <IconButton size="sm" label={t('messageVersions.edit')} icon={<Pencil aria-hidden />}
-              blocked={unavailable !== null} reason={unavailable ?? undefined} onClick={begin} />}
           </div>}
           </div>
         </div>
