@@ -48,14 +48,15 @@ test('a new tag uses its returned colour and survives assignment refusal with an
   await page.goto(`/topic/${ACME.fixLogin}`);
   await page.getByRole('button', { name: 'Edit tags', exact: true }).click();
   await page.getByLabel('Tag name').fill('infra');
-  await page.route(`**/api/v1/topics/${ACME.fixLogin}`, async (route) => {
-    if (route.request().method() !== 'PATCH') return route.continue();
+  const assignment = `**/api/v1/nodes/${ACME.fixLogin}/tags`;
+  await page.route(assignment, async (route) => {
+    if (route.request().method() !== 'PUT') return route.continue();
     await route.fulfill({ status: 403, json: { type: 'orch:error:authz.denied', code: 'authz.denied', title: 'Permission changed', detail: 'topic.interact is required.', status: 403, request_id: '' } });
   });
   await page.getByRole('button', { name: 'Make the tag infra', exact: true }).click();
   await expect(page.getByText('infra was created, but the topic was not changed.')).toBeVisible();
   await expect(page.getByLabel('Tag name')).toHaveValue('infra');
-  await page.unroute(`**/api/v1/topics/${ACME.fixLogin}`);
+  await page.unroute(assignment);
   await page.getByRole('button', { name: 'Apply infra', exact: true }).click();
   await expect(page.getByLabel('Tag name')).toHaveValue('');
 });
@@ -83,7 +84,7 @@ test('a newer edit refuses Undo and the ordinary list menu uses the same capture
   await signIn(page, PEOPLE.ada);
   await page.goto(`/project/${ACME.web}?view=list&status=all`);
   const row = page.getByRole('row').filter({ has: page.getByRole('link', { name: 'Fix login', exact: true }) });
-  await row.getByRole('button', { name: 'More about Fix login' }).click();
+  await row.getByRole('button', { name: 'Actions for Fix login', exact: true }).click();
   await page.getByRole('menuitem', { name: 'Mark done', exact: true }).click();
   const changed = page.getByRole('region', { name: /^Notifications/ });
   await expect(changed.getByText('Fix login marked done', { exact: true })).toBeVisible();

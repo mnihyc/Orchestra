@@ -21,7 +21,7 @@ import { Textarea } from '@/ui/Textarea';
 import { copyText } from '@/ui/clipboard';
 
 import { type Candidate, useTargetOrg } from './candidates';
-import { linkOf } from './target';
+import { linkTo } from '@/lib/links';
 
 /** The longest line a sharer writes to the people they tell. */
 const LINE_MAX = 500;
@@ -51,8 +51,8 @@ export function useDirectOff(target: AccessTarget): boolean {
  */
 export async function tellThem(targets: readonly AccessTarget[], orgId: string, people: readonly Candidate[], line: string, wording: (names: string) => string): Promise<string[]> {
   const links = targets.flatMap((entry) => {
-    const url = linkOf(entry);
-    return url === null ? [] : [targets.length === 1 ? url : `${entry.name}: ${url}`];
+    const url = linkTo(entry);
+    return [targets.length === 1 ? url : `${entry.name}: ${url}`];
   });
   const failed: string[] = [];
   for (const entry of people) {
@@ -74,11 +74,11 @@ export function TellThem({ target, staged, state, onChange }: { target: AccessTa
   const people = staged.filter((entry) => entry.user !== undefined);
   const members = tellable(staged);
   if (people.length === 0) return null;
-  const url = linkOf(target);
+  const url = linkTo(target);
   const reason = off ? t('access.tell.off') : members.length === 0 ? t('access.tell.outside', { names: people.map((entry) => entry.name).join(', ') }) : null;
   const names = members.map((entry) => entry.name).join(', ');
   const copy = async () => {
-    if (url !== null) await copyText(url, t('common.linkCopied'));
+    await copyText(url, t('common.linkCopied'));
   };
 
   return (
@@ -92,7 +92,7 @@ export function TellThem({ target, staged, state, onChange }: { target: AccessTa
           disabled={reason !== null}
           onCheckedChange={(on) => onChange({ ...state, on })}
         />
-        {reason !== null && url !== null && (
+        {reason !== null && (
           <Button size="sm" icon={<Copy aria-hidden />} onClick={() => void copy()}>
             {t('access.footer.copyLink')}
           </Button>

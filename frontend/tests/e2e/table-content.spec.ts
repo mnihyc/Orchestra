@@ -78,7 +78,8 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
       const table = page.getByRole('table', { name: scene.label, exact: true });
       await expect(table).toBeVisible();
       await expect(table.locator('tbody tr').first()).toBeVisible();
-      for (const width of [1440, 1100, 400]) {
+      // The workbench narrows the table at 1440. Keep a wider sample for the image source column.
+      for (const width of scene.key === 'templates' ? [1920, 1440, 1100, 400] : [1440, 1100, 400]) {
         await page.setViewportSize({ width, height: 900 });
         await expect(table.locator('thead [data-table-grow="true"]')).toHaveCount(1);
         const region = table.locator('..');
@@ -89,7 +90,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
         await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
         await region.focus();
         await expect(region).toBeFocused();
-        if (width === 1440 && scene.key === 'templates') {
+        if (width === 1920 && scene.key === 'templates') {
           const source = table.locator('td[data-table-column="source"] code').filter({ hasText: 'gcr.io/distroless/static-debian12:nonroot' });
           await expect(source).toBeVisible();
           await expect(source).toHaveText('gcr.io/distroless/static-debian12:nonroot');

@@ -40,7 +40,7 @@
   "files": [
     {
       "path": "orch.patch.yml",
-      "template": "# Written by Orch for one session, and again at every start.\n# The two rows that follow switch off what dsh sends to its vendor with every request to the official\n# DeepSeek API: the log of the session and the list of the plugins. Orch's model forwarder refuses both\n# again, in case a build of dsh does not honour this.\n- id: session-log-deepseek\n  disabled: true\n- id: plugin-package-inventory-deepseek\n  disabled: true\n# Orch owns goal continuations and checks every turn before it starts. Disable the native goal\n# service, driver, command and tools so none can start unchecked turns in this managed home.\n- id: goal\n  disabled: true\n- id: goal-round-driver\n  disabled: true\n- id: command-goal\n  disabled: true\n- id: tool-goal\n  disabled: true\n# The one model route: Orch's forwarder, which holds the key. The token below is the connector's, never a model key.\n- id: llm-pi-ai\n  config:\n    providers:\n      orch:\n        apiKeyEnv: ORCH_LLM_TOKEN\n        api: {api:json}\n        baseURL: {llm_url:json}\n{#if api=openai-completions}        compat:\n          supportsDeveloperRole: false\n          maxTokensField: max_tokens\n{/if}        models:\n{#each models}          - id: {item:json}\n            input: [text, image]\n            contextWindow: {context_window}\n            maxTokens: 32768\n            reasoningEfforts:\n              off:\n              minimal: minimal\n              low: low\n              medium: medium\n              high: high\n              xhigh: xhigh\n              max: max\n{/each}- id: agent-default-model\n  config:\n    provider: orch\n    model: {model:json}\n- id: acp\n  config:\n    provider: orch\n    model: {model:json}\n# Orch's environment confines the program, not its own sandbox, which cannot start inside a container.\n- id: sandbox-policy\n  config:\n    mode: danger-full-access\n    workspaceRoot: {cwd:json}\n- id: approval\n  config:\n    policy: {approval.policy:json}\n- id: permission\n  config:\n    presets:\n      orch-ask:\n        sandbox: danger-full-access\n        approval: ask\n      orch-bypass:\n        sandbox: danger-full-access\n        approval: never\n    defaultPreset: {approval.preset:json}\n"
+      "template": "# Written by Orch for one session, and again at every start.\n# The two rows that follow switch off what dsh sends to its vendor with every request to the official\n# DeepSeek API: the log of the session and the list of the plugins. Orch's model forwarder refuses both\n# again, in case a build of dsh does not honour this.\n- id: session-log-deepseek\n  disabled: true\n- id: plugin-package-inventory-deepseek\n  disabled: true\n# The independent page-fetch choice controls the HTTP reader. Native auxiliary search stays off until its own\n# guarded route is available; it must not use the vendor's independent endpoint.\n- id: tool-web\n  config:\n    search: false\n    fetch: {page_fetch_native}\n    searchTimeoutMs: 60000\n# The auxiliary provider uses the same guarded listener and bound model, never a vendor key.\n- id: web-search-deepseek\n  config:\n    apiKeyEnv: ORCH_LLM_TOKEN\n    baseURL: {web_search_url:json}\n    model: {model:json}\n{#if protocol=anthropic-messages}- id: tool-web\n  config:\n    search: {web_search_native}\n    fetch: {page_fetch_native}\n    searchTimeoutMs: 60000\n{/if}# Orch owns goal continuations and checks every turn before it starts. Disable the native goal\n# service, driver, command and tools so none can start unchecked turns in this managed home.\n- id: goal\n  disabled: true\n- id: goal-round-driver\n  disabled: true\n- id: command-goal\n  disabled: true\n- id: tool-goal\n  disabled: true\n# The one model route: Orch's forwarder, which holds the key. The token below is the connector's, never a model key.\n- id: llm-pi-ai\n  config:\n    providers:\n      orch:\n        apiKeyEnv: ORCH_LLM_TOKEN\n        api: {api:json}\n        baseURL: {llm_url:json}\n{#if api=openai-completions}        compat:\n          supportsDeveloperRole: false\n          maxTokensField: max_tokens\n{/if}        models:\n{#each models}          - id: {item:json}\n            input: [text, image]\n            contextWindow: {context_window}\n            maxTokens: 32768\n            reasoningEfforts:\n              off:\n              minimal: minimal\n              low: low\n              medium: medium\n              high: high\n              xhigh: xhigh\n              max: max\n{/each}- id: agent-default-model\n  config:\n    provider: orch\n    model: {model:json}\n- id: acp\n  config:\n    provider: orch\n    model: {model:json}\n# Orch's environment confines the program, not its own sandbox, which cannot start inside a container.\n- id: sandbox-policy\n  config:\n    mode: danger-full-access\n    workspaceRoot: {cwd:json}\n- id: approval\n  config:\n    policy: {approval.policy:json}\n- id: permission\n  config:\n    presets:\n      orch-ask:\n        sandbox: danger-full-access\n        approval: ask\n      orch-bypass:\n        sandbox: danger-full-access\n        approval: never\n    defaultPreset: {approval.preset:json}\n"
     },
     {
       "path": "bridge.patch.yml",
@@ -103,7 +103,8 @@
     "mcp": {
       "strict": true
     },
-    "discover_sessions": false
+    "discover_sessions": false,
+    "turn_changes_require_restart": true
   },
   "tools": [
     {
@@ -118,6 +119,13 @@
         "read"
       ],
       "family": "read",
+      "argument": "file_path"
+    },
+    {
+      "names": [
+        "read_image"
+      ],
+      "family": "image",
       "argument": "file_path"
     },
     {
@@ -212,5 +220,72 @@
     ],
     "file": "orch-dsh-bridge.mjs"
   },
-  "reports_context": true
+  "reports_context": true,
+  "capability_program": {
+    "access": {
+      "forwarded": {
+        "native": {
+          "generation": {
+            "enabled": true,
+            "modes": [
+              "native"
+            ],
+            "default_mode": "native"
+          },
+          "image_input": {
+            "enabled": true,
+            "modes": [
+              "native"
+            ],
+            "default_mode": "native"
+          },
+          "web_search": {
+            "enabled": true,
+            "modes": [
+              "live"
+            ],
+            "default_mode": "disabled",
+            "interfaces": [
+              "anthropic-messages"
+            ],
+            "eligible_when": {
+              "type": "object",
+              "required": [
+                "route_kind"
+              ],
+              "properties": {
+                "route_kind": {
+                  "const": "native-model"
+                }
+              }
+            }
+          },
+          "page_fetch": {
+            "enabled": true,
+            "modes": [
+              "on"
+            ],
+            "default_mode": "on"
+          }
+        },
+        "orch_tools": true
+      }
+    },
+    "native_switches": {
+      "web_search": {
+        "capability": "web_search",
+        "values": {
+          "disabled": "disabled",
+          "live": "live"
+        }
+      },
+      "page_fetch": {
+        "capability": "page_fetch",
+        "values": {
+          "off": false,
+          "on": true
+        }
+      }
+    }
+  }
 }

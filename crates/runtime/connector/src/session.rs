@@ -62,16 +62,25 @@ pub fn tls_dialer(
         Some(ServerTrust::Authority(Box::new(identity.authority.clone()))),
         ServiceName::Frontend,
         None,
-        clock,
+        Arc::clone(&clock),
     )?;
     // Through the system's proxy, where it names one: a restricted unit reaches the gateway only through its
     // host's proxy, which its driver names.
+    let prober = crate::gateway_selection::HttpsGatewayProber::new(
+        Arc::clone(&pinned),
+        Arc::clone(&public),
+        &identity.authority,
+        clock,
+    )?;
     Ok(TlsDialer::new(Some(pinned), Some(public))
+        .with_gateway_prober(Arc::new(prober))
         .with_proxy(Some(orch_link::outward::OutwardProxy::system())))
 }
 
 /// What the link is started with, from what the connector has.
 pub struct LinkSettings<'a> {
+    /// Latest authenticated catalogue saved with the enrollment record.
+    pub gateways: Vec<orch_link_contract::gateways::GatewayInstance>,
     /// The connector's version, as the hello says it.
     pub version: &'a str,
     /// What this machine is built for.
@@ -97,6 +106,10 @@ pub struct LinkSettings<'a> {
 /// The link's configuration.
 pub fn machine_config(settings: LinkSettings<'_>) -> Result<MachineConfig, PkiError> {
     Ok(MachineConfig {
+        gateway: orch_link::gateways::PrimaryGateway {
+            choice: settings.config.connector.gateway.clone(),
+            catalogue: settings.gateways,
+        },
         hosted_endpoints: settings.hosted_endpoints,
         follow_system_endpoints: settings.follow_system_endpoints
             && settings.config.endpoints.is_empty(),
@@ -208,6 +221,7 @@ mod tests {
             }
         };
         let settings = LinkSettings {
+            gateways: Vec::new(),
             follow_system_endpoints: true,
             hosted_endpoints: None,
             version: "0.1.0",

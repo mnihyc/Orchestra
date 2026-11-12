@@ -74,7 +74,7 @@ export function SubscriptionBell({ thread, label }: { thread: Pick<Thread, 'id' 
       open={open}
       onOpenChange={(next) => { if (!change.isPending) setOpen(next); }}
       content={<><DropdownEntries entries={entries} /><OutsideMenu nodeId={thread.id} onClose={() => setOpen(false)} onPause={(mode, prefs) => { setOpen(false); setPause({ mode, prefs }); }} /></>}
-      trigger={<BellTrigger label={heading} level={effective} inherited={own === null} showLevel pending={change.isPending} />}
+      trigger={<BellTrigger label={heading} scopeLabel={t('chat.segment.thread')} level={effective} inherited={own === null} showLevel pending={change.isPending} />}
     />
     {pause !== null && <PauseDialog open mode={pause.mode} initial={pause.prefs} onOpenChange={(on) => { if (!on) setPause(null); }} />}
   </>

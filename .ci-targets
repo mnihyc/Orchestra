@@ -1,0 +1,4 @@
+# The engine's settling round, tenth pass, its last commits: the test kit's hold, the real-harness program, the rule's cases.
+test -p orch-testkit --lib
+test -p orch-engine --test background_wake_native -- --test-threads=3
+test -p orch-engine --test usage_rows

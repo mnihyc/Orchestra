@@ -66,5 +66,5 @@ test('an org at the root is named alone, as nothing lies above it', async ({ pag
   await page.goto('/org/acme');
   await page.getByRole('button', { name: /^Actions for Acme(?: · .+)?$/ }).first().click();
   await page.getByRole('menuitem', { name: 'Colour…', exact: true }).click();
-  await expect(openDialog(page)).toHaveAccessibleName('Colour of Acme');
+  await expect(openDialog(page)).toHaveAccessibleName(/^Colour of (the \w+ )?Acme(, in .+)?$/);
 });

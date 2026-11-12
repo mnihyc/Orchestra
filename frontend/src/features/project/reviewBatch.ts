@@ -1,5 +1,5 @@
 /** Per-row guarded writes, uncertain answers and exact successful inverses; there is no batch write endpoint. */
-import { ApiError } from '@/api/client';
+import { ApiError, ReceiptAcknowledged } from '@/api/client';
 import { applyArchivePlan, moveNode, previewMove, deleteNode, readNode, restoreNode } from '@/api/nodes';
 import type { Node, NodeArchivePlan, NodeDeletePlan, NodeMovePlan } from '@/generated/api-types';
 
@@ -46,7 +46,7 @@ export async function applyRows(plans: readonly PlacePlan[], keys: ReadonlyMap<s
     else {
       update({ review, state: 'applying' });
       try { result = { review, state: 'succeeded', receipt: await applyPlace(review, keys.get(review.before.id) ?? '') }; }
-      catch (error) { result = { review, state: error instanceof ApiError && error.status < 500 ? 'refused' : 'uncertain', error }; }
+      catch (error) { result = { review, state: error instanceof ReceiptAcknowledged ? 'succeeded' : error instanceof ApiError && error.status < 500 ? 'refused' : 'uncertain', error }; }
     }
     results.push(result); update(result);
   }

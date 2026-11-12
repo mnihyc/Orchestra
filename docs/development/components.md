@@ -44,7 +44,7 @@ states its behavior, tests and any remaining limitations.
 | [orch-provider-contract](../../crates/contracts/provider/README.md) | Provider source contracts: facts, models and credential presentation. |
 | [orch-settings-contract](../../crates/contracts/settings/README.md) | Settings catalogue and resolution data, without evaluation. |
 | [orch-access-contract](../../crates/contracts/access/README.md) | Permission catalogue, roles and permission-page contracts, without access decisions. |
-| [orch-summarizer-contract](../../crates/contracts/summarizer/README.md) | Summarizer contract for title, description and tag generation. |
+| [orch-summarizer-contract](../../crates/contracts/summarizer/README.md) | Summarizer contract for titles, tags, summary text and handoffs. |
 | [orch-notifier-contract](../../crates/contracts/notifier/README.md) | Notification channel contract hosted by the worker. |
 | [orch-blob-contract](../../crates/contracts/blob/README.md) | BlobStore trait seam; local storage is the v0.1 implementation. |
 | [orch-identity-contract](../../crates/contracts/identity/README.md) | IdentityProviderKind trait seam; OIDC is the v0.1 implementation. |

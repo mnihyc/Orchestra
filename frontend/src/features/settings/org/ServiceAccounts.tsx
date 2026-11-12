@@ -22,7 +22,9 @@ import {
 } from '@/api/directory';
 import { takes } from '@/features/settings/refusals';
 import { type Returned, returnedToTokenForm, TokenForm, TokenMade } from '@/features/settings/TokenForm';
-import type { ApiTokenCreateBody, Org, OrgToken, ServiceAccount, TokenCreated } from '@/generated/api-types';
+import { KeyActivity } from '@/features/settings/KeyActivity';
+import { KeyScopeReview } from '@/features/settings/KeyRules';
+import type { ApiTokenCreateBody, ApiTokenInfo, Org, OrgToken, ServiceAccount, TokenCreateResponse } from '@/generated/api-types';
 import { USERNAME_PATTERN } from '@/api/auth';
 import { useFormatContext } from '@/lib/appearance';
 import { useActKey } from '@/lib/forms';
@@ -107,14 +109,18 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
   const id = account.user.id;
   const list = useQuery(serviceTokensQuery(id));
   const [making, setMaking] = useState(returned !== null);
-  const [made, setMade] = useState<TokenCreated | null>(null);
+  const [made, setMade] = useState<TokenCreateResponse | null>(null);
+  const [madeName, setMadeName] = useState('');
+  const [reviewing, setReviewing] = useState<ApiTokenInfo | null>(null);
   const make = useMutation({
     // The proof is not part of what the act is: a retry with a new code is the same creation.
-    mutationFn: (body: ApiTokenCreateBody) => createServiceToken(id, body, actKey({ ...body, proof: null })),
-    onSuccess: (token) => {
+    mutationFn: async (body: ApiTokenCreateBody) => {
+      const token = await createServiceToken(id, body, actKey({ ...body, proof: null }));
+      setMadeName(body.name);
       setMade(token);
       setMaking(false);
     },
+    gcTime: 0,
   });
   const revoke = useMutation({
     mutationFn: (tokenId: string) => revokeServiceToken(id, tokenId),
@@ -126,6 +132,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
       title={t('settings.service.tokensTitle', { name: account.user.display_name })}
       description={t('settings.service.tokensLead')}
       size="lg"
+      dismissible={!make.isPending}
       footer={
         making ? (
           <>
@@ -143,7 +150,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
     >
       <div className="flex flex-col gap-4 py-2">
         {making ? (
-          <TokenForm formId={SERVICE_TOKEN_FORM} serviceAccountId={id} onMake={(body) => make.mutate(body)} pending={make.isPending} error={make.error} returned={returned} />
+          <TokenForm operationScoped formId={SERVICE_TOKEN_FORM} serviceAccountId={id} onMake={(body) => make.mutate(body)} pending={make.isPending} error={make.error} returned={returned} />
         ) : (
           <div>
             <Button variant="primary" icon={<Plus aria-hidden />} onClick={() => {
@@ -155,9 +162,9 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
             </Button>
           </div>
         )}
-        {made !== null && !making && <TokenMade made={made} />}
+        {made !== null && !making && <><TokenMade made={made} name={madeName} />{made.token === null && <div><Button variant="danger" pending={revoke.isPending} onClick={() => revoke.mutate('info' in made ? made.info.id : made.token_id, { onSuccess: () => { setMade(null); make.reset(); setMaking(true); } })}>{t('tokens.new.revokeAndAgain')}</Button></div>}</>}
         {list.isPending ? (
-          <SkeletonRows rows={2} />
+          <SkeletonRows read={list} rows={2} />
         ) : list.isError ? (
           <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
         ) : list.data.length === 0 ? (
@@ -172,6 +179,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
                   <span className="ml-3 text-sm text-text-muted">{t('tokens.madeOn', { time: formatDateTime(token.created_at, format) })}</span>
                 </span>
                 <span className="text-sm text-text-muted">{token.last_used_at === null ? t('tokens.neverUsed') : <RelativeTime at={token.last_used_at} />}</span>
+                <Button size="sm" variant="ghost" onClick={() => setReviewing(token)}>{t('operationKeys.review')}</Button>
                 <Button size="sm" variant="danger-ghost" pending={revoke.isPending && revoke.variables === token.id} onClick={() => revoke.mutate(token.id)} aria-label={t('tokens.revokeTitle', { name: token.name })}>
                   {t('tokens.revoke')}
                 </Button>
@@ -180,6 +188,7 @@ function Tokens({ account, onClose, returned }: { account: ServiceAccount; onClo
           </ul>
         )}
       </div>
+      {reviewing !== null && <Dialog open onOpenChange={(open) => !open && setReviewing(null)} title={t('operationKeys.reviewTitle', { name: reviewing.name })} size="lg" footer={<Button onClick={() => setReviewing(null)}>{t('common.close')}</Button>}><KeyScopeReview token={reviewing} /></Dialog>}
     </Dialog>
   );
 }
@@ -194,6 +203,7 @@ function OrgTokens({ org }: { org: Org }) {
   const list = useInfiniteQuery(orgTokensQuery(org.id));
   const tokens = list.data?.pages.flatMap((page) => page.items) ?? [];
   const [refusing, setRefusing] = useState<OrgToken | null>(null);
+  const [activity, setActivity] = useState<OrgToken | null>(null);
   const refuse = useMutation({
     mutationFn: (token: OrgToken) => refuseOrgToken(org.id, token.id),
     onSuccess: (_none, token) => {
@@ -204,7 +214,7 @@ function OrgTokens({ org }: { org: Org }) {
   return (
     <Section id="org-tokens" title={t('settings.orgTokens.title', { org: org.name })} lead={t('settings.orgTokens.lead', { org: org.name })}>
       {list.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={list} rows={2} />
       ) : list.isError && tokens.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : tokens.length === 0 ? (
@@ -222,14 +232,15 @@ function OrgTokens({ org }: { org: Org }) {
                     {!token.lifetime_allowed && <Badge tone="warning">{t('settings.orgTokens.tooLong')}</Badge>}
                   </span>
                   <span className="block text-sm text-text-muted">
-                    {token.scopes.includes('*') ? t('tokens.scopes.everything') : t('tokens.scopes.count', { count: token.scopes.length })}
+                    {token.rules !== undefined && token.rules !== null ? token.rules.length === 0 ? t('operationKeys.denyAllShort') : t('operationKeys.ruleCount', { count: token.rules.length }) : token.scopes.includes('*') ? t('tokens.scopes.everything') : t('tokens.scopes.count', { count: token.scopes.length })}
                     {' · '}
-                    {token.node === null ? t('tokens.everywhere') : token.node.name}
+                    {token.rules !== undefined && token.rules !== null ? t('operationKeys.boundTargets') : token.node === null ? t('tokens.everywhere') : token.node.name}
                     {' · '}
                     {token.expires_at === null ? t('tokens.neverEnds') : formatDateTime(token.expires_at, format)}
                   </span>
                 </span>
                 <span className="text-sm text-text-muted">{token.last_used_at === null ? t('tokens.neverUsed') : <RelativeTime at={token.last_used_at} />}</span>
+                <Button size="sm" variant="ghost" onClick={() => setActivity(token)}>{t('operationKeys.activity.title')}</Button>
                 {!token.refused_here && (
                   <Button size="sm" variant="danger-ghost" onClick={() => setRefusing(token)}>
                     {t('settings.orgTokens.refuse')}
@@ -241,6 +252,7 @@ function OrgTokens({ org }: { org: Org }) {
           <Pagination hasMore={list.hasNextPage} loading={list.isFetchingNextPage} error={list.isFetchNextPageError ? list.error : undefined} onMore={() => void list.fetchNextPage()} />
         </div>
       )}
+      {activity !== null && <Dialog open onOpenChange={(open) => !open && setActivity(null)} title={t('operationKeys.activity.forKey', { name: activity.name })} size="lg" footer={<Button onClick={() => setActivity(null)}>{t('common.close')}</Button>}><KeyActivity tokenId={activity.id} orgId={org.id} /></Dialog>}
       <ConfirmDialog
         open={refusing !== null}
         onOpenChange={(next) => !next && setRefusing(null)}
@@ -296,7 +308,7 @@ export function ServiceAccounts({ org }: { org: Org }) {
       {!may ? (
         <EmptyState compact icon={<Bot aria-hidden />} title={t('settings.service.readers', { name: org.name })} description={refusal} />
       ) : list.isPending ? (
-        <SkeletonRows rows={2} />
+        <SkeletonRows read={list} rows={2} />
       ) : list.isError ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : list.data.length === 0 ? (

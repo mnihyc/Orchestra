@@ -137,9 +137,14 @@ services:
       - ./config/secrets/service_gateway_key.pem:/run/secrets/service_gateway_key.pem:ro
     networks:
       control:
-        # The name the system advertises for the pinned listener, and the one its
-        # certificate is good for. Managed runtimes reach it through the host;
-        # the services of this stack, the node among them, find it here.
+        # The name the gateway's certificate is good for, and the one managed
+        # runtimes are told to dial ([gateway] managed_endpoint): they reach it
+        # through a host entry that points to the published port. The services
+        # of this stack may reach the gateway by it too. It is not what the
+        # system advertises to machines, which is [[gateway.endpoints]] in
+        # config/orch.toml, an address that resolves and answers from outside
+        # and from inside the stack. The bundled node goes by [node]
+        # gateway_url, and needs neither.
         aliases: [gateway.orch.internal]
     healthcheck:
       # The listener behind the web edge answers a connection.

@@ -8,9 +8,10 @@ import { Button } from '@/ui/Button';
 import { compactControls } from '@/ui/FilterBar';
 import { Popover } from '@/ui/Popover';
 
-export function ResourceListControls({ filters, sorting, participating, onParticipation, filtered, sorted }: {
+export function ResourceListControls({ filters, sorting, grouping, participating, onParticipation, filtered, sorted }: {
   filters?: ReactNode;
   sorting?: ReactNode;
+  grouping?: ReactNode;
   participating: boolean;
   onParticipation: (value: boolean) => void;
   filtered: boolean;
@@ -37,5 +38,6 @@ export function ResourceListControls({ filters, sorting, participating, onPartic
       </Button>}>
       <div data-resource-sort-panel className={panel}>{sorting}</div>
     </Popover>}
+    {grouping}
   </>;
 }

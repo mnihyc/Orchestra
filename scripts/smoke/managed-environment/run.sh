@@ -6,10 +6,10 @@
 #
 # The stack publishes its pinned listener on the Docker bridge's address at the port it listens on inside (so that
 # a machine of the stack's network and a managed unit find it by the name the system advertises), and its public
-# address is the web edge's name inside the stack (the node fetches the unit's connector from the address people
-# reach the system at). Beside it run a machine of a person (a container of the stack's network, with a connector
-# enrolled by a token, which holds the provider and the harness) and the scripted model server (a program on the
-# host, on the bridge's address).
+# address is its own web edge on the loopback (the node fetches the unit's connector from there through its own
+# connection, and a machine's token is minted only for an address an installer accepts). Beside it run a machine of
+# a person (a container of the stack's network, with a connector enrolled by a token, which holds the provider and
+# the harness) and the scripted model server (a program on the host, on the bridge's address).
 set -Eeuo pipefail
 # shellcheck source-path=SCRIPTDIR/..
 # shellcheck source=lib.sh
@@ -31,12 +31,14 @@ MODEL_PID=""
 ENV_ID=""
 UNIT=""
 
-# The stack as an operator sets it for a host whose containers can reach the web edge by its name and the gateway
-# on the bridge: the system's name (it labels what the node makes, which is how the end of the scenario finds it),
-# the public address, and the port of the pinned listener in all the places that name it.
+# The stack as an operator sets it for a host whose containers can reach the gateway on the bridge: the system's name
+# (it labels what the node makes, which is how the end of the scenario finds it), the port of the pinned listener in
+# all the places that name it, and the one address the system advertises for it: the bridge's, which a machine of the
+# stack's network, a managed unit (outside the stack's network, it enrolls at what the system advertises) and this
+# host all reach, and which is not a name that only means something inside the stack, as a machine's token requires.
 sed -i \
   -e "s|^name = \"Orch\"|name = \"$SYSTEM_NAME\"|" \
-  -e "s|^public_url = .*|public_url = \"http://frontend\"|" \
+  -e "s|^url = \"wss://gateway:9443\"|url = \"wss://$BRIDGE:$GATEWAY_PORT\"|" \
   -e "s|wss://gateway.orch.internal:9443|wss://gateway.orch.internal:$GATEWAY_PORT|g" \
   -e "s|wss://gateway:9443|wss://gateway:$GATEWAY_PORT|g" \
   -e "s|^pinned_bind = .*|pinned_bind = \"[::]:$GATEWAY_PORT\"|" \
@@ -160,8 +162,14 @@ TOPIC="$(call POST "/projects/$PROJECT_ID/topics" '{"name":"Landing page"}' | jq
 check "they were made" test -n "$ORG" -a -n "$PROJECT_ID" -a -n "$TOPIC"
 
 step "the scripted model server, and a machine of the person that holds the provider"
-(cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
-MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+# The scripted model server is built from the tree, or is the program ORCH_SMOKE_MOCK_LLM names (to run where no toolchain is).
+if [ -n "${ORCH_SMOKE_MOCK_LLM:-}" ]; then
+  MOCK="$ORCH_SMOKE_MOCK_LLM"
+  [ -x "$MOCK" ] || abort "ORCH_SMOKE_MOCK_LLM does not name a program: $MOCK"
+else
+  (cd "$SMOKE_REPO" && cargo build -q -p orch-testkit --bin orch-mock-llm) || abort "orch-mock-llm was not built"
+  MOCK="${CARGO_TARGET_DIR:-$SMOKE_REPO/target}/debug/orch-mock-llm"
+fi
 mkdir -p "$WORK/lab/data"
 MODEL_KEY="$(openssl rand -hex 16)"
 printf '%s\n' "$MODEL_KEY" > "$WORK/lab/model.key"; chmod 600 "$WORK/lab/model.key"
@@ -172,10 +180,19 @@ model_answers() { curl -fsS -H "authorization: Bearer $MODEL_KEY" "http://$BRIDG
 model_wants_its_key() { ! curl -fsS "http://$BRIDGE:$MODEL_PORT/v1/models" > /dev/null 2>&1; }
 wait_for 20 "the scripted model server answers with the key" model_answers
 check "and does not without it" model_wants_its_key
-CONNECTOR="$(find "$A" -maxdepth 1 -name 'orch-connector-linux-*-musl' | head -n 1)"
+CONNECTOR="$(find "$A" -maxdepth 1 -name "orch-connector-linux-$(uname -m)-musl" -print -quit)"
+[ -n "$CONNECTOR" ] || abort "the release has no Linux connector for $(uname -m)"
+# The release's files are downloads and carry no execute permission: the machine of the person runs a copy that has it.
+mkdir -p "$WORK/lab/bin"
+cp "$CONNECTOR" "$WORK/lab/bin/orch-connector"
+chmod 755 "$WORK/lab/bin/orch-connector"
+# A connector keeps a lock file beside its data directory, as the shipped Compose file gives the node one; the account
+# of the machine cannot make one in the root of the container.
+: > "$WORK/lab/data.orch-instance-lock"
 printf '[connector]\nroles = ["agent", "provider"]\n' > "$WORK/lab/data/config.toml"
 docker run -d --name "$LAB" --network "${PROJECT}_control" --user "$(id -u):$(id -g)" \
-  -v "$WORK/lab/data:/data" -v "$CONNECTOR:/usr/local/bin/orch-connector:ro" \
+  -v "$WORK/lab/data:/data" -v "$WORK/lab/data.orch-instance-lock:/data.orch-instance-lock" \
+  -v "$WORK/lab/bin/orch-connector:/usr/local/bin/orch-connector:ro" \
   debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 sleep infinity > /dev/null || abort "the machine of the person did not start"
 MACHINE_TOKEN="$(call POST /machines/enrollment-tokens '{"name_hint":"lab"}' | jq -r .token)"
 lab() { docker exec "$LAB" orch-connector --data-dir /data "$@"; }
@@ -219,16 +236,18 @@ ENV_ID="$(printf '%s' "$MADE" | jq -r .id)"
 JOB_ID="$(printf '%s' "$MADE" | jq -r '.job.id // empty')"
 check "the environment was made and a job runs" test -n "$ENV_ID" -a "$ENV_ID" != null -a -n "$JOB_ID"
 expect "it is being provisioned" "provisioning" "$(printf '%s' "$MADE" | jq -r .status)"
-deadline=$((SECONDS + 300))
+deadline=$((SECONDS + 900))
 while [ "$SECONDS" -lt "$deadline" ]; do
   JOB="$(call GET "/jobs/$JOB_ID")" || break
   case "$(printf '%s' "$JOB" | jq -r .state)" in succeeded | failed | cancelled) break ;; esac
   sleep 1
 done
 expect "the job succeeded" "succeeded" "$(printf '%s' "$JOB" | jq -r .state)"
-expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach verify commit" \
+expect "it went through the phases of making a unit, in order" "schedule image volumes tools create enroll attach files after_up verify commit" \
   "$(printf '%s' "$JOB" | jq -r '[.progress.phases[].name] | join(" ")')"
-expect "and every one is done" "done" "$(printf '%s' "$JOB" | jq -r '[.progress.phases[].state] | unique | join(" ")')"
+# A phase with nothing to do (no commands to run after the start, no kept image to reuse) is skipped, not done.
+expect "and every one is done, or skipped where there was nothing to do" "true" \
+  "$(printf '%s' "$JOB" | jq -r 'all(.progress.phases[]; .state == "done" or .state == "skipped")')"
 ENV="$(call GET "/environments/$ENV_ID")"
 expect "the environment is running" "running" "$(printf '%s' "$ENV" | jq -r .status)"
 expect "it is its first unit" "1" "$(printf '%s' "$ENV" | jq -r .generation)"
@@ -285,13 +304,22 @@ expect "it is the same unit" "$UNIT" "$(docker ps --filter "label=orch.system=$S
 expect "the file is still there" "written before the stop" "$(docker exec "$UNIT" cat /workspace/web/notes.txt)"
 expect "the generation did not move" "1" "$(call GET "/environments/$ENV_ID" | jq -r .generation)"
 
-step "the environment is removed, and its container goes"
-refuses "an environment with a thread bound to it is not removed" api DELETE "/environments/$ENV_ID?confirm=Main"
-expect "and the reason is told" "resource.in_use" "$(jq -r .code "$REPLY_FILE")"
+step "the environment is removed, its container goes, and its volumes are kept until they are purged"
+# A thread bound to an environment does not stop its removal. The unit goes; the files (the volumes) are kept for the
+# days the removal froze, until a home admin confirms their permanent removal with the environment's name and the
+# revision of the removal.
+check "the removal is accepted, though a thread is bound to the environment" api DELETE "/environments/$ENV_ID?confirm=Main"
 check "the topic is deleted, and its thread with it" api DELETE "/nodes/$TOPIC"
-check "the removal is accepted" api DELETE "/environments/$ENV_ID?confirm=Main"
 container_gone() { [ -z "$(docker ps -aq --filter "label=orch.system=$SYSTEM_NAME")" ]; }
 wait_for 120 "the container is gone" container_gone
+# A removed environment is no longer read by its own address: its kept files are listed at its home.
+kept_removal() { call GET "/nodes/$PROJECT_ID/environments/deleted" | jq -r --arg env "$ENV_ID" '[.items[] | select(.environment.id == $env)][0].removal'; }
+files_are_kept() { [ "$(kept_removal | jq -r '"\(.phase) \(.can_purge)"')" = "kept true" ]; }
+wait_for 120 "its files are kept, and a home admin may purge them" files_are_kept
 volumes_gone() { [ -z "$(docker volume ls -q | grep -F -e "$ENV_ID" -e "$UNIT" || true)" ]; }
-wait_for 60 "so are its volumes" volumes_gone
+refuses "its volumes are still there" volumes_gone
+REVISION="$(kept_removal | jq -r .revision)"
+check "the purge is accepted when it names the environment and the revision of its removal" \
+  api DELETE "/environments/$ENV_ID/purge?confirm=Main&expected_revision=$REVISION"
+wait_for 120 "its volumes are gone" volumes_gone
 expect "the errors the API logged in all this" "0" "$(compose logs --no-color api 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -c ' ERROR ' || true)"

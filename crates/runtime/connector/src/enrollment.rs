@@ -274,8 +274,28 @@ impl DataDir {
 
     /// Keeps the system list without modifying any local address override or policy.
     pub fn store_server_endpoints(&self, endpoints: Vec<Endpoint>) -> Result<(), EnrollError> {
+        self.store_server_advertisement(Some(endpoints), None, None, None)
+    }
+
+    /// Persist one primary's advertisement atomically, without rewriting local gateway choice.
+    pub fn store_server_advertisement(
+        &self,
+        endpoints: Option<Vec<Endpoint>>,
+        gateways: Option<Vec<orch_link_contract::gateways::GatewayInstance>>,
+        measurements: Option<Vec<orch_link_contract::gateways::GatewayMeasurement>>,
+        measured_at: Option<Time>,
+    ) -> Result<(), EnrollError> {
         let mut record = self.record()?;
-        record.server_endpoints = endpoints;
+        if let Some(endpoints) = endpoints {
+            record.server_endpoints = endpoints;
+        }
+        if let Some(gateways) = gateways {
+            record.gateways = gateways;
+        }
+        if let Some(measurements) = measurements {
+            record.gateway_measurements = measurements;
+            record.gateway_measured_at = measured_at;
+        }
         let path = self.identity_dir().join(RECORD_FILE);
         let bytes = serde_json::to_vec_pretty(&record)
             .map_err(|error| EnrollError::Config(error.to_string()))?;
@@ -314,6 +334,15 @@ impl DataDir {
 /// What the connector keeps of its enrollment, beside the keys.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnrollmentRecord {
+    /// Time of the retained probe result; old cached records remain explicitly undated.
+    #[serde(default)]
+    pub gateway_measured_at: Option<Time>,
+    /// Latest labelled gateways, never a replacement for the locally selected primary.
+    #[serde(default)]
+    pub gateways: Vec<orch_link_contract::gateways::GatewayInstance>,
+    /// Verified enrollment measurements, retained for installation/status display.
+    #[serde(default)]
+    pub gateway_measurements: Vec<orch_link_contract::gateways::GatewayMeasurement>,
     /// The last system preference list; distinct from the machine's own config.endpoints.
     #[serde(default)]
     pub server_endpoints: Vec<Endpoint>,
@@ -339,6 +368,37 @@ pub struct EnrollmentRecord {
 /// The system's answers to the connector's two requests.
 #[async_trait]
 pub trait EnrollTransport: Send + Sync {
+    /// Read installation metadata without issuing or spending an enrollment token.
+    /// Older systems and in-memory fixtures may have no discovery endpoint.
+    async fn gateways(
+        &self,
+        _address: &str,
+        _token: &EnrollmentToken,
+    ) -> Result<Option<orch_link_contract::gateways::GatewayDiscovery>, EnrollError> {
+        Ok(None)
+    }
+
+    /// A verified probe before the machine has a credential of its own.
+    async fn probe_gateway(
+        &self,
+        _authority: &Certificate,
+        _endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, orch_link::reconnect::DialError>
+    {
+        Err(orch_link::reconnect::DialError::Connect(
+            "gateway probing is unavailable on this enrollment transport".into(),
+        ))
+    }
+
+    /// Enroll at the selected verified entrance, retaining the entrance's declared trust mode.
+    async fn enroll_at(
+        &self,
+        endpoint: &Endpoint,
+        token: &EnrollmentToken,
+        request: &EnrollRequest,
+    ) -> Result<EnrollReply, EnrollError> {
+        self.enroll(&endpoint.url, token, request).await
+    }
     /// Asks to be enrolled at `address`. `token` carries the pin to trust the answer by.
     async fn enroll(
         &self,
@@ -419,6 +479,90 @@ fn refusal(status: StatusCode) -> Option<EnrollRefusal> {
 
 #[async_trait]
 impl EnrollTransport for HttpsEnroll {
+    async fn gateways(
+        &self,
+        address: &str,
+        token: &EnrollmentToken,
+    ) -> Result<Option<orch_link_contract::gateways::GatewayDiscovery>, EnrollError> {
+        let base = enrollment_base(address)
+            .map_err(|error| EnrollError::Unreachable(error.to_string()))?;
+        let order = self
+            .only
+            .map_or_else(|| vec![Trust::Public, Trust::Pinned], |only| vec![only]);
+        for trust in order {
+            let response = self
+                .client(trust, token.pin(), None, None)?
+                .for_enrollment()
+                .send(
+                    &base,
+                    Method::GET,
+                    orch_link_contract::gateways::DISCOVERY_PATH,
+                    &[],
+                    Bytes::new(),
+                    std::time::Duration::from_secs(u64::from(REQUEST_TIMEOUT_SECS)),
+                )
+                .await;
+            match response {
+                Ok(reply)
+                    if reply.status == StatusCode::NOT_FOUND
+                        || reply.status == StatusCode::METHOD_NOT_ALLOWED =>
+                {
+                    return Ok(None);
+                }
+                Ok(reply) if reply.status == StatusCode::OK => {
+                    let discovery: orch_link_contract::gateways::GatewayDiscovery =
+                        serde_json::from_slice(&reply.body).map_err(|_| {
+                            EnrollError::Unreachable(
+                                "the gateway catalogue could not be read".into(),
+                            )
+                        })?;
+                    let authority = Certificate::from_pem(&discovery.ca_pem)?;
+                    if !token.pins(&authority.spki_sha256()) {
+                        return Err(EnrollError::Unreachable(
+                            "the gateway catalogue belongs to another installation".into(),
+                        ));
+                    }
+                    return Ok(Some(discovery));
+                }
+                Err(HttpsError::Tls(_)) => continue,
+                Ok(_) => {
+                    return Err(EnrollError::Unreachable(
+                        "the verified enrollment entrance refused gateway discovery".into(),
+                    ));
+                }
+                Err(error) => return Err(EnrollError::Unreachable(error.to_string())),
+            }
+        }
+        Err(EnrollError::Unreachable(
+            "the gateway catalogue's TLS identity could not be verified".into(),
+        ))
+    }
+
+    async fn probe_gateway(
+        &self,
+        authority: &Certificate,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, orch_link::reconnect::DialError>
+    {
+        use orch_link::gateways::GatewayProber as _;
+        let prober = crate::gateway_selection::HttpsGatewayProber::for_enrollment(
+            authority,
+            Arc::clone(&self.clock),
+        )
+        .map_err(|error| orch_link::reconnect::DialError::Tls(error.to_string()))?;
+        prober.measure(endpoint).await
+    }
+
+    async fn enroll_at(
+        &self,
+        endpoint: &Endpoint,
+        token: &EnrollmentToken,
+        request: &EnrollRequest,
+    ) -> Result<EnrollReply, EnrollError> {
+        HttpsEnroll::new(Arc::clone(&self.clock), Some(endpoint.trust))
+            .enroll(&endpoint.url, token, request)
+            .await
+    }
     async fn enroll(
         &self,
         address: &str,
@@ -649,6 +793,69 @@ async fn enroll_inner(
     {
         return Err(EnrollError::Config("This data directory belongs to another system. Use Enroll again on its machine's page, or a new data directory for another system.".to_owned()));
     }
+    let config = data_dir.config(|_| None)?;
+    let discovery = transport.gateways(&inputs.address, &token).await?;
+    let catalogue = discovery
+        .as_ref()
+        .map(|reply| reply.gateways.clone())
+        .or_else(|| previous.as_ref().map(|(record, _)| record.gateways.clone()))
+        .unwrap_or_default();
+    let selection = orch_link::gateways::PrimaryGateway {
+        choice: config.connector.gateway.clone(),
+        catalogue,
+    };
+    if selection.choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
+        && !selection
+            .catalogue
+            .iter()
+            .any(|gateway| Some(gateway.id.as_str()) == selection.choice.gateway_id.as_deref())
+    {
+        return Err(EnrollError::Config(
+            "the selected gateway is not advertised by this installation".into(),
+        ));
+    }
+    let mut selected = Vec::new();
+    let mut gateway_measurements = Vec::new();
+    if !selection.catalogue.is_empty()
+        || selection.choice.selection == orch_link_contract::gateways::GatewaySelection::Selected
+    {
+        let local = endpoints_of(&config);
+        let candidates = if local.is_empty() {
+            selection
+                .catalogue
+                .iter()
+                .flat_map(|gateway| gateway.endpoints.clone())
+                .collect()
+        } else {
+            local
+        };
+        let authority = discovery
+            .as_ref()
+            .map(|reply| Certificate::from_pem(&reply.ca_pem))
+            .transpose()?
+            .or_else(|| {
+                previous
+                    .as_ref()
+                    .map(|(_, identity)| identity.authority.clone())
+            })
+            .ok_or_else(|| {
+                EnrollError::Unreachable("the catalogue has no verified authority".into())
+            })?;
+        let prober = EnrollmentProbe {
+            transport,
+            authority: &authority,
+        };
+        let (ordered, measurements) = selection
+            .candidates(&prober, &candidates, None)
+            .await
+            .map_err(EnrollError::Unreachable)?;
+        for candidate in ordered {
+            if !selected.contains(&candidate.endpoint) {
+                selected.push(candidate.endpoint);
+            }
+        }
+        gateway_measurements = measurements;
+    }
     let pending = PendingEnrollment::start()?;
     let request = EnrollRequest {
         machine_id: previous.as_ref().map(|(record, _)| record.machine_id),
@@ -660,7 +867,23 @@ async fn enroll_inner(
         protocol_versions: vec![PROTOCOL_VERSION],
         roles: inputs.roles.clone(),
     };
-    let reply = transport.enroll(&inputs.address, &token, &request).await?;
+    let reply = if selected.is_empty() {
+        transport.enroll(&inputs.address, &token, &request).await?
+    } else {
+        let mut result = Err(EnrollError::Unreachable(
+            "no advertised gateway entrance answered enrollment".into(),
+        ));
+        for endpoint in selected {
+            match transport.enroll_at(&endpoint, &token, &request).await {
+                Err(error @ EnrollError::Unreachable(_)) => result = Err(error),
+                answer => {
+                    result = answer;
+                    break;
+                }
+            }
+        }
+        result?
+    };
     if previous
         .as_ref()
         .is_some_and(|(record, _)| record.machine_id != reply.machine_id)
@@ -672,6 +895,9 @@ async fn enroll_inner(
         .map_err(EnrollError::Distrusted)?;
     identity.save(&data_dir.identity_dir())?;
     let record = EnrollmentRecord {
+        gateway_measured_at: (!gateway_measurements.is_empty()).then(|| clock.time()),
+        gateways: reply.gateways.clone(),
+        gateway_measurements,
         server_endpoints: reply.endpoints.clone(),
         machine_id: reply.machine_id,
         name: previous
@@ -728,6 +954,31 @@ async fn enroll_inner(
         record,
         endpoints,
     })
+}
+
+pub(crate) struct EnrollmentProbe<'a> {
+    pub(crate) transport: &'a dyn EnrollTransport,
+    pub(crate) authority: &'a Certificate,
+}
+
+#[async_trait]
+impl orch_link::reconnect::Dialer for EnrollmentProbe<'_> {
+    async fn dial(
+        &self,
+        _endpoint: &Endpoint,
+    ) -> Result<orch_link::framing::Connection, orch_link::reconnect::DialError> {
+        Err(orch_link::reconnect::DialError::Connect(
+            "enrollment probes do not establish machine sessions".into(),
+        ))
+    }
+
+    async fn probe(
+        &self,
+        endpoint: &Endpoint,
+    ) -> Result<orch_link_contract::gateways::GatewayMeasurement, orch_link::reconnect::DialError>
+    {
+        self.transport.probe_gateway(self.authority, endpoint).await
+    }
 }
 
 /// The name of a role, as a configuration writes it.
@@ -1088,6 +1339,7 @@ mod tests {
                 self.authority.certificate_pem()
             };
             Ok(EnrollReply {
+                gateways: Vec::new(),
                 machine_id: enrolled.machine_id,
                 certificate_pem: enrolled.certificate.pem(),
                 ca_pem,

@@ -56,6 +56,25 @@ enum Outbound {
     Datagram(IdPacket),
 }
 
+#[cfg(feature = "test-observers")]
+impl Outbound {
+    fn observed_bytes(&self) -> Option<usize> {
+        match self {
+            Self::Frame(frame) => frames::encode(frame.as_ref(), MAX_MESSAGE_BYTES)
+                .ok()
+                .map(|text| text.len()),
+            Self::Data(bytes) => Some(bytes.len()),
+            Self::Datagram(packet) => orch_link_contract::ports::BackplanePortDatagram {
+                machine_id: packet.machine,
+                datagram: packet.packet.frame.clone(),
+            }
+            .encode()
+            .ok()
+            .map(|bytes| bytes.len()),
+        }
+    }
+}
+
 struct IdPacket {
     machine: orch_types::Id,
     packet: orch_link::ports::Datagram,
@@ -66,6 +85,8 @@ struct Shared {
     pending: Mutex<HashMap<i64, oneshot::Sender<AuthReply>>>,
     next_question: AtomicI64,
     up: watch::Sender<bool>,
+    #[cfg(feature = "test-observers")]
+    observed: Mutex<Option<Arc<orch_link::test_observers::QueueGauge>>>,
 }
 
 /// The way to the system: cheap to clone, and always there, whether or not the
@@ -96,10 +117,7 @@ impl BackplaneHandle {
         machine: orch_types::Id,
         packet: orch_link::ports::Datagram,
     ) -> bool {
-        lock(&self.shared.out).as_ref().is_some_and(|out| {
-            out.send(Outbound::Datagram(IdPacket { machine, packet }))
-                .is_ok()
-        })
+        self.send_outbound(|| Outbound::Datagram(IdPacket { machine, packet }))
     }
     /// A handle on a connection that is not up yet.
     #[must_use]
@@ -110,6 +128,8 @@ impl BackplaneHandle {
                 pending: Mutex::new(HashMap::new()),
                 next_question: AtomicI64::new(1),
                 up: watch::channel(false).0,
+                #[cfg(feature = "test-observers")]
+                observed: Mutex::new(None),
             }),
         }
     }
@@ -136,9 +156,7 @@ impl BackplaneHandle {
     /// Sends a frame to the system. Returns whether it was handed to a
     /// connection: while there is none the frame is not kept.
     pub fn send(&self, frame: BackplaneFrame) -> bool {
-        lock(&self.shared.out)
-            .as_ref()
-            .is_some_and(|out| out.send(Outbound::Frame(Box::new(frame))).is_ok())
+        self.send_outbound(|| Outbound::Frame(Box::new(frame)))
     }
 
     /// Sends tunnel data to the system.
@@ -146,9 +164,27 @@ impl BackplaneHandle {
         let Ok(bytes) = data.encode() else {
             return false;
         };
-        lock(&self.shared.out)
-            .as_ref()
-            .is_some_and(|out| out.send(Outbound::Data(bytes)).is_ok())
+        self.send_outbound(|| Outbound::Data(bytes))
+    }
+
+    fn send_outbound(&self, message: impl FnOnce() -> Outbound) -> bool {
+        lock(&self.shared.out).as_ref().is_some_and(|out| {
+            let message = message();
+            #[cfg(feature = "test-observers")]
+            let observed = lock(&self.shared.observed).clone();
+            #[cfg(feature = "test-observers")]
+            let bytes = message.observed_bytes();
+            #[cfg(feature = "test-observers")]
+            if let Some(queue) = &observed {
+                queue.enqueue(bytes);
+            }
+            let sent = out.send(message).is_ok();
+            #[cfg(feature = "test-observers")]
+            if !sent && let Some(queue) = &observed {
+                queue.failed_enqueue(bytes);
+            }
+            sent
+        })
     }
 
     /// Asks the system whether a session may start. `None` when the system
@@ -344,6 +380,14 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
     tracing::info!("the backplane is up");
     let (mut sink, mut source) = socket.split();
     let (out, mut queued) = mpsc::unbounded_channel();
+    #[cfg(feature = "test-observers")]
+    let observed = orch_link::test_observers::QueueGauge::new("gateway.backplane");
+    #[cfg(feature = "test-observers")]
+    let _receiver_lifetime = observed.receiver();
+    #[cfg(feature = "test-observers")]
+    {
+        *lock(&gateway.inner.backplane.shared.observed) = Some(Arc::clone(&observed));
+    }
     {
         // Every session that stands is told to the system, and the way to it
         // is opened, as one step: a session that begins meanwhile is either in
@@ -351,7 +395,15 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
         let handle = &gateway.inner.backplane;
         let mut slot = lock(&handle.shared.out);
         for up in gateway.inner.sessions.announcements() {
-            let _ = out.send(Outbound::Frame(Box::new(BackplaneFrame::MachineUp(up))));
+            let message = Outbound::Frame(Box::new(BackplaneFrame::MachineUp(up)));
+            #[cfg(feature = "test-observers")]
+            let bytes = message.observed_bytes();
+            #[cfg(feature = "test-observers")]
+            observed.enqueue(bytes);
+            if out.send(message).is_err() {
+                #[cfg(feature = "test-observers")]
+                observed.failed_enqueue(bytes);
+            }
         }
         *slot = Some(out.clone());
         handle.shared.up.send_replace(true);
@@ -372,6 +424,8 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
             },
             outgoing = queued.recv() => {
                 let Some(outgoing) = outgoing else { break Ok(()) };
+                #[cfg(feature = "test-observers")]
+                let observed_send = observed.selected(outgoing.observed_bytes());
                 let message = match outgoing {
                     Outbound::Frame(frame) => match text_of(&frame) {
                         Some(message) => message,
@@ -383,12 +437,16 @@ async fn hold(gateway: &Gateway) -> Result<(), Fault> {
                         let Ok(bytes)=data.encode() else {continue;};
                         if sink.send(Message::Binary(bytes)).await.is_err() {break Err(Fault::Connect("the connection failed".into()));}
                         packet.packet.delivered();
+                        #[cfg(feature = "test-observers")]
+                        observed_send.complete();
                         continue;
                     },
                 };
                 if sink.send(message).await.is_err() {
                     break Err(Fault::Connect("the connection failed".to_owned()));
                 }
+                #[cfg(feature = "test-observers")]
+                observed_send.complete();
             }
             _ = stats.tick() => {
                 gateway.inner.sessions.sample_round_trips();
@@ -474,6 +532,16 @@ fn on_frame(gateway: &Gateway, frame: BackplaneFrame) {
                         connections,
                     },
                 ));
+        }
+        BackplaneFrame::TunOpen(open) if !gateway.inner.sessions.has_primary(open.machine_id) => {
+            gateway.inner.backplane.send(BackplaneFrame::TunOpenErr(
+                orch_link_contract::backplane::TunOpenErr {
+                    machine_id: open.machine_id,
+                    channel: open.channel,
+                    code: orch_link_contract::tunnels::OpenErrorCode::PeerOffline,
+                    detail: "API-owned attachments require this machine's primary session".into(),
+                },
+            ));
         }
         frame @ (BackplaneFrame::TunOpen(_)
         | BackplaneFrame::TunCredit(_)

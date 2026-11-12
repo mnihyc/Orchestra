@@ -13,7 +13,7 @@ use common::{
 use orch_api_contract::threads::{ItemKind, ItemPayload, TurnState};
 use orch_authz::Caller;
 use orch_link_contract::commands::CommandKind;
-use orch_link_contract::events::TurnOutcome;
+use orch_link_contract::events::{DeltaField, TurnOutcome};
 use orch_types::Id;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -80,13 +80,12 @@ async fn an_input_on_an_idle_thread_starts_a_turn_that_streams_text_and_ends() {
         numbers.windows(2).all(|pair| pair[0] < pair[1]),
         "items are numbered in the order they were made: {numbers:?}"
     );
-    let ItemPayload::AgentMessage(message) = &sync
+    let message_item = sync
         .items
         .iter()
         .find(|item| item.kind() == ItemKind::AgentMessage)
-        .unwrap()
-        .payload
-    else {
+        .unwrap();
+    let ItemPayload::AgentMessage(message) = &message_item.payload else {
         panic!("an agent message")
     };
     assert_eq!(
@@ -99,11 +98,26 @@ async fn an_input_on_an_idle_thread_starts_a_turn_that_streams_text_and_ends() {
         sync.inputs.is_empty(),
         "an input that was delivered is not among those that wait"
     );
-    assert_eq!(
-        world.live.deltas().len(),
-        2,
-        "the text was forwarded as it came"
-    );
+    let deltas = world.live.deltas();
+    assert!(!deltas.is_empty(), "the text reaches live readers");
+    let mut offset = 0;
+    let mut streamed = String::new();
+    for delta in deltas {
+        assert_eq!(delta.thread_id, thread);
+        assert_eq!(delta.item_id, message_item.id);
+        assert_eq!(delta.turn_id, Some(start.turn_id));
+        assert_eq!(delta.stream, "main");
+        assert_eq!(delta.field, DeltaField::Text);
+        assert_eq!(delta.offset, offset, "live text has no gaps or duplicates");
+        assert_eq!(
+            delta.len,
+            i64::try_from(delta.data.chars().count()).unwrap()
+        );
+        offset += delta.len;
+        streamed.push_str(&delta.data);
+    }
+    assert_eq!(streamed, "I will fix.");
+    assert_eq!(offset, message.text_len);
     let highest: i64 = world
         .scalar(
             "SELECT next_seq - 1 FROM threads WHERE node_id = $1",

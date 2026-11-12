@@ -4,7 +4,7 @@
  * the menu key and `Shift+F10` for whatever has the focus, and a long press on a touch screen.
  */
 import { ContextMenu as Primitive } from 'radix-ui';
-import type { ReactNode } from 'react';
+import type { ComponentProps, ReactNode } from 'react';
 import { ChoicePicker } from '@/ui/Choice';
 
 import { menuContentClasses, MenuEntries, type MenuEntry, type MenuParts } from '@/ui/Menu';
@@ -43,9 +43,10 @@ export interface ContextMenuProps {
   disabled?: boolean;
   /** Told when the menu opens and closes, so that what its entries depend on is asked for only when it is wanted. */
   onOpenChange?: (open: boolean) => void;
+  onCloseAutoFocus?: ComponentProps<typeof Primitive.Content>['onCloseAutoFocus'];
 }
 
-export function ContextMenu({ entries = [], content, label, children, disabled = false, onOpenChange }: ContextMenuProps) {
+export function ContextMenu({ entries = [], content, label, children, disabled = false, onOpenChange, onCloseAutoFocus }: ContextMenuProps) {
   const covered = usePromptCovered();
   const { attach, scrollProps } = useScrolls();
   return (
@@ -61,7 +62,7 @@ export function ContextMenu({ entries = [], content, label, children, disabled =
         {children}
       </Primitive.Trigger>
       <Primitive.Portal>
-        <Primitive.Content style={covered ? { display: 'none' } : undefined} ref={attach} {...scrollProps} aria-label={label} collisionPadding={8} className={menuContentClasses}
+        <Primitive.Content style={covered ? { display: 'none' } : undefined} ref={attach} {...scrollProps} aria-label={label} collisionPadding={8} className={menuContentClasses} onCloseAutoFocus={onCloseAutoFocus}
           onInteractOutside={(event) => { if (isInspectionTarget(event.target)) event.preventDefault(); }}>
           <ChoicePicker>{content ?? <MenuEntries parts={CONTEXT_PARTS} entries={entries} />}</ChoicePicker>
         </Primitive.Content>
