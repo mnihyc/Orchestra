@@ -1303,10 +1303,41 @@ async fn a_move_offers_each_mount_detach_as_is_or_copy_and_asks_before_a_copy_la
     assert!(made.location.made);
     let name = made.location.source.unwrap();
     let machine = f.target.machine.simple().to_string();
-    assert_eq!(
-        name,
-        format!("orch-mount-{data}-{}", &machine[machine.len() - 12..]),
-        "a new location has a name of the machine's own"
+    let prefix = format!("orch-mount-{data}-{}-", &machine[machine.len() - 12..]);
+    let suffix = name
+        .strip_prefix(&prefix)
+        .expect("a new location has the exact mount and machine prefix");
+    assert!(
+        !suffix.is_empty(),
+        "each new location has its own destination"
+    );
+    let another = plan_with(
+        &f,
+        Some(vec![
+            MountChoice {
+                mount_id: data,
+                fate: MountFate::Copy,
+                into: Some(CopyInto::NewLocation),
+            },
+            MountChoice {
+                mount_id: notes,
+                fate: MountFate::Detach,
+                into: None,
+            },
+        ]),
+    )
+    .await;
+    let other = row(&another, data).copy.unwrap();
+    assert!(other.location.made);
+    let other_name = other.location.source.unwrap();
+    assert!(
+        other_name
+            .strip_prefix(&prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+    );
+    assert_ne!(
+        name, other_name,
+        "two new-location plans have distinct destinations before either is published"
     );
     let off = row(&both, notes);
     assert_eq!(off.detached_because, Some(MountDetachedBecause::Asked));
@@ -2119,4 +2150,222 @@ async fn a_move_that_brings_the_home_tells_no_machine_of_any_thread_whatever_the
         kinds_of[0], kinds_of[1],
         "the move gives the machines the same kinds of command for 2 threads and for 12"
     );
+}
+
+#[tokio::test]
+async fn the_native_hosted_destination_selector_runs_before_measurements_and_rejects_foreign_recipe_identity()
+ {
+    let f = fixture().await;
+    let mut conn = f.world.pool.acquire().await.unwrap();
+    let principal = Principal::load(
+        &mut conn,
+        Caller::session(f.world.ada),
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    let common = f
+        .world
+        .engine()
+        .draft_update(
+            &mut conn,
+            &principal,
+            Target::Environment(f.environment),
+            UpdatePreflightReason::Recreate,
+            None,
+        )
+        .await
+        .unwrap();
+    let before = (
+        f.source.count(CommandKind::NodeRuntimeVolumesMeasure),
+        f.source_unit.count(CommandKind::FsManifest),
+        f.target.count(CommandKind::NodeVolumeCarryCheck),
+    );
+    let body = EnvironmentMovePreflightBody {
+        host_id: Some(f.target.id),
+        ..Default::default()
+    };
+    let selected = orch_engine::jobs::environment_move::select_destination(
+        &mut conn,
+        &principal,
+        f.environment,
+        &common.recipe,
+        &body,
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.state.id, f.environment);
+    assert_eq!(selected.old.id, f.old);
+    assert_eq!(selected.destination.host.id, f.target.id);
+    assert_ne!(
+        selected.destination.host.id, selected.old.host_id,
+        "one real selected host, not a candidate union"
+    );
+    assert_eq!(
+        selected.kept_image,
+        envs::runtime(&mut conn, f.old)
+            .await
+            .unwrap()
+            .unwrap()
+            .kept_image
+            .map(
+                |value| serde_json::from_value::<orch_driver_contract::kept::KeptImage>(value)
+                    .unwrap()
+            )
+    );
+    let automatic = orch_engine::jobs::environment_move::select_destination(
+        &mut conn,
+        &principal,
+        f.environment,
+        &common.recipe,
+        &Default::default(),
+        f.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        automatic.destination.host.id, f.target.id,
+        "the ordinary automatic scheduler chooses the same permitted other host"
+    );
+    let mut foreign = common.recipe.clone();
+    foreign.target = Target::Environment(new_id());
+    assert!(matches!(
+        orch_engine::jobs::environment_move::select_destination(
+            &mut conn,
+            &principal,
+            f.environment,
+            &foreign,
+            &body,
+            f.world.clock.time()
+        )
+        .await,
+        Err(orch_engine::updates::UpdateError::Denied)
+    ));
+    let wrong_template = EnvironmentMovePreflightBody {
+        template_id: Some(new_id()),
+        ..body.clone()
+    };
+    assert!(matches!(
+        orch_engine::jobs::environment_move::select_destination(
+            &mut conn,
+            &principal,
+            f.environment,
+            &common.recipe,
+            &wrong_template,
+            f.world.clock.time()
+        )
+        .await,
+        Err(orch_engine::updates::UpdateError::Invalid(_))
+    ));
+    assert_eq!(
+        (
+            f.source.count(CommandKind::NodeRuntimeVolumesMeasure),
+            f.source_unit.count(CommandKind::FsManifest),
+            f.target.count(CommandKind::NodeVolumeCarryCheck)
+        ),
+        before,
+        "native selection starts no count, fingerprint, workspace listing or carry probe"
+    );
+}
+
+#[tokio::test]
+async fn a_move_records_both_physical_hosts_and_its_detached_directories_without_starting_a_turn() {
+    let f = fixture().await;
+    let mount = mount_at(&f, "old-data", "detach", &[&f.source]).await;
+    let enabled: serde_json::Map<String, serde_json::Value> =
+        std::iter::once((mount.to_string(), json!(true))).collect();
+    f.world
+        .set(f.world.topic, "env.mounts", json!(enabled))
+        .await;
+    let created = f
+        .world
+        .engine()
+        .create_thread(
+            &Caller::session(f.world.ada),
+            orch_engine::binding::NewThread {
+                topic: f.world.topic,
+                name: "Move facts".into(),
+                agent: f.world.agent,
+                provider: f.world.provider,
+                environment: f.environment,
+                directory: "web".into(),
+                arrangement: None,
+                model: Some(common::MODEL.into()),
+                effort: None,
+            },
+        )
+        .await
+        .unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+        .bind(created.thread)
+        .fetch_one(f.world.pool.pool())
+        .await
+        .unwrap();
+    let job = queue(&f).await;
+    f.target.wait_for(CommandKind::NodeRuntimeStart, 1).await;
+    let unit = hosting::enroll(&f.world, f.target.started().unwrap()).await;
+    let bytes = f.data.len() as i64;
+    unit.added
+        .machine
+        .handler
+        .on(CommandKind::FsMaterialize, move |_| {
+            Ok(CommandResult::FsMaterialize(FsMaterializeResult {
+                files: 1,
+                bytes,
+                skipped: 0,
+            }))
+        });
+    let (state, _, error) = wait_over(&f.world, job.id).await;
+    assert_eq!(state, "succeeded", "{error:?}");
+    let payload: serde_json::Value = sqlx::query_scalar("SELECT payload FROM items WHERE thread_id=$1 AND kind='marker' AND payload->>'marker'='environment_moved' ORDER BY seq_created DESC LIMIT 1")
+        .bind(created.thread).fetch_one(f.world.pool.pool()).await.unwrap();
+    let payload: orch_api_contract::threads::MarkerPayload =
+        serde_json::from_value(payload).unwrap();
+    let orch_api_contract::threads::MarkerPayload::EnvironmentMoved(marker) = payload else {
+        panic!("a move marker")
+    };
+    assert_eq!(
+        marker.from_host.as_ref().map(|host| host.id),
+        Some(f.source.id)
+    );
+    assert_eq!(
+        marker.to_host.as_ref().map(|host| host.id),
+        Some(f.target.id)
+    );
+    assert_eq!(
+        marker.from_machine.as_ref().map(|machine| machine.id),
+        Some(f.source.machine)
+    );
+    assert_ne!(
+        marker.from_machine.as_ref().map(|machine| machine.id),
+        Some(f.source_unit.id)
+    );
+    assert_eq!(
+        marker.to_machine.as_ref().map(|machine| machine.id),
+        Some(f.target.machine)
+    );
+    assert_eq!(
+        marker.from.id, marker.to.id,
+        "the hosts distinguish the same Main environment"
+    );
+    assert_eq!(marker.mounts_detached, ["old-data"]);
+    let notices: serde_json::Value =
+        sqlx::query_scalar("SELECT pending_notices FROM threads WHERE node_id=$1")
+            .bind(created.thread)
+            .fetch_one(f.world.pool.pool())
+            .await
+            .unwrap();
+    let notices = notices.to_string();
+    assert!(
+        notices.contains("The environment moved to another machine. Your directory is still web.")
+    );
+    assert!(notices.contains("These directories are no longer available: old-data."));
+    let after: i64 = sqlx::query_scalar("SELECT count(*) FROM thread_inputs WHERE thread_id=$1")
+        .bind(created.thread)
+        .fetch_one(f.world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(after, before, "the notice accompanies a future real input");
+    f.world.engine().stop();
 }

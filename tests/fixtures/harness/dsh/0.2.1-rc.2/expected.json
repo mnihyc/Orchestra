@@ -1,0 +1,2620 @@
+{
+  "format": 1,
+  "program": "dsh",
+  "version": "0.2.1-rc.2",
+  "evidence": {
+    "kind": "published_protocol",
+    "references": [
+      "https://github.com/deepseek-ai/deepseek-harness/tree/687f282e8625c6b8d11ff58211a90524be2e4317/packages/acp/acp",
+      "https://registry.npmjs.org/@agentclientprotocol/sdk/-/sdk-1.4.0.tgz",
+      "https://pypi.org/project/deepseek-harness-runtime-bin/0.2.1rc2/",
+      "Tolerance and failure injections are authored protocol cases, not recordings from a vendor process. Native ACP and Orch companion support are distinguished explicitly."
+    ],
+    "package": {
+      "name": "@agentclientprotocol/sdk",
+      "version": "1.4.0",
+      "sha256": "57beb0f7705b09406e5bcc984d1f6a141940680b4c42755be026f77f64365a37"
+    }
+  },
+  "managed_pins": [
+    {
+      "name": "goal",
+      "value": {
+        "disabled": true
+      },
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "goal-round-driver",
+      "value": {
+        "disabled": true
+      },
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "command-goal",
+      "value": {
+        "disabled": true
+      },
+      "divergence_scenario": "automatic_divergence"
+    },
+    {
+      "name": "tool-goal",
+      "value": {
+        "disabled": true
+      },
+      "divergence_scenario": "automatic_divergence"
+    }
+  ],
+  "scenarios": {
+    "approval_checkpoint": {
+      "status": "unsupported",
+      "reason": "Command checkpoints are another program’s control protocol; DSH has one-shot tool permission requests."
+    },
+    "approval_command": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "request": {
+              "request_kind": "command"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "failed",
+            "payload": {
+              "tool": {
+                "kind": "command"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "approval_file_change": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "request": {
+              "request_kind": "file_change"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "failed",
+            "payload": {
+              "tool": {
+                "kind": "file_change"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "approval_mcp": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP exposes MCP tool calls but no separate MCP approval request family."
+    },
+    "approval_network": {
+      "status": "unsupported",
+      "reason": "The native server does not emit a network-specific approval; unknown tool requests still receive a generic card."
+    },
+    "approval_permissions": {
+      "status": "unsupported",
+      "reason": "Native ACP exposes tool permission requests, not a separate permissions-details request kind."
+    },
+    "approval_plan": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP intentionally omits presentation plans; the Orch companion supplies plan review."
+    },
+    "approval_prompt_user_rule": {
+      "status": "unsupported",
+      "reason": "Native DSH offers one-shot allow/reject choices and does not offer durable prompt-user rules."
+    },
+    "approval_unknown": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "approval.requested",
+          "body": {
+            "request": {
+              "request_kind": "other"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "failed",
+            "payload": {
+              "tool": {
+                "kind": "other"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "automatic_divergence": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "code": "harness_diverged"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "background_end": {
+      "status": "unsupported",
+      "reason": "Native ACP has no background-End control. Orch executor-backed commands and companion extras retain their existing End tests."
+    },
+    "background_wake": {
+      "status": "unsupported",
+      "reason": "Native ACP has no background-wake control; Orch owns the continuation and executor-backed command lifecycle."
+    },
+    "broken_stream": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Partial reply.",
+              "phase": "commentary"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "harness_error"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "session.lost",
+          "body": {},
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "compaction_automatic": {
+      "status": "unsupported",
+      "reason": "The published native ACP server does not report a compaction cause. Automatic versus manual cannot be inferred from a generic update."
+    },
+    "compaction_idle": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP does not emit an idle compaction update in this release; no turn or duration is invented."
+    },
+    "compaction_manual": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP has no manual compaction control. The Orch companion reports compaction phases."
+    },
+    "compaction_marker": {
+      "status": "unsupported",
+      "reason": "This release’s native DSH ACP updates do not emit a completed compaction marker. Companion phase behavior remains separately tested."
+    },
+    "context_overflow": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "context_overflow",
+              "said": "context length exceeded"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "fork": {
+      "status": "unsupported",
+      "reason": "The published native DSH ACP server explicitly does not provide fork. Orch companion fork is a separate extension, covered by dsh-bridge session tests."
+    },
+    "hooks": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP omits UI-specific hook notifications. A future native method is still counted, never silently dropped."
+    },
+    "idle_unknown_event": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "unrecognized_event",
+                "subject": "future_idle_update",
+                "value": {
+                  "count": 1
+                },
+                "changed": false,
+                "diverged": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "interrupt": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Before interrupt.",
+              "phase": "commentary"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "interrupted"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "mcp_elicitation": {
+      "status": "unsupported",
+      "reason": "The native server intentionally omits elicitation. Generic unknown permission requests remain cancellable."
+    },
+    "mcp_failure": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP does not publish a separate MCP startup-failure notification; ordinary failed tools retain their actual status."
+    },
+    "mcp_startup": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP does not publish MCP startup status; the actual mounted MCP tool call is covered."
+    },
+    "model_reroute": {
+      "status": "unsupported",
+      "reason": "DSH pins a prompt’s selected model at admission and has no native reroute notification. Native configuration reports are covered without relabelling an old model call."
+    },
+    "overloaded": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "provider_busy",
+              "said": "provider overloaded"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "process_exit": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Partial reply.",
+              "phase": "commentary"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "harness_error"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "session.lost",
+          "body": {},
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "protocol_invalid_version": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": false,
+            "error": {
+              "code": "harness_unavailable"
+            }
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "protocol_missing_version": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": false,
+            "error": {
+              "code": "harness_unavailable"
+            }
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "protocol_newer_major": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": false,
+            "error": {
+              "code": "harness_unavailable"
+            }
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "protocol_newer_minor": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "rate_limit": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "provider_busy",
+              "said": "rate limit reached"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "resume": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": true
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "session_close": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "session_unload": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "settings_program": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "settings",
+                "value": {
+                  "model": "[\"orch\",\"second\"]"
+                },
+                "changed": true,
+                "diverged": false,
+                "next_turn": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "settings_server": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "settings",
+                "value": {
+                  "model": "[\"orch\",\"second\"]"
+                },
+                "changed": true,
+                "diverged": false,
+                "next_turn": true
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "sign_in_expired": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "provider_unauthorized",
+              "said": "authentication required: expired"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "sign_in_revoked": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "failed",
+            "error": {
+              "code": "provider_unauthorized",
+              "said": "unauthorized: revoked"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "start": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "steer": {
+      "status": "unsupported",
+      "reason": "Native ACP has no steering method; this is an Orch companion extension, covered by the existing plugin/control tests."
+    },
+    "subagents": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "subagent",
+                "state": "completed"
+              },
+              "raw": {
+                "name": "subagent"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_malformed": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "code": "harness_error"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Valid frame after malformed bytes.",
+              "phase": "final"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_optional_fields": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Optional fields absent.",
+              "phase": "final"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_unknown_enum": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "other",
+                "name": "future_tool"
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_unknown_event": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "unrecognized_event",
+                "subject": "future_update",
+                "value": {
+                  "count": 1
+                },
+                "changed": false,
+                "diverged": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "unrecognized_event",
+                "subject": "future_update",
+                "value": {
+                  "count": 1
+                },
+                "changed": false,
+                "diverged": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_unknown_fields": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "text": "Kept known text.",
+              "phase": "final"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tolerance_unknown_method": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "unrecognized_event",
+                "subject": "future/notice",
+                "value": {
+                  "count": 1
+                },
+                "changed": false,
+                "diverged": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "marker": "harness_changed",
+              "data": {
+                "program": "DeepSeek Harness",
+                "change": "unrecognized_event",
+                "subject": "future/request",
+                "value": {
+                  "count": 1
+                },
+                "changed": false,
+                "diverged": false
+              }
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_command": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "command",
+                "command": "printf fixture"
+              },
+              "raw": {
+                "name": "bash"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_file_change": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_change"
+              },
+              "raw": {
+                "name": "edit"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_mcp": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "mcp",
+                "server": "fixture",
+                "tool": "lookup"
+              },
+              "raw": {
+                "name": "mcp__fixture__lookup"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_plan": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "other",
+                "name": "todo_write"
+              },
+              "raw": {
+                "name": "todo_write"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_read": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_read",
+                "path": "fixture.txt"
+              },
+              "raw": {
+                "name": "read"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_search": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "file_search",
+                "query": "fixture"
+              },
+              "raw": {
+                "name": "grep"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_subagent": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "subagent",
+                "name": "helper",
+                "state": "completed"
+              },
+              "raw": {
+                "name": "subagent"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_web_fetch": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "web_fetch",
+                "url": "https://page.example.test"
+              },
+              "raw": {
+                "name": "web_fetch"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "tool_web_search": {
+      "status": "supported",
+      "events": [
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "start",
+            "ok": true,
+            "value": {
+              "harness_version": "0.2.1-rc.2"
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "open_session",
+            "ok": true,
+            "value": {
+              "native_session_ref": "fixture-session",
+              "resumed": false
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "item.completed",
+          "body": {
+            "status": "completed",
+            "payload": {
+              "tool": {
+                "kind": "web_search",
+                "query": "fixture"
+              },
+              "raw": {
+                "name": "web_search"
+              },
+              "duration_ms": 0
+            }
+          },
+          "subset": true
+        },
+        {
+          "name": "turn.completed",
+          "body": {
+            "status": "completed"
+          },
+          "subset": true
+        },
+        {
+          "name": "adapter.result",
+          "body": {
+            "method": "close_session",
+            "ok": true
+          },
+          "subset": true
+        }
+      ],
+      "quiet": false,
+      "ignore_events": [
+        "harness.status",
+        "session.opened",
+        "turn.started",
+        "item.started",
+        "item.delta",
+        "item.updated",
+        "model.request",
+        "turn.phase"
+      ]
+    },
+    "usage_limit": {
+      "status": "unsupported",
+      "reason": "DSH ACP has no subscription-plan limit facts. Raw provider failures are retained, but a plan/reset fact cannot be invented."
+    },
+    "user_input": {
+      "status": "unsupported",
+      "reason": "Native DSH ACP intentionally omits elicitation and interactive questions; Orch companion questions use its own native request path."
+    }
+  }
+}

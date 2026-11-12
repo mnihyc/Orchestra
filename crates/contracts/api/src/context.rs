@@ -146,12 +146,30 @@ pub struct StreamTokens {
 }
 
 /// One model's share of a turn's tokens.
+fn model_tokens_reported() -> bool {
+    true
+}
+fn reported_model_tokens(value: &bool) -> bool {
+    *value
+}
+
+/// One model's independently reported token and capability quantities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ModelTokens {
     /// The model, as the harness named it.
     pub model: String,
     /// What it used.
     pub tokens: TokenUsage,
+    /// False when only capability quantities are known; the zero token container then asserts no token count.
+    #[serde(
+        default = "model_tokens_reported",
+        skip_serializing_if = "reported_model_tokens"
+    )]
+    pub tokens_reported: bool,
+    /// Known quantities for this turn by capability, independent of token reports and request timing.
+    /// Missing is unknown; an explicitly reported zero remains present.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub counts: std::collections::BTreeMap<String, i64>,
 }
 
 /// A time the harness shortened its conversation.
@@ -170,6 +188,12 @@ pub struct ContextShortening {
 /// What a turn used beyond its totals, as its harness reported it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnUsageDetail {
+    /// The main model the native harness explicitly reported running, independent of the requested choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model: Option<String>,
+    /// Its display name on the provider, where that entry was known when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_model_display: Option<String>,
     /// API time reported for the whole turn; excludes tool and human waits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_time_ms: Option<i64>,
@@ -205,12 +229,24 @@ impl TurnUsageDetail {
 /// harness to the stored turn as it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TurnUsageReport {
+    /// This observation contains capability quantities only; its numeric token containers are unobserved.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub counters_only: bool,
     /// Whole-turn API time, where the harness reports only a turn total.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_time_ms: Option<i64>,
     /// The sub-agents' share of the turn's tokens, which they include.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<TokenUsage>,
+    /// How much of the use this report comes with the request rows of the turn carry: the sum, part by part, of the
+    /// figures, as they are reported as rows, of the requests of the turn whose cost the use holds. Where a program
+    /// cannot tell for a request whether its totals hold it (one that was cut off), the figure is no more than the use
+    /// can hold of that kind of request, so that it never says that the use holds what it does not. A receiver that
+    /// counts the rows closes the turn as the use less this figure, whichever rows it has by then and whenever the
+    /// others come. Absent, nothing is said, and it closes the turn as the use less the rows it has when it closes. The
+    /// use that is shown is not changed by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_by_rows: Option<TokenUsage>,
     /// Each sub-agent's share, by the stream of its items.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub by_subagent: Vec<StreamTokens>,
@@ -408,6 +444,23 @@ crate::endpoints! {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn model_counts_are_optional_and_do_not_invent_a_zero_token_report() {
+        let tokens = serde_json::to_value(TokenUsage::default()).unwrap();
+        let old: ModelTokens =
+            serde_json::from_value(json!({"model":"old-model","tokens":tokens})).unwrap();
+        assert!(old.tokens_reported && old.counts.is_empty());
+        let old_wire = serde_json::to_value(old).unwrap();
+        assert!(old_wire.get("counts").is_none() && old_wire.get("tokens_reported").is_none());
+        let counter:ModelTokens=serde_json::from_value(json!({"model":"counter-only","tokens":tokens,"tokens_reported":false,"counts":{"lookup":0,"pictures":2}})).unwrap();
+        assert!(!counter.tokens_reported);
+        assert_eq!(counter.counts["lookup"], 0);
+        assert_eq!(
+            serde_json::to_value(counter).unwrap()["tokens_reported"],
+            false
+        );
+    }
 
     #[test]
     fn a_fill_reads_and_writes_as_the_wire_has_it() {

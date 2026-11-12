@@ -448,28 +448,42 @@ pub async fn effective(
     node: Id,
     policy: Policy,
 ) -> Result<Effective, Error> {
-    let graph = Graph::load(conn, &[node]).await?;
-    let site = graph.site_of(node).ok_or(Error::NotFound(node))?;
-    let everything = every_permission([site.kind]);
-    let frame = Frame::load(
-        conn,
-        principal,
-        policy,
-        graph,
-        std::slice::from_ref(&site),
-        &everything,
-    )
-    .await?;
-    Ok(Effective {
-        node,
-        kind: site.kind.node().unwrap_or(NodeKind::Org),
-        role: frame.role_for(&site),
-        administers: frame.administers(&site),
-        owner: frame.owns(&site),
-        restricted: frame.restricted(&site),
-        archived_node: site.archived_node,
-        held: frame.effective(&site),
-    })
+    effective_many(conn, principal, &[node], policy)
+        .await?
+        .pop()
+        .ok_or(Error::NotFound(node))
+}
+
+/// The same native authority observations in one frame for an already selected node set.
+pub async fn effective_many(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    policy: Policy,
+) -> Result<Vec<Effective>, Error> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let graph = Graph::load(conn, ids).await?;
+    let sites: Vec<_> = ids.iter().filter_map(|id| graph.site_of(*id)).collect();
+    if sites.is_empty() {
+        return Ok(Vec::new());
+    }
+    let everything = every_permission(sites.iter().map(|site| site.kind));
+    let frame = Frame::load(conn, principal, policy, graph, &sites, &everything).await?;
+    Ok(sites
+        .iter()
+        .map(|site| Effective {
+            node: site.id,
+            kind: site.kind.node().unwrap_or(NodeKind::Org),
+            role: frame.role_for(site),
+            administers: frame.administers(site),
+            owner: frame.owns(site),
+            restricted: frame.restricted(site),
+            archived_node: site.archived_node,
+            held: frame.effective(site),
+        })
+        .collect())
 }
 
 /// Whether the node `node` is restricted.

@@ -42,6 +42,7 @@ export interface RateDraft {
   cached: string;
   output: string;
   cacheWrite: string;
+  webSearch?: string;
   tiers: TierDraft[];
   steps: StepDraft[];
 }
@@ -61,6 +62,7 @@ export function draftOf(pattern: string, rate: Rate): RateDraft {
     cached: rate.cached_input_per_mtok,
     output: rate.output_per_mtok,
     cacheWrite: rate.cache_write_per_mtok ?? '',
+    webSearch: rate.web_search_per_call ?? '',
     tiers: Object.entries(rate.tiers ?? {}).map(([tier, multiplier]) => ({ tier, multiplier })),
     steps: (rate.above ?? []).map((step) => ({
       tokens: String(step.context_tokens),
@@ -112,6 +114,7 @@ export function check(draft: RateDraft, taken: readonly string[], replacing: str
   required('cached', draft.cached);
   required('output', draft.output);
   optional('cacheWrite', draft.cacheWrite);
+  optional('webSearch', draft.webSearch ?? '');
 
   const seenTiers = new Set<string>();
   draft.tiers.forEach((one, at) => {
@@ -149,6 +152,7 @@ export function rateOf(draft: RateDraft): Rate {
     }))
     .sort((one, other) => one.context_tokens - other.context_tokens);
   return {
+    ...((draft.webSearch ?? '').trim() === '' ? {} : { web_search_per_call: (draft.webSearch ?? '').trim() }),
     input_per_mtok: text(draft.input),
     cached_input_per_mtok: text(draft.cached),
     output_per_mtok: text(draft.output),

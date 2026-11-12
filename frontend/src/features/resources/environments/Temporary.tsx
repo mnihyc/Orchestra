@@ -14,11 +14,13 @@ import { EnvironmentExportButton } from './WorkspaceExport';
 import { environmentRemovalPhase } from './words';
 
 /** Destructive consent is in the switch's tooltip; the one guide explains its lifetime. */
-export function TemporaryChoice({ checked, onChange, disabled = false }: { checked: boolean; onChange: (value: boolean) => void; disabled?: boolean }) {
+export function TemporaryChoice({ checked, onChange, disabled = false, forThread = true }: { checked: boolean; onChange: (value: boolean) => void; disabled?: boolean; forThread?: boolean }) {
   const { t } = useTranslation();
+  const description = t(forThread ? 'temporary.description' : 'temporary.idleDescription');
   return <div className="flex items-start gap-1">
-    <Switch name={t('temporary.name')} description={t('temporary.description')} checked={checked} onCheckedChange={onChange} disabled={disabled}
-      tooltip={checked ? t('temporary.consent') : t('temporary.description')} />
+    <Switch name={t('temporary.name')} checked={checked} onCheckedChange={onChange} disabled={disabled}
+      aria-description={description}
+      tooltip={checked ? `${description} ${t(forThread ? 'temporary.consent' : 'temporary.idleConsent')}` : description} />
     <TaskGuideLink guide="temporary-environments" />
   </div>;
 }

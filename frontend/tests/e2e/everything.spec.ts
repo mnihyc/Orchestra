@@ -191,7 +191,7 @@ test('Management opens the same page with system scope and repeated department n
   ]);
   await signInForManagement(page);
   await page.goto('/admin/everything');
-  await page.getByRole('link', { name: 'Open the whole system in Everything' }).click();
+  await page.getByRole('link', { name: 'View the whole system', exact: true }).click();
   await expect(page).toHaveURL(/\/everything\?scope=system/);
   await page.getByRole('button', { name: 'Filters', exact: true }).click();
   await expect(page.getByRole('combobox', { name: 'Scope', exact: true })).toHaveText('System');

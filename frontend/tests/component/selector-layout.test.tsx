@@ -46,8 +46,8 @@ for (const language of ['en', 'zh-CN'] as const) {
       expect(screen.getByText(allWords.description)).toBeVisible();
       expect(screen.getByText(machineWords.description)).toBeVisible();
     } else {
-      expect(all).not.toHaveAttribute('aria-describedby');
-      expect(machine).not.toHaveAttribute('aria-describedby');
+      expect(all).toHaveAccessibleDescription(allWords.description);
+      expect(machine).toHaveAccessibleDescription(machineWords.description);
       expect(within(all).queryByText(allWords.description)).not.toBeInTheDocument();
       expect(container.querySelector('[data-choice-description], [data-choice-help]')).toBeNull();
     }
@@ -57,8 +57,8 @@ for (const language of ['en', 'zh-CN'] as const) {
       expect(screen.getByText(machineWords.description)).toBeVisible();
       expect(screen.getByText(allWords.description)).toBeVisible();
     } else {
-      expect(screen.queryByText(machineWords.description)).not.toBeInTheDocument();
-      expect(screen.queryByText(allWords.description)).not.toBeInTheDocument();
+      expect(screen.getByText(machineWords.description)).not.toBeVisible();
+      expect(screen.getByText(allWords.description)).not.toBeVisible();
     }
     expect(container.querySelector('[data-choice-selected-description]')).toBeNull();
   });
@@ -83,7 +83,8 @@ for (const language of ['en', 'zh-CN'] as const) {
       expect(screen.getByText(automatic.description)).toBeVisible();
     } else {
       expect(container.querySelector('[data-choice-description]')).toBeNull();
-      expect(screen.queryByText(ask.description)).not.toBeInTheDocument();
+      expect(current).toHaveAccessibleDescription(ask.description);
+      expect(screen.getByText(ask.description)).not.toBeVisible();
       await user.hover(current);
       expect(await screen.findByRole('tooltip')).toHaveTextContent(ask.description);
     }
@@ -110,7 +111,8 @@ for (const language of ['en', 'zh-CN'] as const) {
       expect(screen.getByText(ask.description)).toBeVisible();
     } else {
       expect(await screen.findByRole('tooltip')).toHaveTextContent(automatic.description);
-      await waitFor(() => expect(screen.queryByText(ask.description)).not.toBeInTheDocument());
+      expect(next).toHaveAccessibleDescription(automatic.description);
+      await waitFor(() => expect(screen.getByText(ask.description)).not.toBeVisible());
       expect(container.querySelector('[data-choice-description]')).toBeNull();
     }
     await user.click(screen.getByRole('button', { name: i18n.t('help.hint.label', { term: 'Approval mode' }) }));
@@ -122,7 +124,7 @@ for (const language of ['en', 'zh-CN'] as const) {
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     if (radio) expect(screen.getByText(ask.description)).toBeVisible();
-    else await waitFor(() => expect(screen.queryByText(ask.description)).not.toBeInTheDocument());
+    else await waitFor(() => expect(screen.getByText(ask.description)).not.toBeVisible());
   });
 
   it(`keeps a resource audience compact with all consequences behind its one question in ${language}`, async () => {
@@ -137,8 +139,9 @@ for (const language of ['en', 'zh-CN'] as const) {
     const members = screen.getByRole('radio', { name: choiceCopy(i18n.t, 'resourceAccess.home', { home: 'Acme' }).name });
     expect(members).toHaveTextContent('Acme');
     expect(container.querySelector('[data-choice-selected-description], [data-choice-description]')).toBeNull();
-    const own = i18n.t('resources.access.gives.only_me', { home: 'Acme' });
-    expect(screen.queryByText(own)).not.toBeInTheDocument();
+    const own = `${i18n.t('resources.access.gives.only_me', { home: 'Acme' })} ${i18n.t('resources.access.admins', { home: 'Acme' })}`;
+    expect(screen.getByRole('radio', { name: choiceCopy(i18n.t, 'resourceAccess.only_me', { home: 'Acme' }).name })).toHaveAccessibleDescription(own);
+    expect(screen.getByText(own)).not.toBeVisible();
     const question = screen.getByRole('button', { name: i18n.t('help.hint.label', { term: i18n.t('resources.access.label') }) });
     await user.click(question);
     const help = screen.getByRole('dialog', { name: i18n.t('resources.access.label') });

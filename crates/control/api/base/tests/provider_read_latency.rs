@@ -1,0 +1,284 @@
+//! Stored provider reads cannot wait for a unit, a host or the release payload catalogue.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test fails by panicking"
+)]
+mod places;
+mod rig;
+mod support;
+
+use orch_api_contract::resources::{
+    ProviderGet, ProviderList, ProviderListQuery, ProviderListScope,
+};
+use orch_engine::hosting::{Enrollment, EnrollmentAsk, HostServices, HostingError, ToolBuild};
+use orch_link_contract::commands::CommandKind;
+use orch_types::new_id;
+use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+use support::failure_trace::FailureTrace;
+use tracing::instrument::WithSubscriber as _;
+
+/// How many phases and events a read keeps: its statements and the pool's answers, with room to spare.
+const TRACE_TAIL: usize = 192;
+
+async fn timed_read<T>(
+    trace: &FailureTrace,
+    pool: &sqlx::PgPool,
+    operation: &'static str,
+    failure: &'static str,
+    missed: &mut Vec<&'static str>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    // A read runs some sixty statements: the whole of them stay in the trace, with their text, so that a slow read
+    // names where its round trips went.
+    let mut read_trace = FailureTrace::with_tail(
+        if operation == "GET" {
+            "provider GET SQL"
+        } else {
+            "provider LIST SQL"
+        },
+        Duration::from_millis(100),
+        TRACE_TAIL,
+    );
+    let mut pending = Box::pin(future.with_subscriber(read_trace.recorder()));
+    let began = std::time::Instant::now();
+    let (held_before, nested_before) = orch_db::pool::guard_reports();
+    trace.mark(format!(
+        "{operation} begins; budget=100ms; pool size={} idle={}",
+        pool.size(),
+        pool.num_idle()
+    ));
+    let answer = tokio::time::timeout(Duration::from_millis(100), &mut pending).await;
+    trace.mark(format!(
+        "{operation} read elapsed={:?}; budget=100ms; timed_out={}; pool size={} idle={}",
+        began.elapsed(),
+        answer.is_err(),
+        pool.size(),
+        pool.num_idle()
+    ));
+    let reply = match answer {
+        Ok(reply) => {
+            read_trace.finish();
+            reply
+        }
+        Err(error) => {
+            missed.push(operation);
+            let reply = tokio::time::timeout(rig::PATIENCE, &mut pending)
+                .await
+                .expect(failure);
+            trace.mark(format!(
+                "{operation} diagnostic completion elapsed={:?}; original budget=100ms; timeout={error}",
+                began.elapsed()
+            ));
+            reply
+        }
+    };
+    let (held_after, nested_after) = orch_db::pool::guard_reports();
+    trace.mark(format!(
+        "{operation} guard reports; nested_acquires={} long_transactions={}",
+        nested_after.saturating_sub(nested_before),
+        held_after.saturating_sub(held_before),
+    ));
+    reply
+}
+
+#[derive(Default)]
+struct Unanswered {
+    calls: AtomicUsize,
+}
+#[async_trait::async_trait]
+impl HostServices for Unanswered {
+    async fn enrollment(
+        &self,
+        _conn: &mut orch_db::Conn,
+        _ask: &EnrollmentAsk,
+    ) -> Result<Enrollment, HostingError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+    async fn tools(
+        &self,
+        _conn: &mut orch_db::Conn,
+        _os: &str,
+        _arch: &str,
+        _harnesses: &[String],
+    ) -> Result<Vec<ToolBuild>, HostingError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn a_provider_whose_new_unit_never_answers_is_read_and_listed_in_under_a_hundred_milliseconds()
+ {
+    let s = rig::Scene::for_requests_without_supervisor().await;
+    for db in [&s.rig.world.app.app.db, s.rig.engine.db()] {
+        assert_eq!(
+            db.pool().options().get_max_connections(),
+            s.rig.world.db.pool.options().get_max_connections(),
+            "the request profile retains the fixture's serving width"
+        );
+        let settings: (String, String, String) = sqlx::query_as(
+            "SELECT current_setting('jit'), current_setting('statement_timeout'),
+                    current_setting('idle_in_transaction_session_timeout')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            settings,
+            ("off".to_owned(), "15s".to_owned(), "10s".to_owned())
+        );
+    }
+    let host_services = Arc::new(Unanswered::default());
+    s.rig.engine.attach_host_services(host_services.clone());
+    for kind in [
+        CommandKind::AgentStart,
+        CommandKind::ProviderRefresh,
+        CommandKind::NodeResourcesInspect,
+        CommandKind::NodeRuntimeStart,
+    ] {
+        s.rig.machine.handler.hold(kind);
+    }
+    let mut conn = s.rig.world.conn().await;
+    let host = orch_db::queries::resources::access_fixtures::insert_resource(
+        &mut conn,
+        "host",
+        Some(s.ada.id()),
+        Some(s.tree.org.base.id),
+        "Silent host",
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hosts SET machine_id=$2,drivers=$3 WHERE id=$1").bind(host).bind(s.rig.machine_id)
+        .bind(json!({"docker":{"name":"docker","title":"Docker","lifecycle":"unit","spec_schemas":{"provider":{}},"live_changes":{}}}))
+        .execute(&mut *conn).await.unwrap();
+    // The system's template of providers' runtimes, as an installation's seed makes it.
+    sqlx::query("INSERT INTO env_templates (id, name, kind, driver, spec) VALUES ($1, 'Provider runtime', 'provider', 'docker', '{}') ON CONFLICT (id) DO NOTHING")
+        .bind(orch_db::seeds::PROVIDER_RUNTIME_TEMPLATE_ID)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let runtime = new_id();
+    sqlx::query("INSERT INTO runtimes(id,kind,host_id,unit_name,provider_id,driver,template_id,spec_hash,state) VALUES($1,'provider',$2,$3,$4,'docker',$5,$6,'creating')")
+        .bind(runtime).bind(host).bind(format!("unanswered-{runtime}")).bind(s.on.provider)
+        .bind(orch_db::seeds::PROVIDER_RUNTIME_TEMPLATE_ID).bind(vec![0_u8;32]).execute(&mut *conn).await.unwrap();
+    sqlx::query("UPDATE providers SET machine_id=NULL,key_machine_id=NULL,status='needs_setup',facts_at=NULL,facts_requested_at=NULL WHERE id=$1")
+        .bind(s.on.provider).execute(&mut *conn).await.unwrap();
+    drop(conn);
+    let before = s.rig.commands.issued_total();
+    // One read of each kind before the clocks start. A first read pays what the reads of a running server do not:
+    // every statement is parsed and planned once on each pooled connection (the pool keeps a prepared statement
+    // cache per connection, and the connection options leave it at its default), and every backend loads its
+    // catalogue caches when it first uses a table. The reads below answer within the budget from a connection that
+    // has served this page before, as the reads of a running server do. These two must still answer, and answer
+    // without the silent unit: they are bounded by the patience, count in the checks of the end, and a read that
+    // waited for the unit would not return.
+    let request = s
+        .rig
+        .world
+        .app
+        .call(ProviderGet, &[&s.on.provider])
+        .token(&s.ada.token);
+    let warming = tokio::time::timeout(rig::PATIENCE, request.send())
+        .await
+        .expect("a provider GET must not wait for a native or catalogue answer");
+    assert!(
+        warming.status.is_success(),
+        "warming GET: {}",
+        warming.status
+    );
+    let request = s
+        .rig
+        .world
+        .app
+        .call(ProviderList, &[])
+        .token(&s.ada.token)
+        .query(&ProviderListQuery {
+            scope: Some(ProviderListScope::Mine),
+            ..ProviderListQuery::default()
+        });
+    let warming = tokio::time::timeout(rig::PATIENCE, request.send())
+        .await
+        .expect("a provider list must not resolve the unit or release payload");
+    assert!(
+        warming.status.is_success(),
+        "warming LIST: {}",
+        warming.status
+    );
+    let mut missed_budgets = Vec::new();
+    let mut trace = FailureTrace::new("provider GET/LIST phases", Duration::from_millis(100));
+    let request = s
+        .rig
+        .world
+        .app
+        .call(ProviderGet, &[&s.on.provider])
+        .token(&s.ada.token);
+    let read = timed_read(
+        &trace,
+        s.rig.world.app.app.db.pool(),
+        "GET",
+        "a provider GET must not wait for a native or catalogue answer",
+        &mut missed_budgets,
+        request.send(),
+    )
+    .await;
+    trace.mark(format!("GET status={}", read.status));
+    let read = read.ok();
+    assert_eq!(read.base.id, s.on.provider);
+    assert_eq!(
+        read.runtime.as_ref().map(|runtime| runtime.state.as_str()),
+        Some("creating")
+    );
+    let request = s
+        .rig
+        .world
+        .app
+        .call(ProviderList, &[])
+        .token(&s.ada.token)
+        .query(&ProviderListQuery {
+            scope: Some(ProviderListScope::Mine),
+            ..ProviderListQuery::default()
+        });
+    let listed = timed_read(
+        &trace,
+        s.rig.world.app.app.db.pool(),
+        "LIST",
+        "a provider list must not resolve the unit or release payload",
+        &mut missed_budgets,
+        request.send(),
+    )
+    .await;
+    trace.mark(format!("LIST status={}", listed.status));
+    let listed = listed.ok();
+    assert!(
+        listed
+            .items
+            .iter()
+            .filter_map(orch_api_contract::common::Listed::as_visible)
+            .any(|row| row.base.id == s.on.provider)
+    );
+    assert_eq!(
+        s.rig.commands.issued_total(),
+        before,
+        "stored reads issue no native command"
+    );
+    assert_eq!(
+        host_services.calls.load(Ordering::SeqCst),
+        0,
+        "stored reads never ask the silent host to enroll or discover tools"
+    );
+    // The serving pool is separate from the raw fixture pool.
+    trace.mark("closing the fixture pool");
+    tokio::time::timeout(rig::PATIENCE, s.rig.db.pool().close())
+        .await
+        .expect("the request-profile fixture pool closes");
+    assert!(
+        missed_budgets.is_empty(),
+        "provider reads exceeded their original 100 ms budgets: {missed_budgets:?}"
+    );
+    trace.finish();
+}

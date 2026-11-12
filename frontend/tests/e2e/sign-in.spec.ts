@@ -1,11 +1,14 @@
 /** Getting in: the first administrator, a wrong and a right password, a second step, a code by mail, a name that is locked, and signing out. */
 import { expect, test } from '@playwright/test';
 
-import { expectAccessibleInBothThemes, mailed, PEOPLE, scenario, signIn } from './support.ts';
+import { expectAccessibleInBothThemes, mailed, PEOPLE, scenario, signIn, arrived, screenAddress } from './support.ts';
 
 test.beforeEach(async () => {
   await scenario();
 });
+
+/** The landing path and the list state it may carry stay exact. */
+const atOrgHome = (path: RegExp) => screenAddress(path);
 
 test('a system with no user leads everybody to the setup, and the first person becomes its administrator', async ({ page }) => {
   await scenario({ scenario: 'fresh' });
@@ -32,12 +35,12 @@ test('a system with no user leads everybody to the setup, and the first person b
   await page.getByRole('button', { name: 'Create administrator' }).click();
 
   // They are signed in, in their own org, inside the workbench.
-  await expect(page).toHaveURL(/\/org\/root$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/root$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 
   // The setup is over for good: its address leads into the application now.
   await page.goto('/setup');
-  await expect(page).toHaveURL(/\/org\/root$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/root$/));
 });
 
 test('a wrong password is said at its field, and the right one gets in', async ({ page }) => {
@@ -60,7 +63,7 @@ test('a wrong password is said at its field, and the right one gets in', async (
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.ada.password);
   await page.getByRole('button', { name: 'Sign in' }).click();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 
@@ -81,7 +84,7 @@ test('somebody with an authenticator is asked for its code after a right passwor
 
   await code.fill(PEOPLE.grace.totp);
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('somebody whose second step is a mailed code is sent one at once, and gets in with it', async ({ page }) => {
@@ -96,7 +99,7 @@ test('somebody whose second step is a mailed code is sent one at once, and gets 
 
   await page.getByLabel('Code').fill(await mailed('linus', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('a code by mail gets somebody in without their password, and the page says the same whatever the name', async ({ page }) => {
@@ -125,7 +128,7 @@ test('a code by mail gets somebody in without their password, and the page says 
 
   await page.getByLabel('Code').fill(await mailed('margaret', 'code'));
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
 });
 
 test('a name that is locked says which proof is closed, until when, and what else works', async ({ page }) => {
@@ -133,7 +136,7 @@ test('a name that is locked says which proof is closed, until when, and what els
   await page.getByLabel('Username or email address').fill(PEOPLE.bolted.login);
   // The right password is refused like any other while the name is locked.
   await page.getByLabel('Password', { exact: true }).fill(PEOPLE.bolted.password);
-  const rejected = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login'));
+  const rejected = arrived(page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login')));
   await page.getByRole('button', { name: 'Sign in' }).click();
 
   const refusal = page.getByRole('alert').filter({ hasText: 'Too many wrong passwords for this name.' });
@@ -194,7 +197,7 @@ test('a session outlives a reload, though its token was never kept anywhere', as
 
   await page.reload();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(atOrgHome(/\/org\/acme\/?$/));
   await expect(page.getByRole('navigation', { name: 'Navigation' })).toBeVisible();
 });
 

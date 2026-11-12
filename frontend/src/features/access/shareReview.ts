@@ -41,7 +41,7 @@ export async function applyShares(reviews: readonly ShareReview[], update: (resu
     if (!review.preview.allowed || review.preview.revision !== review.change.expected_revision) result = { review, state: 'skipped' };
     else {
       update({ review, state: 'applying' });
-      try { result = { review, state: 'succeeded', after: await changePage(review.target, review.change) }; }
+      try { result = { review, state: 'succeeded', after: await changePage(review.target, review.change, undefined, review.preview.owner_reads?.confirmation) }; }
       catch (error) { result = { review, state: error instanceof ApiError && error.status < 500 ? 'refused' : 'uncertain', error }; }
     }
     results.push(result); update(result);

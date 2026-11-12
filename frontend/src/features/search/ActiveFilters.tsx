@@ -65,10 +65,10 @@ export function ActiveFilters({ params, onParams, values }: { params: SearchPara
     add('kinds', label, value, () => clear({ kinds: undefined }));
   }
   for (const [field, key] of [
-    ['title_only', 'titleOnly'], ['with_file', 'withFile'], ['mentions_me', 'mentionsMe'],
-    ['shared_with_me', 'sharedWithMe'], ['participating', 'participating'], ['regex', 'regex'],
+    ['title_only', 'search.filters.titleOnly'], ['with_file', 'people.withFile'], ['mentions_me', 'search.filters.mentionsMe'],
+    ['shared_with_me', 'search.filters.sharedWithMe'], ['participating', 'search.filters.participating'], ['regex', 'search.filters.regex'],
   ] as const) {
-    if (params[field] === 'true') add(field, key === 'withFile' ? t('people.withFile') : t(`search.filters.${key}` as const), null, () => clear({ [field]: undefined }));
+    if (params[field] === 'true') add(field, t(key), null, () => clear({ [field]: undefined }));
   }
   const order = [
     { value: 'newest', name: t('search.order.newest.name'), description: t('search.order.newest.description') },
@@ -76,10 +76,10 @@ export function ActiveFilters({ params, onParams, values }: { params: SearchPara
   ];
   const current = params.sort ?? 'newest';
   return <div className="flex min-w-0 items-center gap-2 py-2">
-    <div aria-label={t('search.filters.active', { count: narrowing(params) })} className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
+    <div role="group" aria-label={t('search.filters.active', { count: narrowing(params) })} className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
       {chips}
       {chips.length > 0 && <Button variant="ghost" size="sm" onClick={() => onParams({
-        ...(params.q === undefined ? {} : { q: params.q }), tab: tabOf(params),
+        ...(params.q === undefined ? {} : { q: params.q }), tab: tabOf(params), org: params.org,
         ...(params.sort === undefined ? {} : { sort: params.sort }),
       })}>{t('search.filters.clearAll')}</Button>}
     </div>

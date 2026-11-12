@@ -92,6 +92,49 @@ impl Redactor {
         masked
     }
 
+    /// The exact same ordered replacements over private file-backed input. A match may span any
+    /// number of caller chunks; matching never depends on a guessed overlap or line boundary.
+    pub fn mask_reader(
+        &self,
+        reader: impl std::io::Read,
+    ) -> std::io::Result<orch_private_file::PrivateText> {
+        fn replace(
+            text: &str,
+            ranges: impl Iterator<Item = (usize, usize)>,
+        ) -> std::io::Result<orch_private_file::PrivateText> {
+            orch_private_file::PrivateText::build(|output| {
+                let mut after = 0;
+                for (first, last) in ranges {
+                    output.write_all(&text.as_bytes()[after..first])?;
+                    output.write_all(MASK.as_bytes())?;
+                    after = last;
+                }
+                output.write_all(&text.as_bytes()[after..])
+            })
+        }
+        let mut current = orch_private_file::PrivateText::from_reader(reader)?;
+        for secret in &self.secrets {
+            let text = current.text();
+            let next = replace(
+                text,
+                text.match_indices(secret.as_str())
+                    .map(|(start, _)| (start, start + secret.len())),
+            )?;
+            current = next;
+        }
+        for pattern in &self.patterns {
+            let text = current.text();
+            let next = replace(
+                text,
+                pattern
+                    .find_iter(text)
+                    .map(|found| (found.start(), found.end())),
+            )?;
+            current = next;
+        }
+        Ok(current)
+    }
+
     /// Masks the text of each part that has some.
     pub fn mask_parts(&self, parts: &mut [ChatPart]) {
         for part in parts {
@@ -110,7 +153,7 @@ pub async fn for_chat(
     chat: &ChatRow,
     keys: KeyProvider<'_>,
 ) -> Result<Redactor, Error> {
-    let place = Place::Node(chat.node_id.unwrap_or(chat.org_id));
+    let place = Place::Node(chat.home());
     let patterns: Vec<Pattern> = orch_settings::get(conn, place, "redaction.patterns")
         .await?
         .unwrap_or_default();
@@ -193,5 +236,43 @@ mod tests {
                 text: MASK.to_owned()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+    #[test]
+    fn file_masking_is_identical_across_large_multiline_unicode_and_zero_width_matches()
+    -> std::io::Result<()> {
+        let source = format!(
+            "prefix {} secret-value before{}after\n尾部 secret-value\n",
+            "字🙂".repeat(20000),
+            "a\n".repeat(40000)
+        );
+        for patterns in [
+            vec![],
+            vec![Pattern {
+                name: "multiline".into(),
+                regex: "(?s)before.*after".into(),
+            }],
+            vec![
+                Pattern {
+                    name: "line starts".into(),
+                    regex: "(?m)^".into(),
+                },
+                Pattern {
+                    name: "mask itself".into(),
+                    regex: r"\[masked\]\[masked\]".into(),
+                },
+            ],
+        ] {
+            let redactor = Redactor::new(&patterns, vec!["secret-value".into(), "secret".into()]);
+            let expected = redactor.mask(&source);
+            let actual = redactor.mask_reader(source.as_bytes())?;
+            assert_eq!(actual.text(), expected);
+            assert_eq!(redactor.mask_reader(&b""[..])?.text(), redactor.mask(""));
+        }
+        Ok(())
     }
 }

@@ -1,4 +1,4 @@
-//! OpenRouter's recorded answers read as a subscription's facts: the key's limit and each budget as windows with their next reset, the free models' requests of the day, the account's credits for a management key alone.
+//! OpenRouter's recorded answers read as a subscription's facts: the key's limit and each budget as windows with their next reset, the free models' requests of the day, the account's credits wherever the account endpoint answers.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -159,7 +159,7 @@ async fn an_ordinary_key_with_a_weekly_limit_shows_it_as_a_window_and_its_credit
         (&total["used"], &total["limit"], &total["remaining"]),
         (&json!("5"), &json!("20"), &json!("15"))
     );
-    // OpenRouter answers the account's credits with 403 to an ordinary key: nothing is told, and no error.
+    // This recorded account refuses the ordinary key with 403: nothing is told, and no error.
     assert!(told.get("balances").is_none());
     let facts: ProviderFacts = serde_json::from_value(told.clone()).unwrap();
     let members = declared(
@@ -174,7 +174,7 @@ async fn an_ordinary_key_with_a_weekly_limit_shows_it_as_a_window_and_its_credit
 }
 
 #[tokio::test]
-async fn a_management_keys_answer_adds_the_accounts_credits() {
+async fn an_ordinary_keys_successful_credits_answer_adds_the_accounts_credits() {
     let told = report(
         key(
             json!(20.0),
@@ -309,4 +309,74 @@ async fn a_key_without_a_limit_has_no_window_of_its_own_and_one_whose_limit_neve
         (&json!("10"), &json!("4")),
         "the key's spending says it too"
     );
+}
+
+#[tokio::test]
+async fn the_management_key_is_only_for_credits_and_a_refusal_preserves_ordinary_key_access() {
+    struct Roles {
+        refuse_admin: bool,
+        asked: Mutex<Vec<(String, String)>>,
+    }
+    #[async_trait]
+    impl VendorClient for Roles {
+        async fn get(&self, _: &Url, path: &str, credential: &Secret, _: usize) -> Option<Json> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((path.into(), credential.expose().into()));
+            match path {
+                "/api/v1/key" => {
+                    assert_eq!(credential.expose(), "test-model");
+                    Some(key(
+                        json!(20),
+                        json!(15),
+                        json!("weekly"),
+                        json!([]),
+                        Json::Null,
+                    ))
+                }
+                "/api/v1/credits" => {
+                    if self.refuse_admin && credential.expose() == "test-management" {
+                        None
+                    } else {
+                        Some(json!({"data":{"total_credits":50,"total_usage":12.5}}))
+                    }
+                }
+                _ => None,
+            }
+        }
+    }
+    for refuse_admin in [false, true] {
+        let vendor = Arc::new(Roles {
+            refuse_admin,
+            asked: Mutex::new(Vec::new()),
+        });
+        let source = (builtin().make)(vendor.clone(), Arc::new(ManualClock::new(now().get())));
+        let ask = SourceAsk {
+            provider: SourceAskProvider {
+                id: new_id(),
+                name: "Example".into(),
+            },
+            endpoints: vec![SourceAskEndpoint {
+                protocol: "openai-responses".into(),
+                base_url: BASE.into(),
+            }],
+            config: Default::default(),
+            secrets: [("admin_key".into(), Secret::new("test-management"))].into(),
+            credential: Some(SourceAskCredential {
+                key: Secret::new("test-model"),
+            }),
+        };
+        let report = source.read_facts(ask).await.unwrap().0;
+        assert_eq!(report["balances"][0]["remaining"], "37.5");
+        let mut expected = vec![
+            ("/api/v1/key".into(), "test-model".into()),
+            ("/api/v1/credits".into(), "test-management".into()),
+        ];
+        if refuse_admin {
+            expected.push(("/api/v1/credits".into(), "test-model".into()));
+        }
+        assert_eq!(*vendor.asked.lock().unwrap(), expected);
+        assert_eq!(source.describe().check(), Ok(()));
+    }
 }

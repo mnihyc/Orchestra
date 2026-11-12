@@ -4,6 +4,7 @@
  * it says where it leads and offers what is done with a link. Whoever reads a page they cannot write opens
  * a link with a press, as on any page. Only an address the page would take as a link is opened.
  */
+import { linkTo } from '@/lib/links';
 import type { Editor } from '@tiptap/core';
 import type { EditorView } from '@tiptap/pm/view';
 import { useEditorState } from '@tiptap/react';
@@ -54,7 +55,7 @@ export function LinkCard({ editor, editable }: { editor: Editor; editable: boole
           {href}
         </span>
         <IconButton action="openNewTab" label={actionName('openNewTab')} onClick={() => openLink(href)} />
-        <IconButton action="copyLink" label={actionName('copyLink')} onClick={() => void copyText(href, t('common.linkCopied'))} />
+        <IconButton action="copyLink" label={actionName('copyLink')} onClick={() => void copyText(linkTo({ href }), t('common.linkCopied'))} />
         {editable && (
           <IconButton
             action="edit"

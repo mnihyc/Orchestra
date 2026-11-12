@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -269,6 +269,11 @@ impl Run<'_> {
         }
         let mut bytes = Vec::new();
         let mut reader = &file;
+        // Positioned reads advance the shared file cursor on some platforms.
+        // Search always consumes the complete text, including the sniffed head.
+        if reader.rewind().is_err() {
+            return false;
+        }
         if Read::by_ref(&mut reader)
             .take(self.preview_bytes + 1)
             .read_to_end(&mut bytes)
@@ -276,7 +281,6 @@ impl Run<'_> {
         {
             return false;
         }
-        // The head was read by position and this read starts at the cursor, which is at the start.
         if bytes.len() as u64 > self.preview_bytes {
             return false;
         }

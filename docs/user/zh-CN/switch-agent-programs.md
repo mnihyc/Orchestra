@@ -5,6 +5,7 @@ keywords: 切换, 分支, 携带, 延续, 摘要, 不带历史, 无, 历史, 轮
 heading_id.打开方案: open-the-plan
 heading_id.选择历史: choose-history
 heading_id.检查文件和影响: review-files-and-effects
+summary: 查看切换或分支的提供方、代理、历史和文件选择。
 ---
 
 # 切换代理程序并延续历史

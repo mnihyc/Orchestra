@@ -2,9 +2,7 @@
 import { expect, test, type Page } from '@playwright/test';
 
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from './support';
-
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41810'}`;
+import { DOUBLE, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from './support';
 
 interface Received { by: string; control: boolean; dropped: boolean; kind: number }
 

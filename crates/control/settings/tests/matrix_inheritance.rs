@@ -207,7 +207,14 @@ struct Layer {
 /// Merge the layers along the place's path, from the top, using the key's declared rule.
 fn expected(def: &SettingDef, layers: &[Layer]) -> Option<Json> {
     if layers.is_empty() {
-        return def.default_value().filter(|value| !value.is_null());
+        return def.default_value().filter(|value| {
+            !value.is_null()
+                && !(def.zero_means_no_limit()
+                    && value.as_str().map_or_else(
+                        || value.as_i64() == Some(0),
+                        |text| text.parse::<f64>() == Ok(0.0),
+                    ))
+        });
     }
     let locked = layers.iter().position(|layer| layer.locked);
     // For union, map and append the rows below a locked row are ignored.
@@ -257,9 +264,56 @@ fn expected(def: &SettingDef, layers: &[Layer]) -> Option<Json> {
                 .collect();
             json!(texts.join("\n\n"))
         }
-        Merge::Min => {
-            let least = layers.iter().filter_map(|layer| layer.value.as_i64()).min();
-            least.map_or(Json::Null, |least| json!(least))
+        Merge::Min | Merge::Max => {
+            // Matrix samples are bounded numbers; precision extremes have dedicated contract cases.
+            let mut winner: Option<(&Json, f64)> = None;
+            for layer in layers {
+                let number = layer
+                    .value
+                    .as_f64()
+                    .or_else(|| layer.value.as_str()?.parse().ok());
+                let Some(number) = number else { continue };
+                if def.zero_means_no_limit() && number == 0.0 {
+                    continue;
+                }
+                if winner.is_none_or(|(_, prior)| {
+                    if def.merge == Merge::Min {
+                        number <= prior
+                    } else {
+                        number >= prior
+                    }
+                }) {
+                    winner = Some((&layer.value, number));
+                }
+            }
+            winner.map_or(Json::Null, |(value, _)| value.clone())
+        }
+        Merge::All => Json::Bool(
+            layers
+                .iter()
+                .filter_map(|layer| layer.value.as_bool())
+                .all(|value| value),
+        ),
+        Merge::Any => Json::Bool(
+            layers
+                .iter()
+                .filter_map(|layer| layer.value.as_bool())
+                .any(|value| value),
+        ),
+        Merge::Stricter => {
+            let Schema::Choice { values } = def.schema else {
+                panic!("ordered fixture policy needs declared choices")
+            };
+            layers
+                .iter()
+                .filter_map(|layer| {
+                    values
+                        .iter()
+                        .position(|choice| Some(*choice) == layer.value.as_str())
+                        .map(|rank| (&layer.value, rank))
+                })
+                .max_by_key(|(_, rank)| *rank)
+                .map_or(Json::Null, |(value, _)| value.clone())
         }
     };
     Some(value).filter(|value| !value.is_null())
@@ -280,25 +334,11 @@ fn agree(def: &SettingDef, expected: &Option<Json>, got: &Option<Json>) -> bool 
 }
 
 fn merge_word(merge: Merge) -> &'static str {
-    match merge {
-        Merge::Replace => "replace",
-        Merge::Union => "union",
-        Merge::Intersect => "intersect",
-        Merge::Map => "map",
-        Merge::Append => "append",
-        Merge::Min => "min",
-    }
+    merge.as_str()
 }
 
 fn merge_of(word: &str) -> Merge {
-    match word {
-        "replace" => Merge::Replace,
-        "union" => Merge::Union,
-        "intersect" => Merge::Intersect,
-        "map" => Merge::Map,
-        "append" => Merge::Append,
-        _ => Merge::Min,
-    }
+    word.parse().unwrap_or(Merge::Min)
 }
 
 /// The rows of the key that the database already holds on the path (a seed), as layers.

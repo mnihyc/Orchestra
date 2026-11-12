@@ -209,6 +209,58 @@ fn image_error(error: bollard::errors::Error) -> DriverError {
 }
 
 impl DockerDriver {
+    /// Finds a held source, retaining its exact usable reference even without a repository alias.
+    async fn held_image(
+        &self,
+        reference: &str,
+        digest: Option<&str>,
+    ) -> Result<Option<(ImageInspect, String)>, DriverError> {
+        let original = pinned_reference(reference, digest);
+        let target = self.config.local_image(&original).to_owned();
+        if let Some(image) = self.daemon.image(&target).await? {
+            return Ok(Some((image, target)));
+        }
+        // A configured carried image is admitted only through that exact verified local identity.
+        if self.config.offline_images.contains_key(&original) {
+            return Ok(None);
+        }
+        let parsed = parse_reference(reference);
+        let Some(wanted) = digest.or(parsed.digest.as_deref()) else {
+            return Ok(None);
+        };
+        let tag = parsed.tag.as_ref().map_or_else(
+            || parsed.name.clone(),
+            |tag| format!("{}:{tag}", parsed.name),
+        );
+        let Some(image) = self.daemon.image(&tag).await? else {
+            return Ok(None);
+        };
+        let Some(id) = image.id.as_deref().filter(|id| {
+            id.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == crate::config::IMAGE_DIGEST_HEX_BYTES
+                    && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }) else {
+            return Ok(None);
+        };
+        let matches = id == wanted
+            || image
+                .repo_digests
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|entry| {
+                    entry
+                        .split_once('@')
+                        .is_some_and(|(_, digest)| digest == wanted)
+                });
+        if !matches {
+            return Ok(None);
+        }
+        let id = id.to_owned();
+        Ok(Some((image, id)))
+    }
+
     /// Observes programs on the exact image without its entrypoint, hooks, network, mounts or capabilities.
     pub(crate) async fn image_programs(&self, image: &ImageInspect) -> BTreeMap<String, bool> {
         let Some(image) = image.id.clone() else {
@@ -318,14 +370,16 @@ impl DockerDriver {
                 }
                 let original = pinned_reference(reference, digest.as_deref());
                 let target = self.config.local_image(&original).to_owned();
-                if self.daemon.image(&target).await?.is_none() {
+                if let Some((_, selected)) = self.held_image(reference, digest.as_deref()).await? {
+                    Ok(selected)
+                } else {
                     if self.config.offline_images.contains_key(&original) {
                         return Err(DriverError::Image(format!("carried-in image {reference} is missing; load its verified archive on this daemon")));
                     }
                     self.pull_image(reference, digest.as_deref(), &crate::progress::Silent)
                         .await?;
+                    Ok(target)
                 }
-                Ok(target)
             }
             Source::Build(build) => {
                 let alias = crate::build::spec_alias(&self.config, build);
@@ -430,7 +484,10 @@ impl DockerDriver {
                 let original = pinned_reference(&reference, digest.as_deref());
                 let target = self.config.local_image(&original).to_owned();
                 let carried = self.config.offline_images.contains_key(&original);
-                let held = self.daemon.image(&target).await?;
+                let held = self
+                    .held_image(&reference, digest.as_deref())
+                    .await?
+                    .map(|(image, _)| image);
                 if carried && held.is_none() {
                     return Err(DriverError::Image(format!(
                         "carried-in image {reference} is missing; load its verified archive on this daemon"
@@ -464,7 +521,9 @@ impl DockerDriver {
                     digest: if carried {
                         image.id.clone()
                     } else {
-                        digest_of(&image, &reference)
+                        digest
+                            .or_else(|| parse_reference(&reference).digest)
+                            .or_else(|| digest_of(&image, &reference))
                     },
                     built: None,
                 })
@@ -673,6 +732,317 @@ pub fn steps_without_use(images: &[ImageSummary], parent: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod offline_pin {
+        use super::*;
+        use orch_driver_contract::driver::EnvironmentDriver;
+        use orch_driver_contract::runtime::RuntimeKind;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixListener;
+
+        const HELD: &str = "registry.example.test/team/held:1";
+        // This fixture accepts metadata GETs, an empty pull POST and a fixed probe JSON only.
+        // These match the existing image_capacity stub's generous ceilings; no file/archive body is sent.
+        const HEADER_MAX: usize = 32 * 1024;
+        const BODY_MAX: usize = 1024 * 1024;
+
+        // Full SHA-256-shaped fixture values keep manifest and local content identities distinct.
+        fn digest(byte: &str) -> String {
+            format!("sha256:{}", byte.repeat(64))
+        }
+
+        /// The daemon lacks a repository digest alias but can inspect the original held tag.
+        /// This owned socket never contacts a Docker daemon or an external registry.
+        struct HeldDaemon {
+            _directory: tempfile::TempDir,
+            task: tokio::task::JoinHandle<()>,
+            requests: Arc<Mutex<Vec<String>>>,
+            socket: String,
+        }
+
+        impl Drop for HeldDaemon {
+            fn drop(&mut self) {
+                self.task.abort();
+            }
+        }
+
+        impl HeldDaemon {
+            async fn start(image: Json, mapped_present: bool) -> Self {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("image.sock");
+                let listener = UnixListener::bind(&path).unwrap();
+                let requests = Arc::new(Mutex::new(Vec::new()));
+                let observed = Arc::clone(&requests);
+                let task = tokio::spawn(async move {
+                    while let Ok((mut socket, _)) = listener.accept().await {
+                        let mut header = Vec::new();
+                        loop {
+                            let mut byte = [0];
+                            if socket.read(&mut byte).await.unwrap_or(0) == 0 {
+                                break;
+                            }
+                            header.push(byte[0]);
+                            assert!(header.len() <= HEADER_MAX);
+                            if header.ends_with(b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        let header = String::from_utf8_lossy(&header);
+                        let first = header.lines().next().unwrap_or_default().to_owned();
+                        let length = header.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        });
+                        if let Some(length) = length {
+                            assert!(length <= BODY_MAX);
+                            let mut body = vec![0; length];
+                            let _ = socket.read_exact(&mut body).await;
+                        } else if header.lines().any(|line| {
+                            line.split_once(':').is_some_and(|(name, value)| {
+                                name.eq_ignore_ascii_case("transfer-encoding")
+                                    && value.trim().eq_ignore_ascii_case("chunked")
+                            })
+                        }) {
+                            let mut body = Vec::new();
+                            while body.as_slice() != b"0\r\n\r\n"
+                                && !body.ends_with(b"\r\n0\r\n\r\n")
+                            {
+                                let mut chunk = [0; 4096];
+                                let read = socket.read(&mut chunk).await.unwrap_or(0);
+                                if read == 0 {
+                                    break;
+                                }
+                                assert!(body.len() + read <= BODY_MAX);
+                                body.extend_from_slice(&chunk[..read]);
+                            }
+                        }
+                        observed.lock().unwrap().push(first.clone());
+                        let uri = first.split_whitespace().nth(1).unwrap_or_default();
+                        let decoded = url::form_urlencoded::parse(uri.as_bytes())
+                            .next()
+                            .map(|(path, _)| path.into_owned())
+                            .unwrap_or_default();
+                        let image_name = decoded
+                            .split_once("/images/")
+                            .and_then(|(_, name)| name.strip_suffix("/json"));
+                        let (status, body) = if decoded.contains("/version") {
+                            (
+                                200,
+                                serde_json::json!({"ApiVersion":"1.44","Version":"27.0"}),
+                            )
+                        } else if decoded.contains("/info") {
+                            (200, serde_json::json!({}))
+                        } else if decoded.contains("/images/create") {
+                            (
+                                500,
+                                serde_json::json!({"message":"registry is unreachable"}),
+                            )
+                        } else if let Some(name) = image_name {
+                            if name == HELD || name.starts_with("sha256:") && mapped_present {
+                                (200, image.clone())
+                            } else {
+                                (404, serde_json::json!({"message":"no such image identity"}))
+                            }
+                        } else {
+                            (
+                                500,
+                                serde_json::json!({"message":"no container operation in the controlled daemon"}),
+                            )
+                        };
+                        let body = body.to_string();
+                        let response = format!(
+                            "HTTP/1.1 {status} controlled\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    }
+                });
+                Self {
+                    _directory: directory,
+                    task,
+                    requests,
+                    socket: path.to_string_lossy().into_owned(),
+                }
+            }
+
+            async fn driver(&self, carried: Option<(&str, &str)>) -> DockerDriver {
+                let mut config = DockerConfig {
+                    socket: self.socket.clone(),
+                    ..DockerConfig::default()
+                };
+                if let Some((pin, id)) = carried {
+                    config
+                        .offline_images
+                        .insert(pinned_reference(HELD, Some(pin)), id.to_owned());
+                }
+                DockerDriver::connect_for_inventory(config).await.unwrap()
+            }
+
+            fn pulls(&self) -> usize {
+                self.requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|line| line.contains("/images/create"))
+                    .count()
+            }
+        }
+
+        fn request(pin: &str) -> RuntimeSpec {
+            let id = orch_types::new_id();
+            serde_json::from_value(serde_json::json!({
+                "runtime_id":id,"kind":"provider","name":"controlled-offline-pin","driver":"docker",
+                "spec":{"image":HELD,"image_digest":pin,"user":{"uid":1000,"gid":1000},
+                    "network":{"mode":"bridge","egress":"open","dns":[]},
+                    "security":{"read_only_rootfs":false,"no_new_privileges":true,"cap_add":[],"cap_drop":["NET_RAW"]},
+                    "mounts":[]},
+                "resources":{},"roles":["provider"],"gateway_url":"wss://gateway.test:9443",
+                "enroll_token":"token-of-the-controlled-test","ca_cert":"test-certificate",
+                "tools":[],"volumes":{"state":{"name":"controlled-state","storage":null}},
+                "mounts":[],"env":{},"labels":{"orch.system":"controlled","orch.runtime_id":id,"orch.kind":"provider"}
+            })).unwrap()
+        }
+
+        async fn resolves(image: Json, spec: RuntimeSpec, pin: &str, id: &str) {
+            let daemon = HeldDaemon::start(image, false).await;
+            let driver = daemon.driver(None).await;
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            // Both production consumers run before any assertion, including on the old implementation.
+            let ensured = driver.ensure_image(&spec.spec).await;
+            let selected = driver.image_for(&spec, &parsed).await;
+            assert_eq!(
+                daemon.pulls(),
+                0,
+                "ensure={ensured:?}; selected={selected:?}"
+            );
+            assert_eq!(ensured.unwrap().digest.as_deref(), Some(pin));
+            assert_eq!(selected.unwrap(), id);
+        }
+
+        #[tokio::test]
+        async fn a_held_foreign_repository_digest_pins_the_exact_local_image_without_a_pull() {
+            let pin = digest("a");
+            let id = digest("b");
+            resolves(serde_json::json!({"Id":id,"RepoDigests":[format!("other.example.test/base@{pin}")]}), request(&pin), &pin, &id).await;
+        }
+
+        #[tokio::test]
+        async fn a_held_content_id_without_repository_digests_is_a_local_pin() {
+            let id = digest("b");
+            resolves(serde_json::json!({"Id":id}), request(&id), &id, &id).await;
+        }
+
+        #[tokio::test]
+        async fn a_requested_digest_after_another_repository_digest_is_echoed_without_substitution()
+        {
+            let first = digest("a");
+            let pin = digest("c");
+            let id = digest("b");
+            resolves(serde_json::json!({"Id":id,"RepoDigests":[format!("first.example.test/base@{first}"),format!("second.example.test/base@{pin}")]}), request(&pin), &pin, &id).await;
+        }
+
+        #[tokio::test]
+        async fn an_inline_reference_pin_uses_the_same_held_image_without_a_pull() {
+            let pin = digest("a");
+            let id = digest("b");
+            let mut spec = request(&pin);
+            spec.spec["image"] = serde_json::json!(format!("{HELD}@{pin}"));
+            assert!(
+                spec.spec
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("image_digest")
+                    .is_some()
+            );
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            assert!(matches!(&parsed.source, Source::Image { digest: None, .. }));
+            resolves(
+                serde_json::json!({"Id":id,"RepoDigests":[format!("other.example.test/base@{pin}")]}),
+                spec,
+                &pin,
+                &id,
+            )
+            .await;
+        }
+
+        #[tokio::test]
+        async fn a_held_tag_with_a_different_digest_cannot_satisfy_a_pin() {
+            let pin = digest("c");
+            let id = digest("b");
+            let daemon = HeldDaemon::start(serde_json::json!({"Id":id,"RepoDigests":[format!("other.example.test/base@{}",digest("a"))]}), false).await;
+            let driver = daemon.driver(None).await;
+            let spec = request(&pin);
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            let ensured = driver.ensure_image(&spec.spec).await;
+            let selected = driver.image_for(&spec, &parsed).await;
+            assert!(matches!(ensured, Err(DriverError::Image(_))));
+            assert!(matches!(selected, Err(DriverError::Image(_))));
+            assert!(daemon.pulls() > 0);
+        }
+
+        #[tokio::test]
+        async fn a_matching_repository_digest_without_an_addressable_image_id_is_not_a_tag_fallback()
+         {
+            let pin = digest("a");
+            let daemon = HeldDaemon::start(
+                serde_json::json!({"RepoDigests":[format!("other.example.test/base@{pin}")]}),
+                false,
+            )
+            .await;
+            let driver = daemon.driver(None).await;
+            let spec = request(&pin);
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            let ensured = driver.ensure_image(&spec.spec).await;
+            let selected = driver.image_for(&spec, &parsed).await;
+            assert!(matches!(ensured, Err(DriverError::Image(_))));
+            assert!(matches!(selected, Err(DriverError::Image(_))));
+            assert!(daemon.pulls() > 0);
+        }
+
+        #[tokio::test]
+        async fn a_carried_image_retains_its_configured_identity_and_report() {
+            let pin = digest("a");
+            let id = digest("b");
+            let daemon = HeldDaemon::start(serde_json::json!({"Id":id}), true).await;
+            let driver = daemon.driver(Some((&pin, &id))).await;
+            let spec = request(&pin);
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            assert_eq!(
+                driver
+                    .ensure_image(&spec.spec)
+                    .await
+                    .unwrap()
+                    .digest
+                    .as_deref(),
+                Some(id.as_str())
+            );
+            assert_eq!(driver.image_for(&spec, &parsed).await.unwrap(), id);
+            assert_eq!(daemon.pulls(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_missing_carried_identity_does_not_fall_back_to_a_matching_original_tag() {
+            let pin = digest("a");
+            let id = digest("b");
+            let daemon = HeldDaemon::start(serde_json::json!({"Id":id,"RepoDigests":[format!("other.example.test/base@{pin}")]}), false).await;
+            let driver = daemon.driver(Some((&pin, &id))).await;
+            let spec = request(&pin);
+            let parsed = DockerSpec::parse(RuntimeKind::Provider, &spec.spec).unwrap();
+            let ensured = driver.ensure_image(&spec.spec).await;
+            let selected = driver.image_for(&spec, &parsed).await;
+            assert!(
+                matches!(ensured, Err(DriverError::Image(ref why)) if why.contains("carried-in image"))
+            );
+            assert!(
+                matches!(selected, Err(DriverError::Image(ref why)) if why.contains("carried-in image"))
+            );
+            assert_eq!(daemon.pulls(), 0);
+        }
+    }
 
     #[test]
     fn a_reference_is_taken_apart_into_name_tag_and_digest_and_a_port_is_not_a_tag() {
