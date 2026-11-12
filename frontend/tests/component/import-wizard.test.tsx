@@ -6,7 +6,9 @@ import { client } from '@/api/client';
 import { ImportDialog } from '@/features/people/ImportDialog';
 import type { ImportPlan, ImportRequest, Job } from '@/generated/api-types';
 import { me, memberAccess, org, userRef } from '../doubles/fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ plan: vi.fn(), start: vi.fn(), watch: vi.fn(), uploadFails: false }));
 vi.mock('@/api/imports', async (original) => ({ ...await original<object>(), planImport: calls.plan, startImport: calls.start }));
@@ -76,7 +78,7 @@ it('recognises a package from preflight, reviews options and follows its accepte
   expect(calls.watch).toHaveBeenCalledWith(job, 'place', true);
   await person.click(screen.getByRole('button', { name: 'Finish job' }));
   expect(await screen.findByText('Report report-1')).toBeVisible();
-});
+}, 10_000); // The case is the whole walk, from the chosen file to the report of its job, each step drawn and asked about in turn, so its work cannot be less: about half of the default limit on a runner, hence twice it.
 
 it('keeps a blocked plan visible and does not start an import', async () => {
   calls.plan.mockResolvedValue({ ...plan, blockers: [{ code: 'import.too_many', message: 'Too many' }] });

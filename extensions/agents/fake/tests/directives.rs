@@ -1159,7 +1159,7 @@ async fn a_cut_breaks_the_stream_in_the_middle_of_an_answer_and_says_the_answer_
     let ended = events.last().unwrap();
     assert_eq!(ended.body["status"], "failed");
     let error = &ended.body["error"];
-    assert_eq!(error["code"], "provider_unreachable");
+    assert_eq!(error["code"], "stream_interrupted");
     assert_eq!(error["retryable"], true);
     assert_eq!(error["incomplete"], true);
     let item = events

@@ -17,9 +17,10 @@ export function planningAfter(approval: Pick<Approval, 'thread_id'>, on: boolean
   if (approval.thread_id !== null) composerWriter.setPlanning(approval.thread_id, on);
 }
 
-export function PlanAnswer({ disabled, pending, onProceed, onKeepPlanning }: {
+export function PlanAnswer({ disabled, pending, reason, onProceed, onKeepPlanning }: {
   disabled: boolean;
   pending: 'proceed' | 'keep' | null;
+  reason?: string | undefined;
   onProceed: () => void;
   onKeepPlanning: (words: string) => void;
 }) {
@@ -32,14 +33,15 @@ export function PlanAnswer({ disabled, pending, onProceed, onKeepPlanning }: {
         onChange={(event) => setWords(event.target.value)} fieldClassName="w-full" />}
       <div className="flex flex-wrap items-center gap-2">
         <Hint id="plan-answer" popover />
-        <Button variant="primary" size="md" disabled={disabled || pending !== null} pending={pending === 'proceed'} onClick={onProceed} data-plan-proceed>
+        <Button variant="primary" size="md" disabled={disabled || pending !== null} pending={pending === 'proceed'} reason={reason ?? (pending !== null ? t('ui.unavailable.deciding') : disabled ? t('composer.row.readOnly') : undefined)} onClick={onProceed} data-plan-proceed>
           {t('plan.proceed')}
         </Button>
         <Button variant="secondary" size="md" disabled={disabled || pending !== null || (writing && words.trim() === '')} pending={pending === 'keep'}
+          reason={reason ?? (pending !== null ? t('ui.unavailable.deciding') : disabled ? t('composer.row.readOnly') : writing && words.trim() === '' ? t('ui.unavailable.planWords') : undefined)}
           onClick={() => (writing ? onKeepPlanning(words.trim()) : setWords(''))} data-plan-keep>
           {t('plan.keepPlanning')}
         </Button>
-        {writing && <Button variant="ghost" size="md" disabled={pending !== null} onClick={() => setWords(null)}>{t('common.cancel')}</Button>}
+        {writing && <Button variant="ghost" size="md" disabled={pending !== null} reason={pending !== null ? t('ui.unavailable.deciding') : undefined} onClick={() => setWords(null)}>{t('common.cancel')}</Button>}
       </div>
     </div>
   );

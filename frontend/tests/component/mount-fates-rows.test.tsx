@@ -9,6 +9,13 @@ import type { PlanMount } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
+/** The element at a place in a list the case has just asked for: a missing one fails the case by name, not by a type hole. */
+function nth<Item>(items: readonly Item[], index: number): Item {
+  const item = items[index];
+  if (item === undefined) throw new Error(`no element at ${index} of ${items.length}`);
+  return item;
+}
+
 const base = { action: 'keep', path: '/mnt/x', mode: 'read_only', detached_because: null, copy_unavailable: null, copy: null, data_kind: null, fingerprints_available: false, fingerprints: null } as const;
 
 const notes: PlanMount = { ...base, mount: { id: 'notes', name: 'notes', address: 'acme.notes' }, fate: 'as_is', default_fate: 'as_is', fates: ['detach', 'as_is', 'copy'] };
@@ -49,6 +56,41 @@ for (const locale of ['en', 'zh-CN'] as const) describe(locale, () => {
     rerender(<MountFates mounts={[synced]} picks={{}} onPick={vi.fn()} onCheck={onCheck} checkError={failure} />);
     expect(screen.getByRole('alert')).toHaveTextContent(t('mountPlan.fingerprints.failed'));
     expect(screen.getByRole('alert')).toHaveTextContent('The host is offline');
+  });
+
+  it('brings the outcome of the check that was asked into view in the row that asked, and no other outcome', async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const user = userEvent.setup();
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView');
+    try {
+      const mount = (name: string): PlanMount => ({ ...fixed, mount: { id: name, name, address: `acme.${name}` }, fingerprints_available: true });
+      const [first, second] = [mount('first'), mount('second')];
+      const onCheck = vi.fn();
+      const checkedAt = '2026-10-25T14:03:00.000Z';
+      const { rerender } = show(<MountFates mounts={[first, second]} picks={{}} onPick={vi.fn()} onCheck={onCheck} />);
+      const again = (props: { checking?: boolean; checkError?: Error; same?: boolean }) => rerender(<MountFates mounts={[first, second].map((row) => props.same === undefined ? row : { ...row, fingerprints: { matches: props.same, checked_at: checkedAt } })} picks={{}} onPick={vi.fn()} onCheck={onCheck} checking={props.checking} checkError={props.checkError ?? null} />);
+      // Pressing the second row's Check: the request is for every row, and what is brought into view is that row's.
+      await user.click(nth(screen.getAllByRole('button', { name: t('mountPlan.fingerprints.check') }), 1));
+      again({ checking: true });
+      expect(scrolled).not.toHaveBeenCalled();
+      again({ same: true });
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      expect(scrolled).toHaveBeenLastCalledWith({ block: 'nearest' });
+      const outcome = scrolled.mock.contexts[0] as HTMLElement;
+      expect(outcome).toHaveAttribute('data-fingerprint-check');
+      expect(outcome).toContainElement(nth(screen.getAllByRole('status'), 1));
+      expect(outcome).not.toContainElement(nth(screen.getAllByRole('status'), 0));
+      // An outcome nobody asked for here (a read another person began, a plan read again) does not move the screen.
+      again({ same: false });
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      // A failure comes under the button that asked as well.
+      await user.click(nth(screen.getAllByRole('button', { name: t('mountPlan.fingerprints.check') }), 0));
+      again({ same: false, checking: true });
+      again({ checkError: new ApiError({ type: 'orch:error:plan.blocked', code: 'plan.blocked', title: 'Blocked', status: 409, detail: 'The check failed', request_id: 'check', blockers: [{ code: 'mount_fingerprint_unavailable', message: 'The host is offline' }] }, null) });
+      expect(scrolled).toHaveBeenCalledTimes(2);
+      expect(scrolled.mock.contexts[1]).toBe(screen.getAllByRole('alert')[0]);
+    } finally { scrolled.mockRestore(); }
   });
 
   it('offers each changeable mount its three fates, preselected, and sends only what the person changes', async () => {

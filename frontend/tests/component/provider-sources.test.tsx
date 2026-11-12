@@ -10,7 +10,9 @@ import { Button } from '@/ui/Button';
 import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
 import { planProvider } from '../unit/provider-plan-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 vi.mock('@/features/help/open', () => ({useHelpOpener:() => vi.fn()}));
 

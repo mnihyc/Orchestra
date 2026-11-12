@@ -1,0 +1,6 @@
+{"id":"native-plural-search","type":"webSearch","status":"completed","query":null,"action":{"type":"search","query":null,"queries":["Python official website","Python docs"]}}
+{"id":"native-open-page","type":"webSearch","status":"completed","query":null,"action":{"type":"openPage","url":"https://docs.python.org/"}}
+{"id":"native-find-page","type":"webSearch","status":"completed","query":null,"action":{"type":"findInPage","url":"https://docs.python.org/tutorial/","pattern":"classes"}}
+{"id":"native-unknown-page","type":"webSearch","status":"completed","query":null,"action":{"type":"openPage","url":null}}
+{"id":"native-future-action","type":"webSearch","status":"completed","query":null,"action":{"type":"futureAction","safe_value":"retained"}}
+{"id":"native-single-search","type":"webSearch","status":"completed","query":"a legacy query","action":{"type":"search","query":"actual native query","queries":null}}

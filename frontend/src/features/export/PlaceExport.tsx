@@ -208,7 +208,7 @@ export function PlaceExport({ target, open, onClose }: FileDialogProps) {
 
   let body: ReactNode;
   if (node.isError) body = <ErrorState compact error={node.error} retrying={node.isRefetching} onRetry={() => void node.refetch()} />;
-  else if (!ready) body = <SkeletonRows rows={5} />;
+  else if (!ready) body = <SkeletonRows read={node} rows={5} />;
   else body = <PlaceTree rows={rows} onExpandedChange={onExpandedChange} onTick={onTick} className="py-1" />;
 
   return (

@@ -61,7 +61,7 @@ the actual Review changes action rather than repeating a paragraph on every turn
 - `SideThreadLane.tsx`: A side thread beside the conversation: its own short exchange with the same agent, named after its thread, kept by a fork or closed.
 - `Catchup.tsx`: Unread summary and jump-to-latest behavior.
 - `TurnFooter.tsx`: Duration, the model by its display name and effort, recorded usage, and what the turn changed.
-- `ItemActions.tsx`: Copy, link, pin, quote, discuss, forward, select, and fork or ask on the side from any message.
+- `ItemActions.tsx`: Copy, link, pin, quote, discuss, forward, select, and fork or start a side thread from any message.
 - `ChatRefs.tsx`: Count of chat messages quoting an item, opening that chat.
 - `items/UserMessage.tsx`: Human, system, forwarded and delivered announcement inputs.
 - `items/AgentMessage.tsx`: Streaming agent Markdown and final actions.

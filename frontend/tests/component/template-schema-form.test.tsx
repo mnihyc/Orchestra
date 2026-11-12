@@ -9,7 +9,9 @@ import { SchemaForm } from '@/features/resources/templates/SchemaSettings';
 import type { Schema } from '@/features/resources/templates/schema';
 import { i18n, setLocale } from '@/i18n';
 import { Switch } from '@/ui/Switch';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(), checkTemplate: vi.fn() }));
 vi.mock('@/features/help/Hint', () => ({ Hint: () => null }));

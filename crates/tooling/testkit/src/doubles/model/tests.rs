@@ -824,6 +824,90 @@ async fn a_sleep_holds_back_a_plain_answer_as_well() {
 }
 
 #[tokio::test]
+async fn a_hold_waits_for_its_release_and_a_release_made_before_the_stream_comes_to_it_is_remembered()
+ {
+    let mock = start().await;
+    let client = mock.client();
+    let waiting = tokio::spawn(async move {
+        client
+            .send(messages_request(
+                "#!mock\nsay first\nhold the gate\nsay second",
+                true,
+            ))
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "the stream waits at the hold");
+    mock.release("the gate");
+    let reply = waiting.await.unwrap();
+    assert!(
+        reply.text().contains("second"),
+        "it went on after the release"
+    );
+    // A release that comes before the stream is at the hold lets it by.
+    let started = Instant::now();
+    let reply = mock
+        .client()
+        .send(messages_request(
+            "#!mock\nsay first\nhold the gate\nsay again",
+            true,
+        ))
+        .await
+        .unwrap();
+    assert!(reply.text().contains("again"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_hold_nobody_releases_ends_the_stream_with_an_error_that_names_it() {
+    let mock = MockLlm::start(MockConfig::default().with_hold_limit(Duration::from_millis(200)))
+        .await
+        .unwrap();
+    let started = Instant::now();
+    let mut open = mock
+        .client()
+        .open(messages_request(
+            "#!mock\nsay first\nhold never released\nsay never",
+            true,
+        ))
+        .await
+        .unwrap();
+    let mut seen = String::new();
+    while let Ok(Some(chunk)) = open.next_chunk().await {
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+    }
+    assert!(seen.contains("first"), "{seen}");
+    assert!(
+        seen.contains("never released"),
+        "the error names the hold: {seen}"
+    );
+    assert!(seen.contains("200ms"), "and the time: {seen}");
+    assert_eq!(
+        mock.requests()[0].hold_expired.as_deref(),
+        Some("never released"),
+        "and the server's record names it too"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn a_hold_in_an_answer_that_is_not_streamed_is_refused() {
+    let mock = start().await;
+    let reply = mock
+        .client()
+        .send(messages_request("#!mock\nsay a\nhold gate\nsay b", false))
+        .await
+        .unwrap();
+    assert_eq!(reply.status, 400);
+    assert!(
+        reply.text().contains("needs a streamed answer"),
+        "{}",
+        reply.text()
+    );
+}
+
+#[tokio::test]
 async fn a_client_that_goes_away_is_noted() {
     let mock = start().await;
     let mut open = mock

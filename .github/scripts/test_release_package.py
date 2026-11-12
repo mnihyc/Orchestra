@@ -36,6 +36,7 @@ class PackageInputTests(unittest.TestCase):
             self.assertIn("--reuse-frontend", events[2])
             self.assertIn("--require-all-connectors", events[2])
             self.assertIn("--check", events[3])
+            self.assertIn("--check-source", events[3])
 
 
 if __name__ == "__main__":

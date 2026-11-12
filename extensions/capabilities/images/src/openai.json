@@ -1,0 +1,594 @@
+{
+  "contract": 1,
+  "endpoint_rules": [
+    {
+      "when": {
+        "type": "object",
+        "required": [
+          "scheme",
+          "host",
+          "path",
+          "port",
+          "has_credentials",
+          "has_query",
+          "has_fragment"
+        ],
+        "properties": {
+          "scheme": {
+            "const": "https"
+          },
+          "host": {
+            "const": "api.openai.com"
+          },
+          "path": {
+            "enum": [
+              "/v1",
+              "/v1/"
+            ]
+          },
+          "port": {
+            "type": "null"
+          },
+          "has_credentials": {
+            "const": false
+          },
+          "has_query": {
+            "const": false
+          },
+          "has_fragment": {
+            "const": false
+          }
+        }
+      },
+      "endpoints": {
+        "images": {
+          "address": "https://api.openai.com/v1",
+          "interface": "openai-images",
+          "credential_role": "model"
+        }
+      },
+      "offerings": {
+        "gpt-image-2.5-sunburst": {
+          "title": "gpt-image-2.5-sunburst",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gpt-image-2.5-sunburst"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-image-2.5-sunburst"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quality": {
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "background": {
+                "enum": [
+                  "auto",
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "output_format": {
+                "enum": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ]
+              },
+              "output_compression": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "stream": {
+                "const": false
+              },
+              "moderation": {
+                "enum": [
+                  "auto",
+                  "low"
+                ]
+              },
+              "partial_images": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "image": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "mask": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gpt-image-2.5-flare": {
+          "title": "gpt-image-2.5-flare",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gpt-image-2.5-flare"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-image-2.5-flare"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quality": {
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ]
+              },
+              "background": {
+                "enum": [
+                  "auto",
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "output_format": {
+                "enum": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ]
+              },
+              "output_compression": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "stream": {
+                "const": false
+              },
+              "moderation": {
+                "enum": [
+                  "auto",
+                  "low"
+                ]
+              },
+              "partial_images": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "image": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "mask": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gpt-image-2": {
+          "title": "gpt-image-2",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gpt-image-2"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-image-2"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quality": {
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "background": {
+                "enum": [
+                  "auto",
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "output_format": {
+                "enum": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ]
+              },
+              "output_compression": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "stream": {
+                "const": false
+              },
+              "moderation": {
+                "enum": [
+                  "auto",
+                  "low"
+                ]
+              },
+              "partial_images": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "image": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "mask": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gpt-image-1.5": {
+          "title": "gpt-image-1.5",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gpt-image-1.5"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-image-1.5"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quality": {
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "background": {
+                "enum": [
+                  "auto",
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "output_format": {
+                "enum": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ]
+              },
+              "output_compression": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "stream": {
+                "const": false
+              },
+              "moderation": {
+                "enum": [
+                  "auto",
+                  "low"
+                ]
+              },
+              "partial_images": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "image": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "mask": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "gpt-image-1-mini": {
+          "title": "gpt-image-1-mini",
+          "kind": "service",
+          "endpoint": "images",
+          "enabled": false,
+          "groups": [
+            "images"
+          ],
+          "capabilities": {
+            "image_generation": {
+              "enabled": true,
+              "modes": [
+                "on",
+                "service"
+              ]
+            }
+          },
+          "parameters": {
+            "model": "gpt-image-1-mini"
+          },
+          "options": {
+            "type": "object",
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "const": "gpt-image-1-mini"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "size": {
+                "type": "string",
+                "minLength": 1
+              },
+              "quality": {
+                "enum": [
+                  "auto",
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "background": {
+                "enum": [
+                  "auto",
+                  "opaque",
+                  "transparent"
+                ]
+              },
+              "output_format": {
+                "enum": [
+                  "png",
+                  "jpeg",
+                  "webp"
+                ]
+              },
+              "output_compression": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "stream": {
+                "const": false
+              },
+              "moderation": {
+                "enum": [
+                  "auto",
+                  "low"
+                ]
+              },
+              "partial_images": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3
+              },
+              "image": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "mask": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "x_docs": "https://developers.openai.com/api/reference/python/resources/images/methods/generate"
+}

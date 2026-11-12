@@ -1,5 +1,6 @@
 /** A name leads to a real, privacy-filtered page; the person edits it and private inspection is explicit. */
 import { expect, test } from '@playwright/test';
+import { OUTSIDER } from '../doubles/access.ts';
 import { asAdmin } from './admin-mode-support.ts';
 import { bodySent, ACME, expectAccessibleSettled, PEOPLE, scenario, signIn } from './support.ts';
 
@@ -13,7 +14,7 @@ test('the person edits their page, pins a visible place, and reads every day as 
   await expect(page.getByRole('region', { name: 'Pinned', exact: true })).toHaveCount(1);
   await expect(page.getByRole('region', { name: 'Pin preview', exact: true })).toBeVisible();
   await expect(page.getByRole('complementary', { name: 'About you in the page preview', exact: true })).toBeVisible();
-  await page.getByLabel('About you').fill('Builds **tools**.');
+  await page.getByRole('textbox', { name: 'About you', exact: true }).fill('Builds **tools**.');
   await page.getByLabel('Pronouns').fill('she/her');
   await expect(page.getByRole('status').filter({ hasText: 'Saved' })).toBeVisible();
   await page.getByLabel('Find something to pin').fill('Web');
@@ -36,7 +37,8 @@ test('the person edits their page, pins a visible place, and reads every day as 
 
 test('unseen pins are omitted and closed, missing and service pages have the same outside state', async ({ page }) => {
   await configure('/page', { username: 'ada', profile: { pins: [{ node_id: ACME.web }] } });
-  await signIn(page, PEOPLE.margaret);
+  // The org-only audience is closed to the explicit outsider; Margaret is a member of Acme.
+  await signIn(page, { login: OUTSIDER.username, password: OUTSIDER.password });
   await page.goto('/u/ada');
   await expect(page.getByRole('region', { name: 'Pinned' }).getByRole('link', { name: 'Web' })).toHaveCount(0);
   await configure('/page', { username: 'ada', profile: { settings: { show_time: true, show_activity: true, audience: 'orgs' } } });
@@ -55,7 +57,7 @@ test('private inspection has its band, and Only me explains the member managers 
   await expect(page.getByRole('img', { name: 'Private · You see this as an admin of Acme' })).toBeVisible();
   await page.goto('/settings/your-page');
   await page.getByRole('combobox', { name: 'Who can open my page' }).click();
-  const privateChoice = page.getByRole('option', { name: 'Only me', exact: true });
+  const privateChoice = page.getByRole('option', { name: 'Private', exact: true });
   await expect(privateChoice).toHaveAccessibleDescription(/Admins who manage members of one of your orgs/);
   const accepted = page.waitForResponse(async (response) => response.request().method() === 'PATCH' && new URL(response.url()).pathname.endsWith('/me/profile') && ((await bodySent(response.request())) as { audience?: string }).audience === 'private');
   await privateChoice.click();
@@ -71,14 +73,17 @@ test('private inspection has its band, and Only me explains the member managers 
   expect((await activityAccepted).ok()).toBeTruthy();
 });
 
-test('a name card opens with the keyboard, links to the page and returns focus on Escape', async ({ page }) => {
+test('a name card opens with the keyboard, links to the page and returns focus on Escape', { tag: '@development' }, async ({ page }) => {
   await signIn(page, PEOPLE.ada);
   await page.goto('/dev/ui');
-  const name = page.getByRole('button', { name: 'Ada Lovelace', exact: true }).first();
+  // The gallery's user-chip fixture uses the short display name Ada.
+  const name = page.getByRole('region', { name: 'TagChip, UserChip, AvatarStack', exact: true }).getByRole('button', { name: 'Ada', exact: true }).first();
+  await expect(name).toBeVisible();
   await name.focus();
   await page.keyboard.press('Enter');
-  const card = page.getByRole('dialog', { name: 'Ada Lovelace' });
+  const card = page.getByRole('dialog', { name: 'Ada', exact: true });
   await expect(card.getByRole('link', { name: 'Open page' })).toBeVisible();
+  await expect(card.getByRole('link', { name: 'Open page' })).toHaveAttribute('href', '/u/ada');
   await page.keyboard.press('Escape');
   await expect(name).toBeFocused();
 });

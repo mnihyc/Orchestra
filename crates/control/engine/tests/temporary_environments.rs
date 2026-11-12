@@ -381,6 +381,7 @@ async fn recovery_after_the_original_deadline_replays_original_and_busy_child_su
             let child = orch_engine::ids::derived("command.busy-retry", &[original.as_bytes()]);
             commands
                 .issue(Outgoing {
+                    authority: None,
                     id: child,
                     ..command
                 })

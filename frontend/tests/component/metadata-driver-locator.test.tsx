@@ -9,7 +9,9 @@ import type { DriverInfo, Template } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { id } from '../doubles/fixtures';
 import { detailTemplate } from './resource-detail-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ drivers: vi.fn<() => Promise<DriverInfo[]>>(), create: vi.fn<typeof Resources.createTemplate>(), check: vi.fn<typeof Resources.checkTemplate>(), close: vi.fn(), navigate: vi.fn() }));
 const HOME_ID = id(72, 1);
@@ -36,10 +38,11 @@ it('retains the draft while locating a late driver, then uses that driver’s de
   const user = userEvent.setup(); show(<NewTemplateDialog onClose={calls.close} />);
   const picker = await screen.findByRole('combobox', { name: i18n.t('templates.new.driver') });
   expect(picker).toHaveValue('Declared driver 1');
-  await user.type(screen.getByRole('textbox', { name: i18n.t('templates.new.name') }), 'Native template');
+  // The words of the name and of the draft are what is kept, not how they were typed: they are pasted, a keystroke draws the whole form again.
+  await user.click(screen.getByRole('textbox', { name: i18n.t('templates.new.name') })); await user.paste('Native template');
   await user.selectOptions(screen.getByRole('combobox', { name: 'Fixture home' }), HOME_ID);
   const first = screen.getByRole('textbox', { name: 'Driver endpoint 1' });
-  await user.clear(first); await user.type(first, 'https://draft.example.test');
+  await user.clear(first); await user.paste('https://draft.example.test');
   await user.click(picker); expect(within(screen.getByRole('listbox')).getAllByRole('option')).toHaveLength(13);
   await user.type(picker, 'driver-13');
   const description = `Run through driver route 13. ${i18n.t('templates.new.driverHosts', { count: 13 })}`;

@@ -465,7 +465,7 @@ function WithNode({
   children: (node: Node) => ReactNode;
 }) {
   const query = useQuery(nodeQuery(place.id));
-  if (query.isPending) return <SkeletonRows rows={3} className="py-2" />;
+  if (query.isPending) return <SkeletonRows read={query} rows={3} className="py-2" />;
   if (query.isError) {
     return <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   }
@@ -587,7 +587,7 @@ function ArchiveDialog({ place, open, onClose }: DialogProps & { place: PlaceRef
       error={archive.error ?? undefined}
       onConfirm={() => archive.mutate()}
     >
-      {plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : plan.data === undefined ? <SkeletonRows rows={4} /> : <ArchiveConsequences plan={plan.data} />}
+      {plan.isError ? <ErrorState compact error={plan.error} onRetry={() => void plan.refetch()} /> : plan.data === undefined ? <SkeletonRows read={plan} rows={4} /> : <ArchiveConsequences plan={plan.data} />}
     </ConfirmDialog>
   );
 }
@@ -689,17 +689,21 @@ function DeleteDialog({ place, open, onClose }: DialogProps & { place: PlaceRef 
         ...(isDepartment ? { members: { role }, resources } : {}),
         ...(plan === null ? {} : { preflight_id: plan.preflight_id, expected_revision: plan.revision }),
       }),
+    // Whether the screen in view is in what is deleted is known before the request: once it is answered, the tree has
+    // dropped the place and everything in it, and nothing is left to say where the screen lay.
+    onMutate: () => {
+      const viewing = heading?.nodeId;
+      return { inside: viewing !== undefined && useTreeStore.getState().byOrg.size > 0 && isInside(viewing, place.id) };
+    },
     onError: (error) => {
       const current = staleCurrent(error);
       if (current !== null) setReplaced(current);
     },
-    onSuccess: (deleted) => {
+    onSuccess: (deleted, _vars, context) => {
       // A screen that was in what is deleted has nothing left to show: it goes to the place above. What it had read
       // of what is gone is not asked again: the registry of acts leaves that to the tree, which says what is gone.
-      const viewing = heading?.nodeId;
-      const inside = viewing !== undefined && useTreeStore.getState().byOrg.size > 0 && isInside(viewing, place.id);
       onClose();
-      if (inside && parent !== null) void navigate({ to: placePath({ id: parent.id, kind: parent.kind }) });
+      if (context.inside && parent !== null) void navigate({ to: placePath({ id: parent.id, kind: parent.kind }) });
       toast({
         tone: 'success',
         title: t('places.toast.deleted', { name: place.name }),

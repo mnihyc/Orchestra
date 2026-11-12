@@ -259,6 +259,7 @@ pub fn stream(segment: &Segment, usage: &Usage, ctx: &Ctx) -> (Vec<Frame>, Endin
     for (at, step) in segment.steps.iter().enumerate() {
         match step {
             Step::Sleep(duration) => wire.wait(*duration),
+            Step::Hold(name) => wire.hold(name),
             Step::Keepalive => wire.comment("keep-alive"),
             Step::Event { name, data } => wire.raw(Some(name), data),
             Step::Garbage(text) => wire.raw(None, text),

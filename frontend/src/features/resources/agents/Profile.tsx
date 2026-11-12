@@ -24,12 +24,14 @@ import { DescriptorOverrides } from '@/features/resources/agents/Overrides';
 import { type DescriptorView, harnessSupportWords, harnessVersionWords, humanize, readDescriptor, reportedHarnessName, versionPin } from '@/features/resources/agents/descriptor';
 import { Facts } from '@/features/resources/Facts';
 import { DetailPages, ResourceDetails, ResourceTabs as Tabs, ResourceHeadingActs as HeadingActs } from '@/features/resources/DetailSections';
+import { Hint } from '@/features/help/Hint';
 import { SourceSettingLink } from '@/features/settings/SourceSettingLink';
 import { useSay } from '@/features/settings/SettingRow';
 import { useHarnessTitle } from '@/features/resources/harnesses';
 import { programNameIn } from '@/features/resources/programNames';
 import { Bindings } from '@/features/resources/agents/Bindings';
 import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
+import { ProfileConfigKeys } from '@/features/resources/agents/ProfileConfigKeys';
 import { ResourceAccess } from '@/features/resources/ResourceAccess';
 import { ReadOnlySettingsNotice } from '@/features/settings/ReadOnlyNotice';
 import { useResourceHeading } from '@/features/resources/trail';
@@ -47,7 +49,7 @@ import { SettingRow as SettingRowLayout } from '@/ui/SettingRow';
 import { SettingEditor } from '@/ui/SettingEditor';
 import { SettingChanges } from '@/ui/SettingChanges';
 import { ValueSummary } from '@/ui/ValueSummary';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { type Column, Table } from '@/ui/Table';
 import { Textarea } from '@/ui/Textarea';
 import { toast } from '@/ui/Toast';
@@ -57,10 +59,10 @@ export { AGENT_TABS, type AgentTab };
 /** The sentinel of the version menu for "the default build": a menu cannot hold an empty value. */
 const DEFAULT_BUILD = '\u0000default';
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -294,7 +296,7 @@ function ProfileForm({ agent, manage }: { agent: Agent; manage: boolean }) {
         <ul aria-label={t('agents.profile.title')} className="min-w-0 divide-y divide-border rounded-lg border border-border bg-surface">
           {manage && <SettingRowLayout name={t('agents.profile.name')}
             value={<Input label={t('agents.profile.name')} hideLabel value={name} disabled={save.isPending} onChange={(event) => setName(event.target.value)} autoComplete="off" />} />}
-          <SettingRowLayout name={t('agents.profile.pin')} description={t('agents.profile.pinHint')} readOnly={!manage}
+          <SettingRowLayout name={t('agents.profile.pin')} description={t('agents.profile.pinHint')} help={<Hint id="agent-pin" />} readOnly={!manage}
             reason={manage && current === null ? t('settings.compact.finishDraft') : undefined} value={manage ? <ChoiceLocator
             label={t('agents.profile.pin')}
             hideLabel
@@ -307,9 +309,10 @@ function ProfileForm({ agent, manage }: { agent: Agent; manage: boolean }) {
               ...(shownPin !== DEFAULT_BUILD && !builds.some((build) => build.version === shownPin) ? [{ value: shownPin, ...choiceOption(t, 'dynamic.value', { name: harnessVersionWords(t, shownPin), context: t('agents.profile.pin') }) }] : []),
             ]}
           /> : shownPin === DEFAULT_BUILD ? t('agents.list.pinDefault') : harnessVersionWords(t, shownPin)} />
-          {!manage && <SettingRowLayout name={t('agents.profile.json')} readOnly value={<ValueSummary value={agent.profile} />} />}
+          {!manage && <SettingRowLayout name={t('agents.profile.json')} help={<Hint id="agent-profile" />} readOnly value={<ValueSummary value={agent.profile} />} />}
+          <ProfileConfigKeys profile={agent.profile} />
           <li><ResourceDetails keepMounted pauseEffects={false}><ul>
-          {manage && <SettingEditor name={t('agents.profile.json')} description={`${t('agents.profile.lead')} ${t('agents.profile.jsonHint')}`}
+          {manage && <SettingEditor name={t('agents.profile.json')} description={`${t('agents.profile.lead')} ${t('agents.profile.jsonHint')}`} help={<Hint id="agent-profile" />}
             status={jsonOpen ? undefined : current === null ? <StateLine role="alert" tone="danger" compact message={t('agents.profile.jsonInvalid')} /> : fault === undefined ? undefined : <StateLine role="alert" tone="danger" compact message={fault} />}
             label={t('settings.compact.editValue', { name: t('agents.profile.json') })} open={jsonOpen} onOpenChange={setJsonOpen}
             summary={<ValueSummary inControl value={agent.profile} />} disabled={save.isPending}><Textarea
@@ -382,10 +385,10 @@ export function AgentScreen({ agentId, tab, onTab }: AgentScreenProps) {
   const acts = useAgentActs({ onProfile: () => onTab('profile'), afterDelete: () => void navigate({ to: '/resources/agents' }) });
 
   const refused = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status);
-  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons />;
+  if (query.data === undefined || refused) return query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : <Skeletons read={query} />;
   const agent = query.data;
   const manage = holds(agent.access, 'agent.manage');
-  const descriptor = readDescriptor(agent.descriptor);
+  const descriptor = readDescriptor(agent.descriptor, locale);
   const { edit, primary, menu } = acts.page(agent);
   const harness = declaredHarness ?? harnessTitle(agent.harness_kind);
 
@@ -406,7 +409,7 @@ export function AgentScreen({ agentId, tab, onTab }: AgentScreenProps) {
         facts={[
           agent.disabled ? <Badge key="state" tone="warning">{t('resources.disabled')}</Badge> : <Badge key="state" tone="accent">{t('agents.list.enabled')}</Badge>,
         ]}
-        actions={manage ? <HeadingActs omit={tab === 'profile' ? ['edit', 'rename'] : []} admin={adminSpec(agent, 'agent.manage')} name={agent.name} primary={primary} edit={edit} menu={menu} /> : <HeadingActs name={agent.name} primary={null} edit={null} menu={menu} />}
+        actions={<HeadingActs omit={tab === 'profile' ? ['edit', 'rename'] : []} admin={adminSpec(agent, 'agent.manage')} name={agent.name} primary={primary} edit={edit} menu={menu} />}
       />
       <Tabs
         label={t('agents.tabs.label')}

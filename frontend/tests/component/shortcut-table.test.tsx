@@ -22,16 +22,16 @@ let originalTheme: string | null;
 beforeEach(() => { originalTheme = document.documentElement.getAttribute('data-theme'); calls.read.mockClear(); calls.write.mockReset(); calls.write.mockImplementation(() => Promise.resolve()); setKeyChoices(SHIPPED_CHOICES); unbind = bindAction('inbox', () => true); });
 afterEach(async () => { cleanup(); unbind?.(); setKeyChoices(SHIPPED_CHOICES); if (originalTheme === null) document.documentElement.removeAttribute('data-theme'); else document.documentElement.dataset.theme = originalTheme; await setLocale('en'); });
 
-function draw(dialog = false) {
+function draw(dialog = false, onOpenChange: (open: boolean) => void = () => undefined) {
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY }, mutations: { retry: false } } });
   cache.setQueryData(meStateKey, { other: { untouched: true }, keys: { extra: 'kept', single_key: true, bindings: { 'future-action': 'Alt+9' } } });
   // The actual shell mirrors personal state into the one book, even when the help tab draws the list.
   function Kept() {
     const state = useQuery(meStateQuery).data;
     useEffect(() => { setKeyChoices(keyChoicesOf(state?.keys)); }, [state]);
-    return dialog ? <ShortcutDialog open onOpenChange={() => undefined} /> : <KeyList />;
+    return dialog ? <ShortcutDialog open onOpenChange={onOpenChange} /> : <KeyList />;
   }
-  render(<QueryClientProvider client={cache}><TooltipProvider><Kept /></TooltipProvider></QueryClientProvider>);
+  render(<QueryClientProvider client={cache}><TooltipProvider overflow={false}><Kept /></TooltipProvider></QueryClientProvider>);
   return cache;
 }
 
@@ -131,4 +131,20 @@ it('refuses a taken shortcut and leaves the native action bound to its former ke
       expect(keyBook.handle(new KeyboardEvent('keydown', { key: 'i', cancelable: true }))).toBe(true);
     });
   } finally { away(); }
+});
+
+it('gives up a choice of keys with Escape and keeps the shortcut sheet open until the next Escape', async () => {
+  const changed = vi.fn();
+  draw(true, changed); const user = userEvent.setup();
+  const dialog = screen.getByRole('dialog', { name: i18n.t('shell.shortcuts.title') });
+  await user.type(within(dialog).getByRole('searchbox', { name: i18n.t('shell.keyChoice.search') }), keyActionName(i18n.t, 'inbox'));
+  const change = within(dialog).getByRole('button', { name: i18n.t('shell.keyChoice.changeOf', { action: keyActionName(i18n.t, 'inbox') }) });
+  await user.click(change);
+  expect(within(dialog).getByRole('group', { name: i18n.t('shell.keyChoice.pressing', { action: keyActionName(i18n.t, 'inbox') }) })).toHaveFocus();
+  await user.keyboard('{Escape}');
+  await waitFor(() => expect(within(dialog).getByRole('button', { name: i18n.t('shell.keyChoice.changeOf', { action: keyActionName(i18n.t, 'inbox') }) })).toHaveFocus());
+  expect(changed).not.toHaveBeenCalled();
+  expect(calls.write).not.toHaveBeenCalled();
+  await user.keyboard('{Escape}');
+  expect(changed).toHaveBeenCalledWith(false);
 });

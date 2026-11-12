@@ -4,19 +4,38 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { ThreadStateIcon, threadStateLabel } from '@/ui/ThreadState';
 import { useAppearance } from '@/lib/appearance';
 import { formatSpan } from '@/lib/time';
+import { serverClock } from '@/lib/serverClock';
 import { i18n, setLocale } from '@/i18n';
 import { display, recoveryDisplay } from '../doubles/thread-display';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+import { isThreadDisplay } from '@/lib/threadDisplay';
+
+skipOverflowFallback();
 
 const appearance = useAppearance.getState();
 const NOW = Date.parse('2026-10-28T00:00:00.000Z');
-afterEach(async () => { cleanup(); vi.useRealTimers(); useAppearance.setState(appearance); await setLocale('en'); });
+afterEach(async () => { cleanup(); serverClock.clear(); vi.useRealTimers(); useAppearance.setState(appearance); await setLocale('en'); });
+
+for (const locale of ['en', 'zh-CN'] as const) {
+  it(`keeps a machine-return recovery visible in the shared thread display (${locale})`, async () => {
+    await setLocale(locale);
+    const queued = display('queued', { recovery: recoveryDisplay({
+      failure_kind: 'session_lost', stop_reason: 'machine_offline', step: 'continue',
+      continuing: true, attempt: 1, attempts: 1, due_at: null,
+    }) });
+    expect(isThreadDisplay(queued)).toBe(true);
+    const view = show(<ThreadStateIcon display={queued} />);
+    expect(screen.getByRole('img', { name: `${i18n.t('calls.details.machine_offline')} · ${i18n.t('calls.attempt', { attempt: '1', total: '1' })}` })).toBeVisible();
+    expect(view.container.querySelector('svg.lucide-clock-3')).not.toBeNull();
+  });
+}
 
 for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
   it(`shows the retry countdown and stopped cause at ${width}/${theme}/${locale}`, async () => {
     await setLocale(locale);
     useAppearance.setState({ locale, theme, resolvedTheme: theme });
     vi.useFakeTimers(); vi.setSystemTime(NOW);
+    serverClock.observe(new Date(NOW).toISOString(), NOW, NOW);
     const queued = display('queued', { blocked_reason: 'error', recovery: recoveryDisplay() });
     const label = (seconds: number) => `${i18n.t('threadStates.retryIn', { time: formatSpan(seconds * 1_000, { locale }, 'short') })} · ${i18n.t('calls.attempt', { attempt: '2', total: '3' })}`;
     const view = show(<div data-theme={theme} style={{ width }}><ThreadStateIcon display={queued} /></div>);
@@ -46,20 +65,33 @@ it('uses the reserved continuation and configured denominator rather than guessi
   expect(threadStateLabel(stopped, i18n.t, { locale: 'en' }, NOW)).toBe(i18n.t('calls.details.author_lacks_use'));
 });
 
-it('shares its clocks across a thousand icons and releases them when those icons leave', async () => {
+it('shares its clocks across a thousand icons and releases them when those icons leave', () => {
   vi.useFakeTimers(); vi.setSystemTime(NOW);
+    serverClock.observe(new Date(NOW).toISOString(), NOW, NOW);
   const queued = display('queued', { recovery: recoveryDisplay() });
   const icons = (count: number) => <>{Array.from({ length: count }, (_, index) => <ThreadStateIcon key={index} display={queued} />)}</>;
   const view = show(icons(1));
-  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+  // Both shared interval callbacks publish synchronously. One act batches their readers
+  // without draining unrelated asynchronous tooltip/DOM work once per mounted icon.
+  act(() => { vi.advanceTimersByTime(1_000); });
   const oneIconTimers = vi.getTimerCount();
   const network = vi.spyOn(globalThis, 'fetch');
-  view.rerender(icons(1_000));
-  await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
-  expect(screen.getAllByRole('img')).toHaveLength(1_000);
-  expect(vi.getTimerCount()).toBe(oneIconTimers);
-  expect(network).not.toHaveBeenCalled();
-  view.unmount();
-  expect(vi.getTimerCount()).toBe(0);
-  network.mockRestore();
+  try {
+    view.rerender(icons(1_000));
+    act(() => { vi.advanceTimersByTime(1_000); });
+    expect(screen.getAllByRole('img')).toHaveLength(1_000);
+    expect(vi.getTimerCount()).toBe(oneIconTimers);
+    expect(network).not.toHaveBeenCalled();
+    view.unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { view.unmount(); network.mockRestore(); }
+}, 10_000); // A thousand icons are what the case shows, so drawing them is its work and cannot be less: about half of the default limit on a runner, hence twice it.
+
+it('keeps an unmeasured server clock out of countdowns and reacts to an actual sample', () => {
+  vi.useFakeTimers(); vi.setSystemTime(NOW); serverClock.clear();
+  const queued = display('queued', { recovery: recoveryDisplay() });
+  show(<ThreadStateIcon display={queued} />);
+  expect(screen.getByRole('img', { name: `${i18n.t('state.queued')} · ${i18n.t('calls.attempt', { attempt: '2', total: '3' })}` })).toBeVisible();
+  act(() => serverClock.observe(new Date(NOW).toISOString(), NOW, NOW));
+  expect(screen.getByRole('img', { name: `${i18n.t('threadStates.retryIn', { time: formatSpan(55_000, { locale: 'en' }, 'short') })} · ${i18n.t('calls.attempt', { attempt: '2', total: '3' })}` })).toBeVisible();
 });

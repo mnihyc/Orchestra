@@ -13,13 +13,15 @@ test('Build your own opens the provider contract and its facts/model/reset/prese
     if (request.method() !== 'GET' && /\/providers(?:\/|$)/.test(path)) changes.push(`${request.method()} ${path}`);
   });
   await page.goto('/help');
-  await page.getByRole('tab', { name: 'Build your own', exact: true }).click();
+  await page.getByRole('tab', { name: /^Build your own(?:\s+\d+)?$/ }).click();
   await page.getByRole('button', { name: /^Build your own provider source/ }).click();
   await expect(page.getByRole('heading', { name: 'Build your own provider source', level: 1 })).toBeVisible();
   await expect(page.getByRole('link', { name: 'facts', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'facts', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Implement a provider facts source', level: 1 })).toBeVisible();
-  await expect(page.locator('pre').filter({ hasText: 'class Acme:' }).first()).toBeVisible();
+  const program = page.getByRole('figure').filter({ has: page.getByRole('region', { name: 'Code in python', exact: true }) }).first();
+  await program.getByRole('button', { name: 'Show all', exact: true }).click();
+  await expect(program.getByRole('region', { name: 'Code in python', exact: true })).toContainText('class Acme:');
   const schemaLink = page.getByRole('link', { name: 'SourceAsk', exact: true });
   const href = await schemaLink.getAttribute('href');
   expect(href).toContain('source-ask');

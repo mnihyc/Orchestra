@@ -9,7 +9,9 @@ import { SETTINGS_REGISTRY } from '@/generated/settings-registry';
 import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { detailEnvironment } from './resource-detail-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const entries = [
   { key: 'env.lifetime', value: 'temporary' }, { key: 'env.temporary_idle_hours', value: 24 },

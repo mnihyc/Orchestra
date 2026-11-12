@@ -9,7 +9,9 @@ import { managementSections, placeSettingsSections, settingsNavigation } from '@
 import { sectionLabel } from '@/features/settings/sectionLabels';
 import { i18n, setLocale } from '@/i18n';
 import { SectionNav } from '@/ui/SectionNav';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const modes = [['en', 'light'], ['en', 'dark'], ['zh-CN', 'light'], ['zh-CN', 'dark']] as const;
 const histories: ReturnType<typeof createMemoryHistory>[] = [];
@@ -58,23 +60,28 @@ function current(nav: HTMLElement, expected: string) {
   expect(links[0]).toHaveAccessibleName(expected);
 }
 
-it.each(modes)('finds all 22 Management destinations locally and reaches the last by keyboard in %s/%s', async (locale, theme) => {
+it.each(modes)('finds all 24 Management destinations locally and reaches the last by keyboard in %s/%s', async (locale, theme) => {
   await setLocale(locale); document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
   const user = userEvent.setup(); const { router, reads } = draw('/admin/overview');
   const label = i18n.t('admin.nav.label'); const nav = await screen.findByRole('navigation', { name: label });
   const field = within(nav).getByRole('combobox', { name: label });
-  expect(LISTED).toHaveLength(22);
-  expect(within(nav).getAllByRole('link')).toHaveLength(22);
+  expect(LISTED.map((entry) => entry.id)).toEqual([
+    'overview', 'users', 'tokens', 'orgs', 'everything', 'sign-in', 'email', 'hosts', 'runtimes', 'templates', 'mcp',
+    'capabilities', 'harnesses', 'agents', 'plugins', 'defaults', 'rates', 'settings', 'storage', 'semantic-search',
+    'system', 'gateways', 'pki', 'audit',
+  ]);
+  expect(LISTED).toHaveLength(24);
+  expect(within(nav).getAllByRole('link')).toHaveLength(24);
   for (const entry of LISTED) expect(within(nav).getByRole('link', { name: i18n.t(`admin.sections.${entry.id}.title`) })).toHaveAttribute('href', `/admin/${entry.id}`);
   const initial = i18n.t('admin.sections.overview.title'); const last = i18n.t('admin.sections.audit.title');
   current(nav, initial); expect(field).toHaveValue(initial); expect(reads).toHaveBeenCalledTimes(1);
-  await user.click(field); expect(screen.getAllByRole('option')).toHaveLength(22);
+  await user.click(field); expect(screen.getAllByRole('option')).toHaveLength(24);
   expect(field).toHaveAttribute('placeholder', i18n.t('ui.combobox.search'));
   await user.type(field, last);
   expect(screen.getAllByRole('option')).toHaveLength(1); expect(screen.getByRole('option', { name: last })).toBeVisible();
   expect(router.state.location.href).toBe('/admin/overview'); current(nav, initial); expect(reads).toHaveBeenCalledTimes(1);
   await user.keyboard('{Escape}'); expect(field).toHaveValue(initial); expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-  await user.keyboard('{ArrowDown}'); expect(screen.getAllByRole('option')).toHaveLength(22);
+  await user.keyboard('{ArrowDown}'); expect(screen.getAllByRole('option')).toHaveLength(24);
   await user.keyboard('{End}'); expect(screen.getByRole('option', { name: last, selected: true })).toBeVisible();
   await user.keyboard('{Enter}');
   await waitFor(() => expect(router.state.location.pathname).toBe('/admin/audit'));
@@ -89,15 +96,15 @@ it.each(modes)('finds all 22 Management destinations locally and reaches the las
 });
 
 const scopes = [
-  { href: '/topic/topic-place?tab=settings&section=policies', destination: '/topic/topic-place?tab=settings&section=audit', search: { tab: 'settings', section: 'audit' } },
-  { href: '/project/project-place/settings?section=policies', destination: '/project/project-place/settings?section=audit', search: { section: 'audit' } },
+  { href: '/topic/topic-place?tab=settings&section=defaults', destination: '/topic/topic-place?tab=settings&section=audit', search: { tab: 'settings', section: 'audit' } },
+  { href: '/project/project-place/settings?section=defaults', destination: '/project/project-place/settings?section=audit', search: { section: 'audit' } },
 ] as const;
 
 for (const scope of scopes) it.each(['en', 'zh-CN'] as const)(`keeps the exact scoped native destination from ${scope.href} in %s`, async (locale) => {
   await setLocale(locale); const user = userEvent.setup(); const { router, reads } = draw(scope.href);
   const nav = await screen.findByRole('navigation', { name: 'Scoped sections' });
   const field = within(nav).getByRole('combobox', { name: 'Scoped sections' }); const name = sectionLabel('audit', i18n.t);
-  expect(field).toHaveValue(sectionLabel('policies', i18n.t)); current(nav, sectionLabel('policies', i18n.t));
+  expect(field).toHaveValue(sectionLabel('defaults', i18n.t)); current(nav, sectionLabel('defaults', i18n.t));
   expect(within(nav).getByRole('link', { name })).toHaveAttribute('href', scope.destination);
   await user.type(field, name); expect(screen.getAllByRole('option')).toHaveLength(1);
   expect(router.state.location.href).toBe(scope.href); expect(reads).toHaveBeenCalledTimes(1);

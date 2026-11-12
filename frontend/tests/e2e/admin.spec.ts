@@ -1,7 +1,7 @@
 /** Management at work: how the system stands and a part that fails, a person made and given a link, suspended and resumed, the last system admin kept, a root org's limit switched, the audit list filtered and its file started, a host that is full, the notice for everybody, who may register, an identity provider, and somebody who is no system admin refused. */
 import { expect, type Page, type TestInfo, test } from '@playwright/test';
 
-import { PEOPLE, scenario } from './support.ts';
+import { PEOPLE, scenario, arrived, screenAddress } from './support.ts';
 import { signInForManagement as signIn } from './admin-mode-support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
@@ -24,6 +24,15 @@ async function open(page: Page, path: string, person: { login: string; password:
 
 const row = (page: Page, name: string | RegExp) => page.getByRole('row', { name });
 const notices = (page: Page) => page.getByRole('region', { name: /^Notifications/ });
+
+/** Inspect responsive table details in the management pane after freeing its surrounding bars. */
+async function showTableColumns(page: Page): Promise<void> {
+  for (const [bar, label] of [['left', 'Left bar'], ['right', 'Right bar']] as const) {
+    if (await page.locator(`[data-workbench-bar="${bar}"]:visible`).count() > 0) {
+      await page.getByRole('button', { name: label, exact: true }).click();
+    }
+  }
+}
 
 /** The current destination is the same link in both presentations; its containing frame chooses which is visible. */
 async function currentSection(page: Page, id: string, title: string) {
@@ -195,6 +204,7 @@ test.describe('Users', () => {
     await expect(made.getByRole('button', { name: 'Copy link' })).toBeVisible();
     await made.getByRole('button', { name: 'Done' }).click();
 
+    await showTableColumns(page);
     await expect(row(page, /Rosalind Franklin/)).toContainText('rosalind@example.org');
     await expect(row(page, /Rosalind Franklin/)).toContainText('Not confirmed yet');
 
@@ -280,12 +290,27 @@ test.describe('Users', () => {
   });
 
   test('makes a link to a new password, with its tick for a second step that was lost, and says what to tell somebody whose name is locked', async ({ page }) => {
+    // The lock lasts three hours from the world's start. The product says its end as a time alone when that is still today, and
+    // with the date when the day turns in between. The browser's clock is put where each form is made, so that the case does not
+    // depend on the hour it runs at (the lock's end is placed in the browser's own zone to tell where its day begins).
+    const lockEnds = Date.now() + 3 * 60 * 60 * 1_000;
+    const MINUTE = 60 * 1_000, DAY = 24 * 60 * MINUTE;
+    const zone = await page.evaluate((moment) => new Date(moment).getTimezoneOffset(), lockEnds) * MINUTE;
+    const sameDay = (lockEnds - zone) % DAY >= 5 * MINUTE ? lockEnds - 5 * MINUTE : lockEnds + 5 * MINUTE;
+    await page.clock.install({ time: new Date(sameDay) });
+    await page.clock.resume();
     await open(page, '/admin/users');
 
     // A name that strangers' wrong tries have closed says which proof until when, and what to tell the person.
     const locked = row(page, /Bo Lted/);
-    await expect(locked).toContainText(/Password locked for new browsers until \d{2}:\d{2}/);
+    await expect(locked).toContainText(/Password locked for new browsers until \d{2}:\d{2} [AP]M(?!\d)/);
+    await expect(locked).not.toContainText(/until [A-Z][a-z]{2} \d{1,2}, /);
     await expect(locked).toContainText('They can sign in where they signed in before, or with a reset link.');
+    // The day before, the same end is another day's: the date comes with the time.
+    await page.clock.setSystemTime(new Date(lockEnds - DAY - 5 * MINUTE));
+    await page.reload();
+    await expect(locked).toContainText(/Password locked for new browsers until [A-Z][a-z]{2} \d{1,2}, \d{2}:\d{2} [AP]M/);
+    await page.clock.setSystemTime(new Date());
 
     await openMenu(page, 'Grace Hopper');
     await page.getByRole('menuitem', { name: 'Reset link…' }).click();
@@ -321,6 +346,7 @@ test.describe('Users', () => {
 test.describe('Organizations', () => {
   test('switches a root org’s limit and says how many stay, and an org without owners is given one', async ({ page }) => {
     await open(page, '/admin/orgs');
+    await showTableColumns(page);
     const acme = row(page, /Acme/);
     const takes = acme.getByRole('switch', { name: 'Takes members' });
     await expect(takes).toBeChecked();
@@ -328,6 +354,8 @@ test.describe('Organizations', () => {
     await expect(takes).not.toBeChecked();
     await expect(acme.getByText('No further members. Its 7 people stay.')).toBeVisible();
     await page.reload();
+    await page.waitForLoadState('networkidle');
+    await showTableColumns(page);
     await expect(row(page, /Acme/).getByRole('switch', { name: 'Takes members' })).not.toBeChecked();
     await row(page, /Acme/).getByRole('switch', { name: 'Takes members' }).click();
     await expect(row(page, /Acme/).getByRole('switch', { name: 'Takes members' })).toBeChecked();
@@ -359,7 +387,7 @@ test.describe('Organizations', () => {
     await expect(row(page, /Old Labs/)).toContainText('Archived');
 
     await row(page, /Acme/).getByRole('link', { name: 'Open' }).click();
-    await expect(page).toHaveURL(/\/org\/acme$/);
+    await expect(page).toHaveURL(screenAddress('/org/acme'));
   });
 
   test("lists team orgs before people's own, and keeps one kind in the address", async ({ page }) => {
@@ -382,8 +410,11 @@ test.describe('Sign-in', () => {
     const group = page.getByRole('radiogroup', { name: 'Who may register' });
     const invite = group.getByRole('radio', { name: 'Invite' });
     await expect(invite).toBeChecked();
-    await expect(group.getByText('An invitation into any org here, a department included, or one of the system\'s. Each root org decides which forms it gives out.')).toBeVisible();
-    await expect(page.getByText('Whoever joins gets an org of their own.')).toBeVisible();
+    // Compact choices keep their full explanation on focus.
+    await invite.focus();
+    await expect(page.getByRole('tooltip')).toContainText('An invitation into any org here, a department included, or one of the system\'s. Each root org decides which forms it gives out.');
+    // Personal organizations now have a separate creation setting, enabled as shipped.
+    await expect(page.getByRole('switch', { name: 'Create personal organizations', exact: true })).toBeChecked();
 
     await group.getByRole('radio', { name: 'Open' }).click();
     await expect(group.getByRole('radio', { name: 'Open' })).toBeChecked();
@@ -400,7 +431,7 @@ test.describe('Sign-in', () => {
     await makers.getByRole('radio', { name: 'Invited' }).click();
     await expect(makers.getByRole('radio', { name: 'Invited' })).toBeChecked();
     await expect(page.getByText('A system admin gives such an invitation from Users; it is used once.')).toBeVisible();
-    await expect(page.getByText("A person's own org is made with them whatever is chosen here.")).toBeVisible();
+    await expect(page.getByText('Personal organization creation is controlled separately from team organization creation.')).toBeVisible();
 
     await page.goto('/admin/users');
     await openMenu(page, 'Vera Rubin');
@@ -430,14 +461,21 @@ test.describe('Sign-in', () => {
     // A code by mail: the two ticks are the system's own value, and the lock holds every org to it.
     const code = page.getByRole('group', { name: 'A code by mail', exact: true });
     const signInByMail = code.getByRole('checkbox', { name: 'Sign in', exact: true });
+    await signInByMail.focus();
     await expect(signInByMail).toHaveAccessibleDescription('A way to sign in without the password');
     await signInByMail.check();
     await expect(signInByMail).toBeChecked();
     await page.getByRole('switch', { name: 'Hold every org to it' }).click();
     await expect(page.getByRole('switch', { name: 'Hold every org to it' })).toBeChecked();
     await page.reload();
+    await page.waitForLoadState('networkidle');
     await expect(signInByMail).toBeChecked();
     const secondStep = code.getByRole('checkbox', { name: 'Second step', exact: true });
+    await page.mouse.move(0, 0);
+    // Move there deliberately: a quietly restored focus does not open its tooltip again.
+    await signInByMail.focus();
+    await page.keyboard.press('Tab');
+    await expect(secondStep).toBeFocused();
     await expect(secondStep).toHaveAccessibleDescription('A second step after the password, for whoever switches it on');
     await expect(secondStep).not.toBeChecked();
     await expect(page.getByRole('switch', { name: 'Hold every org to it' })).toBeChecked();
@@ -474,7 +512,7 @@ test.describe('Sign-in', () => {
     await open(page, '/admin/sign-in');
     await expect(row(page, /Acme single sign-on/)).toContainText('/auth/oidc/acme-sso/callback');
     await row(page, /Acme single sign-on/).getByRole('button', { name: 'Actions for Acme single sign-on', exact: true }).click();
-    const tested = page.waitForResponse((response) => response.request().method() === 'POST' && /\/api\/v1\/admin\/identity-providers\/[^/]+\/test$/u.test(new URL(response.url()).pathname));
+    const tested = arrived(page.waitForResponse((response) => response.request().method() === 'POST' && /\/api\/v1\/admin\/identity-providers\/[^/]+\/test$/u.test(new URL(response.url()).pathname)));
     await page.getByRole('menuitem', { name: 'Test…', exact: true }).click();
     const result = await tested; expect(result.status()).toBe(200); expect(await result.json()).toMatchObject({ ok: true, error: null });
     const testDialog = page.getByRole('dialog', { name: 'Test Acme single sign-on', exact: true });
@@ -598,17 +636,24 @@ test.describe('Capabilities and harnesses', () => {
 
   test('says what each adapter supports from its descriptor, and sets another build as the default of its kind', async ({ page }) => {
     await open(page, '/admin/harnesses');
-    const table = page.getByRole('table', { name: 'What each adapter supports' });
-    const claude = table.getByRole('row', { name: /Claude Code/ });
-    await expect(claude).toContainText("Keeps its own notes in the thread's directory");
-    await expect(claude).toContainText('Can be watched');
-    const codex = table.getByRole('row', { name: /Codex/ });
-    await expect(codex).toContainText('Has one memory for its whole home: kept off; the agent keeps notes with its tools');
-    // A member the descriptor does not hold is said as not said, and a descriptor without phases is not given them.
-    const acme = table.getByRole('row', { name: /Acme agent/ });
-    await expect(acme).toContainText('None: the agent keeps notes with its tools');
-    await expect(acme).toContainText('Not said');
-    await expect(acme).toContainText('Can be typed into');
+    const directory = page.getByRole('table', { name: 'Agent programs', exact: true });
+    // Program pages now show server-grouped declarations, replacing the client-derived memory/terminal table.
+    // A program is listed under the name its adapter declares, with its kind beside it.
+    for (const { name, kind } of [{ name: 'Claude Code', kind: 'claude-code' }, { name: 'Codex', kind: 'codex' }, { name: 'Acme agent', kind: 'acme-agent' }]) {
+      await directory.getByRole('link', { name, exact: true }).click();
+      await page.getByRole('tab', { name: 'Capabilities', exact: true }).click();
+      const steering = page.locator('[data-program-capability="steer"]');
+      await expect(steering).toContainText(`Steering · ${kind === 'acme-agent' ? 'Off' : 'On'}`);
+      if (kind === 'acme-agent') {
+        await steering.getByRole('button', { name: 'Help: Steering', exact: true }).click();
+        await expect(page.getByRole('dialog', { name: 'Steering', exact: true })).toContainText('This build does not declare steering');
+        await page.keyboard.press('Escape');
+        // An empty declaration group stays empty instead of inventing session phases from a missing field.
+        await expect(page.getByRole('region', { name: 'Sessions', exact: true }).getByText('No capabilities declared', { exact: true })).toBeVisible();
+      }
+      await page.getByRole('button', { name: 'Agent programs', exact: true }).click();
+    }
+    await directory.getByRole('link', { name: 'Claude Code', exact: true }).click();
 
     const builds = page.getByRole('table', { name: 'Builds' });
     await expect(builds.getByRole('row', { name: /2\.1\.0/ })).toContainText('Default');
@@ -682,7 +727,7 @@ test.describe('the rest of Management', () => {
     await open(page, '/admin/settings');
     await expect(page.getByLabel('Search the settings')).toBeVisible();
     const sections = await currentSection(page, 'settings', 'Settings');
-    for (const [id, name] of [['email', 'Channels'], ['templates', 'Templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
+    for (const [id, name] of [['email', 'Channels'], ['templates', 'System templates'], ['mcp', 'MCP presets'], ['defaults', 'Access defaults'], ['rates', 'Rates']] as const) {
       const link = sections.locator(`a[data-section-id="${id}"]`);
       await expect(link).toHaveText(name); await expect(link).toHaveAttribute('href', `/admin/${id}`);
     }

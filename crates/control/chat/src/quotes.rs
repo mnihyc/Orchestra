@@ -41,12 +41,11 @@ pub fn refs_in(parts: &[ChatPart]) -> Vec<(Id, Id)> {
     found
 }
 
-/// Checks the quotes of parts that are about to be written in `chat` by the
-/// caller: they are in the chat of a thread, the items are of that thread, and
-/// the caller can read the thread. None when the parts quote nothing.
-pub async fn check(
+/// Resolves the actual thread-chat relationship and verifies that the quoted items belong to
+/// that thread. These are source facts, not read authority; callers still apply ordinary access
+/// checks before reading or writing. None when the parts quote nothing.
+pub async fn source_of(
     conn: &mut Conn,
-    act: &Acting<'_>,
     chat: &ChatRow,
     parts: &[ChatPart],
 ) -> Result<Option<Quoted>, Error> {
@@ -77,6 +76,21 @@ pub async fn check(
             format!("{missing} is not an item of this thread"),
         ));
     }
+    Ok(Some(Quoted { thread, items }))
+}
+
+/// Checks the quotes of parts that are about to be written in `chat` by the caller: their
+/// resolved source is valid and the caller can read that thread. None when no item is quoted.
+pub async fn check(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    chat: &ChatRow,
+    parts: &[ChatPart],
+) -> Result<Option<Quoted>, Error> {
+    let Some(quoted) = source_of(conn, chat, parts).await? else {
+        return Ok(None);
+    };
+    let thread = quoted.thread;
     let seen = nodes::check(
         conn,
         act.principal,
@@ -92,7 +106,7 @@ pub async fn check(
             permission: Permission::ThreadView,
         });
     }
-    Ok(Some(Quoted { thread, items }))
+    Ok(Some(quoted))
 }
 
 /// Takes the thread's next number. It is taken before the chat's, whenever a

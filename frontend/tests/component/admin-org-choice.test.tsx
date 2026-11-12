@@ -56,7 +56,7 @@ function Harness({ value = current.id, disabled = false }: { value?: string | nu
 const clients: QueryClient[] = [];
 function draw(ui: ReactNode) {
   const queries = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } }); clients.push(queries);
-  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider><Toaster>{ui}</Toaster></TooltipProvider></QueryClientProvider>) };
+  return { queries, ...render(<QueryClientProvider client={queries}><TooltipProvider overflow={false}><Toaster>{ui}</Toaster></TooltipProvider></QueryClientProvider>) };
 }
 const field = () => screen.getByRole('combobox', { name: i18n.t('admin.idp.defaultOrg') });
 const list = () => within(screen.getByRole('listbox', { name: i18n.t('admin.idp.defaultOrg') }));

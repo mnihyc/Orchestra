@@ -44,6 +44,7 @@ import { ThreadReadProvider, useThreadReadRef } from '@/realtime/threadReadConte
 import { resultThreadRead, type ThreadReadRef } from '@/realtime/threadScope';
 import { threadReadOnly, threadViewOf, threadWriter, useThreadPart, useThreadView } from '@/realtime/stores/thread';
 import { holds } from '@/lib/permissions';
+import { useAfterDelay } from '@/lib/afterDelay';
 import { Button } from '@/ui/Button';
 import { EmptyState } from '@/ui/EmptyState';
 import { ErrorState } from '@/ui/ErrorState';
@@ -65,7 +66,7 @@ export function StoredTimeline({ snapshot }: { snapshot: ThreadSync }) {
 
 function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadReadRef }) {
   const key = snapshot.thread.id;
-  const preferences = useTimelinePreferences();
+  const preferences = useTimelinePreferences(key);
   const view = useThreadView(key);
   const ui = useThreadUi(key);
   useEffect(() => {
@@ -76,7 +77,7 @@ function StoredHistory({ snapshot, read }: { snapshot: ThreadSync; read: ThreadR
   const context: TimelineContext = { threadId: key, threadName: snapshot.thread.name,
     inspection: { threadId: snapshot.thread.id, ...(snapshot.projection === undefined || snapshot.projection === null ? {} : { continuationId: snapshot.projection.viewed_continuation_id }) },
     detail: preferences.detail, recent: recentTurns(view.turns), layout: preferences.layout, setLayout: preferences.setLayout, meId: null, canInteract: false, canManage: false, live: false, lit: null, selection: NOT_PICKING };
-  return <TimelineContextValue.Provider value={context}><div className="mx-auto flex w-full max-w-(--reading-width) flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <RowView key={row.key} row={row} />)}</div></TimelineContextValue.Provider>;
+  return <TimelineContextValue.Provider value={context}><ol role="list" className="mx-auto flex w-full max-w-(--reading-width) list-none flex-col gap-6 px-2 py-4" data-stored-timeline>{rows.map((row) => <li key={row.key}><RowView row={row} /></li>)}</ol></TimelineContextValue.Provider>;
 }
 
 export interface TimelineHandle {
@@ -89,6 +90,8 @@ export interface TimelineHandle {
 }
 
 export interface TimelineProps {
+  /** Main thread controls and rows can share their view viewport. */
+  viewport?: HTMLDivElement | null;
   threadId: string;
   /** A retained tab behind another does not mark its items read. */
   shown?: boolean;
@@ -106,6 +109,7 @@ export interface TimelineProps {
   focusPrompt?: PromptFocus | null | undefined;
   /** Version browsing keeps its prompt in place; ordinary permalinks still briefly identify their target. */
   highlightLink?: boolean;
+  pinApprovals?: boolean;
   ref?: Ref<TimelineHandle>;
 }
 
@@ -126,12 +130,12 @@ function Skeletons() {
   );
 }
 
-export function Timeline({ threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, ref }: TimelineProps) {
+export function Timeline({ viewport, threadId, shown = true, item: linked, items: alsoLinked = null, empty, onVisible, selection = NOT_PICKING, onVersionSelect, focusPrompt, highlightLink = true, pinApprovals = false, ref }: TimelineProps) {
   const compact = useCompactControls();
   const { t } = useTranslation();
   const read = useThreadReadRef(threadId);
   const view = useThreadView(threadId);
-  const preferences = useTimelinePreferences();
+  const preferences = useTimelinePreferences(threadId);
   const ui = useThreadUi(threadId);
   const meId = useStore(client.session, (state) => state.userId);
   const socket = useSocketStatus();
@@ -141,6 +145,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
   const root = useRef<HTMLDivElement>(null);
   usePromptFocus(root, focusPrompt, view.order);
   const [lit, setLit] = useState<ReadonlySet<string> | null>(null);
+  const later = useAfterDelay();
   const [seen, setSeen] = useState(0);
   const [atEnd, setAtEnd] = useState(true);
   const [restored] = useState(() => readTimelinePosition(read, view.read?.selection ?? null));
@@ -182,6 +187,8 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
       threadId,
       threadName: thread?.name ?? '',
       detail: preferences.detail,
+      liveTools: !readOnly && preferences.liveTools,
+      pinApprovals: pinApprovals && !readOnly,
       recent,
       layout: preferences.layout,
       setLayout: preferences.setLayout,
@@ -194,7 +201,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
       lit,
       selection: readOnly ? NOT_PICKING : selection,
     }),
-    [threadId, thread, preferences.detail, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect],
+    [threadId, thread, preferences.detail, preferences.liveTools, preferences.layout, preferences.setLayout, recent, meId, socket.phase, lit, selection, readOnly, onVersionSelect, pinApprovals],
   );
 
   // New rows below the reader's place: counted since they were last at the end.
@@ -229,7 +236,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
             if (highlight) {
               const lighted: ReadonlySet<string> = new Set([itemId, ...also]);
               setLit(lighted);
-              setTimeout(() => setLit((current) => (current === lighted ? null : current)), LIT_MS);
+              later(() => setLit((current) => (current === lighted ? null : current)), LIT_MS);
             }
           }
         });
@@ -246,7 +253,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
         })
         .catch(() => { if (isCurrentThreadRead(captured)) setFailedLink(itemId); });
     },
-    [read],
+    [read, later],
   );
   const jump = useCallback(() => {
     // The end of a historical window is not the conversation's newest end. Once
@@ -321,7 +328,7 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
 
   if (rows.length === 0) {
     return (
-      <div className="flex h-full items-center-safe justify-center overflow-y-auto">
+      <div className={viewport === undefined ? "flex h-full items-center-safe justify-center overflow-y-auto" : "flex h-full min-h-16 items-center-safe justify-center"}>
         <EmptyState compact={compact}
           icon={<Bot aria-hidden />}
           title={t(readOnly ? 'messageVersions.empty' : 'timeline.empty.title')}
@@ -332,9 +339,15 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
     );
   }
 
+  const showJump = !atEnd || view.loaded === 'window' && view.hasNewer;
+  const jumpButton = (
+    <Button className="pointer-events-auto shadow-md" variant="secondary" size="sm" icon={<ArrowDown aria-hidden />} onClick={jump}>
+      {view.loaded !== 'window' && away > 0 ? t('timeline.newBelow', { count: away }) : t('timeline.jump')}
+    </Button>
+  );
   return (
     <TimelineContextValue.Provider value={context}>
-      <div ref={root} className="relative flex h-full min-h-0 flex-col">
+      <div ref={root} className={viewport === undefined ? "relative flex h-full min-h-0 flex-col" : "relative flex min-h-16 flex-col"}>
         {(loadingOlder || olderFailed) && (
           <div className="absolute top-2 left-1/2 z-(--layer-sticky) -translate-x-1/2">
             {loadingOlder ? (
@@ -349,8 +362,9 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
         )}
         <VirtualList
           ref={list}
+          viewport={viewport}
           label={t('timeline.label')}
-          className="h-full min-h-0 overflow-y-auto"
+          className={viewport === undefined ? "h-full min-h-0 overflow-y-auto" : "min-h-16"}
           count={rows.length}
           startAtEnd={!linkActive || failedLink === linked}
           initialPosition={linked === null && positionRead === 'done' ? restored : null}
@@ -374,13 +388,13 @@ export function Timeline({ threadId, shown = true, item: linked, items: alsoLink
             onVisible?.(ids);
           }}
         />
-        {(!atEnd || view.loaded === 'window' && view.hasNewer) && (
-          <div className="pointer-events-none absolute right-0 bottom-3 left-0 flex justify-center">
-            <Button className="pointer-events-auto shadow-md" variant="secondary" size="sm" icon={<ArrowDown aria-hidden />} onClick={jump}>
-              {view.loaded !== 'window' && away > 0 ? t('timeline.newBelow', { count: away }) : t('timeline.jump')}
-            </Button>
-          </div>
-        )}
+        {showJump && (viewport === undefined
+          ? <div className="pointer-events-none absolute right-0 bottom-3 left-0 flex justify-center">{jumpButton}</div>
+          // Where the view scrolls the conversation with its controls, this root is as tall as the whole conversation: the button
+          // sticks to the foot of what the reader sees of it, and rests at the end of the conversation, above the controls, when that is in view.
+          : <div data-jump-anchor className="pointer-events-none sticky bottom-0 z-(--layer-sticky) h-0">
+              <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center">{jumpButton}</div>
+            </div>)}
       </div>
     </TimelineContextValue.Provider>
   );

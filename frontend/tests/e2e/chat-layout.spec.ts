@@ -4,6 +4,8 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 import { chats, messageSaying } from './chat-support.ts';
 import { ACME, emit, scenario, signIn } from './support.ts';
 import { showWorkbenchView } from './workbench-support.ts';
+import english from '../../src/i18n/en.json' with { type: 'json' };
+import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 
 const WORDS = {
   en: { header: 'Chat controls', composer: 'Chat message controls', send: 'Send message', reply: 'Reply', cancelReply: 'Cancel reply', edit: 'Edit', editor: 'Edit message', save: 'Save', cancel: 'Cancel' },
@@ -45,8 +47,12 @@ async function containedButtons(group: Locator, frame: { x: number; width: numbe
   return result;
 }
 
-async function finishFonts(page: Page) {
-  await page.evaluate(async () => { await document.fonts.ready; });
+async function finishPainting(page: Page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    await Promise.all(document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+      .map((animation) => animation.finished.catch(() => undefined)));
+  });
 }
 
 for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) {
@@ -62,6 +68,7 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     const words = SCOPE_WORDS[locale];
     const scope = page.getByRole('radiogroup', { name: words.group, exact: true });
     await expect(scope).toBeVisible();
+    await finishPainting(page);
     const view = page.locator('[data-chat-view]').filter({ has: scope });
     const row = view.locator('[data-chat-header]');
     const frame = await bounds(row);
@@ -113,14 +120,19 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await page.goto(`/thread/${ACME.mainThread}`);
     const threadSend = page.locator('[data-composer-control="send"]').getByRole('button').first();
     await expect(threadSend).toBeVisible();
-    await finishFonts(page);
+    await finishPainting(page);
     const reference = await bounds(threadSend);
     expect(reference.height).toBeLessThanOrEqual(ORDINARY_PX + ROUNDING_PX);
     await info.attach('thread-reference', { body: await page.screenshot(), contentType: 'image/png' });
 
     await page.goto(`/org/acme/messages?chat=${seeded.chat}`);
     const view = page.locator(`[data-chat-view="${seeded.chat}"]`);
+    const ui = locale === 'en' ? english : chinese;
+    const sheet = page.getByRole('dialog').filter({ has: page.locator('[data-workbench-bar="right"]') });
+    await expect.poll(async () => await view.isVisible() || await sheet.isVisible()).toBe(true);
+    if (await sheet.isVisible()) await sheet.getByRole('button', { name: ui.common.close, exact: true }).click();
     await expect(view).toBeVisible();
+    await finishPainting(page);
     const frame = await bounds(view);
     expect(frame.x).toBeGreaterThanOrEqual(-ROUNDING_PX);
     expect(frame.x + frame.width).toBeLessThanOrEqual(width + ROUNDING_PX);
@@ -148,8 +160,18 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     const compact = await containedButtons(controls, frame);
     for (const button of compact) {
       expect(button.height).toBeLessThanOrEqual(COMPACT_PX + ROUNDING_PX);
-      expect(Math.abs(button.y + button.height - grown.y - grown.height)).toBeLessThanOrEqual(ROUNDING_PX);
     }
+    // Sample auto-sized input and controls together, rather than comparing different resize frames.
+    const alignment = await controls.evaluate((element) => {
+      const input = element.querySelector('textarea, [role="textbox"]');
+      if (input === null) throw new Error('The chat controls contain their input');
+      const bottom = input.getBoundingClientRect().bottom;
+      return [...element.querySelectorAll('button')].filter((button) => button.closest('[aria-hidden="true"]') === null)
+        .filter((button) => getComputedStyle(button).visibility === 'visible').map((button) => button.getBoundingClientRect())
+        .filter((rect) => rect.width > 0 && rect.height > 0).map((rect) => Math.abs(rect.bottom - bottom));
+    });
+    expect(alignment).toHaveLength(compact.length);
+    for (const difference of alignment) expect(difference).toBeLessThanOrEqual(ROUNDING_PX);
     await box.focus();
     for (const button of await controls.getByRole('button').all()) {
       await page.keyboard.press('Tab');
@@ -189,5 +211,40 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await mine.getByRole('button', { name: words.cancel, exact: true }).click();
     await expect(mine.getByRole('textbox')).toHaveCount(0);
     await expect(mine.getByText('Compact chat layout review', { exact: true })).toBeVisible();
+  });
+}
+
+// The line under the box that tells of the saved draft goes when the message is sent, so that nothing under a reader's
+// pointer moves a second later when the saved draft is removed.
+for (const width of [1440, 400]) {
+  test(`the room of the conversation holds after a message is sent at ${width}px`, async ({ page }) => {
+    await scenario();
+    const seeded = await chats('/seed');
+    if (typeof seeded.chat !== 'string') throw new Error('The seeded conversation needs its chat id.');
+    const chat = seeded.chat;
+    await emit(ACME.mainThread, { thread: { state: 'idle' } });
+    await chats('/locale', { as: 'ada', locale: 'en' });
+    await page.setViewportSize({ width, height: 900 });
+    await signIn(page);
+    await page.goto(`/org/acme/messages?chat=${chat}`);
+    const view = page.locator(`[data-chat-view="${chat}"]`);
+    const sheet = page.getByRole('dialog').filter({ has: page.locator('[data-workbench-bar="right"]') });
+    await expect.poll(async () => await view.isVisible() || await sheet.isVisible()).toBe(true);
+    if (await sheet.isVisible()) await sheet.getByRole('button', { name: english.common.close, exact: true }).click();
+    await expect(view).toBeVisible();
+    const box = view.getByRole('textbox');
+    await box.fill('Room that holds after a send');
+    // A reader who wrote and paused has a draft saved, with the line that says so.
+    await expect(view.locator('[data-chat-composer] [role="status"]')).toHaveText('Draft saved');
+    const removed = page.waitForResponse((response) => response.request().method() === 'DELETE' && new URL(response.url()).pathname.endsWith(`/chats/${chat}/draft`));
+    await view.getByRole('group', { name: 'Chat message controls', exact: true }).getByRole('button', { name: 'Send message', exact: true }).click();
+    await expect(messageSaying(page, 'Room that holds after a send')).toBeVisible();
+    await expect(box).toHaveValue('');
+    const room = async () => (await bounds(view.locator('[data-chat-history]'))).height;
+    const settled = await room();
+    // The saved draft is removed from the server a moment later; once that is answered and drawn, the room is the same.
+    await removed;
+    await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    expect(await room()).toBe(settled);
   });
 }

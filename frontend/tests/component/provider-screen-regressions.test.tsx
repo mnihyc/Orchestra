@@ -14,8 +14,10 @@ import type { Provider } from '@/generated/api-types';
 import { i18n, loadSearchCatalogues } from '@/i18n';
 import { knownPlaces } from '@/lib/placeLabel';
 import { planProvider } from '../unit/provider-plan-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
 import { MODEL_ESTIMATE } from '../doubles/fixtures';
+
+skipOverflowFallback();
 
 const listed=vi.hoisted((): {rows:Provider[]} => ({rows:[]}));
 beforeAll(async () => { await loadSearchCatalogues(); });

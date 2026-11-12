@@ -7,6 +7,7 @@
 import { Slot, Tooltip as Primitive } from 'radix-ui';
 import { type ComponentPropsWithRef, type ReactNode, useEffect } from 'react';
 
+import { AUTOMATIC_FOCUS } from '@/ui/focus';
 import { Kbd } from '@/ui/Kbd';
 import { ChoicePicker } from '@/ui/Choice';
 import { useTransientLayer } from '@/ui/PromptScope';
@@ -18,9 +19,12 @@ const REST_MS = OVERFLOW_REST_MS;
 /** Once one name is showing, the next appears at once for this long: reading along a row of buttons. */
 const SKIP_REST_MS = 300;
 
-/** Stands once round the application: every tooltip shares its timing. */
-export function TooltipProvider({ children }: { children: ReactNode }) {
-  useEffect(() => installOverflowTooltips(document), []);
+/**
+ * Stands once round the application: every tooltip shares its timing. `overflow` draws the fallback for text that the screen
+ * shortens, which a harness with no layout (and so no text that is shortened) may leave out where it proves nothing of it.
+ */
+export function TooltipProvider({ children, overflow = true }: { children: ReactNode; overflow?: boolean }) {
+  useEffect(() => (overflow ? installOverflowTooltips(document) : undefined), [overflow]);
   return (
     <Primitive.Provider delayDuration={REST_MS} skipDelayDuration={SKIP_REST_MS}>
       {children}
@@ -55,7 +59,7 @@ export function Tooltip({ content, shortcut, side = 'top', align = 'center', chi
         // A portalled child card does not focus or hover its ancestor's tooltip trigger.
         onFocus={(event) => {
           handedDown.onFocus?.(event);
-          if (!event.currentTarget.contains(event.target)) event.preventDefault();
+          if (!event.currentTarget.contains(event.target) || event.currentTarget.closest(`[${AUTOMATIC_FOCUS}]`) !== null) event.preventDefault();
         }}
         onPointerMove={(event) => {
           handedDown.onPointerMove?.(event);

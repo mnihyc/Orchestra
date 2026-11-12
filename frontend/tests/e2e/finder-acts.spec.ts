@@ -1,10 +1,17 @@
 /** Ctrl+K runs the native acts; the shortcut sheet stays readable and operable in both sizes/themes/locales. */
 import { expect, test, type Page } from '@playwright/test';
 import { caption } from '../../e2e/capture/open.ts';
-import { ACME, bodySent, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, bodySent, PEOPLE, scenario, screenAddress, signIn } from './support.ts';
 import { change } from './change-support.ts';
 
 type Locale = 'en' | 'zh-CN';
+/** The choices an address carries are those of the controls on the screen it names: here, only the audit list's own. */
+function carriesOnly(url: URL, listPrefix: string): boolean {
+  const list = url.searchParams.get('list');
+  if (list === null) return false;
+  const choices: unknown = JSON.parse(list);
+  return typeof choices === 'object' && choices !== null && Object.keys(choices).length > 0 && Object.keys(choices).every((name) => name.startsWith(listPrefix));
+}
 const palette = (page: Page, locale: Locale) => page.getByRole('dialog', { name: caption('@finder.title', locale), exact: true });
 async function open(page: Page, locale: Locale, query: string) {
   await page.keyboard.press('Control+k');
@@ -18,8 +25,9 @@ async function act(page: Page, locale: Locale, query: string, id: string) {
   await expect(finder).toHaveCount(0);
 }
 async function appearance(page: Page, locale: Locale, theme: 'light' | 'dark') {
-  const login = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login'));
-  await signIn(page); const auth: unknown = await (await login).json();
+  // The body is read as the answer arrives: once the page has navigated on, the browser no longer holds it.
+  const login = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith('/auth/login')).then((response) => response.json() as Promise<unknown>);
+  await signIn(page); const auth = await login;
   if (typeof auth !== 'object' || auth === null || !('access_token' in auth) || typeof auth.access_token !== 'string') throw new Error('The fake sign-in returned no session.');
   const saved = await page.request.patch('/api/v1/me', { headers: { Authorization: `Bearer ${auth.access_token}` }, data: { locale, theme } });
   expect(saved.ok()).toBe(true); await page.reload();
@@ -28,9 +36,11 @@ async function appearance(page: Page, locale: Locale, theme: 'light' | 'dark') {
 test.beforeEach(async () => { await scenario(); });
 
 for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const) for (const locale of ['en', 'zh-CN'] as const) {
-  test(`native acts and a searchable shortcut table at ${width}px, ${theme}, ${locale}`, async ({ page }, info) => {
+  test(`native acts and a searchable shortcut table at ${width}px, ${theme}, ${locale}`, async ({ page, context }, info) => {
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
     await page.setViewportSize({ width, height: width === 400 ? 860 : 900 });
     await appearance(page, locale, theme); await page.goto(`/thread/${ACME.mainThread}`);
+    await expect(page.locator('[data-thread-header]')).toBeVisible();
     const finder = await open(page, locale, '>');
     await expect(finder.getByRole('button', { name: caption('@finder.modes.commands', locale), exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(finder.getByRole('switch')).toHaveCount(0);
@@ -54,7 +64,15 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     await page.getByRole('dialog').getByRole('button', { name: caption('@common.cancel', locale), exact: true }).click();
 
     await act(page, locale, locale === 'en' ? '> settings audit' : '> 设置 审计', 'go.place-settings.audit');
-    await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}\\?tab=settings&section=audit$`));
+    // The audit list puts its own choices into the address once it is on screen, in the one order, with the marker; the
+    // usage board's choices, which the topic page only reads, and those of any other screen are not there.
+    await expect(page).toHaveURL((url) => screenAddress(`/topic/${ACME.fixLogin}`, { tab: 'settings', section: 'audit' }).test(url.href) && carriesOnly(url, 'trace.'));
+    if (width === 1440) {
+      // The tab's Copy link gives the address that the bar shows.
+      await page.locator('[data-main-area] [data-navigation-strip="views"] [role="tab"][aria-selected="true"]').press('Shift+F10');
+      await page.getByRole('menuitem', { name: caption('@actions.copyLink.label', locale), exact: true }).click();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(page.url());
+    }
     await act(page, locale, locale === 'en' ? '> keyboard shortcuts' : '> 键盘 快捷键', 'account.keys');
     const sheet = page.getByRole('dialog', { name: caption('@shell.shortcuts.title', locale), exact: true });
     const box = await sheet.boundingBox();
@@ -113,14 +131,26 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
 
 test('New document creates one native document, and Fork invokes the ordinary one-request act', async ({ page }) => {
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
   const creates: string[] = [];
   page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/documents')) creates.push(request.url()); });
   await act(page, 'en', '> new document', 'create.document');
   await expect(page).toHaveURL(/\/doc\//); expect(creates).toHaveLength(1);
-  await page.goto(`/thread/${ACME.mainThread}`); await change.mode('auto');
+  await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
+  await change.mode('auto');
   const forks: string[] = [];
   page.on('request', (request) => { if (request.method() === 'POST' && new URL(request.url()).pathname.endsWith('/forks/now')) forks.push(request.url()); });
+  // A native fork confirms agent access before it is made; the plan of a new thread offers the four places an agent may be given access, the preset being none.
+  await page.route('**/api/v1/threads/*/forks/preflight', async (route) => {
+    const response = await route.fetch(); const plan = await response.json() as Record<string, unknown>;
+    const none = { where: 'nothing', parts: {} };
+    await route.fulfill({ response, json: { ...plan, agent_access: { preset: none, choices: [none, { where: 'thread', parts: {} }, { where: 'topic', parts: {} }, { where: 'project', parts: {} }] } } });
+  });
   await act(page, 'en', '> fork', 'thread.change-fork-now');
+  const confirm = page.getByRole('dialog', { name: 'Agent access for the fork of Main thread', exact: true });
+  await expect(confirm).toBeVisible(); expect(forks).toEqual([]);
+  const fork = confirm.getByRole('button', { name: 'Fork', exact: true }); await expect(fork).toBeEnabled(); await fork.click();
   await expect(page).toHaveURL((url) => url.pathname.startsWith('/thread/') && url.pathname !== `/thread/${ACME.mainThread}`);
   expect(forks).toHaveLength(1);
 });
@@ -142,8 +172,9 @@ test('administrator reach is the same session act, once in each direction, and i
   await expect(finder.locator('[data-value^="commands:account.admin."]')).toHaveCount(0);
 });
 
-test('Ask on the side opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
+test('Side thread opens the ordinary form for the fixture with a verified read-only reader', async ({ page }) => {
   await signIn(page); await page.goto(`/thread/${ACME.mainThread}`);
+  await expect(page.locator('[data-thread-header]')).toBeVisible();
   const finder = await open(page, 'en', '> ask side');
   const ask = finder.locator('[data-value="commands:thread.side-ask"]'); await expect(ask).toBeVisible();
   await expect(ask).not.toHaveAttribute('aria-disabled', 'true');
@@ -153,6 +184,8 @@ test('Ask on the side opens the ordinary form for the fixture with a verified re
 
 test('a refused theme act restores the accepted theme, says why, and can be tried again', async ({ page }) => {
   await appearance(page, 'en', 'light');
+  // The shortcut is bound once the shell has mounted its finder button.
+  await expect(page.getByRole('button', { name: 'Find anything', exact: true, includeHidden: true })).toBeEnabled();
   let refused = false; let writes = 0;
   await page.route('**/api/v1/me', async (route) => {
     if (route.request().method() !== 'PATCH') { await route.continue(); return; }

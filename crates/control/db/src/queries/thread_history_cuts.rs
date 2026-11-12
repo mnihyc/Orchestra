@@ -9,6 +9,8 @@ use crate::queries::{
 use crate::{Conn, DbError};
 use orch_types::{Hash, Id, Json, Seq};
 
+pub mod native;
+
 /// The normal largest history decode batch, including explicit full operations.
 pub const PAGE: i64 = thread_history::PAGE;
 
@@ -42,15 +44,32 @@ pub async fn cut(conn: &mut Conn, id: Id) -> Result<Option<Cut>, DbError> {
 
 /// Indexed boundary of this actual read history, excluding inactive suffixes.
 pub async fn last_completed(conn: &mut Conn, thread: Id, view: Id) -> Result<Option<i32>, DbError> {
+    last_ended(conn, thread, view, false).await
+}
+
+/// Latest finished turn in this actual read view, including failed or interrupted answers.
+/// Keep carries their recorded words as well as successfully completed turns.
+pub async fn last_finished(conn: &mut Conn, thread: Id, view: Id) -> Result<Option<i32>, DbError> {
+    last_ended(conn, thread, view, true).await
+}
+
+async fn last_ended(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    all_finished: bool,
+) -> Result<Option<i32>, DbError> {
     let sql = format!(
         "{OWNERS} SELECT max(t.ordinal) FROM owners o JOIN LATERAL(
       SELECT t.ordinal FROM turns t WHERE t.thread_id=$1 AND t.continuation_id=o.owner
-        AND t.ordinal BETWEEN o.first_turn AND o.last_turn AND t.state='completed'
+        AND t.ordinal BETWEEN o.first_turn AND o.last_turn
+        AND (t.state='completed' OR ($3 AND t.state IN ('failed','interrupted')))
       ORDER BY t.ordinal DESC LIMIT 1) t ON true"
     );
     Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(thread)
         .bind(view)
+        .bind(all_finished)
         .fetch_one(conn)
         .await?)
 }
@@ -112,36 +131,40 @@ fn has_before_sql() -> String {
     )
 }
 
-/// Before-Orch payloads have no synthetic Orch turn. Resolve their actual
-/// retained revisions in the same bounded decoder used by an explicit history.
-pub async fn before_items(conn: &mut Conn, thread: Id, view: Id) -> Result<Vec<ItemRow>, DbError> {
-    let sql = format!(
-        "{OWNERS},candidates AS (SELECT i.id,o.frozen_at,i.seq_created
-      FROM owners o JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner
-      WHERE i.before_orch AND i.turn_id IS NULL AND i.stream='main'
-        AND i.seq_created BETWEEN o.first_seq AND o.last_seq AND i.seq_created>$3
-      ORDER BY i.seq_created LIMIT $4) {}",
-        crate::queries::thread_continuations::reading::DECODE
-    );
-    let mut all = Vec::new();
-    let mut after = 0;
-    loop {
-        let page: Vec<ItemRow> = sqlx::query_as(sqlx::AssertSqlSafe(sql.clone()))
-            .bind(thread)
-            .bind(view)
-            .bind(after)
-            .bind(PAGE)
-            .fetch_all(&mut *conn)
-            .await?;
-        let Some(last) = page.last() else { break };
-        after = last.seq_created;
-        let done = page.len() < PAGE as usize;
-        all.extend(page);
-        if done {
-            break;
+/// Before-import rows retain their actual native identities and have no synthetic turn.
+/// Each read holds one page of the same selected/frozen decoder used by other history readers.
+pub struct BeforeItems {
+    thread: Id,
+    view: Id,
+    after: Seq,
+    done: bool,
+}
+impl BeforeItems {
+    pub fn new(thread: Id, view: Id) -> Self {
+        Self {
+            thread,
+            view,
+            after: 0,
+            done: false,
         }
     }
-    Ok(all)
+    pub async fn next(&mut self, conn: &mut Conn) -> Result<Vec<ItemRow>, DbError> {
+        if self.done {
+            return Ok(Vec::new());
+        }
+        let page = crate::queries::thread_continuations::reading::before_items_page(
+            conn,
+            self.thread,
+            self.view,
+            self.after,
+        )
+        .await?;
+        self.done = page.is_empty();
+        if let Some(last) = page.last() {
+            self.after = last.seq_created;
+        }
+        Ok(page)
+    }
 }
 
 /// The caller holds the source thread lock and the owner's creation/runner claim.
@@ -239,21 +262,37 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
     if changed != 1 {
         return Err(thread_history::damaged());
     }
+    // Capture uses the same bounded page as decoding/copying. A single INSERT for an
+    // entire history otherwise spends the request's statement deadline on FK checks.
+    // Keyset progress follows actual turns, so sparse ordinal ranges add no empty pages.
     let sql = format!(
-        "{OWNERS} INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
-      SELECT $3,'turn',t.id,t.ordinal,to_jsonb(t) FROM turns t WHERE t.thread_id=$1
-        AND t.ordinal BETWEEN $4 AND $5 AND t.state NOT IN ('starting','running')
+        "{OWNERS},capture_page AS (
+      SELECT t.id,t.ordinal,to_jsonb(t) AS body FROM turns t WHERE t.thread_id=$1
+        AND t.ordinal BETWEEN $4 AND $5 AND t.ordinal>$6
+        AND t.state NOT IN ('starting','running')
         AND EXISTS(SELECT 1 FROM owners o WHERE o.owner=t.continuation_id
-          AND t.ordinal BETWEEN o.first_turn AND o.last_turn)"
+          AND t.ordinal BETWEEN o.first_turn AND o.last_turn)
+        ORDER BY t.ordinal LIMIT $7
+      ),captured_page AS (
+        INSERT INTO thread_history_cut_rows(cut_id,kind,row_id,ordinal,body)
+        SELECT $3,'turn',id,ordinal,body FROM capture_page RETURNING ordinal
+      ) SELECT max(ordinal) FROM captured_page"
     );
-    sqlx::query(sqlx::AssertSqlSafe(sql))
-        .bind(asked.thread)
-        .bind(asked.view)
-        .bind(asked.id)
-        .bind(first)
-        .bind(last)
-        .execute(&mut *conn)
-        .await?;
+    let mut after = first.saturating_sub(1);
+    loop {
+        let next: Option<i32> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.clone()))
+            .bind(asked.thread)
+            .bind(asked.view)
+            .bind(asked.id)
+            .bind(first)
+            .bind(last)
+            .bind(after)
+            .bind(PAGE)
+            .fetch_one(&mut *conn)
+            .await?;
+        let Some(next) = next else { break };
+        after = next;
+    }
     if last > 0
         && !sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM thread_history_cut_rows
@@ -396,6 +435,11 @@ pub async fn capture(conn: &mut Conn, asked: &Capture) -> Result<Cut, DbError> {
         .bind(asked.id)
         .execute(&mut *conn)
         .await?;
+    // One metadata pass at capture; all later plan readers use these same frozen totals.
+    sqlx::query("SELECT thread_history_keep_cut_counts($1)")
+        .bind(asked.id)
+        .execute(&mut *conn)
+        .await?;
     cut(conn, asked.id)
         .await?
         .ok_or_else(thread_history::damaged)
@@ -423,34 +467,44 @@ const PAGE_BODIES: &str = "bodies AS (
 /// Each span reads its own page from the index of the items, and the kept copies theirs from the cut's own rows, so a
 /// page costs a page however long the cut is.
 fn members_page(descending: bool) -> String {
-    let (order, limit_side) = if descending {
-        ("DESC", "LEAST(s.last_seq,$3-s.seq_offset)")
-    } else {
-        ("", "LEAST(s.last_seq,$3-s.seq_offset)")
-    };
+    member_page_sql(descending, false)
+}
+
+fn copy_members_page() -> String {
+    member_page_sql(false, true)
+}
+
+fn member_page_sql(descending: bool, copying: bool) -> String {
+    let order = if descending { "DESC" } else { "" };
+    let live_kind = if copying { "AND i.kind<>'marker'" } else { "" };
+    let frozen_kind = if copying { "AND x.kind<>'marker'" } else { "" };
     format!(
         "page AS MATERIALIZED (SELECT * FROM (
     SELECT m.* FROM thread_history_cut_spans s CROSS JOIN LATERAL (
-      SELECT s.cut_id,i.id AS item_id,i.seq_created+s.seq_offset AS seq_created,i.turn_id,i.stream,i.kind,
+      SELECT s.cut_id,k.item_id,k.seq_created+s.seq_offset AS seq_created,k.turn_id,k.stream,k.kind,
         NULL::uuid AS parent_cut_id,
-        CASE WHEN i.seq_updated>s.frozen_at THEN (SELECT r.seq_updated FROM thread_item_revisions r
-          WHERE r.item_id=i.id AND r.seq_updated<=s.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS revision_seq,
+        CASE WHEN k.seq_updated>s.frozen_at THEN (SELECT r.seq_updated FROM thread_item_revisions r
+          WHERE r.item_id=k.item_id AND r.seq_updated<=s.frozen_at ORDER BY r.seq_updated DESC LIMIT 1) END AS revision_seq,
         COALESCE(x.native_alias,a.native_ref) AS native_alias,NULL::jsonb AS body
-      FROM items i
-        LEFT JOIN thread_history_cut_items x ON x.cut_id=s.cut_id AND x.item_id=i.id
-        LEFT JOIN thread_native_item_aliases a ON a.item_id=i.id
-      WHERE i.thread_id=s.thread_id AND i.continuation_id=s.owner_continuation_id
-        AND i.seq_created BETWEEN GREATEST(s.first_seq,$2-s.seq_offset+1) AND {limit_side}
-        AND ($4::text IS NULL OR i.stream=$4) AND x.body IS NULL
-        AND ((i.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
-                WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id))
-          OR (i.turn_id IS NULL AND ((s.loose_before_orch AND i.before_orch)
-                OR i.seq_created BETWEEN s.loose_low AND s.loose_high)))
-      ORDER BY i.seq_created {order} LIMIT $5) m
-    WHERE s.cut_id=$1
+      FROM (
+        SELECT i.id AS item_id,i.seq_created,i.seq_updated,i.turn_id,i.stream,i.kind FROM items i
+        WHERE i.thread_id=s.thread_id AND i.continuation_id=s.owner_continuation_id
+          AND i.seq_created BETWEEN GREATEST(s.first_seq,$2-s.seq_offset+1) AND LEAST(s.last_seq,$3-s.seq_offset)
+          AND ($4::text IS NULL OR i.stream=$4) {live_kind}
+          AND COALESCE((SELECT x.body IS NULL FROM thread_history_cut_items x
+            WHERE x.cut_id=s.cut_id AND x.item_id=i.id),true)
+          AND ((i.turn_id IS NOT NULL AND EXISTS(SELECT 1 FROM thread_history_cut_rows t
+                  WHERE t.cut_id=s.cut_id AND t.kind='turn' AND t.row_id=i.turn_id))
+            OR (i.turn_id IS NULL AND ((s.loose_before_orch AND i.before_orch)
+                  OR i.seq_created BETWEEN s.loose_low AND s.loose_high)))
+        ORDER BY i.seq_created {order} LIMIT $5
+      ) k
+        LEFT JOIN thread_history_cut_items x ON x.cut_id=s.cut_id AND x.item_id=k.item_id
+        LEFT JOIN thread_native_item_aliases a ON a.item_id=k.item_id
+    ) m WHERE s.cut_id=$1
     UNION ALL
     (SELECT x.cut_id,x.item_id,x.seq_created,x.turn_id,x.stream,x.kind,x.parent_cut_id,x.revision_seq,x.native_alias,x.body
-      FROM thread_history_cut_items x WHERE x.cut_id=$1 AND x.body IS NOT NULL
+      FROM thread_history_cut_items x WHERE x.cut_id=$1 AND x.body IS NOT NULL {frozen_kind}
         AND x.seq_created>$2 AND x.seq_created<=$3 AND ($4::text IS NULL OR x.stream=$4)
       ORDER BY x.seq_created {order} LIMIT $5)
   ) held ORDER BY seq_created {order} LIMIT $5)"
@@ -498,6 +552,38 @@ pub async fn items_page(
         .await?)
 }
 
+/// The ordinary frozen selector with a byte-buffer target before decoding returned rows.
+pub async fn items_page_bounded(
+    conn: &mut Conn,
+    id: Id,
+    after: Seq,
+    through: Seq,
+    stream: Option<&str>,
+    descending: bool,
+) -> Result<Vec<ItemRow>, DbError> {
+    let order = if descending { "DESC" } else { "ASC" };
+    let members =
+        members_page(descending).replacen("page AS MATERIALIZED", "raw_page AS MATERIALIZED", 1);
+    let sql=format!("WITH {members},sized AS MATERIALIZED (
+      SELECT c.*,COALESCE(CASE WHEN c.body IS NOT NULL THEN COALESCE((c.body->>'payload_bytes')::bigint,octet_length((c.body->'payload')::text))
+        WHEN c.revision_seq IS NOT NULL THEN COALESCE((r.body->>'payload_bytes')::bigint,octet_length((r.body->'payload')::text))
+        ELSE i.payload_bytes END,0) AS decode_size
+      FROM raw_page c LEFT JOIN items i ON i.id=c.item_id AND c.body IS NULL
+      LEFT JOIN thread_item_revisions r ON r.item_id=c.item_id AND r.seq_updated=c.revision_seq),
+      page AS MATERIALIZED(SELECT chosen.* FROM (SELECT sized.*,sum(decode_size) OVER(ORDER BY seq_created {order} ROWS UNBOUNDED PRECEDING) AS used FROM sized) chosen
+        WHERE used-decode_size<$6::bigint),{PAGE_BODIES}
+      SELECT p.* FROM bodies CROSS JOIN LATERAL jsonb_populate_record(NULL::items,bodies.body) p ORDER BY p.seq_created");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(after)
+        .bind(through)
+        .bind(stream)
+        .bind(PAGE)
+        .bind(thread_history::PAGE_BYTES)
+        .fetch_all(conn)
+        .await?)
+}
+
 /// What a cut holds, counted in SQL: the number of its turns, and its main-stream items by kind (those made in a turn,
 /// and the loose lines from before Orch).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -511,17 +597,14 @@ pub struct CutCounts {
 /// Counts what the cut `id` holds. Nothing of it is read into memory.
 pub async fn counts(conn: &mut Conn, id: Id) -> Result<CutCounts, DbError> {
     let turns: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM thread_history_cut_rows WHERE cut_id=$1 AND kind='turn'",
+        "SELECT COALESCE((SELECT row_count FROM thread_history_cut_row_counts WHERE cut_id=$1 AND kind='turn'),0)",
     )
     .bind(id)
     .fetch_one(&mut *conn)
     .await?;
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT c.kind,count(*)::bigint FROM thread_history_cut_members($1) c
-      WHERE c.stream='main' AND (c.turn_id IS NOT NULL
-        OR COALESCE((c.body->>'before_orch')::boolean,
-          (SELECT i.before_orch FROM items i WHERE i.id=c.item_id),false))
-      GROUP BY c.kind",
+        "SELECT kind,sum(item_count)::bigint FROM thread_history_cut_counts
+      WHERE cut_id=$1 AND stream='main' AND content GROUP BY kind",
     )
     .bind(id)
     .fetch_all(&mut *conn)
@@ -532,21 +615,10 @@ pub async fn counts(conn: &mut Conn, id: Id) -> Result<CutCounts, DbError> {
     })
 }
 
-/// How long the bodies of the main-stream items of the cut `id` are as a reader decodes them: the body the cut froze,
-/// the revision it inherited, or the item's own body. It reads every item of the cut once, in the database, so it is
-/// asked only of a cut that is small enough to be worth proving something against.
+/// Exact decoded payload bytes of the main stream, measured once at its frozen capture.
 pub async fn payload_bytes(conn: &mut Conn, id: Id) -> Result<i64, DbError> {
-    Ok(sqlx::query_scalar(
-        "SELECT COALESCE(sum(CASE WHEN c.body IS NOT NULL THEN octet_length(c.body::text)
-            WHEN c.revision_seq IS NOT NULL THEN (SELECT octet_length(r.body::text) FROM thread_item_revisions r
-              WHERE r.item_id=c.item_id AND r.seq_updated=c.revision_seq)
-            ELSE i.payload_bytes END),0)::bigint
-      FROM thread_history_cut_members($1) c LEFT JOIN items i ON i.id=c.item_id AND c.body IS NULL
-      WHERE c.stream='main'",
-    )
-    .bind(id)
-    .fetch_one(conn)
-    .await?)
+    Ok(sqlx::query_scalar("SELECT COALESCE(sum(payload_bytes),0)::bigint FROM thread_history_cut_counts WHERE cut_id=$1 AND stream='main'")
+        .bind(id).fetch_one(conn).await?)
 }
 
 /// The turns of the cut `id` with these identifiers, oldest first.
@@ -646,12 +718,27 @@ pub async fn last_sub_messages(
         .collect())
 }
 
-/// Raw frozen table rows are used only by the atomic copy, in bounded batches.
+/// A bounded frozen payload page, retaining markers for ordinary history readers.
 pub async fn item_bodies_page(conn: &mut Conn, id: Id, after: Seq) -> Result<Vec<Json>, DbError> {
-    let sql = format!(
-        "WITH {}, {PAGE_BODIES} SELECT body FROM bodies ORDER BY seq_created",
-        members_page(false)
-    );
+    item_bodies_from(conn, id, after, members_page(false)).await
+}
+
+/// The copied conversation omits markers; they do not consume payload or parent pages.
+pub async fn copy_item_bodies_page(
+    conn: &mut Conn,
+    id: Id,
+    after: Seq,
+) -> Result<Vec<Json>, DbError> {
+    item_bodies_from(conn, id, after, copy_members_page()).await
+}
+
+async fn item_bodies_from(
+    conn: &mut Conn,
+    id: Id,
+    after: Seq,
+    members: String,
+) -> Result<Vec<Json>, DbError> {
+    let sql = format!("WITH {members}, {PAGE_BODIES} SELECT body FROM bodies ORDER BY seq_created");
     let rows: Vec<Option<Json>> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind(id)
         .bind(after)
@@ -665,6 +752,88 @@ pub async fn item_bodies_page(conn: &mut Conn, id: Id, after: Seq) -> Result<Vec
         .collect()
 }
 
+/// Copies one keyset page of frozen turns. The cursor is the last complete metadata key,
+/// including turns without items; every row keeps the atomic copy's existing identity mapping.
+pub async fn copy_turns_page(
+    conn: &mut Conn,
+    id: Id,
+    target: Id,
+    owner: Id,
+    first: Seq,
+    after: Option<(i32, Id)>,
+) -> Result<Option<(i32, Id)>, DbError> {
+    let (position, limit) = if after.is_some() {
+        ("AND (r.ordinal,r.row_id)>($5::integer,$6::uuid)", "$7")
+    } else {
+        ("", "$5")
+    };
+    let sql = format!(
+        "WITH page AS MATERIALIZED (
+          SELECT r.row_id,r.ordinal,r.body FROM thread_history_cut_rows r
+          WHERE r.cut_id=$2 AND r.kind='turn' {position}
+          ORDER BY r.ordinal,r.row_id LIMIT {limit}
+        ),copied AS (
+          INSERT INTO turns SELECT p.* FROM page r
+      CROSS JOIN LATERAL jsonb_populate_record(NULL::turns,r.body||jsonb_build_object(
+      'id',md5($1::text||r.row_id::text)::uuid,'thread_id',$1::uuid,'continuation_id',$3::uuid,'ordinal',r.ordinal,
+      'segment_id',md5($1::text||(r.body->>'segment_id'))::uuid,'input_id',md5($1::text||(r.body->>'input_id'))::uuid,
+      'lease_id',NULL,'native_turn_ref','fork-copy:'||r.row_id::text,'native_end_confirmed',true,
+      'before_snapshot_id',NULL,'end_manifest_blob',NULL,'files_end_manifest',NULL,'end_work',NULL,
+      'files_work_pending',false,'files_end_due',false,'cut_notice_sent',true,'phase',NULL,'phase_at',NULL,'phase_attempt',NULL,
+      'waiting_since',NULL,'seq_updated',$4::bigint,'completed_seq',$4::bigint)) p
+          RETURNING id
+        )
+        SELECT r.ordinal,r.row_id FROM page r CROSS JOIN (SELECT count(*) FROM copied) done
+        ORDER BY r.ordinal DESC,r.row_id DESC LIMIT 1"
+    );
+    let mut query = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(target)
+        .bind(id)
+        .bind(owner)
+        .bind(first);
+    if let Some((ordinal, row)) = after {
+        query = query.bind(ordinal).bind(row);
+    }
+    Ok(query.bind(PAGE).fetch_optional(conn).await?)
+}
+
+/// Restores a page of copied parent links after all copied items exist. Reading the frozen
+/// bodies and updating their mapped parents share one statement, including pages without parents.
+pub async fn restore_copy_parents_page(
+    conn: &mut Conn,
+    id: Id,
+    target: Id,
+    after: Seq,
+) -> Result<Option<Seq>, DbError> {
+    let sql = format!(
+        "WITH {}, {PAGE_BODIES}, checked AS MATERIALIZED (
+          SELECT max(seq_created) AS last,COALESCE(bool_or(body IS NULL),false) AS damaged FROM bodies
+        ),restored AS (
+          UPDATE items i SET parent_item_id=md5($6::text||(b.body->>'parent_item_id'))::uuid
+          FROM bodies b,checked c WHERE NOT c.damaged AND b.body->>'parent_item_id' IS NOT NULL
+            AND i.id=md5($6::text||(b.body->>'id'))::uuid
+            AND EXISTS(SELECT 1 FROM thread_history_cut_members($1) p
+              WHERE p.item_id=(b.body->>'parent_item_id')::uuid AND p.kind<>'marker')
+          RETURNING i.id
+        )
+        SELECT c.last,c.damaged FROM checked c CROSS JOIN (SELECT count(*) FROM restored) done",
+        copy_members_page()
+    );
+    let (last, damaged): (Option<Seq>, bool) = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(id)
+        .bind(after)
+        .bind(i64::MAX)
+        .bind(None::<&str>)
+        .bind(PAGE)
+        .bind(target)
+        .fetch_one(conn)
+        .await?;
+    if damaged {
+        return Err(thread_history::damaged());
+    }
+    Ok(last)
+}
+
 pub async fn item_ids(conn: &mut Conn, id: Id) -> Result<Vec<Id>, DbError> {
     Ok(sqlx::query_scalar("SELECT item_id FROM thread_history_cut_members($1) WHERE kind<>'marker' ORDER BY seq_created")
         .bind(id).fetch_all(conn).await?)
@@ -673,7 +842,7 @@ pub async fn item_ids(conn: &mut Conn, id: Id) -> Result<Vec<Id>, DbError> {
 /// How many rows of a kind (`segment`, `input`, `turn` or `approval`) the cut `id` holds.
 pub async fn row_count(conn: &mut Conn, id: Id, kind: &str) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT count(*) FROM thread_history_cut_rows WHERE cut_id=$1 AND kind=$2",
+        "SELECT COALESCE((SELECT row_count FROM thread_history_cut_row_counts WHERE cut_id=$1 AND kind=$2),0)",
     )
     .bind(id)
     .bind(kind)
@@ -684,7 +853,7 @@ pub async fn row_count(conn: &mut Conn, id: Id, kind: &str) -> Result<i64, DbErr
 /// The highest number among the rows of a kind that the cut `id` holds; nought where it holds none.
 pub async fn max_ordinal(conn: &mut Conn, id: Id, kind: &str) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
-        "SELECT COALESCE(max(ordinal),0)::bigint FROM thread_history_cut_rows WHERE cut_id=$1 AND kind=$2",
+        "SELECT COALESCE((SELECT max_ordinal::bigint FROM thread_history_cut_row_counts WHERE cut_id=$1 AND kind=$2),0)",
     )
     .bind(id)
     .bind(kind)
@@ -694,12 +863,12 @@ pub async fn max_ordinal(conn: &mut Conn, id: Id, kind: &str) -> Result<i64, DbE
 
 /// Numbering reserves every captured position, including omitted marker rows.
 pub async fn item_count(conn: &mut Conn, id: Id) -> Result<i64, DbError> {
-    Ok(
-        sqlx::query_scalar("SELECT count(*) FROM thread_history_cut_members($1)")
-            .bind(id)
-            .fetch_one(conn)
-            .await?,
+    Ok(sqlx::query_scalar(
+        "SELECT COALESCE(sum(item_count),0)::bigint FROM thread_history_cut_counts WHERE cut_id=$1",
     )
+    .bind(id)
+    .fetch_one(conn)
+    .await?)
 }
 
 pub async fn native_aliases(conn: &mut Conn, id: Id) -> Result<Vec<(Id, String)>, DbError> {

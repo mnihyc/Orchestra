@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight, FileText, Folder, Lock, Pencil, Plus } from 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { sharedTreeQuery, threadSharedQuery } from '@/api/share';
-import { DocumentPolicy } from '@/features/people/DocumentPolicy';
+import { AgentKnowledgeNotice } from '@/features/people/AgentKnowledgeNotice';
 import { IsolationBadge } from '@/features/thread/BindingSummary';
 import type { SharedEntry, Thread } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
@@ -17,6 +17,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { UserChip } from '@/ui/UserChip';
 import { ThreadPanel } from './ThreadPanel';
 import { ShareToAgent } from './ShareToAgent';
+import { PersonalSkillsPolicyLine } from './PersonalSkills';
 
 function Entry({ entry, threadId }: { entry: SharedEntry; threadId: string }) {
   const { t } = useTranslation();
@@ -37,7 +38,7 @@ function Entry({ entry, threadId }: { entry: SharedEntry; threadId: string }) {
 function Branch({ threadId, path = '/' }: { threadId: string; path?: string }) {
   const { t } = useTranslation();
   const query = useQuery(sharedTreeQuery(threadId, path));
-  if (query.data === undefined) return query.error === null ? <SkeletonRows rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
+  if (query.data === undefined) return query.error === null ? <SkeletonRows read={query} rows={3} /> : <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   return <><ul aria-label={t('threadViews.knowledge.tree')}>{query.data.entries.map((entry, index) => <Entry key={`${entry.id}:${index}`} entry={entry} threadId={threadId} />)}</ul>
     {query.data.entries.length === 0 && <EmptyState compact icon={<Folder aria-hidden />} title={t('threadViews.knowledge.empty')} />}
     {query.data.truncated && <p className="text-sm text-text-muted">{t('threadViews.knowledge.truncated')}</p>}</>;
@@ -48,13 +49,14 @@ function Knowledge({ thread }: { thread: Thread }) {
   const shares = useQuery(threadSharedQuery(thread.id));
   const [sharing, setSharing] = useState(false);
   return <div className="h-full overflow-auto p-3" data-testid="thread-knowledge">
-    <DocumentPolicy topicId={thread.parent_id ?? thread.id} />
+    <AgentKnowledgeNotice />
+    <PersonalSkillsPolicyLine read={shares} threadId={thread.id} />
     {thread.binding?.isolation.orch_tools.offered === false && <div className="pb-3"><IsolationBadge thread={thread} /></div>}
     <Button size="sm" onClick={() => setSharing(true)}>{t('threadViews.knowledge.share')}</Button>
     {shares.error !== null && <ErrorState compact error={shares.error} onRetry={() => void shares.refetch()} />}
-    {shares.data !== undefined && <><p className="py-3 text-sm text-text-muted">{t(`threadViews.knowledge.policy.${shares.data.policy}`)}</p>
+    {shares.data !== undefined && <>
       {shares.data.read_first_paths.length > 0 && <section aria-label={t('people.readFirst')} className="pb-3"><h3 className="text-sm font-semibold">{t('people.readFirst')}</h3><p className="text-xs text-text-muted">{t('people.readFirstHint')}</p><ul>{shares.data.read_first_paths.slice(0, 5).map((material) => <li key={material.id} className="break-all font-mono text-xs">{material.path}</li>)}</ul>{shares.data.read_first_paths.length > 5 && <p className="text-xs text-text-muted">{t('people.moreMaterial')}</p>}</section>}
-      {shares.data.shares.filter((share) => share.mode === 'snapshot').map((share) => <p key={share.id} className="pb-2 text-sm">{t('threadViews.knowledge.copy', { name: share.by.display_name })}</p>)}</>}
+      {shares.data.shares.filter((share) => share.mode === 'snapshot').map((share) => <p key={share.id} className="pb-2 text-sm">{t('threadViews.knowledge.copy', { name: (share.by?.display_name ?? '').length > 0 ? share.by?.display_name : t('agentContributions.giverUnavailable') })}</p>)}</>}
     <Branch threadId={thread.id} />
     {sharing && <ShareToAgent thread={thread} onClose={() => setSharing(false)} />}
   </div>;

@@ -42,6 +42,7 @@ export interface ViewerProps {
   head: FileHead;
   /** The line to go to, for a viewer of text. */
   line: number | null;
+  endLine?: number | undefined;
   /** Identity of an explicit line-opening request; repeated requests preserve the mounted viewer. */
   lineRequest?: number | undefined;
   /** The tab that shows it: a viewer that holds unsaved text marks that tab. */

@@ -10,7 +10,9 @@ import type { Field, LoginMethod, LoginState, Notifier, ProviderSetup } from '@/
 import { i18n, setLocale } from '@/i18n';
 import { id, me, userRef } from '../doubles/fixtures';
 import { planProvider } from '../unit/provider-plan-fixtures';
-import { show } from './support';
+import { show, skipOverflowFallback } from './support';
+
+skipOverflowFallback();
 
 const calls = vi.hoisted(() => ({ setup: vi.fn<() => Promise<ProviderSetup>>(), progress: vi.fn<() => Promise<LoginState>>(), start: vi.fn<typeof Login.startProviderLogin>(), submit: vi.fn() }));
 const HOME_ID = id(71, 1), PROVIDER = id(71, 2), PROFILE = id(71, 3);
@@ -19,7 +21,7 @@ const methods: LoginMethod[] = Array.from({ length: 13 }, (_, index) => ({ id: `
   summary: `Use account route ${index + 1}.`, kind: 'interactive', yields: 'login', recommended: index === 12, lifetime_secs: null,
   requires: `Account prerequisite ${index + 1}`, fields: [field('region', `Region ${index + 1}`, 'text', `zone-${index + 1}`)] }));
 const profile = { id: PROFILE, name: 'Declared adapter', address: 'workshop.adapter', harness_kind: 'metadata-adapter', harness: { kind: 'metadata-adapter', name: 'Declared adapter' }, machine: null, disabled: false };
-const setup: ProviderSetup = { subscriptions: [{ agent: profile, harness: { kind: profile.harness_kind, name: profile.name }, methods, options_schema: {}, arrangements: [], template: { id: id(71, 4), name: 'Provider runtime' } }],
+const setup: ProviderSetup = { grouping: [], subscriptions: [{ agent: profile, harness: { kind: profile.harness_kind, name: profile.name }, methods, options_schema: {}, arrangements: [], template: { id: id(71, 4), name: 'Provider runtime' } }],
   subscriptions_withheld: [], subscriptions_unshared: [], machines: [], key_machines: [], protocols: [], presets: [], api_arrangements: [], runtime_templates: [], sources: [], http_allowed: false };
 const idle: LoginState = { state: 'idle', method: null, asks: null, shows: [], expires_at: null, error: null };
 const provider = planProvider({ id: PROVIDER, owner: userRef(me(1, 'ada', 'Ada Lovelace')), home: { id: HOME_ID, kind: 'org', name: 'Workshop', redacted: false }, org_id: HOME_ID, agent: profile, harness_kind: profile.harness_kind,
