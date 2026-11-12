@@ -7,6 +7,7 @@ heading_id.通知和共享: notify-and-share
 heading_id.在文档中提及: mention-in-a-document
 heading_id.通知进度: notification-progress
 heading_id.查看更早的讨论和评论: read-older-discussions-and-comments
+summary: 打开人员卡片、主动通知，并在提及工作时查看共享影响。
 ---
 
 # 人员与提及

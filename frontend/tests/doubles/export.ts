@@ -605,7 +605,8 @@ export class ExportWorld implements Part {
         if (view.kind === 'thread') threads.push(view);
       }
     }
-    return { status: 200, body: { announcements: [], complete: true, jobs: [], seq: 1, since: null, threads, topic } };
+    const schedules = this.world.requestFeeds.topicSchedules(person, topicId);
+    return { status: 200, body: { announcements: [], input_schedules: schedules.rows, complete: true, jobs: [], seq: schedules.seq, since: null, threads, topic } };
   }
 
   // ---------------------------------------------------------------- the part

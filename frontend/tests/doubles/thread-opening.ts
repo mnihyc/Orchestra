@@ -1,5 +1,6 @@
 /** The first thread screen reuses the fake world's native readers without making nested HTTP requests. */
-import type { ThreadOpening } from '../../src/generated/api-types.ts';
+import type { Problem, ThreadOpening, TopicSync } from '../../src/generated/api-types.ts';
+import { isAgentSchedule } from '../../src/features/schedules/facts.ts';
 import { Refusal, type Person, type World } from './world.ts';
 
 export async function threadOpening(world: World, person: Person, threadId: string, limit: number): Promise<ThreadOpening> {
@@ -16,7 +17,19 @@ export async function threadOpening(world: World, person: Person, threadId: stri
   // An aside has its own conversation and draft, with the choices and limits of its parent.
   const parent = sync.thread.side_of?.id;
   const choices = parent ?? threadId;
-  return {
+  let pending: ThreadOpening['pending_agent_schedules'];
+  if (sync.projection?.follows_active !== false) {
+    try {
+      const topic = await read(`/topics/${sync.thread.topic_id}/sync`) as TopicSync;
+      pending = { status: 'ready', data: { seq: topic.seq, items: topic.input_schedules.flatMap((row) =>
+        isAgentSchedule(row, threadId) && row.state === 'active' && row.next_run_at !== null
+          ? [{ id: row.id, name: row.name, state: row.state, next_run_at: row.next_run_at }] : []) } };
+    } catch (error) {
+      if (!(error instanceof Refusal) || error.answer.status !== 403) throw error;
+      pending = { status: 'failed', problem: error.answer.body as Problem, retry_after: null };
+    }
+  }
+  const opening: ThreadOpening = {
     sync,
     draft: await optional(`/threads/${threadId}/draft`) as ThreadOpening['draft'],
     parameters: await optional(`/threads/${choices}/parameters`) as ThreadOpening['parameters'],
@@ -25,5 +38,10 @@ export async function threadOpening(world: World, person: Person, threadId: stri
     outline: parent === undefined
       ? await read(`/threads/${threadId}/outline`, new URLSearchParams({ limit: String(limit) })) as ThreadOpening['outline']
       : world.workspace.outlineSnapshot(sync, new URLSearchParams({ limit: String(limit) })),
+    gateway: sync.projection?.follows_active === false ? null : {
+      status: 'ready' as const, data: await read(`/threads/${threadId}/gateway`) as NonNullable<Extract<NonNullable<ThreadOpening['gateway']>, { status: 'ready' }>['data']>,
+    },
+    ...(pending === undefined ? {} : { pending_agent_schedules: pending }),
   };
+  return opening;
 }

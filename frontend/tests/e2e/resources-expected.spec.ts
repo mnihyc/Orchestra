@@ -6,7 +6,8 @@ import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import { HINTED_FORMS, resourceHintGuide, type HintedForm, type ResourceHintId } from '../../src/features/resources/hints.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { PEOPLE, scenario, signIn } from './support.ts';
+import { bodySent, PEOPLE, scenario, signIn } from './support.ts';
+import { signInForManagement } from './admin-mode-support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
@@ -18,11 +19,12 @@ async function resourceControl(path: string, body: unknown = {}): Promise<unknow
 }
 
 /** The words of the English catalogue, for the term each hint stands beside. */
-const catalogue = JSON.parse(readFileSync(fileURLToPath(new URL('../../src/i18n/en.json', import.meta.url)), 'utf8')) as { help: { hints: Record<string, { title: string }> } };
+const catalogue = JSON.parse(readFileSync(fileURLToPath(new URL('../../src/i18n/en.json', import.meta.url)), 'utf8')) as { help: { hints: Record<string, { title: string }> }; environmentData: { title: string; choices: string }; machineInstallation: { connectHeading: string } };
 const termOf = (id: ResourceHintId): string => catalogue.help.hints[id]?.title ?? id;
 
 async function open(page: Page, path: string, person: { login: string; password: string } = PEOPLE.ada): Promise<void> {
-  await signIn(page, person);
+  if (person.login === PEOPLE.ada.login) await signInForManagement(page, person);
+  else await signIn(page, person);
   await page.goto(path);
 }
 
@@ -54,30 +56,44 @@ const KINDS = [
 
 const pathOf = (page: Page) => page.getByRole('navigation', { name: 'Where this is' });
 const kindsOf = (page: Page) => page.getByRole('navigation', { name: 'Kinds of resources' });
+const mainOf = (page: Page) => page.getByRole('main', { name: 'Main area', exact: true });
+const currentResource = (page: Page, name: string) => page.getByRole('tablist', { name: 'Main area', exact: true }).getByRole('tab', { name, exact: true });
+const providerEndpoints = (page: Page) => page.getByRole('heading', { name: 'Endpoints', level: 2, exact: true }).locator('xpath=ancestor::section[1]');
+
+async function registeredPart(page: Page, name: string): Promise<void> {
+  const section = page.locator('[data-resource-section="registered"]:visible').last().locator('[data-resource-sections]').first();
+  const link = section.getByRole('link', { name, exact: true });
+  if (await link.isVisible()) await link.click();
+  else {
+    await section.getByRole('combobox').first().click();
+    await page.getByRole('option', { name, exact: true }).click();
+  }
+}
 
 for (const entry of KINDS) {
   test(`${entry.kind}: the way to a resource is in three parts, each a link, and one press goes back to the list as it was left`, async ({ page }) => {
     await open(page, entry.list);
     // What is typed in the list stays in it when the way back is taken.
-    await page.getByRole('searchbox').fill(entry.search);
+    await mainOf(page).getByRole('searchbox').fill(entry.search);
     await expect(page).toHaveURL(new RegExp(entry.param));
-    await page.getByRole('link', { name: entry.thing, exact: true }).click();
+    await mainOf(page).getByRole('link', { name: entry.thing, exact: true }).click();
     await expect(page.getByRole('heading', { name: entry.thing, level: 1 })).toBeVisible();
 
     // Resources / Kind / Name: the first two lead somewhere, the last is where one is.
     const path = pathOf(page);
-    await expect(path.getByRole('link', { name: 'Resources' })).toHaveAttribute('href', '/resources/providers');
+    await expect(path.getByRole('link', { name: 'Resources' })).toHaveAttribute('href', '/resources');
     await expect(path.getByRole('link', { name: entry.kind })).toHaveAttribute('href', new RegExp(`^${entry.list}`));
-    await expect(path.getByText(entry.thing, { exact: true })).toHaveAttribute('aria-current', 'page');
+    // The path names the ancestors; the selected workbench tab now names the current resource.
+    await expect(currentResource(page, entry.thing)).toHaveAttribute('aria-selected', 'true');
     await expect(path.getByRole('link', { name: entry.thing })).toHaveCount(0);
 
     await path.getByRole('link', { name: entry.kind }).click();
     await expect(page).toHaveURL(new RegExp(entry.param));
     await expect(page.getByRole('heading', { name: entry.kind, level: 1 })).toBeVisible();
-    await expect(page.getByRole('searchbox')).toHaveValue(entry.search);
+    await expect(mainOf(page).getByRole('searchbox')).toHaveValue(entry.search);
 
     // On a narrow screen the path is folded away, and the way back is an arrow beside the name.
-    await page.getByRole('link', { name: entry.thing, exact: true }).click();
+    await mainOf(page).getByRole('link', { name: entry.thing, exact: true }).click();
     const back = page.getByRole('link', { name: `Back to ${entry.kind}` });
     await expect(back).toBeHidden();
     await page.setViewportSize({ width: 390, height: 800 });
@@ -89,7 +105,7 @@ for (const entry of KINDS) {
 }
 
 test('the row of kinds stands above the heading of every list and is on no resource screen', async ({ page }) => {
-  await signIn(page);
+  await signInForManagement(page);
   for (const entry of KINDS) {
     await page.goto(entry.list);
     const heading = page.getByRole('heading', { name: entry.kind, level: 1 });
@@ -102,7 +118,7 @@ test('the row of kinds stands above the heading of every list and is on no resou
     expect(above, `the row of kinds is above the heading of ${entry.kind}`).toBeLessThan(below);
 
     // Every screen of a resource, every tab of it: its name, then its own tabs, and no row of kinds anywhere.
-    await page.getByRole('link', { name: entry.thing, exact: true }).click();
+    await mainOf(page).getByRole('link', { name: entry.thing, exact: true }).click();
     await expect(page.getByRole('heading', { name: entry.thing, level: 1 })).toBeVisible();
     await expect(kindsOf(page)).toHaveCount(0);
     const parts = page.getByRole('tablist', { name: /^Parts of/ });
@@ -119,7 +135,7 @@ test('the tabs of an environment stand in the order of its screen, and its headi
   await open(page, `/resources/environments/${RUNS_ON.workspace}`);
   await expect(page.getByRole('heading', { name: 'Workspace', level: 1 })).toBeVisible();
   const tabs = (await page.getByRole('tablist', { name: 'Parts of the environment' }).getByRole('tab').allInnerTexts()).map((label) => label.split('\n')[0]);
-  expect(tabs).toEqual(['Overview', 'Threads', 'Machine limits', 'Access', 'Settings', 'Danger zone']);
+  expect(tabs).toEqual(['Overview', 'Threads', 'Tools', 'Files', 'Access', 'Settings']);
   // The status is said once: under the name, and in its chip, not in both.
   await expect(page.getByText(/threads · 3 topics · Running/)).toHaveCount(0);
 });
@@ -130,7 +146,8 @@ test('a row has its act at its end, and the same menu by the menu button, the ri
 
   // The act most used shows when the row is pointed at, and is named by what it does and to what.
   const open_ = row.getByRole('button', { name: 'Open Claude Code' });
-  await expect(open_).toHaveCSS('opacity', '0');
+  // Primary row actions stay visible at every width; menus contain the remaining actions once.
+  await expect(open_).toHaveCSS('opacity', '1');
   await row.hover();
   await expect(open_).toHaveCSS('opacity', '1');
 
@@ -139,7 +156,8 @@ test('a row has its act at its end, and the same menu by the menu button, the ri
   const menu = page.getByRole('menu', { name: /^Actions for Claude Code(?: · .+)?$/ });
   await expect(menu).toBeVisible();
   const byButton = await entriesOf(menu);
-  expect(byButton).toEqual(['Open', 'Disable…', 'Edit…', 'Rename…', 'Share…', 'Copy link', 'Delete…']);
+  // Profiles retain no stored content to clean up, and binding changes precede their field editors.
+  expect(byButton).toEqual(['Move…', 'Duplicate', 'Duplicate to…', 'Disable…', 'Switch its threads…', 'Edit…', 'Rename…', 'Share…', 'Copy link', 'Delete…']);
   await page.keyboard.press('Escape');
   await expect(menu).toBeHidden();
 
@@ -165,26 +183,32 @@ test('a row has its act at its end, and the same menu by the menu button, the ri
   await expect(row.getByText('Switched off')).toBeVisible();
   await row.hover();
   await row.getByRole('button', { name: 'Enable Claude Code' }).click();
+  await page.getByRole('alertdialog', { name: 'Enable Claude Code?' }).getByRole('button', { name: 'Enable', exact: true }).click();
   await expect(row.getByText('Switched off')).toHaveCount(0);
-  await expect(notice(page, 'Claude Code was enabled')).toBeVisible();
+  await expect(notice(page, 'Claude Code enabled')).toBeVisible();
 });
 
-test('in a room that is not wide the row has the menu alone, and the act most used is the first of it', async ({ page }) => {
+test('a narrow resource row keeps its primary action and menu within the table', async ({ page }) => {
   await open(page, '/resources/agents');
   const row = rowOf(page, 'Agent profiles', 'Claude Code');
   await row.hover();
   await expect(row.getByRole('button', { name: 'Open Claude Code' })).toBeVisible();
 
-  // A phone, or a window with its bars beside it: no room for a button beside the menu, and no room lost to one that is not seen.
+  // The primary action remains available beside its menu even when the workbench narrows.
   await page.setViewportSize({ width: 700, height: 800 });
-  await expect(row.getByRole('button', { name: 'Open Claude Code' })).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Open Claude Code' })).toBeVisible();
   const menu = row.getByRole('button', { name: /^Actions for Claude Code(?: · .+)?$/ });
   await expect(menu).toBeVisible();
   const table = await page.getByRole('table', { name: 'Agent profiles' }).boundingBox();
   const end = await menu.boundingBox();
   expect((end?.x ?? 0) + (end?.width ?? 0), 'the menu is inside the table').toBeLessThanOrEqual((table?.x ?? 0) + (table?.width ?? 0));
   await menu.click();
-  expect((await entriesOf(page.getByRole('menu', { name: /^Actions for Claude Code(?: · .+)?$/ }))).at(0)).toBe('Open');
+  const actions = page.getByRole('menu', { name: /^Actions for Claude Code(?: · .+)?$/ });
+  await expect(actions.getByRole('menuitem', { name: 'Open', exact: true })).toHaveCount(0);
+  await expect(actions.getByRole('menuitem', { name: 'Rename…', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await row.getByRole('button', { name: 'Open Claude Code' }).click();
+  await expect(page.getByRole('heading', { name: 'Claude Code', level: 1 })).toBeVisible();
 });
 
 test('an act that opens something goes to the place that holds it: Copy link says that it did', async ({ page, context }) => {
@@ -197,21 +221,33 @@ test('an act that opens something goes to the place that holds it: Copy link say
   expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(/\/resources\/templates\/[0-9a-f-]+$/);
 });
 
-test('a reader who may not do an act is not offered it, on the row or on the page', async ({ page }) => {
+test('a reader sees why management is unavailable and cannot invoke it from the row or page', async ({ page }) => {
   await open(page, '/resources/providers?view=usable', PEOPLE.dora);
+  const writes: string[] = [];
+  page.on('request', (request) => {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method()) && /\/providers(?:\/|$)/.test(new URL(request.url()).pathname)) writes.push(request.url());
+  });
   const row = rowOf(page, 'Providers', 'Team Anthropic');
   await row.click({ button: 'right' });
   // She may use it: what is hers to do with it is to open it, to share what she holds of it (the page says how far) and to pass its address on.
-  expect(await entriesOf(page.getByRole('menu', { name: /^Actions for Team Anthropic(?: · .+)?$/ }))).toEqual(['Open', 'Share…', 'Copy link']);
+  const rowMenu = page.getByRole('menu', { name: /^Actions for Team Anthropic(?: · .+)?$/ });
+  for (const label of ['Disable…', 'Rename…', 'Delete…']) await expect(rowMenu.getByRole('menuitem', { name: label, exact: true })).toHaveAttribute('aria-disabled', 'true');
+  for (const label of ['Share…', 'Copy link']) await expect(rowMenu.getByRole('menuitem', { name: label, exact: true })).not.toHaveAttribute('aria-disabled', 'true');
+  await rowMenu.getByRole('menuitem', { name: 'Rename…', exact: true }).press('Enter');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
   await page.keyboard.press('Escape');
-  // Nothing is theirs to do to several of them at once, so there is no box to tick one.
-  await expect(page.getByRole('checkbox', { name: /^Select / })).toHaveCount(0);
+  // Selection can now review sharing; it does not confer any management action.
+  await expect(row.getByRole('checkbox', { name: 'Select Team Anthropic', exact: true })).toBeVisible();
 
   await row.getByRole('link', { name: 'Team Anthropic', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Team Anthropic', level: 1 })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: /^Actions for Team Anthropic(?: · .+)?$/ }).click();
-  expect(await entriesOf(page.getByRole('menu', { name: /^Actions for Team Anthropic(?: · .+)?$/ }))).toEqual(['Share…', 'Copy link']);
+  const pageMenu = page.getByRole('menu', { name: /^Actions for Team Anthropic(?: · .+)?$/ });
+  await expect(pageMenu.getByRole('menuitem', { name: 'Rename…', exact: true })).toHaveAttribute('aria-disabled', 'true');
+  await pageMenu.getByRole('menuitem', { name: 'Rename…', exact: true }).press('Enter');
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(writes).toEqual([]);
 });
 
 test('rows that are ticked have the acts they share above the table, and a destructive one names them', async ({ page }) => {
@@ -241,23 +277,27 @@ test('rows that are ticked have the acts they share above the table, and a destr
   await page.getByRole('checkbox', { name: 'Select Codex', exact: true }).check();
   await page.getByRole('checkbox', { name: 'Select Scripted agent' }).check();
   await bar.getByRole('button', { name: 'Enable' }).click();
-  await expect(notice(page, 'Switched on 2 profiles')).toBeVisible();
+  const enabling = page.getByRole('alertdialog', { name: 'Enable 2 resources?' });
+  await expect(enabling.getByText('Codex', { exact: true })).toBeVisible();
+  await expect(enabling.getByText('Scripted agent', { exact: true })).toBeVisible();
+  await enabling.getByRole('button', { name: 'Enable', exact: true }).click();
+  await expect(notice(page, '2 resources enabled')).toBeVisible();
 });
 
 test('an environment that Orch made is started from its row, and the row says it is working', async ({ page }) => {
   await open(page, '/resources/environments');
   const row = rowOf(page, 'Environments', 'Sandbox');
-  await expect(row.getByText('Stopped')).toBeVisible();
+  await expect(row.getByText('Stopped', { exact: true })).toBeVisible();
   await row.hover();
   await row.getByRole('button', { name: 'Start Sandbox' }).click();
   // Within the moment it is asked: the button gives way to a sign that it is under way.
   await expect(row.getByRole('status')).toBeVisible();
-  await expect(row.getByText('Running')).toBeVisible();
+  await expect(row.getByText('Running', { exact: true })).toBeVisible();
   await row.hover();
   await expect(row.getByRole('button', { name: 'Stop Sandbox' })).toBeVisible();
   // A directory on a person's machine has no unit to start, and its row says nothing of the kind.
   await rowOf(page, 'Environments', 'Workspace').getByRole('button', { name: /^Actions for Workspace(?: · .+)?$/ }).click();
-  expect(await entriesOf(page.getByRole('menu', { name: /^Actions for Workspace(?: · .+)?$/ }))).toEqual(['Open', 'Disable…', 'Edit…', 'Rename…', 'Share…', 'Copy link', 'Delete…']);
+  expect(await entriesOf(page.getByRole('menu', { name: /^Actions for Workspace(?: · .+)?$/ }))).toEqual(['Move…', 'Duplicate', 'Duplicate to…', 'Disable…', 'Edit…', 'Rename…', 'Move to another machine…', 'Share…', 'Copy link', 'Delete…', 'Clean up…']);
 });
 
 test('a template is edited: its name, its description and whether it is on change; its driver is shown, read only, with why', async ({ page }) => {
@@ -279,11 +319,14 @@ test('a template is edited: its name, its description and whether it is on chang
   await expect(notice(page, 'Saved Node 22 and pnpm')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Node 22 and pnpm', level: 1 })).toBeVisible();
   await expect(page.getByText('Node with pnpm, for the web team.')).toBeVisible();
-  await expect(pathOf(page).getByText('Node 22 and pnpm', { exact: true })).toBeVisible();
+  await expect(currentResource(page, 'Node 22 and pnpm')).toHaveAttribute('aria-selected', 'true');
 
   // It is off now, and the page offers the opposite act at once.
   await page.getByRole('button', { name: /^Actions for Node 22 and pnpm(?: · .+)?$/ }).click();
-  await expect(page.getByRole('menuitem', { name: 'Enable' })).toBeVisible();
+  // Enable is the primary page action, so the secondary menu no longer repeats it.
+  await expect(page.getByRole('menuitem', { name: 'Enable', exact: true })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('button', { name: 'Enable', exact: true })).toBeVisible();
 });
 
 test('an environment is edited: its name and its two switches change, where it runs is read only, and its settings are on their tab', async ({ page }) => {
@@ -303,16 +346,17 @@ test('an environment is edited: its name and its two switches change, where it r
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(notice(page, 'Saved Main workspace')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Main workspace', level: 1 })).toBeVisible();
-  await expect(page.getByRole('switch', { name: 'Allow a terminal' })).not.toBeChecked();
 
   // Its own settings are a table of their own, and the form says where.
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  await page.getByRole('dialog', { name: 'Edit Main workspace' }).getByRole('button', { name: 'Open Settings' }).click();
+  const edited = page.getByRole('dialog', { name: 'Edit Main workspace' });
+  await expect(edited.getByRole('switch', { name: 'Allow a terminal' })).not.toBeChecked();
+  await edited.getByRole('button', { name: 'Open Settings' }).click();
   await expect(page.getByRole('tab', { name: 'Settings', selected: true })).toBeVisible();
 });
 
 test('Host Edit uses its settings once; the other resource editors keep their guarded fields', async ({ page }) => {
-  await signIn(page);
+  await signInForManagement(page);
 
   await page.goto('/resources/hosts');
   await page.getByRole('link', { name: 'build-host', exact: true }).click();
@@ -339,8 +383,8 @@ test('Host Edit uses its settings once; the other resource editors keep their gu
   await page.goto(`/resources/agents/${RUNS_ON.codexOnLaptop}`);
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
   dialog = page.getByRole('dialog', { name: 'Edit Codex on ada-laptop' });
-  await expect(dialog.getByRole('textbox', { name: 'Harness' })).toHaveAttribute('readonly', '');
-  await expect(dialog.getByText('The harness is chosen when a profile is made, and a profile keeps it.')).toBeVisible();
+  await expect(dialog.getByRole('textbox', { name: 'Agent program', exact: true })).toHaveAttribute('readonly', '');
+  await expect(dialog.getByText('The agent program is chosen when a profile is made and stays with that profile.')).toBeVisible();
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('Codex on the laptop');
   await dialog.getByRole('switch', { name: 'Switched on' }).click();
   await dialog.getByRole('button', { name: 'Save' }).click();
@@ -348,13 +392,18 @@ test('Host Edit uses its settings once; the other resource editors keep their gu
   await expect(page.getByText('Switched off')).toBeVisible();
 
   await page.goto(`/resources/providers/${RUNS_ON.openAiKey}`);
-  await page.getByRole('button', { name: 'Edit', exact: true }).click();
-  dialog = page.getByRole('dialog', { name: 'Edit OpenAI key' });
-  await expect(dialog.getByRole('textbox', { name: 'What it is' })).toHaveAttribute('readonly', '');
-  await expect(dialog.getByRole('textbox', { name: 'Endpoints' })).toHaveAttribute('readonly', '');
+  // Providers no longer have a generic Edit form: Rename edits their name, and Sign-in and keys owns their endpoints.
+  await expect(page.getByRole('button', { name: 'Edit', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: 'Actions for OpenAI key', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Rename…', exact: true }).click();
+  dialog = page.getByRole('dialog', { name: 'Rename OpenAI key' });
+  await expect(dialog.getByRole('textbox', { name: 'What it is' })).toHaveCount(0);
+  await expect(dialog.getByRole('textbox', { name: 'Endpoints' })).toHaveCount(0);
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('OpenAI team key');
   await dialog.getByRole('button', { name: 'Save' }).click();
   await expect(page.getByRole('heading', { name: 'OpenAI team key', level: 1 })).toBeVisible();
+  await page.getByRole('tab', { name: 'Sign-in and keys', exact: true }).click();
+  await expect(providerEndpoints(page).getByRole('textbox', { name: 'Address', exact: true }).first()).toBeEditable();
 });
 
 test('somebody who changed it first is not overwritten: the form says so and reads it again', async ({ page }) => {
@@ -364,21 +413,50 @@ test('somebody who changed it first is not overwritten: the form says so and rea
   await expect(page.getByRole('tab', { name: 'Settings', selected: true })).toBeVisible();
   const name = page.getByRole('textbox', { name: 'Name', exact: true });
   await name.fill('build-host-2');
-  // The host is renamed from another place while this form is open.
-  await page.evaluate(async (id) => {
+  // A second writer changes the labels while this name draft is open.
+  const hostId = new URL(page.url()).pathname.split('/').at(-1);
+  if (hostId === undefined) throw new Error('The native host address is required');
+  const competing = await page.evaluate(async (id) => {
     const login = await fetch('/api/v1/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: 'ada', password: 'correct horse battery' }) });
     const { access_token: token } = (await login.json()) as { access_token: string };
     const read = await fetch(`/api/v1/hosts/${id}`, { headers: { Authorization: `Bearer ${token}` } });
-    const host = (await read.json()) as { revision: number };
-    await fetch(`/api/v1/hosts/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ expected_revision: host.revision, labels: ['elsewhere'] }) });
-  }, new URL(page.url()).pathname.split('/').at(-1));
-  await page.getByRole('button', { name: 'Save settings', exact: true }).click();
+    const host = (await read.json()) as { revision: number; name: string; labels: string[] };
+    const response = await fetch(`/api/v1/hosts/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify({ expected_revision: host.revision, labels: ['elsewhere'] }) });
+    if (!response.ok) throw new Error('The competing host change must succeed');
+    return { before: host, after: (await response.json()) as { revision: number } };
+  }, hostId);
+  const writes: Promise<unknown>[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'PATCH' && new URL(request.url()).pathname === `/api/v1/hosts/${hostId}`) writes.push(bodySent(request));
+  });
+  // A live revision can reveal the conflict before Save. Review is then required before rebasing.
   await expect(page.getByText('Somebody changed this host first', { exact: true })).toBeVisible();
   await expect(name).toHaveValue('build-host-2');
+  const save = page.getByRole('button', { name: 'Save settings', exact: true });
+  await expect(save).toBeDisabled();
+  await save.press('Enter');
+  expect(writes).toHaveLength(0);
+  await page.locator('summary').filter({ hasText: /^Review changes$/ }).click();
+  const review = page.getByRole('table', { name: 'Review changes', exact: true });
+  const changedName = review.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Name', exact: true }) });
+  await expect(changedName.getByRole('cell').nth(1)).toContainText(competing.before.name);
+  await expect(changedName.getByRole('cell').nth(2)).toContainText('build-host-2');
+  const changedLabels = review.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Labels', exact: true }) });
+  await expect(changedLabels.getByRole('cell').nth(1)).toContainText('elsewhere');
+  await page.getByRole('button', { name: 'Keep my changes', exact: true }).click();
+  await expect(name).toHaveValue('build-host-2');
+  await expect(save).toBeEnabled();
+  const saved = page.waitForResponse((response) => response.request().method() === 'PATCH'
+    && new URL(response.url()).pathname === `/api/v1/hosts/${hostId}`);
+  await save.click();
+  expect((await saved).ok()).toBe(true);
+  expect(await Promise.all(writes)).toEqual([{ expected_revision: competing.after.revision, name: 'build-host-2', labels: competing.before.labels }]);
+  await expect(page.getByText('Somebody changed this host first', { exact: true })).toHaveCount(0);
 });
 
 test('a hint opens by the pointer and by the keyboard, with its parts, and closes on Escape', async ({ page }) => {
-  await open(page, `/resources/environments/${RUNS_ON.workspace}`);
+  // The environment's controls now live under Settings rather than Overview.
+  await open(page, `/resources/environments/${RUNS_ON.workspace}?tab=controls`);
   const trigger = page.getByRole('button', { name: 'Help: Allow writing from outside' });
   await trigger.click();
   const card = page.getByRole('dialog', { name: 'Allow writing from outside' });
@@ -415,7 +493,7 @@ test('standalone resource hints stay available and template fields share one gui
   test.setTimeout(600_000);
   // A step that cannot be done fails where it stands, and does not wait for the end of the walk.
   page.setDefaultTimeout(30_000);
-  await signIn(page);
+  await signInForManagement(page);
   const missing: string[] = [];
   const seen = new Map<HintedForm, Set<ResourceHintId>>();
 
@@ -427,8 +505,38 @@ test('standalone resource hints stay available and template fields share one gui
       const destination = resourceHintGuide(id);
       const dialogs = page.getByRole('dialog');
       const root = await dialogs.count() > 0 ? dialogs.last() : page.locator('body');
-      const slot = root.locator(`[data-help-control="${id}"]`);
-      const where = root.locator(`[data-help-article="${destination.id}"]${destination.heading === null ? '' : `[data-help-heading="${destination.heading}"]`}:visible`);
+      // The single root/runtime choosers became independent workspace/home choices, with one explanation.
+      if (form === 'register-environment' && id === 'env-root' || form === 'make-environment' && id === 'env-runtime') {
+        const term = catalogue.environmentData.title;
+        const question = root.getByRole('button', { name: `Help: ${term}`, exact: true });
+        await expect(question).toHaveCount(1);
+        await question.click();
+        await expect(page.getByRole('dialog', { name: term, exact: true })).toContainText(catalogue.environmentData.choices);
+        await page.keyboard.press('Escape');
+        found.add(id);
+        return;
+      }
+      if (id === 'who-may-use') {
+        // The audience control now owns its contextual question instead of a static catalogue hint.
+        const term = termOf(id);
+        await root.getByRole('button', { name: `Help: ${term}`, exact: true }).click();
+        const explanation = page.getByRole('dialog', { name: term, exact: true });
+        await expect(explanation.getByRole('term').first()).toBeVisible();
+        expect(await explanation.getByRole('term').count()).toBeGreaterThanOrEqual(2);
+        await page.keyboard.press('Escape');
+        found.add(id);
+        return;
+      }
+      // Task guides replace the retired provider wizard's and profile program's individual hint controls.
+      const task = (form === 'add-provider' && ['provider-kind', 'key-place', 'arrangement-separated', 'arrangement-key_separated'].includes(id))
+        || (form === 'register-provider' && id === 'machine-provider-source') ? 'add-a-provider'
+        : form === 'add-agent' && id === 'agent-harness' ? 'register-your-program'
+          : form === 'add-machine' && id === 'machine-delegate' ? 'connect-a-machine' : null;
+      // Enrollment also links other portions of this task; this form's guide is its exact connect heading.
+      const taskSelector = `button[data-help-guide="${task ?? ''}"]${task === 'connect-a-machine' ? `[data-help-heading="${catalogue.machineInstallation.connectHeading}"]` : ''}`;
+      const slot = task === null ? root.locator(`[data-help-control="${id}"]`) : root.locator(taskSelector);
+      const where = task === null ? root.locator(`[data-help-article="${destination.id}"]${destination.heading === null ? '' : `[data-help-heading="${destination.heading}"]`}:visible`)
+        : root.locator(`${taskSelector}:visible`);
       // The form is drawn a moment after the page; a hint that is not there within that moment is not there.
       try {
         // Every declared control still contributes its own help, even while its question shares this guide.
@@ -448,32 +556,34 @@ test('standalone resource hints stay available and template fields share one gui
     await page.goto('/resources/providers');
     await page.getByRole('button', { name: 'Add provider' }).click();
     const dialog = page.getByRole('dialog', { name: 'Add provider' });
-    await expect(dialog.getByText('Step 1 of 3')).toBeVisible();
+    await dialog.getByRole('combobox', { name: 'Fill from an example', exact: true }).click();
+    await page.getByRole('option', { name: 'Custom interface', exact: true }).click();
     await has('provider-kind');
-    await dialog.getByRole('radio', { name: /Custom/ }).click();
-    await dialog.getByRole('button', { name: 'Next' }).click();
-    await expect(dialog.getByText('Step 2 of 3')).toBeVisible();
-    await dialog.getByRole('combobox', { name: 'Format' }).click();
+    await dialog.getByRole('combobox', { name: 'Format', exact: true }).click();
     await page.getByRole('option').first().click();
     await has('endpoint-format');
-    await has('key-place');
+    await has('home');
     await dialog.getByLabel('Address', { exact: true }).fill('https://models.example.test/v1');
-    await dialog.getByLabel('API key', { exact: true }).fill('sk-test-0000');
+    await dialog.getByLabel('Key', { exact: true }).fill('sk-test-0000');
+    await dialog.getByRole('combobox', { name: 'Key role', exact: true }).click();
+    await page.getByRole('option', { name: 'Model key', exact: true }).click();
     await dialog.getByRole('button', { name: 'Next' }).click();
-    await expect(dialog.getByText('Step 3 of 3')).toBeVisible();
-    for (const id of ['home', 'who-may-use', 'arrangement-separated', 'arrangement-key_separated'] as const) await has(id);
+    await expect(dialog.getByRole('combobox', { name: 'Keep the key on', exact: true })).toBeVisible();
+    await has('key-place');
+    await dialog.locator('summary').filter({ hasText: /^How agents may run on it$/ }).click();
+    for (const id of ['who-may-use', 'arrangement-separated', 'arrangement-key_separated'] as const) await has(id);
     await page.keyboard.press('Escape');
   });
 
   await walk('provider-key', async (has) => {
     await page.goto(`/resources/providers/${RUNS_ON.openAiKey}?tab=key`);
-    await expect(page.getByRole('tab', { name: 'Key', exact: true, selected: true })).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Sign-in and keys', exact: true, selected: true })).toBeVisible();
     await has('endpoint-format');
   });
 
   await walk('provider-arrangements', async (has) => {
-    await page.goto(`/resources/providers/${RUNS_ON.openAiKey}?tab=arrangements`);
-    await expect(page.getByRole('tab', { name: 'How agents run', selected: true })).toBeVisible();
+    await page.goto(`/resources/providers/${RUNS_ON.openAiKey}?tab=settings`);
+    await expect(page.getByRole('tab', { name: 'Settings', exact: true, selected: true })).toBeVisible();
     for (const id of HINTED_FORMS['provider-arrangements']) await has(id);
   });
 
@@ -488,25 +598,30 @@ test('standalone resource hints stay available and template fields share one gui
 
   await walk('register-provider', async (has) => {
     await page.goto(`/resources/machines/${RUNS_ON.laptop}?tab=registered`);
+    await registeredPart(page, 'Providers');
     await page.getByRole('button', { name: 'Register a provider…' }).click();
-    await expect(page.getByRole('dialog', { name: /Register a provider/ })).toBeVisible();
+    // Registration now uses the same provider creation form with this machine already selected.
+    await expect(page.getByRole('dialog', { name: 'Add provider', exact: true })).toBeVisible();
     await has('machine-provider-source');
     await has('home');
-    await page.keyboard.press('Escape');
+    await page.getByRole('dialog', { name: 'Add provider', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
   });
 
   await walk('register-agent', async (has) => {
+    await registeredPart(page, 'Agent profiles');
     await page.getByRole('button', { name: 'Register a profile…' }).click();
     await expect(page.getByRole('dialog', { name: /Register an agent profile/ })).toBeVisible();
     await has('home');
-    await page.keyboard.press('Escape');
+    // A program picker opens on focus; cancel the owning form rather than only dismissing that picker.
+    await page.getByRole('dialog', { name: /Register an agent profile/ }).getByRole('button', { name: 'Cancel', exact: true }).click();
   });
 
   await walk('register-environment', async (has) => {
+    await registeredPart(page, 'Environments');
     await page.getByRole('button', { name: 'Register an environment…' }).click();
     await expect(page.getByRole('dialog', { name: /Register an environment/ })).toBeVisible();
     for (const id of HINTED_FORMS['register-environment']) await has(id);
-    await page.keyboard.press('Escape');
+    await page.getByRole('dialog', { name: /Register an environment/ }).getByRole('button', { name: 'Cancel', exact: true }).click();
   });
 
   await walk('make-environment', async (has) => {
@@ -519,7 +634,7 @@ test('standalone resource hints stay available and template fields share one gui
   });
 
   await walk('environment-switches', async (has) => {
-    await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
+    await page.goto(`/resources/environments/${RUNS_ON.workspace}?tab=controls`);
     for (const id of HINTED_FORMS['environment-switches']) await has(id);
   });
 
@@ -539,7 +654,7 @@ test('standalone resource hints stay available and template fields share one gui
   });
 
   await page.getByRole('link', { name: 'Node 22 dev', exact: true }).click();
-  await page.getByRole('tab', { name: 'Configuration' }).click();
+  await page.getByRole('tab', { name: 'Settings', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Write an environment template', exact: true })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Help: Configuration (JSON)', exact: true })).toHaveCount(0);
 
@@ -567,8 +682,9 @@ test('standalone resource hints stay available and template fields share one gui
 
   await walk('host-remove-runtime', async (has) => {
     await page.getByRole('tab', { name: /What runs on it/ }).click();
-    await page.getByRole('button', { name: /^Actions for orch-env/ }).first().click();
-    await page.getByRole('menuitem', { name: 'Remove…' }).click();
+    // Runtime rows now name their canonical resource; the unit identifier remains secondary technical data.
+    await page.getByRole('button', { name: 'Actions for Sandbox', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Delete…', exact: true }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await has('host-volumes');
     await page.keyboard.press('Escape');
@@ -584,11 +700,16 @@ test('standalone resource hints stay available and template fields share one gui
 
   await walk('agent-profile', async (has) => {
     await page.goto(`/resources/agents/${RUNS_ON.codexOnLaptop}?tab=profile`);
-    await expect(page.getByRole('tab', { name: 'Profile', exact: true, selected: true })).toBeVisible();
-    for (const id of HINTED_FORMS['agent-profile']) await has(id);
+    await expect(page.getByRole('tab', { name: 'Settings', exact: true, selected: true })).toBeVisible();
+    await has('agent-pin');
+    // The raw JSON editor is now an explicitly opened technical detail.
+    await page.getByRole('tabpanel', { name: 'Settings', exact: true }).locator('details[data-resource-details] > summary').first().click();
+    await has('agent-profile');
   });
 
   await walk('edit-agent', async (has) => {
+    // The Settings page already exposes these fields; its generic editor remains on Overview.
+    await page.getByRole('tab', { name: 'Overview', exact: true }).click();
     await page.getByRole('button', { name: 'Edit', exact: true }).click();
     await expect(page.getByRole('dialog', { name: /Edit Codex on ada-laptop/ })).toBeVisible();
     await has('agent-pin');
@@ -609,15 +730,12 @@ test('standalone resource hints stay available and template fields share one gui
 });
 
 test('a field that a descriptor declares brings its own help to its hint, and one that gives none has no "?"', async ({ page }) => {
-  await open(page, '/resources/providers');
-  await page.getByRole('button', { name: 'Add provider' }).click();
-  const dialog = page.getByRole('dialog', { name: 'Add provider' });
-  await dialog.getByRole('radio', { name: /Custom/ }).click();
-  await dialog.getByRole('button', { name: 'Next' }).click();
-  await dialog.getByRole('combobox', { name: 'Format' }).click();
-  await page.getByRole('option').first().click();
-  await dialog.getByText('Advanced').click();
-  const options = dialog.locator('details');
+  // Creation deliberately omits credential options; the provider's ordinary endpoint editor retains the full descriptor.
+  await open(page, `/resources/providers/${RUNS_ON.openAiKey}?tab=key`);
+  await expect(page.getByRole('tab', { name: 'Sign-in and keys', exact: true, selected: true })).toBeVisible();
+  const endpoint = providerEndpoints(page).locator('fieldset').first();
+  await endpoint.locator('summary').filter({ hasText: /^Advanced$/ }).click();
+  const options = endpoint.locator('details');
 
   // The help a descriptor gives is the card of the "?" beside the field, and is no longer a line under it.
   await expect(options.getByText('How the key is sent to this endpoint.')).toHaveCount(0);
@@ -678,12 +796,15 @@ test('revocation names the connection certificate and a revoked machine can be e
   await expect(revoke.getByRole('button',{name:"Revoke ada-laptop's certificate",exact:true})).toBeVisible();
   await expect(revoke).toContainText('Its programs and files are kept.');
   await revoke.getByRole('button',{name:'Cancel',exact:true}).click();
-  await expect(page.getByRole('button', { name: 'Enroll again…' }).first()).toBeVisible();
+  // A healthy machine's primary action refreshes its facts; reenrollment remains in its actions menu.
+  await page.getByRole('button', { name: 'Actions for ada-laptop', exact: true }).click();
+  await expect(page.getByRole('menuitem', { name: 'Enroll again…', exact: true })).toBeVisible();
+  await page.keyboard.press('Escape');
 
   await page.goto('/resources/machines');
   await page.getByRole('link', { name: 'old-mac', exact: true }).click();
   await expect(page.getByText('old-mac was revoked')).toBeVisible();
-  await page.getByRole('tab', { name: 'Certificate' }).click();
+  await page.getByRole('tab', { name: 'Software', exact: true }).click();
   await page.getByRole('button',{name:'Actions for old-mac',exact:true}).click();
   await expect(page.getByRole('menuitem',{name:'Revoke…',exact:true})).toBeDisabled();
   await page.keyboard.press('Escape');

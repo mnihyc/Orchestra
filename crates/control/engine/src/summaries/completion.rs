@@ -6,9 +6,7 @@ use crate::commands::{Outcome, Outgoing};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::resource_facts::activity;
-use crate::turns::OwnUse;
 use async_trait::async_trait;
-use orch_agent_contract::events::TokenUsage;
 use orch_db::queries::{resources::thread_engine as resources, threads};
 use orch_db::{Conn, DbError};
 use orch_link_contract::commands::{ProviderComplete, ProviderCompleteResult, SerialKey};
@@ -16,6 +14,9 @@ use orch_summarizer_contract::summarizer::SummarizeError;
 use orch_summarizer_model::Complete;
 use orch_types::{Id, Json};
 use serde_json::json;
+
+pub(super) mod automatic;
+mod paid;
 
 /// A model failure with no matching policy must not fall back to an unrelated retry timer.
 pub(super) const NO_RULE: &str = "calls.details.rule_unavailable";
@@ -50,7 +51,7 @@ fn effort_is_offered(params: &Json, model: &Json) -> bool {
     }
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, sqlx::FromRow)]
 struct Call {
     id: Id,
     node_id: Id,
@@ -58,80 +59,10 @@ struct Call {
     thread_id: Option<Id>,
     provider_id: Id,
     person_id: Option<Id>,
+    issued_by: Option<Id>,
+    entry_id: Option<Id>,
     model_name: String,
     created_at: chrono::DateTime<chrono::Utc>,
-}
-
-async fn counted(
-    engine: &Engine,
-    conn: &mut Conn,
-    call: &Call,
-    answer: &ProviderCompleteResult,
-) -> Result<(), EngineError> {
-    let tokens: TokenUsage = answer.usage;
-    engine
-        .count_own_use(
-            conn,
-            &OwnUse {
-                purpose: crate::turns::OwnPurpose::Summary,
-                timing: Some(&answer.timing),
-                id: call.id,
-                at: answer.timing.end.map_or(call.created_at, |at| at.get()),
-                topic: call.topic_id,
-                thread: call.thread_id,
-                provider: call.provider_id,
-                entry: None,
-                person: call.person_id,
-                model: &call.model_name,
-                tokens: orch_db::usage::ledger::Tokens {
-                    input: tokens.input_tokens,
-                    cached_input: tokens.cached_input_tokens,
-                    cache_write: tokens.cache_write_tokens,
-                    output: tokens.output_tokens,
-                    reasoning: tokens.reasoning_tokens,
-                    total: tokens.total_tokens,
-                },
-                request_ref: answer.request_ref.as_deref(),
-            },
-        )
-        .await?;
-    sqlx::query("DELETE FROM summary_calls WHERE id=$1")
-        .bind(call.id)
-        .execute(conn)
-        .await
-        .map_err(DbError::from)?;
-    Ok(())
-}
-
-/// Only the model client knows whether a failed command actually made an upstream request.
-async fn count_failed(
-    engine: &Engine,
-    conn: &mut Conn,
-    call: &Call,
-    error: &orch_link_contract::commands::CommandError,
-) -> Result<(), EngineError> {
-    let Some(raw) = error
-        .details
-        .as_ref()
-        .and_then(|details| details.get("model_request"))
-    else {
-        return Ok(());
-    };
-    let request: orch_agent_contract::requests::UsageRequest = serde_json::from_value(raw.clone())
-        .map_err(|error| EngineError::unreadable(error.to_string()))?;
-    request.check().map_err(EngineError::unreadable)?;
-    counted(
-        engine,
-        conn,
-        call,
-        &ProviderCompleteResult {
-            text: String::new(),
-            usage: request.tokens.clone().usage(),
-            request_ref: None,
-            timing: request.measured(),
-        },
-    )
-    .await
 }
 
 /// Reconciles answered calls after a lost process, without making any new provider request.
@@ -140,36 +71,27 @@ pub(super) async fn recover(
     conn: &mut Conn,
     limit: i64,
 ) -> Result<(), EngineError> {
-    let calls: Vec<Call> = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at FROM summary_calls WHERE purpose = 'summary' ORDER BY created_at,id LIMIT $1")
+    let calls: Vec<Call> = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE purpose = 'summary' ORDER BY created_at,id LIMIT $1")
         .bind(limit).fetch_all(&mut *conn).await.map_err(DbError::from)?;
     for call in calls {
         let status = engine.inner.commands.status(call.id).await?;
         match status.and_then(|status| status.outcome) {
             Some(Outcome::Succeeded(value)) => {
+                engine.reconcile_paid_service_command(call.id).await?;
                 settle_recovered(engine, conn, &call, crate::model_inputs::Sent::Taken).await?;
-                let answer: ProviderCompleteResult = serde_json::from_value(value)
+                let _: ProviderCompleteResult = serde_json::from_value(value)
                     .map_err(|error| EngineError::unreadable(error.to_string()))?;
-                let mut tx = engine.db().begin().await?;
-                counted(engine, &mut tx, &call, &answer).await?;
-                tx.commit().await.map_err(DbError::from)?;
+                paid::retire(conn, call.id).await?;
             }
             Some(outcome) => {
-                if let Outcome::Failed(error) = &outcome {
-                    let mut tx = engine.db().begin().await?;
-                    count_failed(engine, &mut tx, &call, error).await?;
-                    tx.commit().await.map_err(DbError::from)?;
-                }
+                engine.reconcile_paid_service_command(call.id).await?;
                 let sent = if matches!(outcome, Outcome::Failed(_)) {
                     crate::model_inputs::Sent::Refused
                 } else {
                     crate::model_inputs::Sent::Unknown
                 };
                 settle_recovered(engine, conn, &call, sent).await?;
-                sqlx::query("DELETE FROM summary_calls WHERE id=$1")
-                    .bind(call.id)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(DbError::from)?;
+                paid::retire(conn, call.id).await?;
             }
             None => {}
         }
@@ -200,15 +122,6 @@ async fn settle_recovered(
     Ok(())
 }
 
-/// The document version an auxiliary request is allowed to read.
-#[derive(Clone, Copy)]
-pub(super) struct DocumentContext {
-    /// The document whose text was captured.
-    pub(super) id: Id,
-    /// The document sequence the prompt was made from.
-    pub(super) seq: i64,
-}
-
 /// A single call has one persistent command and ledger identity, even after a scheduler crash.
 pub(super) struct Host {
     pub(super) engine: Engine,
@@ -216,7 +129,7 @@ pub(super) struct Host {
     pub(super) call: Id,
     pub(super) workflow: Id,
     pub(super) task: &'static str,
-    pub(super) document: Option<DocumentContext>,
+    pub(super) resource: Option<super::resource::Work>,
 }
 
 impl Host {
@@ -234,10 +147,6 @@ impl Host {
             || request.params.is_some()
         {
             context["candidate"] = json!({"provider_id":request.provider_id,"model":request.model_name,"params":request.params.clone().unwrap_or_else(||json!({}))});
-        }
-        if let Some(document) = self.document {
-            context["document_id"] = json!(document.id);
-            context["document_seq"] = json!(document.seq);
         }
         context
     }
@@ -276,6 +185,9 @@ impl Host {
                 "no summarizer setting writer is recorded".to_owned(),
             ));
         };
+        let frozen = paid::read(&self.engine, self.call)
+            .await
+            .map_err(internal)?;
         let retained = self
             .engine
             .inner
@@ -291,7 +203,16 @@ impl Host {
             .await
             .map_err(internal)?
             .is_some();
-        if let Some(body) = retained {
+        if already_issued && frozen.is_none() {
+            return Err(SummarizeError::Skipped(
+                "The summary has no original prepared command".into(),
+            ));
+        }
+        if let Some(body) = frozen
+            .as_ref()
+            .map(|command| command.body.clone())
+            .or(retained)
+        {
             let original: ProviderComplete = serde_json::from_value(body).map_err(internal)?;
             if original.provider_id != request.provider_id
                 || original.model_name != request.model_name
@@ -300,63 +221,13 @@ impl Host {
                     "The retained model request belongs to another choice".to_owned(),
                 ));
             }
-            request.protocol = original.protocol;
+            request = original;
         }
         let mut tx = self.engine.db().begin().await.map_err(internal)?;
         // A revocation committed while this runs refuses its commit; no epoch row is held meanwhile.
         orch_db::queries::transaction_guard::lock_action(&mut tx)
             .await
             .map_err(internal)?;
-        if let Some(document) = self.document {
-            let current = orch_db::queries::documents::get(&mut tx, document.id)
-                .await
-                .map_err(internal)?;
-            if current.is_none_or(|row| {
-                row.deleted_at.is_some()
-                    || row.description_source != "auto"
-                    || row.node_id != node
-                    || row.doc_seq != document.seq
-            }) {
-                return Err(SummarizeError::Skipped(
-                    "the summary's source changed".to_owned(),
-                ));
-            }
-            let principal = orch_authz::Principal::load(
-                &mut tx,
-                orch_authz::Caller::session(writer),
-                orch_types::Time::new(self.engine.inner.clock.now()),
-            )
-            .await
-            .map_err(internal)?;
-            let document_view = orch_authz::documents::check(
-                &mut tx,
-                &principal,
-                document.id,
-                orch_access_contract::permissions::Permission::DocView,
-                orch_authz::Policy::default(),
-            )
-            .await
-            .map_err(internal)?
-            .is_allowed();
-            let node_view = orch_authz::nodes::check_named(
-                &mut tx,
-                &principal,
-                node,
-                orch_access_contract::permissions::PermissionName::OfNode(
-                    orch_access_contract::permissions::NodePermission::View,
-                ),
-                orch_authz::Act::Use,
-                orch_authz::Policy::default(),
-            )
-            .await
-            .map_err(internal)?
-            .is_allowed();
-            if !document_view || !node_view {
-                return Err(SummarizeError::Skipped(
-                    "the summarizer cannot read its source".to_owned(),
-                ));
-            }
-        }
         if let Some(reason) =
             crate::calls::switched_off_reason(&mut tx, request.provider_id, &request.model_name)
                 .await
@@ -370,13 +241,63 @@ impl Host {
             .filter(|provider| {
                 !provider.protocols.is_empty()
                     && provider.deleted_at.is_none()
-                    && provider.status == "ready"
+                    && crate::providers::request_status_available(&provider.status)
             })
             .ok_or_else(|| {
                 SummarizeError::Skipped(
-                    "the summarizer needs a ready provider with forwarded access".to_owned(),
+                    "the summarizer needs an available provider with forwarded access".to_owned(),
                 )
             })?;
+        if request.protocol.is_empty() {
+            request.protocol = super::resource::completion_protocol(&provider.protocols)
+                .map_err(internal)?
+                .ok_or_else(|| {
+                    SummarizeError::Skipped(
+                        "The provider offers no generation interface".to_owned(),
+                    )
+                })?;
+        }
+        let model = resources::model(&mut tx, provider.id, &request.model_name)
+            .await
+            .map_err(internal)?
+            .filter(|model| model.enabled)
+            .ok_or_else(|| {
+                SummarizeError::Skipped("the selected model is not offered".to_owned())
+            })?;
+        if !already_issued && frozen.is_none() {
+            let parameters: orch_provider_contract::models::ModelParameters =
+                orch_provider_contract::models::composed_model_parameters(
+                    &model.parameters,
+                    &model.groups,
+                    &model.option_layers,
+                    Some(&request.protocol),
+                )
+                .map_err(internal)?;
+            // Internal request configuration, not response content or a new provider-read door.
+            let endpoint =
+                resources::provider_request_defaults(&mut tx, provider.id, &request.protocol)
+                    .await
+                    .map_err(internal)?;
+            let selected = request.params.clone().unwrap_or_else(|| json!({}));
+            let params = orch_model_contract::parameters::resolve(
+                &request.protocol,
+                &parameters,
+                &endpoint,
+                &selected,
+            )
+            .map_err(|reason| SummarizeError::Skipped(reason.to_owned()))?;
+            request.params = Some(params);
+            request.model_parameters = Some(parameters);
+        }
+        let resource = self.resource.as_ref().map(|work| work.candidate(&request));
+        let resource_frame = match resource.as_ref() {
+            Some(work) => Some(
+                work.frame(&mut tx, self.engine.inner.clock.as_ref())
+                    .await
+                    .map_err(internal)?,
+            ),
+            None => None,
+        };
         let allowed = self
             .engine
             .inner
@@ -399,6 +320,8 @@ impl Host {
                             )
                         })?
                         .flatten(),
+                    // A summary runs in no environment.
+                    runs_in: None,
                 },
             )
             .await
@@ -412,13 +335,6 @@ impl Host {
                 "the setting writer may not use this provider or model here".to_owned(),
             ));
         }
-        let model = resources::model(&mut tx, provider.id, &request.model_name)
-            .await
-            .map_err(internal)?
-            .filter(|model| model.enabled)
-            .ok_or_else(|| {
-                SummarizeError::Skipped("the selected model is not offered".to_owned())
-            })?;
         if request
             .params
             .as_ref()
@@ -438,21 +354,31 @@ impl Host {
                 "the selected model is not allowed here".to_owned(),
             ));
         }
-        if !already_issued
-            && !self
-                .engine
-                .room_for_summary(&mut tx, node, provider.id, &request.model_name)
+        let requested_tier = request.params.as_ref().and_then(|params| {
+            orch_model_contract::parameters::requested_tier_for_caps(&request.protocol, params)
+        });
+        let room = if already_issued {
+            true
+        } else if let Some(work) = resource.as_ref() {
+            work.room(&self.engine, &mut tx, &request)
                 .await
                 .map_err(internal)?
-        {
+        } else {
+            self.engine
+                .room_for_summary_with_tier(
+                    &mut tx,
+                    node,
+                    provider.id,
+                    &request.model_name,
+                    requested_tier.as_deref(),
+                )
+                .await
+                .map_err(internal)?
+        };
+        if !room {
             return Err(SummarizeError::Skipped(
-                "a shared usage cap has no room for summaries".to_owned(),
+                "A usage cap has no room for summaries".to_owned(),
             ));
-        }
-        if request.protocol.is_empty() {
-            request.protocol = provider.protocols.first().cloned().ok_or_else(|| {
-                SummarizeError::Skipped("the API provider offers no protocol".to_owned())
-            })?;
         }
         let machine = provider.key_machine_id.ok_or_else(|| {
             SummarizeError::Skipped(
@@ -471,16 +397,21 @@ impl Host {
         let thread = threads::thread(&mut tx, node).await.map_err(internal)?;
         let context: Option<(Option<Id>,Option<Id>)> = sqlx::query_as("SELECT COALESCE(s.agent_id,t.agent_id),COALESCE(s.environment_id,t.environment_id) FROM threads t LEFT JOIN segments s ON s.id=t.current_segment_id WHERE t.node_id=$1")
             .bind(node).fetch_optional(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
-        let (agent, environment) = context.unwrap_or_default();
-        if !activity::accepts_context(
-            &mut tx,
-            provider.id,
-            &request.model_name,
-            agent,
-            environment,
-        )
-        .await
-        .map_err(internal)?
+        let (agent, environment) = if resource.is_none() {
+            context.unwrap_or_default()
+        } else {
+            (None, None)
+        };
+        if resource.is_none()
+            && !activity::accepts_context(
+                &mut tx,
+                provider.id,
+                &request.model_name,
+                agent,
+                environment,
+            )
+            .await
+            .map_err(internal)?
         {
             return Err(SummarizeError::Skipped("Resource switched off".into()));
         }
@@ -497,6 +428,31 @@ impl Host {
         .ok_or_else(|| SummarizeError::Skipped("redaction is unavailable".to_owned()))?;
         request.system = material["system"].as_str().unwrap_or_default().to_owned();
         request.input = material["input"].as_str().unwrap_or_default().to_owned();
+        if !already_issued {
+            let input_tokens = orch_summarizer_model::context::estimated_tokens(&request.system)
+                .saturating_add(orch_summarizer_model::context::estimated_tokens(
+                    &request.input,
+                ));
+            let current = orch_provider_contract::models::composed_model_parameters(
+                &model.parameters,
+                &model.groups,
+                &model.option_layers,
+                Some(&request.protocol),
+            )
+            .map_err(internal)?;
+            let exceeds_window = current
+                .context_open()
+                .or(current.context_window.filter(|window| *window > 0))
+                .is_some_and(|window| {
+                    i64::from(input_tokens).saturating_add(request.max_output_tokens) > window
+                });
+            let exceeds_context = resource
+                .as_ref()
+                .is_some_and(|work| input_tokens > work.context_tokens());
+            if exceeds_window || exceeds_context {
+                return Err(SummarizeError::Skipped("the rendered summary exceeds its input allowance or the model window after output".into()));
+            }
+        }
         // Admission uses the final redacted bytes and current allowance. A masking replacement or a changed model
         // window cannot make a previously fitted handoff or goal check exceed the place's input share.
         if matches!(self.task, "handoff" | "goal_check") {
@@ -511,6 +467,17 @@ impl Host {
                 ));
             }
         }
+        let entry_id = match resource_frame.as_ref() {
+            Some(frame) => super::resource::model_entry(
+                &mut tx,
+                frame.principal(),
+                node,
+                &frame.value().config,
+            )
+            .await
+            .map_err(internal)?,
+            None => None,
+        };
         let call = Call {
             id: self.call,
             node_id: node,
@@ -518,17 +485,94 @@ impl Host {
             thread_id: thread.map(|thread| thread.node_id),
             provider_id: provider.id,
             person_id: Some(writer),
+            issued_by: resource.as_ref().and_then(super::resource::Work::issuer),
+            entry_id,
             model_name: request.model_name.clone(),
             created_at: self.engine.inner.clock.now(),
         };
-        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(id) DO NOTHING")
-            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
-        let outgoing =
-            Outgoing::new(self.call, machine, SerialKey::None, &request).map_err(internal)?;
+        if let Some(frame) = resource_frame {
+            frame
+                .into_parts()
+                .first_effect
+                .check(self.engine.inner.clock.as_ref())
+                .map_err(internal)?;
+        }
+        sqlx::query("INSERT INTO summary_calls (id,node_id,topic_id,thread_id,provider_id,person_id,model_name,created_at,agent_id,environment_id,issued_by,entry_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(id) DO NOTHING")
+            .bind(call.id).bind(node).bind(call.topic_id).bind(call.thread_id).bind(call.provider_id).bind(call.person_id).bind(&call.model_name).bind(call.created_at).bind(agent).bind(environment).bind(call.issued_by).bind(call.entry_id).execute(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
+        let admitted: Call = sqlx::query_as("SELECT id,node_id,topic_id,thread_id,provider_id,person_id,issued_by,entry_id,model_name,created_at FROM summary_calls WHERE id=$1 AND purpose='summary' AND cancel_reason IS NULL")
+            .bind(call.id).fetch_one(&mut *tx).await.map_err(DbError::from).map_err(internal)?;
+        let mut expected = call;
+        expected.created_at = admitted.created_at;
+        if expected != admitted {
+            return Err(SummarizeError::Skipped(
+                "The original summary receipt belongs to another source".into(),
+            ));
+        }
+        let call = admitted;
+        let attribution = if frozen.is_none() {
+            Some(paid::attribution(&mut tx, &call).await.map_err(internal)?)
+        } else {
+            None
+        };
+        let outgoing = if let Some(frozen) = frozen {
+            if !paid::matches(&frozen, node, self.call, resource.as_ref()) {
+                return Err(SummarizeError::Skipped(
+                    "The prepared summary command belongs to another source".into(),
+                ));
+            }
+            frozen
+        } else {
+            let mut outgoing = Outgoing::new(
+                self.call,
+                machine,
+                SerialKey::Provider(provider.id),
+                &request,
+            )
+            .map_err(internal)?
+            .by(paid::deadline(&call));
+            if let Some(work) = resource.as_ref() {
+                let authority =
+                    super::resource::command::Authority::capture(&mut tx, work.clone(), &outgoing)
+                        .await
+                        .map_err(internal)?;
+                let native =
+                    crate::commands::CommandAuthority::ResourceSummary(Box::new(authority));
+                let authority = work.bind_command(&outgoing, native).map_err(internal)?;
+                outgoing = outgoing.with_authority(authority);
+            } else {
+                let source =
+                    automatic::Source::capture(&mut tx, self, &call, root_call, configured)
+                        .await
+                        .map_err(internal)?;
+                let authority = super::resource::command::Authority::capture_automatic(
+                    &mut tx, source, &outgoing,
+                )
+                .await
+                .map_err(internal)?;
+                outgoing = outgoing.with_authority(
+                    crate::commands::CommandAuthority::ResourceSummary(Box::new(authority)),
+                );
+            }
+            outgoing
+        };
         // Current authority is decided when this commits; an earlier change refuses the commit.
         // Only then are the prompt recorded and the call queued, each with no transaction open, so
         // a summary neither holds a turn or a revocation back nor goes out after a change that refused it.
         tx.commit().await.map_err(DbError::from).map_err(internal)?;
+        let outgoing = if let Some(attribution) = attribution {
+            match paid::prepare(self, outgoing, attribution).await {
+                Ok(prepared) => prepared,
+                Err(error) => {
+                    let mut conn = self.engine.db().acquire().await.map_err(internal)?;
+                    paid::retire_unprepared(&mut conn, self.call)
+                        .await
+                        .map_err(internal)?;
+                    return Err(internal(error));
+                }
+            }
+        } else {
+            outgoing
+        };
         let blocks = [
             crate::model_inputs::ModelBlock::new(
                 "summary_system",
@@ -537,19 +581,18 @@ impl Host {
             ),
             crate::model_inputs::ModelBlock::new("summary_input", "summary", request.input.clone()),
         ];
-        let model_input = match self.document {
-            Some(document) => {
-                self.engine
-                    .record_document_model_input(node, document.id, &self.call.to_string(), &blocks)
-                    .await
-            }
-            None => {
-                self.engine
-                    .record_node_model_input(node, "summary", &self.call.to_string(), &blocks)
-                    .await
-            }
-        }
-        .map_err(internal)?;
+        let model_input = match resource.as_ref() {
+            Some(work) => self
+                .engine
+                .record_summary_model_input(node, work.request(), &self.call.to_string(), &blocks)
+                .await
+                .map_err(internal)?,
+            None => self
+                .engine
+                .record_node_model_input(node, "summary", &self.call.to_string(), &blocks)
+                .await
+                .map_err(internal)?,
+        };
         let stopped = {
             let mut conn = self.engine.db().acquire().await.map_err(internal)?;
             let reason = activity::request_stop_reason(&mut conn, self.call)
@@ -572,25 +615,51 @@ impl Host {
                 .await;
             return Err(SummarizeError::Skipped(reason));
         }
-        self.engine
-            .inner
-            .commands
-            .issue(outgoing)
-            .await
-            .map_err(internal)?;
-        let outcome = self
-            .engine
-            .inner
-            .commands
-            .wait(self.call)
-            .await
-            .map_err(internal)?;
+        let outcome = match self.engine.run_paid_service_command(outgoing).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let issued = self
+                    .engine
+                    .inner
+                    .commands
+                    .status(self.call)
+                    .await
+                    .map_err(internal)?
+                    .is_some();
+                if !issued {
+                    let mut conn = self.engine.db().acquire().await.map_err(internal)?;
+                    paid::retire_unprepared(&mut conn, self.call)
+                        .await
+                        .map_err(internal)?;
+                }
+                self.engine
+                    .settle_node_model_input(
+                        node,
+                        model_input,
+                        if issued {
+                            crate::model_inputs::Sent::Unknown
+                        } else {
+                            crate::model_inputs::Sent::Refused
+                        },
+                    )
+                    .await;
+                return Err(internal(error));
+            }
+        };
         let stopped = {
             let mut conn = self.engine.db().acquire().await.map_err(internal)?;
             activity::request_stop_reason(&mut conn, self.call)
                 .await
                 .map_err(internal)?
         };
+        self.engine
+            .reconcile_paid_service_command(self.call)
+            .await
+            .map_err(internal)?;
+        {
+            let mut conn = self.engine.db().acquire().await.map_err(internal)?;
+            paid::retire(&mut conn, self.call).await.map_err(internal)?;
+        }
         let answer = match outcome {
             Outcome::Succeeded(value) => {
                 self.engine
@@ -600,9 +669,6 @@ impl Host {
             }
             Outcome::Failed(error) => {
                 let mut tx = self.engine.db().begin().await.map_err(internal)?;
-                count_failed(&self.engine, &mut tx, &call, &error)
-                    .await
-                    .map_err(internal)?;
                 if let Some(reason) = stopped.as_ref() {
                     tx.commit().await.map_err(DbError::from).map_err(internal)?;
                     self.engine
@@ -679,7 +745,14 @@ impl Host {
                 if failure.get("retryable").is_none() {
                     failure["retryable"] = json!(matches!(
                         failure["code"].as_str(),
-                        Some("provider_busy" | "provider_unreachable" | "model_refused")
+                        Some(
+                            "provider_busy"
+                                | "rate_limited"
+                                | "overloaded"
+                                | "stream_interrupted"
+                                | "provider_unreachable"
+                                | "model_refused"
+                        )
                     ));
                 }
                 failure["said"] = raw
@@ -763,11 +836,6 @@ impl Host {
                 return Err(SummarizeError::Skipped(reason.to_owned()));
             }
         };
-        let mut tx = self.engine.db().begin().await.map_err(internal)?;
-        counted(&self.engine, &mut tx, &call, &answer)
-            .await
-            .map_err(internal)?;
-        tx.commit().await.map_err(DbError::from).map_err(internal)?;
         if let Some(reason) = stopped {
             return Err(SummarizeError::Skipped(reason));
         }
@@ -815,6 +883,7 @@ impl Complete for Host {
             ));
         };
         if let Some(candidate) = candidate {
+            let candidate = *candidate;
             if let Some(reason) =
                 crate::calls::switched_off_reason(&mut tx, candidate.provider_id, &candidate.model)
                     .await
@@ -838,15 +907,26 @@ impl Complete for Host {
                 .await
                 .map_err(internal)?
                 .filter(|model| model.enabled);
+            let supported = match target.as_ref() {
+                Some(provider) => super::resource::completion_protocol(&provider.protocols)
+                    .map_err(internal)?
+                    .is_some(),
+                None => false,
+            };
+            let original;
+            let caller = if let Some(work) = self.resource.as_ref() {
+                original = work
+                    .caller(&mut tx, self.engine.inner.clock.as_ref())
+                    .await
+                    .map_err(internal)?;
+                &original
+            } else {
+                original = orch_authz::Caller::session(writer).with_admin_mode(false);
+                &original
+            };
             let reason = if !self
                 .engine
-                .candidate_allowed(
-                    &mut tx,
-                    node,
-                    &orch_authz::Caller::session(writer).with_admin_mode(false),
-                    &candidate,
-                    Purpose::Summary,
-                )
+                .candidate_allowed(&mut tx, node, caller, &candidate, Purpose::Summary)
                 .await
                 .unwrap_or(false)
             {
@@ -855,10 +935,11 @@ impl Complete for Host {
             {
                 Some("candidate_parameters")
             } else if target.as_ref().is_none_or(|target| {
-                target.status != "ready"
+                !crate::providers::request_status_available(&target.status)
                     || target.deleted_at.is_some()
                     || target.protocols.is_empty()
             }) || model.is_none()
+                || !supported
             {
                 Some("candidate_unavailable")
             } else if model
@@ -891,17 +972,9 @@ impl Complete for Host {
                 if target.protocols.contains(&request.protocol) {
                     return request.protocol.clone();
                 }
-                target
-                    .protocols
-                    .iter()
-                    .find(|protocol| {
-                        matches!(
-                            protocol.as_str(),
-                            "openai-responses" | "anthropic-messages" | "openai-chat"
-                        )
-                    })
-                    .or_else(|| target.protocols.first())
-                    .cloned()
+                super::resource::completion_protocol(&target.protocols)
+                    .ok()
+                    .flatten()
                     .unwrap_or_default()
             });
             request.provider_id = candidate.provider_id;
@@ -921,7 +994,7 @@ impl Complete for Host {
             call,
             workflow: self.workflow,
             task: self.task,
-            document: self.document,
+            resource: self.resource.clone(),
         };
         let answer = attempt
             .complete_once(node, request, self.call, &configured)

@@ -11,9 +11,12 @@ import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { EmptyState } from '@/ui/EmptyState';
 import { choiceOption, offeredChoice } from '@/i18n/choices';
+import { ModelReport } from './ModelReport';
 
 import { createModel, updateModel } from '@/api/resources';
 import { Hint } from '@/features/help/Hint';
+import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
+import { searchModesFor } from '@/features/models/webSearch';
 import { firstStep, formatContext, readTokens } from '@/features/models/context';
 import { accessProgramDisplayName } from '@/features/models/names';
 import { type EntryForm, effortsOf, type Faults, faultsOf, formOf, hasLargest, parametersOf, refusedAt, type StepForm } from '@/features/resources/providers/entry';
@@ -32,6 +35,7 @@ import { RadioGroup } from '@/ui/RadioGroup';
 import { Select } from '@/ui/Select';
 import { Switch } from '@/ui/Switch';
 import { toast } from '@/ui/Toast';
+import { OptionSchemaEditor } from '@/features/models/OptionSchemaEditor';
 
 /** The value of a choice that stands for "none": a select cannot hold an empty value. */
 const NONE = '\u0000none';
@@ -91,7 +95,7 @@ function Switches({
     <Part title={title} lead={lead}>
       {items.length === 0 && <EmptyState compact title={empty} />}
       {items.map((item) => (
-        <Switch key={item.id} label={item.label} hint={item.hint} checked={item.on} disabled={disabled} onCheckedChange={(on) => onSwitch(item.id, on)} />
+        <Switch key={item.id} presentation="compact" label={item.label} hint={item.hint} checked={item.on} disabled={disabled} onCheckedChange={(on) => onSwitch(item.id, on)} />
       ))}
       {anyOn && (
         <Select
@@ -119,7 +123,7 @@ function Switches({
             }}
             autoComplete="off"
           />
-          <Button size="sm" action="create" disabled={typed.trim() === ''} onClick={addTyped}>
+          <Button size="sm" action="create" aria-label={t('providers.models.switchOnIn', { area: title })} disabled={typed.trim() === ''} onClick={addTyped}>
             {t('providers.models.switchOn')}
           </Button>
         </div>
@@ -165,7 +169,7 @@ export interface EntryFieldsProps {
   otherGroups: readonly string[];
   /** The limits that cover the model, where it has an entry to ask about. */
   limits?: ReactNode;
-  provider: Pick<Provider, 'kind' | 'harness_kind'>;
+  provider: Pick<Provider, 'kind' | 'harness_kind'> & Partial<Pick<Provider, 'protocols' | 'model_groups_max'>>;
 }
 
 /** The fields that say what a model can be run with here: the same in the dialog that adds a model and in its row editor. */
@@ -180,6 +184,8 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
   const offeredLargest = base.offered?.context_max ?? null;
   const offeredTiers = base.offered?.service_tiers ?? [];
   const offeredPrograms = base.offered?.access_programs ?? [];
+  const declaredSearchModes = searchModesFor(provider);
+  const searchModes = declaredSearchModes.length > 0 ? declaredSearchModes : [...new Set([...(base.offered?.web_search ?? []), ...(base.web_search ?? [])])];
   const step = firstStep(parametersOf(form, base).rate);
 
   // What is on is listed with what is offered, so that a switch that was typed in can be switched off again.
@@ -210,10 +216,26 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
 
   return (
     <div className="flex flex-col gap-4">
+      <ModelReport offered={base.offered} source={source} />
+      {searchModes.length > 0 && <Part title={t('webSearch.title')} lead={<>{t('webSearch.managerHint')} <ArticleGuideLink article="provider-web-search" title={t('webSearch.guide')} /></>}>
+        <p className="text-sm text-text-muted">{t('webSearch.optionsHint')}</p>
+        {faults.search !== undefined && <p role="alert" className="text-sm text-danger-text">{faults.search}</p>}
+        {searchModes.map((mode) => <Switch key={mode} presentation="compact" label={t('webSearch.modeSwitch', { mode: offeredChoice(t, 'webSearch', mode)?.label ?? mode })}
+          hint={(base.offered?.web_search ?? []).includes(mode) ? t('webSearch.offered', { source }) : t('webSearch.declared')}
+          checked={form.searchModes.includes(mode)} disabled={disabled} onCheckedChange={(on) => {
+            const enabled = on ? [...new Set([...form.searchModes, mode])] : form.searchModes.filter((one) => one !== mode);
+            onChange({ ...form, searchModes: enabled, defaultSearch: enabled.includes(form.defaultSearch) ? form.defaultSearch : 'disabled' });
+          }} />)}
+        <Select label={t('models.editor.defaultSearch')} hint={t('webSearch.defaultHint')}
+          value={form.searchModes.includes(form.defaultSearch) ? form.defaultSearch : 'disabled'} disabled={disabled}
+          onValueChange={(defaultSearch) => onChange({ ...form, defaultSearch })}
+          options={[{value:'disabled',...choiceOption(t, 'webSearch.disabled')}, ...form.searchModes.filter((mode) => mode !== 'disabled').map((mode) => ({value:mode,...(offeredChoice(t, 'webSearch', mode) ?? choiceOption(t, 'dynamic.value', {name:mode,context:t('webSearch.title')}))}))]} />
+      </Part>}
+
       <Part title={t('models.editor.efforts.title')}>
         <Input help={<Hint id="model-efforts" />} label={t('providers.models.effortsLabel')} hint={t('models.editor.efforts.hint')} value={form.efforts} disabled={disabled} error={faults.efforts} onChange={(event) => onChange({ ...form, efforts: event.target.value })} autoComplete="off" />
         <Select
-          label={t('models.editor.startsWith')}
+          label={t('models.editor.defaultEffort')}
           value={form.defaultEffort === '' || !efforts.includes(form.defaultEffort) ? NONE : form.defaultEffort}
           disabled={disabled || efforts.length === 0}
           error={faults.defaultEffort}
@@ -232,7 +254,7 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
         anotherLabel={t('providers.models.anotherSpeed')}
         onAnother={(id) => switchTier(id, true)}
         start={{
-          label: t('models.editor.startsWith'),
+          label: t('models.editor.defaultSpeed'),
           none: t('models.editor.standard'),
           hint: t('models.editor.speeds.startHint'),
           value: form.defaultTier,
@@ -252,7 +274,7 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
         anotherLabel={t('providers.models.anotherProgram')}
         onAnother={(name) => switchProgram(name, true)}
         start={{
-          label: t('models.editor.startsWith'),
+          label: t('models.editor.defaultProgram'),
           none: t('models.editor.noProgram'),
           hint: t('models.editor.programs.startHint'),
           value: form.defaultProgram,
@@ -302,9 +324,9 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
         </div>
         {hasLargest(form) && (
           <div className="flex flex-col gap-2">
-            <p className="text-sm font-medium text-text">{t('models.editor.startsWith')}</p>
+            <p className="text-sm font-medium text-text">{t('models.editor.defaultContext')}</p>
             <RadioGroup
-              label={t('models.editor.startsWith')}
+              label={t('models.editor.defaultContext')}
               variant="list"
               disabled={disabled}
               value={form.start}
@@ -331,9 +353,13 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
         {step !== null && largest !== null && largest > step && <p className="text-sm text-text-muted">{t('models.editor.context.step', { size: formatContext(step, locale) })}</p>}
       </Part>
       <p className="text-sm text-text-muted">{t('models.editor.switchedOn')}</p>
+      <Part title={t('providerOptions.schemaTitle')}>
+        <div className="flex justify-end"><ArticleGuideLink article="provider-details" heading="request-options" title={t('models.groups.optionsGuide')} /></div>
+        <OptionSchemaEditor value={form.requestOptions} protocols={provider.protocols ?? []} disabled={disabled} error={faults.requestOptions} onChange={(requestOptions) => onChange({ ...form, requestOptions })} />
+      </Part>
 
       <Part title={t('models.groups.title')}>
-        <GroupsField groups={form.groups} offered={otherGroups} error={faults.groups} disabled={disabled} onChange={(groups) => onChange({ ...form, groups })} />
+        <GroupsField groups={form.groups} offered={otherGroups} maximum={provider.model_groups_max ?? undefined} error={faults.groups} disabled={disabled} onChange={(groups) => onChange({ ...form, groups })} />
       </Part>
 
       {limits !== undefined && <Part title={t('models.limits.title')}>{limits}</Part>}
@@ -343,6 +369,7 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
           <Input label={t('providers.models.rateInput')} inputMode="decimal" value={form.rate.input} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, input: event.target.value } })} autoComplete="off" />
           <Input label={t('providers.models.rateCached')} inputMode="decimal" value={form.rate.cached} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, cached: event.target.value } })} autoComplete="off" />
           <Input label={t('providers.models.rateOutput')} inputMode="decimal" value={form.rate.output} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, output: event.target.value } })} autoComplete="off" />
+          <Input label={t('webSearch.price')} optional inputMode="decimal" value={form.rate.search ?? ''} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, search: event.target.value } })} autoComplete="off" />
           <Input label={t('providers.models.rateWrite')} optional inputMode="decimal" value={form.rate.write} disabled={disabled} onChange={(event) => onChange({ ...form, rate: { ...form.rate, write: event.target.value } })} autoComplete="off" />
         </div>
         {form.tiers.map((tier) => (
@@ -384,18 +411,18 @@ export function EntryFields({ base, form, onChange, faults, disabled, otherGroup
 }
 
 /** What the model's row editor opens with while it is being filled in. */
-function useEntryForm(initial: () => EntryForm) {
+function useEntryForm(initial: () => EntryForm, maximumGroups?: number, existingGroups: readonly string[] = []) {
   const { t } = useTranslation();
   const locale = useAppearance((state) => state.locale);
   const [form, setForm] = useState<EntryForm>(initial);
-  const faults = faultsOf(form, t, locale);
+  const faults = faultsOf(form, t, locale, maximumGroups, existingGroups);
   return { form, setForm, faults, wrong: Object.keys(faults).length > 0 };
 }
 
 /** Adds a model: the routing name first, then the name people see, then what it can be run with. */
 export function AddModelDialog({ provider, onClose }: { provider: Provider; onClose: () => void }) {
   const { t } = useTranslation();
-  const { form, setForm, faults, wrong } = useEntryForm(() => formOf({}));
+  const { form, setForm, faults, wrong } = useEntryForm(() => formOf({}), provider.model_groups_max ?? undefined);
   const [routing, setRouting] = useState('');
   const [display, setDisplay] = useState('');
   const [shown, setShown] = useState(false);
@@ -469,9 +496,9 @@ export function AddModelDialog({ provider, onClose }: { provider: Provider; onCl
 }
 
 /** The row editor of a model: what it can be run with here, saved as the entry it is. */
-export function ModelEditorDialog({ provider, model, onClose }: { provider: Provider; model: ProviderModel; onClose: () => void }) {
+export function ModelEditorDialog({ provider, model, onClose, proposedGroup }: { provider: Provider; model: ProviderModel; onClose: () => void; proposedGroup?: string }) {
   const { t } = useTranslation();
-  const { form, setForm, faults, wrong } = useEntryForm(() => formOf(model.parameters, model.groups));
+  const { form, setForm, faults, wrong } = useEntryForm(() => formOf(model.parameters, proposedGroup === undefined || model.groups.includes(proposedGroup) ? model.groups : [...model.groups, proposedGroup]), provider.model_groups_max ?? undefined, model.groups);
   const save = useMutation({
     mutationFn: () => updateModel(provider.id, model.id, { parameters: parametersOf(form, model.parameters), groups: form.groups }),
     onSuccess: () => {

@@ -23,5 +23,5 @@
   {"method":"error","params":{"error":{"message":"stream disconnected before completion: idle timeout waiting for SSE","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122"},"emittedAtMs":1791799440084},
   {"method":"turn/completed","params":{"threadId":"01a12f91-90ee-7543-9326-555ba2a32e28","turn":{"id":"01a12f91-9177-7dc2-b493-bc6ca9fde122","rootTurnId":"01a12f91-9177-7dc2-b493-bc6ca9fde122","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"stream disconnected before completion: idle timeout waiting for SSE","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799431,"completedAt":1791799440,"durationMs":8538}},"emittedAtMs":1791799440092}
  ],
- "expect": {"outcome": "failed", "code": "provider_unreachable", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "idle timeout waiting for SSE"}
+ "expect": {"outcome": "failed", "code": "stream_interrupted", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "idle timeout waiting for SSE"}
 }

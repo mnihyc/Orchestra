@@ -6,7 +6,7 @@ import { marker } from '../doubles/thread-rows.ts';
 import { ADA } from '../doubles/thread-scenes.ts';
 import { ACME, configureThread, emit, scenario, signIn } from './support.ts';
 import { asAdmin } from './admin-mode-support.ts';
-import { HISTORY_KEY as KEY, PROGRAM_EXIT_REASON, historyBuilds, historySetting, programExitProvider } from './agent-history-support.ts';
+import { HISTORY_BUILDS_PATH, HISTORY_KEY as KEY, PROGRAM_EXIT_REASON, historyBuilds, historySetting, programExitProvider } from './agent-history-support.ts';
 
 const IDLE_MS = 60_000;
 
@@ -140,7 +140,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     const writes = await historySetting(page);
     const reads = traffic(page);
     try {
-      await page.goto('/org/acme.research/settings/policies');
+      await page.goto('/org/acme.research/settings/defaults');
       const row = page.locator(`[data-setting="${KEY}"]`);
       await expect(row.getByRole('spinbutton')).toHaveValue('7'); await settled(page);
       const cold = [...reads.requests];
@@ -167,12 +167,13 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     await historyBuilds(page);
     const reads = traffic(page);
     try {
-      await page.goto('/admin/harnesses'); await settled(page);
+      await page.goto(HISTORY_BUILDS_PATH); await settled(page);
       const cold = [...reads.requests];
       const idleReads = await idle(page, reads, cold.length);
       const beforeAction = reads.requests.length;
-      await page.getByRole('button', { name: words.admin.harnesses.status.checked, exact: true }).first().click();
-      await expect(page.getByText(new RegExp(words.agentHistory.nativeDelete))).toBeVisible();
+      // The build's row names what its check switched off; its button opens the check's results.
+      await page.getByRole('button', { name: new RegExp(words.agentHistory.nativeDelete) }).first().click();
+      await expect(page.getByRole('dialog').getByText(new RegExp(words.agentHistory.nativeDelete)).first()).toBeVisible();
       await expect(page.getByText(new RegExp(words.agentHistory.safeFallback))).toBeVisible();
       await capture(page, info, `check-results-${suffix}`);
       expect(reads.requests.slice(beforeAction)).toEqual([]);

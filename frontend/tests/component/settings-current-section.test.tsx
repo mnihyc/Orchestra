@@ -33,7 +33,7 @@ it.each(['en', 'zh-CN'] as const)('marks exactly one current section for topic/p
   const project = createRoute({ getParentRoute: () => root, path: '/project/$projectId/settings', component: ProjectSettings,
     validateSearch: (search: Record<string, unknown>) => isProjectSection(search.section) && search.section !== 'general' ? { section: search.section } : {},
   });
-  const router = createRouter({ routeTree: root.addChildren([topic, project]), history: createMemoryHistory({ initialEntries: ['/topic/login?tab=settings&section=policies'] }), defaultPendingMinMs: 0 });
+  const router = createRouter({ routeTree: root.addChildren([topic, project]), history: createMemoryHistory({ initialEntries: ['/topic/login?tab=settings&section=defaults'] }), defaultPendingMinMs: 0 });
   show(<RouterProvider router={router} />);
   const assertCurrent = async (label: string, section: string) => {
     const nav = await screen.findByRole('navigation', { name: label });
@@ -42,13 +42,13 @@ it.each(['en', 'zh-CN'] as const)('marks exactly one current section for topic/p
     expect(selected[0]).toHaveTextContent(sectionLabel(section, i18n.t));
     expect(within(nav).getByRole('combobox', { name: label })).toHaveValue(sectionLabel(section, i18n.t));
   };
-  await assertCurrent('Topic sections', 'policies');
+  await assertCurrent('Topic sections', 'defaults');
   await act(async () => { await router.navigate({ to: '/topic/$topicId', params: { topicId: 'login' }, search: { tab: 'settings', section: 'general' } }); });
   await assertCurrent('Topic sections', 'general');
   await act(async () => { await router.navigate({ to: '/topic/$topicId', params: { topicId: 'login' }, search: { tab: 'settings', section: 'audit' } }); });
   await assertCurrent('Topic sections', 'audit');
-  await act(async () => { await router.navigate({ to: '/project/$projectId/settings', params: { projectId: 'web' }, search: { section: 'policies' } }); });
-  await assertCurrent('Project sections', 'policies');
+  await act(async () => { await router.navigate({ to: '/project/$projectId/settings', params: { projectId: 'web' }, search: { section: 'defaults' } }); });
+  await assertCurrent('Project sections', 'defaults');
   await act(async () => { await router.navigate({ to: '/project/$projectId/settings', params: { projectId: 'web' }, search: { section: 'general' } }); });
   await assertCurrent('Project sections', 'general');
 });

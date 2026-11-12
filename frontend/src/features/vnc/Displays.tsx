@@ -69,7 +69,7 @@ export function DisplaysPanel({ environment, threadId, load }: DisplaysPanelProp
   const look = useMutation({ mutationFn: () => lookAgainForDisplays(environment.id), onSuccess: (list) => client.setQueryData(displayKeys.list(environment.id), list) });
   const mayWork = environment.access.permissions.includes('vnc.manage');
 
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   const data = query.data;
   const displays = data.displays.filter((display) => display.state !== 'closed');

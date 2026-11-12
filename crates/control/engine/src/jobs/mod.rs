@@ -7,6 +7,7 @@ pub mod background_end;
 pub mod batch;
 pub mod capability_change;
 pub mod cleanup;
+pub(crate) mod command_identity;
 pub mod continuation;
 pub mod document_notices;
 pub mod environment_move;
@@ -17,6 +18,8 @@ pub mod health;
 pub mod host_delete;
 pub mod import;
 pub mod kept_images;
+/// Exact native lifecycle proposals in the durable command channel.
+pub mod lifecycle_commands;
 pub mod machine_move;
 pub mod mcp_offering;
 pub mod mcp_restart;

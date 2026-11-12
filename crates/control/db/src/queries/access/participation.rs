@@ -17,6 +17,8 @@ pub struct Mark {
 /// It does not evaluate View: the caller's frame still decides every returned row.
 /// Ordinary thread ownership is aggregated into requested ancestors instead of
 /// expanding a hundred thousand owned threads into the permission graph.
+/// `resources_only` selects the direct query only with no node targets or node/chat pages;
+/// other shapes retain the full query.
 #[expect(
     clippy::too_many_arguments,
     reason = "one request's ordinary identity and requested pages are bound together"
@@ -33,9 +35,29 @@ pub async fn marks(
     closed: &[Id],
     subtree: Option<Id>,
     scope_roots: &[Id],
+    resources_only: bool,
 ) -> Result<Vec<Mark>, DbError> {
     let kinds: Vec<&str> = pages.iter().map(|page| page.object_kind.as_str()).collect();
     let ids: Vec<Id> = pages.iter().map(|page| page.object_id).collect();
+    if resources_only
+        && nodes.is_empty()
+        && pages
+            .iter()
+            .all(|page| !matches!(page.object_kind.as_str(), "node" | "chat"))
+    {
+        return Ok(sqlx::query_as(include_str!("participation_resources.sql"))
+            .bind(user)
+            .bind(groups)
+            .bind(at.get())
+            .bind(&kinds)
+            .bind(&ids)
+            .bind(member_roots)
+            .bind(closed)
+            .bind(subtree)
+            .bind(scope_roots)
+            .fetch_all(conn)
+            .await?);
+    }
     let sql = include_str!("participation.sql")
         .replace(
             "__ROLE_SUBJECT__",

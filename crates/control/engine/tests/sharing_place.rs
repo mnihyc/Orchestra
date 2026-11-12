@@ -17,7 +17,7 @@ use orch_authz::Caller;
 use orch_db::audit::Origin;
 use orch_db::queries::access::testing as access_testing;
 use orch_db::queries::hierarchy::testing::insert_node;
-use orch_engine::sharing::{Record, ShareError, Subject, live_id, live_id_alone};
+use orch_engine::sharing::{Record, ShareError, Subject, live_id_given};
 use orch_link_contract::commands::OrchTool;
 use orch_types::{Id, new_id};
 use serde_json::json;
@@ -83,6 +83,7 @@ fn area(
         timeline,
         chat,
         documents,
+        ..ShareParts::default()
     })
 }
 
@@ -94,6 +95,8 @@ fn live(
     client: &str,
 ) -> ShareWithAgents {
     ShareWithAgents {
+        link_origin: None,
+        viewers_read: None,
         read_first: None,
         download: None,
         what: ShareWhat::Node(ShareWhatNode { node_id: place }),
@@ -175,7 +178,10 @@ async fn a_place_shared_by_itself_opens_its_own_documents_and_nothing_inside_it(
     .unwrap();
     assert_eq!(made.len(), 1);
     assert!(!made[0].inside, "it is the place by itself");
-    assert_eq!(made[0].id, live_id_alone("node", k.outer, k.reader));
+    assert_eq!(
+        made[0].id,
+        live_id_given("node", k.outer, k.reader, Some(k.world.ada), true)
+    );
     assert_eq!(made[0].parts.chat, Some(ShareLevel::Read));
     assert_eq!(made[0].parts.documents, Some(ShareDocumentsLevel::Read));
     assert_eq!(made[0].parts.timeline, None);
@@ -258,7 +264,10 @@ async fn a_place_shared_with_what_is_in_it_opens_the_documents_inside_as_well() 
         made[0].inside,
         "it is the place with what is in it unless the request says otherwise"
     );
-    assert_eq!(made[0].id, live_id("node", k.outer, k.reader));
+    assert_eq!(
+        made[0].id,
+        live_id_given("node", k.outer, k.reader, Some(k.world.ada), false)
+    );
     assert!(entries_of_the_agents(&k, k.outer, "defaults").await >= 1);
     assert!(
         ok(read_doc(&k, k.outer_doc).await)["text"]
@@ -357,7 +366,10 @@ async fn both_ways_can_stand_for_the_same_place_and_are_changed_and_taken_back_e
     assert_eq!(listed.len(), 2, "{listed:?}");
     let with_what_is_in_it = listed.iter().find(|record| record.inside).unwrap();
     let by_itself = listed.iter().find(|record| !record.inside).unwrap();
-    assert_eq!(with_what_is_in_it.id, live_id("node", k.outer, k.reader));
+    assert_eq!(
+        with_what_is_in_it.id,
+        live_id_given("node", k.outer, k.reader, Some(k.world.ada), false)
+    );
     assert_eq!(by_itself.id, alone.id);
     assert_ne!(with_what_is_in_it.id, by_itself.id);
     assert_eq!(with_what_is_in_it.parts.timeline, Some(ShareLevel::Read));

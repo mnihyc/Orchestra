@@ -12,6 +12,7 @@
  * measured are written into the report of the run.
  */
 import { expect, type Page, test } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
 
 import { fillNames, scenario, signIn } from '../e2e/support.ts';
 
@@ -34,7 +35,7 @@ async function slowdown(page: Page): Promise<number> {
 }
 
 /** Types into the field and times, in the page, how long it takes for a row that matches `expected` to stand in the list. */
-async function timeTo(page: Page, text: string, expected: string): Promise<number> {
+async function timeTo(page: Page, text: string, expected: string, remote = false): Promise<number> {
   const field = page.getByRole('dialog', { name: 'Find' }).getByRole('combobox', { name: 'Search terms', exact: true });
   await field.fill('');
   await page.evaluate(
@@ -64,8 +65,16 @@ async function timeTo(page: Page, text: string, expected: string): Promise<numbe
     },
     expected,
   );
+  const reply = remote ? page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith('/search/names') && url.searchParams.get('q') === text && response.ok();
+  }) : null;
   await field.fill(text);
-  return page.evaluate(() => (window as unknown as { measured: Promise<number> }).measured);
+  const elapsed = await page.evaluate(() => (window as unknown as { measured: Promise<number> }).measured);
+  await expect(field).toHaveValue(text);
+  await expect(page.getByRole('option', { name: new RegExp(expected, 'i') })).toBeVisible();
+  if (reply !== null) await reply;
+  return elapsed;
 }
 
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)] ?? 0;
@@ -87,22 +96,24 @@ test('the finder answers within its budget with ten thousand names in the fake A
   const factor = await slowdown(page);
 
   const local: number[] = [];
-  for (const [text, expected] of [['>sign', 'Sign out'], ['>theme', 'Theme: Dark'], [':sandbox', 'Sandbox'], ['>new org', 'New org'], [':idle stop', 'Idle stop']] as const) {
+  for (const [text, expected] of [['>sign', 'Sign out'], ['>theme', 'Theme: Dark'], [':sandbox', english.settingRegistry.sandbox.mode.title], ['>new org', 'New org'], [':idle stop', 'Idle stop']] as const) {
     local.push(await timeTo(page, text, expected));
   }
   const named: number[] = [];
   for (const number of ['00042', '07777', '09999', '01234', '05000']) {
     // One name of ten thousand has this number. The row that offers to search for the words typed holds the number too, and is
     // there at once: what is waited for is the name itself ("Quarterly report 00042"), which only the server's answer holds.
-    named.push(await timeTo(page, `report ${number}`, `(Quarterly|Nightly|Notes on) report ${number}`));
+    named.push(await timeTo(page, `report ${number}`, `(Quarterly|Nightly|Notes on) report ${number}`, true));
   }
 
   const report = `slowdown ${factor.toFixed(1)}x; local groups: median ${median(local).toFixed(0)} ms, slowest ${slowest(local).toFixed(0)} ms (budget ${(LOCAL_BUDGET_MS * factor).toFixed(0)} ms); named things: median ${median(named).toFixed(0)} ms, slowest ${slowest(named).toFixed(0)} ms (budget ${(NAMED_BUDGET_MS * factor).toFixed(0)} ms)`;
   console.warn(report);
   info.annotations.push({ type: 'figures', description: report });
   expect(SAMPLES).toBe(local.length);
-  for (const sample of local) expect(sample, report).toBeGreaterThan(0);
-  for (const sample of named) expect(sample, report).toBeGreaterThan(0);
+  // A completed input and render can share one browser clock tick. timeTo separately
+  // proves the matching visible answer (and the named search response); -1 still fails.
+  for (const sample of local) expect(sample, report).toBeGreaterThanOrEqual(0);
+  for (const sample of named) expect(sample, report).toBeGreaterThanOrEqual(0);
   expect(slowest(local), report).toBeLessThan(LOCAL_BUDGET_MS * factor);
   expect(slowest(named), report).toBeLessThan(NAMED_BUDGET_MS * factor);
 });

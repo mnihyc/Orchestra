@@ -44,6 +44,126 @@ struct Entry {
     descriptor: ExecutorDescriptor,
     executor: Box<dyn Executor>,
     running: Option<ExecutorEndpoint>,
+    local_program: Option<String>,
+}
+
+impl Entry {
+    fn selected_program<'a>(&self, context: &'a EnvironmentContext) -> Option<&'a str> {
+        if context.tools_dir.is_some() || self.descriptor.protocol != ExecutorProtocol::Harness {
+            return None;
+        }
+        context
+            .local_programs
+            .get(self.descriptor.program.as_ref()?)
+            .map(String::as_str)
+    }
+
+    async fn retire_changed_program(
+        &mut self,
+        context: &EnvironmentContext,
+        available: &ExecutorAvailability,
+    ) -> std::result::Result<bool, orch_agent_contract::adapter::AdapterError> {
+        let changed = self.local_program.is_some()
+            && self.running.as_ref().is_some_and(|running| {
+                self.selected_program(context) != self.local_program.as_deref()
+                    || !available.available
+                    || available.version.as_deref() != Some(running.version.as_str())
+            });
+        if changed {
+            self.running = None;
+            self.local_program = None;
+            self.executor.stop().await?;
+        }
+        Ok(changed)
+    }
+}
+
+async fn start_entry(
+    kind: &str,
+    entry: &mut Entry,
+    allowed: Option<&[String]>,
+    context: &EnvironmentContext,
+    required_version: Option<&str>,
+) -> Result<ExecStartResult> {
+    if let Some(list) = allowed {
+        let offered = list.iter().any(|name| {
+            name == kind
+                || tool_set_name(name, kind).is_some_and(|set| entry.descriptor.has_tool_set(set))
+        });
+        if !offered {
+            return Err(HostError::ExecNotOffered(format!(
+                "this machine's owner does not let its exec node offer {kind:?}"
+            )));
+        }
+    }
+    let availability = entry.executor.available(context).await;
+    entry
+        .retire_changed_program(context, &availability)
+        .await
+        .map_err(|error| {
+            HostError::Internal(format!(
+                "{kind:?} did not retire its previous program: {error}"
+            ))
+        })?;
+    if !availability.available {
+        return Err(HostError::Unsupported(format!(
+            "{kind:?} cannot start here: {}",
+            availability
+                .reason
+                .unwrap_or_else(|| "no reason was given".to_owned())
+        )));
+    }
+    let local_program = entry.selected_program(context).map(str::to_owned);
+    if local_program.is_some()
+        && required_version.is_some_and(|version| availability.version.as_deref() != Some(version))
+    {
+        return Err(HostError::Unsupported(
+            "the confirmed program is not the executor build admitted for these tools".into(),
+        ));
+    }
+    let endpoint = match entry.executor.start(context).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            if entry.local_program.take().is_some() {
+                entry.running = None;
+            }
+            return Err(HostError::Internal(format!(
+                "{kind:?} did not start: {error}"
+            )));
+        }
+    };
+    endpoint.port().map_err(|error| {
+        HostError::Internal(format!(
+            "{kind:?} gave an address that is not its own: {error}"
+        ))
+    })?;
+    if local_program.is_some()
+        && required_version.is_some_and(|version| endpoint.version != version)
+    {
+        let _ = entry.executor.stop().await;
+        entry.running = None;
+        entry.local_program = None;
+        return Err(HostError::Unsupported(
+            "the executor started at a different build than these tools admit".into(),
+        ));
+    }
+    let result = ExecStartResult {
+        service: service_of(kind, entry.descriptor.protocol),
+        version: endpoint.version.clone(),
+        tool_sets: if endpoint.tool_sets.is_empty() {
+            entry
+                .descriptor
+                .tool_sets
+                .iter()
+                .map(|set| set.name.clone())
+                .collect()
+        } else {
+            endpoint.tool_sets.clone()
+        },
+    };
+    entry.running = Some(endpoint);
+    entry.local_program = local_program;
+    Ok(result)
 }
 
 fn tool_set_name<'a>(offer: &'a str, executor: &str) -> Option<&'a str> {
@@ -114,6 +234,7 @@ impl Executors {
                 descriptor,
                 executor,
                 running: None,
+                local_program: None,
             },
         );
         Ok(())
@@ -136,6 +257,9 @@ impl Executors {
         // An executor is `Send` and not `Sync`, so it is looked at through a unique borrow.
         for (kind, entry) in entries.iter_mut() {
             let availability = entry.executor.available(context).await;
+            if let Err(error) = entry.retire_changed_program(context, &availability).await {
+                tracing::warn!(%kind, %error, "an executor of a changed program could not be stopped");
+            }
             let mut fact = availability.clone().into_fact(kind);
             // A tool set is offered only if it is one the executor declared.
             if let Some(sets) = &mut fact.tool_sets {
@@ -218,53 +342,7 @@ impl Executors {
         let entry = entries
             .get_mut(kind)
             .ok_or_else(|| HostError::NotFound(format!("there is no executor {kind:?}")))?;
-        if let Some(list) = allowed {
-            let offered = list.iter().any(|name| {
-                name == kind
-                    || tool_set_name(name, kind)
-                        .is_some_and(|set| entry.descriptor.has_tool_set(set))
-            });
-            if !offered {
-                return Err(HostError::ExecNotOffered(format!(
-                    "this machine's owner does not let its exec node offer {kind:?}"
-                )));
-            }
-        }
-        let availability = entry.executor.available(context).await;
-        if !availability.available {
-            return Err(HostError::Unsupported(format!(
-                "{kind:?} cannot start here: {}",
-                availability
-                    .reason
-                    .unwrap_or_else(|| "no reason was given".to_owned())
-            )));
-        }
-        let endpoint = entry
-            .executor
-            .start(context)
-            .await
-            .map_err(|error| HostError::Internal(format!("{kind:?} did not start: {error}")))?;
-        endpoint.port().map_err(|error| {
-            HostError::Internal(format!(
-                "{kind:?} gave an address that is not its own: {error}"
-            ))
-        })?;
-        let result = ExecStartResult {
-            service: service_of(kind, entry.descriptor.protocol),
-            version: endpoint.version.clone(),
-            tool_sets: if endpoint.tool_sets.is_empty() {
-                entry
-                    .descriptor
-                    .tool_sets
-                    .iter()
-                    .map(|set| set.name.clone())
-                    .collect()
-            } else {
-                endpoint.tool_sets.clone()
-            },
-        };
-        entry.running = Some(endpoint);
-        Ok(result)
+        start_entry(kind, entry, allowed, context, None).await
     }
 
     /// Where the running executor `kind` is reached, for the tunnels that end at it.
@@ -308,6 +386,95 @@ impl Executors {
         allowed: Option<&[String]>,
         context: &EnvironmentContext,
     ) -> Result<ExecutorEndpoint> {
+        self.ensure_at_version(kind, allowed, context, None, None)
+            .await
+    }
+
+    /// A fresh ticket may name a build; a retry without one retains the exact registered endpoint.
+    pub async fn ensure_at_version(
+        &self,
+        kind: &str,
+        allowed: Option<&[String]>,
+        context: &EnvironmentContext,
+        version: Option<&str>,
+        registered: Option<&ExecutorEndpoint>,
+    ) -> Result<ExecutorEndpoint> {
+        let mut entries = self.entries.lock().await;
+        let entry = entries
+            .get_mut(kind)
+            .ok_or_else(|| HostError::NotFound(format!("there is no executor {kind:?}")))?;
+        if registered.is_some_and(|expected| entry.running.as_ref() != Some(expected)) {
+            return Err(HostError::Unsupported(
+                "the registered executor was retired".into(),
+            ));
+        }
+        if entry.selected_program(context).is_none() && entry.local_program.is_none() {
+            drop(entries);
+            return self.ensure_legacy(kind, allowed, context).await;
+        }
+        let expected = version
+            .map(str::to_owned)
+            .or_else(|| {
+                entry
+                    .running
+                    .as_ref()
+                    .map(|endpoint| endpoint.version.clone())
+            })
+            .ok_or_else(|| {
+                HostError::Unsupported(
+                    "a local executor needs an admitted or previously running build".into(),
+                )
+            })?;
+        let availability = entry.executor.available(context).await;
+        let retired = entry
+            .retire_changed_program(context, &availability)
+            .await
+            .map_err(|error| {
+                HostError::Internal(format!(
+                    "{kind:?} did not retire its previous program: {error}"
+                ))
+            })?;
+        if retired && (registered.is_some() || version.is_none()) {
+            return Err(HostError::Unsupported(
+                "the registered executor's program changed".into(),
+            ));
+        }
+        if !availability.available || availability.version.as_deref() != Some(expected.as_str()) {
+            return Err(HostError::Unsupported(
+                "the confirmed program is not the executor build admitted for these tools".into(),
+            ));
+        }
+        if let Some(endpoint) = &entry.running {
+            if endpoint.version != expected {
+                return Err(HostError::Unsupported(
+                    "the running executor is not the build admitted for these tools".into(),
+                ));
+            }
+            if answers(endpoint).await {
+                return Ok(endpoint.clone());
+            }
+        }
+        if entry.running.take().is_some() {
+            entry.local_program = None;
+            entry
+                .executor
+                .stop()
+                .await
+                .map_err(|error| HostError::Internal(format!("{kind:?} did not stop: {error}")))?;
+        }
+        start_entry(kind, entry, allowed, context, Some(&expected)).await?;
+        entry
+            .running
+            .clone()
+            .ok_or_else(|| HostError::Internal(format!("{kind:?} was started and is not there")))
+    }
+
+    async fn ensure_legacy(
+        &self,
+        kind: &str,
+        allowed: Option<&[String]>,
+        context: &EnvironmentContext,
+    ) -> Result<ExecutorEndpoint> {
         if let Some(endpoint) = self.endpoint(kind).await {
             if answers(&endpoint).await {
                 return Ok(endpoint);
@@ -320,6 +487,13 @@ impl Executors {
             .ok_or_else(|| HostError::Internal(format!("{kind:?} was started and is not there")))
     }
 
+    /// Whether this executor currently uses a confirmed machine program rather than a held cache.
+    pub async fn uses_local_program(&self, kind: &str, context: &EnvironmentContext) -> bool {
+        self.entries.lock().await.get(kind).is_some_and(|entry| {
+            entry.selected_program(context).is_some() || entry.local_program.is_some()
+        })
+    }
+
     /// Stops the executor `kind`, if it runs.
     pub async fn stop(&self, kind: &str) -> Result<()> {
         let mut entries = self.entries.lock().await;
@@ -327,6 +501,7 @@ impl Executors {
             .get_mut(kind)
             .ok_or_else(|| HostError::NotFound(format!("there is no executor {kind:?}")))?;
         if entry.running.take().is_some() {
+            entry.local_program = None;
             entry
                 .executor
                 .stop()
@@ -334,6 +509,37 @@ impl Executors {
                 .map_err(|error| HostError::Internal(format!("{kind:?} did not stop: {error}")))?;
         }
         Ok(())
+    }
+
+    /// Retires executors started from a removed or replaced confirmed program.
+    pub async fn stop_changed_programs(
+        &self,
+        after: &BTreeMap<String, String>,
+        context: &EnvironmentContext,
+    ) {
+        if context.tools_dir.is_some() {
+            return;
+        }
+        let mut entries = self.entries.lock().await;
+        for (kind, entry) in entries.iter_mut() {
+            if entry.descriptor.protocol != ExecutorProtocol::Harness {
+                continue;
+            }
+            let Some(program) = &entry.descriptor.program else {
+                continue;
+            };
+            let Some(started) = entry.local_program.as_deref() else {
+                continue;
+            };
+            if after.get(program).map(String::as_str) != Some(started)
+                && entry.running.take().is_some()
+            {
+                entry.local_program = None;
+                if let Err(error) = entry.executor.stop().await {
+                    tracing::warn!(%kind, %error, "an executor of a withdrawn program could not be stopped");
+                }
+            }
+        }
     }
 
     /// Stops every running executor, as when the environment is detached.
@@ -402,6 +608,8 @@ mod tests {
     use orch_agent_contract::adapter::AdapterError;
     use orch_agent_contract::descriptor::SandboxMode;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn context(mcp: bool) -> EnvironmentContext {
         serde_json::from_value(json!({
@@ -466,6 +674,297 @@ mod tests {
 
     /// An executor of a harness's own protocol, which is not there.
     struct Missing;
+
+    struct LocalProgram {
+        stops: Arc<AtomicUsize>,
+        starts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Executor for LocalProgram {
+        fn kind(&self) -> &'static str {
+            "local-program"
+        }
+        fn describe(&self) -> ExecutorDescriptor {
+            serde_json::from_value(json!({
+                "kind":"local-program","title":"Local program","program":"codex",
+                "protocol":"harness","sandbox_modes":["open"]
+            }))
+            .unwrap()
+        }
+        async fn available(&self, env: &EnvironmentContext) -> ExecutorAvailability {
+            ExecutorAvailability::available(
+                env.variables
+                    .get("TEST_VERSION")
+                    .map_or("1.0.0", String::as_str),
+                vec![SandboxMode::Open],
+            )
+        }
+        async fn start(
+            &mut self,
+            env: &EnvironmentContext,
+        ) -> std::result::Result<ExecutorEndpoint, AdapterError> {
+            let count = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(ExecutorEndpoint {
+                address: "127.0.0.1:41777".into(),
+                token: Some(orch_plugin_contract::Secret::new(format!(
+                    "controlled-executor-{count}"
+                ))),
+                version: env
+                    .variables
+                    .get("TEST_VERSION")
+                    .map_or("1.0.0", String::as_str)
+                    .into(),
+                tool_sets: Vec::new(),
+                sandbox_modes: vec![SandboxMode::Open],
+            })
+        }
+        async fn stop(&mut self) -> std::result::Result<(), AdapterError> {
+            self.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn removing_or_replacing_a_local_path_retires_its_executor_at_the_same_version() {
+        for after in [
+            BTreeMap::new(),
+            BTreeMap::from([("codex".into(), "/b/codex".into())]),
+        ] {
+            let registry = registry().await;
+            let stops = Arc::new(AtomicUsize::new(0));
+            registry
+                .register(Box::new(LocalProgram {
+                    stops: Arc::clone(&stops),
+                    starts: Default::default(),
+                }))
+                .await
+                .unwrap();
+            let mut env = context(false);
+            env.local_programs.insert("codex".into(), "/a/codex".into());
+            registry.start("local-program", None, &env).await.unwrap();
+            registry.start("orch-exec", None, &env).await.unwrap();
+            registry.stop_changed_programs(&after, &env).await;
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+            assert!(registry.endpoint("local-program").await.is_none());
+            assert!(registry.endpoint("orch-exec").await.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn unchanged_selections_and_held_cache_builds_are_not_retired_by_local_path_changes() {
+        for cached in [false, true] {
+            let registry = registry().await;
+            let stops = Arc::new(AtomicUsize::new(0));
+            registry
+                .register(Box::new(LocalProgram {
+                    stops: Arc::clone(&stops),
+                    starts: Default::default(),
+                }))
+                .await
+                .unwrap();
+            let mut env = context(false);
+            env.local_programs.insert("codex".into(), "/a/codex".into());
+            if cached {
+                env.tools_dir = Some("/held-cache".into());
+            }
+            registry.start("local-program", None, &env).await.unwrap();
+            let mut after = env.local_programs.clone();
+            after.insert("claude-code".into(), "/claude".into());
+            registry.stop_changed_programs(&after, &env).await;
+            assert_eq!(stops.load(Ordering::SeqCst), 0);
+            assert!(registry.endpoint("local-program").await.is_some());
+            if cached {
+                registry.stop_changed_programs(&BTreeMap::new(), &env).await;
+                assert_eq!(stops.load(Ordering::SeqCst), 0);
+                assert!(registry.endpoint("local-program").await.is_some());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn an_executor_already_started_from_the_new_path_survives_that_update() {
+        let registry = registry().await;
+        let stops = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Box::new(LocalProgram {
+                stops: Arc::clone(&stops),
+                starts: Default::default(),
+            }))
+            .await
+            .unwrap();
+        let mut env = context(false);
+        env.local_programs.insert("codex".into(), "/b/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        let current = registry.endpoint("local-program").await.unwrap();
+        registry
+            .stop_changed_programs(&env.local_programs, &env)
+            .await;
+        assert_eq!(registry.endpoint("local-program").await, Some(current));
+        assert_eq!(stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn current_program_version_facts_retire_the_old_executor_but_keep_unrelated_tools() {
+        let registry = registry().await;
+        let stops = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Box::new(LocalProgram {
+                stops: Arc::clone(&stops),
+                starts: Default::default(),
+            }))
+            .await
+            .unwrap();
+        let mut env = context(false);
+        env.local_programs.insert("codex".into(), "/a/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        registry.start("orch-exec", None, &env).await.unwrap();
+        env.variables.insert("TEST_VERSION".into(), "2.0.0".into());
+        let facts = registry.facts(&env).await;
+        let changed = facts
+            .iter()
+            .find(|fact| fact.kind == "local-program")
+            .unwrap();
+        assert!(changed.available);
+        assert_eq!(changed.version, "2.0.0");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(registry.endpoint("local-program").await.is_none());
+        assert!(registry.endpoint("orch-exec").await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_fresh_local_executor_requires_the_exact_admitted_known_or_unknown_build() {
+        for version in ["1.0.0", "unknown"] {
+            let registry = registry().await;
+            let starts = Arc::new(AtomicUsize::new(0));
+            let stops = Arc::new(AtomicUsize::new(0));
+            registry
+                .register(Box::new(LocalProgram {
+                    starts: Arc::clone(&starts),
+                    stops: Arc::clone(&stops),
+                }))
+                .await
+                .unwrap();
+            let mut env = context(false);
+            env.local_programs.insert("codex".into(), "/a/codex".into());
+            env.variables.insert("TEST_VERSION".into(), version.into());
+            for requested in [None, Some("another-build")] {
+                assert!(
+                    registry
+                        .ensure_at_version("local-program", None, &env, requested, None)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(starts.load(Ordering::SeqCst), 0);
+                assert!(registry.endpoint("local-program").await.is_none());
+            }
+            let endpoint = registry
+                .ensure_at_version("local-program", None, &env, Some(version), None)
+                .await
+                .unwrap();
+            assert_eq!(endpoint.version, version);
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert!(
+                registry
+                    .ensure_at_version("local-program", None, &env, Some("another-build"), None)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(registry.endpoint("local-program").await, Some(endpoint));
+            assert_eq!(starts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                stops.load(Ordering::SeqCst),
+                0,
+                "a stale ticket does not kill a current executor"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_ticketless_retry_does_not_start_a_changed_build_and_a_fresh_ticket_must_name_it() {
+        let registry = registry().await;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Box::new(LocalProgram {
+                starts: Arc::clone(&starts),
+                stops: Arc::clone(&stops),
+            }))
+            .await
+            .unwrap();
+        let mut env = context(false);
+        env.local_programs.insert("codex".into(), "/a/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        let original = registry.endpoint("local-program").await.unwrap();
+        env.variables.insert("TEST_VERSION".into(), "2.0.0".into());
+        assert!(
+            registry
+                .ensure_at_version("local-program", None, &env, None, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "the changed program was never started by the retry"
+        );
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert!(registry.endpoint("local-program").await.is_none());
+        assert!(
+            registry
+                .ensure_at_version("local-program", None, &env, Some("1.0.0"), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        let replacement = registry
+            .ensure_at_version("local-program", None, &env, Some("2.0.0"), None)
+            .await
+            .unwrap();
+        assert_eq!(replacement.version, "2.0.0");
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_retired_registered_endpoint_is_not_revived_after_a_same_build_path_replacement() {
+        let registry = registry().await;
+        let starts = Arc::new(AtomicUsize::new(0));
+        registry
+            .register(Box::new(LocalProgram {
+                starts: Arc::clone(&starts),
+                stops: Default::default(),
+            }))
+            .await
+            .unwrap();
+        let mut env = context(false);
+        env.local_programs.insert("codex".into(), "/a/codex".into());
+        registry.start("local-program", None, &env).await.unwrap();
+        let original = registry.endpoint("local-program").await.unwrap();
+        env.local_programs.insert("codex".into(), "/b/codex".into());
+        registry
+            .stop_changed_programs(&env.local_programs, &env)
+            .await;
+        assert!(
+            registry
+                .ensure_at_version("local-program", None, &env, None, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        let replacement = registry
+            .ensure_at_version("local-program", None, &env, Some("1.0.0"), None)
+            .await
+            .unwrap();
+        assert_ne!(replacement, original);
+        assert!(
+            registry
+                .ensure_at_version("local-program", None, &env, None, Some(&original))
+                .await
+                .is_err()
+        );
+        assert_eq!(registry.endpoint("local-program").await, Some(replacement));
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+    }
 
     #[async_trait]
     impl Executor for Missing {

@@ -1,0 +1,2 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"from_harness","frame":{"method":"turn/completed","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"failed","error":{"message":"Native context window exceeded.","codexErrorInfo":"contextWindowExceeded","additionalDetails":null},"items":[]}}}}

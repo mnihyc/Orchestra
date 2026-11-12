@@ -72,10 +72,10 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-export function useSearchStream(filters: SearchFilters, enabled: boolean, immediate: boolean, submitted: number, typedAt: number, onUnavailable?: (error: unknown) => boolean) {
+export function useSearchStream(filters: SearchFilters, enabled: boolean, immediate: boolean, submitted: number, typedAt: number, onUnavailable?: (error: unknown) => boolean, projection: 'results' | 'org-count' = 'results') {
   const cache = useQueryClient();
   const reader = useStore(client.session, (session) => `${session.userId ?? ''}:${session.readerVersion ?? 0}`);
-  const queryKey = [...searchKey(filters), 'stream', reader] as const;
+  const queryKey = [...searchKey(filters), projection === 'org-count' ? 'org-count' : 'stream', reader] as const;
   const key = JSON.stringify(queryKey);
   const [stored, dispatch] = useReducer(reducer, undefined, initial);
   // A new reader or selection never paints the preceding reader's parts, even for one frame.
@@ -114,7 +114,10 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
   // The normal query owns cancellation, authority retirement and native reference patches.
   // Payloads are cached during a stream but its order belongs to the mounted view. Reopening must
   // start a new authorized stream even if an interrupted stream left cached payloads behind.
-  const source = useQuery({queryKey, queryFn: ({signal}) => collect(signal), enabled, staleTime: Infinity, refetchOnMount: 'always', retry: false});
+  // Returning to a cached selection also needs a fresh view-owned order. Focus and reconnect
+  // keep the current stream; selection changes, explicit submits and mounts start one.
+  const source = useQuery({queryKey, queryFn: ({signal}) => collect(signal), enabled, staleTime: 0, refetchOnMount: 'always',
+    refetchOnWindowFocus: false, refetchOnReconnect: false, retry: false});
   useEffect(() => {if (!enabled) request.current?.abort();}, [enabled]);
   useEffect(() => () => request.current?.abort(), []);
   const {refetch}=source;
@@ -155,6 +158,6 @@ export function useSearchStream(filters: SearchFilters, enabled: boolean, immedi
   }));
   const available = state.shown.filter((id) => hits[id] !== undefined);
   const ids = state.expanded ? available : available.slice(0, state.pageSize);
-  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: !state.ended || Object.values(state.running).some(Boolean),
+  return {...state, hits, ids, total: Object.keys(hits).length, unfinished: enabled && (!state.ended || Object.values(state.running).some(Boolean)),
     more, block, hasMore: !state.expanded && Object.keys(hits).length > state.pageSize || state.cursor !== null};
 }
