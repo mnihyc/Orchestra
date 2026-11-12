@@ -1,14 +1,15 @@
 /** Shared SegmentedControl component (navigation); primitives are wrapped here.
  *
- * A choice among a few things that are all in view, one of which is always chosen: a theme, a
+ * A choice among a few things that are all in view: a theme, a
  * density, a way of looking at a list. The arrow keys go from one to the next. Short names alone
- * determine the buttons' widths; descriptions open only in that option's hover/focus tooltip.
+ * determine the buttons' widths; descriptions are announced with each option and shown in its hover/focus tooltip.
+ * A choice not reported yet is null, leaving every segment unselected until it is known or chosen.
  */
 import { RadioGroup } from 'radix-ui';
-import { type ReactNode, useRef } from 'react';
+import { type ComponentPropsWithRef, type ReactNode, useId, useRef } from 'react';
 
 import { ActionIcon, type ActionId } from '@/ui/actions';
-import { Choice, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
+import { Choice, hasChoiceDescription, type ChoiceDetails, type ChoiceName } from '@/ui/Choice';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
 
@@ -24,15 +25,24 @@ export type Segment<Value extends string> = ChoiceName & ChoiceDetails & {
 export interface SegmentedControlProps<Value extends string> {
   /** What is being chosen, for a screen reader. */
   label: string;
-  value: Value;
+  value: Value | null;
   onValueChange: (value: Value) => void;
   segments: readonly Segment<Value>[];
+  /** A pending save holds the value and keeps keyboard focus on its segment. */
+  pending?: boolean;
   size?: 'sm' | 'md';
   /** Gives the group the available width; options keep the width of their short names. */
   block?: boolean;
+  /** Keep related labels on one line when the caller supplies a narrow alternative. */
+  wrap?: boolean;
   /** Marks the chosen one as where the keyboard begins when a dialog that holds the control opens. */
   startsKeyboard?: boolean;
   className?: string;
+}
+
+function SegmentButton({ descriptionId, ...props }: ComponentPropsWithRef<typeof RadioGroup.Item> & { descriptionId: string | undefined }) {
+  // Radix appends its tooltip id; the same consequence already has a persistent association.
+  return <RadioGroup.Item {...props} aria-describedby={descriptionId ?? props['aria-describedby']} />;
 }
 
 export function SegmentedControl<Value extends string>({
@@ -40,21 +50,25 @@ export function SegmentedControl<Value extends string>({
   value,
   onValueChange,
   segments,
+  pending = false,
   size = 'md',
   block = false,
+  wrap = true,
   startsKeyboard = false,
   className,
 }: SegmentedControlProps<Value>) {
   const group=useRef<HTMLDivElement>(null);
+  const id = useId();
   return (
     <div data-choice-selector className={cx('inline-grid min-w-0 max-w-full self-start justify-items-start gap-1', block ? 'w-full' : 'w-fit', className)}>
     <RadioGroup.Root
       ref={group}
       data-segmented=""
       aria-label={label}
-      value={value}
+      aria-busy={pending || undefined}
+      value={value ?? ''}
       // A real radio group selects on arrow navigation and never clears the chosen value.
-      onValueChange={(next) => onValueChange(next as Value)}
+      onValueChange={(next) => { if (!pending) onValueChange(next as Value); }}
       onKeyDownCapture={(event)=>{
         if(event.ctrlKey || event.altKey || event.metaKey)return;
         const target=event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-segment-value]') : null;
@@ -70,15 +84,17 @@ export function SegmentedControl<Value extends string>({
         if(segment===undefined)return;
         // Select during the key press so a quick release cannot move focus without changing the choice.
         event.preventDefault();event.stopPropagation();
+        if (pending) return;
         if(segment.value!==value)onValueChange(segment.value);
         requestAnimationFrame(()=>Array.from(group.current?.querySelectorAll<HTMLElement>('[data-segment-value]') ?? []).find((button)=>button.dataset.segmentValue===segment.value)?.focus());
       }}
       className={cx(
-        'inline-flex max-w-full flex-wrap items-stretch gap-0.5 rounded-md bg-bg-muted p-0.5',
+        'inline-flex max-w-full items-stretch gap-0.5 rounded-md bg-bg-muted p-0.5',
+        wrap ? 'flex-wrap' : 'flex-nowrap',
         block && 'flex w-full',
       )}
     >
-      {segments.map((segment) => (
+      {segments.map((segment, index) => (
         <Choice
           key={segment.value}
           name={segment.name ?? segment.label}
@@ -87,18 +103,21 @@ export function SegmentedControl<Value extends string>({
           compact
           className={cx('min-w-0 max-w-full', block && 'flex-1')}
         >{(content, control) => {
-          const { 'aria-describedby': description, ...name } = control;
-          return <Tooltip content={segment.tooltip ?? segment.description}><RadioGroup.Item
-          {...name}
-          {...(description === undefined ? {} : { 'aria-describedby': description })}
+          const description = hasChoiceDescription(segment.description) ? `${id}-${index}-description` : undefined;
+          return <><Tooltip content={segment.tooltip ?? segment.description}><SegmentButton
+          {...control}
+          aria-describedby={description}
+          descriptionId={segment.tooltip === undefined ? description : undefined}
           value={segment.value}
           data-segment-value={segment.value}
           // A tooltip's open state must not replace the radio's selected state.
           data-state={value === segment.value ? 'checked' : 'unchecked'}
           disabled={segment.disabled}
+          aria-disabled={pending || undefined}
           {...(startsKeyboard && segment.value === value ? { 'data-autofocus': '' } : {})}
           className={cx(
-            'choice-option inline-flex min-w-0 flex-auto items-center justify-center gap-1 rounded-sm px-2 font-medium whitespace-normal text-text-muted transition-colors',
+            'choice-option inline-flex min-w-0 flex-auto items-center justify-center gap-1 rounded-sm px-2 font-medium text-text-muted transition-colors',
+            wrap ? 'whitespace-normal' : 'whitespace-nowrap',
             size === 'md' ? 'min-h-8 text-base' : 'min-h-6 text-sm',
             'hover:text-text',
             // System colours can erase the selected ground: its underline keeps a non-colour mark.
@@ -108,7 +127,9 @@ export function SegmentedControl<Value extends string>({
         >
           {segment.action === undefined ? segment.icon : <ActionIcon action={segment.action} />}
           {content}
-        </RadioGroup.Item></Tooltip>;
+        </SegmentButton></Tooltip>
+        {/* Consequences remain readable before selection even while the compact tooltip is closed. */}
+        {description !== undefined && <span id={description} hidden>{segment.description}</span>}</>;
         }}</Choice>
       ))}
     </RadioGroup.Root>

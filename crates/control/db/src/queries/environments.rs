@@ -8,6 +8,38 @@
 use crate::{Conn, DbError};
 use orch_types::Id;
 
+/// The existing agent-reach line of one selected Thread; no credential value is read.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ThreadArrangement {
+    /// The selected bound Thread.
+    pub thread: Id,
+    /// Its stored arrangement, absent before the first binding.
+    pub arrangement: Option<String>,
+    /// The last recorded shared-copy expiry, if any.
+    pub copy_expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Reads the exact selected Thread set in one query. Historical shared leases remain
+/// eligible as before; only the credential_shared arrangement displays this expiry.
+pub async fn thread_arrangements(
+    conn: &mut Conn,
+    threads: &[Id],
+) -> Result<Vec<ThreadArrangement>, DbError> {
+    if threads.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_as(
+        "SELECT t.node_id AS thread,t.arrangement,
+           (SELECT l.copy_expires_at FROM leases l
+             WHERE l.thread_id=t.node_id AND l.mode='shared'
+             ORDER BY l.opened_at DESC LIMIT 1) AS copy_expires_at
+         FROM threads t WHERE t.node_id=ANY($1)",
+    )
+    .bind(threads)
+    .fetch_all(conn)
+    .await?)
+}
+
 /// Activity counts for one requested environment, without naming its users or threads.
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct Activity {
@@ -364,6 +396,8 @@ pub mod thread_engine {
         pub config: Json,
         /// The machine it is on now.
         pub machine_id: Option<Id>,
+        /// The template it was made from, for a managed environment.
+        pub template_id: Option<Id>,
         /// How many times it was made anew.
         pub generation: i32,
         /// Where it stands.
@@ -381,7 +415,7 @@ pub mod thread_engine {
     /// The environment `id`.
     pub async fn environment(conn: &mut Conn, id: Id) -> Result<Option<EnvironmentRow>, DbError> {
         let mut found: Option<EnvironmentRow> = sqlx::query_as(
-            "SELECT id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id,
+            "SELECT id, name, owner_id, org_id, placement, home_node_id, workspace_root, config, machine_id, template_id,
                     generation, status, status_detail, facts, remove_at, deleted_at
                FROM environments WHERE id = $1",
         )
@@ -397,6 +431,49 @@ pub mod thread_engine {
             row.facts["environment_descriptor"] = machine.descriptor.unwrap_or(Json::Null);
         }
         Ok(found)
+    }
+
+    /// The environment's own program decisions and the name of the machine offering it.
+    pub async fn machine_program_metadata(
+        conn: &mut Conn,
+        environment: Id,
+        machine: Id,
+    ) -> Result<Option<(Option<Json>, String)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT e.config->'exec.version_overrides',m.name
+             FROM environments e JOIN machines m ON m.id=e.machine_id
+             WHERE e.id=$1 AND e.machine_id=$2 AND e.placement='connected'
+               AND e.template_id IS NULL AND e.deleted_at IS NULL",
+        )
+        .bind(environment)
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?)
+    }
+
+    /// The same no-cache environment snapshot with one exact provider/profile/runtime-host report.
+    pub async fn machine_program_binding(
+        conn: &mut Conn,
+        environment: Id,
+        machine: Id,
+        provider: Id,
+        agent: Id,
+        harness_machine: Option<Id>,
+    ) -> Result<Option<(Option<Json>, String, Option<String>)>, DbError> {
+        Ok(sqlx::query_as(
+            "SELECT e.config->'exec.version_overrides',m.name,h.harness_version
+             FROM environments e JOIN machines m ON m.id=e.machine_id
+             LEFT JOIN harnesses h ON h.provider_id=$3 AND h.agent_id=$4 AND h.machine_id=$5
+             WHERE e.id=$1 AND e.machine_id=$2 AND e.placement='connected'
+               AND e.template_id IS NULL AND e.deleted_at IS NULL",
+        )
+        .bind(environment)
+        .bind(machine)
+        .bind(provider)
+        .bind(agent)
+        .bind(harness_machine)
+        .fetch_optional(conn)
+        .await?)
     }
 
     /// Records that something was done in an environment: the end of a turn.
@@ -721,11 +798,14 @@ pub mod routes {
         Ok(())
     }
 
-    /// The local policy each of the machines `ids` last reported, for those that reported one.
-    pub async fn machine_policies(conn: &mut Conn, ids: &[Id]) -> Result<Vec<(Id, Json)>, DbError> {
+    /// Only the policy and confirmed program facts needed by an environment's exec projection.
+    pub async fn machine_program_facts(
+        conn: &mut Conn,
+        ids: &[Id],
+    ) -> Result<Vec<(Id, Json)>, DbError> {
         Ok(sqlx::query_as(
-            "SELECT id, facts -> 'policy' FROM machines
-              WHERE id = ANY($1) AND jsonb_typeof(facts -> 'policy') = 'object'",
+            "SELECT id, jsonb_build_object('policy',facts->'policy','harnesses',facts->'harnesses')
+               FROM machines WHERE id = ANY($1)",
         )
         .bind(ids)
         .fetch_all(conn)
@@ -1004,6 +1084,7 @@ pub mod workspace {
         environment: Id,
         thread: Option<Id>,
         turn: Option<Id>,
+        item: Option<Id>,
     ) -> Result<Vec<ChangeRow>, DbError> {
         let rows: Vec<(Id, Id, DateTime<Utc>, Json)> = sqlx::query_as(
             "SELECT DISTINCT ON (c.change ->> 'path') i.id, i.thread_id, i.updated_at, c.change
@@ -1015,11 +1096,13 @@ pub mod workspace {
                 AND jsonb_typeof(i.payload #> '{tool,changes}') = 'array'
                 AND ($2::uuid IS NULL OR i.thread_id = $2)
                 AND ($3::uuid IS NULL OR i.turn_id = $3)
+                AND ($4::uuid IS NULL OR i.id = $4)
               ORDER BY c.change ->> 'path', i.seq_created DESC, c.n DESC",
         )
         .bind(environment)
         .bind(thread)
         .bind(turn)
+        .bind(item)
         .fetch_all(conn)
         .await?;
         Ok(rows
@@ -2206,6 +2289,9 @@ pub mod hosting {
         Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "{CONNECTED_SELECT}
               WHERE e.placement = 'connected' AND e.deleted_at IS NULL AND e.remove_at IS NULL
+                AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.environment_id=e.id
+                    AND j.kind='environment_provision' AND j.plan->>'mode'='copy'
+                    AND NOT COALESCE((j.plan->>'provision_committed')::boolean,false))
                 AND e.status = ANY($3)
                 AND (
                       (e.status = 'running' AND NOT (m.online AND m.status = 'active' AND m.deleted_at IS NULL))
@@ -2502,6 +2588,9 @@ pub mod changes {
         conn: &mut Conn,
         machines: &[Id],
     ) -> Result<Vec<(Id, String)>, DbError> {
+        if machines.is_empty() {
+            return Ok(Vec::new());
+        }
         Ok(
             sqlx::query_as("SELECT id, connector_version FROM machines WHERE id = ANY($1)")
                 .bind(machines)

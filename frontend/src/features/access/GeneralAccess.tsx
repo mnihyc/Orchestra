@@ -42,7 +42,7 @@ interface GeneralAccessProps {
   canGive?: readonly AccessChoice[];
   summary?: string;
   onReset?: () => void;
-  environment?: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean };
+  environment?: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; tooltip?: string };
 }
 
 export function GeneralAccessControl({ catalogue, kind, place, rulesPlace = place, value, onChange, disabled = false, hasAudience = true, canGive, summary, onReset, environment }: GeneralAccessProps) {
@@ -66,7 +66,7 @@ export function GeneralAccessControl({ catalogue, kind, place, rulesPlace = plac
         aside={value === 'custom' && onReset !== undefined ? <Button size="sm" variant="ghost" disabled={disabled} onClick={onReset}>{t('access.general.back', { place: rulesPlace })}</Button> : undefined}
       />
       {value === 'defaults' && summary !== undefined && <p className="text-sm text-text-muted">{summary}</p>}
-      {environment !== undefined && <Checkbox label={t('access.general.letIn')} checked={environment.checked} onCheckedChange={environment.onChange} disabled={environment.disabled ?? disabled} />}
+      {environment !== undefined && <Checkbox label={t('access.general.letIn')} tooltip={environment.tooltip} checked={environment.checked} onCheckedChange={environment.onChange} disabled={environment.disabled ?? disabled} />}
     </div>
   );
 }

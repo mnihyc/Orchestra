@@ -1,0 +1,3 @@
+# One single entry must allow the whole ask: the engine's cases, and every engine test program compiled.
+test -p orch-engine --test use_where --test credentials
+test -p orch-engine --no-run

@@ -235,12 +235,20 @@ async fn run_on(job: &Job, restored: Option<Id>, undo: bool) -> Result<Done, Sto
     // A directory is attached instead of a unit started: at the destination of a move that attaches a
     // machine's directory, and when a kept registration is restored on its own machine. Either runs the
     // directory's resolved commands on that machine, with no unit.
-    let attaching = !undo
-        && (row
+    let copying_directory = row.kind == jobs::kind::ENVIRONMENT_PROVISION
+        && row.plan["mode"] == "copy"
+        && row
             .plan
-            .pointer("/portable/destination/lifecycle")
+            .pointer("/creator_provision/origin/operation")
             .and_then(Json::as_str)
-            == Some("attach")
+            .is_some_and(orch_api_contract::environment_sources::duplicating::is_connected);
+    let attaching = !undo
+        && (copying_directory
+            || row
+                .plan
+                .pointer("/portable/destination/lifecycle")
+                .and_then(Json::as_str)
+                == Some("attach")
             || (row.kind == jobs::retained::RESTORE
                 && row.plan.get("connected").and_then(Json::as_bool) == Some(true)));
     let runtime = if attaching {
@@ -364,14 +372,21 @@ async fn run_on(job: &Job, restored: Option<Id>, undo: bool) -> Result<Done, Sto
             )
         } else {
             // A move names the machine it attaches; a restored registration, the machine it is kept on.
-            let machine: Id = serde_json::from_value(
-                row.plan
-                    .get("candidate_machine")
-                    .or_else(|| row.plan.get("connected_machine"))
-                    .cloned()
-                    .unwrap_or(Json::Null),
-            )
-            .map_err(EngineError::from)?;
+            let machine = if copying_directory {
+                crate::environment_creation::connected_target(&mut tx, &row)
+                    .await?
+                    .map(|(_, machine)| machine)
+                    .ok_or_else(|| failure("the connected copy target is gone"))?
+            } else {
+                serde_json::from_value::<Id>(
+                    row.plan
+                        .get("candidate_machine")
+                        .or_else(|| row.plan.get("connected_machine"))
+                        .cloned()
+                        .unwrap_or(Json::Null),
+                )
+                .map_err(EngineError::from)?
+            };
             (
                 machine,
                 orch_db::queries::environment_facts::on_machine(&mut tx, machine, None).await?,

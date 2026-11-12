@@ -93,7 +93,7 @@ test.describe('joined native harness thread', () => {
       await expect(main.getByText('The later main answer.', { exact: true })).toBeVisible();
       await source.click({ button: 'right' });
       await page.getByRole('menuitem', { name: 'Side thread from here…', exact: true }).click();
-      const ask = page.getByRole('dialog', { name: 'Ask on the side', exact: true });
+      const ask = page.getByRole('dialog', { name: 'Side thread', exact: true });
       await ask.getByRole('textbox', { name: 'What to ask' }).fill('#!fake\nsay The first aside answer stays here.');
       await ask.getByRole('textbox').press('Enter');
       await expect(ask).toHaveCount(0);

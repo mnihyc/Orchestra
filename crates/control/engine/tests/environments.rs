@@ -1209,3 +1209,85 @@ async fn retained_placement_cannot_bypass_room_occupied_by_other_work() {
     assert_eq!(generation, 1);
     world.shutdown().await;
 }
+
+#[tokio::test]
+async fn native_hosted_creation_prepares_without_writes_and_checks_its_actual_first_insert() {
+    use orch_authz::{Caller, Principal};
+    use orch_engine::{
+        EngineError,
+        environments::{self, CreateError, Request},
+    };
+    use orch_types::Time;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let world = common::World::new().await;
+    hosting::serve(&world);
+    let host = hosting::ScriptedHost::on(&world, "Creation first effect", 32768).await;
+    let template = hosting::template(&world).await;
+    let checks = AtomicUsize::new(0);
+    for allowed in [false, true] {
+        let mut tx = world.pool.begin().await.unwrap();
+        let principal = Principal::load(
+            &mut tx,
+            Caller::session(world.ada),
+            Time::new(world.clock.now()),
+        )
+        .await
+        .unwrap();
+        let config = serde_json::json!({});
+        let prepared = environments::prepare_creation(
+            &mut tx,
+            world.clock.now(),
+            &principal,
+            &Request {
+                owner: world.ada,
+                name: Some("Prepared creation"),
+                home: world.root,
+                template: Some(template),
+                host: Some(Some(host.id)),
+                config: &config,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.home(), world.root);
+        assert_eq!(prepared.template(), template);
+        assert_eq!(prepared.host(), host.id);
+        let before: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM environments WHERE name='Prepared creation'")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, 0,
+            "native preparation selects facts but inserts no resource"
+        );
+        let result = environments::apply_creation(&mut tx, world.clock.now(), &prepared, || {
+            checks.fetch_add(1, Ordering::SeqCst);
+            if allowed {
+                Ok(())
+            } else {
+                Err(EngineError::BeforeEffect(Box::new(std::io::Error::other(
+                    "creation closed before insertion",
+                ))))
+            }
+        })
+        .await;
+        if allowed {
+            let made = result.unwrap();
+            assert_eq!(made.job.environment_id, Some(made.id));
+        } else {
+            assert!(matches!(
+                result,
+                Err(CreateError::Internal(EngineError::BeforeEffect(_)))
+            ));
+        }
+        let after: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM environments WHERE name='Prepared creation'")
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(after, i64::from(allowed));
+        tx.rollback().await.unwrap();
+    }
+    assert_eq!(checks.load(Ordering::SeqCst), 2);
+}

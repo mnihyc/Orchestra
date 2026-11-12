@@ -67,13 +67,15 @@ function Form({ thread }: { thread: Thread }) {
   const [notify, setNotify] = useState(initial.notify);
   const plans = useGoalPlans(thread);
   const settings = useQuery({ ...settingsQuery(thread.id) });
-  const placeValue = (field: LimitField): { shown: string; locked: boolean } => {
+  const placeValue = (field: LimitField): { shown: string; locked: boolean; known: boolean } => {
     const setting = settings.data?.find((one) => one.key === LIMIT_KEYS[field]);
-    const raw = setting?.value;
-    const zero = raw === undefined || raw === null || raw === 0 || raw === '0' || raw === '';
-    const locked = setting?.locked_by !== undefined && setting.locked_by !== null;
-    return { shown: zero ? t('goals.editor.noLimit') : typeof raw === 'number' ? formatNumber(raw, locale) : typeof raw === 'string' ? raw : t('goals.editor.noLimit'), locked };
+    if (!settings.isSuccess || setting?.value === undefined) return { shown: t(settings.isPending ? 'common.loading' : 'goals.editor.fromPlace'), locked: false, known: false };
+    const raw = setting.value;
+    const zero = raw === null || raw === 0 || raw === '0' || raw === '';
+    const locked = setting.locked_by !== null;
+    return { shown: zero ? t('goals.editor.noLimit') : typeof raw === 'number' ? formatNumber(raw, locale) : typeof raw === 'string' ? raw : t('goals.editor.noLimit'), locked, known: true };
   };
+  const placeValues = { turns: placeValue('turns'), minutes: placeValue('minutes'), credits: placeValue('credits') };
   const save = useMutation({
     mutationFn: () => existing === null
       ? setGoal(read, { objective: objective.trim(), condition: condition.trim(), limits: limitsOf(limits), notify_on_end: notify, plan: plans })
@@ -88,12 +90,15 @@ function Form({ thread }: { thread: Thread }) {
   const ready = objective.trim() !== '' && condition.trim() !== '';
   const own = limitsOf(limits);
   const summary = [
-    own.max_turns === null ? placeValue('turns').shown : own.max_turns === 0 ? '' : t('goals.line.turns', { count: own.max_turns }),
-    own.max_minutes === null ? placeValue('minutes').shown : own.max_minutes === 0 ? '' : formatSpan(own.max_minutes * 60_000, { locale }, 'short'),
-    own.max_credits === null ? placeValue('credits').shown : Number(own.max_credits) === 0 ? '' : t('goals.line.credits', { credits: own.max_credits }),
+    own.max_turns === null ? placeValues.turns.shown : own.max_turns === 0 ? '' : t('goals.line.turns', { count: own.max_turns }),
+    own.max_minutes === null ? placeValues.minutes.shown : own.max_minutes === 0 ? '' : formatSpan(own.max_minutes * 60_000, { locale }, 'short'),
+    own.max_credits === null ? placeValues.credits.shown : Number(own.max_credits) === 0 ? '' : t('goals.line.credits', { credits: own.max_credits }),
   ].filter((part) => part !== '' && part !== t('goals.editor.noLimit'));
+  const inheritedUnread = own.max_turns === null && !placeValues.turns.known || own.max_minutes === null && !placeValues.minutes.known || own.max_credits === null && !placeValues.credits.known;
+  const limitsTitle = inheritedUnread ? t(settings.isPending ? 'goals.editor.limitsChecking' : settings.isError ? 'goals.editor.limitsUnavailable' : 'goals.editor.limitsInherited')
+    : summary.length === 0 ? t('goals.editor.limitsNone') : t('goals.editor.limitsSome', { summary: summary.join(' · ') });
   const field = (name: LimitField, label: string) => {
-    const place = placeValue(name);
+    const place = placeValues[name];
     return (
       <Input key={name} label={label} type="number" inputMode="numeric" min={0} value={limits[name]} placeholder={place.shown}
         disabled={place.locked} {...(place.locked ? { hint: t('goals.editor.lockedBy') } : {})}
@@ -116,7 +121,7 @@ function Form({ thread }: { thread: Thread }) {
       <form className="flex min-w-0 flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (ready && !save.isPending) save.mutate(); }}>
         <Textarea label={t('goals.editor.objective')} rows={3} maxLength={OBJECTIVE_MAX} value={objective} onChange={(event) => setObjective(event.target.value)} data-autofocus />
         <Textarea label={t('goals.editor.condition')} rows={2} maxLength={CONDITION_MAX} value={condition} onChange={(event) => setCondition(event.target.value)} />
-        <Disclosure title={summary.length === 0 ? t('goals.editor.limitsNone') : t('goals.editor.limitsSome', { summary: summary.join(' · ') })}>
+        <Disclosure title={limitsTitle}>
           <div className="grid gap-3 py-3 sm:grid-cols-3">
             {field('turns', t('goals.editor.turns'))}
             {field('minutes', t('goals.editor.minutes'))}
@@ -124,6 +129,7 @@ function Form({ thread }: { thread: Thread }) {
           </div>
         </Disclosure>
         <Checkbox label={t('goals.editor.notify')} checked={notify} onCheckedChange={setNotify} />
+        {settings.isError && <ErrorAlert error={settings.error} action={<Button size="sm" onClick={() => void settings.refetch()}>{t('common.tryAgain')}</Button>} />}
         {save.error !== null && <ErrorAlert error={save.error} />}
       </form>
     </Dialog>

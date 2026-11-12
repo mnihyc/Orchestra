@@ -7,6 +7,14 @@
 //! decision depends on that kind ([`ApprovalDecision`]), and so does who may
 //! decide it.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use std::collections::BTreeMap;
 
 use orch_types::{Id, Json, Time};
@@ -535,6 +543,38 @@ impl From<Approval> for ApprovalDecisionReply {
     }
 }
 
+/// The accepted decision without returning its existing request or reference payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ApprovalWriteReceipt {
+    /// This is an acknowledgement, not an approval projection.
+    pub projection: crate::common::ReceiptProjection,
+    /// The exact approval whose outcome was accepted.
+    pub approval_id: Id,
+    /// The actual state left by the ordinary writer.
+    pub state: ApprovalState,
+    /// The decision's retained actor, without a private account projection.
+    pub decided_by: Option<Id>,
+    /// When the decision was accepted.
+    pub decided_at: Option<Time>,
+    /// For a port decision, its exact reviewed opening.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opening_id: Option<Id>,
+    /// Only the generated proof already intended for this deciding person, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link: Option<crate::ports::PortLinkDelivery>,
+}
+
+crate::common::full_or_receipt! {
+    /// The native approval result or the same committed outcome's restricted receipt.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+    pub enum ApprovalWriteResponse {
+        /// Existing content is readable under this same operation.
+        Full(ApprovalDecisionReply),
+        /// The action succeeded without permission to disclose its existing card.
+        Receipt(ApprovalWriteReceipt),
+    }
+}
+
 impl std::ops::Deref for ApprovalDecisionReply {
     type Target = Approval;
 
@@ -691,15 +731,223 @@ pub enum ApprovalDecision {
     Input(HeldInputDecision),
 }
 
+impl ApprovalDecision {
+    /// The existing short approve/note shape is shared by capability and access requests.
+    /// Normalize it once; the stored approval kind still selects the ordinary writer.
+    #[must_use]
+    pub fn as_access_decision(&self) -> Option<AccessDecision> {
+        match self {
+            Self::Capability(decision) => Some(AccessDecision {
+                approve: decision.approve,
+                permissions: None,
+                options: None,
+                expires_at: None,
+                quick_duration: None,
+                note: decision.note.clone(),
+            }),
+            Self::Access(decision) => Some(decision.clone()),
+            _ => None,
+        }
+    }
+}
+
+// These are the typed references the existing common card can disclose. Literal request,
+// answer and configuration text and public UserRefs are not independently reinterpreted.
+pub(crate) const APPROVAL_SOURCE_FACETS: &[Facet] = &[
+    Facet::response_content(
+        &[Object(K::Org)],
+        Target::ResolvedCollection("approval_nodes_orgs"),
+    ),
+    Facet::response_content(
+        &[Object(K::Project)],
+        Target::ResolvedCollection("approval_nodes_projects"),
+    ),
+    Facet::response_content(
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("approval_nodes_topics"),
+    ),
+    Facet::response_content(
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("approval_nodes_threads"),
+    ),
+    Facet::response_content(
+        &[Object(K::Document)],
+        Target::ResolvedCollection("approval_documents"),
+    ),
+    Facet::response_content(
+        &[Object(K::DocumentContainer)],
+        Target::ResolvedCollection("approval_document_containers"),
+    ),
+    Facet::response_content(
+        &[Object(K::Provider)],
+        Target::ResolvedCollection("approval_providers"),
+    ),
+    Facet::response_content(
+        &[Object(K::Agent)],
+        Target::ResolvedCollection("approval_agents"),
+    ),
+    Facet::response_content(
+        &[Object(K::Environment)],
+        Target::ResolvedCollection("approval_environments"),
+    ),
+    Facet::response_content(
+        &[Object(K::Host)],
+        Target::ResolvedCollection("approval_hosts"),
+    ),
+    Facet::response_content(
+        &[Object(K::Machine)],
+        Target::ResolvedCollection("approval_machines"),
+    ),
+    Facet::response_content(
+        &[Object(K::Template)],
+        Target::ResolvedCollection("approval_templates"),
+    ),
+    Facet::response_content(
+        &[Object(K::McpServer)],
+        Target::ResolvedCollection("approval_mcp_servers"),
+    ),
+    Facet::response_content(
+        &[Object(K::Mount)],
+        Target::ResolvedCollection("approval_mounts"),
+    ),
+    Facet::response_content(
+        &[Object(K::Skill)],
+        Target::ResolvedCollection("approval_skills"),
+    ),
+    Facet::response_content(
+        &[Identity(I::Chat)],
+        Target::ResolvedCollection("approval_chats"),
+    ),
+];
+pub(crate) const fn approval_read_facets(
+    target: Target,
+) -> [Facet; APPROVAL_SOURCE_FACETS.len() + 1] {
+    let primary = Facet::required(Read, &[Identity(I::Approval)], target);
+    let mut facets = [primary; APPROVAL_SOURCE_FACETS.len() + 1];
+    let mut index = 0;
+    while index < APPROVAL_SOURCE_FACETS.len() {
+        facets[index + 1] = APPROVAL_SOURCE_FACETS[index];
+        index += 1;
+    }
+    facets
+}
+const fn approval_write_facets(primary: Facet) -> [Facet; APPROVAL_SOURCE_FACETS.len() + 2] {
+    let mut facets = [primary; APPROVAL_SOURCE_FACETS.len() + 2];
+    facets[1] =
+        Facet::response_content(&[Identity(I::Approval)], Target::Resolved("approval_scope"));
+    let mut index = 0;
+    while index < APPROVAL_SOURCE_FACETS.len() {
+        facets[index + 2] = APPROVAL_SOURCE_FACETS[index];
+        index += 1;
+    }
+    facets
+}
+const fn approval_with_extra(
+    primary: Facet,
+    extra: Facet,
+) -> [Facet; APPROVAL_SOURCE_FACETS.len() + 3] {
+    let base = approval_write_facets(primary);
+    let mut facets = [base[0]; APPROVAL_SOURCE_FACETS.len() + 3];
+    let mut index = 0;
+    while index < base.len() {
+        facets[index] = base[index];
+        index += 1;
+    }
+    facets[base.len()] = extra;
+    facets
+}
+const fn approval_port_facets() -> [Facet; APPROVAL_SOURCE_FACETS.len() + 3] {
+    // Once/Deny have no additional grant. Grant binds exactly its native approver scope.
+    approval_with_extra(
+        Facet::required(
+            Manage,
+            &[Object(K::Environment)],
+            Target::Resolved("approval_subject"),
+        ),
+        Facet::required(
+            Manage,
+            &[
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Org),
+                Identity(I::System),
+            ],
+            Target::ResolvedCollection("approval_capability_grants"),
+        ),
+    )
+}
+const fn approval_input_facets() -> [Facet; APPROVAL_SOURCE_FACETS.len() + 3] {
+    // Same conditional native Manage footprint as the existing ThreadInputRun producer.
+    approval_with_extra(
+        Facet::required(
+            Write,
+            &[Object(K::Thread)],
+            Target::Resolved("approval_subject"),
+        ),
+        Facet::required(
+            Manage,
+            &[Object(K::Thread)],
+            Target::ResolvedCollection("input_native_manage"),
+        ),
+    )
+}
+
 crate::endpoints! {
     /// Lists approvals: those waiting or decided, sent to the caller, asked by them, or attached to a node.
-    ApprovalList: GET "/approvals", User, query ApprovalListQuery, none, json Page<Approval>, 200;
+    ApprovalList: GET "/approvals", User, query ApprovalListQuery, none, json Page<Approval>, 200,
+        operation Op::facets(&approval_read_facets(Target::ResolvedCollection("approval_scopes")));
     /// Reads one approval.
-    ApprovalGet: GET "/approvals/{id}", Rule("an eligible approver, the requester, or thread.view on its thread"), none, none, json Approval, 200;
-    /// Decides an approval, by the permission it requires.
-    ApprovalDecide: POST "/approvals/{id}/decision", Rule("the permission the approval requires: thread.manage for a harness's, access.manage on what is asked for access, being an approver of its scope for a capability"), none, json ApprovalDecision, json ApprovalDecisionReply, 200;
-    /// Takes back a request for access.
-    ApprovalCancel: POST "/approvals/{id}/cancel", Rule("the person who asked"), none, none, json Approval, 200;
+    ApprovalGet: GET "/approvals/{id}", Rule("an eligible approver, the requester, or thread.view on its thread"), none, none, json Approval, 200,
+        operation Op::facets(&approval_read_facets(Target::Resolved("approval_scope")));
+    /// Decides an approval, by the permission its current native kind requires.
+    ApprovalDecide: POST "/approvals/{id}/decision", Rule("the permission the approval requires: thread.manage for a harness request except the shared plan-answer rule; access.manage on the requested object; ports.manage on the port environment; or the capability's current eligible scoped approver"), none, json ApprovalDecision, json ApprovalWriteResponse, 200,
+        operation Op::receipt(&Op::variants(&[
+            Variant {
+                name: "harness",
+                selector: "stored kind=harness except request_kind=plan",
+                facets: &approval_write_facets(Facet::required(Manage, &[Object(K::Thread)], Target::Resolved("approval_subject"))),
+            },
+            Variant {
+                name: "access",
+                selector: "stored kind=access; actual requested object or Chat membership",
+                facets: &approval_write_facets(Facet::required(Manage, &[
+                    Object(K::Org), Object(K::Project), Object(K::Topic), Object(K::Thread),
+                    Object(K::Document), Object(K::DocumentContainer), Object(K::Provider), Object(K::Agent),
+                    Object(K::Environment), Object(K::Host), Object(K::Machine), Object(K::Template),
+                    Object(K::McpServer), Object(K::Mount), Object(K::Skill), Identity(I::Chat),
+                ], Target::Resolved("approval_subject"))),
+            },
+            Variant {
+                name: "capability",
+                selector: "stored kind=capability; resolve its current effective approver_scope",
+                facets: &approval_write_facets(Facet::required(Manage,
+                    &[Object(K::Environment), Object(K::Host), Object(K::Org), Identity(I::System)],
+                    Target::Resolved("approval_subject"))),
+            },
+            Variant {
+                name: "port",
+                selector: "stored kind=port; a Grant additionally resolves its actual capability approver scope",
+                facets: &approval_port_facets(),
+            },
+            Variant {
+                name: "plan_interact",
+                selector: "stored kind=plan, or harness request_kind=plan, and shared deciding_permission is thread.interact",
+                facets: &approval_write_facets(Facet::required(Write, &[Object(K::Thread)], Target::Resolved("approval_subject"))),
+            },
+            Variant {
+                name: "plan_manage",
+                selector: "stored kind=plan, or harness request_kind=plan, and shared deciding_permission is thread.manage",
+                facets: &approval_write_facets(Facet::required(Manage, &[Object(K::Thread)], Target::Resolved("approval_subject"))),
+            },
+            Variant {
+                name: "input",
+                selector: "stored kind=input",
+                facets: &approval_input_facets(),
+            },
+        ]));
+    /// Takes back one's own request for access.
+    ApprovalCancel: POST "/approvals/{id}/cancel", Rule("the person who asked"), none, none, json ApprovalWriteResponse, 200,
+        operation Op::receipt(&Op::facets(&approval_write_facets(Facet::required(Write, &[Identity(I::Approval)], Target::Resolved("approval_subject")))));
     /// Lists the answers allowed for a thread, newest first, those no longer active with why.
     ThreadApprovalRuleList: GET "/threads/{id}/approval-rules", Permission("thread.manage"), query PageQuery, none, json Page<ThreadApprovalRule>, 200;
     /// Takes back an answer allowed for a thread: the next undecided request asks again; an action already allowed goes on.

@@ -602,6 +602,172 @@ async fn selecting_a_native_runtime_elsewhere_never_invents_a_shared_form_or_aut
 }
 
 #[tokio::test]
+async fn an_entry_that_allows_only_the_types_in_which_the_credential_stays_refuses_a_copy_by_the_entry_and_makes_none()
+ {
+    let s = stand().await;
+    s.world.access.limit_types(
+        s.world.ada,
+        &[ArrangementType::Separated, ArrangementType::KeySeparated],
+    );
+    for kind in [
+        ArrangementType::CredentialShared,
+        ArrangementType::HandedOver,
+    ] {
+        let result = s
+            .world
+            .engine()
+            .create_thread(
+                &Caller::session(s.world.ada),
+                NewThread {
+                    topic: s.world.topic,
+                    name: "No quiet copy".into(),
+                    agent: s.world.agent,
+                    provider: s.world.provider,
+                    environment: s.environment,
+                    directory: "web".into(),
+                    arrangement: Some(kind),
+                    model: Some(common::MODEL.into()),
+                    effort: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(CreateThreadError::Incompatible(
+                    Incompatible::ArrangementNotAllowed {
+                        by: NotAllowedBy::Entry
+                    }
+                ))
+            ),
+            "{kind:?}: {result:?}"
+        );
+    }
+    assert!(s.bodies(K::LeaseOpen).is_empty());
+    assert!(s.bodies(K::ProviderCredentialIssue).is_empty());
+    assert_eq!(s.holder().await, None, "nothing was handed over");
+}
+
+/// The arrangement a thread was bound in.
+async fn bound_in(s: &Stand, thread: Id) -> String {
+    sqlx::query_scalar("SELECT arrangement FROM threads WHERE node_id = $1")
+        .bind(thread)
+        .fetch_one(s.world.pool.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn where_the_harness_can_run_with_the_credential_staying_the_thread_takes_that_type_by_itself()
+ {
+    let s = stand().await;
+    s.offers_its_executor().await;
+    // The login is with the profile that runs the harness, at the machine that keeps it.
+    sqlx::query("UPDATE providers SET key_machine_id = machine_id WHERE id = $1")
+        .bind(s.world.provider)
+        .execute(s.world.pool.pool())
+        .await
+        .unwrap();
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    // Nothing limits the entry: the type that is preferred is a copy, and it is taken.
+    let preferred = s.thread_in(s.environment, None, "preferred").await;
+    assert_eq!(bound_in(&s, preferred).await, "credential_shared");
+    // The entry names no type: it allows those in which the credential stays, and the thread is
+    // neither refused nor given a copy, it takes the type in which the credential stays.
+    s.world.access.limit_types(
+        s.world.ada,
+        &[ArrangementType::Separated, ArrangementType::KeySeparated],
+    );
+    let elsewhere = s.thread_in(s.environment, None, "on another machine").await;
+    assert_eq!(bound_in(&s, elsewhere).await, "separated");
+    // In an environment on the provider's own machine nothing leaves anything.
+    let here = s
+        .thread_in(s.world.environment, None, "on its machine")
+        .await;
+    let kind = bound_in(&s, here).await;
+    assert!(
+        ["together", "separated", "key_separated"].contains(&kind.as_str()),
+        "{kind}"
+    );
+}
+
+#[tokio::test]
+async fn a_native_harness_that_needs_a_copy_of_the_login_is_not_offered_to_an_entry_that_names_no_type()
+ {
+    // The login is not at the machine that runs the harness, so `separated` would put a copy there:
+    // the entry that names no type refuses it, by the entry, and the thread is not moved elsewhere.
+    let s = stand().await;
+    s.offers_its_executor().await;
+    s.world
+        .set(
+            s.world.topic,
+            "binding.prefer",
+            json!(["credential_shared"]),
+        )
+        .await;
+    s.world.access.limit_types(
+        s.world.ada,
+        &[ArrangementType::Separated, ArrangementType::KeySeparated],
+    );
+    let result = s
+        .world
+        .engine()
+        .create_thread(
+            &Caller::session(s.world.ada),
+            NewThread {
+                topic: s.world.topic,
+                name: "Needs a copy".into(),
+                agent: s.world.agent,
+                provider: s.world.provider,
+                environment: s.environment,
+                directory: "web".into(),
+                arrangement: None,
+                model: Some(common::MODEL.into()),
+                effort: None,
+            },
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(CreateThreadError::Incompatible(
+                Incompatible::ArrangementNotAllowed {
+                    by: NotAllowedBy::Entry
+                }
+            ))
+        ),
+        "{result:?}"
+    );
+    assert!(s.bodies(K::LeaseOpen).is_empty());
+    // Named on the entry, the copy is allowed, and is made.
+    s.world
+        .access
+        .limit_types(s.world.ada, &[ArrangementType::CredentialShared]);
+    let thread = s.thread_in(s.environment, None, "named").await;
+    assert_eq!(bound_in(&s, thread).await, "credential_shared");
+}
+
+#[tokio::test]
+async fn an_entry_that_names_the_copy_lets_it_be_made() {
+    let s = stand().await;
+    s.world
+        .access
+        .limit_types(s.world.ada, &[ArrangementType::CredentialShared]);
+    let thread = s.thread(ArrangementType::CredentialShared, "named").await;
+    s.say(thread, "hello").await;
+    s.turn_start(thread, 0).await;
+    let lease = &s.bodies(K::LeaseOpen)[0];
+    assert_eq!(lease["mode"], "shared");
+    assert_eq!(lease["recipient"]["machine_id"], json!(s.env.id));
+}
+
+#[tokio::test]
 async fn a_copy_is_issued_sealed_to_the_machine_of_the_harness_and_given_to_it_before_its_session_opens()
  {
     let s = stand().await;
@@ -943,6 +1109,97 @@ async fn a_credential_is_brought_home_by_the_environment_giving_it_back_and_the_
         )
         .await;
     assert!(matches!(again, Err(ReturnError::NotHeld)), "{again:?}");
+}
+
+#[tokio::test]
+async fn credential_returns_preserve_exact_custody_timestamps() {
+    use orch_access_contract::decisions::ObjectRef;
+    use orch_access_contract::permissions::ObjectKind;
+    use orch_engine::credentials::handover_authority::HandoverAuthority;
+    use orch_engine::operation_scope::{Prepared, targets};
+
+    let s = stand().await;
+    let thread = s
+        .thread(ArrangementType::HandedOver, "Precise custody")
+        .await;
+    s.say(thread, "hello").await;
+    let start = s.turn_start(thread, 0).await;
+    s.finish_turn(thread, &start).await;
+    let provider = s.world.provider;
+    let mut conn = s.world.pool.acquire().await.unwrap();
+    // Custody identity retains the database's microseconds, even within one public millisecond.
+    let since: chrono::DateTime<Utc> = sqlx::query_scalar(
+        "UPDATE providers SET held_since=date_trunc('milliseconds',held_since)+interval '1 microsecond'
+         WHERE id=$1 RETURNING held_since",
+    )
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    let target = targets::page_object(
+        &mut conn,
+        ObjectRef {
+            kind: ObjectKind::Provider,
+            id: provider,
+        },
+    )
+    .await
+    .unwrap();
+    let mut plan = Prepared::for_selection("ProviderHandoverReturn.provider").unwrap();
+    plan.bind(0, target.object.kind, &[target]).unwrap();
+    let caller = plan.admit(&Caller::session(s.world.ada), false).unwrap();
+    let authority = HandoverAuthority::capture(
+        &mut conn,
+        &caller,
+        provider,
+        false,
+        false,
+        s.world.clock.time(),
+    )
+    .await
+    .unwrap();
+    let authority: HandoverAuthority =
+        serde_json::from_value(serde_json::to_value(authority).unwrap()).unwrap();
+    assert!(
+        authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since + chrono::Duration::microseconds(1))
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        !authority
+            .authorized(&mut conn, s.world.clock.time())
+            .await
+            .unwrap(),
+        "a different custody in the same millisecond cannot reuse the accepted return"
+    );
+    sqlx::query("UPDATE providers SET held_since=$2 WHERE id=$1")
+        .bind(provider)
+        .bind(since)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    drop(conn);
+    s.world
+        .engine()
+        .return_credential(
+            provider,
+            ReturnWhy::Person {
+                by: s.world.ada,
+                interrupt: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(s.holder().await, None);
+    assert_eq!(s.bodies(K::AgentCredentialReturn).len(), 1);
+    assert_eq!(s.bodies(K::ProviderCredentialAccept).len(), 1);
 }
 
 #[tokio::test]

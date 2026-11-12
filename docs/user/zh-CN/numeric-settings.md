@@ -3,6 +3,7 @@ title: 设置中的零
 screens: /settings, /resources, /project/$projectId/settings, /org/$slug, /topic/$topicId, /thread/$threadId, /admin
 keywords: 零, 0, 关闭, 数字, 天数, 等待, 宽限, 标签, 预览, 继承设置
 heading_id.零值: zero-values
+summary: 了解零何时表示关闭、立即执行或普通数值。
 ---
 
 # 设置中的零

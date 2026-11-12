@@ -4,7 +4,7 @@ import { expect, test } from '@playwright/test';
 
 import { zipFilesOf } from '../doubles/export.ts';
 import { DOCS, openDocument } from './documents-support.ts';
-import { begin, openThread, row, showView, workspace } from './inspector-support.ts';
+import { begin, MAIN, row, showView, workspace } from './inspector-support.ts';
 import { signIn } from './support.ts';
 
 test.use({ viewport: { width: 1600, height: 1000 } });
@@ -41,12 +41,12 @@ The words of Ada and a local image.
 $x^2 + y^2 = z^2$
 #image("images/pixel.png", width: 24pt)
 // orch:diagram 00000000-0000-4000-8000-000000000001
-#figure(raw(block: true, lang: "mermaid", "graph TD\\n  A[Begin]-->B[End]"), caption: [Diagram, as its Mermaid source])
+#figure(raw(block: true, lang: "mermaid", "graph LR\\n  A[Begin]-->B[End]"), caption: [Diagram, as its Mermaid source])
 #pagebreak()
 = Second page
 Needle only appears on this page.
 `;
-  const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64');
+  const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==', 'base64');
   const zip = zipFilesOf([['main.typ', Buffer.from(source)], ['images/pixel.png', pixel]], true);
   await page.route(new RegExp(`/api/v1/documents/${DOCS.plan}/export`), async (route) => {
     expect(new URL(route.request().url()).searchParams.get('format')).toBe('typst');
@@ -68,7 +68,9 @@ Needle only appears on this page.
   await expect.poll(workerCount).toBe(0);
 
   await workspace('/put', { files: { 'web/offline.pdf': { base64: bytes.toString('base64') } } });
-  await openThread(page);
+  // The export kept this browser signed in; continue to the viewer in the same session.
+  await page.goto(`/thread/${MAIN}`);
+  await expect(page.getByRole('heading', { name: 'Main thread', exact: true })).toBeVisible();
   await showView(page, /^Files/);
   await row(page, /^offline\.pdf/).click();
   const viewer = page.locator('[data-viewer="pdf"]');
@@ -85,7 +87,10 @@ Needle only appears on this page.
   await expect(viewer.locator('canvas')).toHaveCount(1);
   await expect.poll(() => viewer.locator('canvas').evaluate((canvas: HTMLCanvasElement) => canvas.width * canvas.height)).toBeGreaterThan(0);
   expect(await viewer.locator('canvas').evaluate((canvas: HTMLCanvasElement) => canvas.width * canvas.height)).toBeLessThanOrEqual(8_000_000);
-  await page.getByRole('button', { name: 'Close offline.pdf', exact: true }).click();
+  // The tab strip exposes its tabs to assistive technology; Delete is its native close action.
+  const tab = page.getByRole('tab', { name: 'offline.pdf', exact: true });
+  await tab.focus();
+  await tab.press('Delete');
   await expect(viewer).toHaveCount(0);
   await expect.poll(workerCount).toBe(0);
   expect(external).toEqual([]);

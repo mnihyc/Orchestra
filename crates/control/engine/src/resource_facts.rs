@@ -384,6 +384,117 @@ pub async fn project(
     policy: Policy,
     facts: &[RawFacts],
 ) -> Result<Vec<ResourceFacts>, EngineError> {
+    Ok(prepare_projection(conn, principal, policy, facts)
+        .await?
+        .project(facts))
+}
+
+/// Native name visibility prepared on this read snapshot. Additional consumers can only
+/// narrow this set; there is no public constructor that supplies ordinary authority.
+pub struct PreparedVisibility {
+    visible: HashSet<(ObjectKind, Id)>,
+    system_admin: bool,
+}
+
+impl PreparedVisibility {
+    /// Actual stored objects whose native visibility licenses a dependent's name.
+    pub fn sources(&self) -> impl Iterator<Item = ObjectRef> + '_ {
+        self.visible.iter().map(|(kind, id)| ObjectRef {
+            kind: *kind,
+            id: *id,
+        })
+    }
+
+    /// Additional operation restrictions cannot add a native visible source or change counts.
+    pub fn restrict_to(&mut self, allowed: &HashSet<(ObjectKind, Id)>) {
+        self.visible.retain(|object| allowed.contains(object));
+    }
+
+    fn names(&self, object: Option<ObjectRef>) -> bool {
+        object.map_or_else(
+            || self.system_admin,
+            |object| self.visible.contains(&(object.kind, object.id)),
+        )
+    }
+
+    /// Actual native edge memberships whose names this prepared projection emits.
+    /// A consumer can retain source associations without inspecting projected JSON.
+    pub fn named_edges<'a>(
+        &'a self,
+        facts: &'a [RawFacts],
+    ) -> impl Iterator<Item = (&'a FactSubject, &'a Dependent)> + 'a {
+        facts.iter().flat_map(move |raw| {
+            raw.dependents
+                .iter()
+                .filter(move |edge| self.names(edge.visibility))
+                .map(move |edge| (&raw.subject, edge))
+        })
+    }
+
+    /// A consuming operation can hide system-only names, never add administrative standing.
+    pub fn restrict_system_names(&mut self, allowed: bool) {
+        self.system_admin &= allowed;
+    }
+
+    /// The original grouping/hidden-count projection, using only the prepared native visibility.
+    #[must_use]
+    pub fn project(&self, facts: &[RawFacts]) -> Vec<ResourceFacts> {
+        facts
+            .iter()
+            .map(|raw| {
+                let mut row = ResourceFacts {
+                    subject: raw.subject.clone(),
+                    as_of: raw.as_of,
+                    dependents: Vec::new(),
+                    dependents_complete: raw.dependents_complete,
+                    uses: raw.uses.clone(),
+                };
+                let mut groups = BTreeMap::<DependentRelation, DependentGroup>::new();
+                for edge in &raw.dependents {
+                    let group = groups
+                        .entry(edge.relation)
+                        .or_insert_with(|| DependentGroup {
+                            relation: edge.relation,
+                            count: 0,
+                            visible: Vec::new(),
+                            hidden: 0,
+                            until: None,
+                        });
+                    group.until = if group.count == 0 {
+                        edge.until
+                    } else {
+                        group
+                            .until
+                            .zip(edge.until)
+                            .map(|(left, right)| left.max(right))
+                    };
+                    group.count += 1;
+                    let allowed = self.names(edge.visibility);
+                    if allowed {
+                        group.visible.push(VisibleDependent {
+                            object: edge.object,
+                            name: edge.name.clone(),
+                            relation: edge.relation,
+                            until: edge.until,
+                        });
+                    } else {
+                        group.hidden += 1;
+                    }
+                }
+                row.dependents = groups.into_values().collect();
+                row
+            })
+            .collect()
+    }
+}
+
+/// Prepare the same native privacy decisions once, before a consumer adds its own source bound.
+pub async fn prepare_projection(
+    conn: &mut Conn,
+    principal: &Principal,
+    policy: Policy,
+    facts: &[RawFacts],
+) -> Result<PreparedVisibility, EngineError> {
     let mut by_kind = BTreeMap::<ObjectKind, BTreeSet<Id>>::new();
     for edge in facts.iter().flat_map(|row| &row.dependents) {
         if let Some(object) = edge.visibility {
@@ -414,55 +525,10 @@ pub async fn project(
             }
         }
     }
-    Ok(facts
-        .iter()
-        .map(|raw| {
-            let mut row = ResourceFacts {
-                subject: raw.subject.clone(),
-                as_of: raw.as_of,
-                dependents: Vec::new(),
-                dependents_complete: raw.dependents_complete,
-                uses: raw.uses.clone(),
-            };
-            let mut groups = BTreeMap::<DependentRelation, DependentGroup>::new();
-            for edge in &raw.dependents {
-                let group = groups
-                    .entry(edge.relation)
-                    .or_insert_with(|| DependentGroup {
-                        relation: edge.relation,
-                        count: 0,
-                        visible: Vec::new(),
-                        hidden: 0,
-                        until: None,
-                    });
-                group.until = if group.count == 0 {
-                    edge.until
-                } else {
-                    group
-                        .until
-                        .zip(edge.until)
-                        .map(|(left, right)| left.max(right))
-                };
-                group.count += 1;
-                let allowed = edge.visibility.map_or_else(
-                    || principal.is_system_admin(),
-                    |object| visible.contains(&(object.kind, object.id)),
-                );
-                if allowed {
-                    group.visible.push(VisibleDependent {
-                        object: edge.object,
-                        name: edge.name.clone(),
-                        relation: edge.relation,
-                        until: edge.until,
-                    });
-                } else {
-                    group.hidden += 1;
-                }
-            }
-            row.dependents = groups.into_values().collect();
-            row
-        })
-        .collect())
+    Ok(PreparedVisibility {
+        visible,
+        system_admin: principal.is_system_admin(),
+    })
 }
 
 /// Reads existing fact sources without an additional use producer.

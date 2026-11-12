@@ -205,6 +205,7 @@ async fn a_helper_without_a_runtime_row_stops_and_removes_only_under_its_own_ins
                 cmd: Some(vec!["sleep".into(), "3600".into()]),
                 labels: Some(std::collections::HashMap::from([
                     ("orch.system".into(), lab.system.clone()),
+                    ("orch.test".into(), lab.token.clone()),
                     ("orch.driver".into(), "docker".into()),
                 ])),
                 ..Default::default()
@@ -239,9 +240,42 @@ async fn a_helper_without_a_runtime_row_stops_and_removes_only_under_its_own_ins
         .stop_resource(&lab.system, &resource.resource, STOP_GRACE)
         .await
         .unwrap();
-    lab.driver
+    let removed = lab
+        .driver
         .remove_resource(&lab.system, &resource.resource)
-        .await
-        .unwrap();
+        .await;
+    if removed.is_err() {
+        let state = lab
+            .docker
+            .inspect_container(&made.id, None)
+            .await
+            .ok()
+            .and_then(|container| container.state)
+            .map(|state| {
+                (
+                    state.running,
+                    state.paused,
+                    state.restarting,
+                    state.dead,
+                    state.exit_code,
+                )
+            });
+        let inventory = lab.driver.resources(&lab.system).await;
+        let selected = inventory
+            .as_ref()
+            .ok()
+            .and_then(|items| items.iter().find(|item| item.resource == resource.resource));
+        let dependants = inventory.as_ref().ok().map(|items| {
+            items
+                .iter()
+                .filter(|item| item.depends_on.contains(&resource.resource))
+                .count()
+        });
+        eprintln!(
+            "orphan helper removal diagnostic after refusal: state={state:?} selected_busy={:?} dependants={dependants:?}",
+            selected.map(|item| item.busy)
+        );
+    }
+    removed.unwrap();
     assert!(!lab.has_container(&name).await);
 }

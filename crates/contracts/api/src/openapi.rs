@@ -5,7 +5,7 @@
 //! its answer and who may make it, and every type goes in as the JSON Schema it derives. It is
 //! extended with wire schemas supplied by the caller before definitions are collected.
 
-use crate::common::{BASE_PATH, PROBLEM_JSON, Problem};
+use crate::common::{BASE_PATH, KEY_BASE_PATH, PROBLEM_JSON, Problem};
 use crate::routes::{Access, Route, Shape};
 use schemars::{SchemaGenerator, generate::SchemaSettings};
 use serde_json::{Map, Value, json};
@@ -84,12 +84,37 @@ pub fn document(
     version: &str,
     extend_schemas: fn(&mut SchemaGenerator),
 ) -> Value {
+    render(routes, version, extend_schemas, true)
+}
+
+/// Full internal contract input for frontend type generation; never served or published.
+#[must_use]
+pub fn internal_document(
+    routes: &[Route],
+    version: &str,
+    extend_schemas: fn(&mut SchemaGenerator),
+) -> Value {
+    render(routes, version, extend_schemas, false)
+}
+
+fn render(
+    routes: &[Route],
+    version: &str,
+    extend_schemas: fn(&mut SchemaGenerator),
+    keys: bool,
+) -> Value {
     let mut generator = generator();
     let problem = generator.subschema_for::<Problem>();
     // A job's generic result carries these cleanup receipts outside a route reply schema.
     let _cleanup_outcome = generator.subschema_for::<crate::storage::CleanupOutcome>();
     let mut operations: Vec<(Route, Value)> = Vec::new();
     for route in routes {
+        let declared = crate::operations::for_route(route).unwrap_or_else(|error| {
+            panic!("cannot publish an incomplete operation catalogue: {error}")
+        });
+        if keys && declared.delegation != crate::operations::Delegation::Business {
+            continue;
+        }
         let schema_of = |shape: Shape, generator: &mut SchemaGenerator| match shape {
             Shape::Json(write) => Some(Value::from(write(generator))),
             _ => None,
@@ -98,13 +123,30 @@ pub fn document(
         let body = schema_of(route.body, &mut generator);
         let reply = schema_of(route.reply, &mut generator);
         let (kind, permission, rule) = access(route);
+        let business = declared;
         let mut operation = json!({
             "operationId": route.name,
             "summary": route.summary.trim(),
             "x-orch-access": kind,
-            "x-orch-tokens": route.access.tokens(),
+            "x-orch-tokens": business.delegation == crate::operations::Delegation::Business,
+            // Historical declaration only: individual handlers also had credential gates.
+            // This is not a statement that a legacy key could call every User/Rule route.
+            "x-orch-legacy-access-tokens": route.access.tokens(),
+            "x-orch-operation": business,
             "responses": {},
         });
+        match route.idempotency {
+            crate::routes::Idempotency::Unspecified => {}
+            crate::routes::Idempotency::ClientId => {
+                operation["x-orch-idempotency"] = json!({"mode":"body_client_id"})
+            }
+            crate::routes::Idempotency::NativeHeader(reason) => {
+                operation["x-orch-idempotency"] = json!({"mode":"native_header","reason":reason})
+            }
+            crate::routes::Idempotency::NotKeyed(reason) => {
+                operation["x-orch-idempotency"] = json!({"mode":"not_keyed","reason":reason})
+            }
+        }
         if let Some(permission) = permission {
             operation["x-orch-permission"] = json!(permission);
         }
@@ -148,6 +190,7 @@ pub fn document(
     // The frames of the browser's socket travel no declared request, but the browser's types are
     // generated from this one document.
     let _ = generator.subschema_for::<crate::search::SearchStreamEvent>();
+    let _ = generator.subschema_for::<crate::ask::AskEvent>();
     extend_schemas(&mut generator);
     let definitions: Map<String, Value> = generator.take_definitions(true);
     let mut paths = Map::new();
@@ -171,14 +214,14 @@ pub fn document(
         "info": {
             "title": "Orch API",
             "version": version,
-            "description": "Every request of the Orch HTTP API. Generated from the route registry; do not edit.",
+            "description": if keys { "Account-key business API. Generated from the shared route registry; current ordinary rights and key restrictions both apply." } else { "Private frontend generation input from the shared HTTP contract. Not published." },
             "license": { "name": "Apache-2.0", "identifier": "Apache-2.0" },
         },
-        "servers": [{ "url": BASE_PATH }],
+        "servers": [{ "url": if keys { KEY_BASE_PATH } else { BASE_PATH } }],
         "paths": paths,
         "components": {
             "schemas": definitions,
-            "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "description": "An access token of a browser session, or an API token." } },
+            "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer", "description": if keys { "An account API key (opat_)." } else { "A browser access token on the browser HTTP surface." } } },
         },
     })
 }

@@ -1,7 +1,9 @@
 ---
+group: getting-started
 title: Add a provider of any kind
 screens: /resources/providers, /resources/machines, /thread/$threadId, /topic/$topicId
 keywords: provider, subscription, API key, custom endpoint, GPU, adapter, Chat Completions, Responses, Messages, source, 提供方, 订阅, 密钥, 自有模型
+summary: Connect a model endpoint or program sign-in, then choose credentials, models and runtime.
 ---
 
 # Add a provider of any kind
@@ -27,6 +29,25 @@ that machine, not your browser. **Run the connection on** is a separate choice; 
 the same machine or the new container.
 Only choose a sign-in program on a machine that offers it.
 
+## Key proposals
+
+You can paste a **Key** while adding an API provider. A known format proposes an
+existing example and **Key role**, marked **From key format**. Choose **Use** to
+fill the example's fields; **From catalogue** identifies that example. You can
+edit either choice. An unknown or ambiguous format leaves the provider choice
+to you. A proposal does not verify a key, a capability, a price or a limit.
+
+The next step reviews the role before saving. A **Model key** goes to the
+provider's existing model-key store. An **Admin key** goes only to the chosen
+facts source's declared admin-key field. If that source offers no such field,
+choose another source or leave this key out and add it after setup. You can
+still add the model key later in **Sign-in and keys**. Your edits survive Back,
+setup refreshes and a refused save.
+
+The provider's normal first read after saving supplies vendor facts. Read those
+on its page before enabling an offered model. Typing or reviewing a key makes
+no vendor request; the unsaved key stays in this form until you choose to save.
+
 ## 3. Choose who reports models and limits
 
 Known vendors have built-in readers. For your own adapter, select a **program on a machine**
@@ -42,7 +63,7 @@ models you want after creation. No vendor preset is required.
 
 ## 4. Create, sign in and use it
 
-Choose **Add provider**. In **Sign-in and keys**, add the key or complete the offered
+Choose **Add provider**. In **Sign-in and keys**, add a key left out of setup or complete the offered
 subscription sign-in. Saving a key also reads its available models and facts. **Refresh** asks again;
 accept and enable the models you want in **Models**. Discovery never adds them by itself.
 Choose the provider and an enabled model in a thread, then send a small request.
