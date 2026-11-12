@@ -1,0 +1,3 @@
+# Where on a Use entry and the type's default: the frontend's types and unit suite.
+web typecheck
+web test

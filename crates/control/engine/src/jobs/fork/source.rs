@@ -7,11 +7,133 @@ use orch_authz::{Act, Principal, TokenGrant, nodes};
 use orch_db::queries::{jobs, thread_history_cuts as cuts};
 
 const SOURCE: &str = "confirmed_history_source";
+fn managed_error(error: EngineError) -> Stop {
+    match error {
+        EngineError::BeforeEffect(_) => failed(
+            "authz.denied",
+            "The original native operation is no longer permitted.",
+        ),
+        error => error.into(),
+    }
+}
 
 /// How much of the history phase the export of a native archive is, while its bytes cross the line: half.
 /// The file crosses twice, up from the machine that holds the session and down to the one that opens
 /// it, and the opening that follows imports what came; the other half is left to those.
 const EXPORT_SHARE: f64 = 0.5;
+
+/// Ordinary confirmations have one caller; automatic input recovery retains every origin.
+pub(super) enum Authority<'a> {
+    Direct(&'a Caller),
+    Managed {
+        caller: &'a Caller,
+        origin: &'a crate::fork_plan::operation::Origin,
+    },
+    Agent {
+        caller: &'a Caller,
+        thread: Id,
+        turn: Id,
+    },
+    Recovery {
+        input_id: Id,
+        callers: &'a crate::inputs::InputCallers,
+    },
+}
+
+impl Authority<'_> {
+    pub(super) fn actor(&self) -> Id {
+        match self {
+            Self::Direct(caller) | Self::Agent { caller, .. } | Self::Managed { caller, .. } => {
+                caller.user()
+            }
+            Self::Recovery { callers, .. } => callers.user(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct RecoveryInputAuthority {
+    input_id: Id,
+    captured: crate::inputs::InputAuthority,
+}
+
+pub(super) enum Authorized {
+    Direct(Caller),
+    Managed {
+        principal: Principal,
+        origin: Box<crate::fork_plan::operation::Origin>,
+    },
+    Lifecycle {
+        principal: Principal,
+        until: Option<Time>,
+    },
+    Recovery,
+}
+
+impl Authorized {
+    pub(super) fn check(&self, clock: &dyn orch_types::Clock) -> Result<(), EngineError> {
+        if let Self::Managed { principal, origin } = self {
+            origin.deadline(clock, principal.caller())?;
+        }
+        if let Self::Lifecycle { principal, until } = self
+            && (!principal.caller().key_deadline_allows(clock)
+                || until.is_some_and(|until| clock.time() >= until))
+        {
+            return Err(EngineError::BeforeEffect(Box::new(
+                crate::operation_scope::continuing::Error::Refused,
+            )));
+        }
+        Ok(())
+    }
+    /// The bounded recovery producer never creates a thread or environment. Do not
+    /// collapse its origins to satisfy an unrelated single-caller birth interface.
+    pub(super) fn creation_caller(&self) -> Result<Caller, Stop> {
+        match self {
+            Self::Direct(caller) => Ok(caller.clone()),
+            Self::Managed { principal, .. } | Self::Lifecycle { principal, .. } => {
+                Ok(principal.caller().clone())
+            }
+            Self::Recovery => Err(failed(
+                "recovery_shape_changed",
+                "An input recovery cannot create a new thread or environment.",
+            )),
+        }
+    }
+}
+
+fn recovery_shape_matches(
+    recipe: &Recipe,
+    thread: &threads::ThreadRow,
+    reach: crate::fork_plan::Reach,
+) -> bool {
+    recipe.result == ForkResult::Replace
+        && recipe.request.result == ForkResult::Replace
+        && recipe.forkplan.result == ForkResult::Replace
+        && recipe.new_thread.is_none()
+        && recipe.batch_id.is_none()
+        && reach == crate::fork_plan::Reach::Seen
+        && matches!(
+            recipe.request.environment,
+            None | Some(ForkEnvironment::Same { same: true })
+        )
+        && recipe.request.topic_id.is_none()
+        && recipe.request.name.is_none()
+        && recipe.request.access.is_none()
+        && recipe.request.agent_access.is_none()
+        && recipe.request.directory.is_none()
+        && recipe.request.cwd.is_none()
+        && recipe.request.mounts.is_none()
+        && recipe.request.worktree.is_none()
+        && recipe.request.files_at.is_none()
+        && recipe.forkplan.files.is_none()
+        && recipe.forkplan.worktree.is_none()
+        && recipe.forkplan.files_at.is_none()
+        && recipe.source_execution.environment().is_some()
+        && recipe.to_environment == recipe.source_execution.environment()
+        && matches!(&recipe.forkplan.to.environment, ForkPlanTarget::Existing(environment) if Some(environment.id) == recipe.source_execution.environment())
+        && recipe.forkplan.to.directory == thread.workspace_dir
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Source {
@@ -33,21 +155,69 @@ pub(super) struct Source {
     pub model: Option<String>,
     pub token: Option<Id>,
     pub scope: Option<crate::continuations::recipe::AuthorizationScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_input: Option<RecoveryInputAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_thread: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<crate::fork_plan::operation::Origin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    operation_version: Option<u8>,
 }
 
 pub(super) async fn confirmed(
     conn: &mut orch_db::Conn,
     thread: &threads::ThreadRow,
-    caller: &Caller,
+    authority: &Authority<'_>,
     recipe: &Recipe,
     cut_id: Id,
     reach: crate::fork_plan::Reach,
 ) -> Result<Source, EngineError> {
-    let native_ref = match thread.current_segment_id {
-        Some(id) => threads::segment(conn, id)
+    let (token, scope, recovery_input) = match authority {
+        Authority::Managed { caller, origin } => {
+            if origin.captured().user() != caller.user()
+                || !origin.matches_job(thread.node_id, &recipe.request, reach, recipe.batch_id)
+            {
+                return Err(EngineError::unreadable(
+                    "the confirmed native operation has another source",
+                ));
+            }
+            (None, None, None)
+        }
+        Authority::Direct(caller) | Authority::Agent { caller, .. } => (
+            caller.grant().and_then(|grant| grant.token()),
+            caller
+                .grant()
+                .map(|grant| crate::continuations::recipe::AuthorizationScope {
+                    scopes: grant.scopes().to_strings(),
+                    subtree: grant.subtree(),
+                }),
+            None,
+        ),
+        Authority::Recovery { input_id, callers } => {
+            if !recovery_shape_matches(recipe, thread, reach) {
+                return Err(EngineError::unreadable(
+                    "the input recovery changed its bounded switch shape",
+                ));
+            }
+            (
+                None,
+                None,
+                Some(RecoveryInputAuthority {
+                    input_id: *input_id,
+                    captured: callers.captured().clone(),
+                }),
+            )
+        }
+    };
+    let native_ref = match (
+        recipe.source_execution.environment(),
+        thread.current_segment_id,
+    ) {
+        (Some(_), Some(id)) => threads::segment(conn, id)
             .await?
             .and_then(|segment| segment.native_session_ref),
-        None => None,
+        _ => None,
     };
     let range = crate::fork_plan::history_range_view(
         conn,
@@ -70,7 +240,10 @@ pub(super) async fn confirmed(
     .await?
     .own
     .map(|own| own.value);
-    let model = crate::resolved::load(conn, thread.node_id).await?.model;
+    let model = match &recipe.forkplan.from {
+        orch_api_contract::forks::ForkPlanFrom::Program { model, .. } => Some(model.clone()),
+        _ => crate::resolved::load(conn, thread.node_id).await?.model,
+    };
     Ok(Source {
         cut_id,
         thread: thread.node_id,
@@ -88,18 +261,32 @@ pub(super) async fn confirmed(
         arrangement: thread.arrangement.clone(),
         own_params,
         model,
-        token: caller.grant().and_then(|grant| grant.token()),
-        scope: caller
-            .grant()
-            .map(|grant| crate::continuations::recipe::AuthorizationScope {
-                scopes: grant.scopes().to_strings(),
-                subtree: grant.subtree(),
-            }),
+        token,
+        scope,
+        recovery_input,
+        agent_thread: match authority {
+            Authority::Agent { thread, .. } => Some(*thread),
+            _ => None,
+        },
+        operation: match authority {
+            Authority::Managed { origin, .. } => Some((**origin).clone()),
+            _ => None,
+        },
+        operation_version: matches!(authority, Authority::Managed { .. }).then_some(1),
     })
 }
 
 pub(super) fn retained(plan: &Json) -> Result<Source, Stop> {
-    serde_json::from_value(plan.get(SOURCE).cloned().ok_or_else(|| {
+    if plan
+        .get(SOURCE)
+        .is_some_and(|value| value.get("operation").is_some_and(Json::is_null))
+    {
+        return Err(failed(
+            "authz.denied",
+            "The retained native operation source is malformed.",
+        ));
+    }
+    let retained: Source = serde_json::from_value(plan.get(SOURCE).cloned().ok_or_else(|| {
         failed(
             "history_source_unconfirmed",
             "This older operation has no confirmed history source; a new source is not guessed.",
@@ -110,7 +297,17 @@ pub(super) fn retained(plan: &Json) -> Result<Source, Stop> {
             "history_source_unconfirmed",
             "The confirmed history source cannot be read.",
         )
-    })
+    })?;
+    if !matches!(
+        (&retained.operation, retained.operation_version),
+        (None, None) | (Some(_), Some(1))
+    ) {
+        return Err(failed(
+            "authz.denied",
+            "The retained native operation source is incomplete.",
+        ));
+    }
+    Ok(retained)
 }
 
 async fn allowed(
@@ -136,7 +333,7 @@ async fn allowed(
 
 async fn environment_manager(
     conn: &mut orch_db::Conn,
-    job: &Job,
+    access: &dyn crate::access::ResourceAccess,
     principal: &Principal,
     environment: Id,
     work: Option<Id>,
@@ -158,14 +355,31 @@ async fn environment_manager(
             return Ok(false);
         }
     }
-    Ok(job
-        .engine()
-        .inner
-        .access
+    Ok(access
         .environment_manage(conn, principal.user(), environment)
         .await
         .map_err(EngineError::from)?
         .is_allowed())
+}
+
+pub(super) async fn lock_operation_actor(
+    conn: &mut orch_db::Conn,
+    id: Id,
+) -> Result<(), EngineError> {
+    if let Some(row) = jobs::job(conn, id).await? {
+        crate::jobs::lifecycle_commands::environment::lock_source(conn, &row).await?;
+    }
+    if let Some(value) = jobs::job(conn, id).await?.and_then(|row| {
+        row.plan
+            .get(SOURCE)
+            .and_then(|source| source.get("operation"))
+            .cloned()
+    }) {
+        let origin: crate::fork_plan::operation::Origin = serde_json::from_value(value)?;
+        orch_db::queries::transaction_guard::lock_native_actor(conn, origin.captured().user())
+            .await?;
+    }
+    Ok(())
 }
 
 /// Called in the native/file admission and commit transactions. Passive captured
@@ -176,13 +390,72 @@ pub(super) async fn authorize(
     recipe: &Recipe,
     source: &Source,
     target: Option<&threads::ThreadRow>,
-) -> Result<Caller, Stop> {
+) -> Result<Authorized, Stop> {
+    lock_operation_actor(conn, job.id()).await?;
     let row = job.lock_owned(conn).await?.ok_or(Stop::Lost)?;
+    if source.operation.is_some() {
+        threads::lock(conn, source.thread)
+            .await?
+            .ok_or(Stop::Lost)?;
+    }
     if row.cancel_requested() {
         return Err(Stop::Cancelled);
     }
     job.check()?;
-    if source.cut_id != job.id()
+    let authorized = authorize_on(
+        conn,
+        &row,
+        recipe,
+        source,
+        target,
+        job.engine().inner.clock.as_ref(),
+        job.engine().inner.access.as_ref(),
+    )
+    .await?;
+    if let Authorized::Managed { principal, origin } = &authorized {
+        retain_operation(
+            conn,
+            &row,
+            principal.caller(),
+            origin,
+            job.engine().inner.clock.as_ref(),
+        )
+        .await?;
+    }
+    Ok(authorized)
+}
+
+pub(super) async fn retain_operation(
+    conn: &mut orch_db::Conn,
+    row: &JobRow,
+    caller: &Caller,
+    origin: &crate::fork_plan::operation::Origin,
+    clock: &dyn orch_types::Clock,
+) -> Result<(), Stop> {
+    origin.deadline(clock, caller).map_err(managed_error)?;
+    let mut current = retained(&row.plan)?;
+    current.operation = Some(origin.clone());
+    jobs::merge_plan(conn, row.id, &json!({(SOURCE):current}), clock.now()).await?;
+    origin.deadline(clock, caller).map_err(managed_error)?;
+    Ok(())
+}
+
+/// The same native authority gate on an executor's actual row, clock and resource access.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one existing native authority gate keeps all of its original prerequisites and runtime ports"
+)]
+pub(super) async fn authorize_on(
+    conn: &mut orch_db::Conn,
+    row: &JobRow,
+    recipe: &Recipe,
+    source: &Source,
+    target: Option<&threads::ThreadRow>,
+    clock: &dyn orch_types::Clock,
+    access: &dyn crate::access::ResourceAccess,
+) -> Result<Authorized, Stop> {
+    if source.cut_id != row.id
         || source.thread != recipe.source_thread
         || source.segment != recipe.source_segment
     {
@@ -211,6 +484,7 @@ pub(super) async fn authorize(
         ));
     }
     if recipe.result == ForkResult::Replace
+        && recipe.source_execution.environment().is_some()
         && let Some(segment) = source.segment
     {
         let actual = threads::segment(conn, segment).await?.ok_or_else(|| {
@@ -240,44 +514,345 @@ pub(super) async fn authorize(
             ));
         }
     }
-    let principal =
-        super::super::source::load_principal(conn, job, recipe.by, source.token).await?;
-    let current = principal.caller().clone();
-    let mut principals = vec![principal];
-    if let Some(scope) = &source.scope {
-        principals.push(
-            Principal::load(
+    if let ExecutionSource::Program {
+        program,
+        root_org_id,
+    } = &recipe.source_execution
+    {
+        let current = if recipe.result == ForkResult::New
+            && let Some(segment) = source.segment
+        {
+            crate::fork_plan::program::execution_at(conn, thread.node_id, segment).await
+        } else {
+            crate::fork_plan::program::execution(conn, &thread).await
+        }
+        .map_err(|_| {
+            failed(
+                "history_source_changed",
+                "The captured program binding is unavailable",
+            )
+        })?;
+        let Some((current, provider, model)) = current else {
+            return Err(failed(
+                "history_source_changed",
+                "The source is no longer the confirmed built-in program",
+            ));
+        };
+        if current.id != *program
+            || current.root_org_id != *root_org_id
+            || provider.id != recipe.forkplan.from.provider().id
+            || source.model.as_ref() != Some(&model)
+        {
+            return Err(failed(
+                "history_source_changed",
+                "The captured program, provider or model changed",
+            ));
+        }
+    }
+    if source.agent_thread != recipe.by_agent {
+        return Err(failed(
+            "authz.denied",
+            "The accepted agent fork authority changed.",
+        ));
+    }
+    if let Some(agent_thread) = source.agent_thread {
+        if recipe.result != ForkResult::New || source.recovery_input.is_some() {
+            return Err(failed(
+                "authz.denied",
+                "An agent confirmation permits only a new fork.",
+            ));
+        }
+        let has_origin = if let Some(turn) = recipe.by_agent_turn {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM turns WHERE id=$1 AND thread_id=$2)",
+            )
+            .bind(turn)
+            .bind(agent_thread)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(orch_db::DbError::from)?
+        } else {
+            false
+        };
+        if !has_origin {
+            return Err(failed(
+                "authz.denied",
+                "The accepted agent fork's original turn is unavailable.",
+            ));
+        }
+        let agent = orch_authz::reach::Agent::of(conn, agent_thread)
+            .await
+            .map_err(EngineError::from)?
+            .ok_or_else(|| {
+                failed(
+                    "authz.denied",
+                    "The agent that confirmed this fork is unavailable.",
+                )
+            })?;
+        let reach = orch_authz::reach::Reach::load_current(
+            conn,
+            agent,
+            clock.time(),
+            &orch_authz::reach::Things {
+                nodes: vec![source.thread],
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(EngineError::from)?;
+        if !reach.thread_act_by(
+            source.thread,
+            thread.side_of.is_some(),
+            Permission::ThreadFork,
+            recipe.by,
+        ) {
+            return Err(failed(
+                "authz.denied",
+                "The accepted giver no longer supplies thread.fork to this agent.",
+            ));
+        }
+    }
+    let mut managed = None;
+    let mut lifecycle = None;
+    let (principals, current) = if crate::jobs::lifecycle_commands::environment::present(row) {
+        if source.operation.is_some()
+            || source.recovery_input.is_some()
+            || source.agent_thread.is_some()
+        {
+            return Err(failed(
+                "authz.denied",
+                "The lifecycle child has another native authority.",
+            ));
+        }
+        let checked =
+            crate::jobs::lifecycle_commands::environment::current(conn, row, clock, access, None)
+                .await
+                .map_err(managed_error)?;
+        let caller = checked.principal.caller().clone();
+        lifecycle = Some(checked.until);
+        (vec![checked.principal], Some(caller))
+    } else if let Some(operation) = &source.operation {
+        if source.token.is_some()
+            || source.scope.is_some()
+            || source.recovery_input.is_some()
+            || source.agent_thread.is_some()
+            || !operation.matches_job(
+                source.thread,
+                &recipe.request,
+                source.reach,
+                recipe.batch_id,
+            )
+            || operation.captured().user() != recipe.by
+        {
+            return Err(failed(
+                "authz.denied",
+                "The retained native operation changed its source.",
+            ));
+        }
+        let current = retained(&row.plan)?.operation.ok_or_else(|| {
+            failed(
+                "authz.denied",
+                "The original native operation source is missing.",
+            )
+        })?;
+        let (principal, origin) = operation
+            .current_act(conn, clock, &current)
+            .await
+            .map_err(managed_error)?;
+        let caller = principal.caller().clone();
+        managed = Some(origin);
+        (vec![principal], Some(caller))
+    } else if let Some(recovery) = &source.recovery_input {
+        if source.token.is_some()
+            || source.scope.is_some()
+            || row.plan.get("copy_worktree").and_then(Json::as_bool) != Some(false)
+            || !recovery_shape_matches(recipe, &thread, source.reach)
+        {
+            return Err(failed(
+                "recovery_shape_changed",
+                "The retained input recovery changed its bounded switch shape.",
+            ));
+        }
+        let input = threads::input(conn, recovery.input_id)
+            .await?
+            .filter(|input| input.thread_id == source.thread && input.author_id == Some(recipe.by))
+            .ok_or_else(|| {
+                failed(
+                    "origin_authority",
+                    "The accepted recovery input is unavailable.",
+                )
+            })?;
+        let current_authority = crate::inputs::saved_authority(
+            input.submission_authority.as_ref(),
+        )?
+        .ok_or_else(|| {
+            failed(
+                "origin_authority",
+                "The recovery input's current authority is unavailable.",
+            )
+        })?;
+        let captured = recovery
+            .captured
+            .retaining_current(recipe.by, &current_authority)?;
+        let authority = {
+            let mut unit = Unit::new(conn, clock.now());
+            crate::inputs::input_authority_callers(
+                &mut unit, &thread, &input, recipe.by, &captured, clock,
+            )
+            .await?
+            .ok_or_else(|| {
+                failed(
+                    "origin_authority",
+                    "The accepted recovery credentials are no longer available.",
+                )
+            })?
+        };
+        let mut principals = Vec::with_capacity(authority.callers().len());
+        for caller in authority.callers() {
+            principals.push(
+                Principal::load(conn, caller.clone(), clock.time())
+                    .await
+                    .map_err(EngineError::from)?,
+            );
+        }
+        (principals, None)
+    } else {
+        if let Some(token) = source.token {
+            let scoped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM api_tokens WHERE id=$1 AND operation_scope IS NOT NULL)")
+                .bind(token).fetch_one(&mut *conn).await.map_err(orch_db::DbError::from)?;
+            if scoped {
+                return Err(failed(
+                    "authz.denied",
+                    "This scoped native operation has no retained original source.",
+                ));
+            }
+        }
+        let principal =
+            super::super::source::load_principal_at(conn, recipe.by, source.token, clock.time())
+                .await?;
+        let current = principal.caller().clone();
+        let mut principals = vec![principal];
+        if let Some(scope) = &source.scope {
+            principals.push(
+                Principal::load(
+                    conn,
+                    Caller::token(
+                        recipe.by,
+                        TokenGrant::from_stored(&scope.scopes, scope.subtree)
+                            .map_err(EngineError::unreadable)?,
+                    ),
+                    clock.time(),
+                )
+                .await
+                .map_err(EngineError::from)?,
+            );
+        }
+        (principals, Some(current))
+    };
+    for principal in &principals {
+        if recipe.forkplan.files.is_some()
+            || recipe.forkplan.files_at.is_some()
+            || recipe.forkplan.worktree.is_some()
+        {
+            // Files are copied only from a source with a real workspace; a program source has none.
+            let from_environment = recipe
+                .source_execution
+                .environment()
+                .ok_or_else(|| failed("authz.denied", "The file source is unavailable."))?;
+            let destination = match recipe.to_environment.or_else(|| {
+                row.plan
+                    .get(made::ENVIRONMENT)
+                    .and_then(Json::as_str)
+                    .and_then(|id| id.parse::<Id>().ok())
+            }) {
+                Some(id) => {
+                    orch_db::queries::environments::thread_engine::environment(conn, id)
+                        .await?
+                        .ok_or_else(|| {
+                            failed("authz.denied", "The file destination is unavailable.")
+                        })?
+                        .home_node_id
+                }
+                None => match &recipe.request.environment {
+                    Some(ForkEnvironment::New { new }) => new.home_node_id.unwrap_or(source.topic),
+                    _ => {
+                        orch_db::queries::environments::thread_engine::environment(
+                            conn,
+                            from_environment,
+                        )
+                        .await?
+                        .ok_or_else(|| failed("authz.denied", "The file source is unavailable."))?
+                        .home_node_id
+                    }
+                },
+            };
+            match crate::copy_out::authorize(
                 conn,
-                Caller::token(
-                    recipe.by,
-                    TokenGrant::from_stored(&scope.scopes, scope.subtree)
-                        .map_err(EngineError::unreadable)?,
-                ),
-                Time::new(job.now()),
+                principal,
+                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Environment,
+                    id: from_environment,
+                }),
+                Some(destination),
             )
             .await
-            .map_err(EngineError::from)?,
-        );
-    }
-    for principal in principals {
+            {
+                Ok(_) => {}
+                Err(crate::copy_out::Error::Native(error)) => return Err(error.into()),
+                Err(_) => {
+                    return Err(failed(
+                        "authz.denied",
+                        "The source environment no longer permits files to be copied into this organization.",
+                    ));
+                }
+            }
+        }
+        if recipe.result != ForkResult::Replace {
+            match crate::copy_out::authorize(
+                conn,
+                principal,
+                crate::copy_out::Subject::Object(orch_access_contract::decisions::ObjectRef {
+                    kind: orch_access_contract::permissions::ObjectKind::Thread,
+                    id: source.thread,
+                }),
+                Some(source.topic),
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(crate::copy_out::Error::Native(error)) => return Err(error.into()),
+                Err(_) => {
+                    return Err(failed(
+                        "authz.denied",
+                        "The source no longer permits a copy into this organization.",
+                    ));
+                }
+            }
+        }
         let environment_reach = source.reach == crate::fork_plan::Reach::Environment
             && recipe.result == ForkResult::Replace;
         if environment_reach {
-            if !environment_manager(conn, job, &principal, recipe.from_environment, None).await? {
+            let environment = recipe.source_execution.environment().ok_or_else(|| {
+                failed(
+                    "authz.denied",
+                    "A program has no source environment management authority",
+                )
+            })?;
+            if !environment_manager(conn, access, principal, environment, None).await? {
                 return Err(failed(
                     "authz.denied",
                     "Current environment management no longer permits this accepted batch member.",
                 ));
             }
-        } else if !allowed(conn, &principal, source.thread, Permission::ThreadView).await? {
+        } else if !allowed(conn, principal, source.thread, Permission::ThreadView).await? {
             return Err(failed(
                 "authz.denied",
                 "The accepted credential no longer permits reading the confirmed source.",
             ));
         }
         if recipe.result != ForkResult::Replace
-            && !allowed(conn, &principal, source.thread, Permission::ThreadManage).await?
-            && !allowed(conn, &principal, source.thread, Permission::ThreadFork).await?
+            && !allowed(conn, principal, source.thread, Permission::ThreadManage).await?
+            && !allowed(conn, principal, source.thread, Permission::ThreadFork).await?
         {
             return Err(failed(
                 "authz.denied",
@@ -286,12 +861,13 @@ pub(super) async fn authorize(
         }
         if !environment_reach
             && recipe.result == ForkResult::Replace
-            && (recipe.forkplan.from.agent.id != recipe.forkplan.to.agent.id
-                || recipe.forkplan.from.provider.id != recipe.forkplan.to.provider.id
+            && (recipe.forkplan.from.agent().map(|agent| agent.id)
+                != Some(recipe.forkplan.to.agent.id)
+                || recipe.forkplan.from.provider().id != recipe.forkplan.to.provider.id
                 || serde_json::to_value(recipe.forkplan.to.arrangement)
                     .map_err(EngineError::from)?
                     != serde_json::to_value(&source.arrangement).map_err(EngineError::from)?)
-            && !allowed(conn, &principal, source.thread, Permission::ThreadManage).await?
+            && !allowed(conn, principal, source.thread, Permission::ThreadManage).await?
         {
             return Err(failed(
                 "authz.denied",
@@ -299,13 +875,7 @@ pub(super) async fn authorize(
             ));
         }
         if recipe.result != ForkResult::Replace
-            && !allowed(
-                conn,
-                &principal,
-                source.topic,
-                Permission::TopicStartThreads,
-            )
-            .await?
+            && !allowed(conn, principal, source.topic, Permission::TopicStartThreads).await?
         {
             return Err(failed(
                 "authz.denied",
@@ -319,15 +889,21 @@ pub(super) async fn authorize(
                 .and_then(|id| id.parse::<Id>().ok())
         });
         let moving = matches!(recipe.forkplan.to.environment, ForkPlanTarget::Made { .. })
-            || target_environment.is_some_and(|to| to != recipe.from_environment);
+            || target_environment
+                .is_some_and(|to| Some(to) != recipe.source_execution.environment());
         let directory_changes = recipe.forkplan.to.directory != thread.workspace_dir;
         if recipe.result != ForkResult::Replace
             && !moving
             && !environment_manager(
                 conn,
-                job,
-                &principal,
-                recipe.from_environment,
+                access,
+                principal,
+                recipe.source_execution.environment().ok_or_else(|| {
+                    failed(
+                        "authz.denied",
+                        "A program has no source environment to place another thread in",
+                    )
+                })?,
                 Some(source.topic),
             )
             .await?
@@ -342,10 +918,14 @@ pub(super) async fn authorize(
         {
             let decision = orch_authz::environments::check_move(
                 conn,
-                &principal,
+                principal,
                 &orch_authz::environments::Moving {
                     thread: (recipe.result == ForkResult::Replace).then_some(source.thread),
-                    from: (recipe.result == ForkResult::Replace).then_some(recipe.from_environment),
+                    from: if recipe.result == ForkResult::Replace {
+                        recipe.source_execution.environment()
+                    } else {
+                        None
+                    },
                     to: target_environment,
                     all_of_the_environment: environment_reach,
                 },
@@ -363,7 +943,7 @@ pub(super) async fn authorize(
         if recipe.result != ForkResult::Replace
             && let Some(orch_api_contract::access::ThreadAccess::As(page)) = &recipe.request.access
             && page.source != source.thread
-            && !allowed(conn, &principal, page.source, Permission::ThreadManage).await?
+            && !allowed(conn, principal, page.source, Permission::ThreadManage).await?
         {
             return Err(failed(
                 "authz.denied",
@@ -372,7 +952,7 @@ pub(super) async fn authorize(
         }
         if source.range.is_none_or(|(first, _)| first == 1)
             && let Some(parent) = thread.side_of
-            && !allowed(conn, &principal, parent, Permission::ThreadView).await?
+            && !allowed(conn, principal, parent, Permission::ThreadView).await?
         {
             return Err(failed(
                 "authz.denied",
@@ -383,7 +963,8 @@ pub(super) async fn authorize(
         // contract rather than inventing ThreadInteract on a read-only source.
         let provider_required = !environment_reach
             && (recipe.result != ForkResult::Replace
-                || recipe.forkplan.from.provider.id != recipe.forkplan.to.provider.id);
+                || matches!(recipe.source_execution, ExecutionSource::Program { .. })
+                || recipe.forkplan.from.provider().id != recipe.forkplan.to.provider.id);
         if provider_required {
             if !principal.caller().permits(Permission::ProviderUse) {
                 return Err(failed(
@@ -391,10 +972,7 @@ pub(super) async fn authorize(
                     "The accepted credential no longer includes provider.use.",
                 ));
             }
-            let answer = job
-                .engine()
-                .inner
-                .access
+            let answer = access
                 .provider_use(
                     conn,
                     &crate::access::ProviderUse {
@@ -410,6 +988,9 @@ pub(super) async fn authorize(
                         provider: recipe.forkplan.to.provider.id,
                         model: Some(&recipe.forkplan.to.model),
                         effort: recipe.forkplan.to.effort.as_deref(),
+                        runs_in: crate::access::RunsIn::of(
+                            target_environment.or_else(|| recipe.source_execution.environment()),
+                        ),
                     },
                 )
                 .await
@@ -439,13 +1020,11 @@ pub(super) async fn authorize(
         }
         let profile_required = !environment_reach
             && (recipe.result != ForkResult::Replace
-                || recipe.forkplan.from.agent.id != recipe.forkplan.to.agent.id);
+                || recipe.forkplan.from.agent().map(|agent| agent.id)
+                    != Some(recipe.forkplan.to.agent.id));
         if profile_required
             && (!principal.caller().permits(Permission::AgentUse)
-                || !job
-                    .engine()
-                    .inner
-                    .access
+                || !access
                     .agent_use(
                         conn,
                         recipe.by,
@@ -469,10 +1048,27 @@ pub(super) async fn authorize(
             ));
         }
     }
+    let Some(current) = current else {
+        return Ok(Authorized::Recovery);
+    };
+    if let Some(until) = lifecycle {
+        let principal = principals.into_iter().next().ok_or(Stop::Lost)?;
+        let authorized = Authorized::Lifecycle { principal, until };
+        authorized.check(clock).map_err(managed_error)?;
+        return Ok(authorized);
+    }
+    if let Some(origin) = managed {
+        origin.deadline(clock, &current).map_err(managed_error)?;
+        let principal = principals.into_iter().next().ok_or(Stop::Lost)?;
+        return Ok(Authorized::Managed {
+            principal,
+            origin: Box::new(origin),
+        });
+    }
     // Birth suppliers take one Caller. Supply the actual intersection, rather
     // than silently upgrading a stored token back to its person's session.
     let Some(scope) = &source.scope else {
-        return Ok(current);
+        return Ok(Authorized::Direct(current));
     };
     let accepted = orch_access_contract::decisions::Scopes::parse(&scope.scopes)
         .map_err(EngineError::unreadable)?;
@@ -523,7 +1119,7 @@ pub(super) async fn authorize(
     if let Some(token) = source.token {
         grant = grant.for_token(token);
     }
-    Ok(Caller::token(recipe.by, grant))
+    Ok(Authorized::Direct(Caller::token(recipe.by, grant)))
 }
 
 pub(super) async fn capture(
@@ -559,6 +1155,7 @@ pub(super) async fn capture(
 impl Forking {
     pub(super) async fn source_cut(&self, job: &Job) -> Result<cuts::Cut, Stop> {
         let mut tx = job.engine().db().begin().await?;
+        lock_operation_actor(&mut tx, job.id()).await?;
         let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
         let source = retained(&owned.plan)?;
         let thread = threads::lock(&mut tx, source.thread)
@@ -622,8 +1219,14 @@ impl Forking {
                     "The accepted waiting turn belongs to another continuation.",
                 ));
             }
+            // A control-plane program has no native harness to acknowledge its end.
+            // Its settled turn and cleared current execution are the source boundary.
+            let needs_native_end = !matches!(
+                &self.recipe.source_execution,
+                ExecutionSource::Program { .. }
+            );
             if matches!(turn.state.as_str(), "starting" | "running")
-                || !native_end_confirmed
+                || needs_native_end && !native_end_confirmed
                 || pending
                 || thread.current_turn_id.is_some()
             {
@@ -707,6 +1310,7 @@ pub(super) async fn freeze_target(
         arrangement: snapshot.thread.arrangement.clone().unwrap_or_default(),
     };
     let mut tx = job.engine().db().begin().await?;
+    lock_operation_actor(&mut tx, job.id()).await?;
     let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     let source = retained(&owned.plan)?;
     let thread = threads::thread(&mut tx, target.thread).await?;
@@ -770,7 +1374,7 @@ pub(super) async fn check_target(
     if environment.deleted_at.is_some()
         || environment.remove_at.is_some()
         || environment.status != "running"
-        || provider.status != "ready"
+        || !crate::providers::request_status_available(&provider.status)
         || machine.status != "active"
         || machine.deleted_at.is_some()
         || !machine.online
@@ -805,7 +1409,9 @@ pub(super) async fn save(
     command: Outgoing,
     attempt: Option<&Attempt>,
 ) -> Result<Outgoing, Stop> {
+    let command = job.prepare_command(command).await?;
     let mut tx = job.engine().db().begin().await?;
+    lock_operation_actor(&mut tx, job.id()).await?;
     let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     let source = retained(&owned.plan)?;
     let target =
@@ -858,8 +1464,41 @@ pub(super) async fn save(
         }
     };
     saved.deadline = Some(deadline);
+    if !fresh && source.operation.is_some() && saved.authority.is_none() {
+        return Err(failed(
+            "authz.denied",
+            "The known native command lost its original source.",
+        ));
+    }
+    let current = jobs::job(&mut tx, job.id()).await?.ok_or(Stop::Lost)?;
+    saved = super::command::history(&current, slot, saved)?;
+    let private = saved
+        .authority
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(EngineError::from)?;
+    let budget = super::operation::Preparation::from_job(&current)?;
+    let accepted = match &budget {
+        Some(source) => Some(
+            source
+                .current(
+                    &mut tx,
+                    job.engine().inner.clock.as_ref(),
+                    job.engine().inner.access.as_ref(),
+                )
+                .await
+                .map_err(managed_error)?,
+        ),
+        None => None,
+    };
+    if let Some(accepted) = &accepted {
+        accepted
+            .check(job.engine().inner.clock.as_ref())
+            .map_err(managed_error)?;
+    }
     let key = saved.key.wire();
-    orch_db::queries::link::insert_command(
+    orch_db::queries::link::insert_command_with_authority(
         &mut tx,
         &orch_db::queries::link::NewCommand {
             id: saved.id,
@@ -870,6 +1509,7 @@ pub(super) async fn save(
             deadline_at: deadline.get(),
         },
         job.now(),
+        private.as_ref(),
     )
     .await?;
     let row = orch_db::queries::link::command(&mut tx, saved.id)
@@ -889,6 +1529,12 @@ pub(super) async fn save(
         return Err(failed(
             "history_command_changed",
             "The native command differs from its original admitted identity or budget.",
+        ));
+    }
+    if orch_db::queries::link::command_authority(&mut tx, saved.id).await? != private {
+        return Err(failed(
+            "authz.denied",
+            "The native command retained another original source.",
         ));
     }
     cuts::hold_command(&mut tx, source.cut_id, saved.id, saved.machine).await?;
@@ -946,6 +1592,11 @@ pub(super) async fn save(
         patch["history_attempts"] = attempts;
     }
     jobs::merge_plan(&mut tx, job.id(), &patch, job.now()).await?;
+    if let Some(accepted) = &accepted {
+        accepted
+            .check(job.engine().inner.clock.as_ref())
+            .map_err(managed_error)?;
+    }
     tx.commit().await.map_err(orch_db::DbError::from)?;
     Ok(saved)
 }
@@ -1034,6 +1685,7 @@ pub(super) async fn artifact(
     factual: bool,
 ) -> Result<(), Stop> {
     let mut tx = job.engine().db().begin().await?;
+    lock_operation_actor(&mut tx, job.id()).await?;
     let owned = job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     let source = retained(&owned.plan)?;
     if !factual {
@@ -1072,6 +1724,7 @@ pub(super) async fn exported(
     archive: &SessionExportResult,
 ) -> Result<(), Stop> {
     let mut tx = job.engine().db().begin().await?;
+    lock_operation_actor(&mut tx, job.id()).await?;
     job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     let blob = orch_db::queries::storage::blob(&mut tx, &archive.blob)
         .await?
@@ -1113,6 +1766,7 @@ pub(super) async fn child_result(
     result: &SessionOpenResult,
 ) -> Result<(), Stop> {
     let mut tx = job.engine().db().begin().await?;
+    lock_operation_actor(&mut tx, job.id()).await?;
     job.lock_owned(&mut tx).await?.ok_or(Stop::Lost)?;
     let name = format!("native_result_{}", command.id);
     if !cuts::keep_artifact(

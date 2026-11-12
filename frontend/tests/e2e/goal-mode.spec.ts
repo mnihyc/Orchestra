@@ -1,7 +1,7 @@
 /** Goal states, evidence and the space above the composer on the shipped application. */
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import type { Item, ThreadGoal, ThreadOpening } from '../../src/generated/api-types';
 import { agentMessage, ALLOW_DENY, approvalItem, harnessApproval, marker, plan, threadInput, turn, userMessage } from '../doubles/thread-rows';
@@ -21,6 +21,31 @@ const BASE: ThreadGoal = {
   helper: true, agent_reports: true, last_report: null, ended_at: null,
 };
 const SCREEN_DIR = resolve(process.env.ORCH_GOAL_SCREEN_DIR ?? 'output/playwright/goals');
+
+/**
+ * How far a row's top stands above the end of its pane's content, once the page has stopped moving. The thread's screen is its own scroll
+ * owner and its composer stands at the end of the conversation, taller than a phone's pane when an approval, a plan and a queue are shown:
+ * the pane's scroll position decides where a row is on the screen, and a press on a control that is out of view moves it (the browser case
+ * scrolls the control into view first), so the place on the screen is no measure of whether a row stayed. Its distance from the end of
+ * the content is the same wherever the pane is scrolled, and it does not move for a conversation still measuring above it.
+ */
+async function settledRise(row: Locator): Promise<number> {
+  let last = Number.NaN;
+  let still = 0;
+  await expect.poll(async () => {
+    const rise = await row.evaluate((element) => {
+      const pane = element.closest('[data-screen="thread"]');
+      if (pane === null) return Number.NaN;
+      const top = element.getBoundingClientRect().top - pane.getBoundingClientRect().top + pane.scrollTop;
+      return pane.scrollHeight - top;
+    });
+    // A busy composer row has a place in its pane; without one nothing has settled.
+    still = Number.isFinite(rise) && Math.abs(rise - last) <= 0.5 ? still + 1 : 0;
+    last = rise;
+    return still;
+  }, { intervals: [100, 150, 200, 250, 300, 500] }).toBeGreaterThanOrEqual(3);
+  return last;
+}
 
 async function photograph(page: Page, name: string) {
   await mkdir(SCREEN_DIR, { recursive: true });
@@ -126,7 +151,8 @@ for (const width of [1440, 400]) {
       await photograph(page, `${prefix}-editor-closed`);
       await dialog.getByLabel('Objective', { exact: true }).fill(BASE.objective);
       await dialog.getByLabel('Done when', { exact: true }).fill(CONDITION);
-      await dialog.locator('summary').filter({ hasText: /^Limits: none$/ }).click();
+      // An empty override follows the place; open the same disclosure regardless of its summary value.
+      await dialog.locator('summary').filter({ hasText: /^Limits:/ }).click();
       await expect(dialog.getByLabel('Turns', { exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled();
       await photograph(page, `${prefix}-editor-open`);
@@ -163,18 +189,18 @@ for (const width of [1440, 400]) {
           plan('busy-plan', [{ text: 'Check the redirect', status: 'in_progress' }, { text: 'Run the tests', status: 'pending' }], { turn: 'busy-turn' })],
       });
       await expect(page.locator('[data-passive="blocked"]')).toBeVisible();
-      const approvalBar = page.getByRole('status').filter({ hasText: '1 approval waiting' });
+      // Waiting decisions are ordinary pinned cards above the composer, rather than a duplicate status strip.
+      const approvalBar = page.locator('[data-pinned-approvals]');
       const planLine = page.getByRole('button', { name: 'Step 1 of 2: Check the redirect', exact: true });
       const queue = page.locator('[data-queue]');
       await expect(approvalBar).toBeVisible();
+      await expect(approvalBar.locator('[data-pinned-approval="goal-approval-item"]')).toHaveCount(1);
       await expect(planLine).toBeVisible();
       await expect(queue).toBeVisible();
-      const topEdges = await Promise.all([page.locator('[data-passive-strip]'), approvalBar, planLine, queue].map(async (row) => {
-        const box = await row.boundingBox();
-        if (box === null) throw new Error('A busy composer row has no bounds');
-        return box.y;
-      }));
-      expect(topEdges.every((top, at) => at === 0 || top > (topEdges[at - 1] ?? 0))).toBe(true);
+      // The rows stand in this order, the strip highest: each is nearer the end of the content than the one before it.
+      const rises: number[] = [];
+      for (const row of [page.locator('[data-passive-strip]'), approvalBar, planLine, queue]) rises.push(await settledRise(row));
+      expect(rises.every((rise, at) => at === 0 || rise < (rises[at - 1] ?? 0))).toBe(true);
       const more = page.getByRole('button', { name: 'Show 1 more', exact: true });
       await expect(more).toBeVisible();
       await expect(page.locator('[data-goal-line]')).not.toBeVisible();
@@ -183,8 +209,8 @@ for (const width of [1440, 400]) {
       const passiveCard = page.getByRole('dialog', { name: 'Show 1 more', exact: true });
       await expect(passiveCard).toBeVisible();
       await expect(page.locator('[data-goal-line]')).toBeVisible();
-      const primaryBounds = await page.locator('[data-passive="blocked"]').boundingBox();
-      expect(primaryBounds?.y).toBe(topEdges[0]);
+      // The primary row stays where the strip was across the expansion, wherever the pane is scrolled (a press on the control scrolls it into view).
+      expect(Math.abs(await settledRise(page.locator('[data-passive="blocked"]')) - (rises[0] ?? Number.NaN))).toBeLessThanOrEqual(1);
       await photograph(page, `${prefix}-busy-expanded`);
       await passiveCard.getByRole('button', { name: `Done when ${CONDITION}`, exact: true }).click();
       await expect(passiveCard.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();

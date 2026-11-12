@@ -6,7 +6,7 @@
  * drawn, three times over if need be, and a body that failed to arrive is made again when it is asked for
  * again, so that "Try again" in the view that stopped means something.
  */
-import { Bot, File as FileIcon, ChartNoAxesColumn, History, MessageSquareDashed, Users, BookOpen, Bug, ScrollText, Network } from 'lucide-react';
+import { Bot, File as FileIcon, ChartNoAxesColumn, History, MessageSquareDashed, Users, BookOpen, Bug, ScrollText, Network, SquareTerminal, CalendarClock } from 'lucide-react';
 
 import type { ComponentType } from 'react';
 
@@ -47,6 +47,10 @@ export function registerInspectorViews(): void {
   registerView({ name: 'side-thread', title: 'side.panelTitle', about: 'side.panelAbout', icon: MessageSquareDashed, screens: THREAD, area: 'right', container: 'conversation', order: 4,
     available: () => allTabs(useWorkbench.getState().layout).some((tab) => tab.view === 'side-thread' && tab.of?.side !== undefined),
     body: part(() => import('../timeline/SideThreadLane').then((module) => ({ default: module.SideThreadPanel }))) });
+  registerView({ name: 'background-work', title: 'running.title', about: 'running.about', icon: SquareTerminal, screens: THREAD, area: 'right', container: 'team', order: 3,
+    body: part(() => import('../running/View').then((module) => ({ default: module.BackgroundWorkView }))) });
+  registerView({ name: 'schedules', title: 'agentSchedules.title', about: 'agentSchedules.about', icon: CalendarClock, screens: THREAD, area: 'right', container: 'team', order: 4,
+    body: part(() => import('../schedules/Schedules').then((module) => ({ default: module.SchedulesView }))) });
   registerView({ name: 'history', title: 'threadViews.history.title', about: 'threadViews.history.about', icon: History, screens: THREAD, area: 'right', body: part(() => import('./History').then((module) => ({ default: module.HistoryView }))) });
   registerView({ name: 'people', title: 'threadViews.people.title', about: 'threadViews.people.about', icon: Users, screens: THREAD, area: 'right', container: 'team', order: 2, summary: PeopleSummary, body: part(() => import('./People').then((module) => ({ default: module.PeopleView }))) });
   registerView({ name: 'knowledge', title: 'threadViews.knowledge.title', about: 'threadViews.knowledge.about', icon: BookOpen, screens: THREAD, area: 'right', body: part(() => import('./Knowledge').then((module) => ({ default: module.KnowledgeView }))) });

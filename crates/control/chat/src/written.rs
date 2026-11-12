@@ -426,6 +426,7 @@ mod tests {
 
     fn message(author: &UserRef, minute: u32, parts: Vec<ChatPart>) -> ChatMessage {
         ChatMessage {
+            reference_number: None,
             mention_names: Vec::new(),
             id: new_id(),
             chat_id: new_id(),

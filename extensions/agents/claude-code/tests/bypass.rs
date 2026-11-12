@@ -24,8 +24,10 @@ use serde_json::json;
 const HARNESS: &str = r#"#!/usr/bin/env python3
 import json, os, sys
 if '--version' in sys.argv:
-    print('2.1.296 (Claude Code)')
+    print('__RELEASE_CLAUDE_VERSION__ (Claude Code)')
     sys.exit(0)
+with open(sys.argv[0] + '.launch_modes', 'a', encoding='utf-8') as out:
+    out.write(json.dumps(sys.argv[sys.argv.index('--permission-mode') + 1]) + '\n')
 with open(sys.argv[0] + '.launches', 'a', encoding='utf-8') as out:
     out.write(os.environ.get('CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS', '-') + '\n')
 def send(frame):
@@ -71,7 +73,24 @@ for line in sys.stdin:
 fn stand_in() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().unwrap();
     let program = directory.path().join("harness");
-    std::fs::write(&program, HARNESS).unwrap();
+    let builds: Vec<Json> =
+        serde_json::from_str(include_str!("../../../../deploy/harness-builds.json")).unwrap();
+    // Match the release's native fixture build instead of keeping an obsolete protocol version here.
+    let version = builds
+        .iter()
+        .find(|build| {
+            build["kind"] == "claude-code"
+                && build["os"] == "linux"
+                && build["arch"] == "x86_64"
+                && build["is_default"] == true
+        })
+        .and_then(|build| build["version"].as_str())
+        .expect("the release declares its default Claude Code fixture build");
+    std::fs::write(
+        &program,
+        HARNESS.replace("__RELEASE_CLAUDE_VERSION__", version),
+    )
+    .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
     (directory, program)
 }
@@ -299,12 +318,21 @@ async fn a_plan_can_be_revised_then_proceeded_with_under_the_composers_mode() {
             serde_json::to_value(&revised.request).unwrap()["detail"]["plan"],
             "Read, explain rollback, then change"
         );
-        let controls = records(&program, ".controls");
-        assert_eq!(
-            controls.last().unwrap()["request"]["mode"],
-            "plan",
-            "keeping a plan cannot restore action permissions"
+        let launches = records(&program, ".launch_modes");
+        assert!(!launches.is_empty(), "the plan turn starts its program");
+        assert!(
+            launches.iter().all(|mode| mode == "plan"),
+            "every process starts in plan mode: {launches:?}"
         );
+        let controls = records(&program, ".controls");
+        assert!(
+            controls
+                .iter()
+                .filter(|control| control["request"]["subtype"] == "set_permission_mode")
+                .all(|control| control["request"]["mode"] == "plan"),
+            "keeping a plan cannot restore action permissions: {controls:#?}"
+        );
+        let controls_before_proceed = controls.len();
         rig.adapter
             .resolve_approval(
                 rig.thread,
@@ -325,11 +353,13 @@ async fn a_plan_can_be_revised_then_proceeded_with_under_the_composers_mode() {
         );
         assert_eq!(answers[1]["response"]["response"]["behavior"], "allow");
         let controls = records(&program, ".controls");
-        assert_eq!(
-            controls.last().unwrap()["request"]["subtype"],
-            "set_permission_mode"
-        );
-        assert_eq!(controls.last().unwrap()["request"]["mode"], restored);
+        let permission = controls
+            .iter()
+            .skip(controls_before_proceed)
+            .rev()
+            .find(|control| control["request"]["subtype"] == "set_permission_mode")
+            .expect("Proceed restores the permission mode after the plan");
+        assert_eq!(permission["request"]["mode"], restored);
         rig.adapter.stop().await.unwrap();
     }
 }

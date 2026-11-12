@@ -19,6 +19,7 @@ import { registerView, type ViewProps } from '@/features/workbench/views';
 import { FrameReadiness } from '@/shell/FrameReadiness';
 import { clearScreenHeading, focusScreenHeading, forgetScreenHeading, useScreenHeading } from '@/shell/screen';
 import { useTreeStore, treeWriter } from '@/realtime/stores/tree';
+import { ACME, acmeTree } from '../doubles/fixtures';
 import { currentLocale, i18n, setLocale } from '@/i18n';
 import { TooltipProvider } from '@/ui/Tooltip';
 
@@ -188,4 +189,25 @@ it('does not infer a native/admin authority or resource name from a merely simil
     const target = parsePageAddress(href); expect(target).not.toBeNull(); expect(staticPageName(target!, i18n.t)).toBeNull();
   }
   expect(useTreeStore.getState().byOrg.size).toBe(0); expect(calls.fetch).not.toHaveBeenCalled();
+});
+
+
+it.each(['en', 'zh-CN'] as const)('keeps live-owned and static titles independent of state-only tree changes in %s', async (language) => {
+  await setLocale(language);
+  const tabs = tabsForResources(); seed(tabs);
+  for (const tab of tabs.slice(1)) state().setNamed(tab.id, { title: 'Current authorized title', source: 'view' });
+  treeWriter.reset(ACME.org, acmeTree(), 1);
+  const normalize = vi.spyOn(String.prototype, 'normalize');
+  try {
+    render(<CachedTabNames layout={state().layout} />);
+    const thread = acmeTree().find((node) => node.id === ACME.mainThread);
+    if (thread === undefined) throw new Error('Expected the native thread fixture.');
+    const previous = thread.thread;
+    if (previous === null) throw new Error('Expected the native thread activity.');
+    act(() => treeWriter.apply(ACME.org, [{ ...thread, tree_seq: thread.tree_seq + 1, thread: { ...previous, activity_seq: previous.activity_seq + 1 } }], 2));
+    expect(normalize).not.toHaveBeenCalled();
+    expect(state().named.get(tabs[0]!.id)).toMatchObject({ title: language === 'en' ? 'Providers' : '提供方', source: 'cache' });
+    for (const tab of tabs.slice(1)) expect(state().named.get(tab.id)).toEqual({ title: 'Current authorized title', source: 'view' });
+    expect(calls.fetch).not.toHaveBeenCalled();
+  } finally { normalize.mockRestore(); }
 });

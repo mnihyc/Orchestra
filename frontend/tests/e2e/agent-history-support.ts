@@ -2,7 +2,7 @@
 import type { Page } from '@playwright/test';
 import type { HarnessBuild, MachineRef, ResolvedSetting, SettingDef, SettingReach } from '../../src/generated/api-types.ts';
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { ACME } from './support.ts';
+import { ACME, supplyDefaults } from './support.ts';
 
 export const HISTORY_KEY = 'retention.agent_history_idle_days';
 export const PROGRAM_EXIT_REASON = 'Codex app-server exited with code 7: final diagnostic while a managed turn was running; the recorded conversation remains available';
@@ -31,6 +31,7 @@ export async function historySetting(page: Page) {
   const writes: unknown[] = [];
   await page.route('**/api/v1/settings/registry', (route) => route.fulfill({ json: [def] }));
   await page.route(`**/api/v1/nodes/${ACME.research}/settings`, (route) => route.fulfill({ json: [current] }));
+  await supplyDefaults(page, ACME.research, { registry: () => [def], settings: () => [current] });
   const settingPath = `/api/v1/nodes/${ACME.research}/settings/${HISTORY_KEY}`;
   await page.route((url) => url.pathname === settingPath || url.pathname === `${settingPath}/reach`, async (route) => {
     if (new URL(route.request().url()).pathname.endsWith('/reach')) { await route.fulfill({ json: reach }); return; }
@@ -42,11 +43,21 @@ export async function historySetting(page: Page) {
   return writes;
 }
 
+/** The page of the Codex program, whose builds table shows each build's check. */
+export const HISTORY_BUILDS_PATH = '/admin/harnesses?program=codex';
+
 export async function historyBuilds(page: Page) {
+  const checked = (build: HarnessBuild): HarnessBuild => build.kind !== 'codex' ? build : { ...build, status: 'checked',
+    check: { at: '2026-10-27T12:00:00Z', machine: 'host-1', missing: ['thread/delete', 'thread/loaded/list'], off: ['history_delete', 'history_delete_fallback'], error: null, stage: 'complete', cases: [] } };
   await page.route('**/api/v1/admin/harnesses', async (route) => {
     const response = await route.fetch();
     const builds = await response.json() as HarnessBuild[];
-    await route.fulfill({ response, json: builds.map((build) => build.kind !== 'codex' ? build : { ...build, status: 'checked',
-      check: { at: '2026-10-27T12:00:00Z', machine: 'host-1', missing: ['thread/delete', 'thread/loaded/list'], off: ['history_delete', 'history_delete_fallback'], error: null, stage: 'complete', cases: [] } }) });
+    await route.fulfill({ response, json: builds.map(checked) });
+  });
+  // A program's page reads its builds a page at a time.
+  await page.route((url) => url.pathname === '/api/v1/admin/programs/codex/builds', async (route) => {
+    const response = await route.fetch();
+    const builds = await response.json() as { items: HarnessBuild[] };
+    await route.fulfill({ response, json: { ...builds, items: builds.items.map(checked) } });
   });
 }

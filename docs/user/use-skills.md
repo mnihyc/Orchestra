@@ -1,7 +1,9 @@
 ---
+group: resources
 title: Give agents versioned skills
 screens: /resources/skills, /resources/skills/$id, /thread/$threadId, /org/$slug/settings/$section, /project/$projectId/settings, /admin/$section
 keywords: skills, SKILL.md, archive, import, git, version, draft, publish, latest, pin, agents.skills, scripts
+summary: Import, review and publish skills, then choose which versions agents may use.
 ---
 
 # Give agents versioned skills

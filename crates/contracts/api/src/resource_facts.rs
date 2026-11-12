@@ -1,5 +1,7 @@
 //! Shared current dependents and reported use of resources, with explicit history coverage.
 
+use crate::operations::OperationSpec as Op;
+
 use orch_access_contract::decisions::ObjectRef;
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
@@ -82,7 +84,8 @@ pub struct ResourceImpact {
 
 crate::endpoints! {
     /// Reads current consequences using the resource's native view or management authority.
-    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, none, json FactTarget, json ResourceImpact, 200;
+    ResourceImpactRead: POST "/resources/impact", crate::routes::Access::User, none, json FactTarget, json ResourceImpact, 200,
+        operation Op::facets(&crate::resource_facts_sources::IMPACT_FACETS);
 }
 
 /// A stable subject of the shared facts service. An artifact belongs to one host.

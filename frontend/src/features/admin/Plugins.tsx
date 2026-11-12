@@ -66,7 +66,7 @@ export function Plugins() {
     { id: 'error', header: t('admin.plugins.lastError'), cell: (plugin) => (plugin.detail === '' ? <span className="text-text-subtle">–</span> : <span className="text-sm wrap-anywhere text-text-muted">{plugin.detail}</span>) },
   ];
 
-  if (plugins.isPending) return <SkeletonRows rows={3} />;
+  if (plugins.isPending) return <SkeletonRows read={plugins} rows={3} />;
   if (plugins.isError) return <ErrorState error={plugins.error} retrying={plugins.isRefetching} onRetry={() => void plugins.refetch()} />;
   if (plugins.data.length === 0) return <EmptyState compact icon={<Puzzle aria-hidden />} title={t('admin.plugins.none')} description={t('admin.plugins.noneHint')} />;
   return <Table label={t('admin.sections.plugins.title')} columns={columns} rows={plugins.data} rowKey={(plugin) => `${plugin.component}/${plugin.machine?.id ?? ''}/${plugin.kind}/${plugin.name}`} />;

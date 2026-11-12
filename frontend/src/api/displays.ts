@@ -36,6 +36,6 @@ export function closeDisplay(displayId: string): Promise<Display> {
 }
 
 /** A single-use ticket for the display's socket: to watch, or with `control` to work in it. */
-export function displayTicket(displayId: string, control: boolean): Promise<DisplayTicketCreateReply> {
-  return ok(api.POST('/displays/{display_id}/ticket', { params: { path: { display_id: displayId } }, body: { control } }));
+export function displayTicket(displayId: string, control: boolean, clientKey: string = crypto.randomUUID()): Promise<DisplayTicketCreateReply> {
+  return ok(api.POST('/displays/{display_id}/ticket', { params: { path: { display_id: displayId } }, headers: { 'Idempotency-Key': clientKey }, body: { control } }));
 }

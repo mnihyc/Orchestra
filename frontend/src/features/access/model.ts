@@ -9,6 +9,7 @@
  */
 import type {
   AccessChoice,
+  AccessOptions,
   Entry,
   Holder,
   HolderInput,
@@ -483,9 +484,17 @@ export function forkRowChange(row: PermissionRow, excluded: ReadonlySet<HolderKe
   };
 }
 
-/** Takes a named or followed holder out, cutting only the rows in which it stands. */
+/** Removes direct grants; cuts inheritance only where the removed holder is followed. */
 export function removeHolderChange(page: PermissionPage, holder: LineHolder): PageChange {
-  const rows = page.rows.filter((row) => holdsOfRow(row).some((held) => holderKey(held.holder) === holder.key)).map((row) => forkRowChange(row, new Set([holder.key])));
+  const rows = page.rows.flatMap((row) => {
+    const held = holdsOfRow(row).filter((item) => holderKey(item.holder) === holder.key);
+    if (held.length === 0) return [];
+    if (held.some((item) => item.hold.entry === null)) return [forkRowChange(row, new Set([holder.key]))];
+    // A direct grant can be withdrawn without changing what the row inherits.
+    // Cutting inheritance also rewrites unrelated holders and needs management.
+    return [{ permission: row.permission, ...(row.profile === 'any' ? {} : { profile: row.profile }),
+      remove: held.flatMap((item) => item.hold.entry === null ? [] : [item.hold.entry.id]) }];
+  });
   return { expected_revision: page.revision, rows };
 }
 
@@ -586,7 +595,13 @@ export type GeneralAccessPreset = 'defaults' | 'view' | 'interact' | 'manage' | 
 export type GeneralAccess = GeneralAccessPreset | 'custom';
 
 /** Everyone in a visible place is its explicit Viewer role, which includes the higher roles there. */
-export const generalHolder = (placeId: string, kind = 'thread'): HolderInput => kind === 'org' ? { kind: 'members', id: placeId } : { kind: 'role', role: 'viewer', at: placeId };
+export const generalHolder = (placeId: string | null, kind = 'thread'): HolderInput => {
+  if (kind === 'org') {
+    if (placeId === null) throw new Error('An org audience needs its actual org');
+    return { kind: 'members', id: placeId };
+  }
+  return { kind: 'role', role: 'viewer', at: placeId };
+};
 
 /** Each full line up to the chosen level is named explicitly, including the lower lines. */
 export function generalPermissions(catalogue: Catalogue, kind: string, preset: GeneralAccessPreset): Set<string> {
@@ -598,7 +613,7 @@ export function generalPermissions(catalogue: Catalogue, kind: string, preset: G
 export function generalAccessChange(
   catalogue: Catalogue,
   kind: string,
-  placeId: string,
+  placeId: string | null,
   preset: GeneralAccessPreset,
   page?: PermissionPage,
 ): PageChange {
@@ -665,4 +680,11 @@ export function isFirstOwner(page: PermissionPage, entry: Entry): boolean {
 /** Whether an owner's entry may be taken out: not the only person there. */
 export function mayTakeOutOwner(page: PermissionPage, entry: Entry): boolean {
   return !(entry.holder.kind === 'user' && ownerPeople(page).length <= 1);
+}
+
+/** What a request carries of the options a refusal named: the places it was refused for are said to the person, and a request asks for the use itself. */
+export function askedOptions(options: AccessOptions): AccessOptions {
+  const asked = { ...options };
+  delete asked.where;
+  return asked;
 }

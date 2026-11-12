@@ -22,7 +22,7 @@ WITH __NODE_VISIBILITY__, scoped_nodes AS NOT MATERIALIZED (
      AND (NOT $7 OR COALESCE((page.value->>'participating')::boolean,false))
 ), readable_documents AS NOT MATERIALIZED (
   SELECT d.* FROM documents d JOIN nodes n ON n.id=d.node_id LEFT JOIN threads t ON t.node_id=n.id
-   WHERE d.deleted_at IS NULL AND ($6::uuid IS NULL OR n.path @> ARRAY[$6::uuid]) AND t.side_of IS NULL
+   WHERE d.deleted_at IS NULL AND ($6::uuid IS NULL OR n.path @> ARRAY[$6::uuid]) AND NOT n.unlisted AND t.side_of IS NULL
      AND NOT EXISTS (SELECT 1 FROM nodes gone WHERE gone.id=ANY(n.path) AND gone.deleted_at IS NOT NULL)
      AND COALESCE(($4::jsonb->'objects'->d.id::text->>'view')::boolean,false)
      AND (NOT $7 OR COALESCE(($4::jsonb->'objects'->d.id::text->>'participating')::boolean,false))

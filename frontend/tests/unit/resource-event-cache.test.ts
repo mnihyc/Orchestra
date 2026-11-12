@@ -8,6 +8,25 @@ import { setResourceFollowing } from '@/realtime/resourceFollowing';
 import { inventoryRow } from '../doubles/everything-row';
 import { detailHome, detailHost, detailUnitProvider } from '../component/resource-detail-fixtures';
 
+it('keeps an unrelated paged inventory on a detail baseline and repairs a later membership change', async () => {
+  const cache = new QueryClient(), native = detailUnitProvider;
+  const key = ['provider-default-choices', 'reader', 'resources', { kinds: ['provider'], resource: { details: true, view: 'usable' } }];
+  const page = { pages: [{ items: [], next_cursor: 'another-native-page' }], pageParams: [null] };
+  const read = vi.fn(() => Promise.resolve(page));
+  cache.setQueryData(key, page);
+  const observer = new QueryObserver(cache, { queryKey: key, queryFn: read, staleTime: Infinity });
+  const off = observer.subscribe(() => undefined);
+  try {
+    await applyChanges(resourceChanges('provider', native.id, { row: { kind: 'provider', value: native } }, 'baseline'), cache);
+    expect(cache.getQueryData(['provider', native.id])).toEqual(native);
+    expect(cache.getQueryData(key)).toEqual(page);
+    expect(read).not.toHaveBeenCalled();
+    await applyChanges(resourceChanges('provider', native.id, { row: { kind: 'provider', value: { ...native, revision: native.revision + 1 } } }), cache);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(cache.getQueryData(key)).toEqual(page);
+  } finally { off(); cache.clear(); }
+});
+
 it.each([['host', detailHost], ['provider', detailUnitProvider]] as const)('applies a typed %s event to its detail, list and known name row without a request', async (kind, native) => {
   const cache = new QueryClient();
   const before = { ...native, id: 'watched-resource', name: 'Before' };

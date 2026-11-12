@@ -1,5 +1,5 @@
 /** JSON editing with driver help, property completion and the server's problems at their actual lines. */
-import { autocompletion, completionKeymap } from '@codemirror/autocomplete';
+import { autocompletion, completionKeymap, type CompletionContext, type CompletionResult } from '@codemirror/autocomplete';
 import { json, jsonLanguage, jsonParseLinter } from '@codemirror/lang-json';
 import { syntaxTree } from '@codemirror/language';
 import { linter, lintGutter } from '@codemirror/lint';
@@ -52,6 +52,32 @@ export function problemRange(text: string, pointer: string): { from: number; to:
   return { from, to: Math.max(from, found?.to ?? 0), line: text.slice(0, from).split('\n').length };
 }
 
+/** Offers the schema's properties at the editor's current key position. */
+export function completeSpecProperty(schema: Schema, words: ReturnType<typeof useFieldWords>, context: CompletionContext): CompletionResult | null {
+  const source = context.state.doc.toString();
+  const token = context.matchBefore(/"[^"\n]*"?/);
+  const syntax = syntaxTree(context.state).resolveInner(context.pos, -1);
+  const prefix = source.slice(0, token?.from ?? context.pos).trimEnd();
+  if (syntax.name !== 'PropertyName' && !prefix.endsWith('{') && !prefix.endsWith(',')) return null;
+  const at = jsonRanges(source).filter((range) => range.object && context.pos >= range.from && context.pos <= range.to).sort((a, b) => b.parts.length - a.parts.length)[0];
+  const field = schemaAt(schema, at?.parts ?? [], readSpec(source));
+  const alternatives = field.anyOf ?? field.oneOf;
+  const properties = Object.fromEntries([...(Array.isArray(alternatives) ? alternatives.flatMap((variant) => Object.entries(record(resolveSchema(schema, variant).properties))) : []), ...Object.entries(record(field.properties))]);
+  const hasColon = /^\s*"?\s*:/.test(source.slice(context.pos));
+  return {
+    from: token?.from ?? context.pos,
+    to: source[context.pos] === '"' ? context.pos + 1 : context.pos,
+    options: Object.entries(properties).map(([name, given]) => {
+      const quoted = JSON.stringify(name);
+      const path = [...(at?.parts ?? []), name];
+      const property = record(given);
+      // CodeMirror matches from the replacement start, which includes the typed opening quote.
+      return { ...(token === null ? { label: name } : { label: quoted, displayLabel: name }),
+        type: 'property', detail: words(path, property, 'title'), info: words(path, property, 'description'), apply: quoted + (hasColon ? '' : ': ') };
+    }),
+  };
+}
+
 export function JsonSpec({ schema, driver, text, problems, disabled, onChange }: { schema: Schema; driver: string; text: string; problems: readonly SpecProblem[]; disabled: boolean; onChange: (text: string) => void }) {
   const { t, i18n } = useTranslation();
   const words = useFieldWords(driver);
@@ -72,20 +98,7 @@ export function JsonSpec({ schema, driver, text, problems, disabled, onChange }:
         dom.append(title, help); return { dom };
       } };
     }),
-    autocompletion({ override: [(context) => {
-      const source = context.state.doc.toString();
-      const token = context.matchBefore(/"[^"\n]*"?/);
-      const syntax = syntaxTree(context.state).resolveInner(context.pos, -1);
-      const prefix = source.slice(0, token?.from ?? context.pos).trimEnd();
-      if (syntax.name !== 'PropertyName' && !prefix.endsWith('{') && !prefix.endsWith(',')) return null;
-      const at = jsonRanges(source).filter((range) => range.object && context.pos >= range.from && context.pos <= range.to).sort((a, b) => b.parts.length - a.parts.length)[0];
-      const field = schemaAt(schema, at?.parts ?? [], readSpec(source));
-      const alternatives = field.anyOf ?? field.oneOf;
-      const properties = Object.fromEntries([...(Array.isArray(alternatives) ? alternatives.flatMap((variant) => Object.entries(record(resolveSchema(schema, variant).properties))) : []), ...Object.entries(record(field.properties))]);
-      const hasColon = /^\s*"?\s*:/.test(source.slice(context.pos));
-      return { from: token?.from ?? context.pos, to: source[context.pos] === '"' ? context.pos + 1 : context.pos,
-        options: Object.entries(properties).map(([name, given]) => ({ label: name, type: 'property', detail: words([...(at?.parts ?? []), name], record(given), 'title'), info: words([...(at?.parts ?? []), name], record(given), 'description'), apply: `${JSON.stringify(name)}${hasColon ? '' : ': '}` })) };
-    }] }), keymap.of(completionKeymap),
+    autocompletion({ override: [(context) => completeSpecProperty(schema, words, context)] }), keymap.of(completionKeymap),
   ]), [schema, problems, words, t]);
   // Help and diagnostics are closures on this schema, locale and validation result.
   const languageKey = useMemo(() => JSON.stringify([schema, problems, i18n.resolvedLanguage]), [schema, problems, i18n.resolvedLanguage]);
