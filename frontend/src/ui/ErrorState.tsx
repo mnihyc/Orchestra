@@ -4,11 +4,12 @@
  * its request was refused: one explanation and one next action. Authorized recovery facts open
  * from that action; protocol codes and request identifiers are not interface copy.
  */
-import { OctagonAlert, RefreshCw, WifiOff } from 'lucide-react';
+import { Check, OctagonAlert, RefreshCw, WifiOff } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { ApiError, invitationIssuerAuthorityLost } from '@/api/client';
+import { WhereNames } from '@/features/access/WhereField';
 import { SecondStepGate, waitsForSecondStep } from '@/features/auth/SecondStepGate';
 import type { MissingAccess } from '@/generated/api-types';
 import { permissionDenial } from '@/lib/permissions';
@@ -31,6 +32,8 @@ export interface ErrorStateProps {
   message?: ReactNode;
   /** Tries again when a lost connection or temporary refusal makes that useful. */
   onRetry?: (() => void) | undefined;
+  /** An explicitly supplied read-only recovery; never substitute a mutation retry. */
+  onReadback?: (() => void) | undefined;
   /** Shown while a new try is under way. */
   retrying?: boolean;
   /** Less room round it, for a narrow bar. */
@@ -49,6 +52,7 @@ export function ErrorState({
   titleAs,
   message,
   onRetry,
+  onReadback,
   retrying = false,
   compact = false,
   action,
@@ -57,13 +61,16 @@ export function ErrorState({
 }: ErrorStateProps) {
   // Verification is a workflow, not a generic retry or a second status paragraph.
   if (waitsForSecondStep(error)) return <SecondStepGate error={error} onDone={onRetry} className={className} />;
-  return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
+  return <FailureLine error={error} title={title} titleAs={titleAs} message={message} onRetry={onRetry} onReadback={onReadback} retrying={retrying} compact={compact} action={action} recovery={recovery} className={className} />;
 }
 
-function FailureLine({ error, title, titleAs, message, onRetry, retrying = false, compact = false, action, recovery, className }: ErrorStateProps) {
+function FailureLine({ error, title, titleAs, message, onRetry, onReadback, retrying = false, compact = false, action, recovery, className }: ErrorStateProps) {
   const { t } = useTranslation();
   const [reviewing, setReviewing] = useState(false);
   const text = useErrorText()(error);
+  if (text.acknowledged === true) return <StateLine role="status" tone="neutral" icon={<Check aria-hidden />}
+    title={t('ui.receipt.title')} titleAs={titleAs} message={text.message} compact={compact} className={className}
+    action={onReadback === undefined ? undefined : <Button size="sm" icon={<RefreshCw aria-hidden />} onClick={onReadback}>{t('ui.receipt.readback')}</Button>} />;
   const Icon = error instanceof NetworkError ? WifiOff : OctagonAlert;
   const missing = error instanceof ApiError && !invitationIssuerAuthorityLost(error) ? (error.extra('authz.denied')?.missing ?? []) : [];
   const faults = error instanceof ApiError ? error.faults() : [];
@@ -79,7 +86,7 @@ function FailureLine({ error, title, titleAs, message, onRetry, retrying = false
     ? action ?? (onRetry !== undefined && text.retryable ? <Button size="sm" icon={<RefreshCw aria-hidden />} pending={retrying} onClick={onRetry}>{t('common.tryAgain')}</Button> : undefined)
     : <Button size="sm" onClick={() => setReviewing(true)}>{review.label}</Button>;
   return <>
-    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={message ?? text.message} action={next} compact={compact} className={className} />
+    <StateLine role="alert" tone="danger" icon={<Icon aria-hidden />} title={title} titleAs={titleAs} message={text.diagnostic===undefined ? message ?? text.message : <div className="flex min-w-0 flex-col gap-1"><div>{message ?? text.message}</div><p className="wrap-anywhere whitespace-pre-line">{text.diagnostic}</p></div>} action={next} compact={compact} className={className} />
     {review !== undefined && reviewing && <Dialog open onOpenChange={setReviewing} title={review.label}>
       <div className="flex flex-col gap-3">{review.content}</div>
     </Dialog>}
@@ -110,6 +117,7 @@ export function MissingAccessList({ missing, className }: { missing: readonly Mi
             <span>
               <span className="font-medium">{what}</span>
             </span>
+            {entry.options?.where !== undefined && entry.options.where !== null && entry.options.where.length > 0 && <span><Trans i18nKey="access.missing.notWhere" components={{ names: <WhereNames names={entry.options.where} unreadable={t('access.missing.thatPlace')} /> }} /></span>}
             {entry.closed !== null || entry.ask.length === 0 ? <span className="text-text-muted">{answer}</span> : <span className="flex flex-wrap items-center gap-1 text-text-muted">
               <span className="sr-only">{answer}</span>
               <Trans i18nKey="access.missing.askPeople" components={{ people: entry.ask.length === 1 && entry.ask_more === 0 && entry.ask[0] !== undefined ? <UserChip user={entry.ask[0]} size={24} /> : <AvatarStack users={entry.ask} total={entry.ask.length + entry.ask_more} size={24} /> }} />
@@ -126,10 +134,11 @@ export interface ErrorAlertProps {
   /** Other words for this error on this screen, where the screen knows more than the code says. */
   message?: ReactNode;
   action?: ReactNode;
+  onReadback?: (() => void) | undefined;
   className?: string;
 }
 
 /** A request that was refused, said beside the form that made it. */
-export function ErrorAlert({ error, message, action, className }: ErrorAlertProps) {
-  return <FailureLine error={error} message={message} action={action} compact className={className} />;
+export function ErrorAlert({ error, message, action, onReadback, className }: ErrorAlertProps) {
+  return <FailureLine error={error} message={message} action={action} onReadback={onReadback} compact className={className} />;
 }

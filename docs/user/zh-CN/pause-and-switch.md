@@ -6,6 +6,7 @@ heading_id.关闭: disable
 heading_id.启用: enable
 heading_id.切换: switch
 heading_id.删除: delete
+summary: 了解停用、启用、切换和删除资源对等待工作产生的影响。
 ---
 
 # 暂停、切换和删除

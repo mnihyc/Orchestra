@@ -97,6 +97,39 @@ async fn progress_after_upload_look(rig: &Rig, job: Id) -> JobProgress {
     progress
 }
 
+/// Has the database note every commit that leaves bytes of an upload shown for a job while the job's
+/// plan does not name the upload: what a reader of the job can see between two commits is then told
+/// by the database, not by the moment a poll happens to fall in.
+async fn note_bytes_shown_without_the_upload_they_belong_to(rig: &Rig) {
+    sqlx::raw_sql(
+        r#"CREATE TABLE bytes_shown_without_their_upload (job uuid NOT NULL, bytes_done bigint NOT NULL);
+        CREATE FUNCTION note_bytes_shown_without_their_upload() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO bytes_shown_without_their_upload
+            SELECT id, (progress->>'bytes_done')::bigint FROM jobs
+             WHERE id = NEW.id AND (progress->>'bytes_done')::bigint > 0
+               AND progress->>'message' = 'Uploading the session''s files'
+               AND NOT (plan ? 'native_upload');
+            RETURN NULL;
+        END $$;
+        CREATE CONSTRAINT TRIGGER note_bytes_shown_without_their_upload AFTER INSERT OR UPDATE ON jobs
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION note_bytes_shown_without_their_upload();"#,
+    )
+    .execute(rig.world.pool.pool())
+    .await
+    .unwrap();
+}
+
+/// The commits that were noted: the job and the bytes it showed.
+async fn bytes_shown_without_the_upload_they_belong_to(rig: &Rig) -> Vec<(String, i64)> {
+    sqlx::query_as::<_, (String, i64)>(
+        "SELECT job::text, bytes_done FROM bytes_shown_without_their_upload ORDER BY bytes_done",
+    )
+    .fetch_all(rig.world.pool.pool())
+    .await
+    .unwrap()
+}
+
 fn native() -> Can {
     Can {
         export_native: true,
@@ -139,12 +172,8 @@ async fn the_bytes_that_reach_the_system_are_shown_while_the_machine_puts_the_ar
         first.percent,
         later.percent
     );
-    // Progress and the recovery checkpoint are separate commits; wait for both to be visible.
-    eventually("the uploaded bytes to be checkpointed", || async {
-        rig.job(job.id).await.plan["native_upload"]["received"] == json!(6_000_000)
-    })
-    .await;
-    // The plan keeps where it was, for a runner that takes the job over.
+    // The plan keeps where it was, for a runner that takes the job over: it is in the commit that shows
+    // the bytes, so the row that shows 6,000,000 bytes holds it already.
     let kept = rig.job(job.id).await.plan["native_upload"].clone();
     assert_eq!(kept["received"], json!(6_000_000));
     assert_eq!(kept["size"], json!(size));
@@ -162,6 +191,51 @@ async fn the_bytes_that_reach_the_system_are_shown_while_the_machine_puts_the_ar
     assert_ne!(
         progress.message.as_deref(),
         Some("Uploading the session's files")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bytes_of_an_upload_are_never_shown_in_a_commit_that_does_not_name_the_upload() {
+    let rig = Rig::new(native(), "fake", native()).await;
+    note_bytes_shown_without_the_upload_they_belong_to(&rig).await;
+    let thread = rig.thread_with_history("Shown with their upload").await;
+    let plan = rig.plan(thread, &rig.to_other()).await;
+    rig.world.machine.handler.hold(CommandKind::SessionExport);
+    let job = rig.confirm(thread, &plan).await;
+    rig.world.wait_began(CommandKind::SessionExport, 1).await;
+    let command = export_command(&rig, thread);
+    let hash = Hash::of(b"the archive whose bytes are shown with its name");
+    let size = 8_000_000_i64;
+    // The first bytes, a small step on (under a twentieth of the whole: only the progress moves), and a
+    // long step on (the plan moves with the progress).
+    for received in [2_000_000, 2_100_000, 6_000_000] {
+        upload_under_way(&rig, command, &hash, size, received).await;
+        progress_where(&rig, job.id, "the bytes that came", |progress| {
+            progress.bytes_done == received
+        })
+        .await;
+        assert_eq!(
+            bytes_shown_without_the_upload_they_belong_to(&rig).await,
+            Vec::<(String, i64)>::new(),
+            "bytes were shown for the job in a commit whose plan did not name their upload"
+        );
+        let kept = rig.job(job.id).await.plan["native_upload"].clone();
+        assert_eq!(kept["hash"], json!(hash), "{kept}");
+        assert_eq!(kept["command"], json!(command), "{kept}");
+        assert_eq!(kept["size"], json!(size), "{kept}");
+    }
+    let kept = rig.job(job.id).await.plan["native_upload"].clone();
+    assert_eq!(
+        kept["received"],
+        json!(6_000_000),
+        "the plan holds where the bytes shown had come: {kept}"
+    );
+    rig.world.machine.handler.release();
+    rig.wait_job(job.id, "succeeded").await;
+    assert_eq!(
+        bytes_shown_without_the_upload_they_belong_to(&rig).await,
+        Vec::<(String, i64)>::new(),
+        "bytes were shown for the job in a commit whose plan did not name their upload"
     );
 }
 

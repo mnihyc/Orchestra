@@ -1,6 +1,7 @@
 /** Coarse installation activity served by the web edge while the authenticated API is unavailable. */
 import { queryOptions } from '@tanstack/react-query';
 import { readInstallationProgress } from '@/api/client';
+import { DEFAULT_INSTALLATION_POLL_SECONDS } from '@/lib/pollingDefaults';
 
 export interface MigrationObservation {
   step: string;
@@ -18,7 +19,7 @@ export interface MigrationObservation {
 
 /** The first refresh uses an operator override until a status response supplies its configured interval. */
 const configured = Number(import.meta.env.VITE_UPDATE_STATUS_INTERVAL_SECONDS);
-const INITIAL_SECONDS = Number.isFinite(configured) && configured > 0 ? configured : 1;
+const INITIAL_SECONDS = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_INSTALLATION_POLL_SECONDS;
 const number = (value: unknown): number | null => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
 const string = (value: unknown): string | null => typeof value === 'string' ? value : null;
 

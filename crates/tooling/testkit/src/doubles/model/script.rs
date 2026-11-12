@@ -265,6 +265,8 @@ pub enum Step {
     },
     /// Waits, once.
     Sleep(Duration),
+    /// Waits until the test releases the hold of this name ([`super::MockLlm::release`]).
+    Hold(String),
     /// Sends a comment line, the way a server keeps a quiet stream alive.
     Keepalive,
     /// An error event inside the stream; the stream ends after it.
@@ -651,6 +653,12 @@ impl Script {
                 "sleep" => segment.steps.push(Step::Sleep(Duration::from_millis(number(
                     line, "sleep", rest,
                 )?))),
+                "hold" => {
+                    if rest.is_empty() {
+                        return Err(fault(line, "hold needs a name"));
+                    }
+                    segment.steps.push(Step::Hold(rest.to_owned()));
+                }
                 "error" => segment.error = Some(parse_error(line, rest, true)?),
                 "stream_error" => segment
                     .steps
@@ -940,11 +948,21 @@ mod tests {
             ("header", 1, "needs a name"),
             ("cut_after 3", 1, "needs a say"),
             ("stall soon", 1, "whole number"),
+            ("hold", 1, "needs a name"),
         ] {
             let error = Script::parse(text).unwrap_err();
             assert_eq!(error.line, line, "{text:?}");
             assert!(error.message.contains(part), "{text:?}: {error}");
         }
+    }
+
+    #[test]
+    fn a_hold_is_a_step_with_the_name_the_test_releases_it_by() {
+        let script = Script::parse("say a\nhold the child\nsay b").unwrap();
+        assert!(matches!(
+            script.segments[0].steps.as_slice(),
+            [Step::Text { .. }, Step::Hold(name), Step::Text { .. }] if name == "the child"
+        ));
     }
 
     #[test]

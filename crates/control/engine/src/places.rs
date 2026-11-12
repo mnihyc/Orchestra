@@ -191,6 +191,26 @@ pub async fn resolved_for_new(
     })
 }
 
+/// The actual enabled mount identities from the same prospective environment setting resolution.
+pub async fn mount_ids_for_new(
+    conn: &mut Conn,
+    home: Id,
+    own: &Json,
+) -> Result<Vec<Id>, EngineError> {
+    Ok(resolved_for_new(conn, home, own, keys::ENV_MOUNTS)
+        .await?
+        .as_ref()
+        .and_then(Json::as_object)
+        .map(|named| {
+            named
+                .iter()
+                .filter(|(_, mode)| **mode != Json::Bool(false))
+                .filter_map(|(id, _)| id.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// What a new environment of `template` with the own values `own`, at `home`, would be made with.
 pub async fn wanted(
     conn: &mut Conn,
@@ -201,7 +221,7 @@ pub async fn wanted(
     let needs_own = resolved_for_new(conn, home, own, keys::ENV_NEEDS).await?;
     let limits_own = resolved_for_new(conn, home, own, keys::ENV_RESOURCES).await?;
     let storage = resolved_for_new(conn, home, own, keys::ENV_STORAGE).await?;
-    let mounts = resolved_for_new(conn, home, own, keys::ENV_MOUNTS).await?;
+    let mounts = mount_ids_for_new(conn, home, own).await?;
     let limits = limits_of(&template.spec, limits_own.as_ref());
     let needs = needs_of(&template.spec, needs_own.as_ref(), Some(&limits));
     let storages = storage
@@ -211,17 +231,6 @@ pub async fn wanted(
             named
                 .values()
                 .filter_map(|name| name.as_str().map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
-    let mounts = mounts
-        .as_ref()
-        .and_then(Json::as_object)
-        .map(|named| {
-            named
-                .iter()
-                .filter(|(_, mode)| **mode != Json::Bool(false))
-                .filter_map(|(id, _)| id.parse().ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -444,6 +453,8 @@ pub struct HostPlace {
     pub owner: Option<Id>,
     /// The host's row.
     pub host: HostState,
+    /// Existing native Mount rows whose names entered this exact candidate.
+    pub mount_sources: Vec<Id>,
     /// What the creator's entries on the host and the template come to, where the host can be
     /// used.
     pub created: Option<Created>,
@@ -511,7 +522,48 @@ pub async fn host_places(
     principal: &Principal,
     ask: &Ask<'_>,
 ) -> Result<Vec<HostPlace>, EngineError> {
-    host_places_inner(conn, principal, ask, None, None).await
+    host_places_inner(conn, principal, ask, None, None, None).await
+}
+
+/// Plans selected eligible hosts before this reader's original capped output/ranking.
+pub async fn host_places_selected(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    selected: &[Id],
+) -> Result<Vec<HostPlace>, EngineError> {
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        None,
+        None,
+        Some(HostSelection::Capped(selected)),
+    )
+    .await
+}
+
+/// Uses an already selected native window without applying a second global bound.
+pub async fn host_places_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ask: &Ask<'_>,
+    candidates: &[Id],
+) -> Result<Vec<HostPlace>, EngineError> {
+    host_places_inner(
+        conn,
+        principal,
+        ask,
+        None,
+        None,
+        Some(HostSelection::Window(candidates)),
+    )
+    .await
+}
+
+enum HostSelection<'a> {
+    Capped(&'a [Id]),
+    Window(&'a [Id]),
 }
 
 /// Plans placement of this current environment, retaining only its own existing capacity slot.
@@ -521,7 +573,7 @@ pub async fn host_places_for_environment(
     ask: &Ask<'_>,
     environment: Id,
 ) -> Result<Vec<HostPlace>, EngineError> {
-    host_places_inner(conn, principal, ask, Some(environment), None).await
+    host_places_inner(conn, principal, ask, Some(environment), None, None).await
 }
 
 /// A completed environment may retain its exact published host/template through
@@ -562,7 +614,7 @@ pub async fn retained_host_places(
     {
         return Ok(Vec::new());
     }
-    host_places_inner(conn, principal, ask, Some(environment), Some(host)).await
+    host_places_inner(conn, principal, ask, Some(environment), Some(host), None).await
 }
 
 async fn host_places_inner(
@@ -571,9 +623,34 @@ async fn host_places_inner(
     ask: &Ask<'_>,
     existing: Option<Id>,
     retained_host: Option<Id>,
+    selected: Option<HostSelection<'_>>,
 ) -> Result<Vec<HostPlace>, EngineError> {
     let may_use = if let Some(host) = retained_host {
         vec![host]
+    } else if let Some(selection) = selected {
+        let (ids, capped) = match selection {
+            HostSelection::Capped(ids) => (ids, true),
+            HostSelection::Window(ids) => (ids, false),
+        };
+        let mut allowed = resources::effective_among(conn, principal, ids, Policy::default())
+            .await?
+            .into_iter()
+            .filter(|each| {
+                each.object.kind == orch_access_contract::permissions::ObjectKind::Host
+                    && each.held.iter().any(|held| {
+                        matches!(
+                            held.permission,
+                            Permission::HostUse | Permission::HostManage
+                        )
+                    })
+            })
+            .map(|each| each.object.id)
+            .collect::<Vec<_>>();
+        if capped {
+            allowed.sort_unstable();
+            allowed.truncate(HOSTS_MAX);
+        }
+        allowed
     } else {
         let seen = resources::visible(
             conn,
@@ -789,8 +866,10 @@ async fn host_places_inner(
         };
         let usable = reasons.is_empty();
         places.push(HostPlace {
+            mount_sources: names.iter().map(|(id, _)| *id).collect(),
             owner: host.owner_id,
             place: PlaceHost {
+                grouping: Default::default(),
                 host: HostRef {
                     id: host.id,
                     name: host.name.clone(),

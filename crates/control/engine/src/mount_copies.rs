@@ -223,6 +223,8 @@ pub(crate) fn detach_in(config: &mut Json, detached: &[Id]) {
 
 /// What a plan asks of the mounts, and what it knows of the two sides.
 pub struct Ask<'a> {
+    /// Exact original scoped native act, when this is its supplier.
+    pub preparation: Option<&'a crate::fork_plan::operation::Preparation>,
     /// The request's choices.
     pub choices: &'a [MountChoice],
     /// Which explicit content comparison this plan starts or continues; none never reads contents.
@@ -307,44 +309,60 @@ async fn measure(
     mount: Id,
     data: &DataRef,
     by: Id,
-) -> Result<(Option<VolumeMeasure>, orch_api_contract::forks::Measurement), String> {
-    let count = engine
-        .measure_in_background(
-            machine,
-            orch_link_contract::commands::CommandKind::NodeMountMeasure,
-            json!({"driver":driver,"mount_id":mount,"data":data.link()}),
-            json!({"mount_id":mount}),
-            by,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
+) -> Result<(Option<VolumeMeasure>, orch_api_contract::forks::Measurement), EngineError> {
+    let count = crate::jobs::environment_move::preparation::count(
+        engine,
+        machine,
+        orch_link_contract::commands::CommandKind::NodeMountMeasure,
+        json!({"driver":driver,"mount_id":mount,"data":data.link()}),
+        json!({"mount_id":mount}),
+        by,
+        false,
+        preparation,
+    )
+    .await?;
     let measured = count
         .result
         .map(serde_json::from_value::<VolumeMeasure>)
-        .transpose()
-        .map_err(|error| error.to_string())?;
+        .transpose()?;
     if measured.is_some_and(|value| value.file_count < 0 || value.total_bytes < 0) {
-        return Err("the host returned an invalid measurement".into());
+        return Err(EngineError::unreadable(
+            "the host returned an invalid measurement",
+        ));
     }
     if let (Some(measured), Some(at)) = (measured.as_ref(), count.reference.measured_at) {
-        let mut conn = engine
-            .db()
-            .acquire()
-            .await
-            .map_err(|error| error.to_string())?;
+        let mut conn = engine.db().begin().await?;
+        let accepted = match preparation {
+            Some(source) => Some(source.accept_on(engine, &mut conn).await?),
+            None => None,
+        };
+        sqlx::query("SELECT mount_id FROM mount_locations WHERE mount_id=$1 AND machine_id=$2 AND kind=$3 AND source=$4 FOR UPDATE")
+            .bind(mount).bind(machine).bind(&data.kind).bind(&data.source)
+            .fetch_all(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        if let Some(accepted) = &accepted {
+            accepted.check(engine.inner.clock.as_ref())?;
+        }
         sqlx::query("UPDATE mount_locations SET last_bytes=$3,size_at=$4 WHERE mount_id=$1 AND machine_id=$2 AND kind=$5 AND source=$6")
             .bind(mount).bind(machine).bind(measured.total_bytes).bind(at.get()).bind(&data.kind).bind(&data.source)
-            .execute(&mut *conn).await.map_err(|error|error.to_string())?;
+            .execute(&mut *conn).await.map_err(orch_db::DbError::from)?;
+        if let Some(accepted) = &accepted {
+            accepted.check(engine.inner.clock.as_ref())?;
+        }
+        conn.commit().await.map_err(orch_db::DbError::from)?;
     }
     Ok((measured, count.reference))
 }
 
 /// Whether both hosts can read and write whole locations, asked once for a plan.
-async fn both_carry(engine: &Engine, source: (Id, &str), target: (Id, &str)) -> Result<(), String> {
+async fn both_carry(
+    engine: &Engine,
+    source: (Id, &str),
+    target: (Id, &str),
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
+) -> Result<(), EngineError> {
     for (machine, driver) in [source, target] {
-        crate::volume_carry::check_target(engine, machine, driver)
-            .await
-            .map_err(|error| error.to_string())?;
+        crate::volume_carry::check_target_from(engine, machine, driver, preparation).await?;
     }
     Ok(())
 }
@@ -355,6 +373,7 @@ async fn fingerprint(
     source: (Id, &str, &rows::LocationRow),
     target: (Id, &str, &rows::LocationRow),
     by: Id,
+    preparation: Option<&crate::fork_plan::operation::Preparation>,
 ) -> Result<
     (
         Option<PlanMountFingerprints>,
@@ -368,20 +387,22 @@ async fn fingerprint(
         data: DataRef::of(location).link(),
         work: None,
     };
-    let count = engine
-        .measure_in_background(
-            source.0,
-            orch_link_contract::commands::CommandKind::NodeMountFingerprint,
-            serde_json::to_value(crate::jobs::measurement::FingerprintInput {
-                request_id,
-                source: body(source.1, source.2),
-                target_machine: target.0,
-                target: body(target.1, target.2),
-            })?,
-            json!({"mount_id":source.2.mount_id}),
-            by,
-        )
-        .await?;
+    let count = crate::jobs::environment_move::preparation::count(
+        engine,
+        source.0,
+        orch_link_contract::commands::CommandKind::NodeMountFingerprint,
+        serde_json::to_value(crate::jobs::measurement::FingerprintInput {
+            request_id,
+            source: body(source.1, source.2),
+            target_machine: target.0,
+            target: body(target.1, target.2),
+        })?,
+        json!({"mount_id":source.2.mount_id}),
+        by,
+        false,
+        preparation,
+    )
+    .await?;
     let result = count
         .result
         .map(serde_json::from_value::<PlanMountFingerprints>)
@@ -436,6 +457,7 @@ pub async fn decide_location_copy(
         engine,
         conn,
         &Ask {
+            preparation: None,
             choices: &choices,
             check_fingerprints: None,
             offer: Offer::Everything,
@@ -519,11 +541,21 @@ async fn decide_from(
         (Some(source), Some(target), Some(read), Some(write))
             if different && ids.iter().any(|id| readable(*id)) =>
         {
-            both_carry(engine, (source, read.as_str()), (target, write.as_str())).await
+            both_carry(
+                engine,
+                (source, read.as_str()),
+                (target, write.as_str()),
+                ask.preparation,
+            )
+            .await
         }
-        _ => {
-            Err("only hosts whose drivers copy whole volumes read and write a mount's data".into())
-        }
+        _ => Err(EngineError::unreadable(
+            "only hosts whose drivers copy whole volumes read and write a mount's data",
+        )),
+    };
+    let carry = match carry {
+        Err(error @ EngineError::BeforeEffect(_)) => return Err(error),
+        other => other.map_err(|error| error.to_string()),
     };
     let seed = new_id();
     let mut fated = Vec::new();
@@ -624,7 +656,20 @@ async fn decide_from(
             ask.target_machine,
         ) {
             let from = DataRef::of(from);
-            let measured = measure(engine, source, read, id, &from, ask.principal.user()).await;
+            let measured = measure(
+                engine,
+                source,
+                read,
+                id,
+                &from,
+                ask.principal.user(),
+                ask.preparation,
+            )
+            .await;
+            let measured = match measured {
+                Err(error @ EngineError::BeforeEffect(_)) => return Err(error),
+                other => other,
+            };
             if let Err(why) = &measured {
                 blockers.push(blocker(
                     "mount_copy_unmeasured",
@@ -683,9 +728,14 @@ async fn decide_from(
                         id,
                         &DataRef::of(location),
                         ask.principal.user(),
+                        ask.preparation,
                     )
-                    .await
-                    .ok();
+                    .await;
+                    let count = match count {
+                        Err(error @ EngineError::BeforeEffect(_)) => return Err(error),
+                        other => other,
+                    };
+                    let count = count.ok();
                     let (held, target_measurement) =
                         count.map_or((None, None), |(value, reference)| (value, Some(reference)));
                     if held.is_none() && into != Some(CopyInto::NewLocation) {
@@ -832,6 +882,7 @@ async fn decide_from(
                     (source, read, from),
                     (target, write, to),
                     ask.principal.user(),
+                    ask.preparation,
                 )
                 .await?;
                 (result, Some(reference))

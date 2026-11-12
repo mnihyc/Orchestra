@@ -1,6 +1,6 @@
 /** The thread's status bar shows its actual environment, workspace and shells and opens the matching view. */
 import { expect, test } from '@playwright/test';
-import { begin, MAIN, openThread, showView, workspace } from './inspector-support.ts';
+import { begin, MAIN, MAIN_ENVIRONMENT, openThread, showView, workspace } from './inspector-support.ts';
 import { emit } from './support.ts';
 
 test.use({ viewport: { width: 1440, height: 900 } });
@@ -16,12 +16,21 @@ test('environment, branch and changed lines, isolation and shell count live in t
   await expect(status).toContainText('Connected');
   await expect(status.getByRole('button', { name: /^Workspace:/ })).toHaveText('main +3 −1');
   await expect(status).toContainText('Run with provider');
-  await status.getByRole('button', { name: /^Environment:/ }).click();
-  await expect(page.locator('[data-workbench-bar="right"]')).toHaveAttribute('data-active-container', 'environment');
-  await expect(page.getByTestId('environment-panel')).toBeVisible();
+  // Environment names now use the shared inspection card before their full-page link.
+  const environment = status.getByRole('button', { name: /^Environment:/ });
+  await environment.click();
+  const card = page.getByRole('dialog', { name: 'Workspace', exact: true });
+  await expect(card.locator('[data-resource-card="environment"]')).toBeVisible();
+  await expect(card.getByRole('link', { name: 'Workspace', exact: true })).toHaveAttribute('href', `/resources/environments/${MAIN_ENVIRONMENT}`);
+  await page.keyboard.press('Escape'); await expect(card).toHaveCount(0);
+  await expect(environment).toBeFocused();
+  // The workspace and shell acts still reveal their actual views from a closed bar.
+  await page.getByRole('button', { name: 'Right bar', exact: true }).click();
+  await expect(page.locator('[data-workbench-bar="right"]')).toBeHidden();
   await status.getByRole('button', { name: /^Workspace:/ }).click();
   await expect(page.locator('[data-workbench-bar="right"]')).toHaveAttribute('data-active-container', 'code');
   await expect(page.getByTestId('changes-panel')).toBeVisible();
+  await page.getByRole('button', { name: 'Bottom panel', exact: true }).click();
   await status.getByRole('button', { name: /^\d+ shells?$/ }).click();
   await expect(page.getByRole('tablist', { name: 'Bottom', exact: true }).getByRole('tab', { name: 'Terminal', exact: true })).toBeVisible();
 });

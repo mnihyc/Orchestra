@@ -1,3 +1,5 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
 /** Skills listed with readable records and private permission-page names: each with its latest version and its home. */
 import { Link, useNavigate } from '@tanstack/react-router';
 import { ArrowRight, GraduationCap, Plus } from 'lucide-react';
@@ -24,7 +26,7 @@ export function SkillList() {
   const title = t('screens.skills.title');
   const actsFor = (row: Skill): RowActs => {
     const open: Act = { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: '/resources/skills/$id', params: { id: row.id } }) };
-    return { busy: false, primary: open, keys: {}, entries: entriesOf([shareAct(t, { kind: 'skill', id: row.id, name: row.name }, row.access)]) };
+    return { busy: false, primary: open, keys: {}, entries: [...homeMoveEntries(t, 'skill', row), ...resourceDuplicateEntries(t, 'skill', row), ...entriesOf([shareAct(t, { kind: 'skill', id: row.id, name: row.name }, row.access)])] };
   };
   const columns: Column<Skill>[] = [
     { id: 'name', header: t('resources.listName'), cell: (row) => <div className="flex min-w-0 flex-col gap-1">

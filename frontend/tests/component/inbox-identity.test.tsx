@@ -60,6 +60,22 @@ it('keeps the sender of an explicit person notice independently reachable', () =
   expect(within(item).getByRole('link')).not.toContainElement(sender);
 });
 
+it('opens a route notice repair action and marks its notice read', async () => {
+  await setLocale('en');
+  const row: Notification = { ...notice('mail-route', 'Mail route', 'notification.route_attention'),
+    thread_id: null, thread: null, node: null, path: [], url: '/settings/notifications#route-mail',
+    data: { way: 'System mail', reason: 'Its reply was lost.', waiting_count: 1 },
+  };
+  show(<Rows rows={[row]} />);
+  const repair = screen.getByRole('link', { name: 'Open notification settings' });
+  expect(repair).toHaveAttribute('href', row.url);
+  await userEvent.setup().click(repair);
+  expect(calls.read).toHaveBeenCalledTimes(1);
+  expect(calls.read).toHaveBeenCalledWith({ ids: [row.id] });
+  expect(calls.navigate).toHaveBeenCalledTimes(1);
+  expect(calls.navigate).toHaveBeenCalledWith({ href: row.url });
+});
+
 it.each(modes)('names distinct threads in one topic and one event/context without fetching navigation in %s/%s', async (locale, theme) => {
   await setLocale(locale);
   useAppearance.setState({ theme, resolvedTheme: theme });
@@ -140,6 +156,20 @@ function LiveRows() {
   const rows = useUserStore((state) => state.rows);
   return <Rows rows={[...rows.values()]} />;
 }
+
+it.each(modes)('opens a failed provider job at its supplied provider destination in %s/%s', async (locale, theme) => {
+  await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
+  const row: Notification = { ...notice('job', 'Unused thread', 'job.finished'), thread: null, thread_id: null, node: null, path: [],
+    title: 'Scripted model: A job failed', url: '/resources/providers/scripted-provider',
+    details: { v: 1, action: 'job.finished', parameters: { subject: 'Scripted model', state: 'failed', job: 'provider_provision' } } };
+  show(<Rows rows={[row]} />);
+  const target = screen.getByRole('listitem').querySelector('a');
+  if (target === null) throw new Error('A job notification has no destination');
+  expect(target).toHaveAttribute('href', row.url);
+  await userEvent.click(target);
+  expect(calls.navigate).toHaveBeenCalledWith({ href: row.url });
+  expect(calls.read).toHaveBeenCalledWith({ ids: [row.id] });
+});
 
 it.each(modes)('shows the requested end on an access notification in %s/%s', async (locale, theme) => {
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });

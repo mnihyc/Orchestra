@@ -1,4 +1,4 @@
-/** Address every actual settings section, with the same names and destinations as its frame. */
+/** Address every actual settings section, with the same names and destinations as its frame (the first section is what Settings means without one). */
 import type { TFunction } from 'i18next';
 import { pathOf, type Destination } from '@/features/finder/destinations';
 import { sectionLabel } from '@/features/settings/sectionLabels';
@@ -10,8 +10,8 @@ export function settingsDestinations(place: SettingsPlace, t: TFunction): { id: 
   return sections.map((section) => {
     const label = sectionLabel(section, t);
     const destination: Destination = place.kind === 'org' ? { to: '/org/$slug/settings/$section', params: { slug: place.address ?? place.id, section } }
-      : place.kind === 'project' ? { to: '/project/$projectId/settings', params: { projectId: place.id }, search: { section } }
-        : { to: '/topic/$topicId', params: { topicId: place.id }, search: { tab: 'settings', section } };
+      : place.kind === 'project' ? { to: '/project/$projectId/settings', params: { projectId: place.id }, search: section === 'general' ? {} : { section } }
+        : { to: '/topic/$topicId', params: { topicId: place.id }, search: { tab: 'settings', ...(section === 'general' ? {} : { section }) } };
     return { id: section, pattern: destination.to, path: pathOf(destination), title: t('commands.settingsSection', { scope: place.name, section: label }) };
   });
 }

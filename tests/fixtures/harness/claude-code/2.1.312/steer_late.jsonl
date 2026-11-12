@@ -1,0 +1,12 @@
+{"direction":"to_harness","frame":{"type":"control_request","request_id":{"$replay_capture":"initialize"},"request":{"subtype":"initialize"}},"subset":true}
+{"direction":"from_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":{"$replay_ref":"initialize"},"response":{}}}}
+{"direction":"from_harness","frame":{"type":"system","subtype":"init","session_id":"00000000-0000-0000-0000-000000000004","model":"mock-large","uuid":"init","mcp_servers":[]}}
+{"direction":"to_harness","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Corpus input"}]},"uuid":"00000000-0000-0000-0000-000000000003"},"subset":true}
+{"direction":"to_harness","frame":{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Corpus steer"}]},"uuid":{"$replay_capture":"steer"}},"subset":true}
+{"direction":"from_harness","frame":{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":""}}
+{"direction":"to_harness","frame":{"type":"control_request","request_id":{"$replay_capture":"context"},"request":{"subtype":"get_context_usage","detail":"summary"}},"subset":true}
+{"direction":"from_harness","frame":{"type":"control_response","response":{"subtype":"error","request_id":{"$replay_ref":"context"},"error":"No breakdown in this protocol fixture"}}}
+{"direction":"to_harness","frame":{"type":"control_request","request_id":{"$replay_capture":"cancel"},"request":{"subtype":"cancel_async_message","message_uuid":{"$replay_ref":"steer"}}},"subset":true}
+{"direction":"from_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":{"$replay_ref":"cancel"},"response":{}}}}
+{"direction":"from_harness","frame":{"type":"control_request","request_id":"corpus-barrier","request":{"subtype":"hook_callback","callback_id":"orch-instructions-loaded","input":{}}}}
+{"direction":"to_harness","frame":{"type":"control_response","response":{"subtype":"success","request_id":"corpus-barrier","response":{}}},"subset":true}

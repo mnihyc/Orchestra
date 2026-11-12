@@ -16,6 +16,7 @@ import { queryClient } from '@/api/query';
 import { installReaderCacheBoundary } from '@/api/readerCache';
 import type { Meta } from '@/generated/api-types';
 import { adoptAppearance } from '@/lib/appearance';
+import { canonicalStringifySearch } from '@/lib/listAddress';
 import { routeParams } from '@/lib/routeIdentity';
 import { beginOpening } from '@/lib/opening';
 import '@/realtime/live';
@@ -24,6 +25,8 @@ import { ScreenError } from '@/shell/ScreenError';
 import { Toaster } from '@/ui/Toast';
 import { TooltipProvider } from '@/ui/Tooltip';
 import { ScreenLoading } from '@/shell/ScreenLoading';
+import { OwnerReadConfirmation } from '@/features/access/OwnerReadConfirmation';
+import { cancelOwnerReadConfirmations } from '@/api/ownerReadConfirmation';
 
 /** Rows and buttons use 16 px icons with a 1.75 stroke; the navigation rail uses 20 px. */
 const ICON_SIZE = 16;
@@ -31,6 +34,8 @@ const ICON_STROKE = 1.75;
 
 export const router = createRouter({
   routeTree,
+  // One state of a screen has one address, whoever writes its list state and in whatever sequence (lib/listAddress.ts).
+  stringifySearch: canonicalStringifySearch,
   // The shell prefetches route code on intent; loaders and their data never run on hover.
   defaultPreload: false,
   defaultPendingComponent: ScreenLoading,
@@ -50,10 +55,11 @@ declare module '@tanstack/react-router' {
   }
 }
 
-router.subscribe('onBeforeNavigate', () => beginOpening());
+router.subscribe('onBeforeNavigate', () => { cancelOwnerReadConfirmations(); beginOpening(); });
 
 installReaderCacheBoundary(client, queryClient);
 client.onSession((event) => {
+  cancelOwnerReadConfirmations();
   if (event.type === 'signed_out') {
     // Every route is asked again whether it is for somebody who is not signed in.
     void router.invalidate();
@@ -76,6 +82,7 @@ export function App() {
         <TooltipProvider>
           <Toaster>
             <RouterProvider router={router} />
+            <OwnerReadConfirmation />
           </Toaster>
         </TooltipProvider>
       </LucideProvider>

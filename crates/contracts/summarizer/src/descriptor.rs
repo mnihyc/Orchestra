@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub enum SummaryField {
     /// The node's title.
     Title,
-    /// Its description: the live progress of the work.
+    /// Short status output; never selected to maintain a written description.
     Description,
     /// Its tags, among those defined for its project and org.
     Tags,
@@ -27,16 +27,19 @@ pub enum SummaryField {
     Rollup,
     /// The bounded summary for another agent to continue the work.
     Handoff,
+    /// A standalone paragraph in a summary box, never a written description.
+    Summary,
 }
 
 impl SummaryField {
     /// Every field.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Title,
         Self::Description,
         Self::Tags,
         Self::Rollup,
         Self::Handoff,
+        Self::Summary,
     ];
 }
 
@@ -181,7 +184,8 @@ mod tests {
                 SummaryField::Title,
                 SummaryField::Tags,
                 SummaryField::Rollup,
-                SummaryField::Handoff
+                SummaryField::Handoff,
+                SummaryField::Summary
             ]
         );
         assert_eq!(rules.extensions.get("x_rules"), Some(&json!(12)));
@@ -215,12 +219,12 @@ mod tests {
     fn the_setting_names_the_kind_and_the_rest_is_the_configuration() {
         let setting = json!({
             "kind": "model", "provider_id": "p1", "model_name": "small", "max_output_tokens": 120,
-            "input_items": 50, "input_chars": 500, "prompts": { "description": null, "title": null, "tags": null }
+            "context_tokens": 32000, "prompts": { "description": null, "title": null, "tags": null }
         });
         let (kind, config) = split_setting(&setting).unwrap();
         assert_eq!(kind, "model");
         assert!(config.get("kind").is_none());
-        assert_eq!(config["input_items"], 50);
+        assert_eq!(config["context_tokens"], 32000);
         assert_eq!(
             split_setting(&json!({ "model_name": "x" })),
             Err(SettingError::NoKind)

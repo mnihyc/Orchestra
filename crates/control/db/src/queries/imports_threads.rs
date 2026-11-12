@@ -66,7 +66,6 @@ pub async fn describe_node(
     sqlx::query(
         "UPDATE nodes
             SET description = COALESCE($2::text, description),
-                description_source = CASE WHEN $2::text IS NULL THEN description_source ELSE 'user' END,
                 updated_at = COALESCE($3::timestamptz, updated_at)
           WHERE id = $1",
     )

@@ -1,7 +1,7 @@
 /** Screen-only recovery-code setup, replacement and sign-in, at both widths, languages and themes. */
 import { expect, test } from '@playwright/test';
 import { chats } from './chat-support.ts';
-import { bodySent, PEOPLE, scenario, signIn } from './support.ts';
+import { bodySent, PEOPLE, scenario, signIn, screenAddress } from './support.ts';
 
 const WORDS = {
   en: { app: 'Authenticator app', setup: 'Set up an authenticator app', password: 'Your password', next: 'Continue', code: 'Code from the app', on: 'Switch on', saved: 'Save your recovery codes', list: 'One-use recovery codes', close: 'Close', replace: 'Generate new codes…', confirm: 'Generate new codes', replacing: 'Replace recovery codes?', use: 'Use a recovery code', recovery: 'Recovery code', account: 'Your account', out: 'Sign out', login: 'Username or email address', loginPassword: 'Password', enter: 'Sign in' },
@@ -58,7 +58,8 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     expect(reads).toHaveLength(1);
     expect(await Promise.all(writes)).toEqual([{ proof: { password: PEOPLE.ada.password, recovery_code: old[0] } }]);
     await saved.getByRole('button', { name: w.close, exact: true }).click();
-    await page.getByRole('button', { name: w.account, exact: true }).click();
+    // The phone navigation exposes the same account menu through Me.
+    await page.getByRole('button', { name: width === 400 ? (locale === 'en' ? 'Me' : '我') : w.account, exact: true }).click();
     await page.getByRole('menuitem', { name: w.out, exact: true }).click();
     await page.getByLabel(w.login).fill(PEOPLE.ada.login);
     await page.getByLabel(w.loginPassword, { exact: true }).fill(PEOPLE.ada.password);
@@ -70,6 +71,6 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await expect(page.getByLabel(w.recovery, { exact: true })).toHaveAttribute('aria-invalid', 'true');
     await page.getByLabel(w.recovery, { exact: true }).fill(fresh[0] ?? '');
     await page.keyboard.press('Enter');
-    await expect(page).toHaveURL(/\/org\/acme$/);
+    await expect(page).toHaveURL(screenAddress('/org/acme'));
   });
 }

@@ -1,0 +1,4 @@
+# The batch tree with the Where lane's head merged: the engine's cases where the two lanes meet.
+test -p orch-engine --test use_where --test credentials --test preflight --test usage_rows
+test -p orch-engine --test forks -- use_where
+test -p orch-authz

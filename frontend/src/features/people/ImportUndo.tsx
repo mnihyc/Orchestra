@@ -79,7 +79,7 @@ export function ImportUndo({ id, onClose, onStarted }: { id: string; onClose: ()
   return <ConfirmDialog open onOpenChange={(open) => { if (!open) onClose(); }} title={t('importWizard.undo.title')}
     confirmLabel={t(uncertain ? 'importWizard.dialog.retry' : 'importWizard.undo.action')} danger pending={act.isPending} disabled={!uncertain && (value === undefined || plan.isFetching || value.blockers.length > 0)}
     error={act.error} onConfirm={() => act.mutate()}>
-    {plan.isPending ? <SkeletonRows rows={3} /> : plan.isError ? <ErrorAlert error={plan.error} action={<Button size="sm" onClick={() => void plan.refetch()}>{t('common.tryAgain')}</Button>} />
+    {plan.isPending ? <SkeletonRows read={plan} rows={3} /> : plan.isError ? <ErrorAlert error={plan.error} action={<Button size="sm" onClick={() => void plan.refetch()}>{t('common.tryAgain')}</Button>} />
       : value !== undefined && <div className="flex flex-col gap-2">
         <p>{counts === '' ? t('importWizard.undo.none') : t('importWizard.undo.effect', { counts })}</p>
         <p>{t('importWizard.undo.stays')}</p>

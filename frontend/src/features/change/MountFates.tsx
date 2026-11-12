@@ -2,6 +2,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { TFunction } from 'i18next';
 import { X } from 'lucide-react';
+import { type RefObject, useEffect, useRef } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 
 import { record } from '@/api/cache';
@@ -39,8 +40,8 @@ function observed(job: Job | undefined): PlanMountFingerprints | null {
     ? { matches: result.matches, checked_at: result.checked_at } : null;
 }
 
-function FingerprintCheck({ mount, onCheck, checking, disabled, error, stopRequested }: {
-  mount: PlanMount; onCheck: () => void; checking: boolean; disabled: boolean; error: Error | null; stopRequested: boolean;
+function FingerprintCheck({ mount, onCheck, askedRef, checking, disabled, error, stopRequested }: {
+  mount: PlanMount; onCheck: () => void; askedRef: RefObject<string | null>; checking: boolean; disabled: boolean; error: Error | null; stopRequested: boolean;
 }) {
   const { t } = useTranslation();
   const cache = useQueryClient();
@@ -52,17 +53,27 @@ function FingerprintCheck({ mount, onCheck, checking, disabled, error, stopReque
   const running = reference?.measured_at === null && view?.failed !== true
     && (job === undefined || job.state === 'queued' || job.state === 'running');
   const stopping = stopRequested || reference !== undefined && reference !== null && stop.variables === reference.job_id && (stop.isPending || stop.isSuccess) || job?.progress.activity?.stopping === true;
-  const button = <Button variant="ghost" size="sm" pending={checking || running} disabled={disabled || checking || running} onClick={onCheck}>{t(checking || running ? 'mountPlan.fingerprints.checking' : 'mountPlan.fingerprints.check')}</Button>;
+  const pressed = useRef<HTMLButtonElement>(null);
+  const button = <Button ref={pressed} variant="ghost" size="sm" pending={checking || running} disabled={disabled || checking || running} onClick={onCheck}>{t(checking || running ? 'mountPlan.fingerprints.checking' : 'mountPlan.fingerprints.check')}</Button>;
   const result = mount.fingerprints ?? observed(job);
   const failed = error !== null || view?.failed === true || job?.state === 'failed' || job?.state === 'succeeded' && result === null;
+  // The outcome of a check that was asked for stands under the button that asked, which may be at the foot of the part of the
+  // dialog that scrolls and the outcome, a line or two taller, below it: it is brought into view, as a refusal is. Only
+  // the row whose check was asked: a request checks every row, and each of them coming into view would leave the last.
+  const checked = result?.checked_at;
+  useEffect(() => {
+    if (checking || running || askedRef.current !== mount.mount.id) return;
+    askedRef.current = null;
+    pressed.current?.closest('[data-state-line], [data-fingerprint-check]')?.scrollIntoView({ block: 'nearest' });
+  }, [askedRef, mount.mount.id, checking, running, failed, checked]);
   if (failed) {
     const failure = error ?? view?.error ?? job?.error;
     const native = error !== null ? blockersOf(error).find((blocker) => blocker.code === 'mount_fingerprint_unavailable')?.message ?? error.message : job?.error?.message;
-    return <ErrorAlert error={failure} message={<>{t('mountPlan.fingerprints.failed')}{native !== undefined && <> · {native}</>}</>} action={button} className="mt-1 min-w-0 whitespace-normal" />;
+    return <ErrorAlert error={failure} message={<>{t('mountPlan.fingerprints.failed')}{native !== undefined && <> · {native}</>}</>} action={button} className="mt-1 min-w-0 scroll-mb-2 whitespace-normal" />;
   }
   if (job?.state === 'lost') return <StateLine compact tone="warning" role="status" message={t('source.job.lost')} action={button} />;
   if (job?.state === 'cancelled') return <StateLine compact role="status" message={t('mountPlan.fingerprints.stopped')} action={button} className="text-text-muted" />;
-  return <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1 whitespace-normal" data-fingerprint-check>
+  return <div className="mt-1 flex min-w-0 scroll-mb-2 flex-wrap items-center gap-1 whitespace-normal" data-fingerprint-check>
     {button}
     {running && <IconButton size="sm" action="cancel" icon={<X aria-hidden />} label={t(stopping ? 'liveWork.stopping' : 'mountPlan.fingerprints.stop')} pending={stop.isPending && stop.variables === reference.job_id} disabled={stopping} reason={stop.isError ? t('liveWork.stopFailed') : undefined} onClick={() => stop.mutate(reference.job_id)} />}
     {running && job !== undefined && <div className="basis-full min-w-0"><JobActivityLine job={stop.variables === reference.job_id && stop.isSuccess && stop.data.progress.activity?.stopping === true ? stop.data : job} /></div>}
@@ -87,6 +98,9 @@ export function MountFates({ mounts, picks, onPick, onPickAll, onCheck, checking
   const { locale } = useFormatContext();
   const counts = usePlanMeasurements();
   const cache = useQueryClient();
+  // The mount whose Check was pressed or chosen from its menu: the request checks the rows together, but the outcome that is brought into view is that row's.
+  const asked = useRef<string | null>(null);
+  const check = (mount: string) => { asked.current = mount; onCheck?.(); };
   const stopCheck = useMutation({ mutationFn: (id: string) => cancelJob(id), onSuccess: (value) => cache.setQueryData(forkKeys.job(value.id), value) });
   const rows: Row[] = mounts.filter((mount) => mount.fates.length > 1 || mount.fingerprints_available).map((mount) => {
     const pick = picks[mount.mount.id];
@@ -126,7 +140,7 @@ export function MountFates({ mounts, picks, onPick, onPickAll, onCheck, checking
     const reference = mount.fingerprint_measurement;
     const view = reference === undefined || reference === null ? undefined : counts?.views.get(reference.job_id);
     const reading = reference?.measured_at === null && view?.failed !== true && (view?.job === undefined || view.job.state === 'queued' || view.job.state === 'running');
-    if (mount.fingerprints_available && onCheck !== undefined) values.push({ id: 'check', name: t('mountPlan.fingerprints.check'), onSelect: onCheck, disabled: checking || anyReading ? t('mountPlan.fingerprints.checking') : checkDisabled ? t('changeReady.checking') : false });
+    if (mount.fingerprints_available && onCheck !== undefined) values.push({ id: 'check', name: t('mountPlan.fingerprints.check'), onSelect: () => check(mount.mount.id), disabled: checking || anyReading ? t('mountPlan.fingerprints.checking') : checkDisabled ? t('changeReady.checking') : false });
     if (reading) {
       const stopping = view?.job?.progress.activity?.stopping === true || stopCheck.variables === reference.job_id && (stopCheck.isPending || stopCheck.isSuccess);
       values.push({ id: 'stop-check', name: t('mountPlan.fingerprints.stop'), disabled: stopping ? t('liveWork.stopping') : false, onSelect: () => stopCheck.mutate(reference.job_id) });
@@ -140,7 +154,7 @@ export function MountFates({ mounts, picks, onPick, onPickAll, onCheck, checking
         {!shown.has(CHOICE_COLUMN) && choice(row)}
       </div>
       {!shown.has(SIZE_COLUMN) && <div className="mt-1 min-w-0">{size(row)}</div>}
-      {row.mount.fingerprints_available && onCheck !== undefined && <FingerprintCheck mount={row.mount} onCheck={onCheck} checking={checking} disabled={checkDisabled || anyReading} error={checkError} stopRequested={row.mount.fingerprint_measurement?.job_id === stopCheck.variables && (stopCheck.isPending || stopCheck.isSuccess)} />}
+      {row.mount.fingerprints_available && onCheck !== undefined && <FingerprintCheck mount={row.mount} onCheck={() => check(row.mount.mount.id)} askedRef={asked} checking={checking} disabled={checkDisabled || anyReading} error={checkError} stopRequested={row.mount.fingerprint_measurement?.job_id === stopCheck.variables && (stopCheck.isPending || stopCheck.isSuccess)} />}
     </div> },
     { id: CHOICE_COLUMN, header: t('liveWork.action'), from: 'sm', cell: choice },
     { id: SIZE_COLUMN, header: t('liveWork.size'), from: 'md', cell: size },

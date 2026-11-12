@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 
 import { CardFrame } from '@/features/approvals/Card';
 import { useDecision } from '@/features/approvals/Decision';
+import { decisionReason } from '@/features/approvals/current';
 import { capabilityConsequence, capabilityName } from '@/features/resources/capabilityWords';
 import type { Approval } from '@/generated/api-types';
 import { Badge, type BadgeTone } from '@/ui/Badge';
@@ -35,6 +36,7 @@ export function CapabilityCard({ approval, live, onSettled }: { approval: Capabi
   const label = capabilityName(request.capability, request.label, t);
   const may = approval.can_decide && live;
   const busy = decision.pending;
+  const reason = decisionReason(approval, live, busy, t);
   const send = (approve: boolean, label: string) => decision.decide({ approve, ...(note.trim() === '' ? {} : { note: note.trim() }) }, label);
 
   return (
@@ -68,10 +70,10 @@ export function CapabilityCard({ approval, live, onSettled }: { approval: Capabi
       {approval.approver_scope !== null && <p className="text-sm text-text-muted">{t(`approvals.scope.${approval.approver_scope}`)}</p>}
       {approval.can_decide && <Textarea label={t('approvals.note')} rows={2} value={note} disabled={busy} onChange={(event) => setNote(event.target.value)} />}
       <div className="flex flex-wrap items-center gap-2">
-        <Button action="approve" aria-label={actionName('approve', label)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!may || busy} onClick={() => send(true, t('approvals.approve'))}>
+        <Button action="approve" aria-label={actionName('approve', label)} variant="secondary" pending={decision.pressed === t('approvals.approve')} disabled={!may || busy} reason={reason} onClick={() => send(true, t('approvals.approve'))}>
           {actionName('approve', label)}
         </Button>
-        <Button action="deny" aria-label={actionName('deny', label)} variant="danger-ghost" pending={decision.pressed === t('approvals.deny')} disabled={!may || busy} onClick={() => send(false, t('approvals.deny'))}>
+        <Button action="deny" aria-label={actionName('deny', label)} variant="danger-ghost" pending={decision.pressed === t('approvals.deny')} disabled={!may || busy} reason={reason} onClick={() => send(false, t('approvals.deny'))}>
           {actionName('deny', label)}
         </Button>
       </div>

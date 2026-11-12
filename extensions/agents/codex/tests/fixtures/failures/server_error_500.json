@@ -19,5 +19,5 @@
   {"method":"error","params":{"error":{"message":"We’re currently experiencing high demand, which may cause temporary errors.","codexErrorInfo":"internalServerError","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5"},"emittedAtMs":1791799385199},
   {"method":"turn/completed","params":{"threadId":"01a12f90-7c41-7ef3-b9c0-88c6376be8bc","turn":{"id":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","rootTurnId":"01a12f90-7cb3-7fe3-9fc2-24536ded51d5","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"We’re currently experiencing high demand, which may cause temporary errors.","codexErrorInfo":"internalServerError","additionalDetails":null,"misalignment":null},"startedAt":1791799360,"completedAt":1791799385,"durationMs":24503}},"emittedAtMs":1791799385207}
  ],
- "expect": {"outcome": "failed", "code": "provider_busy", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "high demand"}
+ "expect": {"outcome": "failed", "code": "overloaded", "retryable": true, "incomplete": false, "resets_at": null, "row": "busy", "said_contains": "high demand"}
 }
