@@ -22,12 +22,24 @@ use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Response, StatusCode};
 use orch_model_contract::credentials::Credential;
-use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, authorize};
+use orch_model_contract::endpoint::{AuthMode, AuthorizeError, EndpointOptions, authorize_joined};
 use orch_model_contract::protocol::SecretHeaders;
 use serde_json::json;
 
 /// How the key is presented when an endpoint's options say nothing about it.
 pub const DEFAULT_AUTH: AuthMode = AuthMode::Bearer;
+
+/// Comma-list feature opt-ins accumulate across program, endpoint and native request requirements.
+pub const JOINED_HEADERS: &[&str] = &["anthropic-beta"];
+/// Native fast inference always carries the required versioned beta opt-in.
+pub const REQUEST_HEADERS: &[orch_model_contract::protocol::RequestHeaderRule] =
+    &[orch_model_contract::protocol::RequestHeaderRule {
+        pointer: "/speed",
+        equals: r#""fast""#,
+        name: "anthropic-beta",
+        value: "fast-mode-2026-02-01",
+        join: true,
+    }];
 
 /// The stable Messages API version, also used by connector-originated discovery without a harness header.
 const DEFAULT_VERSION: &str = "2023-06-01";
@@ -51,7 +63,14 @@ pub fn present(
     headers
         .entry("anthropic-version")
         .or_insert(HeaderValue::from_static(DEFAULT_VERSION));
-    let query = authorize(headers, credential, options, secrets, DEFAULT_AUTH)?;
+    let query = authorize_joined(
+        headers,
+        credential,
+        options,
+        secrets,
+        DEFAULT_AUTH,
+        JOINED_HEADERS,
+    )?;
     tracing::trace!(
         protocol = orch_model_contract::protocol::ANTHROPIC_MESSAGES,
         auth = options.auth.unwrap_or(DEFAULT_AUTH).as_str(),

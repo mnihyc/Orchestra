@@ -119,6 +119,7 @@ async fn session_of(harness: Harness) -> Option<(ProviderRig, Arc<Containers>, o
     let home = format!("harness/{}/{}", p.rig.provider, p.rig.agent);
     let start: orch_link_contract::commands::AgentStart = serde_json::from_value(json!({
         "provider_id": p.rig.provider, "agent_id": p.rig.agent, "harness_kind": harness.kind(),
+        "provider_kind": "api",
         "profile": { "harness_version": null, "config": {}, "env": {} }, "home": home
     }))
     .unwrap();
@@ -217,9 +218,7 @@ async fn claude_code_calls_announce_on_the_orch_server_of_the_connector_and_the_
     p.start_turn_in(script, MODEL, "bypass", "open").await;
 
     // The call reaches the system as an event of the session, with the name and the arguments the model gave.
-    p.rig
-        .wait_for(p.thread, p.segment, "orch.tool_call", 1)
-        .await;
+    p.wait_for_turn_event("orch.tool_call", 1).await;
     let call = p
         .rig
         .applied(p.thread, p.segment)

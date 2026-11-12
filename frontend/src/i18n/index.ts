@@ -3,12 +3,12 @@
  * Every sentence a person reads comes from one of the two catalogues beside this file. A catalogue is
  * a part of the build of its own. English also stays available as a safe fallback.
  *
- * A key that is not in the English catalogue does not compile (`t` takes the catalogue's own keys),
- * and a unit test holds the two catalogues to the same keys and the same placeholders. While the
+ * A syntax-only key gate runs before the compiler; finite metadata keys stay typed without giving
+ * i18next the whole catalogue at every call. Tests hold both languages to the same keys and placeholders. While the
  * application is being developed, missing runtime text is reported without interrupting the page.
  */
 /// <reference types="vite/client" />
-import i18next, { type ParseKeys } from 'i18next';
+import i18next from 'i18next';
 import { initReactI18next } from 'react-i18next';
 
 import type { Locale } from '@/generated/api-types';
@@ -19,15 +19,16 @@ import type development from './dev-en.json';
 /** The catalogue every other one is held to. */
 export type Catalogue = typeof english & typeof development;
 
-declare module 'i18next' {
-  interface CustomTypeOptions {
-    defaultNS: 'translation';
-    resources: { translation: Catalogue };
-  }
-}
-
-/** A key of the catalogue, as `t` takes it. */
-export type TranslationKey = ParseKeys;
+/** Metadata keeps a finite key vocabulary, evaluated once rather than by each t() overload. */
+type LeafKeys<Value> = Value extends readonly unknown[] ? never : Value extends object ? {
+  [Key in keyof Value & string]: Value[Key] extends string ? Key : `${Key}.${LeafKeys<Value[Key]>}`;
+}[keyof Value & string] : never;
+type Plural = 'zero' | 'one' | 'two' | 'few' | 'many' | 'other';
+type BaseKey<Key extends string> = Key extends `${infer Base}_ordinal_${Plural}` ? Base
+  : Key extends `${infer Base}_${Plural}` ? Base : never;
+type ExactKey = LeafKeys<Catalogue>;
+/** Authored metadata is checked here; t() calls are checked by build/check-translation-keys.ts. */
+export type TranslationKey = ExactKey | BaseKey<ExactKey>;
 
 /** The languages the interface is written in, each under its own name. */
 export const LOCALES: readonly { locale: Locale; name: string }[] = [

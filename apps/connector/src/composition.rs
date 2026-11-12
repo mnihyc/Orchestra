@@ -225,6 +225,7 @@ fn plugin_builtin() -> BuiltIn {
             PluginKind::Provider,
             orch_provider_contract::choice::builtin::ALL
                 .into_iter()
+                .chain(orch_provider_builtins::names())
                 .chain(["none"]),
         )
 }
@@ -285,12 +286,11 @@ fn environment_with_plugins(
 /// The built-in sources of a key's facts this program carries, as the API's program registers them too: the
 /// connector makes the vendor reader a provider's choice names, or its default, from this table alone.
 fn builtin_sources() -> anyhow::Result<Arc<orch_provider_contract::builtins::BuiltinSources>> {
-    Ok(Arc::new(
-        orch_provider_contract::builtins::BuiltinSources::new([
-            orch_provider_openrouter::builtin(),
-            orch_provider_deepseek::builtin(),
-        ])?,
-    ))
+    let mut sources = orch_provider_builtins::sources()?;
+    for (name, declarations) in orch_image_backends::declarations()? {
+        sources.register_capabilities(name, declarations)?;
+    }
+    Ok(Arc::new(sources))
 }
 
 #[cfg(test)]
@@ -417,6 +417,17 @@ pub async fn enroll_machine(
     let data = DataDir::open(dir).with_context(|| format!("opening {}", dir.display()))?;
     let config = data.config(var).context("reading config.toml")?;
     let choices = crate::enrollment_options::selected(options, &config)?;
+    let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    let gateway = orch_connector_core::gateway_selector::configure_enrollment(
+        &data,
+        &options.url,
+        &options.token,
+        &transport,
+        options.gateway.as_deref(),
+        true,
+    )
+    .await
+    .context("choosing the primary gateway")?;
     let name = options
         .name
         .clone()
@@ -433,17 +444,18 @@ pub async fn enroll_machine(
     let enrolled = orch_connector_core::enrollment::enroll_with_choices(
         &inputs,
         &data,
-        &HttpsEnroll::new(Arc::clone(&clock), None),
+        &transport,
         clock.as_ref(),
         &choices,
     )
     .await
     .context("enrolling")?;
     Ok(format!(
-        "Enrolled {} ({}) in {}.\nThe machine plays the roles {}; `orch-connector run` holds the session.",
+        "Enrolled {} ({}) in {}.\nPrimary gateway choice: {}.\nThe machine plays the roles {}; `orch-connector run` holds the session.",
         enrolled.record.name,
         enrolled.record.machine_id,
         enrolled.record.system.name,
+        orch_connector_core::gateway_selector::choice_name(&gateway, &enrolled.record.gateways),
         inputs
             .roles
             .iter()
@@ -1137,21 +1149,21 @@ mod tests {
 
     #[test]
     fn the_program_registers_each_vendor_reader_and_a_key_at_its_address_reads_it_by_default() {
-        use orch_provider_contract::choice::{Keeper, SourceElement, builtin, default_source};
+        use orch_provider_contract::choice::{Keeper, SourceElement, default_source};
         let table = builtin_sources().unwrap();
         assert_eq!(
             table.iter().map(|entry| entry.name).collect::<Vec<_>>(),
-            builtin::KEY_FACTS
+            ["openrouter", "deepseek", "openai", "anthropic"]
         );
         let openrouter = [url::Url::parse("https://openrouter.ai/api/v1").unwrap()];
         assert_eq!(
             default_source(SourceElement::Facts, Keeper::Key, &openrouter, &table),
-            Some(builtin::OPENROUTER)
+            Some("openrouter")
         );
         let deepseek = [url::Url::parse("https://api.deepseek.com").unwrap()];
         assert_eq!(
             default_source(SourceElement::Facts, Keeper::Key, &deepseek, &table),
-            Some(builtin::DEEPSEEK)
+            Some("deepseek")
         );
     }
 }

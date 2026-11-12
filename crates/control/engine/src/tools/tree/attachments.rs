@@ -117,6 +117,22 @@ pub(super) async fn directories(
         .collect())
 }
 
+/// The exact owner/message/slot witness retained by ordinary attachment discovery.
+/// This reads no filename, path or message content and grants no visibility; the existing
+/// recipient resolver still checks current owner reach, message liveness and the carried slot.
+pub(crate) async fn chat_file_reference(
+    conn: &mut Conn,
+    file: Id,
+) -> Result<Option<(Id, Id, i32)>, EngineError> {
+    Ok(
+        sqlx::query_as("SELECT chat_id,message_id,carried FROM chat_file_references WHERE id=$1")
+            .bind(file)
+            .fetch_optional(conn)
+            .await
+            .map_err(orch_db::DbError::from)?,
+    )
+}
+
 impl Tree {
     async fn remember_files(conn: &mut Conn, entries: &[Entry]) -> Result<(), EngineError> {
         for entry in entries {
@@ -280,13 +296,7 @@ impl Tree {
                         path: format!("{parent}/{directory}/{name}"),
                     }]);
                 }
-                let saved: Option<(Id, Id, i32)> = sqlx::query_as(
-                    "SELECT chat_id,message_id,carried FROM chat_file_references WHERE id=$1",
-                )
-                .bind(file)
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(orch_db::DbError::from)?;
+                let saved = chat_file_reference(conn, *file).await?;
                 if let Some((chat, message, carried)) = saved
                     && let Some(node) = self.chat_origin(chat)
                 {

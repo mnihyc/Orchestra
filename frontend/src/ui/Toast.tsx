@@ -2,8 +2,8 @@
  *
  * A short notice at the lower right for something that happened away from where its reader is
  * looking: a thing done in the background, or failed there. What fails beside its own control is
- * said beside that control, never here. A notice of success leaves by itself; a notice of failure
- * stays until it is put away, because a failure nobody saw is one nobody acts on.
+ * said beside that control, never here. A notice with an action stays until it is used or dismissed;
+ * ordinary success leaves by itself, while failures stay until they are put away.
  */
 import { CircleAlert, CircleCheck, Info, X } from 'lucide-react';
 import { Toast as Primitive } from 'radix-ui';
@@ -73,7 +73,7 @@ export function Toaster({ children }: { children?: ReactNode }) {
           <Primitive.Root
             key={entry.id}
             type={entry.tone === 'danger' ? 'foreground' : 'background'}
-            duration={entry.tone === 'danger' || entry.persistent === true ? Number.POSITIVE_INFINITY : TOAST_SHOWN_MS}
+            duration={entry.tone === 'danger' || entry.persistent === true || entry.action !== undefined ? Number.POSITIVE_INFINITY : TOAST_SHOWN_MS}
             onOpenChange={(open) => {
               if (!open) dismiss(entry.id);
             }}

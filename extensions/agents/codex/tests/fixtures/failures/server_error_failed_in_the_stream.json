@@ -43,5 +43,5 @@
   {"method":"error","params":{"error":{"message":"stream disconnected before completion: The server had an error while processing your request.","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-54fb-7c32-aff7-dfdaa0941cbd","turnId":"01a12f91-555a-7d52-b82b-fffdda5f78c8"},"emittedAtMs":1791799423198},
   {"method":"turn/completed","params":{"threadId":"01a12f91-54fb-7c32-aff7-dfdaa0941cbd","turn":{"id":"01a12f91-555a-7d52-b82b-fffdda5f78c8","rootTurnId":"01a12f91-555a-7d52-b82b-fffdda5f78c8","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"stream disconnected before completion: The server had an error while processing your request.","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799416,"completedAt":1791799423,"durationMs":7042}},"emittedAtMs":1791799423201}
  ],
- "expect": {"outcome": "failed", "code": "provider_unreachable", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "The server had an error while processing your request"}
+ "expect": {"outcome": "failed", "code": "stream_interrupted", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "The server had an error while processing your request"}
 }

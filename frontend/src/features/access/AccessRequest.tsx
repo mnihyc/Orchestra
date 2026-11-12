@@ -16,10 +16,10 @@ import { useStore } from 'zustand';
 import { accessRequestQuery, cancelApproval, permissionsQuery, requestAccess, requestJoin } from '@/api/access';
 import { ApiError, client } from '@/api/client';
 import { approvalQuery } from '@/api/approvals';
-import type { AccessChoice, AccessRequestCreateReply, Approval, MissingAccess } from '@/generated/api-types';
+import type { AccessChoice, Approval, MissingAccess } from '@/generated/api-types';
 import { useActKey } from '@/lib/forms';
 import { Button } from '@/ui/Button';
-import { ErrorAlert } from '@/ui/ErrorState';
+import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { RadioGroup } from '@/ui/RadioGroup';
 import { SkeletonRows } from '@/ui/Skeleton';
@@ -29,7 +29,7 @@ import { Textarea } from '@/ui/Textarea';
 import { AvatarStack } from '@/ui/AvatarStack';
 import { UserChip } from '@/ui/UserChip';
 
-import { CHOICE_ORDER, indexCatalogue, leastChoice } from './model';
+import { askedOptions, CHOICE_ORDER, indexCatalogue, leastChoice } from './model';
 import { usePermissionName } from './names';
 import { RequestedEnd, RequestEndField, useRequestEnd } from './RequestEnd';
 
@@ -39,17 +39,23 @@ const REASON_MAX = 500;
 const rememberKey = (reader: string, objectId: string, forThread: string | undefined, membership: boolean) =>
   `orch.access.request.v2.${JSON.stringify([reader, objectId, forThread ?? null, membership])}`;
 
-function remembered(key: string | null): AccessRequestCreateReply | null {
+/** Only the accepted identity is needed before current cards are loaded. */
+interface SentRequest {
+  batch_id: string;
+  approvals?: Approval[];
+}
+
+function remembered(key: string | null): SentRequest | null {
   if (key === null) return null;
   try {
     const batch = sessionStorage.getItem(key);
-    return batch === null || batch === '' ? null : { batch_id: batch, approvals: [] };
+    return batch === null || batch === '' ? null : { batch_id: batch };
   } catch {
     return null;
   }
 }
 
-function remember(key: string | null, reply: AccessRequestCreateReply | null): void {
+function remember(key: string | null, reply: SentRequest | null): void {
   if (key === null) return;
   try {
     if (reply === null) sessionStorage.removeItem(key);
@@ -117,7 +123,7 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
   const permissionName = usePermissionName(!membership);
   const actKey = useActKey();
   const catalogue = useQuery({...permissionsQuery,enabled:!fixed&&!membership});
-  const index = catalogue.data === undefined ? null : indexCatalogue(catalogue.data);
+  const index = catalogue.data === undefined || catalogue.isError ? null : indexCatalogue(catalogue.data);
   const main = missing.find((entry) => entry.object.id === objectId) ?? missing[0];
   const askable = missing.filter((entry) => entry.closed === null);
   const kind = main?.object.kind ?? 'org';
@@ -127,16 +133,21 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
   const [existingId, setExistingId] = useState(pendingId ?? null);
   const existing = useQuery({ ...approvalQuery(existingId ?? ''), enabled: existingId !== null });
   const storageKey = reader === null || privateReference ? null : rememberKey(reader, rememberAs ?? objectId, forThread, membership);
-  const [sent, setSent] = useState<AccessRequestCreateReply | null>(() => remembered(storageKey));
-  const choice: AccessChoice = chosen ?? (index === null ? 'full_view' : leastChoice(index, kind, main?.permissions ?? []));
+  const [sent, setSent] = useState<SentRequest | null>(() => remembered(storageKey));
+  const needsCatalogue = !fixed && !membership;
+  const hasLevels = index !== null && CHOICE_ORDER.some((entry)=>index.choice(entry,kind).length>0);
+  const choice: AccessChoice | null = index === null || !hasLevels ? null : chosen ?? leastChoice(index, kind, main?.permissions ?? []);
+  const choiceReady = !needsCatalogue || index !== null && (!hasLevels || choice !== null && index.choice(choice,kind).length > 0);
+  const sendReason = !choiceReady ? t(index === null ? catalogue.isError ? 'startImplicit.catalogueFailed' : 'startImplicit.checkingMissing' : 'startImplicit.chooseAccess')
+    : !end.valid ? t('startImplicit.checkAccessEnd') : null;
 
   const [attempt,setAttempt]=useState(0);
   const body = {
     items: askable.map((entry) => ({
       object: { kind: entry.object.kind, id: entry.object.id },
       ...(sharedLabel===undefined?{}:{label:sharedLabel}),
-      permissions: !fixed && entry.object.id === objectId && index !== null && index.choice(choice, entry.object.kind).length > 0 ? index.choice(choice, entry.object.kind) : entry.permissions,
-      ...(entry.options === null ? {} : { options: entry.options }),
+      permissions: needsCatalogue && entry.object.id === objectId && index !== null && choice !== null && index.choice(choice, entry.object.kind).length > 0 ? index.choice(choice, entry.object.kind) : entry.permissions,
+      ...(entry.options === null ? {} : { options: askedOptions(entry.options) }),
     })),
     reason: reason.trim(),
     ...(forThread === undefined ? {} : { for_thread: forThread }),
@@ -212,7 +223,7 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
         else void state.refetch();
       }}>{t('common.tryAgain')}</Button>} />;
     if (privateReference) return <div className="flex flex-col gap-2 text-sm text-text-muted" role="status">
-      {loading ? <SkeletonRows rows={1} /> : approvals[0] !== undefined && approvals[0].state !== 'pending'
+      {loading ? <SkeletonRows read={existingId !== null ? existing : state} rows={1} /> : approvals[0] !== undefined && approvals[0].state !== 'pending'
         ? <DecisionStatus approval={approvals[0]} /> : open ? <span>{t('access.request.waiting')}</span> : null}
       {approvals[0]?.kind === 'access' && <RequestedEnd at={approvals[0].request.expires_at} />}
       {!open && statusError === null && approvals[0] !== undefined && approvals[0].state !== 'approved' && <Button size="sm" onClick={askAgain}>{t('access.request.askAgain')}</Button>}
@@ -222,7 +233,7 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
     </div>;
     return (
       <div className="flex flex-col gap-2 text-left" role="status">
-        {loading ? <SkeletonRows rows={1} /> : (complete || approvals.length > 0) && <InlineAlert tone={complete ? 'success' : 'info'}>
+        {loading ? <SkeletonRows read={existingId !== null ? existing : state} rows={1} /> : (complete || approvals.length > 0) && <InlineAlert tone={complete ? 'success' : 'info'}>
           {complete ? t('access.request.complete') : open ? ask === '' ? t('access.request.waiting') : peopleAsChips ? <Trans i18nKey="access.request.waitingPeople" components={{ people: recipients }} /> : t('access.request.waitingFor', { names: ask }) : t('access.request.answered')}
         </InlineAlert>}
         <ul className="flex flex-col gap-1 text-sm text-text">
@@ -246,10 +257,11 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
     );
   }
 
-  const options = CHOICE_ORDER.filter((entry) => index === null || index.choice(entry, kind).length > 0).map((entry) => ({
+  const options = (index === null ? [] : CHOICE_ORDER.filter((entry) => index.choice(entry, kind).length > 0)).map((entry) => ({
     value: entry,
     name: t(`access.request.levels.${entry}`),
     description: t(`adminReach.requestChoices.${entry}`),
+    note: chosen === null && choice === entry ? t('startImplicit.origin.suggested') : undefined,
   }));
   const errorMessage = send.error instanceof ApiError && send.error.is('access.too_many_requests') && typeof send.error.problem.waiting === 'number'
     ? t('access.request.tooMany', { waiting: send.error.problem.waiting }) : undefined;
@@ -259,10 +271,13 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
       className="flex w-full flex-col gap-3 text-left"
       onSubmit={(event) => {
         event.preventDefault();
-        if (end.valid) send.mutate();
+        if (end.valid && choiceReady) send.mutate();
       }}
     >
-      {!fixed && <ChoiceField label={t('access.request.choose')} options={options}><RadioGroup<AccessChoice> label={t('access.request.choose')} value={choice} onValueChange={setChosen} options={options} /></ChoiceField>}
+      {needsCatalogue && (catalogue.isError ? <ErrorState compact error={catalogue.error} onRetry={()=>void catalogue.refetch()} />
+        : index === null ? <span role="status" className="text-sm text-text-muted">{t('startImplicit.checkingMissing')}</span>
+        : hasLevels ? <ChoiceField label={t('access.request.choose')} options={options}><RadioGroup<AccessChoice> label={t('access.request.choose')} value={choice} onValueChange={setChosen} options={options} /></ChoiceField>
+        : <span className="text-sm text-text-muted">{main?.permissions.map(permissionName).join(', ')}</span>)}
       {privateReference && <span className="text-sm text-text-muted">{membership?t('access.request.join'):t('access.request.asksFor',{access:main?.permissions.map(permissionName).join(', ')})}</span>}
       <RequestEndField value={end} />
       <Textarea
@@ -276,7 +291,7 @@ function AccessRequestForm({ missing, objectId, forThread, fixed = false, privat
       <div className="flex flex-wrap items-center justify-end gap-2">
         {!privateReference && ask !== '' && <span className="min-w-0 flex-1 text-sm text-text-muted">{peopleAsChips ? <Trans i18nKey="access.request.goesToPeople" components={{ people: recipients }} /> : t('access.request.goesTo', { names: ask })}</span>}
         {privateReference && <span className="min-w-0 flex-1 text-sm text-text-muted">{t('people.reference.ownersAsked')}</span>}
-        <Button type="submit" variant="primary" icon={<Send aria-hidden />} pending={send.isPending} disabled={!end.valid}>
+        <Button type="submit" variant="primary" icon={<Send aria-hidden />} pending={send.isPending} disabled={!end.valid || !choiceReady} title={sendReason ?? undefined}>
           {t('access.request.send')}
         </Button>
       </div>

@@ -7,6 +7,7 @@ heading_id.授予-kvm-或-docker-套接字: give-kvm-or-the-docker-socket
 heading_id.重启一个工具服务器: restart-one-tool-server
 heading_id.重启环境: restart-the-environment
 heading_id.阅读重建方案: read-a-recreate-plan
+summary: 查看哪些环境修改立即生效，哪些需要重启或重建。
 ---
 
 # 在环境运行时修改它

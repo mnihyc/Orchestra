@@ -64,7 +64,7 @@ pub fn kind_of(word: &str) -> PortOpeningKind {
 
 /// One audience's capability on one environment as it stands now: the same facts for a person's opening, an
 /// agent's request and the Ports view.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gate {
     /// The driver's actual support, kept separate from this audience's permission.
     pub driver_support: orch_driver_contract::descriptor::OperationSupport,
@@ -430,41 +430,87 @@ pub async fn grant(
     kind: PortOpeningKind,
     origin: &Origin,
 ) -> Result<bool, Error> {
-    let gate = gate(conn, environment, kind).await?;
-    if !gate.offered {
-        return Err(Error::NotAllowed(format!(
-            "this environment's template does not allow \"{}\"",
-            gate.label
-        )));
-    }
-    if gate.decision == "deny" {
-        return Err(Error::NotAllowed(format!(
-            "\"{}\" is denied by capability.policy at this environment's place",
-            gate.label
-        )));
-    }
-    if !may_grant(conn, principal, environment, &gate.approver_scope).await? {
-        return Err(Error::NotAllowed(format!(
-            "\"{}\" is granted by {}",
-            gate.label,
-            approvers_in_words(&gate.approver_scope)
-        )));
-    }
-    let now = principal.now().get();
-    if !rows::grant(conn, environment, &gate.key, now).await? {
-        return Ok(false);
-    }
-    record(
-        conn,
+    let prepared = prepare_grant(conn, environment, kind).await?;
+    prepared.require(conn, principal).await?;
+    prepared.apply(conn, principal, origin).await
+}
+
+/// Native capability facts, not reusable authority. The writer's caller serializes the
+/// environment and refreshes current authority before applying these same operands.
+#[derive(Debug, Clone)]
+pub struct PreparedGrant {
+    environment: Id,
+    gate: Gate,
+}
+
+/// Loads exactly the facts used by the ordinary capability-grant writer.
+pub async fn prepare_grant(
+    conn: &mut Conn,
+    environment: Id,
+    kind: PortOpeningKind,
+) -> Result<PreparedGrant, Error> {
+    Ok(PreparedGrant {
         environment,
-        principal.user(),
-        AuditAction::CapabilityGranted,
-        json!({ "capability": gate.key, "decided_by": principal.user() }),
-        origin,
-        now,
-    )
-    .await?;
-    Ok(true)
+        gate: gate(conn, environment, kind).await?,
+    })
+}
+
+impl PreparedGrant {
+    /// The actual policy/offer observation, also usable as a native response witness.
+    #[must_use]
+    pub fn gate(&self) -> &Gate {
+        &self.gate
+    }
+
+    /// The original grant prerequisites, shared by native and HTTP callers.
+    pub async fn require(&self, conn: &mut Conn, principal: &Principal) -> Result<(), Error> {
+        let gate = &self.gate;
+        if !gate.offered {
+            return Err(Error::NotAllowed(format!(
+                "this environment's template does not allow \"{}\"",
+                gate.label
+            )));
+        }
+        if gate.decision == "deny" {
+            return Err(Error::NotAllowed(format!(
+                "\"{}\" is denied by capability.policy at this environment's place",
+                gate.label
+            )));
+        }
+        if !may_grant(conn, principal, self.environment, &gate.approver_scope).await? {
+            return Err(Error::NotAllowed(format!(
+                "\"{}\" is granted by {}",
+                gate.label,
+                approvers_in_words(&gate.approver_scope)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Applies the native write with no intervening policy query before the first UPDATE.
+    /// The caller must hold the environment footprint and check its current deadline here.
+    pub async fn apply(
+        &self,
+        conn: &mut Conn,
+        principal: &Principal,
+        origin: &Origin,
+    ) -> Result<bool, Error> {
+        let now = principal.now().get();
+        if !rows::grant(conn, self.environment, &self.gate.key, now).await? {
+            return Ok(false);
+        }
+        record(
+            conn,
+            self.environment,
+            principal.user(),
+            AuditAction::CapabilityGranted,
+            json!({"capability":self.gate.key,"decided_by":principal.user()}),
+            origin,
+            now,
+        )
+        .await?;
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

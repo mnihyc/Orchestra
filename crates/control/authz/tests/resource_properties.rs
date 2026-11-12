@@ -322,7 +322,7 @@ impl Scene {
                     };
                     if *kind == ResourceKind::Provider {
                         for model in MODELS {
-                            if granted.provider().allows_model(model) {
+                            if granted.named_together().allows_model(model) {
                                 uses.insert((*user, *id, node, model));
                             }
                         }
@@ -568,4 +568,444 @@ async fn a_locked_row_gives_the_same_holders_to_every_page_of_a_resource_below_i
             assert!(!holders[0].is_empty());
         }
     }
+}
+
+async fn compare_selected_participation(
+    w: &World,
+    caller: Caller,
+    provider: Id,
+) -> (bool, bool, bool, bool) {
+    let principal = w.principal(caller).await;
+    let mut conn = w.conn().await;
+    let object = ObjectRef {
+        kind: ObjectKind::Provider,
+        id: provider,
+    };
+    let (graph, _, site) = resources::site(&mut conn, object).await.unwrap();
+    let sites = [site.clone()];
+    let permissions: Vec<_> = site.kind.permissions().collect();
+    let full = Frame::load(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        graph.clone(),
+        &sites,
+        &permissions,
+    )
+    .await
+    .unwrap();
+    let selected = Frame::load_with_participation(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        graph,
+        &sites,
+        &permissions,
+        &sites,
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected.effective(&site), full.effective(&site));
+    assert_eq!(selected.participates(&site), full.participates(&site));
+    assert_eq!(selected.admin_only(&site), full.admin_only(&site));
+    assert_eq!(selected.admin_access(&site), full.admin_access(&site));
+    assert_eq!(selected.admin_place(&site), full.admin_place(&site));
+    let shown = resources::effective(&mut conn, &principal, object, Policy::default())
+        .await
+        .unwrap();
+    assert_eq!(shown.held, full.effective(&site));
+    assert_eq!(shown.participating, full.participates(&site));
+    assert_eq!(shown.admin_only, full.admin_only(&site));
+    assert_eq!(shown.admin_access, full.admin_access(&site));
+    let home = full.graph().site_of(w.root).unwrap();
+    let homes = [home.clone()];
+    let home_permissions: Vec<_> = home.kind.permissions().collect();
+    let home_full = Frame::load(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        full.graph().clone(),
+        &homes,
+        &home_permissions,
+    )
+    .await
+    .unwrap();
+    let home_selected = Frame::load_with_participation(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        full.graph().clone(),
+        &homes,
+        &home_permissions,
+        &homes,
+    )
+    .await
+    .unwrap();
+    let home_without_metadata = Frame::load_with_participation(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        full.graph().clone(),
+        &homes,
+        &home_permissions,
+        &[],
+    )
+    .await
+    .unwrap();
+    // A selected node still needs descendant/follow summaries: it must use the full SQL path.
+    assert_eq!(
+        home_selected.participates(&home),
+        home_full.participates(&home)
+    );
+    for frame in [&home_selected, &home_without_metadata] {
+        assert_eq!(frame.effective(&home), home_full.effective(&home));
+        assert_eq!(frame.holds_any(&home), home_full.holds_any(&home));
+        assert_eq!(frame.admin_only(&home), home_full.admin_only(&home));
+        assert_eq!(frame.admin_access(&home), home_full.admin_access(&home));
+        assert_eq!(frame.admin_place(&home), home_full.admin_place(&home));
+    }
+    assert!(!home_without_metadata.participates(&home));
+    if principal.caller().as_admin() {
+        assert!(
+            !full.admin_only(&site).is_empty(),
+            "the native baseline is exercised"
+        );
+    }
+    let known = home_full.holds_any(&home) || principal.is_in_tree(home.root.unwrap());
+    (
+        full.participates(&site),
+        full.effective(&site)
+            .iter()
+            .any(|held| held.permission == Permission::ProviderView),
+        known,
+        home_full.participates(&home),
+    )
+}
+
+#[tokio::test]
+async fn selected_resource_metadata_keeps_permissions_names_and_admin_baselines() {
+    let w = World::new().await;
+    let provider = {
+        let mut conn = w.conn().await;
+        let provider = access_fixtures::insert_resource(
+            &mut conn,
+            "provider",
+            Some(w.boss),
+            Some(w.root),
+            "Metadata provider",
+        )
+        .await
+        .unwrap();
+        add_entry(
+            &mut conn,
+            &PageKey::new("provider", provider, "live"),
+            "any",
+            "access.own",
+            ("user", Some(w.boss), None),
+            None,
+            w.now.get(),
+        )
+        .await
+        .unwrap();
+        provider
+    };
+    let owner = compare_selected_participation(&w, Caller::session(w.boss), provider).await;
+    assert!(owner.0 && owner.1 && owner.2);
+    let member = compare_selected_participation(&w, Caller::session(w.maker), provider).await;
+    assert!(
+        !member.0 && member.2,
+        "membership names the org without creating personal resource participation"
+    );
+    let reader = w.user("groupreader").await;
+    let group = w.group(w.root, "Readers", &[reader]).await;
+    let grant = {
+        let mut conn = w.conn().await;
+        add_entry(
+            &mut conn,
+            &PageKey::new("provider", provider, "live"),
+            "any",
+            "provider.view",
+            ("group", Some(group), None),
+            Some(w.now.get() + Duration::days(1)),
+            w.now.get(),
+        )
+        .await
+        .unwrap()
+    };
+    let shared = compare_selected_participation(&w, Caller::session(reader), provider).await;
+    assert!(
+        shared.0 && shared.1 && !shared.2 && shared.3,
+        "resource participation grants no hidden home name"
+    );
+    for subtree in [w.root, w.project] {
+        compare_selected_participation(
+            &w,
+            Caller::token(reader, TokenGrant::new(Scopes::All, Some(subtree))),
+            provider,
+        )
+        .await;
+    }
+    {
+        let mut conn = w.conn().await;
+        sqlx::query("UPDATE users SET status='suspended' WHERE id=$1")
+            .bind(reader)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let suspended = compare_selected_participation(&w, Caller::session(reader), provider).await;
+    assert!(!suspended.0 && !suspended.1);
+    {
+        let mut conn = w.conn().await;
+        sqlx::query("UPDATE users SET status='active' WHERE id=$1")
+            .bind(reader)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE permission_entries SET expires_at=$2 WHERE id=$1")
+            .bind(grant)
+            .bind(w.now.get())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    let expired = compare_selected_participation(&w, Caller::session(reader), provider).await;
+    assert!(!expired.0 && !expired.1);
+    let administrator = w.user("metaadmin").await;
+    {
+        let mut conn = w.conn().await;
+        make_system_admin(&mut conn, administrator).await.unwrap();
+    }
+    let native = compare_selected_participation(
+        &w,
+        Caller::session(administrator).with_admin_mode(true),
+        provider,
+    )
+    .await;
+    assert!(
+        !native.0 && native.1 && native.2,
+        "native reach does not manufacture ordinary participation"
+    );
+}
+
+async fn compare_batched_participation(w: &World, caller: Caller, ids: &[Id]) -> Vec<bool> {
+    let principal = w.principal(caller).await;
+    let mut conn = w.conn().await;
+    let mut graph = orch_authz::engine::Graph::default();
+    let found = resources::read_into(&mut conn, &mut graph, ids)
+        .await
+        .unwrap();
+    let sites: Vec<_> = found
+        .iter()
+        .map(|resource| resources::site_of(&graph, resource).unwrap())
+        .collect();
+    assert_eq!(sites.len(), ids.len());
+    let permissions: Vec<_> = ObjectKind::Provider.permissions().collect();
+    let full = Frame::load(
+        &mut conn,
+        &principal,
+        Policy::default(),
+        graph,
+        &sites,
+        &permissions,
+    )
+    .await
+    .unwrap();
+    let among = resources::effective_among(&mut conn, &principal, ids, Policy::default())
+        .await
+        .unwrap();
+    assert_eq!(among.len(), ids.len());
+    for shown in &among {
+        let site = sites
+            .iter()
+            .find(|site| site.id == shown.object.id)
+            .unwrap();
+        let active = !principal.suspension().applies(&site.orgs);
+        assert_eq!(shown.participating, full.participates(site));
+        assert_eq!(
+            shown.held,
+            if active {
+                full.effective(site)
+            } else {
+                Vec::new()
+            }
+        );
+        assert_eq!(shown.owner, active && full.owns(site));
+        assert_eq!(shown.administers, active && full.administers(site));
+        assert_eq!(shown.role, full.role_for(site));
+        assert_eq!(
+            shown.admin_only,
+            if active {
+                full.admin_only(site)
+            } else {
+                Vec::new()
+            }
+        );
+        assert_eq!(
+            shown.admin_access,
+            if active {
+                full.admin_access(site)
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            shown.admin_place,
+            if active { full.admin_place(site) } else { None }
+        );
+    }
+    let expected: BTreeSet<_> = sites
+        .iter()
+        .filter(|site| {
+            !principal.suspension().applies(&site.orgs) && !full.effective(site).is_empty()
+        })
+        .map(|site| site.id)
+        .collect();
+    let mut after = None;
+    let mut listed = Vec::new();
+    let mut ended = false;
+    // The fixture owns exactly these providers; one-row pages exercise their continuation order.
+    for _ in 0..=ids.len() {
+        let page = resources::visible(
+            &mut conn,
+            &principal,
+            ResourceKind::Provider,
+            orch_authz::nodes::Page { after, limit: 1 },
+            Policy::default(),
+        )
+        .await
+        .unwrap();
+        for shown in page.items {
+            let site = sites
+                .iter()
+                .find(|site| site.id == shown.resource.id)
+                .expect("only fixture providers are listed");
+            assert_eq!(shown.participating, full.participates(site));
+            assert_eq!(shown.held, full.effective(site));
+            assert_eq!(shown.owner, full.owns(site));
+            assert_eq!(shown.administers, full.administers(site));
+            assert_eq!(shown.admin_only, full.admin_only(site));
+            assert_eq!(shown.admin_access, full.admin_access(site));
+            assert_eq!(shown.admin_place, full.admin_place(site));
+            listed.push(shown.resource.id);
+        }
+        if let Some(next) = page.next {
+            assert!(after.is_none_or(|previous| next > previous));
+            after = Some(next);
+        } else {
+            ended = true;
+            break;
+        }
+    }
+    assert!(ended, "the bounded resource list must exhaust");
+    assert_eq!(listed, expected.into_iter().collect::<Vec<_>>());
+    ids.iter()
+        .map(|id| {
+            among
+                .iter()
+                .find(|shown| shown.object.id == *id)
+                .unwrap()
+                .participating
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn resource_batches_keep_cross_home_participation_permissions_and_cursors() {
+    let w = World::new().await;
+    let other = orch_types::new_id();
+    {
+        let mut conn = w.conn().await;
+        orch_db::queries::hierarchy::testing::insert_node(
+            &mut conn, other, "org", None, "Other", w.boss,
+        )
+        .await
+        .unwrap();
+        insert_member(&mut conn, other, w.boss, other)
+            .await
+            .unwrap();
+    }
+    let mut ids = Vec::new();
+    for (home, name) in [(w.root, "First provider"), (other, "Other provider")] {
+        let mut conn = w.conn().await;
+        let id =
+            access_fixtures::insert_resource(&mut conn, "provider", Some(w.boss), Some(home), name)
+                .await
+                .unwrap();
+        add_entry(
+            &mut conn,
+            &PageKey::new("provider", id, "live"),
+            "any",
+            "access.own",
+            ("user", Some(w.boss), None),
+            None,
+            w.now.get(),
+        )
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    assert_eq!(
+        compare_batched_participation(&w, Caller::session(w.boss), &ids).await,
+        vec![true, true]
+    );
+    compare_batched_participation(&w, Caller::session(w.maker), &ids).await;
+    let reader = w.user("batchreader").await;
+    let group = w.group(w.root, "Batch readers", &[reader]).await;
+    let mut grants = Vec::new();
+    for id in &ids {
+        let mut conn = w.conn().await;
+        grants.push(
+            add_entry(
+                &mut conn,
+                &PageKey::new("provider", *id, "live"),
+                "any",
+                "provider.view",
+                ("group", Some(group), None),
+                Some(w.now.get() + Duration::days(1)),
+                w.now.get(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    assert_eq!(
+        compare_batched_participation(&w, Caller::session(reader), &ids).await,
+        vec![true, true]
+    );
+    for subtree in [w.root, other] {
+        compare_batched_participation(
+            &w,
+            Caller::token(reader, TokenGrant::new(Scopes::All, Some(subtree))),
+            &ids,
+        )
+        .await;
+    }
+    {
+        let mut conn = w.conn().await;
+        sqlx::query("UPDATE permission_entries SET expires_at=$2 WHERE id=ANY($1)")
+            .bind(&grants)
+            .bind(w.now.get())
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        compare_batched_participation(&w, Caller::session(reader), &ids).await,
+        vec![false, false]
+    );
+    let administrator = w.user("batchadmin").await;
+    {
+        let mut conn = w.conn().await;
+        make_system_admin(&mut conn, administrator).await.unwrap();
+    }
+    assert_eq!(
+        compare_batched_participation(
+            &w,
+            Caller::session(administrator).with_admin_mode(true),
+            &ids
+        )
+        .await,
+        vec![false, false]
+    );
 }

@@ -1,7 +1,7 @@
 /** Every screen of places, asked in both themes whether anything on it is a serious barrier: with what opens above it open, for somebody who may do everything and for somebody who may only read. */
 import { expect, type Page, test } from '@playwright/test';
 
-import { ACME, expectAccessibleInBothThemes, PEOPLE, scenario, signIn } from '../e2e/support.ts';
+import { ACME, expectAccessibleInBothThemes, PEOPLE, scenario, signIn, mainArea } from '../e2e/support.ts';
 
 test.beforeEach(async () => {
   await scenario();
@@ -15,7 +15,7 @@ async function open(page: Page, path: string, person: { login: string; password:
 test('an org’s home: its overview, its members with their invitations, and its Activity', async ({ page }) => {
   await open(page, '/org/acme');
   await expect(page.getByRole('heading', { name: 'Acme' })).toBeVisible();
-  await expect(page.getByTestId('main').getByRole('heading', { name: 'Projects' })).toBeVisible();
+  await expect(mainArea(page).getByRole('heading', { name: 'Projects' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('tab', { name: /Members/ }).click();
@@ -59,18 +59,18 @@ test('a project as a list, as a board and as Activity, and its filters open', as
   await expect(page.getByRole('table', { name: 'Topics' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await page.getByRole('button', { name: 'Tags' }).click();
+  await page.getByRole('button', { name: 'Tags', exact: true }).click();
   await expect(page.getByRole('checkbox', { name: 'bug' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
-  await page.getByRole('combobox', { name: 'Attention' }).click();
-  await expect(page.getByRole('option', { name: 'Blocked' })).toBeVisible();
-  await expectAccessibleInBothThemes(page, '[role="listbox"]');
+  await page.getByRole('button', { name: /^Needs attention: / }).click();
+  await expect(page.getByRole('menuitemradio', { name: 'Blocked' })).toBeVisible();
+  await expectAccessibleInBothThemes(page, '[role="menu"]');
   await page.keyboard.press('Escape');
 
   await page.getByRole('radio', { name: 'Board' }).click();
-  await expect(page.getByRole('region', { name: /Needs attention/ })).toBeVisible();
+  await expect(page.getByRole('region', { name: /^Waiting for approval/ })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.getByRole('radio', { name: 'Activity' }).click();
@@ -84,12 +84,16 @@ test('a topic’s tabs, one after the other', async ({ page }) => {
   await expectAccessibleInBothThemes(page);
 
   // The tabs of the topic, not the ones of the right bar that have names of their own.
-  const tabs = page.getByTestId('main');
-  for (const tab of ['Threads', 'Environments', 'Documents', 'Activity', 'Settings']) {
+  const tabs = mainArea(page);
+  for (const tab of ['Threads', 'Environments', 'Documents', 'Activity']) {
     await tabs.getByRole('tab', { name: new RegExp(`^${tab}`) }).click();
     await expect(tabs.getByRole('tab', { name: new RegExp(`^${tab}`) })).toHaveAttribute('aria-selected', 'true');
     await expectAccessibleInBothThemes(page);
   }
+  // Settings opens the topic's own settings screen, in the place of its tabs.
+  await tabs.getByRole('tab', { name: /^Settings/ }).click();
+  await expect(page.getByRole('tab', { name: 'General · Fix login' })).toHaveAttribute('aria-selected', 'true');
+  await expectAccessibleInBothThemes(page);
 });
 
 test('the dialogs that make and change places, open', async ({ page }) => {
@@ -152,7 +156,8 @@ test('the left bar with a menu open, starred places, the menu of its org and of 
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
 
-  await page.getByRole('navigation', { name: 'Navigation' }).getByRole('button', { name: /^Actions for Acme(?: · .+)?$/ }).click();
+  // The org's acts are in the menu of Navigation's own title row.
+  await page.getByRole('region', { name: 'Left bar' }).getByRole('button', { name: 'Navigation actions', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'New project…' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');
@@ -172,7 +177,7 @@ test('the places on a small screen, and in Chinese at the compact density', asyn
   await expect(page.getByRole('table', { name: 'Topics' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.goto(`/project/${ACME.web}?view=board`);
-  await expect(page.getByRole('region', { name: /Needs attention/ })).toBeVisible();
+  await expect(page.getByRole('region', { name: /^Waiting for approval/ })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
   await expect(page.getByRole('heading', { name: 'Fix login' })).toBeVisible();
@@ -186,11 +191,13 @@ test('the places on a small screen, and in Chinese at the compact density', asyn
   await page.getByRole('option', { name: '简体中文' }).click();
   await expect(page.locator('html')).toHaveAttribute('data-density', 'compact');
   await page.goto('/org/acme');
-  await expect(page.getByTestId('main').getByRole('heading', { name: '项目' })).toBeVisible();
+  await expect(mainArea(page).getByRole('heading', { name: '项目' })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.goto(`/project/${ACME.web}?view=board`);
-  await expect(page.getByTestId('main').getByRole('heading', { name: '需要关注' })).toBeVisible();
+  // Attention is a filter now; board columns name their actual states.
+  await expect(mainArea(page).getByRole('button', { name: '需要关注: 全部', exact: true })).toBeVisible();
+  await expect(mainArea(page).getByRole('region', { name: /^等待审批/ })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
   await expect(page.getByRole('heading', { name: 'Fix login' })).toBeVisible();

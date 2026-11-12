@@ -18,9 +18,12 @@ import { queryClient } from '@/api/query';
 import { KeyList } from '@/features/help/KeyList';
 import { useHelpOpener } from '@/features/help/open';
 import { useHelpState } from '@/features/help/state';
+import { openAsk } from '@/features/ask/open';
 import { findGroup, findTab } from '@/features/workbench/layout';
 import { useShape } from '@/features/workbench/Narrow';
 import { useWorkbench } from '@/features/workbench/store';
+import { contentTarget } from '@/features/workbench/contentAddress';
+import { openThreadChanges } from '@/features/inspector/reviewTarget';
 import { isClosable } from '@/features/workbench/Tabs';
 import type { Org } from '@/generated/api-types';
 import { bindAction, onKeyListRequested } from '@/shell/keys';
@@ -75,6 +78,15 @@ export function Shortcuts({ listOpen, onListOpenChange }: ShortcutsProps) {
       bindWork('left-bar', () => workbench().revealBar('left', beside)),
       bindWork('right-bar', () => workbench().revealBar('right', beside)),
       bindWork('bottom', () => workbench().toggle('bottom', beside)),
+      bindWork('thread-changes', () => {
+        const state = workbench();
+        const tab = state.activeContent === null ? undefined : findTab(state.layout, state.activeContent)?.tab;
+        const target = tab === undefined ? null : contentTarget(tab);
+        const threadId = target?.kind === 'thread' ? target.id : target?.workspace?.threadId;
+        if (threadId === undefined || threadId === null) return false;
+        openThreadChanges(threadId);
+        return true;
+      }),
       bindAction('next-area', () => focusArea(1)),
       bindAction('previous-area', () => focusArea(-1)),
       ...TAB_ACTIONS.map((id, index) =>
@@ -106,6 +118,7 @@ export function Shortcuts({ listOpen, onListOpenChange }: ShortcutsProps) {
         'help',
         () => { openHelp(); return true; },
       ),
+      bindWork('ask', () => { openAsk(); return true; }),
       bindAction('inbox', () => void navigate({ to: '/inbox' })),
       bindAction('approvals', () => void navigate({ to: '/approvals' })),
       bindAction(

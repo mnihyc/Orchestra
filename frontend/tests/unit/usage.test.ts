@@ -4,14 +4,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { CapStatus, UsageAnalytics, UsageCap, UsageFigures, UsageKey } from '@/generated/api-types';
 import { amountText, check, draftOf, emptyDraft, inputOf, isChange, modelPattern, splitOf, subjectOf, updateOf } from '@/features/usage/capForm';
-import { changeOf, creditsState, formatCredits, formatMeasure, tokenParts } from '@/features/usage/figures';
+import { changeOf, creditsState, formatCredits, formatMeasure, isEmpty, tokenParts } from '@/features/usage/figures';
 import { filterValue, isRest, keyDetail, keyId, keyLabel } from '@/features/usage/keys';
 import { assignSlots, barsOf, REST_SLOT } from '@/features/usage/series';
+import {serviceUnitsWords,serviceQuoteWords} from '@/features/usage/services';
 import {
   bucketAsked,
   bucketsFor,
   defaultBucket,
   figuresParams,
+  filterOf,
   filtersOf,
   offersThreads,
   parseScope,
@@ -390,9 +392,9 @@ describe('a cap in words', () => {
   it('names whom a cap covers in each of the ways', () => {
     expect(capTitle(cap({ split: 'each' }), t)).toContain('Each person');
     expect(capTitle(cap({ subject: { kind: 'role', role: 'developer' }, split: 'each' }), t)).toContain('Each Developer');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, org North together');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } }, split: 'each' }), t)).toContain('Each member of Operators, org North');
-    expect(capTitle(cap({ subject: { kind: 'group', group: { id: ID, name: 'Operators', place: null, description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, a place you cannot see together');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, org North together');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: 'org North', description: '', member_count: 2, org_id: ID } }, split: 'each' }), t)).toContain('Each member of Operators, org North');
+    expect(capTitle(cap({ subject: { kind: 'group', group: { revision: 1, id: ID, name: 'Operators', place: null, description: '', member_count: 2, org_id: ID } } }), t)).toContain('Operators, a place you cannot see together');
     const person=cap({ subject: { kind: 'user', user: { id: ID, kind: 'human', username: 'bo', display_name: 'Bo', address:'acme.bo', avatar: { text: 'B', color: 1 } } } });
     expect(capTitle(person,t)).toContain('Bo on');expect(capTitle(person,t)).not.toContain('acme.bo');
   });
@@ -556,4 +558,51 @@ describe('the tightest cap of a thread', () => {
     expect(tightestPercent([status(null, '900')])).toBeNull();
     expect(tightestPercent([status('1000', '1500')])).toBe(150);
   });
+});
+
+
+describe('service and purpose cap choices',()=>{
+  it('uses the same create/update contract and clears only changed lists',()=>{
+    const draft=emptyDraft({meter:'credits',amount:'50',period:'week',who:'each',services:['@lookup'],purposes:['summary']});
+    const input=inputOf(draft,{nodeId:ID});
+    expect(input).toMatchObject({node_id:ID,meter:'credits',amount:'50',period:'week',split:'each',services:['@lookup'],purposes:['summary']});
+    const stored=cap({meter:'credits',amount:'50',period:'week',split:'each',services:['@lookup'],purposes:['summary']});
+    expect(draftOf(stored)).toMatchObject({services:['@lookup'],purposes:['summary']});
+    const unchanged=updateOf(draftOf(stored),stored);expect(unchanged).toEqual({expected_revision:stored.revision});
+    expect(updateOf({...draftOf(stored),services:[],purposes:[]},stored)).toEqual({expected_revision:stored.revision,services:[],purposes:[]});
+  });
+  it('keeps ordinary request fields absent and names service-only scope accurately',()=>{
+    const input=inputOf(emptyDraft({amount:'100'}),{nodeId:ID});expect(input).not.toHaveProperty('services');expect(input).not.toHaveProperty('purposes');
+    const scoped=cap({meter:'credits',services:['@lookup'],purposes:['summary']});
+    expect(capTitle(scoped,t)).toContain('lookup');expect(capTitle(scoped,t)).toContain('Summaries');expect(capTitle(scoped,t)).not.toContain('all models');
+    expect(capTitle(cap(),t)).toBe('Everyone together on all models in project Web');
+  });
+});
+
+
+describe('purpose and service usage facts',()=>{
+  it('keeps offering kind in identity and clicks only its correct filter',()=>{
+    const model:UsageKey={offering:{kind:'model',name:'same-name'}};const service:UsageKey={offering:{kind:'service',name:'same-name'}};
+    expect(isRest(model)).toBe(false);expect(isRest(service)).toBe(false);expect(keyId('offering',model)).not.toBe(keyId('offering',service));
+    expect(filterOf('offering',model)).toBe('model');expect(filterOf('offering',service)).toBe('service');expect(filterValue('offering',service)).toBe('same-name');
+    expect(isRest({purpose:'summary'})).toBe(false);expect(keyLabel('purpose',{purpose:'summary'},t)).toBe('Summaries');
+    const changed=patchSearch({scope:`node:${ID}`,model:'same-name'},{service:'same-name',purpose:'web_search',by:'offering'});
+    expect(changed).not.toHaveProperty('model');expect(filtersOf(changed)).toMatchObject({service:'same-name',purpose:'web_search'});expect(changed.scope).toBe(`node:${ID}`);
+  });
+  it('never converts an unknown native quantity or price into measured zero or an empty span',()=>{
+    const units={image:{quantity:2,known_requests:1,unknown_requests:1}};
+    expect(serviceUnitsWords(units,t,'en')).toBe('2 images · 1 unreported');
+    expect(serviceUnitsWords({image:{quantity:0,known_requests:0,unknown_requests:1}},t,'en')).toBe('– images · 1 unreported');
+    expect(serviceUnitsWords({image:{quantity:0,known_requests:1,unknown_requests:0}},t,'en')).toBe('0 images');
+    const used=figures(0,0,'0',{service_units:units,unrated_services:1});expect(isEmpty(used)).toBe(false);expect(creditsState(used).none).toBe(true);
+    expect(serviceQuoteWords({offering:'opaque-service',unit:'image',quantity:{state:'empty'},price:{amount:'0.00075',currency:'USD',unit:'image'}},t)).toContain('0.00075 USD');
+  });
+});
+
+
+it('keeps all-unpriced service chart keys and their credit gaps without treating them as rest or zero',()=>{
+  const totals=figures(0,0,'0',{service_units:{image:{quantity:0,known_requests:0,unknown_requests:1}},unrated_services:1});
+  const analytics:UsageAnalytics={...answer(),totals,series:[{at:'2026-10-01T00:00:00Z',figures:totals,by:[{key:{offering:{kind:'service',name:'studio-images'}},figures:totals}]}]};
+  const [stack]=barsOf(analytics,'credits','offering',t).stacks;
+  expect(stack?.label).toBe('studio-images');expect(stack?.rest).toBe(false);expect(stack?.unrated).toEqual([true]);expect(stack?.allUnrated).toBe(true);
 });

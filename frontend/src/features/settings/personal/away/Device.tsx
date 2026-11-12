@@ -44,9 +44,9 @@ export function DeviceReadiness({ channelId }: { channelId: string }) {
     setBusy(id); setError(null); setErrorAct(null);
     try {
       await act();
-      // Removing this device unsubscribes the browser after the server act;
-      // its local subscription is read again, apart from the server views.
-      if (id === 'remove') await client.invalidateQueries({ queryKey: hereKey });
+      // Registration and removal change the browser's own subscription too;
+      // inspect it again independently of the native device roster.
+      if (id === 'enable' || id === 'remove') await client.invalidateQueries({ queryKey: hereKey });
     } catch (failure) { setError(failure); setErrorAct(id); } finally { setBusy(null); }
   };
   const guide = state === 'insecure' || state === 'unavailable' || state === 'blocked' ? GUIDES[state] : null;

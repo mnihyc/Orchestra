@@ -124,7 +124,7 @@ it.each(['en', 'zh-CN'] as const)('keeps one question inside a picker and every 
   await setLocale(locale);
   const term = i18n.t('helpGroups.modelAndEffort');
   const view = show(<><ArticleGuideLink article="resources" heading="providers-and-models" title="Underlying guide" />
-    <section role="dialog" aria-label="Model picker example">
+    <section className="floating-layer" role="dialog" aria-label="Model picker example">
       <SettingHelpGroup settingKeys={['agent.model', 'agent.effort', 'agent.params', 'agent.params']} target={target} term={term} article="resources" heading="providers-and-models" />
       <Hint id="provider-kind" />
     </section></>);

@@ -37,6 +37,7 @@ import { Page } from '@/shell/Page';
 import { useScreenHeading } from '@/shell/screen';
 import { Avatar } from '@/ui/Avatar';
 import { ErrorState } from '@/ui/ErrorState';
+import { StateLine } from '@/ui/StateLine';
 import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
 
 /** The sections of an org's settings, in the order a person looks for them. */
@@ -67,7 +68,7 @@ function SectionBody({ org, section }: { org: Org; section: OrgSection }) {
       return <Groups org={org} />;
     case 'roles':
       return <RolesAndDefaults org={org} />;
-    case 'policies':
+    case 'defaults':
       return <Policies org={org} />;
     case 'tags':
       return <Tags node={org} />;
@@ -97,9 +98,10 @@ export function OrgSettings({ slug, section }: OrgSettingsProps) {
   const data = useRetainedOrg(JSON.stringify([userId, slug]), org, query.isPending);
   const readable = org;
   const sections=data===undefined ? ORG_SECTIONS : sectionsOf(data);
-  const current:OrgSection=section==='destinations' ? 'channels' : isOrgSection(section)&&sections.includes(section) ? section : 'general';
+  const wanted = section === 'destinations' ? 'channels' : section;
+  const current = isOrgSection(wanted) && sections.includes(wanted) ? wanted : null;
 
-  const tabTitle = useSettingsTabTitle(sectionLabel(current, t), readable);
+  const tabTitle = useSettingsTabTitle(sectionLabel(current ?? '', t), readable);
 
   // The root org of what is in view is the one whose navigation the left bar shows.
   useEffect(() => {
@@ -116,7 +118,7 @@ export function OrgSettings({ slug, section }: OrgSettingsProps) {
   const failure = query.isError ? <ErrorState className="h-full" error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} /> : null;
   if (data === undefined) return failure ?? pending;
   const own = data.org_kind === 'personal';
-  const navigation = placeSettingsSections({ kind: 'org', address: data.address, current }, t, data.flat);
+  const navigation = placeSettingsSections({ kind: 'org', address: data.address, current: current ?? '' }, t, data.flat);
   return (
     <>
     {query.isPending && pending}
@@ -124,10 +126,10 @@ export function OrgSettings({ slug, section }: OrgSettingsProps) {
     <SettingsFrame
         adminAccess={data.access.admin_access} private={data.page === 'restricted'} opening={{ kind: data.kind, id: data.id }}
         mark={<Avatar text={orgInitial(data)} color={orgColor(data)} kind={own ? 'human' : 'org'} size={40} />}
-        title={sectionLabel(current,t)}
-        label={t('settings.org.sections', { name: data.name })} current={current}
+        title={sectionLabel(current ?? '',t)}
+        label={t('settings.org.sections', { name: data.name })} current={current ?? ''}
         items={navigation}>
-            <SectionBody key={`${data.id}-${current}`} org={data} section={current} />
+            <>{current === null ? <StateLine message={t('settings.chooseSection')} /> : <SectionBody key={`${data.id}-${current}`} org={data} section={current} />}</>
     </SettingsFrame>
     </Activity>
     </>

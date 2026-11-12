@@ -18,6 +18,7 @@ use crate::tools::documents;
 use crate::tools::shared::{Resolved, Target, audit_by_agent};
 use crate::tools::{Answer, CallContext};
 use crate::written::{self, Detail};
+use futures::future::BoxFuture;
 use orch_access_contract::audit::AuditAction;
 use orch_api_contract::share::{SharedEntryKind, SharedEntryUnit};
 use orch_db::queries::documents::{self as document_rows, history};
@@ -323,59 +324,61 @@ impl Engine {
     }
 
     /// `read_shared`: the call of an agent.
-    pub(crate) async fn read_shared_call(
-        &self,
-        call: &CallContext,
-        thread: &ThreadRow,
-    ) -> Result<Answer, EngineError> {
-        let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
-            Ok(arguments) => arguments,
-            Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
-        };
-        let detail = match arguments.detail.as_deref() {
-            None => Detail::Normal,
-            Some(word) => match Detail::parse(word) {
-                Some(detail) => detail,
-                None => {
-                    return Ok(Refusal::invalid("\"detail\" is brief, normal or full.").into());
-                }
-            },
-        };
-        let max_bytes = arguments.max_bytes.unwrap_or(READ_BYTES_DEFAULT);
-        if !(READ_BYTES_MIN..=READ_BYTES_MAX).contains(&max_bytes) {
-            return Ok(Refusal::invalid(format!(
-                "\"max_bytes\" is from {READ_BYTES_MIN} to {READ_BYTES_MAX}."
-            ))
-            .into());
-        }
-        let budget = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-        let mut conn = self.inner.db.acquire().await?;
-        let resolved = match self
-            .resolve(&mut conn, thread.node_id, &arguments.path, true)
-            .await?
-        {
-            Ok(resolved) => resolved,
-            Err(refusal) => return Ok(refusal.into()),
-        };
-        let got = match self
-            .read_target(
-                &mut conn,
-                &resolved,
-                (arguments.from, arguments.to),
+    pub(crate) fn read_shared_call<'a>(
+        &'a self,
+        call: &'a CallContext,
+        thread: &'a ThreadRow,
+    ) -> BoxFuture<'a, Result<Answer, EngineError>> {
+        Box::pin(async move {
+            let arguments: Arguments = match serde_json::from_value(call.arguments.clone()) {
+                Ok(arguments) => arguments,
+                Err(error) => return Ok(Refusal::invalid(error.to_string()).into()),
+            };
+            let detail = match arguments.detail.as_deref() {
+                None => Detail::Normal,
+                Some(word) => match Detail::parse(word) {
+                    Some(detail) => detail,
+                    None => {
+                        return Ok(Refusal::invalid("\"detail\" is brief, normal or full.").into());
+                    }
+                },
+            };
+            let max_bytes = arguments.max_bytes.unwrap_or(READ_BYTES_DEFAULT);
+            if !(READ_BYTES_MIN..=READ_BYTES_MAX).contains(&max_bytes) {
+                return Ok(Refusal::invalid(format!(
+                    "\"max_bytes\" is from {READ_BYTES_MIN} to {READ_BYTES_MAX}."
+                ))
+                .into());
+            }
+            let budget = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+            let mut conn = self.inner.db.acquire().await?;
+            let resolved = match self
+                .resolve(&mut conn, thread.node_id, &arguments.path, true)
+                .await?
+            {
+                Ok(resolved) => resolved,
+                Err(refusal) => return Ok(refusal.into()),
+            };
+            let got = match self
+                .read_target(
+                    &mut conn,
+                    &resolved,
+                    (arguments.from, arguments.to),
+                    detail,
+                    Some(budget),
+                )
+                .await?
+            {
+                Ok(got) => got,
+                Err(refusal) => return Ok(refusal.into()),
+            };
+            self.audit_read(&mut conn, &resolved, &got).await?;
+            Ok(Answer::Done(resolved.annotate(answer_json(
+                &resolved.path,
                 detail,
-                Some(budget),
-            )
-            .await?
-        {
-            Ok(got) => got,
-            Err(refusal) => return Ok(refusal.into()),
-        };
-        self.audit_read(&mut conn, &resolved, &got).await?;
-        Ok(Answer::Done(resolved.annotate(answer_json(
-            &resolved.path,
-            detail,
-            &got,
-        ))))
+                &got,
+            ))))
+        })
     }
 
     /// Writes down that an agent read something.

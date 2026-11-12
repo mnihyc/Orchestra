@@ -1,0 +1,4 @@
+# Where on a Use entry and the type's default: the whole workspace's lint, the format check and the generated contracts.
+fmt
+contracts
+clippy

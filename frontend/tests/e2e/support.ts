@@ -1,7 +1,7 @@
 /** What the end-to-end tests share: putting the fake API into a scenario, signing in as one of its people, and asking the page whether it is accessible. */
 import type { Turn } from '../../src/generated/api-types';
 import AxeBuilder from '@axe-core/playwright';
-import { expect, type Page, type Request, type Response, test } from '@playwright/test';
+import { expect, type Locator, type Page, type Request, type Response, test } from '@playwright/test';
 
 import { ACME } from '../doubles/fixtures.ts';
 import type { SceneName } from '../doubles/thread-scenes.ts';
@@ -11,7 +11,7 @@ import { expectUniqueGuideEntries } from '../accessibility/guide-entries.ts';
 import { expectOneScrollerPerArea } from '../accessibility/scrolling.ts';
 import { expectOneCurrentSection } from '../accessibility/navigation.ts';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
+export const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
 /** The people of the fake API's team, with what each proves who they are by. */
 export const PEOPLE = {
@@ -27,6 +27,16 @@ export const PEOPLE = {
 } as const;
 
 export { ACME };
+
+/**
+ * The main area of the screen, named one way at every width: the workbench's own main, whether a desktop's panel or a phone's
+ * landmark (the panel's test id is the desktop's alone), and not the reading overlay that covers it while Help is open.
+ * It answers whatever the accessibility tree says of it, so a case that looks into the main area while a dialog holds the rest
+ * of the page out of that tree still finds it; a case about the landmark as a person's tools see it asks for the role itself.
+ */
+export function mainArea(page: Page): Locator {
+  return page.locator('[data-main-area]:not([data-help-reading])');
+}
 
 async function control(path: string, body: unknown = {}): Promise<unknown> {
   const response = await fetch(`${DOUBLE}/__double${path}`, {
@@ -50,14 +60,101 @@ export async function bodySent(request: Request): Promise<unknown> {
   return write.body;
 }
 
+/** A response whose body was asked for when it arrived. */
+export interface Arrived {
+  /** The response itself, for what takes one (`replySent`). */
+  response: Response;
+  status(): number;
+  ok(): boolean;
+  url(): string;
+  request(): Request;
+  headers(): Record<string, string>;
+  body(): Promise<Buffer>;
+  text(): Promise<string>;
+  /** As `Response.json()`: untyped, for the case to say what it expects. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  json(): Promise<any>;
+}
+
+/**
+ * The response to a request, with its body asked for the moment it arrives.
+ *
+ * Every case that reads what the server answered takes it through this one function, or from the fake API's own
+ * record of it (`replySent`). Chromium keeps a response's body only for a while and only while its page stands:
+ * a body that is asked for after the page has moved on, or on a busy runner some steps later, is gone ("No data found
+ * for resource with given identifier"). The cases that read `response.json()` after other steps failed that way,
+ * one at a time, on CI. Start it before the act that makes the request: `const reply = arrived(page.waitForResponse(...))`,
+ * then do the act, then `(await reply).json()`. The read is begun, not awaited, so a response that never ends (a stream)
+ * does not hold the case, and a case that never reads its body costs nothing.
+ */
+export function arrived(response: Promise<Response>): Promise<Arrived> {
+  return response.then((reply) => {
+    // Even asked for as it arrives, Chromium sometimes has no body to give (a body the page itself consumed as a stream); the
+    // fake API's own record of the answer then stands in for it, as `replySent` gives it.
+    const body = reply.body().catch(async (error: unknown) => {
+      const kept = await recordedReply(reply);
+      if (kept === undefined) throw error;
+      return Buffer.from(JSON.stringify(kept.body));
+    });
+    // Nobody may be waiting for it: a refused read must not end the run as an unhandled rejection.
+    body.catch(() => undefined);
+    const text = body.then((bytes) => bytes.toString('utf8'));
+    text.catch(() => undefined);
+    return {
+      response: reply,
+      status: () => reply.status(),
+      ok: () => reply.ok(),
+      url: () => reply.url(),
+      request: () => reply.request(),
+      headers: () => reply.headers(),
+      body: () => body,
+      text: () => text,
+      json: async () => JSON.parse(await text) as unknown,
+    };
+  });
+}
+
+/** Does `act`, and gives back the answer to the request that `matches`, its body asked for as it arrived. */
+export async function replyTo(page: Page, matches: (response: Response) => boolean, act: () => Promise<unknown>): Promise<Arrived> {
+  const reply = arrived(page.waitForResponse(matches));
+  // The wait is already begun; if the act fails first, its own error is the one to show.
+  reply.catch(() => undefined);
+  await act();
+  return reply;
+}
+
 /** The server's exact JSON answer remains readable after the page follows its registration outcome. */
 export async function replySent(response: Response): Promise<unknown> {
   const id = response.headers()['x-request-id'];
   if (id === undefined) throw new Error(`The fake server did not identify ${response.url()}`);
-  const received = (await control('/requests')) as { id: string; reply?: { status: number; body: unknown } }[];
-  const reply = received.find((entry) => entry.id === id)?.reply;
+  const reply = await recordedReply(response);
   if (reply?.status !== response.status()) throw new Error(`No matching JSON answer to ${response.url()}`);
   return reply.body;
+}
+
+/** What the fake API kept of its answer to this response's request, if it identified the answer. */
+async function recordedReply(response: Response): Promise<{ status: number; body: unknown } | undefined> {
+  const id = response.headers()['x-request-id'];
+  if (id === undefined) return undefined;
+  const received = (await control('/requests')) as { id: string; reply?: { status: number; body: unknown } }[];
+  const reply = received.find((entry) => entry.id === id)?.reply ?? ((await control('/reply', { id })) as { status: number; body: unknown } | null) ?? undefined;
+  return reply?.status === response.status() ? reply : undefined;
+}
+
+/** The Defaults editor reads a place's registry and values through the place's joined opening, and reads them separately
+ * only when that opening omits them. A case that supplies its own registry or values gives them here as well as to the
+ * separate readers; each supplier is called once for every opening that is read. */
+export async function supplyDefaults(page: Page, nodeId: string, supply: { registry?: () => unknown[]; settings?: () => unknown[] }): Promise<void> {
+  await page.route(`**/api/v1/nodes/${nodeId}/chat-opening?*`, async (route) => {
+    const response = await route.fetch(); const body: unknown = await response.json();
+    const defaults = typeof body === 'object' && body !== null && 'defaults' in body ? body.defaults : null;
+    if (typeof defaults === 'object' && defaults !== null) {
+      const opened = defaults as Record<string, unknown>;
+      if (supply.registry !== undefined) Object.assign(opened, { registry: supply.registry(), registry_problem: null, registry_retry_after: null });
+      if (supply.settings !== undefined) Object.assign(opened, { settings: supply.settings(), settings_problem: null, settings_retry_after: null });
+    }
+    await route.fulfill({ response, json: body });
+  });
 }
 
 /** Puts the fake API into a scenario: a team at work unless something else is asked for. */
@@ -185,15 +282,23 @@ const AUDIT_ALLOWANCE_MS = 20_000;
  * page off for a screen reader is asked on its own, with the selector `within`: the page behind it is
  * hidden by design, and what it holds that can take the keyboard is held away from it by the list.
  */
-export async function expectAccessible(page: Page, theme: 'light' | 'dark' = 'light', within?: string): Promise<void> {
+/** The dialog in front, which shuts the page behind it off: what it covers is hidden from a screen reader and inert. */
+const OPEN_PROMPT = '[data-prompt-current="true"]';
+
+export async function expectAccessible(page: Page, theme: 'light' | 'dark' = 'light', asked?: string): Promise<void> {
   test.info().setTimeout(test.info().timeout + AUDIT_ALLOWANCE_MS);
   await page.emulateMedia({ colorScheme: theme });
   // The theme follows the system on a page that was told nothing else; let it be drawn.
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+  // With a dialog open only the dialog is asked. The page behind is shut off, though the reader keeps its live regions
+  // announced, which leaves their ancestors seeming reachable while everything else in them is inert.
+  const within = asked ?? (await page.locator(OPEN_PROMPT).count() > 0 ? OPEN_PROMPT : undefined);
   await expectUniqueGuideEntries(page, within);
   await expectOneScrollerPerArea(page, within);
   await expectOneCurrentSection(page, within);
-  const audit = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']);
+  // What an open dialog covers is hidden from a screen reader (marked by the dialog) and inert: nobody can reach or read it,
+  // so it is no barrier and is not asked.
+  const audit = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).exclude('[inert]').exclude('[data-aria-hidden="true"]');
   const results = await (within === undefined ? audit : audit.include(within)).analyze();
   const grave = results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical');
   expect(

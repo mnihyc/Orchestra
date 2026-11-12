@@ -42,6 +42,16 @@ use serde_json::json;
 
 use super::{PATIENCE, Rig};
 
+/// Explicit synthetic provider authority for tests of ordinary and faster structured requests.
+pub fn enabled_parameters() -> orch_provider_contract::models::ModelParameters {
+    serde_json::from_value(
+        json!({"efforts":["low","medium","high"],"service_tiers":[{"id":"priority","label":"Fast"},
+        {"id":"fast","label":"Fast"},{"id":"ultrafast","label":"Ultrafast"}],
+        "access_programs":["daybreak_blue","daybreak_red"]}),
+    )
+    .unwrap()
+}
+
 /// The name of the Responses format.
 pub const RESPONSES: &str = "openai-responses";
 /// The name of the Chat Completions format.
@@ -355,6 +365,53 @@ pub struct ProviderRig {
 }
 
 impl ProviderRig {
+    /// Safe native-turn evidence, without request bodies, headers, credentials or raw frames.
+    pub fn turn_diagnostics(&self) -> Json {
+        let terminal: Vec<_> = self
+            .rig
+            .applied(self.thread, self.segment)
+            .into_iter()
+            .filter(|event| event.kind == "turn.completed")
+            .map(|event| json!({"status":event.body["status"],"error":event.body["error"]}))
+            .collect();
+        let requests: Vec<_> = self
+            .model_requests()
+            .into_iter()
+            .map(|request| {
+                json!({"method":request.method,"path":request.path,"status":request.status,
+                    "outcome":request.outcome,"format":request.format,"stream":request.stream,
+                    "script":request.script,"round":request.round,"credential":request.credential.verdict})
+            })
+            .collect();
+        json!({"terminal":terminal,"requests":requests,
+            "events":self.rig.kinds(self.thread,self.segment)})
+    }
+
+    /// An expected native event must arrive before the turn ends, within the existing patience.
+    pub async fn wait_for_turn_event(&self, kind: &str, count: usize) {
+        let stream = Rig::stream_of(self.thread, self.segment);
+        let arrived = self
+            .rig
+            .controller
+            .wait_until(self.rig.patience, |controller| {
+                let events = controller.applied(&stream);
+                events.iter().filter(|event| event.kind == kind).count() >= count
+                    || events.iter().any(|event| event.kind == "turn.completed")
+            })
+            .await;
+        let observed = self
+            .rig
+            .applied(self.thread, self.segment)
+            .iter()
+            .filter(|event| event.kind == kind)
+            .count();
+        assert!(
+            arrived && observed >= count,
+            "no {count}th {kind}; native turn evidence: {}",
+            self.turn_diagnostics()
+        );
+    }
+
     /// A rig whose connector is started. The model server listens on a port the system chose.
     pub async fn new() -> Self {
         Self::with(|_, _| ()).await
@@ -579,6 +636,18 @@ impl ProviderRig {
             "lease_id": lease, "provider_id": self.rig.provider, "thread_id": thread,
             "mode": "forwarded", "allowed_models": models
         });
+        // The synthetic provider enables Fast for the accounting cases; offers alone never grant it.
+        body["model_parameters"] = Json::Object(
+            models
+                .iter()
+                .map(|model| {
+                    (
+                        (*model).to_owned(),
+                        json!({"service_tiers":[{"id":"priority","label":"Fast"}]}),
+                    )
+                })
+                .collect(),
+        );
         if let Some(protocol) = protocol {
             body["protocol"] = json!(protocol);
         }

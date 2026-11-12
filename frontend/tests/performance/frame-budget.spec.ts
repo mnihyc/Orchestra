@@ -1,7 +1,8 @@
 /** Shipping frame traffic and retained inventory data on a hard opening and an in-app return. */
 import { expect, test, type Request } from '@playwright/test';
 import { resourceFixtures } from '../../e2e/layout-fixtures.ts';
-import { scenario, signIn } from '../e2e/support.ts';
+import { INVENTORY_KINDS } from '../../src/features/resources/inventory.ts';
+import { scenario, signIn, arrived } from '../e2e/support.ts';
 
 const kinds = ['providers', 'agents', 'environments', 'hosts', 'templates', 'mcp', 'mounts', 'machines', 'skills'] as const;
 function record(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
@@ -33,8 +34,14 @@ for (const width of [1440, 400]) for (const kind of kinds) {
     let inventory: unknown = null;
     let coldComplete = false, warmComplete = false;
     try {
-      const own = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === '/api/v1/everything');
-      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/authority');
+      const own = arrived(page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return response.request().method() === 'GET' && url.pathname === '/api/v1/everything'
+          && url.searchParams.get('parent') === 'resources' && url.searchParams.get('kinds') === INVENTORY_KINDS[kind]
+          && url.searchParams.get('resource_details') === 'true';
+      }));
+      // The shell's one admission read carries the authority; the cold path reads /me/authority no more (below).
+      const checked = page.waitForResponse((response) => new URL(response.url()).pathname === '/api/v1/me/bootstrap');
       await page.goto(path);
       const response = await own;
       expect(response.status()).toBe(200);
@@ -56,7 +63,7 @@ for (const width of [1440, 400]) for (const kind of kinds) {
       coldComplete = true;
       await info.attach('frame-cold', { body: await page.screenshot(), contentType: 'image/png' });
       const documentTime = await page.evaluate(() => performance.timeOrigin);
-      await page.getByRole('button', { name: 'Your account', exact: true }).click();
+      await page.getByRole('button', { name: width === 400 ? 'Me' : 'Your account', exact: true }).click();
       await page.getByRole('menuitem', { name: 'Settings', exact: true }).click();
       await expect(page).toHaveURL(/\/settings\/profile(?:\?|$)/);
       await page.waitForLoadState('networkidle');
@@ -74,9 +81,9 @@ for (const width of [1440, 400]) for (const kind of kinds) {
       warmComplete = true;
       await info.attach('frame-warm', { body: await page.screenshot(), contentType: 'image/png' });
       expect(cold.length, cold.join('\n')).toBeLessThanOrEqual(8);
-      expect(cold.filter((read) => read === 'GET /api/v1/meta')).toHaveLength(1);
+      expect(cold.filter((read) => read === 'GET /api/v1/meta')).toHaveLength(0);
       expect(cold.filter((read) => read === 'GET /api/v1/me/bootstrap')).toHaveLength(1);
-      expect(cold.filter((read) => read === 'GET /api/v1/me/authority')).toHaveLength(1);
+      expect(cold.filter((read) => read === 'GET /api/v1/me/authority')).toHaveLength(0);
       expect(cold.filter((read) => /^GET \/api\/v1\/(?:me|me\/admin-mode|orgs)$/.test(read))).toEqual([]);
       expect(cold.filter((read) => /^GET \/api\/v1\/nodes\/[^/]+\/documents\?/.test(read))).toEqual([]);
       expect(cold.filter((read) => /^GET \/api\/v1\/nodes\/[^/]+\/settings$/.test(read))).toEqual([]);

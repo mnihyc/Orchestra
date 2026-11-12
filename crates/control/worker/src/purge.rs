@@ -84,6 +84,8 @@ pub struct Expired {
     pub deliveries: u64,
     /// Notifications of people's Inboxes past the days they are kept.
     pub inbox: u64,
+    /// Recent key-call metadata past its fixed seven-day lifetime.
+    pub key_activity: u64,
 }
 
 /// Removes what has run out, under the lock of the job. None where another
@@ -106,10 +108,27 @@ pub async fn expired(
         .max(config.auth.address_failure_window_secs);
     let throttle =
         identity::prune_throttle(&mut tx, now, spans::seconds(window), NOTICE_KEPT).await?;
-    let idempotency_keys = idempotency::purge(&mut tx, now - ttl_of_keys(config)).await?;
+    let window = orch_settings::get::<i64>(&mut tx, Place::System, keys::API_IDEMPOTENCY_WINDOW)
+        .await?
+        .ok_or_else(|| DbError::Rule {
+            constraint: "idempotency_window_missing".into(),
+        })?;
+    let modern_before = Duration::try_hours(window)
+        .and_then(|span| now.checked_sub_signed(span))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let legacy_before = now
+        .checked_sub_signed(ttl_of_keys(config))
+        .unwrap_or(DateTime::<Utc>::MIN_UTC);
+    let idempotency_keys = idempotency::purge(&mut tx, modern_before.min(legacy_before)).await?;
     let link_codes = routes::drop_expired_codes(&mut tx, now).await?;
     tx.commit().await.map_err(DbError::from)?;
     let (deliveries, inbox) = deliveries_and_inbox(db, now).await?;
+    // This metadata holds no authority. Purge it after the exclusive sign-in
+    // transaction, using the existing bounded upkeep batch and cadence.
+    let key_activity = {
+        let mut conn = db.acquire().await?;
+        orch_db::queries::key_activity::purge(&mut conn, now, ROWS_PER_RUN).await?
+    };
     Ok(Some(Expired {
         sign_in,
         throttle,
@@ -117,6 +136,7 @@ pub async fn expired(
         link_codes,
         deliveries,
         inbox,
+        key_activity,
     }))
 }
 
