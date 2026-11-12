@@ -1,14 +1,14 @@
 //! Redacted input activity and previous values.
 //!
-//! What a summarizer is shown is the node's current title and description, and the thread's main-stream items
-//! since the last summary: at most the latest `input_items`, without tool output, each cut to `input_chars`
-//! characters, after redaction. The engine redacts the stored text (`redaction.*`) before it is handed over,
-//! so a summarizer, built in or installed, never sees what the place masks. [`trim`] makes the list from the
-//! items, and [`ActivityItem`] is one of them.
+//! Source owners apply current native Read and redaction before handing over activity. Model summaries
+//! fill one context-token budget fairly and disclose included, shortened and omitted items. Tool calls
+//! contribute their titles, never their output. Generic non-model producers may use [`trim`] explicitly.
 
 use orch_types::Time;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+pub use orch_plugin_contract::refs::SummaryInputFacts;
 
 /// What kind of material an item is. Document text is distinct from messages, and a summarizer may weigh them differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

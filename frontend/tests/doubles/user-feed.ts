@@ -11,6 +11,7 @@ export interface Listening {
   subscriber: Subscriber;
   id: number;
   username: string;
+  person: Person;
   last: number;
 }
 
@@ -24,6 +25,8 @@ export class UserFeed implements Part {
   private listening: Listening[] = [];
   /** The Inbox the feed carries the rows of: put there by the world once it has both. */
   inbox: InboxView | null = null;
+  /** Capture native row baselines before an admitted connection can observe later writes. */
+  onJoin?: (listener: Listening) => void;
 
   /** An event for the person's own feed. */
   tell(username: string, data: Record<string, unknown>): void {
@@ -44,6 +47,13 @@ export class UserFeed implements Part {
     return this.listening.filter((feed) => feed.username === username);
   }
 
+  /** Retire this reader's old projection before a permission-filtered baseline is read again. */
+  invalidate(username: string): void {
+    const affected = this.listeners(username);
+    this.listening = this.listening.filter((feed) => feed.username !== username);
+    for (const feed of affected) feed.subscriber.send({ op: 'resync', id: feed.id, feed: 'user', reload: true });
+  }
+
   frame(subscriber: Subscriber, person: Person | undefined, frame: Record<string, unknown>): boolean {
     const id = Number(frame.id);
     if (frame.op === 'sub' && frame.feed === 'user') {
@@ -56,7 +66,8 @@ export class UserFeed implements Part {
       const since = typeof frame.since === 'number' ? frame.since : null;
       // A number from after what the Inbox holds means it was put back: the reader loads it anew.
       const reload = since !== null && since > seq;
-      const joined: Listening = { subscriber, id, username, last: reload ? seq : (since ?? seq) };
+      const joined: Listening = { subscriber, id, username, person, last: reload ? seq : (since ?? seq) };
+      this.onJoin?.(joined);
       this.listening.push(joined);
       subscriber.send({ op: 'subscribed', id, feed: 'user', seq, mode: reload ? 'reload' : 'delta' });
       if (!reload && since !== null && since < seq && this.inbox !== null) {

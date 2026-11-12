@@ -10,6 +10,7 @@ heading_keywords.previews-and-chip-sizes: 缩略图, 显示为, 小, 中, 大, �
 heading_keywords.open-and-download: 查看器, 图片, PDF, 音频, 视频, 代码, Markdown, 压缩包, 原文件, 减少动态效果
 heading_keywords.files-for-an-agent: 模型, 原生图片, 路径, 大小, 共享文档, download_shared
 heading_keywords.preview-states: 加载, 无法预览, 已不存在, 私密, 过大
+summary: 预览文件、选择附件显示方式，并查看代理实际收到的内容。
 ---
 
 # 文件和附件

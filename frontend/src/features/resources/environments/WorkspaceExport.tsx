@@ -1,7 +1,10 @@
 /** Workspace exports use the leased snapshot job's live result, then a single authenticated download. */
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { useRef, useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ADMIN_QUERY, queryAuthorityAllows } from '@/api/queryAuthority';
+import { libraryReader, sameLibraryReader } from '@/api/resourceLibrary';
+import { reachKeys, refreshReach } from '@/api/adminReach';
 import { downloadEnvironmentExport, exportEnvironmentFiles } from '@/api/environments';
 import { jobQuery } from '@/api/forks';
 import { JobProgress } from '@/features/change/Progress';
@@ -15,23 +18,27 @@ import { ErrorAlert } from '@/ui/ErrorState';
 import { useErrorText } from '@/ui/errorText';
 
 /** An Inbox result remains downloadable after the source environment is gone. */
-export function SnapshotDownloadButton({ id, name }: { id: string; name: string }) {
+export function SnapshotDownloadButton({ id, name, admin = false }: { id: string; name: string; admin?: boolean }) {
   const { t } = useTranslation();
-  const download = useMutation({ mutationFn: () => downloadEnvironmentExport(id), onSuccess: (blob) => saveFile(blob, `${name}.zip`) });
+  const cache = useQueryClient();
+  const download = useMutation({ mutationFn: (_asked: { reader: ReturnType<typeof libraryReader> }) => downloadEnvironmentExport(id), onSuccess: (blob, asked) => { if (sameLibraryReader(asked.reader) && (!admin || queryAuthorityAllows(cache, ADMIN_QUERY.meta))) saveFile(blob, `${name}.zip`); } });
   return <span className="inline-flex flex-col gap-1">
-    <Button size="sm" pending={download.isPending} onClick={() => download.mutate()}>{t('temporary.download')}</Button>
+    <Button size="sm" pending={download.isPending} onClick={() => download.mutate({ reader: libraryReader() })}>{t('temporary.download')}</Button>
     {download.error !== null && <ErrorAlert error={download.error} />}
   </span>;
 }
 
-function ExportProgress({ initial, name, retry }: { initial: Job; name: string; retry: () => void }) {
+function ExportProgress({ initial, name, environmentId, retry }: { initial: Job; name: string; environmentId: string; retry: () => void }) {
   const { t } = useTranslation();
   const failureText = useErrorText();
   const job = useQuery({ ...jobQuery(initial.id), initialData: initial });
   const row = job.data;
+  const cache = useQueryClient();
+  const [reader] = useState(libraryReader);
   const result = record(row.result);
   const snapshot = typeof result.snapshot_id === 'string' ? result.snapshot_id : null;
   const finished = row.state === 'succeeded' && snapshot !== null;
+  useEffect(() => { if (finished && sameLibraryReader(reader)) void refreshReach(cache, reachKeys.snapshots(environmentId)); }, [cache, environmentId, finished, reader]);
   const failed = row.state === 'failed' || row.state === 'cancelled' || row.state === 'succeeded' && snapshot === null;
   return <div className="flex flex-col items-start gap-3" aria-live="polite">
     {job.error !== null && <ErrorAlert error={job.error} />}
@@ -58,7 +65,7 @@ export function EnvironmentExportButton({ id, name }: { id: string; name: string
     <Button size="sm" pending={exportFiles.isPending} onClick={start}>{t('temporary.export')}</Button>
     {open && <Dialog open onOpenChange={setOpen} title={t('temporary.exportTitle')} footer={<Button onClick={() => setOpen(false)}>{t('common.close')}</Button>}>
       {exportFiles.error !== null ? <div className="flex flex-col items-start gap-3"><ErrorAlert error={exportFiles.error} /><Button size="sm" onClick={() => exportFiles.mutate()}>{t('temporary.retry')}</Button></div>
-        : exportFiles.data !== undefined ? <ExportProgress initial={exportFiles.data} name={name} retry={retry} />
+        : exportFiles.data !== undefined ? <ExportProgress initial={exportFiles.data} name={name} environmentId={id} retry={retry} />
         : <p role="status" className="text-sm text-text-muted">{t('temporary.exporting')}</p>}
     </Dialog>}
   </>;

@@ -41,7 +41,7 @@ export function SystemRates() {
     } else body = source === 'fetch' ? { fetch:true } : { shipped:true };
     return setCatalogue(body);
   },onSuccess:() => { setFile(null); } });
-  if (settings.isPending || table.isPending) return <SkeletonRows rows={4} />;
+  if (settings.isPending || table.isPending) return <SkeletonRows reads={[settings, table]} rows={4} />;
   if (settings.isError || table.isError) return <ErrorState error={settings.error ?? table.error} onRetry={() => { void settings.refetch(); void table.refetch(); }} />;
   return <div className="flex flex-col gap-6">
     <Section id="system-rate-card" title={t('usageAdmin.systemCard')} lead={t('usageAdmin.systemHelp')} action={<Button onClick={() => setOpened({ mode:'add',initial:emptyDraft(),replacing:null })}>{t('usage.rates.add')}</Button>}>

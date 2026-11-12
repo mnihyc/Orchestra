@@ -7,29 +7,50 @@ import { DOCS, openDocument } from './documents-support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
-for (const access of ['private', 'follows'] as const) test(`a compact copy label states ${access} access and sends that choice`, async ({ page }) => {
+for (const access of ['private', 'follows'] as const) test(`a native document copy retains ${access} access through current controls`, async ({ page }) => {
   await signIn(page);
   await openDocument(page, DOCS.plan);
-  await page.getByRole('button', { name: 'Actions for Rollout plan', exact: true }).click();
+  const sourcePath = new URL(page.url()).pathname;
+  const accepted = page.waitForResponse((response) => response.request().method() === 'POST'
+    && new URL(response.url()).pathname === '/api/v1/document-tree/operations');
+  await page.locator('[data-main-area]').getByRole('button', { name: 'Actions for Rollout plan', exact: true }).click();
+  // Duplicate is now the immediate native copy flow; the old preliminary access checkbox is gone.
   await page.getByRole('menuitem', { name: 'Duplicate', exact: true }).click();
-  const dialog = page.getByRole('dialog', { name: 'Start from another document' });
-  await expect(dialog).toHaveAccessibleDescription('Your copy keeps text and files, without comments, history or the original access.');
-  const follows = dialog.getByRole('checkbox', { name: 'Private copy off: destination access', exact: true });
-  await expect(follows).not.toBeChecked();
-  await expect(follows).not.toHaveAttribute('aria-describedby');
-  await follows.focus();
-  await page.keyboard.press('Space');
-  const privateCopy = dialog.getByRole('checkbox', { name: 'Private copy: only you', exact: true });
-  await expect(privateCopy).toBeChecked();
-  await expect(dialog.getByText('The new document belongs to you. Only you can read it until you share it.')).toHaveCount(0);
-  if (access === 'follows') await privateCopy.uncheck();
-  const accepted = page.waitForResponse((response) => response.request().method() === 'POST' && /\/nodes\/[^/]+\/documents\/copy$/.test(new URL(response.url()).pathname));
-  await dialog.getByRole('button', { name: 'Create document', exact: true }).click();
   const reply = await accepted;
-  expect(reply.ok()).toBeTruthy();
-  const body: unknown = (await bodySent(reply.request()));
-  expect(body).toMatchObject({ source_document_id: DOCS.plan, access });
-  await expect(dialog).toHaveCount(0);
+  expect(reply.ok()).toBe(true);
+  const authorization = reply.request().headers().authorization;
+  if (authorization === undefined) throw new Error('The real copy request must carry this test reader');
+  const copyBody: unknown = await bodySent(reply.request());
+  expect(copyBody).toMatchObject({ command: 'copy', items: [{ kind: 'document', id: DOCS.plan }] });
+  expect(copyBody).not.toHaveProperty('access');
+  await expect.poll(() => new URL(page.url()).pathname).not.toBe(sourcePath);
+  const copiedId = new URL(page.url()).pathname.split('/').filter(Boolean).at(-1);
+  if (copiedId === undefined || copiedId === DOCS.plan) throw new Error('The copy must have a fresh document identity');
+  const metadata = async (id: string): Promise<unknown> => {
+    const response = await page.request.get(`/api/v1/documents/${id}`, { headers: { authorization } });
+    expect(response.ok()).toBe(true);
+    const value: unknown = await response.json();
+    return value;
+  };
+  await expect.poll(() => metadata(copiedId)).toMatchObject({ id: copiedId, title: 'Rollout plan', page: 'follows' });
+  await expect(page.getByRole('textbox', { name: 'Title', exact: true })).toHaveValue('Rollout plan');
+  if (access === 'private') {
+    // Privacy is a deliberate action on the new document after the native copy has completed.
+    await page.locator('[data-main-area]').getByRole('button', { name: 'Actions for Rollout plan', exact: true }).click();
+    await page.getByRole('menuitem', { name: 'Make private', exact: true }).click();
+    const dialog = page.getByRole('alertdialog', { name: 'Make this document private?', exact: true })
+      .or(page.getByRole('dialog', { name: 'Make this document private?', exact: true }));
+    await expect(dialog).toContainText('Only its owners will be able to read it, until it is shared.');
+    const changed = page.waitForResponse((response) => response.request().method() === 'PATCH'
+      && new URL(response.url()).pathname === `/api/v1/documents/${copiedId}/permissions`);
+    await dialog.getByRole('button', { name: 'Make private', exact: true }).click();
+    const answer = await changed;
+    expect(answer.ok()).toBe(true);
+    expect(await bodySent(answer.request())).toMatchObject({ whole: 'private' });
+    await expect(dialog).toHaveCount(0);
+    await expect.poll(() => metadata(copiedId)).toMatchObject({ page: 'restricted' });
+  }
+  await expect.poll(() => metadata(DOCS.plan)).toMatchObject({ id: DOCS.plan, page: 'follows' });
 });
 
 test('a chosen agent previews its actual forwarded input before one visible send, and editing never asks again', async ({page}) => {

@@ -12,13 +12,13 @@ import { Button } from '@/ui/Button';
 import { cx } from '@/ui/cx';
 import { Tooltip } from '@/ui/Tooltip';
 
-export function PlanSwitch({ on, onChange, unavailable }: { on: boolean; onChange: (on: boolean) => void; unavailable?: string }) {
+export function PlanSwitch({ on, onChange, unavailable, defaulted = false }: { on: boolean; onChange: (on: boolean) => void; unavailable?: string; defaulted?: boolean }) {
   const compact = useCompactControls();
   const { t } = useTranslation();
   return <span className="inline-flex min-w-0 items-center"><Tooltip content={unavailable ?? t(on ? 'composer.plan.on' : 'composer.plan.off')}>
-    <Button size="sm" variant={on ? 'secondary' : 'ghost'} blocked={unavailable !== undefined} aria-pressed={on} onClick={() => onChange(!on)}
+    <Button size="sm" variant={on ? 'secondary' : 'ghost'} blocked={unavailable !== undefined} aria-label={t('composer.plan.label')} aria-pressed={on} onClick={() => onChange(!on)}
       className={cx('max-w-full', compact ? 'gap-1 px-1 text-xs' : 'gap-1 px-2 text-sm')} data-composer-plan={on ? 'on' : 'off'}>
-      <ListChecks aria-hidden className="size-4 shrink-0" /><span>{t('composer.plan.label')}</span>
+      <ListChecks aria-hidden className="size-4 shrink-0" /><span>{t('composer.plan.label')}</span>{defaulted && <span className="text-xs text-text-subtle" data-mode-default>{t('composer.plan.placeDefault')}</span>}
     </Button>
   </Tooltip><Hint id="plan-mode" popover /></span>;
 }

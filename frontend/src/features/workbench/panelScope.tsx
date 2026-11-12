@@ -110,7 +110,7 @@ export function PanelTargetChoice() {
   const kinds: readonly NameKind[] = tab?.view === 'comments' || tab?.view === 'links' ? ['document'] : tab !== null && environmentPanels.has(tab.view) ? ['thread', 'environment']
     : tab?.view === 'chat' || tab?.view === 'documents' ? ['org', 'project', 'topic', 'thread'] : tab?.view === 'outline' ? ['thread', 'document'] : ['thread'];
   return <Dialog open={id !== null && tab !== null} onOpenChange={(open) => { if (!open) useTargetChoice.setState({ tab: null }); }} title={t('workbench.workspace.target')}>
-    <NamePicker label={t('workbench.workspace.target')} kinds={kinds} chosen={null} placeholder={t('workbench.workspace.selectTarget')} nothing={t('workbench.workspace.noTargets')}
+    <NamePicker pickerKey="workbench.panelScope.workbench.workspace.target" label={t('workbench.workspace.target')} kinds={kinds} chosen={null} placeholder={t('workbench.workspace.selectTarget')} nothing={t('workbench.workspace.noTargets')}
       onChoose={(hit) => {
         if (hit === null || id === null || !['thread', 'document', 'environment', 'org', 'project', 'topic'].includes(hit.kind)) return;
         setPanelScope(id, { mode: 'fixed', target: { kind: hit.kind as InspectorTarget['kind'], id: hit.id } });

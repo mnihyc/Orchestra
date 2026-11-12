@@ -1,0 +1,3 @@
+# The assembled tree: the whole workspace's lint with every target compiled, and the generated contracts' difference.
+contracts
+clippy

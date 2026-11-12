@@ -1,3 +1,4 @@
+import { unjudgedProvenance, unplacedGrouping } from '../doubles/resource-grouping';
 /** Location facts distinguish unconfigured, concealed and offline data on the mount and machine pages. */
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -19,14 +20,14 @@ vi.mock('@/api/resources',()=>({machinesQuery:{queryKey:['machines'],queryFn:rea
 vi.mock('@/api/resource-tools',()=>({machineMountsQuery:(id:string)=>({queryKey:['mounts','machine',id],queryFn:()=>read(id)}),removeMountLocation:vi.fn(),setMountLocation:add}));
 vi.mock('@tanstack/react-router',()=>({useRouter:()=>({state:{location:{pathname:'/resources/mounts/notes'}},history:{push:vi.fn()}}),Link:({to,params,children}:{to:string;params:{id:string};children:ReactNode})=><a href={to.replace('$id',params.id)}>{children}</a>}));
 vi.mock('@/ui/UserChip',()=>({UserChip:({user}:{user:{display_name:string}})=><span>{user.display_name}</span>}));
-const mount=():Mount=>({id:'notes',name:'shared-notes',address:'team.shared-notes',description:'A host directory, read-only',org_id:'org',home:null,owner:null,
+const mount=():Mount=>({ ...unjudgedProvenance(),id:'notes',name:'shared-notes',address:'team.shared-notes',description:'A host directory, read-only',org_id:'org',home:null,owner:null,
   target:'/mnt/notes',read_only:true,enabled:true,default_fate:'as_is',locations:[],locations_hidden:0,kept:[],revision:1,
   access:{permissions:['mount.view'],administers:false,participating:true,admin_only:[],through:[]}});
-const machine=(id:string,name:string,permissions:string[]):Machine=>({id,name,placement:'connected',online:true,platform_os:'linux',owner:null,
+const machine=(id:string,name:string,permissions:string[]):Machine=>({ ...unplacedGrouping(),revision:1,id,name,placement:'connected',online:true,platform_os:'linux',owner:null,
   platform_arch:'x86_64',connector_version:'1.0.0',protocol_version:1,roles:['environment'],status:'active',last_seen_at:null,last_ip:null,
   cert_not_after:'2027-01-01T00:00:00Z',facts:{environment_descriptor:{data_storage:{made_by_orch:'directory',existing_directory:true,reason:null}}},providers:[],agents:[],environments:[],environment_sandboxes:[],
   access:{permissions,administers:false,participating:true,admin_only:[],through:[]}});
-beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue({locations:[],available:[]});readMachines.mockResolvedValue([]);add.mockResolvedValue(mount());});
+beforeEach(()=>{vi.clearAllMocks();read.mockResolvedValue({grouping:[],locations:[],available:[]});readMachines.mockResolvedValue([]);add.mockResolvedValue(mount());});
 afterEach(async()=>{await setLocale('en');});
 
 for(const language of ['en','zh-CN'] as const) {
@@ -63,7 +64,7 @@ for(const language of ['en','zh-CN'] as const) {
   it(`offers a managed directory machine's declared data without requiring personal ownership (${language})`,async()=>{
     await setLocale(language);const user=userEvent.setup();const row=mount();row.access.permissions.push('mount.use');
     readMachines.mockResolvedValue([machine('shared','Shared directory machine',['machine.manage']),machine('read-only','Use-only machine',['machine.view','host.use'])]);
-    read.mockResolvedValue({locations:[],available:[{mount:{id:row.id,name:row.name,address:row.address},path:true,default_storage:true,storages:[]}]});
+    read.mockResolvedValue({grouping:[],locations:[],available:[{mount:{id:row.id,name:row.name,address:row.address},path:true,default_storage:true,storages:[]}]});
     show(<Locations mount={row}/>);
     await user.click(screen.getByRole('button',{name:i18n.t('resourceDetails.mount.addLocation')}));
     const dialog=screen.getByRole('dialog',{name:i18n.t('resourceDetails.mount.addLocation')});
@@ -83,7 +84,7 @@ for(const language of ['en','zh-CN'] as const) {
 it('offers an existing directory without inventing an owned-data capability',async()=>{
   const user=userEvent.setup();const row=mount();row.access.permissions.push('mount.use');
   readMachines.mockResolvedValue([machine('shared','Shared directory machine',['machine.manage'])]);
-  read.mockResolvedValue({locations:[],available:[{mount:{id:row.id,name:row.name,address:row.address},path:true,default_storage:false,storages:[]}]});
+  read.mockResolvedValue({grouping:[],locations:[],available:[{mount:{id:row.id,name:row.name,address:row.address},path:true,default_storage:false,storages:[]}]});
   show(<Locations mount={row}/>);
   await user.click(screen.getByRole('button',{name:i18n.t('resourceDetails.mount.addLocation')}));
   const dialog=screen.getByRole('dialog',{name:i18n.t('resourceDetails.mount.addLocation')});

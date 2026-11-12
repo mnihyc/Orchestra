@@ -32,7 +32,8 @@ async function bounded(page: Page, list: Locator) {
     const box = frame.getBoundingClientRect();
     const scrollers = [frame, ...Array.from(frame.querySelectorAll<HTMLElement>('*'))].filter((node) => /auto|scroll/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight + 1);
     const active = element.querySelector<HTMLElement>('[aria-selected="true"]');
-    const viewport = frame.querySelector('[data-combobox-footer]') === null ? frame : element;
+    const viewport = frame.querySelector('[data-combobox-footer]') === null ? frame
+      : frame.querySelector('[data-combobox-options]') ?? element.closest('[data-combobox-options]') ?? element;
     const row = active?.getBoundingClientRect(), view = viewport.getBoundingClientRect();
     // The shared card limit is 20 rem; keep the assertion correct at the browser's text size.
     return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, maxWidth: 20 * Number.parseFloat(getComputedStyle(document.documentElement).fontSize), scrollers: scrollers.length,
@@ -48,7 +49,7 @@ async function bounded(page: Page, list: Locator) {
     expect(geometry.row.top).toBeGreaterThanOrEqual(geometry.view.top - 1);
     expect(geometry.row.bottom).toBeLessThanOrEqual(geometry.view.bottom + 1);
   }
-  if (await list.getAttribute('role') === 'listbox') {
+  if (await list.getAttribute('role') === 'listbox' || await list.getByRole('listbox').count() > 0) {
     const accessibility = await new AxeBuilder({ page }).include('[role="listbox"]').withRules(['aria-required-children', 'nested-interactive']).analyze();
     expect(accessibility.violations).toEqual([]);
     for (const card of await page.locator('[data-inspection-card]').all()) {
@@ -111,7 +112,7 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
 
       const providerBefore = calls.length;
       const setting = 'agent.default_provider_id';
-      await page.goto(`/project/${ACME.web}/settings?section=policies&setting=${setting}`);
+      await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=${setting}`);
       const field = page.locator(`[data-setting="${setting}"]`).getByRole('combobox', { name: english.settingRegistry.agent.default_provider_id.title, exact: true });
       await expect(field).toBeVisible();
       const current = await field.inputValue();
@@ -123,7 +124,8 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
       const inventory = await choices.json() as EverythingRowPage;
       const next = inventory.items.find((row) => row.resource?.kind === 'provider' && row.name !== current && row.resource.value.status !== 'disabled' && row.resource.value.access.permissions.includes('provider.use'));
       if (next?.name === null || next?.name === undefined) throw new Error('The authorized fixture has no second provider choice');
-      const list = page.getByRole('listbox', { name: english.settingRegistry.agent.default_provider_id.title, exact: true });
+      // The popup owns several valid option lists when home groups have their own controls.
+      const list = page.getByRole('dialog', { name: english.settingRegistry.agent.default_provider_id.title, exact: true });
       await bounded(page, list);
       await capture(page, info, `provider-choice-${width}-${theme}`);
       const inspect = page.getByRole('button', { name: english.ui.detailCard.inspect.replace('{{name}}', next.name), exact: true });
@@ -200,7 +202,9 @@ for (const width of [400, 1440]) for (const theme of ['light', 'dark'] as const)
       await expect(identity).toContainText('Viewer 1');
       await bounded(page, identity);
       await capture(page, info, `people-card-${width}-${theme}`);
-      await expect(page.locator('[data-inspection-card]:visible')).toHaveCount(1);
+      // A kept people list deliberately stays present while its one child identity card is open.
+      await expect(people).toBeVisible();
+      await expect(page.locator('[data-inspection-card]:visible')).toHaveCount(2);
       await page.keyboard.press('Escape');
       await expect(identity).not.toBeVisible();
       await expect(people).toBeVisible();

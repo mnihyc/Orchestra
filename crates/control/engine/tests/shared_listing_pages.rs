@@ -31,6 +31,8 @@ async fn every_named_page_and_a_connector_row_cut_resume_without_skipping_or_dup
     let alpha = world.thread_in(world.topic, "Alpha").await;
     let beta = world.thread_in(world.topic, "Beta").await;
     let zulu = world.thread_in(world.topic, "Zulu").await;
+    share_threads_inside(&world, world.topic, mine, false).await;
+    share_threads_inside(&world, world.topic, other, false).await;
     let query = json!({"sort":"name","kinds":["thread"],"limit":2,"ids":true});
     let first = ok(call(&world, mine, OrchTool::ListShared, query.clone()).await);
     assert_eq!(ids(&first), vec![alpha.to_string(), beta.to_string()]);
@@ -120,6 +122,7 @@ async fn shipped_order_prioritizes_active_work_then_maintained_activity_and_name
     let alpha = world.thread_in(world.topic, "Alpha recent").await;
     let old = world.thread_in(world.topic, "Beta older").await;
     share(&world, "node", active, "live", "thread.view", "any", mine).await;
+    share_threads_inside(&world, world.topic, mine, false).await;
     // The reader is a real active agent too. Establish it before fixing the
     // chronology, so this call cannot manufacture a newer activity timestamp.
     shared::prepare_call_turn(&world, mine).await;
@@ -271,6 +274,7 @@ async fn the_default_fifty_row_page_reaches_the_end_and_the_existing_two_hundred
     sqlx::query("INSERT INTO threads(node_id,topic_id) SELECT id,parent_id FROM nodes WHERE parent_id=$1 AND kind='thread' AND name LIKE 'Work %'")
         .bind(world.topic).execute(&mut *conn).await.unwrap();
     drop(conn);
+    share_threads_inside(&world, world.topic, mine, false).await;
     let mut page = ok(call(
         &world,
         mine,

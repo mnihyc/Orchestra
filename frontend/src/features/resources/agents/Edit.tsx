@@ -119,7 +119,7 @@ export function EditAgent({ agent, only, onProfile, onClose }: EditAgentProps) {
           />
           <Switch label={t('agents.edit.on')} hint={t('agents.edit.onHint')} checked={on} disabled={save.isPending} onCheckedChange={setOn} />
           {onChanged && <div className="flex flex-col gap-2">
-            {impact.isPending?<SkeletonRows rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={on?'enable':'disable'} />}
+            {impact.isPending?<SkeletonRows read={impact} rows={2} />:impact.isError?<ErrorState compact error={impact.error} onRetry={()=>void impact.refetch()} />:<ImpactCounts impact={impact.data} kind={on?'enable':'disable'} />}
             {!on&&<Input optional label={t('resourceImpact.note')} value={note} onChange={(event)=>setNote(event.target.value)} disabled={save.isPending} />}
             {on&&<Checkbox label={t('resourceImpact.runWaiting')} checked={runWaiting} onCheckedChange={setRunWaiting} disabled={save.isPending} />}
           </div>}

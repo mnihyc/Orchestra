@@ -51,8 +51,8 @@ export function readmeCut(blocks: readonly DocumentBlock[]): { shown: DocumentBl
 }
 
 /**
- * The entry of a document's menu that makes it its place's README, or on the one in use stops that; none for
- * somebody who may not Edit the place.
+ * The document menu makes it its place's README, or stops using it there. Missing place metadata
+ * or Manage keeps the same entry disabled with its reason.
  */
 export function useReadmeEntry(doc: Pick<Document, 'id'>, place: Node | undefined): MenuEntry | null {
   const { t } = useTranslation();
@@ -64,12 +64,14 @@ export function useReadmeEntry(doc: Pick<Document, 'id'>, place: Node | undefine
     },
     onError: (error) => toast({ tone: 'danger', title: t('documents.readme.failed'), description: describe(error).message }),
   });
-  if (place === undefined || !holds(place.access, `${place.kind}.manage`)) return null;
-  const inUse = place.readme?.id === doc.id;
+  const reason = place === undefined ? t('implicitAvailability.placeUnavailable')
+    : !holds(place.access, `${place.kind}.manage`) ? t('implicitAvailability.placeManage') : false;
+  const inUse = place?.readme?.id === doc.id;
   return {
     id: 'readme',
     label: inUse ? t('documents.readme.stop') : t('documents.readme.use'),
-    onSelect: () => change.mutate({ node: place, to: inUse ? null : doc.id }),
+    disabled: reason,
+    onSelect: () => { if (place !== undefined && reason === false) change.mutate({ node: place, to: inUse ? null : doc.id }); },
   };
 }
 
@@ -114,9 +116,9 @@ export function PlaceReadme({ readme, foldable = false }: { readme: DocumentRef;
       {open && (
         <div className="px-4 pb-3">
           {sync.data === undefined || cut === null ? (
-            <SkeletonRows rows={3} />
+            <SkeletonRows read={sync} rows={3} />
           ) : (
-            <Suspense fallback={<SkeletonRows rows={3} />}><BlockEditor document={sync.data.document} editable={false} inspection fixed={cut.shown} /></Suspense>
+            <Suspense fallback={<SkeletonRows read={sync} rows={3} />}><BlockEditor document={sync.data.document} editable={false} inspection fixed={cut.shown} /></Suspense>
           )}
           {cut?.more === true && (
             <Link to="/doc/$documentId" params={{ documentId: readme.id }} className="text-sm font-medium text-accent hover:underline focus-visible:outline-2 focus-visible:outline-focus">

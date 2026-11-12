@@ -1,3 +1,4 @@
+import { unjudgedProvenance } from '../doubles/resource-grouping';
 /** A skill's page shows its latest version, origin and files; its managers edit the draft and publish it; a place switches skills on at their latest or a pinned version. */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
@@ -21,7 +22,7 @@ const first: SkillVersionInfo = { id: 'v1', number: 1, name: 'report-writer', de
   archive: { blob: 'a'.repeat(64), size: 300 }, origin: { kind: 'upload', name: 'report-writer.zip', folder: null }, created_by: ADA, created_at: '2026-10-20T10:00:00.000Z' };
 const second: SkillVersionInfo = { ...first, id: 'v2', number: 2, origin: { kind: 'environment', environment_id: 'env', path: 'skills/report-writer' }, created_at: '2026-10-21T10:00:00.000Z' };
 const draftInfo = { based_on: 'v2', file_count: 2, revision: 4, updated_by: ADA, updated_at: '2026-10-22T10:00:00.000Z' };
-const skill: Skill = { id: 'skill', name: 'report-writer', description: 'Writes reports.', org_id: 'team', owner: ADA, home, address: 'workshop.ada.report-writer', enabled: true,
+const skill: Skill = { ...unjudgedProvenance(), id: 'skill', name: 'report-writer', description: 'Writes reports.', org_id: 'team', owner: ADA, home, address: 'workshop.ada.report-writer', enabled: true,
   latest: second, versions: 2, origin: second.origin, draft: draftInfo, revision: 3, access: manage };
 const version: SkillVersion = { version: second, files: [
   { path: 'SKILL.md', size: 80, sha256: 'b'.repeat(64), executable: false },
@@ -79,12 +80,16 @@ it.each(['en', 'zh-CN'] as const)('shows the latest version, where it came from 
   expect(screen.getByRole('button', { name: i18n.t('resourceDetails.skill.reimport') })).toBeVisible();
 });
 
-it('offers neither the draft nor Update to whoever only sees the skill', async () => {
+it('keeps the draft private and explains Update to whoever only sees the skill', async () => {
   current.skill = { ...skill, access: view, draft: null };
   draw(<SkillScreen id="skill" />);
   await screen.findByRole('heading', { level: 1, name: 'report-writer' });
   expect(within(screen.getByRole('tablist')).queryByRole('tab', { name: i18n.t('resourceDetails.skill.draft.title') })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: i18n.t('resourceDetails.skill.reimport') })).not.toBeInTheDocument();
+  const update = screen.getByRole('button', { name: i18n.t('resourceDetails.skill.reimport') });
+  expect(update).toHaveAttribute('aria-disabled', 'true');
+  expect(update).toHaveAttribute('aria-description', i18n.t('resources.act.manageRequired'));
+  await userEvent.click(update);
+  expect(calls.reimport).not.toHaveBeenCalled();
 });
 
 it('updates from where the skill came from and says when nothing changed', async () => {

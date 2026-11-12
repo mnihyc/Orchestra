@@ -36,7 +36,7 @@ export function Pki() {
   const now = useNow();
   const pki = useQuery(pkiQuery);
 
-  if (pki.isPending) return <SkeletonRows rows={5} />;
+  if (pki.isPending) return <SkeletonRows read={pki} rows={5} />;
   if (pki.isError) return <ErrorState error={pki.error} retrying={pki.isRefetching} onRetry={() => void pki.refetch()} />;
 
   const { ca, services, machines_expiring_30d: expiring, machines_expiring: machines } = pki.data;

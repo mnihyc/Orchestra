@@ -45,7 +45,7 @@ pub fn blobs_in(parts: &[ChatPart]) -> Vec<Hash> {
 /// The largest file a chat takes: `chat.attachment_max_bytes` as it resolves at
 /// the chat's node, at its root org for a direct or a group chat.
 pub async fn largest(conn: &mut Conn, chat: &ChatRow) -> Result<i64, Error> {
-    let place = Place::Node(chat.node_id.unwrap_or(chat.org_id));
+    let place = Place::Node(chat.home());
     Ok(
         orch_settings::get::<i64>(conn, place, "chat.attachment_max_bytes")
             .await?
