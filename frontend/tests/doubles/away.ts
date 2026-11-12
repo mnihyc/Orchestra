@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 
-import type { NodeRef, Notification, NotificationChannel, NotificationPrefs, NotificationRoute } from '../../src/generated/api-types.ts';
+import type { NodeRef, Notification, NotificationChannel, NotificationPrefs, NotificationRoute, NotificationSummaryGetReply, OutsideStatus } from '../../src/generated/api-types.ts';
 import type { AwayNotification, AwayPrefs, AwayRoute, NotificationGroup, PushDevice, ReadResult } from '../../src/features/settings/personal/away/types.ts';
 import { type Answer, type Part, type Person, Refusal, type World } from './world.ts';
 
@@ -107,7 +107,7 @@ export class AwayWorld implements Part {
     const old = this.outcomes.get(key);
     const id = old?.id ?? channel.route.id ?? (this.world.notifications.routes.has(key) ? randomUUID() : null);
     const route:AwayRoute = { ...channel.route,...old,id,channel_id:channel.id,
-      channel:id === null ? null : old?.channel ?? { id:channel.id,kind:channel.kind,name:channel.name,org:typeof channel.owner === 'object' ? channel.owner.org : null },
+      channel:id === null ? null : { id:channel.id,kind:channel.kind,name:channel.name,org:typeof channel.owner === 'object' ? channel.owner.org : null },
       needs:channel.route.needs,link:channel.route.link,label:channel.route.label };
     route.waiting_count = this.projection(person, new URLSearchParams('unread=true')).filter((row) => row.kind !== 'notification.route_attention' && (route.kinds.length === 0 || route.kinds.includes(row.kind))).length;
     if (old !== undefined || route.id !== null) this.outcomes.set(key, route);
@@ -118,6 +118,11 @@ export class AwayWorld implements Part {
     const retained = [...this.outcomes].filter(([key, route]) => key.startsWith(`${person.me.username}:`) && route.health === 'channel_removed').map(([, route]) => ({ ...route, waiting_count: this.projection(person, new URLSearchParams('unread=true')).filter((row) => row.kind !== 'notification.route_attention').length }));
     return [...live, ...retained];
   }
+  /** The same scoped status supplies both the native summary and setup observations. */
+  outsideFor(person: Person, scope: string): OutsideStatus {
+    return (this.summary(person, scope).body as NotificationSummaryGetReply).outside;
+  }
+
   private summary(person: Person, scope?: string | null): Answer {
     if (scope !== undefined && scope !== null && !this.readable(person, scope)) throw new Refusal(403, 'authz.denied', 'View is required here', { required: 'node.view', missing: [], requestable: false });
     const prefs = this.prefs(person);
@@ -273,8 +278,15 @@ export class AwayWorld implements Part {
       const before = this.route(person, channel);
       if (body.retry_failed === true && (!before.enabled || before.needs !== null)) throw new Refusal(409, 'route.not_ready', 'Fix this way and switch it on first', { needs: before.needs });
       const answer = this.world.notifications.handle(person, method, path, query, body);
-      const next = { ...before, ...(answer?.body as NotificationRoute), id: before.id ?? randomUUID() };
-      this.outcomes.set(this.key(user, channelId), next); this.announce(person, 'route'); return { status: 200, body: next };
+      const choices = answer?.body as NotificationRoute;
+      // Updating choices or requesting a retry does not acknowledge delivery or
+      // erase the retained outcome, which the native route writer also preserves.
+      const next = { ...before, enabled: choices.enabled, kinds: choices.kinds,
+        unread_delay_minutes: choices.unread_delay_minutes, min_interval_minutes: choices.min_interval_minutes,
+        id: before.id ?? randomUUID() };
+      this.outcomes.set(this.key(user, channelId), next);
+      const projected = this.route(person, channel);
+      this.announce(person, 'route'); return { status: 200, body: projected };
     }
     if (method === 'GET' && path === '/me/push-subscriptions') return { status: 200, body: this.devices.get(user) ?? [] };
     if (method === 'POST' && path === '/me/push-subscriptions') {
@@ -323,7 +335,11 @@ export class AwayWorld implements Part {
     if (path === '/lost-read') { this.lostRead = true; return { status: 204 }; }
     if (path === '/lost-test') { this.lostTest = true; return { status: 204 }; }
     if (path === '/undo-expire') { for (const ticket of this.tickets.values()) ticket.expires = 0; return { status: 204 }; }
-    if (path === '/hide') { this.hidden.set(user, new Set(Array.isArray(body.ids) ? body.ids as string[] : [])); this.announce(person, 'approvals'); return { status: 204 }; }
+    if (path === '/hide') {
+      this.hidden.set(user, new Set(Array.isArray(body.ids) ? body.ids as string[] : []));
+      this.world.users.invalidate(user);
+      return { status: 204 };
+    }
     if (path === '/prefs') { const prefs = { ...this.prefs(person), ...(body.prefs as object), revision: this.prefs(person).revision + 1 }; this.world.notifications.prefs.set(user, prefs); this.announce(person, 'notification_prefs'); return { status: 200, body: prefs }; }
     if (path === '/device') {
       const device = { id: randomUUID(), label: typeof body.label === 'string' ? body.label : 'Another device', endpoint_hash: createHash('sha256').update(String(body.endpoint)).digest('hex'), last_ok_at: null };
@@ -335,7 +351,8 @@ export class AwayWorld implements Part {
       const channel = this.channels(person).find((entry) => typeof body.channel_id === 'string' ? entry.id === body.channel_id : entry.kind === body.kind);
       if (channel === undefined) throw new Refusal(404, 'not_found', 'No channel of that kind');
       const before = this.route(person, channel);
-      const route = { ...before, id: before.id ?? randomUUID(), ...(body.route as Partial<AwayRoute>) };
+      const route = { ...before, id: before.id ?? randomUUID(), ...(body.route as Partial<AwayRoute>),
+        channel: before.channel ?? { id: channel.id, kind: channel.kind, name: channel.name, org: typeof channel.owner === 'object' ? channel.owner.org : null } };
       this.outcomes.set(this.key(user, channel.id), route);
       if (route.health === 'channel_removed') { route.enabled = false; route.channel_id = null; this.removedChannels.add(channel.id); }
       else this.world.notifications.routes.set(this.key(user, channel.id), { ...channel.route, enabled: route.enabled, label: route.label });

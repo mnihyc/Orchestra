@@ -276,6 +276,14 @@ function update(chatId: string, change: (entry: ChatEntry) => ChatEntry): void {
   });
 }
 
+function refreshListedChat(chatId: string): void {
+  for (const [queryKey, data] of queryClient.getQueriesData<{ pages: { items: Chat[] }[] }>({ queryKey: ['chats'] })) {
+    if (data?.pages.some((page) => page.items.some((chat) => chat.id === chatId)) === true) {
+      void queryClient.invalidateQueries({ queryKey, exact: true, refetchType: 'active' });
+    }
+  }
+}
+
 /** The writers. The live connection and the acts of the person call them; no view does. */
 export const chatWriter = {
   reset(chatId: string, chat: Chat, messages: readonly ChatMessage[], hasOlder: boolean, seq: number): void {
@@ -331,10 +339,14 @@ export const chatWriter = {
 
   failed(chatId: string, error: unknown): void {
     update(chatId, (entry) => reduceFailed(entry, error));
+    const closed = useChatStore.getState().byChat.get(chatId)?.closed;
+    if (closed !== undefined && closed !== null) refreshListedChat(chatId);
   },
 
   closed(chatId: string, reason: 'revoked' | 'deleted'): void {
     update(chatId, (entry) => ({ ...entry, closed: reason }));
+    // The feed's authority changed. Let each list reread its own authorized membership and inspection scope.
+    refreshListedChat(chatId);
   },
 
   // A message on its way out.
@@ -390,12 +402,13 @@ export const useChatStates = create<StatesStore>(() => ({ states: new Map(), lat
 /** Within one observed revision reads advance; a newer deliberate revision may move backwards. */
 export function mergeState(held: ChatState | undefined, incoming: ChatState): ChatState {
   if (held === undefined) return incoming;
-  if (incoming.read_revision > held.read_revision) return incoming;
-  if (incoming.read_revision < held.read_revision) return held;
+  const lastMessage = Math.max(held.last_message_seq, incoming.last_message_seq);
+  if (incoming.read_revision > held.read_revision) return { ...incoming, last_message_seq: lastMessage };
+  if (incoming.read_revision < held.read_revision) return { ...held, last_message_seq: lastMessage };
   const lastRead = Math.max(held.last_read_seq, incoming.last_read_seq);
   // Mentions counted before the position the person has read to are read.
   const mentions = incoming.last_read_seq >= held.last_read_seq ? incoming.mentions_unread : Math.min(incoming.mentions_unread, held.mentions_unread);
-  return { ...incoming, last_read_seq: lastRead, mentions_unread: mentions };
+  return { ...incoming, last_message_seq: lastMessage, last_read_seq: lastRead, mentions_unread: mentions };
 }
 
 export const statesWriter = {
@@ -601,8 +614,12 @@ function loadStates(): void {
 }
 
 /** A new message was written in a direct or group chat the person is in, or a chat of theirs began. */
-function heardOfChat(chatId: string, seq: number, at: string): void {
+export function heardOfChat(chatId: string, seq: number, at: string): void {
   statesWriter.heard(chatId, seq, at);
+  // A notice supplies sequence/time, not the authorized message preview. Repair only lists holding an older row.
+  const outdated = queryClient.getQueriesData<{ pages: { items: Chat[] }[] }>({ queryKey: ['chats'] })
+    .filter(([, data]) => data?.pages.some((page) => page.items.some((chat) => chat.id === chatId && chat.last_message_seq < seq)) === true)
+    .map(([key]) => key);
   const found = { listed: false };
   queryClient.setQueriesData<{ pages: { items: Chat[]; next_cursor: string | null }[]; pageParams: unknown[] }>(
     { queryKey: ['chats'] },
@@ -620,7 +637,12 @@ function heardOfChat(chatId: string, seq: number, at: string): void {
     },
   );
   // A chat that no list holds is a new one, or one that was hidden and has a message again.
-  if (!found.listed) void queryClient.invalidateQueries({ queryKey: ['chats'] });
+  if (!found.listed) {
+    for (const [queryKey] of queryClient.getQueriesData({ queryKey: ['chats'] })) {
+      void queryClient.invalidateQueries({ queryKey, exact: true, refetchType: 'active' });
+    }
+  }
+  else for (const queryKey of outdated) void queryClient.invalidateQueries({ queryKey, exact: true, refetchType: 'active' });
 }
 
 function onUserFrame(frame: Parameters<NonNullable<DurableFeed<unknown>['other']>>[0] | { op: string }): void {

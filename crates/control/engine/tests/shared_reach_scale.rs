@@ -12,6 +12,12 @@ use orch_link_contract::commands::OrchTool;
 use orch_types::Time;
 use serde_json::json;
 use shared::*;
+use std::time::Duration;
+
+// A hosted debug scan of 20,002 candidates reached current authority in 27.243s:
+// 13.622s per native raw page. Round to 20s for tree rendering, result delivery and
+// runner variance. This is a fixture completion default, not a product latency limit.
+const DEFAULT_REACH_RESULT_PER_RAW_PAGE: Duration = Duration::from_secs(20);
 
 #[tokio::test]
 async fn unrelated_work_beyond_the_old_root_limit_does_not_truncate_the_agents_reach() {
@@ -166,7 +172,7 @@ async fn granted_pages_keep_ancestors_and_subtrees_and_names_do_not_change_when_
 }
 
 #[tokio::test]
-async fn project_policy_expands_only_that_project_and_conversation_age_uses_maintained_thread_activity()
+async fn a_project_share_reaches_only_that_project_and_conversation_age_uses_maintained_thread_activity()
  {
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Reader").await;
@@ -175,9 +181,7 @@ async fn project_policy_expands_only_that_project_and_conversation_age_uses_main
     let far_project = world.project_in_root("Other project").await;
     let far_topic = world.topic_in(far_project, "Outside").await;
     let far = thread_in_topic(&world, far_topic, "Far peer").await;
-    world
-        .set(world.topic, "sharing.agent_reach", json!("project"))
-        .await;
+    share_threads_inside(&world, world.project, mine, false).await;
     let visible = ok(call(
         &world,
         mine,
@@ -229,10 +233,30 @@ async fn project_policy_expands_only_that_project_and_conversation_age_uses_main
 
 #[tokio::test]
 async fn a_reachable_subtree_follows_its_raw_pages_and_keeps_both_ends_of_the_old_limit() {
+    static LOGS: std::sync::Once = std::sync::Once::new();
+    LOGS.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            tracing_subscriber::EnvFilter::new("orch_engine::tools::tree=debug")
+        });
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
     let world = a_world_whose_agent_takes_tools().await;
     let mine = world.thread("Reader").await;
-    // One beyond the former candidate cap, all genuinely inside the implicit topic.
+    // One beyond the former candidate cap, all inside the explicitly shared topic.
     const COUNT: i64 = 20_001;
+    // The asking thread is also under this topic. Both filtered calls still authorize
+    // every candidate, including the last raw page, before projecting one result.
+    let raw_pages = u32::try_from(COUNT + 1)
+        .unwrap()
+        .div_ceil(u32::try_from(orch_engine::tools::tree::NODES_MAX).unwrap());
+    let result_budget = DEFAULT_REACH_RESULT_PER_RAW_PAGE * raw_pages;
+    eprintln!(
+        "shared reach scale work: candidates={} raw_pages={raw_pages} result_budget={result_budget:?}",
+        COUNT + 1
+    );
     let mut conn = world.pool.acquire().await.unwrap();
     sqlx::query("INSERT INTO nodes(id,kind,parent_id,org_id,path,name,owner_id,created_by,created_at,updated_at)
         SELECT made.id,'thread',p.id,p.org_id,p.path || made.id,'Bound ' || lpad(number::text,5,'0'),$2,$2,
@@ -252,16 +276,18 @@ async fn a_reachable_subtree_follows_its_raw_pages_and_keeps_both_ends_of_the_ol
             .all(|pair| (pair[0].created_at, pair[0].id) > (pair[1].created_at, pair[1].id))
     );
     drop(conn);
-    let newest = ok(call(&world, mine, OrchTool::ListShared,
-        json!({"path":format!("id:{}",world.topic),"names":"Bound *","depth":1,"limit":1,"sort":"changed"})).await);
+    share_threads_inside(&world, world.topic, mine, false).await;
+    let newest = ok(call_with_result_budget(&world, mine, OrchTool::ListShared,
+        json!({"path":format!("id:{}",world.topic),"names":"Bound *","depth":1,"limit":1,"sort":"changed"}),result_budget).await);
     assert_eq!(newest["entries"][0]["name"], "Bound 20001");
     assert_eq!(newest["partial"], true);
     assert!(newest["next_cursor"].is_string());
-    let oldest = ok(call(
+    let oldest = ok(call_with_result_budget(
         &world,
         mine,
         OrchTool::ListShared,
         json!({"path":format!("id:{}",world.topic),"names":"Bound 00001","depth":1,"limit":1}),
+        result_budget,
     )
     .await);
     assert_eq!(

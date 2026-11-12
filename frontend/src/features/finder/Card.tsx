@@ -34,7 +34,7 @@ function Shares({ id }: { id: string }) {
   return <section aria-label={t('finder.card.shares')} className="flex flex-col gap-2 border-t border-border pt-3">
     <h3 className="text-sm font-medium">{t('finder.card.shares')}</h3>
     <p className="text-xs text-text-muted">{t('finder.card.sharesAbout')}</p>
-    {query.isPending ? <SkeletonRows rows={2} /> : query.isError ? <ErrorState error={query.error} compact onRetry={() => void query.refetch()} /> : items.length === 0 ? <EmptyState compact title={t('finder.card.noShares')} /> : <ul className="flex flex-col gap-1">{items.map((item) => {
+    {query.isPending ? <SkeletonRows read={query} rows={2} /> : query.isError ? <ErrorState error={query.error} compact onRetry={() => void query.refetch()} /> : items.length === 0 ? <EmptyState compact title={t('finder.card.noShares')} /> : <ul className="flex flex-col gap-1">{items.map((item) => {
       const target = item.kind === 'node' ? {kind:item.node.kind,id:item.node.id,name:label(item.node) ?? item.node.name ?? ''}
         : item.kind === 'document_container' ? {kind:DOCUMENT_FOLDER_KIND,id:item.folder.id,name:item.folder.redacted ? t('ui.nameUnknown') : item.folder.name ?? t('ui.nameUnknown')}
         : {kind:DOCUMENT_KIND,id:item.document.id,name:item.document.title};

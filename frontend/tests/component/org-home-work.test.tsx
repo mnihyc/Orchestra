@@ -1,4 +1,6 @@
-/** The org's first content is the person's named daily work, before setup or org summaries. */
+/** Unfinished first steps lead the org; named daily work stays before filters and org summaries. */
+import type * as OrgOverviewModule from '@/api/orgOverview';
+import type * as UsageBoardModule from '@/features/usage/Board';
 import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type * as Router from '@tanstack/react-router';
@@ -25,13 +27,17 @@ import type * as Screen from '@/shell/screen';
 import { ACME, acmeTree, me, memberAccess, org, userRef } from '../doubles/fixtures';
 import { executionDisplay } from '../doubles/thread-display';
 import { show } from './support';
+import { overviewFixture } from './overview-fixture';
 
-const calls = vi.hoisted(() => ({
+const calls = vi.hoisted(() => {
+  const personalState: Record<string, unknown> = {};
+  return {
   place: null as Org | null, hits: [] as NameHit[], setupData: null as FirstSteps | null,
+  personalState,
   names: vi.fn<() => Promise<NameSearchPage>>(), searched: vi.fn<(search: Search.NameSearch) => void>(),
   children: vi.fn<() => Promise<NodePage>>(), firstSteps: vi.fn<(id: string | null) => Promise<FirstSteps>>(),
   retryTree: vi.fn(),
-}));
+}; });
 const person = me(1, 'ada', 'Ada');
 const root = org(ACME.org, 'acme', 'Acme', userRef(person), { member_count: 5,
   access: { ...memberAccess, owns: true, permissions: ['org.view', 'org.interact', 'org.manage'] } });
@@ -46,6 +52,16 @@ vi.mock('@/api/search', async (original) => {
     calls.searched(search);
     return { ...api.namesQuery(search), queryFn: () => calls.names(), staleTime: Infinity };
   } };
+});
+vi.mock('@/api/orgOverview', async (original) => {
+  const actual = await original<typeof OrgOverviewModule>();
+  return { ...actual, orgOverviewQuery: (...args: Parameters<typeof actual.orgOverviewQuery>) => ({
+    ...actual.orgOverviewQuery(...args), queryFn: () => {
+      const org = calls.place ?? root;
+      const setup = org.org_kind === 'team' && org.parent_id === null && org.access.owns ? calls.setupData : null;
+      return Promise.resolve(overviewFixture(org, [], { items: calls.hits, partial: false }, setup));
+    },
+  }) };
 });
 vi.mock('@/api/nodes', async (original) => {
   const api = await original<typeof Nodes>();
@@ -62,7 +78,7 @@ vi.mock('@/api/auth', async (original) => ({ ...await original<typeof Auth>(),
   meQuery: { queryKey: ['home-me'], staleTime: Infinity, initialData: () => person, queryFn: () => Promise.resolve(person) },
 }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<typeof Personal>(),
-  meStateQuery: { queryKey: ['me-state'], staleTime: Infinity, initialData: {}, queryFn: () => Promise.resolve({}) },
+  meStateQuery: { queryKey: ['me-state'], staleTime: Infinity, initialData: () => calls.personalState, queryFn: () => Promise.resolve(calls.personalState) },
 }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof Live>(), useOrgTreeFeed: () => undefined, reloadOrgTree: calls.retryTree }));
 vi.mock('@/shell/screen', async (original) => ({ ...await original<typeof Screen>(), useScreenHeading: () => undefined }));
@@ -72,7 +88,7 @@ vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeo
     <a {...anchor} href={params?.threadId === undefined ? '#place' : `/thread/${params.threadId}`} data-route={to}>{children}</a>,
 }));
 vi.mock('@/features/org/Activity', () => ({ ActivityFeed: () => null, OrgActivity: () => <p>Activity body</p> }));
-vi.mock('@/features/usage/Board', () => ({ UsageSection: () => null }));
+vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof UsageBoardModule>(), UsageSection: () => null }));
 vi.mock('@/features/org/ProjectCards', () => ({ DepartmentCard: () => <p>Department summary</p>, ProjectCard: () => <p>Project summary</p> }));
 vi.mock('@/features/settings/org/Members', () => ({ Members: () => <p>Members body</p> }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
@@ -92,7 +108,7 @@ function changed(id: string, name: string, patch: Partial<NonNullable<TreeNode['
   }), ...patch }, ...row };
 }
 function hit(node: TreeNode): NameHit {
-  return { id: node.id, kind: 'thread', name: 'Old lookup title', address: null, avatar: null, owner: null, username: null,
+  return { home_path: [], id: node.id, kind: 'thread', name: 'Old lookup title', address: null, avatar: null, owner: null, username: null,
     path: [], archived: false, recent: true, color: null, custom_color: null, tag: null, thread_attention: null };
 }
 function fill(nodes: readonly TreeNode[]) {
@@ -107,7 +123,7 @@ function facts(): FirstSteps {
   ] };
 }
 beforeEach(() => {
-  vi.clearAllMocks(); calls.place = root; calls.hits = []; calls.setupData = facts();
+  vi.clearAllMocks(); calls.place = root; calls.hits = []; calls.setupData = facts(); calls.personalState = {};
   calls.names.mockImplementation(() => Promise.resolve({ items: calls.hits, partial: false }));
   calls.children.mockResolvedValue({ items: resourceRows([]), next_cursor: null });
   calls.firstSteps.mockImplementation(() => Promise.resolve(calls.setupData ?? facts()));
@@ -126,7 +142,7 @@ describe.each(modes)('org daily work in %s/%s', (locale, theme) => {
     document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
   }
 
-  it('leads with each named waiting/recent thread once, before setup and filters, even when org children fail', async () => {
+  it('keeps each named waiting/recent thread once after active setup and before filters, even when org children fail', async () => {
     await setAppearance();
     const approval = changed(ACME.repro, 'Deploy staging', { waiting: { kind: 'approval', for_caller: true } });
     const blocked = changed(ACME.idleThread, 'Upgrade the session store', { state: 'blocked', blocked_reason: 'binding_invalid', blocked_cause: 'sandbox' }, { participating: true });
@@ -143,14 +159,42 @@ describe.each(modes)('org daily work in %s/%s', (locale, theme) => {
     expect(within(recents).queryByText('Deploy staging')).not.toBeInTheDocument();
     expect(view.container.querySelectorAll('[data-work-thread]')).toHaveLength(3);
     const work = view.container.querySelector('[data-org-work]');
-    if (work === null) throw new Error('daily work is the first body of the overview');
-    expect(work.compareDocumentPosition(await screen.findByTestId('first-steps')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    if (work === null) throw new Error('daily work remains in the overview');
+    expect((await screen.findByTestId('first-steps')).compareDocumentPosition(work) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     const filters = view.container.querySelector('[data-filter-bar]');
     if (filters === null) throw new Error('org filters still have their own row');
     expect(daily.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(view.container.querySelector('[data-org-work]')).not.toHaveTextContent(/Old lookup title|Checked|Refresh|sandbox\.mode|binding_invalid/);
     expect(calls.names).toHaveBeenCalledTimes(1);
     expect(calls.searched.mock.calls.every(([search]) => search.q === '' && search.kinds.join(',') === 'thread' && search.orgId === root.org_id)).toBe(true);
+  });
+
+  it.each([400, 1440])('begins with the unfinished org choice before daily work and filters at %d px', async (width) => {
+    await setAppearance(); fill([]); calls.setupData = { ...facts(), work_mode: null };
+    const view = show(<div style={{ width }}><OrgHome slug="acme" tab="overview" onTab={() => undefined} /></div>);
+    const setup = await screen.findByRole('region', { name: i18n.t('firstSteps.title') });
+    expect(within(setup).getByRole('button', { name: i18n.t('firstSteps.useTeam') })).toBeVisible();
+    const work = view.container.querySelector('[data-org-work]'), filters = view.container.querySelector('[data-filter-bar]');
+    if (work === null || filters === null) throw new Error('the full normal overview must remain present');
+    expect(setup.compareDocumentPosition(work) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(setup.compareDocumentPosition(filters) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('removes completed setup from the daily work entrance', async () => {
+    await setAppearance(); fill([]);
+    calls.setupData = { ...facts(), steps: facts().steps.map((step) => ({ ...step, state: 'done', fact: step.id === 'provider' ? 'models_enabled' : step.fact })) };
+    show(<OrgHome slug="acme" tab="overview" onTab={() => undefined} />);
+    await screen.findByText(i18n.t('places.org.work.empty'));
+    expect(screen.queryByRole('region', { name: i18n.t('firstSteps.title') })).not.toBeInTheDocument();
+  });
+
+  it('keeps a dismissed checklist closed while daily work remains available', async () => {
+    await setAppearance(); fill([]);
+    calls.personalState = { help: { first_steps: { org_id: root.id, work_mode: 'team', dismissed: true } } };
+    show(<OrgHome slug="acme" tab="overview" onTab={() => undefined} />);
+    expect(await screen.findByRole('button', { name: i18n.t('firstSteps.show') })).toBeVisible();
+    expect(screen.queryByRole('region', { name: i18n.t('firstSteps.title') })).not.toBeInTheDocument();
+    expect(screen.getByText(i18n.t('places.org.work.empty'))).toBeVisible();
   });
 
   it('keeps viewer wording honest and applies a live answer, rename and loss of access without another read', async () => {

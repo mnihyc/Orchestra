@@ -6,6 +6,8 @@ pub const MAX_TEXT_BYTES: usize = 16 * 1024;
 /// Enrollment choices extracted as data from an address, an address/token pair or a copied command.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Parsed {
+    /// Exact primary choice from --gateway/-Gateway, if supplied.
+    pub gateway: Option<String>,
     /// System address.
     pub address: String,
     /// Enrollment proof; absent when the next prompt must ask for it.
@@ -33,12 +35,28 @@ impl std::fmt::Debug for Parsed {
         formatter
             .debug_struct("Parsed")
             .field("address", &self.address)
+            .field("gateway", &self.gateway)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
             .field("name", &self.name)
             .field("delegate_policy", &self.delegate_policy)
             .field("no_service", &self.no_service)
             .field("data_dir", &self.data_dir)
             .finish()
+    }
+}
+
+impl Parsed {
+    /// A pasted command cannot enroll the node or another connector instance here.
+    pub fn validate_target(&self, directory: &std::path::Path) -> Result<(), String> {
+        if self.node {
+            return Err(orch_link_contract::enrollment_choices::CONNECTOR_NODE_REFUSAL.to_owned());
+        }
+        if self.data_dir.as_ref().is_some_and(|chosen| {
+            std::path::absolute(chosen).ok() != std::path::absolute(directory).ok()
+        }) {
+            return Err("The pasted command names another data directory. Open its console or paste only the address and token here.".into());
+        }
+        Ok(())
     }
 }
 
@@ -122,6 +140,7 @@ pub fn parse(text: &str) -> Result<Parsed, Error> {
     }
     let words = words(text)?;
     let mut parsed = Parsed {
+        gateway: None,
         address: String::new(),
         token: None,
         name: None,
@@ -155,6 +174,7 @@ pub fn parse(text: &str) -> Result<Parsed, Error> {
                 "--url" | "-url" => Some(&mut parsed.address),
                 "--token" | "-token" => Some(parsed.token.get_or_insert_with(String::new)),
                 "--name" | "-name" => Some(parsed.name.get_or_insert_with(String::new)),
+                "--gateway" | "-gateway" => Some(parsed.gateway.get_or_insert_with(String::new)),
                 "--roles" | "-roles" => Some(parsed.roles.get_or_insert_with(String::new)),
                 "--delegate" | "-delegate" => Some(parsed.delegate.get_or_insert_with(String::new)),
                 "--data-dir" | "-datadir" => Some(parsed.data_dir.get_or_insert_with(String::new)),
@@ -201,6 +221,22 @@ pub fn parse(text: &str) -> Result<Parsed, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_installer_spellings_preserve_an_explicit_gateway_without_showing_the_token() {
+        for command in [
+            "install.sh --url https://orch.test --token oenr_fixture_private --gateway asia",
+            "install.ps1 -Url https://orch.test -Token oenr_fixture_private -Gateway asia",
+        ] {
+            let parsed = parse(command).unwrap();
+            assert_eq!(parsed.gateway.as_deref(), Some("asia"));
+            assert!(!format!("{parsed:?}").contains("oenr_fixture_private"));
+        }
+        assert!(
+            parse("install.sh --url https://orch.test --token fixture --gateway eu --gateway asia")
+                .is_err()
+        );
+    }
 
     #[test]
     fn the_two_copied_installer_commands_and_a_plain_address_keep_the_same_private_data() {

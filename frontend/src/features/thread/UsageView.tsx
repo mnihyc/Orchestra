@@ -36,13 +36,14 @@ export function ThreadUsage({ thread }: { thread: Thread }) {
     <section className="flex flex-col gap-4 rounded-lg border border-border bg-surface p-4" aria-label={t('providerPlan.thisThread')}>
       <div className="flex flex-wrap items-center justify-between gap-2"><h2 className="text-base font-semibold text-text">{t('providerPlan.thisThread')}</h2><Button size="sm" icon={<RefreshCw aria-hidden />} pending={ledger.isFetching} onClick={() => void ledger.refetch()}>{t('providers.overview.refresh')}</Button></div>
       <p className="text-sm text-text-muted">{t('providerPlan.ledgerLead')}</p>
-      {ledger.isError ? <ErrorState compact error={ledger.error} onRetry={() => void ledger.refetch()} /> : ledger.data === undefined ? <SkeletonRows rows={3} /> : <><LedgerFigures figures={ledger.data.totals} /><p className="text-xs text-text-subtle">{t('providerPlan.ledgerSource')} <RelativeTime at={new Date(ledger.dataUpdatedAt).toISOString()} /></p></>}
+      {ledger.isError ? <ErrorState compact error={ledger.error} onRetry={() => void ledger.refetch()} /> : ledger.data === undefined ? <SkeletonRows read={ledger} rows={3} /> : <><LedgerFigures figures={ledger.data.totals} /><p className="text-xs text-text-subtle">{t('providerPlan.ledgerSource')} <RelativeTime at={new Date(ledger.dataUpdatedAt).toISOString()} /></p></>}
     </section>
     {/* What its turns used over time: the parts of their tokens, the context's fill and its shortenings. */}
     <ThreadComposition thread={thread} />
     {thread.binding !== null && <section className="flex flex-col gap-2" aria-label={t('providerPlan.providerTitle', { name: thread.binding.provider.name })}>
       <h2 className="text-base font-semibold text-text">{t('providerPlan.providerTitle', { name: thread.binding.provider.name })}</h2>
-      {readable ? <PlanPanel provider={provider.data} /> : provider.isPending ? <SkeletonRows rows={2} /> : <div className="rounded-lg border border-border bg-surface p-4 text-sm text-text-muted"><p>{t('providerPlan.viewMissing')}</p><p>{thread.blocked?.detail ?? t(thread.binding.provider.status === 'exhausted' ? 'providerPlan.recovery.limit' : thread.binding.provider.status === 'error' || thread.binding.provider.status === 'needs_setup' ? 'providerPlan.recovery.signin' : 'providerPlan.recovery.unavailable')}</p></div>}
+      {provider.isError && !denied && <ErrorState compact error={provider.error} message={t('implicitAvailability.usageFailed')} onRetry={() => void provider.refetch()} />}
+      {readable ? <PlanPanel provider={provider.data} /> : provider.isPending ? <SkeletonRows read={provider} rows={2} /> : !provider.isError || denied ? <div className="rounded-lg border border-border bg-surface p-4 text-sm text-text-muted"><p>{t('providerPlan.viewMissing')}</p><p>{thread.blocked?.detail ?? t(thread.binding.provider.status === 'exhausted' ? 'providerPlan.recovery.limit' : thread.binding.provider.status === 'error' || thread.binding.provider.status === 'needs_setup' ? 'providerPlan.recovery.signin' : 'providerPlan.recovery.unavailable')}</p></div> : null}
     </section>}
     <Limits of={{ kind:'node',id:thread.id,name:thread.name,manage:thread.access.permissions.includes('usage.manage') }} metering={meteringOf(thread)} />
   </div>;

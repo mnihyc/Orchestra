@@ -1,0 +1,1 @@
+{"data":[{"type":"spend_limit","id":"spl_fixture","amount":"50000","currency":"USD","period":"monthly","scope":{"type":"organization"},"is_enabled":true}],"next_page":null}

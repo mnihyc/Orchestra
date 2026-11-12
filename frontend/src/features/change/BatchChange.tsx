@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** Several threads switched at once, from a topic, a provider, an environment or a selection: one plan for each, and one bar for the batch.
  *
  * The same four views as a switch of one thread, using the configured batch size. The threads are listed and ticked (all, to
@@ -24,7 +25,8 @@ import { agentsQuery, providerModelsQuery, providersQuery } from '@/api/resource
 import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
 import { effortLabel, modelLabel } from '@/features/change/modelLabel';
-import { rangeWords } from '@/features/change/plan';
+import { addedResourcesOf, keptResourcesOf, rangeWords, removedResourcesOf } from '@/features/change/plan';
+import { PlanLists } from '@/features/change/Lists';
 import { useRefreshWhenOver } from '@/features/change/refresh';
 import { hasReported, profilesFor } from '@/features/change/RunsOn';
 import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
@@ -42,7 +44,7 @@ import { InlineAlert } from '@/ui/InlineAlert';
 import { Meter } from '@/ui/Meter';
 import { JobActivityLine } from '@/features/change/Progress';
 import { Select } from '@/ui/Select';
-import { SkeletonRows } from '@/ui/Skeleton';
+import { SkeletonRows, type SkeletonRead } from '@/ui/Skeleton';
 import { ThreadStateIcon } from '@/ui/ThreadState';
 import type { ThreadDisplay } from '@/generated/api-types';
 
@@ -73,7 +75,7 @@ interface Candidate {
 type BatchSelector=Pick<ForkBatchPreflightBody,'all_of_provider'|'all_of_agent'|'all_of_environment'|'source_model_id'>;
 
 /** Resource-wide candidates are one projection of current bindings, including the complete private count. */
-function useCandidates(source: BatchSource, active:boolean): { threads: Candidate[]; hidden: number; total:number; label: string; all: BatchSelector | null; loading: boolean; error: unknown } {
+function useCandidates(source: BatchSource, active:boolean): { threads: Candidate[]; hidden: number; total:number; label: string; all: BatchSelector | null; reads: readonly SkeletonRead[]; loading: boolean; error: unknown } {
   const trees = useTreeStore((state) => state.byOrg);
   const displayOf = (id: string) => [...trees.values()].map((held) => held.nodes.get(id)?.thread?.display).find((display) => display !== undefined) ?? null;
   const { t } = useTranslation();
@@ -82,15 +84,15 @@ function useCandidates(source: BatchSource, active:boolean): { threads: Candidat
   const resource=source.kind==='provider'||source.kind==='agent'||source.kind==='model'||source.kind==='environment';
   const object=source.kind==='model'?{kind:'provider' as const,id:source.providerId}:source.kind==='provider'||source.kind==='agent'||source.kind==='environment'?{kind:source.kind,id:source.id}:{kind:'provider' as const,id:''};
   const impact=useQuery({...resourceImpactQuery({object,model_id:source.kind==='model'?source.id:null}),enabled:active&&resource,refetchInterval:false});
-  if(source.kind==='threads')return {threads:source.threads.map((row)=>({...row,display:displayOf(row.id)})),hidden:0,total:source.threads.length,label:source.label??t('change.batch.selected'),all:null,loading:false,error:null};
+  if(source.kind==='threads')return {threads:source.threads.map((row)=>({...row,display:displayOf(row.id)})),hidden:0,total:source.threads.length,label:source.label??t('change.batch.selected'),all:null,reads:[],loading:false,error:null};
   if(source.kind==='topic') {
     const nodes=[...tree.nodes.values()].filter((node)=>node.parent_id===source.id&&node.kind==='thread'&&!node.deleted&&!node.archived);
-    return {threads:nodes.map((node)=>({id:node.id,name:node.name,display:node.thread?.display??null})),hidden:0,total:nodes.length,label:topic.data?.name??'',all:null,loading:topic.isPending,error:topic.error};
+    return {threads:nodes.map((node)=>({id:node.id,name:node.name,display:node.thread?.display??null})),hidden:0,total:nodes.length,label:topic.data?.name??'',all:null,reads:[topic],loading:topic.isPending,error:topic.error};
   }
   const bound=impact.data?.facts.dependents.find((group)=>group.relation==='binding');
   const threads=bound?.visible.flatMap((row)=>row.object?.kind==='thread'?[{id:row.object.id,name:row.name,display:impact.data?.thread_displays?.[row.object.id]??displayOf(row.object.id)}]:[])??[];
   const all:BatchSelector=source.kind==='provider'?{all_of_provider:source.id}:source.kind==='agent'?{all_of_agent:source.id}:source.kind==='model'?{all_of_provider:source.providerId,source_model_id:source.id}:{all_of_environment:source.id};
-  return {threads,hidden:bound?.hidden??0,total:bound?.count??0,label:impact.data?.name??'',all,loading:impact.isPending,error:impact.error};
+  return {threads,hidden:bound?.hidden??0,total:bound?.count??0,label:impact.data?.name??'',all,reads:[impact],loading:impact.isPending,error:impact.error};
 }
 
 export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) {
@@ -231,7 +233,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
   if (batchId !== null) {
     return (
       <Frame title={title} about={about} at="progress" open={open} onClose={onClose} footer={<Button onClick={onClose}>{t('change.progress.hide')}</Button>}>
-        {running.isError ? <ErrorState compact error={running.error} retrying={running.isRefetching} onRetry={() => void running.refetch()} /> : <SkeletonRows rows={3} />}
+        {running.isError ? <ErrorState compact error={running.error} retrying={running.isRefetching} onRetry={() => void running.refetch()} /> : <SkeletonRows read={running} rows={3} />}
       </Frame>
     );
   }
@@ -268,7 +270,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
           )}
         </div>
         {candidates.loading ? (
-          <SkeletonRows rows={3} />
+          <SkeletonRows reads={candidates.reads} rows={3} />
         ) : (
           <ul className="flex max-h-(--list-max-height) flex-col gap-1 overflow-y-auto rounded-lg border border-border bg-surface p-2">
             {threads.map((entry) => (
@@ -285,7 +287,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
       <section aria-label={t('change.batch.target')} className="flex flex-col gap-2">
         <h3 className="text-base font-semibold text-text">{t('change.batch.target')}</h3>
         <div className="grid gap-3 sm:grid-cols-2">
-          <Select
+          <ResourcePicker pickerKey="change.BatchChange.change.runs.provider"
             label={t('change.runs.provider')}
             value={providerId ?? ''}
             placeholder={t('change.batch.chooseProvider')}
@@ -295,9 +297,9 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
               setModel(null);
               setEffort(undefined);
             }}
-            options={(providers.data ?? []).filter((candidate) => candidate.status === 'ready').map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
+            options={(providers.data ?? []).filter((candidate) => (candidate.status === 'ready' || candidate.status === 'exhausted')).map((candidate) => ({ value: candidate.id, name: candidate.name, ...resourceChoice({ kind: 'provider', provider: candidate }) }))}
           />
-          <Select
+          <ResourcePicker pickerKey="change.BatchChange.change.runs.agent"
             label={t('change.runs.agent')}
             value={agentId ?? ''}
             disabled={providerId === null}
@@ -321,7 +323,7 @@ export function BatchChange({ source, batch, open, onClose }: BatchChangeProps) 
       <BatchDestination value={destination} onChange={setDestination} sources={source.kind === 'environment' ? [source.id] : []} />
 
       {plan.isError && <ErrorAlert error={plan.error} action={<Button size="sm" onClick={() => void plan.refetch()}>{t('common.tryAgain')}</Button>} />}
-      {body !== null && plan.isPending && <SkeletonRows rows={3} />}
+      {body !== null && plan.isPending && <SkeletonRows read={plan} rows={3} />}
       {current !== undefined && (
         <div className={cx('flex flex-col gap-3', stale && 'opacity-60 transition-opacity')} aria-busy={stale} data-plan>
           {planGone(confirm.error) && (
@@ -363,6 +365,7 @@ function PlanRows({ plans }: { plans: readonly ForkPlan[] }) {
               {plan.turn_running && <span className="text-sm text-text-muted">{t('change.env.turnRunning')}</span>}
             </div>
             {blocked && <Blockers blockers={plan.blockers} plan={plan} />}
+            <PlanLists compact changes={addedResourcesOf(plan, t)} stays={keptResourcesOf(plan, t)} ends={removedResourcesOf(plan, t)} />
           </li>
         );
       })}

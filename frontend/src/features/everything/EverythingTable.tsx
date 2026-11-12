@@ -1,4 +1,5 @@
 /** A lazily read tree grid: safe paths, aligned optional columns, a sticky header and the tree's keyboard. */
+import { linkTo } from '@/lib/links';
 import { ContainedThreadStateIcon, ThreadStateIcon } from '@/ui/ThreadState';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { ArrowDown, ArrowUp, Bot, Box, Boxes, ChevronDown, ChevronRight, Copy, Filter, FolderTree, GraduationCap, HardDrive, LayoutTemplate, LockKeyhole, MessageSquare, MoreHorizontal, Plug, PlugZap, Server } from 'lucide-react';
@@ -98,7 +99,7 @@ export function shareableRow(row: EverythingRow): boolean {
 /** Flat rows with a State column keep identity and activity in separate first-line slots. */
 export function KindIcon({ row, activity = true }: { row: { id: string; kind: string; path: EverythingRow['path']; thread_display?: EverythingRow['thread_display'] }; activity?: boolean }) {
   const kind = row.kind;
-  if (kind === 'thread' && activity) return <ThreadStateIcon display={row.thread_display} />;
+  if (kind === 'thread' && activity) return <ThreadStateIcon display={row.thread_display ?? null} />;
   if (kind === 'org' || kind === 'project' || kind === 'topic' || kind === 'thread' || kind === 'document') {
     const parent = row.path.filter((step) => step.id !== row.id).at(-1);
     return <NodeIcon kind={kind === 'project' && parent?.kind === 'project' ? 'folder' : kind} />;
@@ -158,9 +159,9 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
   const rowRef = useRef<HTMLTableRowElement>(null);
   const actions: MenuEntry[] = [];
   if (row.href !== null) actions.push({ id: 'open', label: t('everything.open'), href: row.href, onSelect: () => undefined });
-  if (row.href !== null) actions.push({ id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: () => { void copyText(new URL(row.href ?? '', location.origin).href); } });
+  if (row.href !== null) actions.push({ id: 'copy-link', label: t('places.menu.copyLink'), icon: <Copy aria-hidden />, onSelect: () => { void copyText(linkTo({ href: row.href ?? '' })); } });
   const shareKind = row.kind;
-  if (row.can_share && shareKind !== 'group' && shareKind !== 'machine' && shareKind !== 'chat') actions.push({ id: 'share', label: t('everything.share'), onSelect: () => openAccess({ kind: shareKind, id: row.id, name }) });
+  if (row.can_share && shareKind !== 'group' && shareKind !== 'machine') actions.push({ id: 'share', label: t('everything.share'), onSelect: () => openAccess({ kind: shareKind, id: row.id, name }) });
   if (row.settings_href !== null) actions.push({ id: 'settings', label: t('everything.settings'), href: row.settings_href, onSelect: () => undefined });
   if (row.href !== null && row.path.length > 0 && ['org', 'project', 'topic', 'thread', 'document', 'chat'].includes(row.kind)) actions.push({ id: 'show-in-tree', label: t('navigation.showInTree'), onSelect: () => showInTree(row) });
   const press = (event: KeyboardEvent<HTMLTableRowElement>) => {
@@ -202,12 +203,12 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
       {tree.selection !== undefined && <td role="gridcell" className={`${CELL} ${flat ? 'flat-choice' : 'col-start-1 row-start-1 z-(--layer-sticky) w-fit justify-self-start sm:w-auto'}`}>
         {shareableRow(row) && <Checkbox presentation="compact" label={<span className="sr-only">{t('everything.selectNamed', { name: label })}</span>} checked={tree.selection.selected.has(key)} onCheckedChange={(selected) => tree.selection?.toggle(row, selected)} />}
       </td>}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
-        <span className={`flex min-w-0 items-center gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-name' : 'col-span-2 col-start-1 row-start-1 self-start pr-[calc(var(--control-sm)+var(--spacing-3)+var(--spacing-2))] sm:pr-3'}`} style={flat ? undefined : { verticalAlign: 'top', paddingInlineStart: `calc(var(--spacing-4) * ${depth} + var(--spacing-2))` }}>
+        <span className={`flex min-w-0 items-start gap-2 ${!flat && tree.selection !== undefined ? 'pl-8 sm:pl-0' : ''}`}>
           {!flat && (expandable ? <IconButton size="sm" label={t(open ? 'everything.collapse' : 'everything.expand', { name: label })} icon={open ? <ChevronDown aria-hidden /> : <ChevronRight aria-hidden />} aria-expanded={open} onClick={() => tree.toggle(key, !open)} /> : <span className="size-(--control-sm) shrink-0" aria-hidden />)}
-          <KindIcon row={row} activity={!flat || !tree.columns.includes('state')} />
+          <span className="flex h-(--control-sm) shrink-0 items-center"><KindIcon row={row} activity={!flat || !tree.columns.includes('state')} /></span>
           <span className={`flex min-w-0 flex-1 flex-col gap-1 ${flat ? '' : 'wrap-anywhere sm:min-w-[12ch] sm:wrap-normal'}`}>
-            {row.href === null ? <span title={name} className={`font-medium text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
+            {row.href === null ? <span title={name} className={`font-medium leading-(--control-sm) text-text ${flat ? 'truncate' : ''}`}>{name}</span> : <a data-open title={name} aria-label={label} href={row.href} className={`rounded-md font-medium leading-(--control-sm) text-text underline-offset-2 hover:underline ${flat ? 'truncate' : ''}`}>{name}</a>}
             {row.place_label !== null && !tree.columns.includes('where') && <RowPlace value={place} />}
           </span>
           {!pathOnly && (row.kind === 'org' || row.kind === 'project' || row.kind === 'topic') && <ContainedThreadStateIcon id={row.id} />}
@@ -225,7 +226,7 @@ const Row = memo(function Row({ row, parentKey, depth, first, stale = false }: {
                 : <Cell column={column} row={row} onOwner={tree.onOwner} />}
         </>}
       </td>)}
-      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 justify-self-end sm:table-cell'}`}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
+      <td role="gridcell" className={`${CELL} ${flat ? 'flat-actions' : 'col-start-2 row-start-1 self-start justify-self-end sm:table-cell'}`} style={flat ? undefined : { verticalAlign: 'top' }}>{actions.length > 0 && !pathOnly && <Menu label={t('everything.actions', { name })} entries={actions} trigger={<IconButton label={t('everything.actions', { name })} size="sm" icon={<MoreHorizontal aria-hidden />} />} />}</td>
     </tr></ContextMenu>
     {open && <Level parent={row.id} parentKey={key} depth={depth + 1} />}
   </>;
@@ -252,7 +253,7 @@ function Level({ parent, parentKey, depth }: { parent: string | null; parentKey:
     if (shown && tree.all && hasNextPage && !isFetching && !isError) void fetchNextPage();
   }, [shown, tree.all, hasNextPage, isFetching, isError, fetchNextPage]);
   const span = tree.columns.length + 1 + (tree.selection === undefined ? 0 : 1);
-  if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows rows={3} /></td></tr>;
+  if (level.isPending) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}><SkeletonRows read={level} rows={3} /></td></tr>;
   const failure = level.isError ? <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{level.error instanceof ApiError && level.error.status === 403 ? <><p>{t('everything.refused')}</p><Button size="sm" asChild><a href="/everything">{t('everything.openMine')}</a></Button></> : <><ErrorAlert error={level.error} /><Button size="sm" variant="ghost" onClick={() => void level.refetch()}>{t('everything.retry')}</Button></>}</td></tr> : null;
   if (level.isError && (rows.length === 0 || retired)) return failure;
   if (rows.length === 0) return <tr role="row"><td role="gridcell" colSpan={span} className={CELL}>{t(tree.filter.q !== '' ? 'everything.noMatches' : filtering ? 'everything.noResults' : 'everything.empty')}</td></tr>;

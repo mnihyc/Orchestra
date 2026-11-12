@@ -13,8 +13,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use orch_agent_contract::events::TokenUsage;
-use orch_link_contract::commands::{JOURNAL_KEEP_HOURS, LeaseMode, LeaseOpen, MachineKey};
-use orch_types::{Id, Time};
+use orch_api_contract::usage::RequestTiming;
+use orch_link_contract::commands::{
+    JOURNAL_KEEP_HOURS, LeaseMode, LeaseOpen, LeaseUsageGroup, MachineKey,
+};
+use orch_types::{Id, Json, Time};
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::SecretStore;
@@ -74,6 +77,36 @@ pub struct Lease {
 }
 
 impl Lease {
+    /// The provider's ceiling accepted for this model when the turn opened its lease.
+    #[must_use]
+    pub fn model_parameters(
+        &self,
+        model: &str,
+    ) -> Option<&orch_provider_contract::models::ModelParameters> {
+        self.request.model_parameters.get(model)
+    }
+
+    /// Explicit choices of this turn, retained in the same durable journal as its ceilings.
+    #[must_use]
+    pub fn request_options(&self, interface: &str) -> Option<&Json> {
+        self.request.request_options.get(interface)
+    }
+
+    /// The managed scalar of the admitted turn; Some(None) is known ordinary, None an unaware issuer.
+    #[must_use]
+    pub fn access_program(&self) -> Option<Option<&str>> {
+        self.request
+            .access_program
+            .as_ref()
+            .map(|choice| choice.program.as_deref())
+    }
+
+    /// The admitted session's existing core result; this does not resolve or infer another route.
+    #[must_use]
+    pub fn native_model(&self) -> Option<&orch_agent_contract::session::NativeModelContext> {
+        self.request.native_model.as_deref()
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -185,6 +218,23 @@ impl Lease {
     pub fn accrue(&self, usage: &TokenUsage) -> i128 {
         self.allowance.accrue(usage)
     }
+    /// The same supplied quota rate with actual hourly cache-write counts where known.
+    #[must_use]
+    pub fn accrue_observed(&self, usage: &TokenUsage, timing: &RequestTiming) -> i128 {
+        self.allowance.accrue_observed(usage, timing)
+    }
+
+    /// Native search fees at the existing allowance's rate.
+    #[must_use]
+    pub fn accrue_searches(&self, searches: i64) -> i128 {
+        self.allowance.accrue_searches(searches)
+    }
+
+    /// Successful page-fetch fees use the same allowance and cumulative meter.
+    #[must_use]
+    pub fn accrue_fetches(&self, fetches: i64) -> i128 {
+        self.allowance.accrue_fetches(fetches)
+    }
 
     /// Adds what a request used, in whole or in the part read since the last time, with its charge.
     pub fn add_usage(&self, usage: &TokenUsage, accrued: i128) {
@@ -204,7 +254,7 @@ impl Lease {
     /// What the requests under it have used so far.
     #[must_use]
     pub fn totals(&self) -> Totals {
-        self.state().totals
+        self.state().totals.clone()
     }
 
     /// When a copy was last issued under it.
@@ -234,7 +284,7 @@ impl Lease {
             state.closed_at = Some(now);
         }
         self.save(&mut state)?;
-        Ok(state.totals)
+        Ok(state.totals.clone())
     }
 }
 
@@ -245,6 +295,8 @@ pub struct Meter {
     lease: Arc<Lease>,
     counted: TokenUsage,
     accrued: i128,
+    /// Only this active request's current contribution, never completed request history.
+    group: Option<LeaseUsageGroup>,
 }
 
 impl Meter {
@@ -256,6 +308,25 @@ impl Meter {
             lease,
             counted: TokenUsage::default(),
             accrued: 0,
+            group: None,
+        }
+    }
+
+    /// Starts an actual-wire-aware raw request before the upstream send or awaited key report.
+    /// Old journal usage is deliberately left uncovered instead of inventing historical facts.
+    #[must_use]
+    pub fn start_observed(lease: Arc<Lease>) -> Self {
+        {
+            let mut state = lease.state();
+            state.totals.count_request();
+            state.totals.usage_groups.get_or_insert_with(Vec::new);
+            lease.save_count(&mut state);
+        }
+        Self {
+            lease,
+            counted: TokenUsage::default(),
+            accrued: 0,
+            group: None,
         }
     }
 
@@ -268,15 +339,135 @@ impl Meter {
     /// Takes in what the request has used so far (the figures are cumulative): the lease is given the part
     /// that is new.
     pub fn update(&mut self, usage: &TokenUsage) {
+        self.update_inner(usage, None, true);
+    }
+
+    /// Adds cumulative usage and atomically moves this meter's existing contribution if its
+    /// actual reported tier becomes known or changes, even when no token member grew.
+    pub fn update_observed(&mut self, model: &str, usage: &TokenUsage, timing: &RequestTiming) {
+        self.update_inner(usage, Some((model, timing)), true);
+    }
+
+    /// Side replies can report independent quantities without claiming a measured zero-token total.
+    pub fn update_counters(&mut self, model: &str, timing: &RequestTiming) {
+        self.update_inner(&TokenUsage::default(), Some((model, timing)), false);
+    }
+
+    fn update_inner(
+        &mut self,
+        usage: &TokenUsage,
+        facts: Option<(&str, &RequestTiming)>,
+        tokens_reported: bool,
+    ) {
         let new = growth(usage, &self.counted);
-        let charge = self.lease.accrue(usage);
+        let charge = facts
+            .map_or_else(
+                || self.lease.accrue(usage),
+                |(_, timing)| self.lease.accrue_observed(usage, timing),
+            )
+            .saturating_add(
+                facts
+                    .and_then(|(_, timing)| timing.web_searches.value().copied())
+                    .map_or(0, |searches| self.lease.accrue_searches(searches)),
+            )
+            .saturating_add(
+                facts
+                    .and_then(|(_, timing)| timing.web_fetches.value().copied())
+                    .map_or(0, |fetches| self.lease.accrue_fetches(fetches)),
+            );
         let added = (charge - self.accrued).max(0);
-        if new == TokenUsage::default() && added == 0 {
+        if facts.is_none() && new == TokenUsage::default() && added == 0 {
             return;
         }
-        self.lease.add_usage(&new, added);
-        self.counted = self.counted.plus(new);
+        let counted = self.counted.plus(new);
+        let known_cache_subset =
+            |state: Option<&orch_api_contract::usage::UsageMeasurement<i64>>| {
+                use orch_api_contract::usage::UsageMeasurement;
+                match state {
+                    Some(UsageMeasurement::Told { value }) => {
+                        *value >= 0 && *value <= counted.cache_write_tokens
+                    }
+                    Some(UsageMeasurement::Unsupported) => true,
+                    _ => false,
+                }
+            };
+        let group = facts.map(|(model, timing)| LeaseUsageGroup {
+            reported_cost_usage: orch_link_contract::commands::LeaseReportedCost::of(timing),
+            cache_write_usage: (timing.cache_write_1h_tokens.is_some()
+                || timing.cache_write_12h_tokens.is_some())
+            .then(|| orch_link_contract::commands::LeaseCacheWriteUsage {
+                one_hour_tokens: timing
+                    .cache_write_1h_tokens
+                    .as_ref()
+                    .and_then(|state| state.value())
+                    .copied()
+                    .unwrap_or(0)
+                    .max(0),
+                known_requests: i64::from(known_cache_subset(
+                    timing.cache_write_1h_tokens.as_ref(),
+                )),
+                twelve_hour_tokens: timing
+                    .cache_write_12h_tokens
+                    .as_ref()
+                    .and_then(|state| state.value())
+                    .copied()
+                    .unwrap_or(0)
+                    .max(0),
+                twelve_hour_known_requests: i64::from(known_cache_subset(
+                    timing.cache_write_12h_tokens.as_ref(),
+                )),
+            }),
+            search_usage: Some(orch_link_contract::commands::LeaseSearchUsage {
+                fetches: timing.web_fetches.value().copied().unwrap_or(0).max(0),
+                fetch_known_requests: i64::from(matches!(
+                    timing.web_fetches,
+                    orch_api_contract::usage::UsageMeasurement::Told { .. }
+                        | orch_api_contract::usage::UsageMeasurement::Unsupported
+                )),
+                searches: timing.web_searches.value().copied().unwrap_or(0).max(0),
+                known_requests: i64::from(matches!(
+                    timing.web_searches,
+                    orch_api_contract::usage::UsageMeasurement::Told { .. }
+                        | orch_api_contract::usage::UsageMeasurement::Unsupported
+                )),
+            }),
+            model: model.to_owned(),
+            usage: counted,
+            requests: 1,
+            min_context_tokens: counted.input_tokens,
+            max_context_tokens: counted.input_tokens,
+            timing: {
+                let mut grouped = timing.clone();
+                if !matches!(
+                    grouped.reported_cost,
+                    orch_api_contract::usage::UsageMeasurement::Unsupported
+                ) {
+                    grouped.reported_cost = orch_api_contract::usage::UsageMeasurement::Unread;
+                }
+                for value in grouped.declared_counters.values_mut() {
+                    *value = orch_api_contract::usage::UsageMeasurement::Unread;
+                }
+                grouped
+            },
+        });
+        if new == TokenUsage::default() && added == 0 && group == self.group {
+            return;
+        }
+        {
+            let mut state = self.lease.state();
+            if tokens_reported {
+                state.totals.add_usage(&new, added);
+            } else {
+                state.totals.accrued = state.totals.accrued.saturating_add(added);
+            }
+            if let Some(group) = &group {
+                state.totals.replace_group(self.group.as_ref(), group);
+            }
+            self.lease.save_count(&mut state);
+        }
+        self.counted = counted;
         self.accrued += added;
+        self.group = group;
     }
 }
 
@@ -575,6 +766,160 @@ mod tests {
         })
     }
 
+    fn raw_timing(reported: Option<&str>) -> RequestTiming {
+        use orch_api_contract::usage::UsageMeasurement;
+        RequestTiming {
+            wire_protocol: Some("openai-responses".to_owned()),
+            requested_service_tier: Some("fast".to_owned()),
+            reported_service_tier: reported.map_or(UsageMeasurement::Unread, |value| {
+                UsageMeasurement::Told {
+                    value: value.to_owned(),
+                }
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn counter_only_replies_use_the_same_prices_without_claiming_or_recounting_tokens() {
+        use orch_api_contract::usage::UsageMeasurement;
+        let mut request = forwarded(new_id(), new_id());
+        request.allowance = Some(
+            serde_json::from_value(json!({"credits":{"amount":"100","rate":{
+                "input_per_mtok":"1","cached_input_per_mtok":"1","output_per_mtok":"2",
+                "web_search_per_call":"0.125","web_fetch_per_call":"0.25"
+            }}}))
+            .unwrap(),
+        );
+        let leases = Leases::new();
+        let lease = leases.open(&request, now()).unwrap();
+        let mut meter = Meter::start_observed(Arc::clone(&lease));
+        let mut timing = raw_timing(None);
+        timing.web_searches = UsageMeasurement::Told { value: 1 };
+        timing.web_fetches = UsageMeasurement::Told { value: 2 };
+        meter.update_counters("gpt-6-sol", &timing);
+        let first = lease.totals();
+        assert!(
+            !first.known,
+            "independent counts do not report a zero-token total"
+        );
+        // One eighth plus two quarters, in the allowance's existing billionth-per-million scale.
+        assert_eq!(first.accrued, 625_000_000_000_000);
+        meter.update_counters("gpt-6-sol", &timing);
+        assert_eq!(
+            lease.totals(),
+            first,
+            "repeated cumulative quantities are not new calls"
+        );
+        let mut generation = Meter::start_observed(Arc::clone(&lease));
+        generation.update_observed("gpt-6-sol", &used(10, 2), &raw_timing(None));
+        meter.update_counters("gpt-6-sol", &timing);
+        assert!(lease.totals().known);
+        assert_eq!(lease.totals().usage, used(10, 2));
+    }
+
+    #[test]
+    fn active_meter_refinement_moves_only_its_prior_contribution_without_recounting_tokens() {
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let mut first = Meter::start_observed(Arc::clone(&lease));
+        let mut second = Meter::start_observed(Arc::clone(&lease));
+        first.update_observed("gpt-6-sol", &used(100, 10), &raw_timing(None));
+        second.update_observed("gpt-6-sol", &used(200, 20), &raw_timing(None));
+        first.update_observed("gpt-6-sol", &used(100, 10), &raw_timing(Some("default")));
+        // Repeating the cumulative report or refining the tier without growth cannot add tokens.
+        first.update_observed("gpt-6-sol", &used(100, 10), &raw_timing(Some("default")));
+        second.update_observed("gpt-6-sol", &used(250, 25), &raw_timing(Some("priority")));
+        let closed = leases.close_checked(lease.id(), now()).unwrap();
+        assert_eq!(closed.requests, 2);
+        assert_eq!(closed.usage, used(350, 35));
+        let groups = closed.usage_groups.as_ref().unwrap();
+        assert_eq!(
+            groups.len(),
+            2,
+            "the former unread group has no contribution left"
+        );
+        for (reported, tokens) in [("default", used(100, 10)), ("priority", used(250, 25))] {
+            let group = groups
+                .iter()
+                .find(|group| {
+                    group
+                        .timing
+                        .reported_service_tier
+                        .value()
+                        .map(String::as_str)
+                        == Some(reported)
+                })
+                .unwrap();
+            assert_eq!(group.requests, 1);
+            assert_eq!(group.usage, tokens);
+            assert_eq!(group.min_context_tokens, tokens.input_tokens);
+            assert_eq!(group.max_context_tokens, tokens.input_tokens);
+            assert!(
+                group.timing.is_unsupported(),
+                "raw facts do not invent performance capability"
+            );
+        }
+        assert_eq!(leases.close_checked(lease.id(), now()).unwrap(), closed);
+    }
+
+    #[test]
+    fn awareness_does_not_assign_new_facts_to_restored_legacy_usage() {
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let old: Totals = serde_json::from_value(json!({
+            "requests": 1, "usage": used(100, 10), "known": true, "accrued": 0
+        }))
+        .unwrap();
+        assert!(old.usage_groups.is_none());
+        lease.state().totals = old;
+        let mut meter = Meter::start_observed(Arc::clone(&lease));
+        let aware = lease.totals();
+        assert_eq!(aware.usage, used(100, 10));
+        assert_eq!(aware.usage_groups, Some(Vec::new()));
+        meter.update_observed("gpt-6-sol", &used(20, 2), &raw_timing(Some("default")));
+        let totals = lease.totals();
+        assert_eq!(totals.usage, used(120, 12));
+        assert_eq!(totals.usage_groups.unwrap()[0].usage, used(20, 2));
+    }
+
+    #[test]
+    fn aware_request_without_a_usage_report_retains_unknown_usage_in_a_close() {
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let _meter = Meter::start_observed(Arc::clone(&lease));
+        let closed = leases.close_checked(lease.id(), now()).unwrap();
+        assert_eq!(closed.requests, 1);
+        assert_eq!(closed.reported(), None);
+        assert_eq!(closed.usage_groups, Some(Vec::new()));
+    }
+
+    #[test]
+    fn grouped_actual_facts_survive_the_existing_lease_journal_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = Arc::new(crate::roles::Keys::new(
+            orch_pki::certificates::LeafKey::generate().unwrap(),
+        ));
+        let store = Arc::new(SecretStore::open(dir.path(), keys).unwrap());
+        let leases = Leases::stored(Arc::clone(&store), now());
+        let request = forwarded(new_id(), new_id());
+        let lease = leases.open(&request, now()).unwrap();
+        let mut meter = Meter::start_observed(Arc::clone(&lease));
+        meter.update_observed("gpt-6-sol", &used(100, 10), &raw_timing(None));
+        meter.update_observed("gpt-6-sol", &used(100, 10), &raw_timing(Some("priority")));
+        let before = lease.totals();
+        drop(meter);
+        drop(lease);
+        drop(leases);
+        let restored = Leases::stored(store, now());
+        let after = restored.close_checked(request.lease_id, now()).unwrap();
+        assert_eq!(after, before);
+        assert_eq!(
+            after.usage_groups.unwrap()[0].timing,
+            raw_timing(Some("priority"))
+        );
+    }
+
     #[test]
     fn a_session_finds_the_lease_that_was_opened_last_for_its_thread() {
         let leases = Leases::new();
@@ -635,6 +980,7 @@ mod tests {
         assert!(matches!(
             leases.open(
                 &LeaseOpen {
+                    model_parameters: Default::default(),
                     lease_id: lease.id(),
                     ..forwarded(provider, thread)
                 },
@@ -674,6 +1020,7 @@ mod tests {
             Err(LeaseError::Incomplete(LeaseMode::Shared, "form"))
         ));
         let with_form = LeaseOpen {
+            model_parameters: Default::default(),
             form: Some("access_token".into()),
             ..body.clone()
         };
@@ -687,6 +1034,7 @@ mod tests {
     fn a_lease_with_an_allowance_is_spent_when_the_figure_is_reached() {
         let leases = Leases::new();
         let body = LeaseOpen {
+            model_parameters: Default::default(),
             allowance: Some(LeaseOpenAllowance {
                 tokens: Some(20),
                 credits: None,
@@ -721,6 +1069,20 @@ mod tests {
         let store = Arc::new(SecretStore::open(dir.path(), keys).unwrap());
         let leases = Leases::stored(Arc::clone(&store), now());
         let request = LeaseOpen {
+            native_model: Some(Box::new(orch_agent_contract::session::NativeModelContext {
+                model: "original-model".into(),
+                parameters: Default::default(),
+                capabilities: json!([{"capability":"generation","native_config":{"supports_standalone_web_search":true}}]),
+                extensions: Default::default(),
+            })),
+            access_program: Some(orch_link_contract::commands::LeaseAccessProgram {
+                program: Some("original-program".into()),
+            }),
+            request_options: serde_json::from_value(json!({
+                "openai-responses":{"vendor":{"mode":"original"}}
+            }))
+            .unwrap(),
+            model_parameters: Default::default(),
             allowance: Some(LeaseOpenAllowance {
                 tokens: Some(20),
                 credits: None,
@@ -730,6 +1092,7 @@ mod tests {
         let lease = leases.open(&request, now()).unwrap();
         lease.record(Some(&used(10, 6)));
         let shared = LeaseOpen {
+            model_parameters: Default::default(),
             mode: LeaseMode::Shared,
             form: Some("copy".to_owned()),
             recipient: Some(MachineKey {
@@ -743,10 +1106,59 @@ mod tests {
             .unwrap()
             .issued_at_checked(now())
             .unwrap();
+        let ordinary = LeaseOpen {
+            access_program: Some(orch_link_contract::commands::LeaseAccessProgram {
+                program: None,
+            }),
+            ..forwarded(new_id(), new_id())
+        };
+        leases.open(&ordinary, now()).unwrap();
+        assert!(
+            serde_json::to_value(forwarded(new_id(), new_id()))
+                .unwrap()
+                .get("access_program")
+                .is_none(),
+            "an unaware issuer keeps the old omitted wire shape"
+        );
         drop(lease);
         drop(leases);
         let restored = Leases::stored(Arc::clone(&store), now());
         let lease = restored.open(&request, now()).unwrap();
+        assert_eq!(
+            restored.get(ordinary.lease_id).unwrap().access_program(),
+            Some(None),
+            "known ordinary survives the durable journal without collapsing to an unaware issuer"
+        );
+        assert_eq!(lease.access_program(), Some(Some("original-program")));
+        assert_eq!(lease.native_model(), request.native_model.as_deref());
+        assert_eq!(
+            lease.request_options("openai-responses"),
+            Some(&json!({"vendor":{"mode":"original"}}))
+        );
+        let mut changed = request.clone();
+        changed.request_options.clear();
+        changed.native_model = None;
+        changed.access_program = Some(orch_link_contract::commands::LeaseAccessProgram {
+            program: Some("changed-program".into()),
+        });
+        assert_eq!(
+            restored.open(&changed, now()).unwrap().access_program(),
+            Some(Some("original-program")),
+            "repeated lease.open cannot change its frozen managed program after restart"
+        );
+        assert_eq!(
+            restored.open(&changed, now()).unwrap().native_model(),
+            lease.native_model(),
+            "reopening the same lease cannot change its captured native resolution after restart"
+        );
+        assert_eq!(
+            restored
+                .open(&changed, now())
+                .unwrap()
+                .request_options("openai-responses"),
+            lease.request_options("openai-responses"),
+            "repeated lease.open keeps the original frozen choices after restart"
+        );
         assert_eq!(
             restored
                 .of_session(request.provider_id, request.thread_id)
@@ -800,5 +1212,135 @@ mod tests {
                 .of_session(request.provider_id, request.thread_id)
                 .is_none()
         );
+    }
+    #[test]
+    fn search_reports_replace_one_active_contribution_without_double_counting() {
+        use orch_api_contract::usage::UsageMeasurement;
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let mut one = Meter::start_observed(Arc::clone(&lease));
+        let mut timing = raw_timing(Some("default"));
+        timing.web_searches = UsageMeasurement::Told { value: 2 };
+        one.update_observed("gpt-6-sol", &used(10, 2), &timing);
+        one.update_observed("gpt-6-sol", &used(10, 2), &timing);
+        let mut two = Meter::start_observed(Arc::clone(&lease));
+        timing.web_searches = UsageMeasurement::Unread;
+        two.update_observed("gpt-6-sol", &used(5, 1), &timing);
+        let groups = lease.totals().usage_groups.unwrap();
+        assert_eq!(groups[0].search_usage.as_ref().unwrap().searches, 2);
+        assert_eq!(groups[0].search_usage.as_ref().unwrap().known_requests, 1);
+        timing.web_searches = UsageMeasurement::Told { value: 1 };
+        two.update_observed("gpt-6-sol", &used(5, 1), &timing);
+        let groups = lease.totals().usage_groups.unwrap();
+        assert_eq!(groups[0].search_usage.as_ref().unwrap().searches, 3);
+        assert_eq!(groups[0].search_usage.as_ref().unwrap().known_requests, 2);
+    }
+    #[test]
+    fn reported_cost_groups_replace_cumulative_values_and_keep_partial_coverage_unknown() {
+        use orch_api_contract::usage::{ReportedCost, UsageMeasurement};
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let mut first = Meter::start_observed(Arc::clone(&lease));
+        let mut timing = raw_timing(Some("default"));
+        timing.reported_cost = UsageMeasurement::Told {
+            value: ReportedCost {
+                amount: "0.0071".into(),
+                unit: Some("USD".into()),
+            },
+        };
+        first.update_observed("gpt-6-sol", &used(10, 2), &timing);
+        first.update_observed("gpt-6-sol", &used(10, 2), &timing);
+        let mut second = Meter::start_observed(Arc::clone(&lease));
+        timing.reported_cost = UsageMeasurement::Unread;
+        second.update_observed("gpt-6-sol", &used(5, 1), &timing);
+        let groups = lease.totals().usage_groups.unwrap();
+        assert_eq!(groups[0].requests, 2);
+        assert!(
+            groups[0]
+                .reported_cost_usage
+                .as_ref()
+                .unwrap()
+                .complete(2)
+                .is_none()
+        );
+        timing.reported_cost = UsageMeasurement::Told {
+            value: ReportedCost {
+                amount: "0.0123".into(),
+                unit: Some("USD".into()),
+            },
+        };
+        second.update_observed("gpt-6-sol", &used(5, 1), &timing);
+        second.update_observed("gpt-6-sol", &used(5, 1), &timing);
+        let groups = lease.totals().usage_groups.unwrap();
+        assert_eq!(
+            groups[0]
+                .reported_cost_usage
+                .as_ref()
+                .unwrap()
+                .complete(2)
+                .unwrap()
+                .amount,
+            "0.0194"
+        );
+        assert!(
+            matches!(groups[0].timing.reported_cost, UsageMeasurement::Unread),
+            "a group subtotal is separate from individual request timing"
+        );
+    }
+
+    #[test]
+    fn hourly_subsets_replace_active_reports_and_keep_incomplete_requests_unknown() {
+        use orch_api_contract::usage::UsageMeasurement;
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let mut timing = RequestTiming {
+            wire_protocol: Some("anthropic-messages".into()),
+            cache_write_1h_tokens: Some(UsageMeasurement::Told { value: 1 }),
+            ..Default::default()
+        };
+        let mut first = Meter::start_observed(Arc::clone(&lease));
+        let mut usage = used(10, 0);
+        usage.cache_write_tokens = 4;
+        first.update_observed("chosen", &usage, &timing);
+        timing.cache_write_1h_tokens = Some(UsageMeasurement::Told { value: 3 });
+        first.update_observed("chosen", &usage, &timing);
+        let mut second = Meter::start_observed(Arc::clone(&lease));
+        timing.cache_write_1h_tokens = Some(UsageMeasurement::Unread);
+        second.update_observed("chosen", &usage, &timing);
+        let totals = lease.totals();
+        let group = &totals.usage_groups.as_ref().unwrap()[0];
+        assert_eq!(group.requests, 2);
+        assert_eq!(group.cache_write_usage.as_ref().unwrap().one_hour_tokens, 3);
+        assert_eq!(group.cache_write_usage.as_ref().unwrap().known_requests, 1);
+        assert_eq!(group.usage.input_tokens, 20);
+    }
+
+    #[test]
+    fn twelve_hour_subsets_replace_active_reports_and_keep_independent_coverage() {
+        use orch_api_contract::usage::UsageMeasurement;
+        let leases = Leases::new();
+        let lease = leases.open(&forwarded(new_id(), new_id()), now()).unwrap();
+        let mut timing = RequestTiming {
+            wire_protocol: Some("openai-responses".into()),
+            cache_write_12h_tokens: Some(UsageMeasurement::Told { value: 1 }),
+            ..Default::default()
+        };
+        let mut first = Meter::start_observed(Arc::clone(&lease));
+        let mut usage = used(10, 0);
+        usage.cache_write_tokens = 4;
+        first.update_observed("chosen", &usage, &timing);
+        timing.cache_write_12h_tokens = Some(UsageMeasurement::Told { value: 3 });
+        first.update_observed("chosen", &usage, &timing);
+        let mut second = Meter::start_observed(Arc::clone(&lease));
+        timing.cache_write_12h_tokens = Some(UsageMeasurement::Unread);
+        second.update_observed("chosen", &usage, &timing);
+        let totals = lease.totals();
+        let group = &totals.usage_groups.as_ref().unwrap()[0];
+        let cache = group.cache_write_usage.as_ref().unwrap();
+        assert_eq!(group.requests, 2);
+        assert_eq!(cache.twelve_hour_tokens, 3);
+        assert_eq!(cache.twelve_hour_known_requests, 1);
+        assert_eq!(cache.known_requests, 0);
+        assert_eq!(group.usage.input_tokens, 20);
     }
 }

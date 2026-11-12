@@ -114,7 +114,7 @@ export function DocumentList({ node, below = false }: { node: ListedNode; below?
       {canMake && <Templates nodeId={node.id} />}
       {copying && <CopyDocumentDialog destination={node.id} onClose={() => setCopying(false)} />}
       {list.isPending ? (
-        <SkeletonRows rows={3} />
+        <SkeletonRows read={list} rows={3} />
       ) : list.isError && docs.length === 0 ? (
         <ErrorState compact error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />
       ) : docs.length === 0 ? (

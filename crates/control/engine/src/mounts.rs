@@ -27,6 +27,8 @@ type EnabledMountValue = (Json, Option<Id>, Option<Id>, usize);
 /// One resolved mount, with the public result and the machine-only request kept apart.
 #[derive(Debug, Clone)]
 pub struct ResolvedMount {
+    /// The actual stored mount selected before its public reference was made.
+    pub source: Id,
     /// The requested attachment and its mode on the chosen machine.
     pub view: EnvMount,
     /// The managed driver's request; absent for unavailable and connected mounts.
@@ -322,6 +324,7 @@ pub async fn resolve_for(
                 },
             });
         result.push(ResolvedMount {
+            source: row.id,
             view: EnvMount {
                 mount: MountRef {
                     id,
@@ -365,38 +368,69 @@ pub async fn views(
     environment: Id,
     at: DateTime<Utc>,
 ) -> Result<Vec<EnvMount>, EngineError> {
+    prepare_views(conn, environment, at).await?.render()
+}
+
+/// Native selected attachment rows and the already read machine observations.
+/// Rendering never resolves a replacement source set after operation admission.
+pub struct PreparedViews {
+    resolved: Vec<ResolvedMount>,
+    facts: Option<Json>,
+}
+
+impl PreparedViews {
+    /// Exact stored mounts selected by the native resolver, independent of response fields.
+    pub fn mount_ids(&self) -> impl Iterator<Item = Id> + '_ {
+        self.resolved.iter().map(|mount| mount.source)
+    }
+
+    /// The ordinary attachment projection with the same observed-state overlay.
+    pub fn render(&self) -> Result<Vec<EnvMount>, EngineError> {
+        let facts = self.facts.as_ref().and_then(Json::as_array);
+        let mut result = Vec::with_capacity(self.resolved.len());
+        for mount in &self.resolved {
+            let mut view = mount.view.clone();
+            if let Some(fact) = facts.and_then(|facts| {
+                facts.iter().find(|fact| {
+                    fact.get("mount_id") == Some(&json!(view.mount.id))
+                        || fact.get("name").and_then(Json::as_str) == Some(view.mount.name.as_str())
+                })
+            }) && view.reason.is_none()
+            {
+                if let Some(state) = fact.get("state") {
+                    view.state = serde_json::from_value(state.clone())?;
+                }
+                if let Some(reason) = fact.get("reason") {
+                    view.reason = serde_json::from_value(reason.clone())?;
+                }
+                view.path = fact.get("path").and_then(Json::as_str).map(str::to_owned);
+                if let Some(mode) = fact.get("mode").filter(|value| !value.is_null()) {
+                    view.mode = serde_json::from_value(mode.clone())?;
+                }
+                view.enforced = fact
+                    .get("enforced")
+                    .and_then(Json::as_bool)
+                    .unwrap_or(false);
+            }
+            result.push(view);
+        }
+        Ok(result)
+    }
+}
+
+/// Select native attachment sources and observations before a consumer binds their content.
+pub async fn prepare_views(
+    conn: &mut Conn,
+    environment: Id,
+    at: DateTime<Utc>,
+) -> Result<PreparedViews, EngineError> {
     let environment_row = environments::environment(conn, environment)
         .await?
         .ok_or_else(|| EngineError::unreadable("the environment is not there"))?;
-    let facts = environment_row.facts.get("mounts").and_then(Json::as_array);
-    let mut result = Vec::new();
-    for mount in resolve(conn, environment, at).await? {
-        let mut view = mount.view;
-        if let Some(fact) = facts.and_then(|facts| {
-            facts.iter().find(|fact| {
-                fact.get("mount_id") == Some(&json!(view.mount.id))
-                    || fact.get("name").and_then(Json::as_str) == Some(view.mount.name.as_str())
-            })
-        }) && view.reason.is_none()
-        {
-            if let Some(state) = fact.get("state") {
-                view.state = serde_json::from_value(state.clone())?;
-            }
-            if let Some(reason) = fact.get("reason") {
-                view.reason = serde_json::from_value(reason.clone())?;
-            }
-            view.path = fact.get("path").and_then(Json::as_str).map(str::to_owned);
-            if let Some(mode) = fact.get("mode").filter(|value| !value.is_null()) {
-                view.mode = serde_json::from_value(mode.clone())?;
-            }
-            view.enforced = fact
-                .get("enforced")
-                .and_then(Json::as_bool)
-                .unwrap_or(false);
-        }
-        result.push(view);
-    }
-    Ok(result)
+    Ok(PreparedViews {
+        resolved: resolve(conn, environment, at).await?,
+        facts: environment_row.facts.get("mounts").cloned(),
+    })
 }
 
 fn add_values(

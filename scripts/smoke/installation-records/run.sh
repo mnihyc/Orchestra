@@ -32,17 +32,23 @@ api_record() {
 }
 
 step "checks ship off; a manual lookup reports a newer release but installs nothing"
-api_record GET /admin/installation-records > "$EVIDENCE/initial.json"
-check "no scheduled release facts exist with checks disabled" jq -e '.release == null' "$EVIDENCE/initial.json"
+# Management's page itself looks the source up when it is opened (and keeps the answer for an hour, as a manual
+# check does), so what the scheduled check made of the shipped setting is looked at before the page is first read.
+check "no scheduled release facts exist with checks disabled" test "$(sql "SELECT count(*) FROM installation_records WHERE key = 'release_check'")" = 0
 refuses "the off check made no manifest request" grep -F 'GET /latest/download/version.json' "$EVIDENCE/source.log"
 BEFORE="$(edge_version)"
+api_record GET /admin/installation-records > "$EVIDENCE/initial.json"
 api_record POST /admin/releases/check > "$EVIDENCE/release.json"
 check "the configured complete manifest reports the newer offer" jq -e '.newer == true and .command != null and .error == null' "$EVIDENCE/release.json"
 expect "a check installs nothing" "$BEFORE" "$(edge_version)"
 api_record POST /admin/releases/check > "$EVIDENCE/release-again.json"
+expect "the page and both manual checks shared one lookup of the source" 1 "$(grep -cF 'GET /latest/download/version.json' "$EVIDENCE/source.log" || true)"
 NOTICES="$(compose exec -T postgres psql -U orch -d orch -At -c "SELECT count(*) FROM notifications WHERE data->>'reason'='release_available'")"
 expect "one notice for that offer" 1 "$NOTICES"
 printf 'not a manifest' > "$WORK/site/latest/download/version.json"
+# A lookup is not repeated within the hour after the last attempt, whoever asks. The hour is let pass in the
+# record of the attempt (the facts it kept keep their own date), so that the next check does ask the source.
+sql "UPDATE installation_records SET value = jsonb_set(value, '{attempted_at}', to_jsonb(to_char(((value->>'attempted_at')::timestamptz - interval '2 hours') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"'))) WHERE key = 'release_check'" > /dev/null
 api_record POST /admin/releases/check > "$EVIDENCE/release-failure.json"
 check "a bad source keeps its dated successful facts" python3 - "$EVIDENCE/release.json" "$EVIDENCE/release-failure.json" <<'PY'
 import json,sys

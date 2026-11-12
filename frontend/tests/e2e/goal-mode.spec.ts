@@ -1,7 +1,7 @@
 /** Goal states, evidence and the space above the composer on the shipped application. */
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Locator, type Page, test } from '@playwright/test';
 
 import type { Item, ThreadGoal, ThreadOpening } from '../../src/generated/api-types';
 import { agentMessage, ALLOW_DENY, approvalItem, harnessApproval, marker, plan, threadInput, turn, userMessage } from '../doubles/thread-rows';
@@ -21,6 +21,20 @@ const BASE: ThreadGoal = {
   helper: true, agent_reports: true, last_report: null, ended_at: null,
 };
 const SCREEN_DIR = resolve(process.env.ORCH_GOAL_SCREEN_DIR ?? 'output/playwright/goals');
+
+/** The top of a row once the page has stopped moving: a timeline still catching up with its new lines moves what stands above the composer on a small screen, and a slow machine takes longer over it. */
+async function settledTop(row: Locator): Promise<number> {
+  let last = Number.NaN;
+  let still = 0;
+  await expect.poll(async () => {
+    const box = await row.boundingBox();
+    // A busy composer row has bounds; without them nothing has settled.
+    still = box !== null && box.y === last ? still + 1 : 0;
+    last = box === null ? Number.NaN : box.y;
+    return still;
+  }, { intervals: [100, 150, 200, 250, 300, 500] }).toBeGreaterThanOrEqual(3);
+  return last;
+}
 
 async function photograph(page: Page, name: string) {
   await mkdir(SCREEN_DIR, { recursive: true });
@@ -126,7 +140,8 @@ for (const width of [1440, 400]) {
       await photograph(page, `${prefix}-editor-closed`);
       await dialog.getByLabel('Objective', { exact: true }).fill(BASE.objective);
       await dialog.getByLabel('Done when', { exact: true }).fill(CONDITION);
-      await dialog.locator('summary').filter({ hasText: /^Limits: none$/ }).click();
+      // An empty override follows the place; open the same disclosure regardless of its summary value.
+      await dialog.locator('summary').filter({ hasText: /^Limits:/ }).click();
       await expect(dialog.getByLabel('Turns', { exact: true })).toBeVisible();
       await expect(dialog.getByRole('button', { name: 'Set goal', exact: true })).toBeEnabled();
       await photograph(page, `${prefix}-editor-open`);
@@ -163,17 +178,16 @@ for (const width of [1440, 400]) {
           plan('busy-plan', [{ text: 'Check the redirect', status: 'in_progress' }, { text: 'Run the tests', status: 'pending' }], { turn: 'busy-turn' })],
       });
       await expect(page.locator('[data-passive="blocked"]')).toBeVisible();
-      const approvalBar = page.getByRole('status').filter({ hasText: '1 approval waiting' });
+      // Waiting decisions are ordinary pinned cards above the composer, rather than a duplicate status strip.
+      const approvalBar = page.locator('[data-pinned-approvals]');
       const planLine = page.getByRole('button', { name: 'Step 1 of 2: Check the redirect', exact: true });
       const queue = page.locator('[data-queue]');
       await expect(approvalBar).toBeVisible();
+      await expect(approvalBar.locator('[data-pinned-approval="goal-approval-item"]')).toHaveCount(1);
       await expect(planLine).toBeVisible();
       await expect(queue).toBeVisible();
-      const topEdges = await Promise.all([page.locator('[data-passive-strip]'), approvalBar, planLine, queue].map(async (row) => {
-        const box = await row.boundingBox();
-        if (box === null) throw new Error('A busy composer row has no bounds');
-        return box.y;
-      }));
+      const topEdges: number[] = [];
+      for (const row of [page.locator('[data-passive-strip]'), approvalBar, planLine, queue]) topEdges.push(await settledTop(row));
       expect(topEdges.every((top, at) => at === 0 || top > (topEdges[at - 1] ?? 0))).toBe(true);
       const more = page.getByRole('button', { name: 'Show 1 more', exact: true });
       await expect(more).toBeVisible();
@@ -183,8 +197,7 @@ for (const width of [1440, 400]) {
       const passiveCard = page.getByRole('dialog', { name: 'Show 1 more', exact: true });
       await expect(passiveCard).toBeVisible();
       await expect(page.locator('[data-goal-line]')).toBeVisible();
-      const primaryBounds = await page.locator('[data-passive="blocked"]').boundingBox();
-      expect(primaryBounds?.y).toBe(topEdges[0]);
+      expect(await settledTop(page.locator('[data-passive="blocked"]'))).toBe(topEdges[0]);
       await photograph(page, `${prefix}-busy-expanded`);
       await passiveCard.getByRole('button', { name: `Done when ${CONDITION}`, exact: true }).click();
       await expect(passiveCard.getByRole('button', { name: 'Pause', exact: true })).toBeVisible();

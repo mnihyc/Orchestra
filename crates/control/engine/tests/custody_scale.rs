@@ -38,13 +38,28 @@ fn assert_indexed_large_tables(node: &Json) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_current_thread() {
+    let started = std::time::Instant::now();
     let world = World::new().await;
     world.engine().stop();
+    eprintln!(
+        "custody scale phase=fixture_ready elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     // PostgreSQL stores microseconds; a whole-second fixture keeps exact boundary assertions stable.
     let at = world.clock.now().with_nanosecond(0).unwrap();
-    // Each transaction creates one thousand turns and usage rows. Native
-    // commit journals stay bounded without disabling any trigger or constraint.
+    // Each transaction creates one thousand turns and usage rows. Native commit
+    // journals and membership/ownership producers stay enabled; the fixture omits
+    // only item projections that its custody queries never read.
     for thread_number in 1..=THREADS {
+        // Report the first batch and each tenth of the fixture, without logging each stored row.
+        let report = thread_number == 1 || thread_number % (THREADS / 10) == 0;
+        let batch_started = std::time::Instant::now();
+        if report {
+            eprintln!(
+                "custody scale phase=batch_begin thread={thread_number} elapsed_ms={}",
+                started.elapsed().as_millis()
+            );
+        }
         let mut tx = world.pool.begin().await.unwrap();
         sqlx::query("CREATE TEMP TABLE custody_scale_seed ON COMMIT DROP AS SELECT $1::uuid AS topic,$2::uuid AS person,$3::uuid AS provider,$4::uuid AS agent,$5::uuid AS environment,$6::timestamptz AS at,$7::bigint AS threads,$8::bigint AS turns_per_thread,$9::bigint AS tokens_per_turn,$10::bigint AS thread_number")
             .bind(world.topic).bind(world.ada).bind(world.provider).bind(world.agent).bind(world.environment).bind(at).bind(THREADS).bind(TURNS_PER_THREAD).bind(TOKENS_PER_TURN).bind(thread_number)
@@ -61,6 +76,13 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
         .unwrap();
         assert_eq!(pending, TURNS_PER_THREAD);
         tx.commit().await.unwrap();
+        if report {
+            eprintln!(
+                "custody scale phase=batch_committed thread={thread_number} batch_ms={} elapsed_ms={}",
+                batch_started.elapsed().as_millis(),
+                started.elapsed().as_millis()
+            );
+        }
     }
     let mut conn = world.pool.acquire().await.unwrap();
     // Visibility maps let the planner measure the covering paths, rather than fresh insert churn.
@@ -72,6 +94,10 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
         "ANALYZE threads",
         "ANALYZE segments",
     ] {
+        eprintln!(
+            "custody scale phase=vacuum_begin sql={sql} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         sqlx::query(sqlx::AssertSqlSafe(sql))
             .execute(&mut *conn)
             .await
@@ -107,7 +133,15 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
         },
         model_id: None,
     };
+    eprintln!(
+        "custody scale phase=activity_begin elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     let work = activity::read(&mut conn, &target).await.unwrap();
+    eprintln!(
+        "custody scale phase=activity_read elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     let waiting = work
         .iter()
         .filter(|row| row.kind == "waiting")
@@ -148,6 +182,10 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
     )
     .await
     .unwrap();
+    eprintln!(
+        "custody scale phase=projection_begin elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     let facts = activity::project(&mut conn, &principal, &target, &work, Time::new(at))
         .await
         .unwrap();
@@ -164,6 +202,10 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
         (world.agent, ResourceTurnDimension::Agent),
         (world.environment, ResourceTurnDimension::Environment),
     ] {
+        eprintln!(
+            "custody scale phase=rollup_begin resource={id} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         let counted = rollup::resource_turn_counts(&mut conn, &[id], dimension, at)
             .await
             .unwrap();
@@ -204,6 +246,10 @@ async fn a_million_waiting_messages_and_old_items_use_one_work_membership_per_cu
     let sql = format!(
         "EXPLAIN (ANALYZE,BUFFERS,FORMAT JSON) {}",
         include_str!("../src/resource_facts/activity.sql")
+    );
+    eprintln!(
+        "custody scale phase=explain_begin elapsed_ms={}",
+        started.elapsed().as_millis()
     );
     let explain: Json = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
         .bind("provider")
