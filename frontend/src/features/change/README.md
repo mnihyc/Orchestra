@@ -84,3 +84,11 @@ environment transitions and retry, and the loading new-thread action row at 1440
 resolves the actual height token and intrinsic action widths, allowing one CSS pixel only for fractional rounding.
 Legacy sentence/editor test cases are not proof of the current picker UI. The integrator runs all gates and walks the
 shipping build in both languages/themes; writers run no builds or tests.
+
+A built-in source opens the complete native-target review, including its required destination.
+It inherits no native agent or workspace: provider/profile/model and an existing or new environment
+are selected before preflight. A source without an environment offers no file, home or private-view
+copy controls, and its request explicitly selects no source files. Advanced Fork to uses this review;
+immediate Fork retains the built-in program through its Private creation. Built-in native forks also
+start Private, and Reset access restores that default. Ordinary native-source defaults are unchanged.
+Regression sources: component and browser builtin-native-placement, in both languages.

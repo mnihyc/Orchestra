@@ -65,7 +65,7 @@ it('a reader sees the description as written, and nothing where there is none', 
 
 const person = { id: 'ada', kind: 'human', username: 'ada', display_name: 'Ada', avatar: { text: 'A', color: 3 } } as const;
 const listed = (line: string): DocumentRef => ({
-  id: 'doc-1', title: 'Rollout plan', description: '', description_source: 'auto', description_line: line,
+  id: 'doc-1', title: 'Rollout plan', description: '', description_line: line,
   node: { id: 'topic-1', kind: 'topic', name: 'Plans', redacted: false }, owner: person, owners: 1, created_by: person,
   page: 'follows', seq: 3, block_count: 2, bytes: 40, files_bytes: 0, version: 0, open_discussions: 0,
   updated_at: '2026-10-08T17:04:05.123Z', updated_by: person, discussion_level: 'involved', seen_seq: 3, archived: false, deleted: false,

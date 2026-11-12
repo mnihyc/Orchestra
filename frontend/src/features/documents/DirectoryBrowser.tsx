@@ -1,4 +1,6 @@
+import { duplicateEntries } from '@/features/duplicate/target';
 /** Browse the document tree without treating its folders as hierarchy nodes or text editors. */
+import { linkTo } from '@/lib/links';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
@@ -41,7 +43,7 @@ export function DocumentFolderPage({ id, retained = false }: { id: string; retai
   if (folder.isError) return <Page><ErrorState error={folder.error} onRetry={() => void folder.refetch()}
     action={retained ? undefined : <Button asChild><Link to="/inspect/$kind/$id" params={{ kind: 'document_container', id }}>{t('trace.inspect')}</Link></Button>} /></Page>;
   const directory = folder.data?.directory;
-  if (folder.isPending) return <Page><SkeletonRows rows={5} /></Page>;
+  if (folder.isPending) return <Page><SkeletonRows read={folder} rows={5} /></Page>;
   if (directory === undefined || directory === null) return <Page><ErrorState error={new Error('The folder metadata omitted its directory')} message={t('documentFolders.unavailable')} onRetry={() => void folder.refetch()} /></Page>;
   return <DocumentDirectoryPage node={directory.node.id} at={{ kind: 'container', id }} retained={retained} />;
 }
@@ -92,10 +94,10 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
     const path = item.kind === 'container' ? folderPath(item.id) : `/doc/${encodeURIComponent(item.id)}`;
     if (row.entry.deleted_at !== null) return [{ id: 'inspect', label: t('trace.inspect'), onSelect: () => { void navigate({ to: '/inspect/$kind/$id', params: { kind, id: item.id } }); } }, { id: 'restore', label: t('documents.list.restore'), icon: <Undo2 aria-hidden />, disabled: restore.isPending ? t('documentFolders.pending') : row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => restore.mutate(row) }];
     return [
-      { id: 'link', label: t('files.menu.copyLink'), onSelect: () => { void copyText(new URL(path, location.origin).href); } },
+      { id: 'link', label: t('files.menu.copyLink'), onSelect: () => { void copyText(linkTo({ href: path })); } },
       { id: 'access', label: t('documentFolders.access'), icon: <Share2 aria-hidden />,
         onSelect: () => openAccess({ kind, id: item.id, name: row.entry.title }, { share: row.standing.manage }) },
-      { id: 'copy', label: t('documentFolders.actions.copy'), icon: <Copy aria-hidden />, onSelect: () => setAction({ command: 'copy', rows: [row] }) },
+      ...(item.kind === 'document' ? duplicateEntries(t, { kind: 'document', id: item.id, name: row.entry.title, directory: row.entry.parent }) : [{ id: 'copy', label: t('documentFolders.actions.copy'), icon: <Copy aria-hidden />, onSelect: () => setAction({ command: 'copy', rows: [row] }) }]),
       { id: 'move', label: t('documentFolders.actions.move'), disabled: row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => setAction({ command: 'move', rows: [row] }) },
       { id: 'rename', label: t('documentFolders.actions.rename'), icon: <Pencil aria-hidden />, disabled: item.kind === 'container' ? row.standing.manage ? false : t('documents.menu.needsManage') : row.standing.write ? false : t('documentFolders.needsEdit'), onSelect: () => setAction({ command: 'rename', rows: [row] }) },
       { id: 'delete', label: t('documentFolders.actions.delete'), icon: <Trash2 aria-hidden />, danger: true, disabled: row.standing.manage ? false : t('documents.menu.needsManage'), onSelect: () => setAction({ command: 'delete', rows: [row] }) },
@@ -122,7 +124,7 @@ export function DocumentDirectoryPage({ node, at, retained = false }: { node: st
     {view.staleCursor ? <ErrorState error={view.query.error} message={t('documentFolders.changed')}
       action={<Button onClick={() => void view.restart().catch(() => undefined)}>{t('files.tree.reload')}</Button>} />
       : view.query.isError ? <ErrorState error={view.query.error} onRetry={() => void view.retry().catch(() => undefined)} />
-      : page === undefined ? <SkeletonRows rows={5} /> : <>
+      : page === undefined ? <SkeletonRows read={view.query} rows={5} /> : <>
         {page.items.length === 0 ? <EmptyState compact icon={<Folder aria-hidden />} title={t(page.next_cursor === null && view.cursor === null ? 'documentFolders.empty' : 'documentFolders.emptyPage')} />
           : <ul aria-label={title} className="divide-y divide-border rounded-lg border border-border bg-surface">{page.items.map((row) => {
             const item = row.entry.item, menu = menuFor(row);

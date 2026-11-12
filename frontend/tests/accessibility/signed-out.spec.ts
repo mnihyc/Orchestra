@@ -33,7 +33,8 @@ test('sign-in, recovery and registration on a phone', async ({ page }) => {
 test('sign-in in Chinese, with a wrong password said at its field', async ({ page }) => {
   await page.goto('/login');
   await inChinese(page);
-  await expect(page.getByRole('heading', { name: '登录' })).toBeVisible();
+  // The page is headed by the system's name; signing in is its button.
+  await expect(page.getByRole('button', { name: '登录', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
   await page.getByLabel('用户名或邮箱地址').fill(PEOPLE.ada.login);
@@ -58,6 +59,20 @@ test('links that lead nowhere any more: a reset, a confirmation and an invitatio
     await expect(page.getByRole('heading').first()).toBeVisible();
     await expectAccessibleInBothThemes(page);
   }
+});
+
+/** A change of theme is a change of colours that takes a moment on every control that has any. The audit asks about the colours a page rests in. */
+for (const language of ['en', 'zh-CN'] as const) test(`a page whose colours are still changing is audited when they rest, not in the middle of the change of theme, in ${language}`, async ({ page }) => {
+  await page.goto('/login');
+  if (language === 'zh-CN') await inChinese(page);
+  await page.goto('/reset/not-a-token');
+  await expect(page.getByRole('heading').first()).toBeVisible();
+  // Every transition of the page takes three seconds, so that the change of theme is in flight for as long as the audit takes to begin:
+  // the chosen segment of the language and of the theme, each with its own ink and ground, is then far from the colours it rests in.
+  await page.addStyleTag({ content: '*, *::before, *::after { transition-duration: 3s !important; transition-delay: 0s !important; }' });
+  // Light to dark, then dark to light, and to dark again: every audit of the second round begins on a page that has just been changed.
+  await expectAccessibleInBothThemes(page);
+  await expectAccessibleInBothThemes(page);
 });
 
 test('sign-in is worked by keyboard alone, the language and the theme included', async ({ page }) => {

@@ -149,7 +149,7 @@ async fn a_switched_off_summary_target_pauses_without_another_request_or_failure
                 .await;
             world.set(world.topic, "auto.title", json!("off")).await;
             world
-                .set(world.topic, "auto.description", json!("summarizer"))
+                .set(world.topic, "auto.title", json!("summarizer"))
                 .await;
             world
                 .set(
@@ -159,7 +159,7 @@ async fn a_switched_off_summary_target_pauses_without_another_request_or_failure
                 )
                 .await;
             world.set(world.topic, "calls.rules", json!([{"id":"retry","when":{},"steps":[{"type":"retry","delay_secs":0,"times":10,"backoff":1}]}])).await;
-            sqlx::query("UPDATE nodes SET description_source='auto' WHERE id=$1")
+            sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
                 .bind(thread)
                 .execute(world.pool.pool())
                 .await
@@ -266,9 +266,50 @@ async fn a_candidate_is_skipped_when_the_input_author_loses_use_even_if_the_rule
     );
 }
 
+/// The same failed turn, a fallback on the same provider, and the author's entry: the candidate is a
+/// model call of the agent, so it runs in the thread's environment and is asked with that place.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_summary_uses_its_configured_candidate_and_counts_that_model_to_the_setting_writer()
- {
+async fn a_candidate_is_used_only_where_the_authors_entry_lets_work_run() {
+    for named in [true, false] {
+        let world = World::new().await;
+        let author = world.person("placed_author").await;
+        world.give(author, "developer").await;
+        let thread = world.thread_by(author, "Placed authority").await;
+        world.set(world.topic,"calls.rules",json!([{"id":"fallback","when":{},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":common::MODEL,"params":{}}},{"type":"wait","until":"person"}]}])).await;
+        // The entry names the environment the thread runs in, so the first turn is allowed; later it is
+        // narrowed to another place or kept.
+        world.access.use_only_in(author, &[world.environment]);
+        world
+            .engine()
+            .submit_input(&Caller::session(author), thread, queued("Start work"))
+            .await
+            .unwrap();
+        let first = world.turn_start(thread, 0).await;
+        world.say(thread, turn_began(first.turn_id)).await;
+        if !named {
+            world.access.use_only_in(author, &[orch_types::new_id()]);
+        }
+        failed(&world, thread, first.turn_id, "provider_busy").await;
+        if named {
+            let second = world.turn_start(thread, 1).await;
+            assert_eq!(second.model, common::MODEL, "the entry names the place");
+        } else {
+            eventually(
+                "the candidate the entry does not let run here is skipped",
+                || async { recovery(&world, thread).await.state == "waiting" },
+            )
+            .await;
+            assert_eq!(world.turn_starts(thread).len(), 1);
+            assert_eq!(
+                recovery(&world, thread).await.context["skipped"],
+                "candidate_not_allowed"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_automatic_failed_summary_uses_its_configured_candidate_without_attributing_a_person() {
     use orch_link_contract::commands::{
         Command, CommandError, CommandKind, CommandResult, ErrorCode, ProviderCompleteResult,
     };
@@ -283,7 +324,7 @@ async fn a_failed_summary_uses_its_configured_candidate_and_counts_that_model_to
         .bind(orch_types::new_id()).bind(world.provider).bind(common::MODEL).execute(world.pool.pool()).await.unwrap();
     world.set(world.topic, "auto.title", json!("off")).await;
     world
-        .set(world.topic, "auto.description", json!("summarizer"))
+        .set(world.topic, "auto.title", json!("summarizer"))
         .await;
     world
         .set(
@@ -293,7 +334,7 @@ async fn a_failed_summary_uses_its_configured_candidate_and_counts_that_model_to
         )
         .await;
     world.set(world.topic,"calls.rules",json!([{"id":"summary-fallback","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"fallback-model","params":{}}},{"type":"wait","until":"person"}]}])).await;
-    sqlx::query("UPDATE nodes SET description_source='auto' WHERE id=$1")
+    sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
         .await
@@ -310,7 +351,7 @@ async fn a_failed_summary_uses_its_configured_candidate_and_counts_that_model_to
         }
         assert_eq!(request.protocol,"anthropic-messages");
         assert_eq!(request.model_name,"fallback-model");
-        Ok(CommandResult::ProviderComplete(ProviderCompleteResult {text:"A recovered description".to_owned(),usage:orch_agent_contract::events::TokenUsage::from_parts(orch_api_contract::threads::TokensReportedApart {input:100,output:5,..Default::default()}),request_ref:Some("synthetic-summary".to_owned()),timing:Default::default()}))
+        Ok(CommandResult::ProviderComplete(ProviderCompleteResult {text:"A recovered title".to_owned(),usage:orch_agent_contract::events::TokenUsage::from_parts(orch_api_contract::threads::TokensReportedApart {input:100,output:5,..Default::default()}),request_ref:Some("synthetic-summary".to_owned()),timing:Default::default()}))
     });
     {
         let mut conn = world.pool.acquire().await.unwrap();
@@ -330,12 +371,12 @@ async fn a_failed_summary_uses_its_configured_candidate_and_counts_that_model_to
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         world
-            .scalar::<String>("SELECT description FROM nodes WHERE id=$1", thread)
+            .scalar::<String>("SELECT name FROM nodes WHERE id=$1", thread)
             .await,
-        "A recovered description"
+        "A recovered title"
     );
     let actual:(String,Option<Id>)=sqlx::query_as("SELECT model,user_id FROM usage_events WHERE thread_id=$1 AND request_ref='synthetic-summary'").bind(thread).fetch_one(world.pool.pool()).await.unwrap();
-    assert_eq!(actual, ("fallback-model".to_owned(), Some(world.ada)));
+    assert_eq!(actual, ("fallback-model".to_owned(), None));
     assert_eq!(world.count("SELECT count(*) FROM usage_events WHERE thread_id=$1 AND request_ref='synthetic-summary'",thread).await,1);
 }
 
@@ -607,7 +648,7 @@ async fn a_model_failure_without_a_matching_rule_does_not_use_the_old_summary_re
     let thread = world.thread("No implicit recovery").await;
     world.set(world.topic, "auto.title", json!("off")).await;
     world
-        .set(world.topic, "auto.description", json!("summarizer"))
+        .set(world.topic, "auto.title", json!("summarizer"))
         .await;
     world
         .set(
@@ -617,7 +658,7 @@ async fn a_model_failure_without_a_matching_rule_does_not_use_the_old_summary_re
         )
         .await;
     world.set(world.topic, "calls.rules", json!([])).await;
-    sqlx::query("UPDATE nodes SET description_source='auto' WHERE id=$1")
+    sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
         .await
@@ -807,7 +848,7 @@ async fn a_service_retry_rechecks_a_limit_disabled_after_the_failure() {
     let mut tx = world.pool.begin().await.unwrap();
     orch_engine::calls::reserve_service(
         &mut tx,
-        &service(&world, thread, root, workflow, "description"),
+        &service(&world, thread, root, workflow, "title"),
         orch_types::new_id(),
         &json!({"code":"provider_busy","message":"Synthetic capacity","retryable":true}),
         json!({"provider_id":world.provider,"model":common::MODEL}),
@@ -821,7 +862,7 @@ async fn a_service_retry_rechecks_a_limit_disabled_after_the_failure() {
     assert!(matches!(
         orch_engine::calls::plan_service(
             &mut tx,
-            &service(&world, thread, root, workflow, "description"),
+            &service(&world, thread, root, workflow, "title"),
             world.clock.now()
         )
         .await
@@ -849,7 +890,7 @@ async fn an_unusable_model_answer_uses_call_policy_instead_of_summary_backoff() 
     let thread = world.thread("Empty model answer").await;
     world.set(world.topic, "auto.title", json!("off")).await;
     world
-        .set(world.topic, "auto.description", json!("summarizer"))
+        .set(world.topic, "auto.title", json!("summarizer"))
         .await;
     world
         .set(
@@ -858,7 +899,7 @@ async fn an_unusable_model_answer_uses_call_policy_instead_of_summary_backoff() 
             json!({"kind":"model","provider_id":world.provider,"model_name":common::MODEL}),
         )
         .await;
-    sqlx::query("UPDATE nodes SET description_source='auto' WHERE id=$1")
+    sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
         .await
@@ -1037,11 +1078,13 @@ async fn automatic_retries_and_continuations_keep_all_origin_authority_and_stop_
         .unwrap();
         assert_eq!(original.run_as, Some(world.ada));
         assert_eq!(
-            original.submission_authority.as_ref().unwrap()["credentials"][0]["token_id"],
+            original.submission_authority.as_ref().unwrap()["boundaries"][0]["credentials"][0]["token_ids"]
+                [0],
             author_token.to_string()
         );
         assert_eq!(
-            original.run_as_authority.as_ref().unwrap()["credentials"][0]["token_id"],
+            original.run_as_authority.as_ref().unwrap()["boundaries"][0]["credentials"][0]["token_ids"]
+                [0],
             runner_token.to_string()
         );
         if effects {
@@ -1229,7 +1272,7 @@ async fn an_auxiliary_candidate_cannot_send_an_effort_the_target_model_does_not_
         .bind(orch_types::new_id()).bind(world.provider).bind(common::MODEL).bind(json!({"efforts":["low"]})).execute(world.pool.pool()).await.unwrap();
     world.set(world.topic, "auto.title", json!("off")).await;
     world
-        .set(world.topic, "auto.description", json!("summarizer"))
+        .set(world.topic, "auto.title", json!("summarizer"))
         .await;
     world
         .set(
@@ -1239,7 +1282,7 @@ async fn an_auxiliary_candidate_cannot_send_an_effort_the_target_model_does_not_
         )
         .await;
     world.set(world.topic, "calls.rules", json!([{"id":"effort","when":{"purpose":"summary"},"steps":[{"type":"failover","candidate":{"provider_id":world.provider,"model":"limited-effort","params":{"effort":"high"}}},{"type":"wait","until":"person"}]}])).await;
-    sqlx::query("UPDATE nodes SET description_source='auto' WHERE id=$1")
+    sqlx::query("UPDATE nodes SET title_source='auto' WHERE id=$1")
         .bind(thread)
         .execute(world.pool.pool())
         .await
@@ -1352,4 +1395,267 @@ async fn the_shipped_agent_policy_schedules_transient_faults_and_a_known_quota_r
             "the shipped policy cannot spend a second call before its deadline"
         );
     }
+}
+
+/// Keep the shipped rules and reserve their next action through a real failed native turn.
+async fn scheduled_default_failure(
+    world: &World,
+    code: &str,
+) -> (Id, Id, Id, orch_engine::calls::Recovery) {
+    let thread = world
+        .thread("A fresh input beside scheduled recovery")
+        .await;
+    let input = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("The original failed request"),
+        )
+        .await
+        .unwrap();
+    let first = world.turn_start(thread, 0).await;
+    world.say(thread, turn_began(first.turn_id)).await;
+    // One hour is the vendor's declared reset, independent of the shipped transient retry delay.
+    let reset = world.clock.now() + chrono::Duration::hours(1);
+    let error: TurnError = serde_json::from_value(json!({
+        "code":code,"message":"The scripted vendor refused this request",
+        "retryable":code!="provider_exhausted",
+        "resets_at":if code=="provider_exhausted" {Some(orch_types::Time::new(reset))} else {None}
+    }))
+    .unwrap();
+    world
+        .say(
+            thread,
+            Event::TurnCompleted(TurnCompleted {
+                turn_id: first.turn_id,
+                status: TurnOutcome::Failed,
+                error: Some(error),
+            }),
+        )
+        .await;
+    world.wait_turn(first.turn_id, "failed").await;
+    world.wait_followed_up(thread).await;
+    let row = recovery(world, thread).await;
+    assert_eq!(row.state, "scheduled");
+    assert_eq!(row.reference, first.turn_id);
+    assert_eq!(row.failure["code"], code);
+    assert_eq!(row.context["input_id"], json!(input.input.id));
+    let presented = orch_engine::calls::presentation(&row).unwrap();
+    if code == "provider_exhausted" {
+        assert_eq!(
+            presented.step,
+            Some(Step::Wait {
+                until: orch_provider_contract::calls::Until::Reset,
+            })
+        );
+        assert_eq!(row.due_at, Some(reset));
+    } else {
+        assert!(matches!(
+            presented.step,
+            Some(Step::Retry {
+                delay_secs: 60,
+                times: 3,
+                ..
+            })
+        ));
+        assert_eq!(
+            row.due_at,
+            Some(world.clock.now() + chrono::Duration::seconds(60))
+        );
+    }
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    (thread, input.input.id, first.turn_id, row)
+}
+
+/// Freeze the failed turn, its original input and its actual timeline payloads after end work drains.
+async fn failed_history(world: &World, turn: Id) -> Json {
+    sqlx::query_scalar("SELECT jsonb_build_object(
+        'turn',jsonb_build_object('id',t.id,'input_id',t.input_id,'state',t.state,'error',t.error),
+        'input',jsonb_build_object('id',i.id,'author_id',i.author_id,'content',i.content,'state',i.state,'turn_id',i.turn_id,'limit_bypass',i.limit_bypass),
+        'history',(SELECT jsonb_agg(jsonb_build_object('id',h.id,'kind',h.kind,'payload',h.payload) ORDER BY h.seq_created,h.id) FROM items h WHERE h.turn_id=t.id))
+        FROM turns t JOIN thread_inputs i ON i.id=t.input_id WHERE t.id=$1")
+        .bind(turn).fetch_one(world.pool.pool()).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_explicit_input_supersedes_the_shipped_quota_reset_wait_without_resending_old_work()
+{
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_exhausted").await;
+    let history = failed_history(&world, failed).await;
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("A fresh ordinary request after external recovery"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    let second = world.turn_start(thread, 1).await;
+    assert_eq!(
+        world
+            .scalar::<Id>("SELECT input_id FROM turns WHERE id=$1", second.turn_id)
+            .await,
+        fresh.input.id
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+    let completed = recovery(&world, thread).await;
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.due_at, None);
+    assert_eq!(completed.reference, scheduled.reference);
+    assert_eq!(completed.failure, scheduled.failure);
+    world.say(thread, turn_began(second.turn_id)).await;
+    world
+        .say(
+            thread,
+            common::turn_ended(second.turn_id, TurnOutcome::Completed),
+        )
+        .await;
+    world.wait_turn(second.turn_id, "completed").await;
+    world.wait_followed_up(thread).await;
+    world.wait_state(thread, "idle").await;
+    // Passing the old reset proves its old automatic resend was durably superseded.
+    clock.advance(chrono::Duration::hours(1));
+    world.engine().keep_call_recoveries().await.unwrap();
+    assert_eq!(recovery(&world, thread).await.state, "completed");
+    assert_eq!(world.turn_starts(thread).len(), 2);
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE input_id=$1", original)
+            .await,
+        1
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_input_supersedes_quota_reset_wait_but_still_obeys_a_configured_provider_cap() {
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_exhausted").await;
+    let history = failed_history(&world, failed).await;
+    // A shared zero-running cap is deterministically full without fabricated ledger usage.
+    sqlx::query(
+        "INSERT INTO usage_caps(id,provider_id,subject_kind,split,meter,amount,at_limit,created_by)
+        VALUES($1,$2,'everyone','shared','running',0,'stop',$3)",
+    )
+    .bind(orch_types::new_id())
+    .bind(world.provider)
+    .bind(world.ada)
+    .execute(world.pool.pool())
+    .await
+    .unwrap();
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Fresh work still needs room in the configured cap"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    world.wait_blocked(thread, "quota_exceeded").await;
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT state FROM thread_inputs WHERE id=$1",
+                fresh.input.id
+            )
+            .await,
+        "pending"
+    );
+    let completed = recovery(&world, thread).await;
+    assert_eq!(completed.state, "completed");
+    assert_eq!(completed.due_at, None);
+    assert_eq!(completed.reference, scheduled.reference);
+    assert_eq!(completed.failure, scheduled.failure);
+    clock.advance(chrono::Duration::hours(1));
+    world.engine().keep_call_recoveries().await.unwrap();
+    let after_reset = recovery(&world, thread).await;
+    assert_eq!(after_reset.state, "completed");
+    assert_eq!(after_reset.due_at, None);
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    assert_eq!(
+        world.state(thread).await.1.as_deref(),
+        Some("quota_exceeded")
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(
+        world
+            .count("SELECT count(*) FROM turns WHERE input_id=$1", original)
+            .await,
+        1
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fresh_input_does_not_supersede_the_shipped_nonquota_retry_backoff() {
+    let clock = orch_testkit::clock::manual();
+    let world = World::with_clock(std::sync::Arc::new(clock.clone())).await;
+    let (thread, original, failed, scheduled) =
+        scheduled_default_failure(&world, "provider_busy").await;
+    let history = failed_history(&world, failed).await;
+    let fresh = world
+        .engine()
+        .submit_input(
+            &Caller::session(world.ada),
+            thread,
+            queued("Fresh input cannot skip normal transient backoff"),
+        )
+        .await
+        .unwrap();
+    assert_ne!(fresh.input.id, original);
+    // Hold the domain clock before the shipped sixty-second retry, even on a slow test machine.
+    world.engine().keep_call_recoveries().await.unwrap();
+    let retained = recovery(&world, thread).await;
+    assert_eq!(retained.state, "scheduled");
+    assert_eq!(retained.due_at, scheduled.due_at);
+    assert_eq!(retained.reference, scheduled.reference);
+    assert_eq!(retained.failure, scheduled.failure);
+    assert_eq!(retained.action, scheduled.action);
+    assert_eq!(world.turn_starts(thread).len(), 1);
+    assert_eq!(
+        world
+            .scalar::<String>(
+                "SELECT state FROM thread_inputs WHERE id=$1",
+                fresh.input.id
+            )
+            .await,
+        "pending"
+    );
+    assert_eq!(
+        world
+            .count(
+                "SELECT count(*) FROM thread_inputs WHERE thread_id=$1",
+                thread
+            )
+            .await,
+        2
+    );
+    assert_eq!(failed_history(&world, failed).await, history);
 }

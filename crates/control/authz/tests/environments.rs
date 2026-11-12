@@ -644,6 +644,25 @@ async fn everybody_who_reaches_into_an_environment_is_told_by_what_its_doors_and
         Holder::User { id: runner },
     )
     .await;
+    // A thread alone does not let its people use the environment.
+    let principal = s.w.principal(Caller::session(s.eve)).await;
+    let mut conn = s.w.conn().await;
+    let without_use = environments::reach(&mut conn, &principal, s.env, Policy::default())
+        .await
+        .unwrap();
+    for user in [talker, s.w.maker] {
+        assert!(without_use.people.iter().all(|person| person.user != user));
+    }
+    drop(conn);
+    for user in [talker, s.w.maker] {
+        s.w.grant(
+            "environment",
+            s.env,
+            P::EnvironmentUse,
+            Holder::User { id: user },
+        )
+        .await;
+    }
     let principal = s.w.principal(Caller::session(s.eve)).await;
     let mut conn = s.w.conn().await;
     let reach = environments::reach(&mut conn, &principal, s.env, Policy::default())

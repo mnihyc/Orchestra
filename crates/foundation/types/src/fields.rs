@@ -28,6 +28,8 @@ pub enum FieldType {
     Map,
     /// Names with values that are never shown again.
     SecretMap,
+    /// A JSON value, retaining nested objects, arrays, numbers, booleans and null.
+    Json,
 }
 
 impl FieldType {
@@ -102,6 +104,7 @@ impl Field {
             _ => Ok(()),
         };
         match (self.kind, value) {
+            (FieldType::Json, value) => size(&value.to_string()),
             (FieldType::Text | FieldType::Secret, Json::String(text)) => {
                 if text.contains('\n') {
                     return Err("must be one line".into());

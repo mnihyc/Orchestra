@@ -15,6 +15,7 @@ import uuid
 
 from peer import CHUNK, chunks, digest
 from world import API
+from workload import within_budget, failure
 
 
 class WebSocket:
@@ -23,25 +24,32 @@ class WebSocket:
         self.lock = asyncio.Lock()
 
     @classmethod
-    async def connect(cls, url, ca, origin):
+    async def connect(cls, url, ca, origin, subprotocol='orch.port.v1'):
+        if subprotocol not in ('orch.port.v1', 'orch.terminal.v1'):
+            raise ValueError('the fixture has no framing for this subprotocol')
         target = urllib.parse.urlsplit(url)
         context = ssl.create_default_context(cafile=ca)
         reader, writer = await asyncio.open_connection(target.hostname, target.port or 443, ssl=context,
             server_hostname=target.hostname, limit=128 * 1024)
-        key = base64.b64encode(os.urandom(16)).decode()
-        request = (f'GET {target.path}?{target.query} HTTP/1.1\r\nHost: {target.netloc}\r\nUpgrade: websocket\r\n'
-            f'Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n'
-            f'Sec-WebSocket-Protocol: orch.port.v1\r\nOrigin: {origin}\r\n\r\n')
-        writer.write(request.encode())
-        await writer.drain()
-        headers = (await reader.readuntil(b'\r\n\r\n')).decode('ascii')
-        fields = dict(line.split(': ', 1) for line in headers.split('\r\n')[1:] if ': ' in line)
-        fields = {key.lower(): value for key, value in fields.items()}
-        expected = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-        if not headers.startswith('HTTP/1.1 101 ') or fields.get('sec-websocket-accept') != expected or fields.get('sec-websocket-protocol') != 'orch.port.v1':
+        try:
+            key = base64.b64encode(os.urandom(16)).decode()
+            request = (f'GET {target.path}?{target.query} HTTP/1.1\r\nHost: {target.netloc}\r\nUpgrade: websocket\r\n'
+                f'Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n'
+                f'Sec-WebSocket-Protocol: {subprotocol}\r\nOrigin: {origin}\r\n\r\n')
+            writer.write(request.encode())
+            await writer.drain()
+            headers = (await reader.readuntil(b'\r\n\r\n')).decode('ascii')
+            fields = dict(line.split(': ', 1) for line in headers.split('\r\n')[1:] if ': ' in line)
+            fields = {key.lower(): value for key, value in fields.items()}
+            expected = base64.b64encode(hashlib.sha1((key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
+            if not headers.startswith('HTTP/1.1 101 ') or fields.get('sec-websocket-accept') != expected or fields.get('sec-websocket-protocol') != subprotocol:
+                writer.close()
+                raise ValueError('the actual socket refused its upgrade or subprotocol')
+            return cls(reader, writer)
+        except BaseException:
             writer.close()
-            raise ValueError('the actual port socket refused its upgrade or subprotocol')
-        return cls(reader, writer)
+            writer.transport.abort()
+            raise
 
     async def send(self, opcode, data):
         async with self.lock:
@@ -90,12 +98,15 @@ class WebSocket:
     async def close(self):
         self.writer.close()
         try:
-            await self.writer.wait_closed()
+            await asyncio.wait_for(self.writer.wait_closed(), 30)
         except (ConnectionError, ssl.SSLError):
             pass
+        except BaseException:
+            self.writer.transport.abort()
+            raise
 
 
-async def transfer(world, count, port, pause_reader=False, cut=False, ready=None):
+async def transfer(world, count, port, pause_reader=False, cut=False, ready=None, payload=None, observation=None):
     seed = uuid.uuid4().hex
     token = Path(world['token_file']).read_text()
     use = await asyncio.to_thread(API(world['edge'], token).call, 'POST',
@@ -105,11 +116,38 @@ async def transfer(world, count, port, pause_reader=False, cut=False, ready=None
     websocket = await WebSocket.connect(url, world['ca'], world['system'])
     header = json.dumps({'seed': seed, 'bytes': count}).encode()
     await websocket.send(2, struct.pack('!I', len(header)) + header)
-    if ready is not None:
-        ready(seed)
     result = {'seed': seed, 'expected_bytes': count, 'cut': cut, 'paused_reader': pause_reader,
-        'upload_bytes': 0, 'download_bytes': 0, 'max_write_wait_ms': 0}
+        'upload_bytes': 0, 'download_bytes': 0, 'max_write_wait_ms': 0,
+        'progress': []}
     started = time.monotonic()
+    # One checkpoint per source chunk preserves ordered monotonic progress without
+    # retaining any transferred content. CHUNK is the existing 64-KiB payload unit.
+    checkpoints = {'upload': 0, 'download': 0}
+    announced = {'ready': False, 'payload': False}
+
+    def progress(direction):
+        if observation is not None:
+            observation(seed, {'seed': seed, 'upload_bytes': result['upload_bytes'], 'download_bytes': result['download_bytes'],
+                'last_progress_seconds': time.monotonic() - started})
+        offset = result[direction + '_bytes']
+        # A received byte proves actual payload, rather than only an opened socket
+        # or a local write buffer. Other streams can supply it while one reader stalls.
+        if result['download_bytes'] > 0 and not announced['payload']:
+            announced['payload'] = True
+            if payload is not None:
+                payload(seed)
+        # The deliberate outage waits for nonzero payload in BOTH directions on
+        # every stream; sending the initial JSON header is not sufficient evidence.
+        if result['upload_bytes'] > 0 and result['download_bytes'] > 0 and not announced['ready']:
+            announced['ready'] = True
+            if ready is not None:
+                ready(seed)
+        # Keep at most one checkpoint per MiB (the existing deliberate-cut unit),
+        # plus each final offset; three100-MiB streams remain bounded evidence.
+        if offset - checkpoints[direction] >= 1024 * 1024 or offset == count:
+            result['progress'].append({'direction': direction, 'offset': offset,
+                'seconds': time.monotonic() - started})
+            checkpoints[direction] = offset
 
     async def upload():
         for part in chunks(seed, 'upload', count):
@@ -117,6 +155,7 @@ async def transfer(world, count, port, pause_reader=False, cut=False, ready=None
             await websocket.send(2, part)
             result['max_write_wait_ms'] = max(result['max_write_wait_ms'], (time.monotonic() - before) * 1000)
             result['upload_bytes'] += len(part)
+            progress('upload')
         await websocket.send(1, b'eof')
 
     async def download():
@@ -130,6 +169,7 @@ async def transfer(world, count, port, pause_reader=False, cut=False, ready=None
                 break
             received.update(part)
             result['download_bytes'] += len(part)
+            progress('download')
             if result['download_bytes'] > count:
                 raise ValueError('bytes crossed a stream boundary')
             if cut and result['download_bytes'] >= 1024 * 1024:
@@ -158,17 +198,73 @@ async def transfer(world, count, port, pause_reader=False, cut=False, ready=None
 async def run(args):
     world = json.loads(args.world.read_text())
     # Paths inside this isolated client; credentials never enter retained result files.
-    world.update(edge='http://frontend', ca='/fixture/ca.pem', token_file='/fixture/access-token')
+    world.update(edge='http://frontend', ca='/fixture/ca.pem', token_file='/fixture/access-token',
+        fault_state_file='/fixture/fault-state.json')
     started = []
+    active = set()
+    bulk_ready, bulk_done = asyncio.Event(), asyncio.Event()
 
     def ready(seed):
         started.append(seed)
         if len(started) == args.streams:
             args.out.with_suffix('.started').write_text(json.dumps(started))
 
-    results = await asyncio.gather(*(transfer(world, args.bytes, args.port,
-        pause_reader=index == 0 and args.stall, cut=args.cut, ready=ready) for index in range(args.streams)))
-    args.out.write_text(json.dumps({'profile': args.profile, 'streams': results, 'passed': True}, indent=2))
+    def payload(seed):
+        active.add(seed)
+        bulk_ready.set()
+
+    async def one(index):
+        seen = []
+        def receiving(seed):
+            seen.append(seed)
+            payload(seed)
+        try:
+            return await transfer(world, args.bytes, args.port,
+                pause_reader=index == 0 and args.stall, cut=args.cut, ready=ready, payload=receiving,
+                observation=lambda seed, item: args.payload_observations.update({seed: item}))
+        finally:
+            active.difference_update(seen)
+
+    mixed = None
+    watching = None
+    transfers = []
+    results = []
+    if args.mixed:
+        from mixed import Mixed
+        def changed(record):
+            args.out.with_suffix('.mixed.json').write_text(json.dumps(record, indent=2))
+        mixed = Mixed(world, WebSocket, lambda: len(active), changed, profile=args.profile)
+    try:
+        if mixed:
+            await mixed.start()
+            await asyncio.gather(mixed.probe(), mixed.echo())  # Idle comparison, not bulk evidence.
+            watching = asyncio.create_task(mixed.watch(bulk_ready, bulk_done))
+        transfers = [asyncio.create_task(one(index)) for index in range(args.streams)]
+        results = await asyncio.gather(*transfers)
+    finally:
+        bulk_done.set()
+        try:
+            for transfer_task in transfers:
+                if not transfer_task.done():
+                    transfer_task.cancel()
+            await asyncio.gather(*transfers, return_exceptions=True)
+            if watching:
+                try:
+                    await asyncio.wait_for(asyncio.shield(watching), 30)
+                except asyncio.TimeoutError:
+                    mixed.record['watcher_cleanup_failure'] = 'TimeoutError'
+                    watching.cancel()
+                    await asyncio.gather(watching, return_exceptions=True)
+            if mixed and results and mixed.record['terminal_fault'] is None:
+                await asyncio.gather(mixed.probe(), mixed.echo())  # Post-drain comparison.
+        finally:
+            if watching and not watching.done():
+                watching.cancel()
+                await asyncio.gather(watching, return_exceptions=True)
+            if mixed:
+                await mixed.close()
+    args.out.write_text(json.dumps({'profile': args.profile, 'streams': results, 'passed': True,
+        'mixed': None if mixed is None else mixed.record, 'harness_budget_seconds': args.harness_budget_seconds}, indent=2))
 
 
 def main():
@@ -181,13 +277,22 @@ def main():
     parser.add_argument('--profile', choices=['profile', 'floor'], default='profile')
     parser.add_argument('--stall', action='store_true')
     parser.add_argument('--cut', action='store_true')
+    parser.add_argument('--harness-budget-seconds', type=int, default=7200, help='QA work budget only; expiry is incomplete evidence, never a floor performance verdict')
+    parser.add_argument('--mixed', action='store_true', help='Observe owned terminal and public command completion during bulk traffic')
     args = parser.parse_args()
     if not 1 <= args.streams <= 16 or not 0 < args.bytes <= 1024 ** 3:
         parser.error('1..16 bounded streams and 1..1GiB per direction are required')
+    if args.harness_budget_seconds <= 0:
+        parser.error('harness budget must be positive')
+    args.payload_observations = {}
     try:
-        asyncio.run(asyncio.wait_for(run(args), 7200))
+        asyncio.run(within_budget(run(args), args.harness_budget_seconds))
     except BaseException as error:
-        args.out.write_text(json.dumps({'passed': False, 'failure': type(error).__name__}))
+        record = failure(error, args.harness_budget_seconds, args.payload_observations)
+        observed = args.out.with_suffix('.mixed.json')
+        if observed.exists():
+            record['mixed'] = json.loads(observed.read_text())
+        args.out.write_text(json.dumps(record, indent=2))
         raise
 
 

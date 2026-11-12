@@ -1,5 +1,6 @@
 /** A confirmed end to administrator reach returns a private page to its nearest ordinary place. */
 import type { QueryClient } from '@tanstack/react-query';
+import { create } from 'zustand';
 import { meKey } from '@/api/auth';
 import { documentKey } from '@/api/documents';
 import { nodeKey, orgBySlugKey, orgsKey } from '@/api/nodes';
@@ -12,6 +13,9 @@ import { adminAccessOf } from '@/ui/AsAdminMark';
 
 export interface ExitPlace { href: string; id?: string; kind?: 'node' | 'org' | 'doc'; access: 'yes' | 'no' | 'unknown' }
 export interface AdminExitPlan { origin: string; person: string | null; current: ExitPlace | null; parents: readonly ExitPlace[]; fallback: string }
+
+/** One destination acknowledgement, scoped to the same reader and current address. */
+export const useAdminExitNotice = create<{ notice: { person: string; href: string } | null }>(() => ({ notice: null }));
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const nodeKind = (value: unknown): value is NodeKind => value === 'org' || value === 'project' || value === 'topic' || value === 'thread';

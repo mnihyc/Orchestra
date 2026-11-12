@@ -235,6 +235,35 @@ pub(crate) fn mask_text(redactor: &Redactor, text: String) -> String {
     }
 }
 
+/// File-backed whole-turn masking uses the same redactor and assignment rule as mask_text.
+pub(crate) fn mask_spooled(
+    redactor: &Redactor,
+    text: &crate::history_pages::Text,
+) -> Result<crate::history_pages::Text, EngineError> {
+    text.with_reader(|reader| {
+        let masked = redactor
+            .mask_reader(reader)
+            .map_err(EngineError::unreadable)?;
+        let mut out = crate::history_pages::Text::default();
+        for piece in masked.text().split_inclusive(char::is_whitespace) {
+            let word = piece.trim_end_matches(char::is_whitespace);
+            let space = &piece[word.len()..];
+            match word.split_once('=') {
+                Some((name, value))
+                    if !value.is_empty() && is_variable_name(name) && is_secret_member(name) =>
+                {
+                    out.push(name)?;
+                    out.push("=")?;
+                    out.push(MASKED)?;
+                    out.push(space)?;
+                }
+                _ => out.push(piece)?,
+            }
+        }
+        Ok(out)
+    })
+}
+
 /// Masks summary material at a thread or topic before any producer sees it.
 pub(crate) async fn mask_summary(
     conn: &mut Conn,

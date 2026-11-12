@@ -164,9 +164,12 @@ pub async fn waiting_count(conn: &mut Conn, route: Id) -> Result<i64, DbError> {
     Ok(sqlx::query_scalar(
         "SELECT count(*) FROM notification_routes r
            JOIN notifications n ON n.user_id = r.user_id
+           JOIN users u ON u.id=r.user_id AND u.kind='human' AND u.status='active'
+           LEFT JOIN notification_prefs p ON p.user_id=r.user_id
            LEFT JOIN nodes nd ON nd.id = n.node_id
            LEFT JOIN chats ch ON ch.id = n.chat_id
           WHERE r.id = $1 AND n.read_at IS NULL AND n.kind <> 'notification.route_attention'
+            AND NOT COALESCE(p.disabled_kinds ? n.kind,false)
             AND (cardinality(r.kinds) = 0 OR n.kind = ANY(r.kinds))
             AND (r.channel_snapshot ->> 'org_id' IS NULL
                  OR (r.channel_snapshot ->> 'org_id')::uuid = COALESCE(ch.org_id, nd.org_id))",
@@ -648,7 +651,8 @@ pub async fn due_routes(conn: &mut Conn) -> Result<Vec<RouteRow>, DbError> {
         route_columns_of_r!(),
         " FROM notification_routes r JOIN notification_channels c ON c.id = r.channel_id ",
         "WHERE r.enabled AND c.enabled AND (r.unread_delay_minutes IS NOT NULL OR r.min_interval_minutes IS NOT NULL) ",
-        "AND EXISTS (SELECT 1 FROM notifications n WHERE n.user_id = r.user_id AND n.inbox_seq > r.sent_seq AND n.read_at IS NULL) ",
+        "AND EXISTS (SELECT 1 FROM users u WHERE u.id=r.user_id AND u.kind='human' AND u.status='active') ",
+        "AND EXISTS (SELECT 1 FROM notifications n LEFT JOIN notification_prefs p ON p.user_id=n.user_id WHERE n.user_id = r.user_id AND n.inbox_seq > r.sent_seq AND n.read_at IS NULL AND NOT COALESCE(p.disabled_kinds ? n.kind,false) AND (cardinality(r.kinds)=0 OR n.kind=ANY(r.kinds))) ",
         "ORDER BY r.created_at, r.id"
     ))
     .fetch_all(conn)
@@ -717,9 +721,12 @@ pub async fn waiting_inbox(
         "FROM notification_routes r ",
         "JOIN notification_channels c ON c.id = r.channel_id ",
         "JOIN notifications n ON n.user_id = r.user_id ",
+        "JOIN users u ON u.id=r.user_id AND u.kind='human' AND u.status='active' ",
+        "LEFT JOIN notification_prefs p ON p.user_id=r.user_id ",
         "LEFT JOIN nodes nd ON nd.id = n.node_id ",
         "LEFT JOIN chats ch ON ch.id = n.chat_id ",
         "WHERE r.id = $1 AND n.inbox_seq > r.sent_seq AND n.read_at IS NULL ",
+        "AND NOT COALESCE(p.disabled_kinds ? n.kind,false) ",
         "AND ($2::timestamptz IS NULL OR n.created_at <= $2) ",
         "AND (cardinality(r.kinds) = 0 OR n.kind = ANY(r.kinds)) AND ",
         covers!("COALESCE(ch.org_id, nd.org_id)", "$3::bool"),
@@ -798,6 +805,8 @@ pub async fn immediate_routes(
         "SELECT r.id AS route_id, c.id AS channel_id, c.kind AS channel_kind ",
         "FROM notification_routes r JOIN notification_channels c ON c.id = r.channel_id ",
         "WHERE r.user_id = $1 AND r.enabled AND c.enabled ",
+        "AND EXISTS(SELECT 1 FROM users u WHERE u.id=r.user_id AND u.kind='human' AND u.status='active') ",
+        "AND NOT EXISTS(SELECT 1 FROM notification_prefs p WHERE p.user_id=r.user_id AND p.disabled_kinds ? $2) ",
         "AND r.unread_delay_minutes IS NULL AND r.min_interval_minutes IS NULL ",
         "AND (cardinality(r.kinds) = 0 OR $2 = ANY(r.kinds)) AND ",
         covers!("$3::uuid", "$4::bool"),

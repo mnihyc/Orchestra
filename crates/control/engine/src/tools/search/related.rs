@@ -12,7 +12,6 @@ use crate::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use orch_api_contract::search::RelatedKind;
-use orch_authz::reach::{AgentReach, DocumentPolicy};
 use orch_db::queries::{related as rows, search::CandidateSet, threads::ThreadRow};
 use orch_db::{Conn, DbError};
 use orch_types::{Hash, Id, Json};
@@ -32,6 +31,7 @@ impl Engine {
         thread: &ThreadRow,
         args: &Arguments,
         source: &str,
+        budgets: &super::SearchBudgets,
     ) -> Result<Answer, EngineError> {
         if !args.query.is_empty()
             || args.regex.is_some()
@@ -84,12 +84,7 @@ impl Engine {
         let mut scopes = vec![thread.node_id];
         let mut documents = vec![document];
         let mut chats: Vec<Id> = Vec::new();
-        if asking.documents_policy != DocumentPolicy::None || asking.policy == AgentReach::Topic {
-            scopes.push(asking.agent.topic);
-        }
-        if asking.policy == AgentReach::Project {
-            scopes.extend(asking.agent.project);
-        }
+
         let budget = orch_settings::get::<i64>(
             &mut conn,
             orch_settings::Place::Node(source.node_id),
@@ -115,7 +110,7 @@ impl Engine {
         let limit = usize::try_from(
             args.max_results
                 .unwrap_or(i64::try_from(candidates.count).unwrap_or(i64::MAX))
-                .clamp(1, super::RESULTS_MAX),
+                .clamp(1, budgets.results),
         )
         .unwrap_or(1);
         let mut selected = CandidateSet {

@@ -26,6 +26,7 @@ import { ImportStatus } from '@/features/people/ImportStatus';
 import { closeFinder } from '@/features/finder/store';
 import { ShellCommands } from '@/features/finder/shellCommands';
 import { registerHelpView } from '@/features/help/register';
+import { registerAskView } from '@/features/ask/register';
 import { TutorialHost } from '@/features/help/Tutorial';
 import { HelpOverlayHost, HelpWork } from '@/features/help/HelpOverlay';
 import { useHelpState } from '@/features/help/state';
@@ -34,6 +35,7 @@ import { registerInspectorViews } from '@/features/inspector/Inspector';
 import { usePortsRegistration } from '@/features/ports/View';
 import { useBrowserRegistration } from '@/features/browser/View';
 import { useVncRegistration } from '@/features/vnc/View';
+import { DuplicateHost } from '@/features/duplicate/DuplicateHost';
 import { ChangeHost } from '@/features/change/ChangeHost';
 import { useRememberPlace } from '@/features/navigation/lastPlace';
 import { NodeDialogHost } from '@/features/navigation/NodeDialogs';
@@ -68,11 +70,13 @@ import { ScreenLoading } from '@/shell/ScreenLoading';
 import { ErrorState } from '@/ui/ErrorState';
 import { OverlayChoices } from '@/features/workbench/OverlayChoices';
 import { PageRouting } from '@/features/workbench/PageRouting';
+import { holdViewReveals } from '@/features/workbench/openView';
 import { FrameReadiness, useFrameReadiness } from '@/shell/FrameReadiness';
 
 registerShippedViews(Sidebar, NavigationActions, NavigationActions);
 // Each feature supplies its own views; only registered views are offered.
 registerHelpView();
+registerAskView();
 registerInspectorViews();
 
 client.session.subscribe((next, previous) => {
@@ -144,7 +148,7 @@ export function Shell({ children, leavingAdmin = false }: { children: ReactNode;
   if (userId === null) return <><SkipMain /><main id="main-content" data-main-area tabIndex={-1} className="h-dvh bg-bg text-text outline-none"><ScreenLoading /></main></>;
   const ready = bootstrap.data?.person.id === userId;
   const pending = bootstrap.isError ? <div className="p-4 sm:p-6"><ErrorState error={bootstrap.error} onRetry={() => void bootstrap.refetch()} /></div> : <ScreenLoading />;
-  return <FrameReadiness.Provider value={{ ready, pending }}><ShellFrame key={userId} ready={ready} leavingAdmin={leavingAdmin}>{children}</ShellFrame></FrameReadiness.Provider>;
+  return <FrameReadiness.Provider value={{ ready, pending }}><ShellFrame key={userId} userId={userId} ready={ready} leavingAdmin={leavingAdmin}>{children}</ShellFrame></FrameReadiness.Provider>;
 }
 
 /** A bootstrap transition pauses admitted services while preserving their dialogs and drafts. */
@@ -166,11 +170,20 @@ function FrameServices() {
   return <><ShellCommands /><WorkspaceCommands /><TutorialHost /></>;
 }
 
-function ShellFrame({ leavingAdmin, ready }: { children: ReactNode; leavingAdmin: boolean; ready: boolean }) {
+function ShellFrame({ userId, leavingAdmin, ready }: { userId: string; children: ReactNode; leavingAdmin: boolean; ready: boolean }) {
   const frame = useFrameReadiness();
   const [addressed, setAddressed] = useState(false);
   const admitAddress = useCallback(() => setAddressed(true), []);
   const admitted = ready && addressed;
+  const readerVersion = useStore(client.session, (state) => state.readerVersion ?? 0);
+  const viewAdmission = useRef<ReturnType<typeof holdViewReveals> | null>(null);
+  useLayoutEffect(() => {
+    const admission = holdViewReveals(userId, readerVersion);
+    viewAdmission.current = admission;
+    return () => { viewAdmission.current = null; admission.release(); };
+  }, [userId, readerVersion]);
+  useLayoutEffect(() => { if (!admitted) viewAdmission.current?.pause(); }, [admitted, userId, readerVersion]);
+  useEffect(() => { if (admitted) viewAdmission.current?.admit(); }, [admitted, userId, readerVersion]);
   const href = useRouterState({ select: (state) => state.location.href });
   const previousHref = useRef(href);
   useLayoutEffect(() => {
@@ -194,6 +207,7 @@ function ShellFrame({ leavingAdmin, ready }: { children: ReactNode; leavingAdmin
       <NodeDialogHost />
       <CapHost />
       <ChangeHost />
+      <DuplicateHost />
       <AccessHost />
       <ExportHost /><ImportHost /><CloseViews /><PanelTargetChoice />
       </AdmittedServices>

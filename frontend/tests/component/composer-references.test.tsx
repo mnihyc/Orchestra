@@ -18,7 +18,7 @@ vi.mock('@/api/workspace', async (importOriginal) => ({ ...await importOriginal<
 vi.mock('@/api/documents', async (importOriginal) => ({ ...await importOriginal<typeof DocumentsApi>(), exportDocument: calls.export }));
 vi.mock('@/api/search', async (importOriginal) => ({ ...await importOriginal<typeof SearchApi>(), namesQuery: (search: SearchApi.NameSearch) => ({ queryKey: ['reference-documents', search.q], queryFn: () => Promise.resolve([document]), staleTime: Infinity }) }));
 
-const document: NameHit = { id: 'doc-1', kind: 'document', name: 'Login design', address: null, username: null, archived: false, avatar: null, color: null, custom_color: null,
+const document: NameHit = { home_path: [], id: 'doc-1', kind: 'document', name: 'Login design', address: null, username: null, archived: false, avatar: null, color: null, custom_color: null,
   owner: null, recent: true, path: [{ id: 'org-1', kind: 'org', name: 'Acme', redacted: false }], tag: null, thread_attention: null };
 const file: DirEntry = { type: 'file', name: 'login.ts', path: 'src/login.ts', size: 12, mtime: '2026-10-15T00:00:00Z', mode: 0o644, link_target: null, cached: false };
 const thread = { id: 'thread-1', environment: { id: 'env-1' }, directory: 'src', environment_permissions: ['files.view'] } as Thread;

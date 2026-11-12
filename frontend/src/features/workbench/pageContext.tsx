@@ -1,7 +1,8 @@
 /** Typed route adapters read their own content target. There is still one application router. */
-import { defaultStringifySearch, useLocation, useNavigate, type AnyRoute, type UseNavigateResult, type ParsedLocation } from '@tanstack/react-router';
+import { trimPathRight, useLocation, useNavigate, type AnyRoute, type UseNavigateResult, type ParsedLocation } from '@tanstack/react-router';
 import { createContext, useContext, useMemo } from 'react';
 import type { PageTarget } from './pages';
+import { canonicalStringifySearch } from '@/lib/listAddress';
 
 export interface PageNavigation {
   to?: string;
@@ -20,7 +21,7 @@ export const PageContext = createContext<PageContextValue | null>(null);
 export function usePageContext(): PageContextValue | null { return useContext(PageContext); }
 function useTarget(route: { id: string }): PageContextValue {
   const context = usePageContext();
-  if (context?.target.route !== route.id) throw new Error('This page must be hosted by its addressed workbench view.');
+  if (context === null || trimPathRight(context.target.route) !== trimPathRight(route.id)) throw new Error('This page must be hosted by its addressed workbench view.');
   return context;
 }
 export function usePageParams<R extends AnyRoute>(route: R): R['types']['allParams'] {
@@ -39,7 +40,7 @@ export function useViewLocation<Value = ParsedLocation>(options?: { select?: (lo
   const target = usePageContext()?.target;
   const addressed = useMemo((): ParsedLocation | null => {
     if (target === undefined) return null;
-    const searchStr = defaultStringifySearch(target.search);
+    const searchStr = canonicalStringifySearch(target.search);
     const href = `${target.pathname}${searchStr}${target.hash === '' ? '' : `#${target.hash}`}`;
     // A pane has one local locator, not an independent browser-history stack or another pane's history state.
     return { pathname: target.pathname, search: target.search, hash: target.hash, searchStr, href, publicHref: href, external: false, state: { __TSR_index: 0 } };

@@ -53,6 +53,16 @@ pub struct ExecServer {
 impl ExecServer {
     /// Starts it and waits until it says where it listens.
     pub async fn start(label: &str, workspace: &Path, token: &str) -> Self {
+        Self::start_at(label, workspace, workspace, token).await
+    }
+
+    /// A distinct provider-visible path prevents an adapter-local read from impersonating remote IO.
+    pub async fn start_at(
+        label: &str,
+        workspace: &Path,
+        remote_workspace: &Path,
+        token: &str,
+    ) -> Self {
         let directory = tempfile::Builder::new()
             .prefix("orch-codex-exec-token-")
             .tempdir()
@@ -84,7 +94,11 @@ impl ExecServer {
                         "host",
                     ])
                     .arg("-v")
-                    .arg(format!("{0}:{0}", workspace.display()))
+                    .arg(format!(
+                        "{}:{}",
+                        workspace.display(),
+                        remote_workspace.display()
+                    ))
                     .arg("-v")
                     .arg(format!("{0}:{0}:ro", server._token.path().display()))
                     .arg(image())

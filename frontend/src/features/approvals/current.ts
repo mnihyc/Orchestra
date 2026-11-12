@@ -1,4 +1,5 @@
 /** Live request snapshots and confirmed decisions settle a timeline card without another read. */
+import type { TFunction } from 'i18next';
 import type { Approval, Item } from '@/generated/api-types';
 import { approvalSnapshot } from '@/features/approvals/snapshot';
 
@@ -32,4 +33,9 @@ export function approvalOutcome(approval: Approval): Approval['state'] {
   return approval.state === 'approved' && approval.kind === 'harness'
     && (approval.request.request_kind === 'user_input' || approval.request.request_kind === 'mcp_elicitation')
     ? 'answered' : approval.state;
+}
+
+/** One explanation follows the same authority, connection and in-flight state as every decision. */
+export function decisionReason(approval: Pick<Approval, 'can_decide'>, live: boolean, pending: boolean, t: TFunction): string | undefined {
+  return !approval.can_decide ? t('approvals.cannotAnswer') : !live ? t('approvals.waitForLine') : pending ? t('ui.unavailable.deciding') : undefined;
 }

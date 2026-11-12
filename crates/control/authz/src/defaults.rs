@@ -132,6 +132,52 @@ pub async fn resolve_rows(
         .collect())
 }
 
+/// Whether an actual governing defaults row names this caller now, with native inheritance,
+/// profiles, expiry, groups, roles and outside bounds. This is a conjunctive control on an
+/// already admitted subject; it grants no object admission or implicit ownership of its material.
+pub async fn names_caller(
+    conn: &mut Conn,
+    principal: &Principal,
+    place: Id,
+    permission: Permission,
+    profile: Profile,
+) -> Result<bool, Error> {
+    if !principal.caller().permits(permission) {
+        return Ok(false);
+    }
+    let graph = Graph::load(conn, &[place]).await?;
+    let site = graph.site_of(place).ok_or(Error::NotFound(place))?;
+    if let Some(closing) = principal.suspension().closing(&site.orgs) {
+        return Err(Error::Suspended { org: closing.org() });
+    }
+    let mut places = vec![PlaceRef::Node(place)];
+    places.extend(site.chain.iter().copied());
+    let pages = places
+        .iter()
+        .copied()
+        .map(PageRef::defaults_of)
+        .collect::<Vec<_>>();
+    let permissions = std::iter::once(permission)
+        .chain(permission.held_through())
+        .filter(|row| *row != Permission::AccessOwn)
+        .collect::<Vec<_>>();
+    let frame = Frame::load_with(
+        conn,
+        principal,
+        Policy::default(),
+        graph,
+        std::slice::from_ref(&site),
+        &pages,
+        &permissions,
+    )
+    .await?;
+    Ok(permissions.into_iter().any(|row| {
+        !frame
+            .matching_defaults(&site, &places, profile, row)
+            .is_empty()
+    }))
+}
+
 /// The places a defaults row reaches downward: whether `node` is one where
 /// defaults can be kept.
 #[must_use]

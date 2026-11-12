@@ -35,6 +35,13 @@
         "listed": {
           "type": "boolean",
           "description": "Whether the list the suggestion comes from names it."
+        },
+        "origins": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Provenance of explicitly supplied values, keyed by JSON pointer in this suggestion.\nAn unknown or absent origin never becomes vendor confirmation or enabled support."
         }
       },
       "required": [
@@ -48,6 +55,50 @@
     "ModelParameters": {
       "type": "object",
       "properties": {
+        "cache_lifetimes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional cache lifetimes enabled by a manager. Ordinary five-minute caching stays available."
+        },
+        "native_tools": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Binding"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "description": "Optional interface/capability bindings, projected from installed declarations without rewriting older entries."
+        },
+        "web_search": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Native search modes enabled by a provider manager; absence leaves search disabled."
+        },
+        "default_web_search": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The enabled search mode used when a use makes no choice; absent means disabled."
+        },
         "efforts": {
           "type": [
             "array",
@@ -65,6 +116,23 @@
           ],
           "description": "The effort used when none is chosen."
         },
+        "reasoning_modes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional reasoning modes explicitly enabled by a provider manager."
+        },
+        "default_reasoning_mode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An enabled reasoning mode used when a use makes no choice; never set by discovery."
+        },
         "service_tiers": {
           "type": [
             "array",
@@ -81,6 +149,23 @@
             "null"
           ],
           "description": "The speed a thread on this model starts with: one of `service_tiers`. Left out, the ordinary\none. A manager's choice, never discovery's."
+        },
+        "capacity_tiers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ServiceTier"
+          },
+          "description": "Enabled capacity selections. Absence keeps undeclared/older endpoint defaults untouched."
+        },
+        "default_capacity_tier": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "An enabled capacity selection used when none is chosen, never set by discovery."
         },
         "access_programs": {
           "type": [
@@ -141,6 +226,14 @@
           ],
           "description": "Whether it takes images."
         },
+        "request_options": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "description": "Provider constraints on additional request options, keyed by wire protocol; `native` uses\ndeclared adapter parameter keys. JSON Schema enum/const/default/required retain their distinct\nmeanings. An omitted schema preserves the protocol's existing extension surface."
+        },
         "rate": {
           "anyOf": [
             {
@@ -154,6 +247,168 @@
         }
       },
       "description": "What one model can be run with at a provider. Models differ in all of it, so each member is the\nmodel's own and has three parts: what the model offers there (`offered`), what its managers\nopened (`efforts`, `service_tiers`, `access_programs`, up to `context_max`), and what a thread on\nit starts with (`default_*`). What a model *may* be run with is written here; what a thread\n*does* run with is the thread's own setting, chosen within what is open."
+    },
+    "Binding": {
+      "type": "object",
+      "properties": {
+        "input_schema": {
+          "description": "Input schema for this capability; null retains the existing implementation's contract.",
+          "default": null
+        },
+        "eligible_when": {
+          "description": "A local schema over actual thread/offering facts; null imposes no extra predicate.",
+          "default": null
+        },
+        "request": {
+          "description": "Existing native-tool declaration or service request shape.",
+          "default": null
+        },
+        "result": {
+          "description": "Projection into the capability's existing common item.",
+          "default": null
+        },
+        "counters": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Counter"
+          },
+          "description": "Named counters with actual source pointers, never inferred item counts.",
+          "default": {}
+        },
+        "prices": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Price"
+          },
+          "description": "Declared quotes in their own currency/unit.",
+          "default": {}
+        },
+        "discovery": {
+          "description": "Discovery mapping, which offers but never enables capabilities.",
+          "default": null
+        }
+      },
+      "additionalProperties": true,
+      "description": "One uniform declaration of requests, common results, counters and prices."
+    },
+    "Counter": {
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string",
+          "description": "JSON pointer in a decoded response/frame.",
+          "default": ""
+        },
+        "constant": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Explicit per-success quantity where the service bills one call rather than result count.",
+          "default": null
+        },
+        "items": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CountItems"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Count actual completed rows only after their declared byte encoding decodes."
+        },
+        "valid_when": {
+          "description": "The whole response must satisfy this evidence schema before absence can mean anything.",
+          "default": null
+        },
+        "only_when": {
+          "description": "Predicate over the decoded response; null imposes no extra condition.",
+          "default": null
+        },
+        "otherwise": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Explicit quantity when that predicate is false, such as a documented free empty answer.",
+          "default": null
+        },
+        "optional": {
+          "type": "boolean",
+          "description": "Capture if reported; absence does not promise this otherwise unsupported quantity.",
+          "default": false
+        },
+        "unit": {
+          "type": "string",
+          "description": "The capability's ledger unit.",
+          "default": ""
+        },
+        "cumulative": {
+          "type": "boolean",
+          "description": "A new report replaces the prior cumulative snapshot rather than adding it.",
+          "default": false
+        },
+        "reset_on_decrease": {
+          "type": "boolean",
+          "description": "A lower cumulative snapshot explicitly starts again at zero; otherwise that interval is unknown."
+        },
+        "successful_only": {
+          "type": "boolean",
+          "description": "Counts successful operations rather than attempts.",
+          "default": false
+        },
+        "reported_cost": {
+          "type": "boolean",
+          "description": "Optional alternative vendor-reported cost, separate from an estimate.",
+          "default": false
+        }
+      },
+      "additionalProperties": true,
+      "description": "One measured quantity; absence is unknown unless the declaration explicitly says otherwise."
+    },
+    "CountItems": {
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "type": "string",
+          "default": ""
+        },
+        "only_when": {
+          "description": "Optional predicate selects completed outputs within a mixed native array.",
+          "default": null
+        },
+        "base64": {
+          "type": "string",
+          "description": "Each selected row must contain nonempty standard base64 bytes at this pointer.",
+          "default": ""
+        }
+      },
+      "description": "Explicit actual-output cardinality; never a requested quantity or a citation count."
+    },
+    "Price": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "type": "string",
+          "description": "Decimal text, never parsed through a float.",
+          "default": ""
+        },
+        "currency": {
+          "type": "string",
+          "description": "Original currency or the existing credits unit.",
+          "default": ""
+        },
+        "unit": {
+          "type": "string",
+          "description": "Charged quantity, such as token, search, fetch or image.",
+          "default": ""
+        }
+      },
+      "additionalProperties": true,
+      "description": "Exact decimal quote; conversion/rounding remains with the existing pricer."
     },
     "ServiceTier": {
       "type": "object",
@@ -176,6 +431,47 @@
     "ModelOffered": {
       "type": "object",
       "properties": {
+        "cache_lifetimes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional prompt-cache lifetimes observed without enabling them."
+        },
+        "reasoning_modes": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional reasoning modes observed at this offering, without enabling them."
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional discovery details. These facts neither enable a capability nor constrain an old model entry."
+        },
+        "web_search": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Native search modes the source offers, without enabling them."
+        },
         "service_tiers": {
           "type": [
             "array",
@@ -185,6 +481,16 @@
             "$ref": "#/$defs/ServiceTier"
           },
           "description": "Speeds on offer."
+        },
+        "capacity_tiers": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ServiceTier"
+          },
+          "description": "Capacity classes observed independently of inference speed, without enabling them."
         },
         "access_programs": {
           "type": [
@@ -207,9 +513,71 @@
       },
       "description": "What a harness or an endpoint last said a model offers."
     },
+    "ModelReport": {
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Capability support objects in the interface's declared vocabulary; unrecognized members grant nothing."
+        },
+        "output_max": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "description": "Reported maximum output tokens, without changing the thread's output limit."
+        },
+        "lifecycle": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Lifecycle stage as reported. Future stages remain data, not a new refusal rule."
+        },
+        "deprecated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reported deprecation time; absent means it was not reported."
+        },
+        "retires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Reported retirement schedule. A past schedule does not declare that retirement happened."
+        },
+        "line": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Model line proposed by the endpoint, never inferred from a routing name or enabled as a group."
+        }
+      },
+      "additionalProperties": true,
+      "description": "What an endpoint actually reported, retained independently of a manager's enabled model options."
+    },
     "Rate": {
       "type": "object",
       "properties": {
+        "web_search_per_call": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for one successful native web search, additional to token prices."
+        },
+        "web_fetch_per_call": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for one successful native page fetch, separate from searches and tokens."
+        },
         "input_per_mtok": {
           "type": "string",
           "description": "Credits for a million input tokens."
@@ -229,6 +597,20 @@
           ],
           "description": "Credits for a million tokens written to a prompt cache; as input when left out."
         },
+        "cache_write_1h_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million one-hour cache writes; absence leaves that price unknown."
+        },
+        "cache_write_12h_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million twelve-hour cache writes; absence leaves that price unknown."
+        },
         "tiers": {
           "type": [
             "object",
@@ -238,6 +620,16 @@
             "type": "string"
           },
           "description": "Service tiers priced as a multiple of the rate, written as a decimal string: `\"2\"` for\ndouble, `\"0.5\"` for half."
+        },
+        "capacity_tiers": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Actual reported capacity classes priced independently of inference-speed multipliers."
         },
         "above": {
           "type": [
@@ -286,6 +678,20 @@
             "null"
           ],
           "description": "Credits for a million tokens written to a prompt cache."
+        },
+        "cache_write_1h_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million tokens written to a one-hour prompt cache."
+        },
+        "cache_write_12h_per_mtok": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Credits for a million twelve-hour cache writes; inherits the root quote when absent."
         }
       },
       "required": [

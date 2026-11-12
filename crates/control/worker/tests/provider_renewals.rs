@@ -174,6 +174,12 @@ async fn a_runtime_stopped_for_as_many_days_as_the_setting_allows_is_started_onc
     let world = World::new(Notifiers::new()).await;
     let org = world.org("Acme").await;
     let due = provider_in(&world, org, "stopped", 8, json!({})).await;
+    sqlx::query("UPDATE runtimes SET state_detail=$2 WHERE provider_id=$1")
+        .bind(due)
+        .bind(rows::STOPPED_IDLE)
+        .execute(&world.test.pool)
+        .await
+        .unwrap();
     let db = world.db();
     let done = provider_renewals::scheduled(&db, &world.clock)
         .await

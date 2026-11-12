@@ -1,5 +1,5 @@
 /** Away status, safe failures, explicit devices/pause and grouped read/Undo across browser contexts. */
-import { expect, type Page, test } from '@playwright/test';
+import { type Browser, expect, type Page, test } from '@playwright/test';
 
 import type { AwayPrefs, AwayRoute } from '../../src/features/settings/personal/away/types.ts';
 import { approvalsMade, askCapability, notify, notifyMany, onlyChannels, settleAs } from './inbox-support.ts';
@@ -19,7 +19,7 @@ async function editor(page: Page) { await page.goto('/settings/notifications'); 
 async function placeInbox(page: Page) {
   await page.goto('/inbox');
   await page.getByRole('combobox', { name: 'Group notifications' }).click();
-  await page.getByRole('option', { name: 'By place', exact: true }).click();
+  await page.getByRole('option', { name: 'Place', exact: true }).click();
 }
 async function bell(page: Page) { await page.getByRole('button', { name: 'Notifications for this thread' }).click(); }
 async function chooseTime(page: Page, time = '12:30') {
@@ -51,7 +51,8 @@ test('the scoped bell is checked, retains stale facts, and subscription changes 
   await bell(page);
   await expect(page.getByText('Outside Orch: off', { exact: true })).toBeVisible();
   await expect(page.getByRole('menuitem', { name: 'Edit outside notifications' })).toHaveCount(1);
-  await expect(page.getByText('Configured ways do not guarantee receipt.', { exact: false })).toBeVisible();
+  // The bell now shows its observed value and check time; its duplicate delivery disclaimer was removed.
+  await expect(page.getByRole('status').filter({ hasText: 'Outside Orch: off' })).toContainText('Checked');
   await page.getByRole('menuitemradio', { name: 'Off', exact: true }).click();
   expect((await held()).routes.every((route) => !route.enabled)).toBe(true);
   await bell(page);
@@ -97,7 +98,8 @@ test('terminal unconfirmed delivery leaves one Inbox notice, last accepted, curr
   await page.goto('/inbox');
   await expect(page.locator('[data-kind="notification.route_attention"]')).toHaveCount(1);
   await expect(page.getByText('Nothing went out')).toHaveCount(0);
-  await page.getByRole('link', { name: /Delivery could not be confirmed through System mail/ }).click();
+  // The card's explicit repair link stays clickable beside its interactive delivery details.
+  await page.locator('[data-kind="notification.route_attention"]').getByRole('link', { name: 'Open notification settings', exact: true }).click();
   const mail = card(page, 'email');
   await expect(mail.getByText('Last accepted:', { exact: false })).toBeVisible();
   await mail.getByRole('button', { name: 'Retry waiting' }).click();
@@ -174,13 +176,33 @@ test('pause remains confirmed pending, a stale choice keeps edits, and Resume ch
     await expect(page.getByText('Your choices changed in another window')).toBeVisible();
     await expect(page.getByRole('dialog').getByLabel('Time', { exact: true })).toHaveValue('12:30');
     await page.getByRole('button', { name: 'Keep my proposed change' }).click();
-    await away('/fault', { path: '/me/notification-prefs', delay: 800, once: true });
-    await page.getByRole('button', { name: 'Pause notifications' }).click();
-    await expect(page.getByRole('button', { name: 'Pause notifications' })).toHaveAttribute('aria-busy', 'true');
+    // Hold the actual write until its pending state is observed, independently of CI speed.
+    let release!: () => void;
+    const heldWrite = new Promise<void>((resolve) => { release = resolve; });
+    const path = '**/api/v1/me/notification-prefs';
+    await page.route(path, async (route) => {
+      if (route.request().method() === 'PUT') await heldWrite;
+      await route.continue();
+    });
+    const accepted = page.waitForResponse((response) => response.request().method() === 'PUT'
+      && new URL(response.url()).pathname === '/api/v1/me/notification-prefs');
+    try {
+      await page.getByRole('button', { name: 'Pause notifications' }).click();
+      await expect(page.getByRole('button', { name: 'Pause notifications' })).toHaveAttribute('aria-busy', 'true');
+      await expect(page.getByRole('dialog')).toBeVisible();
+      expect((await held()).prefs.pause_until).toBe('2099-01-01T14:00:00.000Z');
+    } finally { release(); }
+    expect((await accepted).ok()).toBe(true);
+    await page.unroute(path);
     await expect(page.getByRole('dialog')).toHaveCount(0);
-    await expect(other.getByText('Paused until', { exact: false })).toBeVisible();
+    // The second window has shown a pause since the control's own change; it is the pause the first window wrote that it is to resume.
+    await expect(other.getByText(/Paused until .*12:30/)).toBeVisible();
     await other.getByRole('button', { name: 'Resume', exact: true }).click();
+    // The answer to the write is awaited, so that a dialog still open says what the server answered and not only that it is open.
+    const resumed = other.waitForResponse((response) => response.request().method() === 'PUT'
+      && new URL(response.url()).pathname === '/api/v1/me/notification-prefs');
     await other.getByRole('dialog').getByRole('button', { name: 'Resume', exact: true }).click();
+    expect((await resumed).ok()).toBe(true);
     await expect(other.getByRole('dialog')).toHaveCount(0);
     const state = await held();
     expect(state.prefs.pause_until).toBeNull();
@@ -189,6 +211,71 @@ test('pause remains confirmed pending, a stale choice keeps edits, and Resume ch
   } finally { await context.close(); }
 });
 
+for (const width of [1440, 400]) {
+  /** Two windows, the second on /inbox showing a pause made by the control, and the first about to change it: the second one's re-reads of the preferences wait for `release`. */
+  async function secondWindowHoldingItsReads(browser: Browser, page: Page): Promise<{ other: Page; release: () => void; close: () => Promise<void> }> {
+    await page.setViewportSize({ width, height: 900 });
+    await signIn(page);
+    const context = await browser.newContext({ viewport: { width, height: 900 } });
+    const other = await context.newPage();
+    await signIn(other);
+    await other.goto('/inbox');
+    await away('/prefs', { prefs: { pause_until: '2099-01-01T14:00:00.000Z' } });
+    await expect(other.getByText(/Paused until .*2:00/)).toBeVisible();
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => { release = resolve; });
+    await other.route('**/api/v1/me/notification-prefs', async (route) => {
+      if (route.request().method() === 'GET') await waiting;
+      await route.continue();
+    });
+    await away('/prefs', { prefs: { pause_until: '2099-01-01T12:30:00.000Z' } });
+    return { other, release, close: () => context.close() };
+  }
+  const put = (page: Page) => page.waitForResponse((response) => response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/v1/me/notification-prefs');
+
+  test(`a Resume is written on the pause its dialog shows, however late the second window's read comes, at ${width}px`, async ({ page, browser }) => {
+    const { other, release, close } = await secondWindowHoldingItsReads(browser, page);
+    try {
+      await other.getByRole('button', { name: 'Resume', exact: true }).click();
+      const dialog = other.getByRole('dialog');
+      // The read the first window's change called for has not answered: the dialog says the pause it was opened on.
+      await expect(dialog.getByRole('status')).toContainText(/2:00/);
+      release();
+      await expect(dialog.getByRole('status')).toContainText(/12:30/);
+      const basis = (await held()).prefs.revision;
+      const resumed = put(other);
+      const sent = other.waitForRequest((request) => request.method() === 'PUT' && new URL(request.url()).pathname === '/api/v1/me/notification-prefs');
+      await dialog.getByRole('button', { name: 'Resume', exact: true }).click();
+      expect((await resumed).ok()).toBe(true);
+      expect(JSON.parse((await sent).postData() ?? '{}')).toEqual({ expected_revision: basis, pause_until: null });
+      await expect(other.getByRole('dialog')).toHaveCount(0);
+      expect((await held()).prefs.pause_until).toBeNull();
+    } finally { release(); await close(); }
+  });
+
+  test(`a Resume the server refuses as stale says that the choices changed and is offered again on how things stand, at ${width}px`, async ({ page, browser }) => {
+    const { other, release, close } = await secondWindowHoldingItsReads(browser, page);
+    try {
+      await other.getByRole('button', { name: 'Resume', exact: true }).click();
+      const dialog = other.getByRole('dialog');
+      const refused = put(other);
+      await dialog.getByRole('button', { name: 'Resume', exact: true }).click();
+      const answer = await refused;
+      expect(answer.status()).toBe(409);
+      // What the person sees: the dialog stays, and once the read answers it says what changed and how things stand now.
+      release();
+      await expect(dialog.getByText('Your choices changed in another window')).toBeVisible();
+      await expect(dialog.getByRole('status')).toContainText(/12:30/);
+      await dialog.getByRole('button', { name: 'Keep my proposed change' }).click();
+      const resumed = put(other);
+      await dialog.getByRole('button', { name: 'Resume', exact: true }).click();
+      expect((await resumed).ok()).toBe(true);
+      await expect(other.getByRole('dialog')).toHaveCount(0);
+      expect((await held()).prefs.pause_until).toBeNull();
+    } finally { release(); await close(); }
+  });
+}
+
 test('place groups use supplied actionability, filtered counts and no answer excerpts, and retain the chosen view', async ({ page }) => {
   const approval = await askCapability({ thread_id: ACME.mainThread, deciders: ['ada'] });
   await notify({ kind: 'capability.requested', title: 'Decision in Web', node: ACME.mainThread, approval_id: approval.id, body: 'Do not use this as an answer excerpt', at: '2026-10-13T00:00:00Z' });
@@ -196,12 +283,14 @@ test('place groups use supplied actionability, filtered counts and no answer exc
   await signIn(page);
   await placeInbox(page);
   await expect(groups(page).first().getByRole('heading', { name: 'Web' })).toBeVisible();
-  await expect(groups(page).first().getByText('Waiting for you', { exact: true })).toHaveCount(2);
+  // The actionable group leads; its row says this once, without a duplicate heading badge.
+  await expect(groups(page).first().getByText('Waiting for you', { exact: true })).toHaveCount(1);
   await expect(page.getByText('Do not use this as an answer excerpt')).toHaveCount(0);
   await settleAs(approval.id, 'ada');
   await expect(groups(page).getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await expect(groups(page).first().getByRole('heading', { name: 'Infra' })).toBeVisible();
   await page.reload();
-  await expect(page.getByRole('combobox', { name: 'Group notifications' })).toContainText('By place');
+  await expect(page.getByRole('combobox', { name: 'Group notifications' })).toContainText('Place');
   await away('/hide', { ids: [ACME.mainThread] });
   await expect(groups(page).getByRole('heading', { name: 'Web' })).toHaveCount(0);
   await expect(page.getByText('Decision in Web', { exact: true })).toHaveCount(0);
@@ -224,7 +313,9 @@ test('group read captures one cut/key and Undo preserves new arrivals and a late
     const other = await context.newPage();
     await signIn(other);
     await other.goto('/inbox');
-    await other.getByRole('link', { name: /Read again elsewhere/ }).click();
+    // Thread notices use their current thread name, so select the exact notice
+    // whose later read must survive Undo without restoring its old authored title.
+    await other.locator(`[data-notification-id="${first.id}"]`).getByRole('link').first().click();
     await expect.poll(async () => (await held()).requests.filter((request) => Array.isArray(request.body.ids) && request.body.ids.includes(first.id)).length).toBeGreaterThan(0);
     await page.getByRole('button', { name: 'Undo', exact: true }).click();
     await expect(page.getByText('Read marks undone')).toBeVisible();
@@ -253,10 +344,10 @@ test('a manager sees only enabled-route counts and removal reaches each memberâ€
     const row = page.locator(`li[data-channel="${route?.channel_id ?? ''}"]`);
     await expect(row.getByText('2 members switched this on')).toBeVisible();
     await expect(row.getByText('dora@example.org')).toHaveCount(0);
-    await row.getByRole('button', { name: /^Remove / }).click();
+    await row.getByRole('button', { name: 'Delete Ops room', exact: true }).click();
     const confirmation = page.getByRole('alertdialog');
     await expect(confirmation.getByText('Removing this channel disables 2 enabled routes.', { exact: false })).toBeVisible();
-    await confirmation.getByRole('button', { name: /^Remove / }).click();
+    await confirmation.getByRole('button', { name: 'Delete Ops room', exact: true }).click();
     await expect(other.locator('[data-retained-route]').getByText('Removed: Ops room')).toBeVisible();
   } finally { await context.close(); }
 });
@@ -338,7 +429,8 @@ test('the editor empty, loading, refused and failed states offer a current retry
   await expect(page.getByText('No way out is set up for you here', { exact: false })).toBeVisible();
   await away('/fault', { path: '/notification-channels', status: 403 });
   await page.reload();
-  await expect(page.getByText('Your notification choices cannot be read', { exact: false })).toBeVisible();
+  // Permission refusals use the shared safe message rather than raw server copy.
+  await expect(page.getByRole('alert')).toHaveText('You do not have access to this. Ask somebody who manages it.');
   await away('/fault', { path: '/notification-channels', status: 503 });
   await page.reload();
   await expect(page.getByRole('button', { name: 'Try again', exact: true }).first()).toBeVisible();

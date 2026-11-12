@@ -4,13 +4,13 @@
 //! a thread is reached in one way whoever reaches it. The receiving thread shows it as a message from the sending
 //! thread, and its agent reads a relayed block naming that thread and the stored time. It is delivered by the settings of
 //! the receiving thread's topic (`broadcast.*`): steered into a turn that runs, left until the next turn, or
-//! interrupting, and an idle thread is started only where that is configured. As shipped it is no input and starts
-//! no turn by itself. Each message counts against the sending thread's `broadcast.rate_per_hour`, with what it
-//! announced, and is audited.
+//! interrupting. An idle thread starts only when wake_idle is explicitly true and its receiving topic allows it.
+//! Each message counts against the sending thread's `broadcast.thread_messages_per_hour`, separately from
+//! announcements, and is audited.
 //!
 //! **Which thread.** The shared tree resolves names, paths and identifiers exactly as it does for reads and
-//! documents. An ambiguous write is refused with reachable candidates. A thread of the sender's own topic
-//! accepts a message by policy; one in another topic needs an explicit write share. Paths are never reduced
+//! documents. An ambiguous write is refused with reachable candidates. A message needs an explicit write share,
+//! or the sender's topic must enable automatic same-topic messages. Paths are never reduced
 //! to their last component or tried in another topic first.
 //!
 //! **References** that the message names (a shared-tree path or `id:` in a link or in backquotes, with `#n` for a
@@ -29,7 +29,7 @@ use crate::delivery::{ORCH_DIR, safe_name};
 use crate::engine::Engine;
 use crate::error::EngineError;
 use crate::ids;
-use crate::tools::announce::{Broadcast, Plan, Reach, Sender};
+use crate::tools::announce::{Broadcast, Plan, Reach, SendRate, Sender};
 use crate::tools::definitions::{Code, FILES_MAX, Refusal, TEXT_MAX_CHARS};
 use crate::tools::message::Message as MessageArguments;
 use crate::tools::references::Resolution;
@@ -156,12 +156,6 @@ impl Engine {
             Ok(target) => target,
             Err(refusal) => return Ok(refusal.into()),
         };
-        if target.node_id == thread.node_id {
-            return Ok(Refusal::invalid(
-                "That is your own thread. A message goes to the agent of another thread.",
-            )
-            .into());
-        }
         if target.archived {
             return Ok(Refusal::new(
                 Code::Closed,
@@ -190,9 +184,16 @@ impl Engine {
             };
             (own, theirs)
         };
-        if let Some(refusal) = self.within_hourly_rate(thread, &own, id).await? {
+        if let Some(refusal) = self
+            .within_hourly_rate(thread, &own, id, SendRate::ThreadMessages)
+            .await?
+        {
             return Ok(refusal.into());
         }
+        let wake_idle = match broadcast.wake_for(arguments.wake_idle) {
+            Ok(wake) => wake,
+            Err(refusal) => return Ok(refusal.into()),
+        };
         if let Some(saved) = self.saved_thread_message(id, &target_path).await? {
             return Ok(saved);
         }
@@ -217,7 +218,7 @@ impl Engine {
             severity: AnnouncementSeverity::Info,
             delivery: broadcast.delivery,
             fallback: broadcast.fallback,
-            wake_idle: broadcast.wake_idle,
+            wake_idle,
             reach: Reach::All,
         };
         let sender = Sender::Agent(Box::new(thread.clone()));
