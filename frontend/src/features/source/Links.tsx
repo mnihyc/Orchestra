@@ -35,13 +35,14 @@ function suggestedOf(thread: Thread): ThreadLink[] {
 }
 
 /** The heading's links, and Edit links… for whoever may change them. */
-export function ThreadLinks({ thread }: { thread: Thread }) {
+export function ThreadLinks({ thread, readOnly = false }: { thread: Thread; readOnly?: boolean }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
-  const mayEdit = holds(thread.access, 'thread.interact') && !thread.archived;
+  const mayEdit = !readOnly && holds(thread.access, 'thread.interact') && !thread.archived;
+  const reason = readOnly ? t('composer.row.readOnly') : thread.archived ? t('implicitAvailability.archived')
+    : !mayEdit ? t('implicitAvailability.threadInteract') : undefined;
   const links = thread.links;
   const suggested = suggestedOf(thread).filter((one) => !links.some((link) => link.url === one.url));
-  if (links.length === 0 && !mayEdit) return null;
   return (
     <span className="inline-flex min-w-0 flex-wrap items-center gap-1" data-thread-links>
       <span className="hidden flex-wrap items-center gap-1 sm:inline-flex">
@@ -61,18 +62,18 @@ export function ThreadLinks({ thread }: { thread: Thread }) {
           />
         </span>
       )}
-      {mayEdit && <IconButton size="sm" label={t('source.links.edit')} icon={<Link2 aria-hidden />} onClick={() => setEditing(true)} />}
-      {mayEdit && suggested.length > 0 && !editing && (
-        <Button size="sm" variant="ghost" icon={<Plus aria-hidden />} onClick={() => setEditing(true)}>
+      <IconButton size="sm" label={t('source.links.edit')} icon={<Link2 aria-hidden />} blocked={!mayEdit} reason={reason} onClick={() => setEditing(true)} />
+      {suggested.length > 0 && !editing && (
+        <Button size="sm" variant="ghost" icon={<Plus aria-hidden />} blocked={!mayEdit} reason={reason} onClick={() => setEditing(true)}>
           {t('source.links.add')}
         </Button>
       )}
-      {editing && <LinksDialog thread={thread} suggested={suggested} onClose={() => setEditing(false)} />}
+      {editing && <LinksDialog thread={thread} suggested={suggested} writable={mayEdit} reason={reason} onClose={() => setEditing(false)} />}
     </span>
   );
 }
 
-function LinksDialog({ thread, suggested, onClose }: { thread: Thread; suggested: ThreadLink[]; onClose: () => void }) {
+function LinksDialog({ thread, suggested, writable, reason, onClose }: { thread: Thread; suggested: ThreadLink[]; writable: boolean; reason: string | undefined; onClose: () => void }) {
   const { t } = useTranslation();
   const [rows, setRows] = useState<ThreadLink[]>(() => thread.links.map((link) => ({ ...link })));
   const save = useMutation({
@@ -98,13 +99,13 @@ function LinksDialog({ thread, suggested, onClose }: { thread: Thread; suggested
       footer={
         <>
           <Button onClick={onClose}>{t('common.cancel')}</Button>
-          <Button action="save" variant="primary" pending={save.isPending} disabled={faults.some((fault) => fault !== null)} onClick={() => save.mutate()}>
+          <Button action="save" variant="primary" pending={save.isPending} disabled={faults.some((fault) => fault !== null)} blocked={!writable} reason={reason} onClick={() => save.mutate()}>
             {t('source.links.save')}
           </Button>
         </>
       }
     >
-      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (faults.every((fault) => fault === null)) save.mutate(); }}>
+      <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); if (writable && faults.every((fault) => fault === null)) save.mutate(); }}>
         {rows.length === 0 && <EmptyState compact title={t('source.links.none')} />}
         {rows.map((row, index) => (
           <div key={index} className="flex flex-col gap-2 rounded-lg border border-border p-2 sm:flex-row sm:items-start">
@@ -114,11 +115,11 @@ function LinksDialog({ thread, suggested, onClose }: { thread: Thread; suggested
           </div>
         ))}
         <div className="flex flex-wrap gap-2">
-          <Button size="sm" icon={<Plus aria-hidden />} disabled={rows.length >= MOST_LINKS} onClick={() => setRows((before) => [...before, { url: '', label: '' }])}>
+          <Button size="sm" icon={<Plus aria-hidden />} blocked={rows.length >= MOST_LINKS} reason={rows.length >= MOST_LINKS ? t('implicitAvailability.linkLimit') : undefined} onClick={() => setRows((before) => [...before, { url: '', label: '' }])}>
             {t('source.links.another')}
           </Button>
           {offered.map((one) => (
-            <Button key={one.url} size="sm" variant="ghost" icon={<Plus aria-hidden />} disabled={rows.length >= MOST_LINKS} onClick={() => setRows((before) => [...before, { ...one }])}>
+            <Button key={one.url} size="sm" variant="ghost" icon={<Plus aria-hidden />} blocked={rows.length >= MOST_LINKS} reason={rows.length >= MOST_LINKS ? t('implicitAvailability.linkLimit') : undefined} onClick={() => setRows((before) => [...before, { ...one }])}>
               {t('source.links.addNamed', { name: one.label === '' ? one.url : one.label })}
             </Button>
           ))}

@@ -1,4 +1,4 @@
-# The harness image of the daily canary (.github/workflows/harness-canary.yml): the newest builds of Codex and
+# The native test image and daily canary (.github/workflows/harness-canary.yml): the newest builds of Codex and
 # Claude Code, or the versions the run is given, on the Node.js release the environment image pins, so that the
 # adapters' Docker tests hold those builds exactly as they hold the pinned ones in `orch-dev-harness`. Nothing of
 # it is shipped; it is made for one run and left with the runner.
@@ -7,6 +7,14 @@ FROM ${NODE_IMAGE}
 
 ARG CODEX_VERSION=latest
 ARG CLAUDE_VERSION=latest
+ARG HARNESS_UID=1000
+
+# The native fixtures mount private host directories. Match their owner without running a harness as root.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git ripgrep curl procps less jq python3 \
+    && rm -r /var/lib/apt/lists \
+    && if [ "$HARNESS_UID" != "$(id -u node)" ]; then usermod --uid "$HARNESS_UID" node; fi \
+    && chown -R "$HARNESS_UID":node /home/node
 
 RUN npm install --global --no-fund --no-audit \
         "@openai/codex@${CODEX_VERSION}" \
@@ -14,3 +22,6 @@ RUN npm install --global --no-fund --no-audit \
     && npm cache clean --force \
     && codex --version \
     && claude --version
+
+USER node
+WORKDIR /workspace

@@ -11,6 +11,7 @@ heading_id.设置导入的线程: set-up-an-imported-thread
 heading_id.撤销导入: undo-an-import
 heading_id.导入纯文件: import-plain-files
 heading_id.设置导入的线程: set-up-an-imported-thread
+summary: 导出 Orch 包，并查看导入其他组织或部署的计划。
 ---
 
 # 在组织或部署之间迁移项目

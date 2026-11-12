@@ -7,7 +7,7 @@ import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
 import { harnessApproval } from '../doubles/thread-rows.ts';
 import { ADA } from '../doubles/thread-scenes.ts';
-import { ACME, addApproval, scenario, signIn } from './support.ts';
+import { ACME, addApproval, scenario, signIn, arrived } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const MODES = [{ locale: 'en', theme: 'light' }, { locale: 'zh-CN', theme: 'dark' }] as const;
@@ -146,14 +146,15 @@ for (const mode of MODES) {
         await expect(input).toHaveAccessibleDescription(description);
       });
       expect(observed.calls.filter((call) => call.path === decisionPath)).toEqual([]);
-      const answered = page.waitForResponse((response) => new URL(response.url()).pathname === decisionPath && response.request().method() === 'POST');
+      const answered = arrived(page.waitForResponse((response) => new URL(response.url()).pathname === decisionPath && response.request().method() === 'POST'));
       await accept.click();
       const response = await answered;
       expect(response.status()).toBe(200);
       expect(await page.evaluate(() => (window as typeof window & { __orchChoiceDecisions: unknown[] }).__orchChoiceDecisions)).toEqual([{ action: 'accept', content: { queue: 'queue-12' } }]);
-      const approved = await response.json() as Approval;
-      expect(approved.state).toBe('approved');
-      expect(approved.decision).toEqual({ action: 'accept', content: { queue: 'queue-12' } });
+      const outcome = await response.json() as Approval;
+      // Elicitation records an answer; Accept carries the exact declared response content.
+      expect(outcome.state).toBe('answered');
+      expect(outcome.decision).toEqual({ action: 'accept', content: { queue: 'queue-12' } });
       await expect(accept).toHaveCount(0);
       expect(observed.calls.filter((call) => call.path === decisionPath)).toHaveLength(1);
     } finally { observed.stop(); await recordCalls(info, observed.calls); }
@@ -165,10 +166,10 @@ for (const mode of MODES) {
     const words = mode.locale === 'en' ? english : chinese;
     const scope = `node:${ACME.org}`;
     const observed = observeApi(page);
-    const usageResponse = (series: string) => page.waitForResponse((response) => {
+    const usageResponse = (series: string) => arrived(page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.pathname === '/api/v1/usage' && url.searchParams.get('scope') === scope && url.searchParams.get('series_by') === series;
-    });
+    }));
     try {
       for (const view of ['usage', 'performance'] as const) {
         const loaded = usageResponse('model');
@@ -184,8 +185,11 @@ for (const mode of MODES) {
         await noTypingIo(page, observed.calls, async () => {
           await input.click();
           const list = page.getByRole('listbox', { name: words.usage.chart.splitBy, exact: true });
-          // Acme is an org: ten declared dimensions + Thread + None; Performance adds Topic.
-          await expect(list.getByRole('option')).toHaveCount(view === 'usage' ? 12 : 13);
+          // Acme exposes twelve dimensions including Offering and Purpose, plus Thread and None; Performance also exposes Topic.
+          await expect(list.getByRole('option')).toHaveCount(view === 'usage' ? 14 : 15);
+          for (const dimension of ['offering', 'purpose'] as const) {
+            await expect(list.getByRole('option', { name: words.usagePerf.choices.splits[dimension].name, exact: true })).toBeVisible();
+          }
           await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.thread.name, exact: true })).toBeVisible();
           await expect(list.getByRole('option', { name: words.usagePerf.choices.splits.model.name, exact: true })).toHaveAttribute('aria-selected', 'true');
           await input.pressSequentially('program');
@@ -209,10 +213,10 @@ for (const mode of MODES) {
         await expect(page.getByRole('button', { name: words.usagePerf.help, exact: true })).toHaveCount(1);
       }
 
-      const recordsResponse = (outcome: string | null) => page.waitForResponse((response) => {
+      const recordsResponse = (outcome: string | null) => arrived(page.waitForResponse((response) => {
         const url = new URL(response.url());
         return response.request().method() === 'GET' && url.pathname === '/api/v1/usage/events' && url.searchParams.get('scope') === scope && url.searchParams.get('outcome') === outcome;
-      });
+      }));
       const loaded = recordsResponse('forced');
       await page.goto(`/usage?scope=${encodeURIComponent(scope)}&view=requests&range=7d&outcome=forced`);
       expect((await loaded).status()).toBe(200);
@@ -254,10 +258,10 @@ for (const mode of MODES) {
     const words = mode.locale === 'en' ? english : chinese;
     const path = `/api/v1/nodes/${ACME.org}/audit`;
     const observed = observeApi(page);
-    const readAction = (action: string | null) => page.waitForResponse((response) => {
+    const readAction = (action: string | null) => arrived(page.waitForResponse((response) => {
       const url = new URL(response.url());
       return response.request().method() === 'GET' && url.pathname === path && url.searchParams.get('action') === action;
-    });
+    }));
     try {
       const loaded = readAction('future.reindexed');
       await page.goto('/org/acme/settings/audit?action=future.reindexed');

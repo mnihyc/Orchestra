@@ -549,7 +549,7 @@ const TreeRow = memo(function TreeRow({ row, door, tabbable, isSelected, selecte
         <ChevronRight className={cx('transition-transform', row.expanded && 'rotate-90')} />
       </span>
       {isDir || entry.type === 'symlink' ? <><Icon className={cx('shrink-0', isDir ? 'text-accent-text' : 'text-text-muted')} aria-hidden /><span data-user-content className="min-w-0 flex-1 truncate">{entry.name}</span></> :
-        <span className="min-w-0 flex-1"><FileChip source={{ ...workspaceSource(door, entry.path, entry.name, entry.size), updatedAt: entry.mtime }} presentation={{ place: 'compact' }} bare onOpen={click} menuEntries={() => menuFor(entry, selected.has(entry.path) ? selected : new Set([entry.path]))} /></span>}
+        <span className="flex min-w-0 flex-1 items-center"><FileChip source={{ ...workspaceSource(door, entry.path, entry.name, entry.size), updatedAt: entry.mtime }} presentation={{ place: 'compact' }} bare onOpen={click} menuEntries={() => menuFor(entry, selected.has(entry.path) ? selected : new Set([entry.path]))} /></span>}
       {over && <span role="status" className="min-w-0 truncate text-sm text-text-muted">{t('uploads.target.move', { path: entry.path })}</span>}
       {kept && <span role="img" aria-label={t('files.tree.cached')} title={t('files.tree.cached')} className="size-2 shrink-0 rounded-full bg-info" />}
       <MenuButton entry={entry} menuFor={menuFor} selected={selected} />

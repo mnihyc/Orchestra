@@ -9,7 +9,7 @@
 //! saved is an ordinary spec, editable like any other. It is the same for a template of either pool.
 
 use orch_types::fields::{FieldError, validate};
-use orch_types::{Field, Json};
+use orch_types::{Field, Hash, Json};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,49 @@ impl ImportDef {
     /// every answer fits its field, nothing else is given. Every fault is returned.
     pub fn check_values(&self, values: &Json) -> Result<(), Vec<FieldError>> {
         validate(&self.fields, values)
+    }
+}
+
+/// One archive actually passed to an import after its declared defaults are applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveReference {
+    /// The input field that names these bytes.
+    pub name: String,
+    /// Immutable content address, never a path or an implied permission.
+    pub hash: Hash,
+}
+
+/// The import source contract names archives as `blob` or a field ending in `_blob`.
+/// Call this on the normalized values actually sent to the driver; an unrelated
+/// hash-looking field confers no archive source and defaults cannot bypass custody.
+pub fn archive_references(values: &Json) -> Result<Vec<ArchiveReference>, Vec<FieldError>> {
+    let Some(values) = values.as_object() else {
+        return Err(vec![FieldError {
+            path: String::new(),
+            message: "must be an object".into(),
+        }]);
+    };
+    let mut archives = Vec::new();
+    let mut faults = Vec::new();
+    for (name, value) in values {
+        if name != "blob" && !name.ends_with("_blob") {
+            continue;
+        }
+        match value.as_str().and_then(|value| value.parse().ok()) {
+            Some(hash) => archives.push(ArchiveReference {
+                name: name.clone(),
+                hash,
+            }),
+            None => faults.push(FieldError {
+                path: name.clone(),
+                message: "an archive names a completed upload".into(),
+            }),
+        }
+    }
+    if faults.is_empty() {
+        Ok(archives)
+    } else {
+        Err(faults)
     }
 }
 
@@ -136,6 +179,43 @@ mod tests {
             notes: vec![],
         };
         assert!(!fine.is_blocked());
+    }
+
+    #[test]
+    fn import_archive_sources_use_only_actual_archive_fields_and_report_all_invalid_addresses() {
+        let first = Hash::of(b"first archive");
+        let second = Hash::of(b"second archive");
+        let unrelated = Hash::of(b"a label");
+        let archives = archive_references(&json!({"blob":first,"context_blob":second,
+            "label":unrelated,"options":{"blob":unrelated}}))
+        .unwrap();
+        assert_eq!(
+            archives,
+            vec![
+                ArchiveReference {
+                    name: "blob".into(),
+                    hash: first
+                },
+                ArchiveReference {
+                    name: "context_blob".into(),
+                    hash: second
+                }
+            ]
+        );
+        let faults =
+            archive_references(&json!({"blob":"not a hash","context_blob":false})).unwrap_err();
+        assert_eq!(
+            faults
+                .iter()
+                .map(|fault| fault.path.as_str())
+                .collect::<Vec<_>>(),
+            ["blob", "context_blob"]
+        );
+        assert!(
+            archive_references(&json!({"dockerfile":"FROM x"}))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

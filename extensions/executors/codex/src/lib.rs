@@ -18,5 +18,6 @@
 #![forbid(unsafe_code)]
 
 pub mod descriptor;
+mod program_version;
 pub mod sandbox;
 pub mod server;

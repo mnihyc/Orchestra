@@ -378,6 +378,88 @@ pub async fn usable(
     )
 }
 
+/// The exact `usable` decision and options for native-selected IDs on one current snapshot.
+/// Home policy has two ordinary node-policy forms; each is loaded once for all its sites.
+/// Subscription sharing remains the resource's own home policy at the same `access` call.
+pub async fn usable_among(
+    conn: &mut Conn,
+    principal: &Principal,
+    ids: &[Id],
+    node: Option<Id>,
+    policies: &Policies,
+) -> Result<HashMap<Id, Usable>, Error> {
+    let mut result = HashMap::new();
+    if ids.is_empty() {
+        return Ok(result);
+    }
+    let mut graph = Graph::default();
+    if let Some(node) = node {
+        graph.extend(conn, &[node]).await?;
+    }
+    let found = read_into(conn, &mut graph, ids).await?;
+    let path = node
+        .and_then(|id| graph.get(id))
+        .map(|node| node.path.clone());
+    for external in [false, true] {
+        let selected: Vec<_> = found
+            .iter()
+            .filter(|resource| policies.at(resource.home).owners_name_outsiders == external)
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        let sites: Vec<_> = selected
+            .iter()
+            .filter_map(|resource| site_of(&graph, resource))
+            .collect();
+        let mut permissions = selected
+            .iter()
+            .filter_map(|resource| use_permission(resource.kind))
+            .collect::<Vec<_>>();
+        permissions.sort_by_key(|permission| permission.as_str());
+        permissions.dedup();
+        let frame = Frame::load(
+            conn,
+            principal,
+            ResourcePolicy {
+                owners_name_outsiders: external,
+                ..ResourcePolicy::default()
+            }
+            .node_policy(),
+            graph.clone(),
+            &sites,
+            &permissions,
+        )
+        .await?;
+        let sites = sites
+            .into_iter()
+            .map(|site| (site.id, site))
+            .collect::<HashMap<_, _>>();
+        for resource in selected {
+            let site = sites
+                .get(&resource.id)
+                .ok_or(Error::NotFound(resource.id))?;
+            let answer = if let Some(unavailable) = resource.unavailable() {
+                Usable::Unavailable(unavailable)
+            } else {
+                match access(
+                    &frame,
+                    resource,
+                    site,
+                    path.as_deref(),
+                    policies.at(resource.home).keeps_to_its_owner(resource),
+                )? {
+                    Ok(granted) => Usable::Yes(Box::new(granted)),
+                    Err(Access::KeptToItsOwner) => Usable::KeptToItsOwner,
+                    Err(Access::None) => Usable::No,
+                }
+            };
+            result.insert(resource.id, answer);
+        }
+    }
+    Ok(result)
+}
+
 /// Of the pairs `pairs` (a thread, and the provider it runs on), those for which the person may
 /// use the provider for that thread, as [`usable`] says it for each: the statements are those of
 /// one question, whatever the number of threads. A provider that is switched off or deleted, or
@@ -704,6 +786,7 @@ async fn judge_provider(
         state_matters,
     } = *judging;
     let wanted_options = MissingOptions {
+        services: None,
         models: Some(vec![chosen.model.to_owned()]),
         efforts: chosen.effort.map(|effort| vec![effort.to_owned()]),
     };

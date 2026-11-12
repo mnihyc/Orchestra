@@ -119,7 +119,9 @@ for (const warm of [false, true]) test(`a dirty file retains its original worksp
   await expect(code).toContainText("import { greet } from './util';");
   if (warm) {
     await workspace('/bind-thread', { environment: MAIN_ENVIRONMENT, thread: MAIN, directory: 'web' });
-    await expect(filesPanel(page).getByRole('heading', { name: 'web/ in Workspace', exact: true })).toBeVisible();
+    // Files follows the focused content; the open Docs checkout file correctly keeps its own workspace.
+    await page.getByRole('tab', { name: 'Idle Main thread · Fix login', exact: true }).click();
+    await expect(filesPanel(page).getByRole('heading', { name: 'Files · web/ in Workspace', exact: true })).toBeVisible();
     await row(page, /^src/).click(); await row(page, /^app\.ts/).click();
     await expect(code).toContainText("import { greet } from './util';");
   }

@@ -115,7 +115,13 @@ pub async fn queue(world: &World, provider: Id, mode: Mode) -> Id {
 /// The connector of the unit of a provider's runtime comes online with the roles of a runtime of that
 /// pool, which the runtime then knows as its own.
 pub async fn enrol(world: &World, runtime: Id) -> Unit {
+    enrol_with(world, runtime, |_| {}).await
+}
+
+/// Installs a candidate's native replies before its runtime binding becomes visible to the job.
+pub async fn enrol_with(world: &World, runtime: Id, configure: impl FnOnce(&Unit)) -> Unit {
     let unit = connector(world, "unit", &["provider", "agent"]).await;
+    configure(&unit);
     let mut conn = world.pool.acquire().await.unwrap();
     host_rows::adopt_machine(&mut conn, unit.id, runtime, Utc::now())
         .await

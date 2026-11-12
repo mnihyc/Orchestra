@@ -1,7 +1,9 @@
 ---
+group: settings
 title: Finding things
 screens: /search, /help, /help/$article, /everything, /trace/$nodeId, /u/$username, /dev/ui
 keywords: finder, search, find, command palette, shortcuts, hints, help, keys, semantic search, similar meaning, regex, filters, 语义搜索
+summary: Find named resources, search conversations and documents, or open help from one place.
 ---
 
 # Finding things
@@ -35,6 +37,10 @@ With nothing typed the finder lists what you starred and what you went to last, 
 screen and its help. The last row, **Advanced search**, opens the search page with the words you typed.
 
 ## Search
+
+Search starts **In the org** shown in the left bar, including its readable departments and projects. The same root applies to names and content found from the rail. Open the org chip and choose **All my orgs** to include your personal org and every other org you can read. **Place** narrows inside that choice. Changing the org clears a narrower place.
+
+The address keeps the org choice for sharing and reload. A fresh search uses the org in view again; choosing All my orgs does not make it your next default. All-org results carry org chips and get org headings only when more than one org answers. An empty org search offers **Search all my orgs**. Its count is the readable results received so far; **+** means more may remain.
 
 Press `Ctrl+/` (`Command+/` on a Mac), or use `/` in the finder.
 Search reads the conversations, chats and documents you may read.

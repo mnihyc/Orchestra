@@ -97,6 +97,22 @@ async fn an_external_translator_carries_json_streamed_tools_errors_and_usage_thr
             && text.contains("response.function_call_arguments.delta"),
         "{text}"
     );
+    let beyond_ceiling = harness
+        .post(
+            "/v1/responses",
+            &json!({"model":MODEL,"input":"hello",
+        "translated_options":{"speed":"ultrafast"}}),
+        )
+        .await;
+    assert_eq!(
+        beyond_ceiling.status, 403,
+        "translation cannot introduce a disabled upstream speed"
+    );
+    assert_eq!(
+        p.model_requests().len(),
+        2,
+        "the translated refusal never reached upstream HTTP"
+    );
     let usage = p.wait_provider_event("lease.usage", 2).await;
     assert_eq!(usage[0].body["usage"]["input_tokens"], 100);
     assert_eq!(usage[0].body["usage"]["cache_write_tokens"], 5);

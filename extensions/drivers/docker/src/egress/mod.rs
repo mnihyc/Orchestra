@@ -17,6 +17,7 @@
 
 pub mod admission;
 pub mod files;
+pub mod parent;
 pub mod program;
 pub mod proxy;
 pub mod resolver;

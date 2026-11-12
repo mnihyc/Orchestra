@@ -59,7 +59,22 @@ async fn run(args: Args) -> anyhow::Result<()> {
     match command {
         Command::Uninstall(options) => uninstall::run(args.data_dir, &options).await,
         Command::RecordInstallation(options) => uninstall::record(args.data_dir, &options),
-        Command::Run(options) => composition::run(args.data_dir, options.managed, BUILD).await,
+        Command::Run(options) => {
+            #[cfg(feature = "test-observers")]
+            let observer =
+                orch_connector_core::test_observers::process::ProcessRecording::from_env(
+                    "connector",
+                    &BUILD,
+                )?;
+            let result = composition::run(args.data_dir, options.managed, BUILD).await;
+            #[cfg(feature = "test-observers")]
+            if result.is_ok()
+                && let Some(observer) = observer
+            {
+                observer.finish()?;
+            }
+            result
+        }
         #[cfg(unix)]
         Command::Proxy(options) => {
             orch_driver_docker::egress::program::run(

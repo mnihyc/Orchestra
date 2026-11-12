@@ -1,5 +1,13 @@
 //! The reader's complete hierarchy, read a level at a time, or searched by name with its authorized paths.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use orch_types::{Id, Time};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -163,6 +171,10 @@ pub struct EverythingTakes {
 /// One visible thing, or a deliberately minimal path step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct EverythingRow {
+    /// Existing resource home, origin and per-machine native judgements.
+    /// Absent for non-resource/path-only rows; an empty judgement list grants no availability.
+    #[serde(default, flatten)]
+    pub grouping: Option<crate::resource_groups::ResourceGrouping>,
     /// Batched current giving and reported use, supplied with readable resource list rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library: Option<crate::resource_facts::ResourceFacts>,
@@ -365,11 +377,116 @@ pub struct ResourceCounts {
     pub skills: i64,
 }
 
+const INVENTORY_FAMILIES: &[orch_access_contract::key_scope::KeyTargetKind] = &[
+    Object(K::Org),
+    Object(K::Project),
+    Object(K::Topic),
+    Object(K::Thread),
+    Object(K::Document),
+    Identity(I::Chat),
+    Object(K::Provider),
+    Object(K::Agent),
+    Object(K::Environment),
+    Object(K::Host),
+    Object(K::Machine),
+    Object(K::Template),
+    Object(K::McpServer),
+    Object(K::Mount),
+    Object(K::Skill),
+];
+
+const INVENTORY_NAMES: [Facet; 6] = [
+    Facet::response_content(
+        &[Identity(I::Group)],
+        Target::ResolvedCollection("inventory_groups"),
+    ),
+    Facet::response_content(
+        &[Object(K::Org)],
+        Target::ResolvedCollection("inventory_names_orgs"),
+    ),
+    Facet::response_content(
+        &[Object(K::Project)],
+        Target::ResolvedCollection("inventory_names_projects"),
+    ),
+    Facet::response_content(
+        &[Object(K::Topic)],
+        Target::ResolvedCollection("inventory_names_topics"),
+    ),
+    Facet::response_content(
+        &[Object(K::Thread)],
+        Target::ResolvedCollection("inventory_names_threads"),
+    ),
+    Facet::response_content(
+        &[Object(K::DocumentContainer)],
+        Target::ResolvedCollection("inventory_containers"),
+    ),
+];
+
+const fn mine_facets() -> [Facet; 7] {
+    [
+        Facet::required(
+            Read,
+            INVENTORY_FAMILIES,
+            Target::ResolvedCollection("results"),
+        ),
+        INVENTORY_NAMES[0],
+        INVENTORY_NAMES[1],
+        INVENTORY_NAMES[2],
+        INVENTORY_NAMES[3],
+        INVENTORY_NAMES[4],
+        INVENTORY_NAMES[5],
+    ]
+}
+
+const fn system_facets() -> [Facet; 8] {
+    [
+        Facet::required(Manage, &[Identity(I::System)], Target::System),
+        Facet::required(
+            Manage,
+            INVENTORY_FAMILIES,
+            Target::ResolvedCollection("results"),
+        ),
+        INVENTORY_NAMES[0],
+        INVENTORY_NAMES[1],
+        INVENTORY_NAMES[2],
+        INVENTORY_NAMES[3],
+        INVENTORY_NAMES[4],
+        INVENTORY_NAMES[5],
+    ]
+}
+
 crate::endpoints! {
     /// Counts the caller's discoverable resources without inspecting their runtimes or reading their contents.
-    ResourcesSummaryGet: GET "/resources/summary", User, none, none, json ResourceCounts, 200;
+    ResourcesSummaryGet: GET "/resources/summary", User, none, none, json ResourceCounts, 200,
+        operation Op::single(
+            Read,
+            &[
+                Object(K::Provider),
+                Object(K::Agent),
+                Object(K::Environment),
+                Object(K::Host),
+                Object(K::Machine),
+                Object(K::Template),
+                Object(K::McpServer),
+                Object(K::Mount),
+                Object(K::Skill),
+            ],
+            Target::ResolvedCollection("results"),
+        );
     /// Lists a level of everything the reader may see, or searches names at every level with their authorized paths.
-    EverythingList: GET "/everything", User, query EverythingListQuery, none, json Page<EverythingRow>, 200;
+    EverythingList: GET "/everything", User, query EverythingListQuery, none, json Page<EverythingRow>, 200,
+        operation Op::variants(&[
+            Variant {
+                name: "mine",
+                selector: "scope=mine or absent",
+                facets: &mine_facets(),
+            },
+            Variant {
+                name: "system",
+                selector: "scope=system under current system administrator standing",
+                facets: &system_facets(),
+            },
+        ]);
 }
 
 #[cfg(test)]

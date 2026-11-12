@@ -97,34 +97,12 @@ async fn move_material(w: &common::World, document: Id, agent: Id, places: &[Id]
         .bind(document).bind(agent).bind(places).fetch_one(w.pool.pool()).await.unwrap()
 }
 
-/// Read the same current agent reach as native creation, including independent document policy.
+/// Read the same current agent entries as native creation.
 /// A surviving grant must fail this fixture's authority premise before it is called a commit-fence failure.
 async fn creation_authority(w: &common::World, agent: Id, topic: Id) -> (bool, Json) {
-    use orch_authz::reach::{Agent, AgentReach, DocumentPolicy, Reach, Things};
-    use orch_settings::Place;
-    use orch_settings_contract::registry::keys;
+    use orch_authz::reach::{Agent, Reach, Things};
     let mut conn = w.pool.acquire().await.unwrap();
     let caller = Agent::of(&mut conn, agent).await.unwrap().unwrap();
-    let policy = orch_settings::get::<String>(
-        &mut conn,
-        Place::Node(caller.topic),
-        keys::SHARING_AGENT_REACH,
-    )
-    .await
-    .unwrap()
-    .as_deref()
-    .and_then(AgentReach::parse)
-    .unwrap_or_default();
-    let documents = orch_settings::get::<String>(
-        &mut conn,
-        Place::Node(caller.topic),
-        keys::SHARING_AGENT_DOCUMENTS,
-    )
-    .await
-    .unwrap()
-    .as_deref()
-    .and_then(DocumentPolicy::parse)
-    .unwrap_or_default();
     let grants =
         orch_authz::reach::grants(&mut conn, &caller, orch_types::Time::new(w.clock.now()))
             .await
@@ -133,10 +111,9 @@ async fn creation_authority(w: &common::World, agent: Id, topic: Id) -> (bool, J
         orch_access_contract::permissions::Permission::DocEdit|orch_access_contract::permissions::Permission::DocManage))
         .map(|grant|json!({"entry":grant.entry,"object":grant.page.id,"permission":grant.permission.as_str()})).collect();
     let same_topic = caller.topic == topic;
-    let reach = Reach::load(
+    let reach = Reach::load_current(
         &mut conn,
         caller,
-        policy,
         orch_types::Time::new(w.clock.now()),
         &Things {
             nodes: vec![topic],
@@ -145,12 +122,11 @@ async fn creation_authority(w: &common::World, agent: Id, topic: Id) -> (bool, J
         },
     )
     .await
-    .unwrap()
-    .with_document_policy(documents);
+    .unwrap();
     let standing = reach.documents_of(topic);
     (
         standing.writes(),
-        json!({"same_topic":same_topic,"document_policy":format!("{documents:?}"),
+        json!({"same_topic":same_topic,
         "read":standing.reads(),"write":format!("{:?}",standing.write),"manage":standing.manages(),"sources":sources}),
     )
 }

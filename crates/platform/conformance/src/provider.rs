@@ -822,12 +822,24 @@ fn facts_shape(value: &Json) -> Result<(), String> {
         optional_text(extra, "unit")?;
         optional_text(extra, "disabled_reason")?;
         optional_count(extra, "decimal_places")?;
-        for member in ["limit", "used", "used_percent"] {
+        for member in ["limit", "used"] {
             if extra.get(member).is_some_and(|value| {
-                !value.is_null() && value.as_f64().is_none_or(|amount| !amount.is_finite())
+                !value.is_null()
+                    && !decimal(value)
+                    && !value.as_number().is_some_and(|number| {
+                        orch_provider_contract::limits::decimal_number(&number.to_string())
+                            .is_some()
+                    })
             }) {
-                return Err(format!("extra_usage.{member} must be numeric or null"));
+                return Err(format!(
+                    "extra_usage.{member} must be bounded decimal text, a legacy number, or null"
+                ));
             }
+        }
+        if extra.get("used_percent").is_some_and(|value| {
+            !value.is_null() && value.as_f64().is_none_or(|amount| !amount.is_finite())
+        }) {
+            return Err("extra_usage.used_percent must be numeric or null".into());
         }
     }
     Ok(())
