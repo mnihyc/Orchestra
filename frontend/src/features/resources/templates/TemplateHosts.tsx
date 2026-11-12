@@ -34,7 +34,7 @@ export function HostAdvice({ hosts, kind, driver, hasSchema }: Props & { hosts: 
 
 export function TemplateHosts(props: Props) {
   const hosts = useQuery(hostsQuery(null));
-  if (hosts.isPending) return <SkeletonRows rows={1} />;
+  if (hosts.isPending) return <SkeletonRows read={hosts} rows={1} />;
   if (hosts.isError) return <ErrorState compact error={hosts.error} onRetry={() => void hosts.refetch()} />;
   return <HostAdvice {...props} hosts={hosts.data} />;
 }

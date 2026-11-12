@@ -75,6 +75,8 @@ impl Whom {
 pub struct AskedOptions {
     /// The models.
     pub models: Option<Vec<String>>,
+    /// The enabled service offerings.
+    pub services: Option<Vec<String>>,
     /// The efforts.
     pub efforts: Option<Vec<String>>,
 }
@@ -86,6 +88,9 @@ impl AskedOptions {
         let mut members = serde_json::Map::new();
         if let Some(models) = &self.models {
             members.insert("models".to_owned(), serde_json::json!(models));
+        }
+        if let Some(services) = &self.services {
+            members.insert("services".to_owned(), serde_json::json!(services));
         }
         if let Some(efforts) = &self.efforts {
             members.insert("efforts".to_owned(), serde_json::json!(efforts));
@@ -102,6 +107,7 @@ impl AskedOptions {
         };
         Some(Self {
             models: words("models")?,
+            services: words("services")?,
             efforts: words("efforts")?,
         })
     }
@@ -840,8 +846,10 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
     })?;
     let Options::ProviderUse(ProviderUse {
         models,
+        services,
         efforts,
         arrangements,
+        r#where,
     }) = &parsed
     else {
         return Err(unfit("options", "are for the use of a provider"));
@@ -861,6 +869,11 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         "models",
     )?;
     within(
+        services,
+        asked.options.as_ref().and_then(|o| o.services.as_ref()),
+        "services",
+    )?;
+    within(
         efforts,
         asked.options.as_ref().and_then(|o| o.efforts.as_ref()),
         "efforts",
@@ -873,13 +886,19 @@ fn options_given(asked: &Asked, chosen: Option<&Json>) -> Result<Json, GrantErro
         {
             members.insert("models".to_owned(), serde_json::json!(models));
         }
+        if services.is_none()
+            && let Some(services) = &wanted.services
+        {
+            members.insert("services".to_owned(), serde_json::json!(services));
+        }
         if efforts.is_none()
             && let Some(efforts) = &wanted.efforts
         {
             members.insert("efforts".to_owned(), serde_json::json!(efforts));
         }
     }
-    let _ = arrangements;
+    // The type and the places only narrow, so an approver may name any: they stay as chosen.
+    let _ = (arrangements, r#where);
     Ok(written)
 }
 
@@ -963,4 +982,44 @@ pub async fn grant(
     let outcome =
         pages::change_for_request(conn, approver, target, &change, policy, origin).await?;
     Ok((outcome, permissions))
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "fixture assertions"
+)]
+mod service_option_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn granting_service_use_preserves_an_omitted_limit_and_refuses_a_wider_selection() {
+        let asked = Asked {
+            label: None,
+            object: ObjectRef {
+                kind: ObjectKind::Provider,
+                id: orch_types::new_id(),
+            },
+            permissions: vec![Permission::ProviderUse],
+            options: Some(AskedOptions {
+                services: Some(vec!["search".into(), "fetch".into()]),
+                ..AskedOptions::default()
+            }),
+            whom: Whom::Requester,
+            reason: "Read the public documentation".into(),
+        };
+        let original = json!({"services":["search","fetch"]});
+        assert_eq!(options_given(&asked, None).unwrap(), original);
+        assert_eq!(options_given(&asked, Some(&json!({}))).unwrap(), original);
+        assert_eq!(
+            options_given(&asked, Some(&json!({"services":["search"]}))).unwrap(),
+            json!({"services":["search"]})
+        );
+        assert!(options_given(&asked, Some(&json!({"services":["images"]}))).is_err());
+        let decoded = AskedOptions::from_json(&original).unwrap();
+        assert_eq!(decoded.to_json(), original);
+        assert!(decoded.models.is_none());
+    }
 }

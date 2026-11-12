@@ -7,7 +7,7 @@ use orch_access_contract::pages::Holder;
 use orch_access_contract::permissions::{Permission, ResourceKind};
 use orch_access_contract::roles::Role;
 use orch_db::Conn;
-use orch_db::queries::access::{self, HolderAudiencePath, HolderAudienceSource, HolderPeopleQuery};
+use orch_db::queries::access::{HolderAudiencePath, HolderAudienceSource, HolderPeopleQuery};
 use orch_types::Id;
 use std::collections::{HashMap, HashSet};
 
@@ -146,7 +146,7 @@ pub async fn reach_counts(
         .map(|(object, orgs)| HolderAudiencePath { object, orgs })
         .collect();
     for (source, user) in
-        access::holder_audiences(conn, &physical_sources, &physical_paths, frame.now().get())
+        crate::holders::holder_audiences(conn, &physical_sources, &physical_paths, frame.now())
             .await?
     {
         for target in physical_targets.get(&source).into_iter().flatten() {
@@ -172,10 +172,10 @@ pub async fn reach_counts(
             orgs: &site.orgs,
         })
         .collect();
-    let people = access::holder_audiences(conn, &sources, &paths, frame.now().get()).await?;
+    let people = crate::holders::holder_audiences(conn, &sources, &paths, frame.now()).await?;
     let mut users: HashMap<Id, HashSet<Id>> = HashMap::new();
     for (environment, person) in
-        access::holder_audiences(conn, &use_sources, &paths, frame.now().get()).await?
+        crate::holders::holder_audiences(conn, &use_sources, &paths, frame.now()).await?
     {
         users.entry(environment).or_default().insert(person);
     }

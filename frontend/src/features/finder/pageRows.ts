@@ -6,7 +6,7 @@
  * that can do so registers how while it is in view, and without one the finder lists no rows, since a
  * result that opens nothing would be a result for nothing.
  */
-import { useSyncExternalStore } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 
 export type RowOpener = ((permission: string) => void) & { readonly permissions: ReadonlySet<string> | null };
 
@@ -31,7 +31,11 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** How the page in view opens a row of itself; `null` when it has none. */
-export function useRowOpener(): RowOpener | null {
-  return useSyncExternalStore(subscribe, () => opener);
+/** Retain the covered page's target for this Finder opening; a later opening observes the current page again. */
+export function useRowOpener(retainWhileOpen = false): RowOpener | null {
+  const current = useSyncExternalStore(subscribe, () => opener);
+  const [held, setHeld] = useState(() => current);
+  // Activity cleans the covered page's effects. Its saved target still belongs to this opening.
+  if (!retainWhileOpen && held !== current) setHeld(() => current);
+  return retainWhileOpen ? held : current;
 }

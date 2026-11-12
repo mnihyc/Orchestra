@@ -23,7 +23,9 @@ fn a_move_and_a_batch_choose_a_machine_and_explicit_copy_without_a_placement_swi
 
 #[test]
 fn a_declared_machine_choice_explains_its_policy_refusal_to_a_person_or_an_agent() {
-    let value = json!({"kind":"machine","machine":{"id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01",
+    let value = json!({"kind":"machine","home":null,"home_path":[],"origin_machine":null,
+        "availability":[{"machine_id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01","available":false,"reason":"The machine policy has remote writes off."}],
+        "machine":{"id":"0199d1a8-7f3c-7a1e-8b3a-1c2d3e4f5a01",
         "name":"Team workstation","online":true,"platform_os":"linux","placement":"connected"},
         "host":null,"usable":false,"reasons":["The machine policy has remote writes off."]});
     let read: EnvironmentMovePlace = serde_json::from_value(value.clone()).unwrap();

@@ -1,7 +1,7 @@
 /** Settings destinations shared by the screens, the palette and the route-coverage gate. */
-export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'policies', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'] as const;
-export const PROJECT_SECTIONS = ['general', 'policies', 'tags', 'audit', 'destinations'] as const;
-export const TOPIC_SECTIONS = ['general', 'policies', 'audit', 'destinations'] as const;
+export const ORG_SECTIONS = ['general', 'departments', 'members', 'groups', 'roles', 'defaults', 'tags', 'service-accounts', 'audit', 'everything', 'channels', 'destinations'] as const;
+export const PROJECT_SECTIONS = ['general', 'defaults', 'tags', 'audit', 'destinations'] as const;
+export const TOPIC_SECTIONS = ['general', 'defaults', 'audit', 'destinations'] as const;
 
 export type ProjectSection = (typeof PROJECT_SECTIONS)[number];
 

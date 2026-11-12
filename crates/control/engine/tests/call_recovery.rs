@@ -8,6 +8,8 @@
 #[path = "call_recovery/auxiliary.rs"]
 mod auxiliary;
 mod common;
+#[path = "call_recovery/session_loss.rs"]
+mod session_loss;
 
 use common::{World, eventually, queued, turn_began};
 use orch_authz::Caller;
@@ -218,6 +220,7 @@ async fn a_place_lock_controls_the_rules_and_guard_of_its_threads() {
 fn embeddings_never_fail_over_to_an_incomparable_model_or_dimension() {
     use orch_provider_contract::calls::{Candidate, compatible_embedding};
     let mut candidate = Candidate {
+        route: None,
         provider_id: Id::nil(),
         model: "same-model".to_owned(),
         agent_id: None,
@@ -401,4 +404,130 @@ async fn a_due_retry_survives_an_engine_restart_and_keeps_its_input() {
             .await,
         input.input.id
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_selected_candidate_keeps_its_chain_when_failure_kind_changes_for_every_purpose() {
+    use orch_engine::calls::{ServiceCall, ServicePlan, plan_service, read_root, reserve};
+    let world = World::new().await;
+    let thread = world.thread("Different fallback failures").await;
+    world.engine().stop();
+    world
+        .set(world.topic, "calls.repeat_limit", json!(100))
+        .await;
+    for purpose in [
+        Purpose::Agent,
+        Purpose::Summary,
+        Purpose::Review,
+        Purpose::Embedding,
+        Purpose::WebSearch,
+        Purpose::PageFetch,
+        Purpose::ImageGeneration,
+    ] {
+        let initial = if purpose.capability().is_some() {
+            "unavailable"
+        } else {
+            "provider_exhausted"
+        };
+        let first_model = if purpose == Purpose::Embedding {
+            common::MODEL
+        } else {
+            "first-fallback"
+        };
+        let second_model = if purpose == Purpose::Embedding {
+            common::MODEL
+        } else {
+            "second-fallback"
+        };
+        let mut first = json!({"provider_id":world.provider,"model":first_model,"params":{}});
+        let mut second = json!({"provider_id":world.provider,"model":second_model,"params":{}});
+        if purpose == Purpose::Embedding {
+            first["dimensions"] = json!(256);
+            second["dimensions"] = json!(256);
+        }
+        world.set(world.topic,"calls.rules",json!([
+            {"id":"selected-chain","when":{"kind":initial,"purpose":purpose},"steps":[{"type":"failover","candidate":first},{"type":"failover","candidate":second},{"type":"wait","until":"person"}]},
+            {"id":"different-failure","when":{},"steps":[{"type":"retry","delay_secs":0,"times":3,"backoff":1}]}
+        ])).await;
+        let root = orch_types::new_id();
+        let context = json!({"root_input":root,"root_call":root,"configured_provider":world.provider,"configured_model":common::MODEL,"provider_id":world.provider,"model":common::MODEL});
+        let mut conn = world.pool.acquire().await.unwrap();
+        let first_failure = orch_types::new_id();
+        let reserved = reserve(
+            &mut conn,
+            thread,
+            purpose,
+            first_failure,
+            &json!({"code":initial,"message":"Synthetic first cause","retryable":true}),
+            context.clone(),
+            world.clock.now(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(reserved.rule["id"], "selected-chain");
+        for (candidate, kind, expected_step) in [
+            (first.clone(), "provider_unreachable", 1),
+            (second.clone(), "model_refused", 2),
+        ] {
+            // This is the existing durable producer seam after its selected destination actually starts.
+            sqlx::query("UPDATE model_call_recovery SET state='running',context=jsonb_set(context,'{candidate}',$4) WHERE node_id=$1 AND purpose=$2 AND call_key=$3")
+                .bind(thread).bind(purpose.as_str()).bind(reserved.call_key).bind(&candidate).execute(&mut *conn).await.unwrap();
+            let mut actual = context.clone();
+            actual["provider_id"] = candidate["provider_id"].clone();
+            actual["model"] = candidate["model"].clone();
+            actual["candidate"] = candidate;
+            let reference = orch_types::new_id();
+            let continued = reserve(
+                &mut conn,
+                thread,
+                purpose,
+                reference,
+                &json!({"code":kind,"message":"A different synthetic cause","retryable":true}),
+                actual,
+                world.clock.now(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(continued.call_key, reserved.call_key);
+            assert_eq!(
+                continued.rule["id"], "selected-chain",
+                "{purpose:?}: another failure rule must not restart a selected chain"
+            );
+            assert_eq!(continued.cursor["step"], expected_step);
+            assert_eq!(
+                continued.failure["code"], kind,
+                "the new cause is still recorded"
+            );
+        }
+        let held = read_root(&mut conn, thread, purpose, root)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(held.state, "waiting");
+        assert_eq!(held.action.as_ref().unwrap()["step"]["type"], "wait");
+        if purpose != Purpose::Agent {
+            let plan = plan_service(
+                &mut conn,
+                &ServiceCall {
+                    node: thread,
+                    purpose,
+                    root,
+                    workflow: None,
+                    task: None,
+                    provider: world.provider,
+                    model: common::MODEL,
+                    dimensions: None,
+                },
+                world.clock.now(),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(plan, ServicePlan::Paused),
+                "restart must preserve the exhausted chain's wait"
+            );
+        }
+    }
 }

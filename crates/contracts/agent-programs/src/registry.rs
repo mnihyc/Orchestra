@@ -504,8 +504,36 @@ mod tests {
     fn codex_keeps_the_interface_and_cases_its_adapter_was_written_against() {
         let codex = Programs::builtin().program("codex").unwrap();
         let probe = codex.checks.interface.as_ref().unwrap();
-        assert_eq!(probe.needs.len(), 54);
-        assert_eq!(codex.checks.conformance.len(), 8);
+        assert_eq!(probe.needs.len(), 74);
+        for name in [
+            "thread/environment/connected",
+            "thread/environment/disconnected",
+            "model/safetyBuffering/updated",
+            "thread/goal/updated",
+            "thread/goal/cleared",
+            "thread/goal/get",
+        ] {
+            assert!(probe.needs.iter().any(|need| need.name == name));
+        }
+        assert_eq!(
+            codex
+                .checks
+                .conformance
+                .iter()
+                .map(|case| case.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "startup",
+                "command_approval",
+                "auto_review",
+                "user_input",
+                "elicitation",
+                "nested_subagent",
+                "native_import",
+                "tools.result_form",
+                "history.native_import",
+            ]
+        );
         assert_eq!(codex.probe_programs(), ["codex"]);
         let claude = Programs::builtin().program("claude-code").unwrap();
         assert_eq!(claude.checks.interface.as_ref().unwrap().needs.len(), 25);

@@ -41,8 +41,8 @@ export function openShell(door: Door, body: EnvironmentTerminalCreateBody): Prom
 }
 
 /** A ticket for attaching to a shell again; attaching ends an attachment elsewhere. */
-export function shellTicket(terminalId: string): Promise<TerminalTicket> {
-  return ok(api.POST('/terminals/{terminal_id}/ticket', { params: { path: { terminal_id: terminalId } } }));
+export function shellTicket(terminalId: string, clientKey: string = crypto.randomUUID()): Promise<TerminalTicket> {
+  return ok(api.POST('/terminals/{terminal_id}/ticket', { params: { path: { terminal_id: terminalId } }, headers: { 'Idempotency-Key': clientKey } }));
 }
 
 /** Closes a shell: its person's act, or an environment manager's. */

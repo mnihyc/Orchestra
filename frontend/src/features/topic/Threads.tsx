@@ -59,7 +59,7 @@ function TopicThreadRows({ orgId, topicId, participating }: TopicThreadsProps & 
   const tree = useOrgTree(orgId);
   const threads = useMemo(() => threadsOfTopic(tree.nodes, topicId).filter((thread) => !participating || participates(thread)), [tree.nodes, topicId, participating]);
 
-  if (!tree.loaded && tree.error === null) return <SkeletonRows rows={3} />;
+  if (!tree.loaded && tree.error === null) return <SkeletonRows read={tree} rows={3} />;
   if (threads.length === 0) {
     return (
       <EmptyState
