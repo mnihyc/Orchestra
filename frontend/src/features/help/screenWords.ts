@@ -7,6 +7,7 @@ const SCREEN_ABOUT: Readonly<Partial<Record<string, TranslationKey>>> = {
   '/chat/$chatId': 'screens.messages.about',
   '/place-chat/$nodeId': 'screens.messages.about',
   '/inbox': 'screens.inbox.about',
+  '/messages/$id': 'screens.administratorMessage.about',
   '/approvals': 'screens.approvals.about',
   '/shared': 'screens.shared.about',
   '/everything': 'screens.everything.about',

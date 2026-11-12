@@ -1,6 +1,6 @@
 /** A person's same announcement and tag controls at every level, answered by the fake world. */
 import { expect, test } from '@playwright/test';
-import { ACME, scenario, signIn } from './support.ts';
+import { ACME, scenario, signIn, mainArea } from './support.ts';
 
 test.beforeEach(async () => { await scenario(); });
 
@@ -9,7 +9,7 @@ for (const [kind, path] of [['org', '/org/acme'], ['project', `/project/${ACME.w
     await signIn(page);
     await page.goto(path);
     if (kind === 'org') {
-      await page.getByTestId('main').locator('header').filter({ has: page.getByRole('heading', { level: 1, name: 'Acme', exact: true }) }).locator('button[aria-haspopup="menu"]').click();
+      await mainArea(page).locator('header').filter({ has: page.getByRole('heading', { level: 1, name: 'Acme', exact: true }) }).locator('button[aria-haspopup="menu"]').click();
       await page.getByRole('menuitem', { name: 'Announcements', exact: true }).click();
     } else await page.getByRole('button', { name: 'Announcements', exact: true }).click();
     const dialog = page.getByRole('dialog', { name: /Announcements in/ });
@@ -24,9 +24,9 @@ for (const [kind, path] of [['org', '/org/acme'], ['project', `/project/${ACME.w
     await page.keyboard.press('Escape');
     const details = async () => {
       if (kind === 'org') {
-        await page.getByTestId('main').locator('header').filter({ has: page.getByRole('heading', { level: 1, name: 'Acme', exact: true }) }).locator('button[aria-haspopup="menu"]').click();
+        await mainArea(page).locator('header').filter({ has: page.getByRole('heading', { level: 1, name: 'Acme', exact: true }) }).locator('button[aria-haspopup="menu"]').click();
         await page.getByRole('menuitem', { name: 'Description and tags', exact: true }).click();
-      } else if (kind === 'project') await page.getByTestId('main').getByRole('button', { name: 'Description and tags', exact: true }).click();
+      } else if (kind === 'project') await mainArea(page).getByRole('button', { name: 'Description and tags', exact: true }).click();
     };
     await details();
     await page.getByRole('button', { name: kind === 'topic' ? 'Edit tags' : 'Add tags', exact: true }).click();

@@ -5,6 +5,8 @@
 //! the program names an MCP tool, what a quiet start leaves behind) is what the adapter says through its hooks
 //! (`native_check`, `mcp_tool_name`, `verify_quiet_start`). Nothing here names a program.
 
+mod auto_classifier;
+mod auto_review;
 pub mod elicitation;
 
 use std::collections::BTreeMap;
@@ -42,6 +44,10 @@ pub struct ModelRequest {
     pub path: String,
     /// Parsed request body.
     pub body: Json,
+    /// Actual HTTP status observed at the controlled endpoint, when answered.
+    pub status: Option<u16>,
+    /// Whether this response came from an explicitly queued fixture script.
+    pub queued: bool,
 }
 
 /// The paths of the scripted model that a quiet start of a program speaking `protocol` reaches and may reach,
@@ -81,6 +87,25 @@ fn tool_line(fixture: &Fixture<'_>, role: &str, arguments: &Json) -> Result<Stri
     Ok(format!("tool {name} {arguments}"))
 }
 
+/// Commands to the same controlled model used by the existing native runner. Keeping this
+/// callback protocol-neutral avoids a production conformance dependency on the testkit.
+#[derive(Debug, Clone)]
+pub enum ModelControl {
+    /// Empty this case's queued responses and observations while retaining its synthetic credential.
+    Reset,
+    /// Answer one request to this exact model with the existing scripted-model language.
+    Queue { model: String, script: String },
+    /// Set the existing scripted model's default response.
+    Default { script: String },
+    /// Match the actual body before consuming a response, including when main/reviewer share a model.
+    QueueMatching {
+        model: Option<String>,
+        script: String,
+        pattern: orch_agent_contract::conformance::NativeRequestPattern,
+        times: u64,
+    },
+}
+
 /// Disposable native context supplied by the node or the adapter's test launcher.
 pub struct Fixture<'a> {
     /// Exact startup inputs; the binary is the build being checked.
@@ -93,6 +118,8 @@ pub struct Fixture<'a> {
     pub within: Duration,
     /// Requests observed at the same scripted model as orch-mock-llm.
     pub requests: &'a (dyn Fn() -> Vec<ModelRequest> + Send + Sync),
+    /// Explicit queue control on that same model, required only by native reviewer cases.
+    pub control_model: Option<&'a (dyn Fn(ModelControl) -> Result<(), String> + Send + Sync)>,
     /// What the manifest of the program under test lists: the cases a build has to pass, and the probes.
     pub checks: &'a orch_agent_programs::manifest::Checks,
     /// Launch environments observed by the caller, for telemetry checks.
@@ -190,6 +217,7 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
     let directory = fixture.workspace.display().to_string();
     SessionSpec {
         settings: SessionSettings {
+            native_model: None,
             agent_id: fixture.start.agent_id,
             thread_id: new_id(),
             segment_id: new_id(),
@@ -209,6 +237,9 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
             instructions: "You are working inside Orch.".to_owned(),
             available_models: vec![MODEL.to_owned()],
             subagent_limits: Default::default(),
+            prompt_cache_ttl: None,
+            background_wake: true,
+            image_generation: None,
             memory: None,
             arrangement: ArrangementType::KeySeparated,
             orch_tools: Vec::new(),
@@ -237,6 +268,8 @@ fn session(fixture: &Fixture<'_>, check: &NativeCheck, protocol: &str) -> Sessio
 
 fn turn(spec: &SessionSpec, text: &str) -> TurnStart {
     TurnStart {
+        native_model: None,
+        native_wake: None,
         plan: false,
         thread_id: spec.settings.thread_id,
         turn_id: new_id(),
@@ -441,6 +474,10 @@ async fn exercise(
         .first()
         .cloned()
         .unwrap_or_default();
+    if name == "auto_review" {
+        auto_review::exercise(adapter, fixture, &mut events, &started, &check, &protocol).await?;
+        return Ok(None);
+    }
     let mut spec = session(fixture, &check, &protocol);
     if name == "sandbox" {
         spec.settings.sandbox_mode = SandboxMode::ReadOnly;

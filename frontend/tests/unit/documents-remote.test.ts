@@ -96,6 +96,21 @@ describe('rows that arrive', () => {
     expect(outline(apply(stateOf(before), before, moved).state.doc)).toEqual(['paragraph B', 'paragraph A', '  bullet Under A']);
   });
 
+  it('keeps the caret when a move answer is already displayed', () => {
+    const before = [row('a', null, '1', 'bullet', 'First'), row('b', 'a', '1', 'bullet', 'Second'),
+      row('c', 'a', '2', 'bullet', 'Third'), row('d', null, '3', 'paragraph', 'After')];
+    const moved = { ...before[2]!, parent_id: null, position: '2', seq_updated: 99 };
+    let displayed = stateOf([before[0]!, before[1]!, moved, before[3]!]);
+    const third = findContainer(displayed.doc, 'c');
+    if (third === null) throw new Error('The moved block must already be displayed');
+    displayed = displayed.apply(displayed.tr.setSelection(TextSelection.create(displayed.doc, third.pos + 2 + 'Third'.length)));
+    const { state: next, tr } = apply(displayed, before, [moved]);
+    expect(tr).toBeNull();
+    expect(next.selection.eq(displayed.selection)).toBe(true);
+    expect(outline(next.doc)).toEqual(['bullet First', '  bullet Second', 'bullet Third', 'paragraph After']);
+    expect(next.selection.$from.parent.textContent).toBe('Third');
+  });
+
   it('change the type of a block, keeping its identifier', () => {
     const before = [row('a', null, '1', 'paragraph', 'Words')];
     const { state } = apply(stateOf(before), before, [{ ...before[0]!, type: 'heading', props: { level: 3 }, seq_updated: 99 }]);

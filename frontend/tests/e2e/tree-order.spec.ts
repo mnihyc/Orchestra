@@ -33,7 +33,7 @@ test('a person orders their tree for every device, and an admin makes that order
 
   // The admin makes it the order of everybody who follows the org's own, and follows it themself.
   await (await viewMenu(page)).getByRole('menuitem', { name: 'Save for everyone in Acme' }).click();
-  await expect(page.getByText('Everyone in Acme now sees this order unless they chose their own')).toBeVisible();
+  await expect(page.getByText('Everyone in Acme now sees this order unless they chose their own', { exact: true })).toBeVisible();
   await (await viewMenu(page)).getByRole('menuitemradio', { name: 'Defaults' }).click();
   await expect.poll(() => top(page)).toEqual(['Research', 'Shop', 'Payroll', 'Infra']);
   await (await viewMenu(page)).getByRole('menuitemradio', { name: 'Name' }).click();

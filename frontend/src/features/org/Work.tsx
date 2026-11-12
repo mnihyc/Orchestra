@@ -69,7 +69,7 @@ export function OrgWork({ org }: { org: Org }) {
     </Section>}
     <Section id={`recent-work-${org.id}`} title={t('places.org.work.recent')}>
       {work.recent.length > 0 && <WorkThreads key={org.id} id={`recent-threads-${org.id}`} rows={work.recent} />}
-      {((!tree.loaded && tree.error === null) || visits.isPending) && <SkeletonRows rows={2} />}
+      {((!tree.loaded && tree.error === null) || visits.isPending) && <SkeletonRows reads={[tree, visits]} rows={2} />}
       {tree.error !== null && <ErrorState compact error={tree.error} onRetry={() => reloadOrgTree(org.org_id)} />}
       {visits.isError && <ErrorState compact title={t('places.org.work.failedRead')} error={visits.error} retrying={visits.isRefetching} onRetry={() => void visits.refetch()} />}
       {tree.loaded && !visits.isPending && !visits.isError && tree.error === null && work.recent.length === 0 && <EmptyState compact

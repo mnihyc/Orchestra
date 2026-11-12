@@ -1,3 +1,5 @@
+import { duplicateEntries } from '@/features/duplicate/target';
+import { threadCapabilities } from '@/features/thread/cached';
 /** Permission-aware node actions, as a row's context menu and its "⋯".
  *
  * One list for everything that can be done with a place, written once and shown wherever the place is:
@@ -9,6 +11,7 @@
  * The acts that need no dialog are carried out here and shown as pending on the place while they are
  * under way; the others open their dialog, which is drawn once for the whole application.
  */
+import { linkTo } from '@/lib/links';
 import { openPage } from '@/features/workbench/PageView';
 import { useTreeNode } from '@/realtime/stores/tree';
 import { actionName } from '@/ui/actions';
@@ -56,10 +59,10 @@ import { useStar } from '@/features/navigation/favorites';
 import { openAccess } from '@/features/access/AccessDialog';
 import { openExport, requestExportAccess } from '@/features/export/ExportHost';
 import { openImport } from '@/features/people/importHostState';
-import { exportEntries } from '@/features/export/menu';
+import { exportEntries, type ExportCheckFailure } from '@/features/export/menu';
 import { mayExportThread } from '@/features/export/pending';
 import { openNodeDialog } from '@/features/navigation/NodeDialogs';
-import { type PlaceRef, placePath, placeUrl, useGoToPlace } from '@/features/navigation/places';
+import { type PlaceRef, placePath, useGoToPlace } from '@/features/navigation/places';
 import type { Access, Node, TopicStatus, UserRef } from '@/generated/api-types';
 import { abilities, canCreateIn, denial, holds } from '@/lib/permissions';
 import { copyText } from '@/ui/clipboard';
@@ -91,6 +94,8 @@ export interface NodeMenuContext {
   settingsHref?: string;
   /** For a thread: whether the caller may take its conversation away as a file, `null` while that is not known. A place is exported by whoever reads it, and does not ask. */
   exportable?: boolean | null;
+  /** A failed export-authority read is not a permission decision. */
+  exportCheckFailure?: ExportCheckFailure;
   /** Whether any creation at this place is currently available for import. */
   importable?: boolean | null;
   /** A failed standing read is distinct from a denial. */
@@ -261,7 +266,8 @@ export function nodeMenuEntries(context: NodeMenuContext, act: NodeMenuActions, 
   // A place is exported by whoever reads it; a thread by whoever holds its Export row, who is told apart from a reader who does not.
   if (act.export !== undefined) {
     other.push(
-      ...exportEntries({ allowed: place.kind === 'thread' ? (context.exportable ?? null) : true, owner, where: where === 'row' ? 'row' : 'screen', onExport: act.export, onRequest: act.requestExport ?? act.export, t }),
+      ...exportEntries({ allowed: place.kind === 'thread' ? (context.exportable ?? null) : true, owner, where: where === 'row' ? 'row' : 'screen', onExport: act.export, onRequest: act.requestExport ?? act.export, t,
+        ...(context.exportCheckFailure === undefined ? {} : { checkFailure: context.exportCheckFailure }) }),
     );
   }
   if (place.kind !== 'thread' && act.import !== undefined) {
@@ -294,7 +300,7 @@ export function nodeMenuEntries(context: NodeMenuContext, act: NodeMenuActions, 
   group(...destroys);
 
   // Nothing is known yet of what the caller holds: the list says so rather than looking complete.
-  if (where === 'row' && !known) {
+  if (where === 'row' && !known && context.exportCheckFailure === undefined) {
     group({ type: 'label', id: 'checking', label: t('places.menu.checking') });
   }
   return entries;
@@ -364,7 +370,7 @@ export function useQuickActs(place: PlaceRef) {
     onSettled: () => setPending(place.id, false),
   });
 
-  const copy = () => copyText(placeUrl(place), t('common.linkCopied'));
+  const copy = () => copyText(linkTo(place), t('common.linkCopied'));
 
   return {
     starred: star.starred,
@@ -389,11 +395,13 @@ export function useNodeMenu(
   },
 ): MenuEntry[] {
   const { t } = useTranslation();
+  const describeError = useErrorText();
   const quick = useQuickActs(place);
   // A row's menu reaches the tree it stands beside; the menu of a place's own screen is about the place alone.
   const tree = useTreeActs((state) => state.acts);
   const inTree = options.where === 'row' ? tree : null;
   const query = useQuery({ ...nodeQuery(place.id), enabled: options.node === undefined && options.enabled !== false });
+  const exportFailure = options.node === undefined && query.isError ? describeError(query.error) : undefined;
   const node = options.node ?? query.data;
   const cache = useQueryClient();
   const directImport = node !== undefined && !node.archived && place.kind !== 'thread'
@@ -430,7 +438,7 @@ export function useNodeMenu(
     ...(place.kind === 'thread' ? {} : { import: () => openImport({ id: place.id, label: importPath === undefined || importPath === '' ? place.name : importPath }) }),
     requestExport: () => requestExportAccess({ kind: place.kind, id: place.id, name: place.name, owner: node?.owner ?? null }),
   };
-  return nodeMenuEntries(
+  const entries = nodeMenuEntries(
     {
       place,
       held: node?.access,
@@ -441,6 +449,7 @@ export function useNodeMenu(
       personal: node?.kind === 'org' ? node.org_kind === 'personal' : undefined,
       ...(node?.kind === 'org' ? { settingsHref: `/org/${encodeURIComponent(node.address)}/settings/general` } : {}),
       exportable: place.kind === 'thread' ? (node?.kind === 'thread' ? mayExportThread(node) : null) : undefined,
+      ...(exportFailure === undefined ? {} : { exportCheckFailure: { reason: exportFailure.message, ...(exportFailure.retryable ? { retry: () => { void query.refetch(); } } : {}) } }),
       importable,
       importCheckFailed: checkDocuments && directory.isError,
       ...(inTree !== null ? { unread: inTree.hasUnread(place.id) } : {}),
@@ -448,10 +457,16 @@ export function useNodeMenu(
     act,
     t,
   );
+  if (place.kind !== 'thread') return entries;
+  const reason = node?.kind !== 'thread' ? t('duplicate.readRequired')
+    : node.lock !== null ? t('threadMove.jobMustEnd') : node.archived || threadCapabilities(node)?.fork !== true ? t('ui.unavailable.forkUnavailable') : undefined;
+  return [...duplicateEntries(t, { kind: 'thread', id: place.id, name: place.name, ...(reason === undefined ? {} : { refusal: reason }) }), ...entries];
 }
 
 export interface NodeMenuButtonProps {
   place: PlaceRef;
+  /** A caption from the same readable tree; omit it for an independent live parent lookup. */
+  parentName?: string | null | undefined;
   /** In a row what the caller may not do is left out; on the place's screen it is shown switched off. */
   where?: 'row' | 'screen';
   /** The node itself, where the screen has read it already. */
@@ -487,9 +502,17 @@ function Entries({ place, where, node, only, extraEntries }: { place: PlaceRef; 
 }
 
 /** The "⋯" of a place: the same list as its right-click menu, for touch and for whoever does not right-click. */
-export function NodeMenuButton({ place, where = 'row', node, className, skipTab = false, extraEntries, menuLabel, triggerRef }: NodeMenuButtonProps) {
-  const parent = useTreeNode(place.parentId);
-  const menuName = menuLabel ?? actionName('actions', where === 'row' && parent !== null ? `${place.name} · ${parent.name}` : place.name);
+export function NodeMenuButton(props: NodeMenuButtonProps) {
+  return props.parentName === undefined ? <ParentMenuButton {...props} /> : menuButton(props, props.parentName);
+}
+
+function ParentMenuButton(props: NodeMenuButtonProps) {
+  const parent = useTreeNode(props.place.parentId);
+  return menuButton(props, parent?.name ?? null);
+}
+
+function menuButton({ place, where = 'row', node, className, skipTab = false, extraEntries, menuLabel, triggerRef }: NodeMenuButtonProps, parentName: string | null) {
+  const menuName = menuLabel ?? actionName('actions', where === 'row' && parentName !== null ? `${place.name} · ${parentName}` : place.name);
   return (
     <Menu
       label={menuName}

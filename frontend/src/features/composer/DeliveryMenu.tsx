@@ -1,4 +1,4 @@
-/** Queue, steer and interrupt for whoever may drive the thread; Ask on the side; broadcast choices.
+/** Queue, steer and interrupt for whoever may drive the thread; Side thread; broadcast choices.
  *
  * What a message does while the agent works: wait its turn in the queue, steer the turn that runs, or
  * stop that turn and go first. The one that is the usual one for this place (`collab.default_delivery`)
@@ -24,6 +24,13 @@ export interface DeliveryState {
   /** A compatibility check names the build that made steering unavailable. */
   steerUnavailable?: string;
   agent: string;
+  /** A displayed next-input default that has not been confirmed yet. */
+  inputReason?: string;
+}
+
+/** The same draft and connection checks apply to buttons, shortcuts and confirmations. */
+export function inputUnavailable(state: DeliveryState, input: { mayDrive: boolean; empty: boolean; tooLong: boolean; attachmentsWaiting: boolean }, t: TFunction): string | false {
+  return !input.mayDrive ? t('composer.row.readOnly') : !state.live ? t('composer.reason.offline') : input.empty ? t('composer.row.empty') : input.tooLong ? t('composer.row.tooLong') : input.attachmentsWaiting ? t('composer.row.filesWaiting') : state.inputReason ?? false;
 }
 
 /** Why a way of sending cannot be used now, or `false`. */
@@ -42,7 +49,7 @@ export function deliveryLabel(delivery: Delivery, t: TFunction): string {
   return delivery === 'steer' ? t('composer.deliveryLabel.steer') : delivery === 'interrupt' ? t('composer.deliveryLabel.interrupt') : t('composer.deliveryLabel.queue');
 }
 
-/** The list beside the Send button of a thread whose turn runs; with `askOnSide`, it ends with the way to ask on the side. */
+/** The list beside the Send button of a thread whose turn runs; with `askOnSide`, it ends with the way to start a side thread. */
 export function deliveryEntries(state: DeliveryState, send: (delivery: Delivery) => void, t: TFunction, askOnSide?: () => void): MenuEntry[] {
   const entry = (delivery: Delivery, icon: React.ReactNode, shortcut: string): MenuEntry => ({
     id: delivery,

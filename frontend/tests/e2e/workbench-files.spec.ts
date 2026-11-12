@@ -17,7 +17,7 @@ test('a desktop file tab keeps its source URL, peers and drafts through normal n
   expect(url.searchParams.get('path')).toBe('web/src/app.ts');
   await code.click(); await page.keyboard.press('Control+Home'); await page.keyboard.type('// Retained file draft\n');
   await expect(page.getByTestId('code-status')).toContainText('Unsaved');
-  await page.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ }).click();
+  await page.getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ }).click();
   await expect(draft).toHaveValue('Do not replace the thread draft when opening a file');
   await expect(fileTree(page)).toBeVisible(); await row(page, /^app\.ts/).click();
   await expect(code).toContainText('// Retained file draft');
@@ -33,7 +33,7 @@ test('a desktop file tab keeps its source URL, peers and drafts through normal n
     .some((key) => key?.includes('.unsaved.') && localStorage.getItem(key)?.includes('// Retained file draft')))).toBe(true);
   page.on('dialog', (dialog) => void dialog.accept());
   await page.reload(); await expect(code).toContainText('// Retained file draft'); await expect(code).toBeEditable();
-  await expect(page.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ })).toBeVisible();
   await page.screenshot({ path: info.outputPath('file-url-draft-reload.png'), animations: 'disabled' });
 });
 
@@ -51,7 +51,7 @@ test('opening the same file line twice moves the existing editor cursor while pr
   await expect(page.getByTestId('outline-panel')).toHaveCount(0);
   await editor(page).click(); await page.keyboard.press('Control+Home'); await page.keyboard.type('// keep this draft ');
   await expect(page.getByTestId('code-status')).toContainText('Line 1,');
-  await page.getByRole('tab', { name: /^Main thread(?: · Fix login)?$/ }).click();
+  await page.getByRole('tab', { name: /\bMain thread(?: · Fix login)?$/ }).click();
   await page.getByRole('button', { name: 'src/app.ts', exact: true }).click();
   await expect(page.getByTestId('code-status')).toContainText('Line 4, column 1');
   await expect(editor(page)).toContainText('// keep this draft');

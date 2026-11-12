@@ -6,6 +6,10 @@
 )]
 
 mod common;
+#[path = "initial_files/connected_copy.rs"]
+mod connected_copy;
+#[path = "initial_files/creator_authority.rs"]
+mod creator_authority;
 mod hosting;
 
 use common::World;
@@ -41,6 +45,10 @@ async fn source(world: &World) -> Prepared {
 }
 
 async fn source_with_root_alias(world: &World, root_alias: bool) -> Prepared {
+    source_with_mode(world, root_alias, false).await
+}
+
+async fn source_with_mode(world: &World, root_alias: bool, whole_environment: bool) -> Prepared {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
         LocalBlobStore::open(directory.path().to_path_buf())
@@ -98,7 +106,11 @@ async fn source_with_root_alias(world: &World, root_alias: bool) -> Prepared {
             v: 1,
             root: orch_engine::sessions::absolute_directory(
                 &environment.workspace_root,
-                &row.workspace_dir,
+                if whole_environment {
+                    ""
+                } else {
+                    &row.workspace_dir
+                },
             ),
             generated_at: Time::new(world.clock.now()),
             generation: i64::from(environment.generation),
@@ -130,6 +142,7 @@ async fn source_with_root_alias(world: &World, root_alias: bool) -> Prepared {
                     .include
                     .iter()
                     .any(|path| path.ends_with("uploads"))
+                    || (whole_environment && body.selection.include == [String::new()])
             );
             Ok(CommandResult::FsSnapshot(FsSnapshotResult {
                 manifest_blob: kept.hash,
@@ -247,20 +260,127 @@ async fn enrolled(
 
 #[tokio::test]
 async fn a_selected_initial_copy_is_complete_before_the_environment_becomes_running() {
-    selected_initial_copy(false).await;
+    selected_initial_copy(false, false).await;
 }
 
 #[tokio::test]
 async fn a_selected_initial_copy_keeps_the_reported_root_of_a_registered_alias() {
-    selected_initial_copy(true).await;
+    selected_initial_copy(true, false).await;
 }
 
-async fn selected_initial_copy(root_alias: bool) {
+#[tokio::test]
+async fn an_environment_workspace_uses_no_thread_and_is_delivered_before_running() {
+    selected_initial_copy(false, true).await;
+}
+
+#[tokio::test]
+async fn an_environment_source_needs_both_native_view_and_file_view() {
+    use orch_db::queries::access::{PageKey, testing};
+    let world = World::new().await;
+    let reader = world.person("workspace-copy-reader").await;
+    let mut conn = world.pool.acquire().await.unwrap();
+    let page = PageKey::new("environment", world.environment, "live");
+    for permission in ["environment.view", "files.view"] {
+        testing::set_row(&mut conn, &page, "any", permission, false, false)
+            .await
+            .unwrap();
+    }
+    let requested = NewEnvironmentFiles::FromEnvironment {
+        from_environment: world.environment,
+        selection: None,
+    };
+    let principal = Principal::load(
+        &mut conn,
+        Caller::session(reader),
+        Time::new(world.clock.now()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        initial_files::plan(&mut conn, &principal, &requested).await,
+        Err(initial_files::Error::Denied(_))
+    ));
+    testing::add_entry(
+        &mut conn,
+        &page,
+        "any",
+        "environment.view",
+        ("user", Some(reader), None),
+        None,
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        initial_files::plan(&mut conn, &principal, &requested).await,
+        Err(initial_files::Error::Denied(_))
+    ));
+    testing::add_entry(
+        &mut conn,
+        &page,
+        "any",
+        "files.view",
+        ("user", Some(reader), None),
+        None,
+        world.clock.now(),
+    )
+    .await
+    .unwrap();
+    let plan = initial_files::plan(&mut conn, &principal, &requested)
+        .await
+        .unwrap();
+    assert_eq!(plan.source_thread(), None);
+    assert_eq!(plan.source_environment(), world.environment);
+    assert_eq!(
+        initial_files::source_identity(&mut conn, &requested)
+            .await
+            .unwrap(),
+        (None, world.environment)
+    );
+    drop(conn);
+    world.engine().stop();
+}
+
+async fn selected_initial_copy(root_alias: bool, whole_environment: bool) {
     let world = World::new().await;
     hosting::serve(&world);
     let host = hosting::ScriptedHost::on(&world, "initial-files", 16384).await;
-    let prepared = source_with_root_alias(&world, root_alias).await;
-    let made = queue(&world, &prepared, &host).await;
+    let prepared = source_with_mode(&world, root_alias, whole_environment).await;
+    let made = if whole_environment {
+        let files = NewEnvironmentFiles::FromEnvironment {
+            from_environment: prepared.source,
+            selection: Some(FileSelection::Selection {
+                include: vec!["uploads".into(), "shares".into()],
+                exclude: None,
+            }),
+        };
+        let made = queue_files(&world, &host, &files).await;
+        let mut conn = world.pool.acquire().await.unwrap();
+        let owner = jobs::job(&mut conn, made.job.id).await.unwrap().unwrap();
+        let plan: initial_files::Plan =
+            serde_json::from_value(owner.plan["initial_files"].clone()).unwrap();
+        assert_eq!(plan.source_thread(), None);
+        assert_eq!(plan.source_environment(), prepared.source);
+        assert!(owner.plan["initial_files"]["thread"].is_null());
+        assert_eq!(
+            owner.plan["initial_files"]["directory"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            owner.plan["initial_files"]["source_binding"]["machine"],
+            json!(world.machine_id)
+        );
+        // The copy follows the Environment source even when the unrelated original
+        // thread changes its binding. There is no synthetic source Thread.
+        sqlx::query("UPDATE threads SET workspace_dir='elsewhere' WHERE node_id=$1")
+            .bind(prepared.thread)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+        made
+    } else {
+        queue(&world, &prepared, &host).await
+    };
     let (unit, captured) = enrolled(&world, &host, &made, 2).await;
     common::eventually("the initial delivery command is held", || async {
         let began = unit.began(CommandKind::FsMaterialize) > 0;

@@ -2,7 +2,7 @@
 //!
 //! The connector that runs on the data directory is asked over its local socket: it holds the harnesses and the
 //! environments whose configuration it reads. `list` shows each server by name, harness, place and transport, and
-//! whether a copy of it is kept for Orch; `forget` deletes such a copy. `import` asks the system over the
+//! whether a copy of it is kept for Orch; `forget` deletes its resource and copy. `import` asks the system over the
 //! running connector's authenticated link, as the machine's owner. The system files and audits the copy,
 //! then uses the same machine command as an import from the Tools page. A refusal is printed.
 
@@ -37,16 +37,16 @@ pub async fn mcp(dir: &Path, command: &Mcp) -> anyhow::Result<String> {
                 .join("\n")),
             other => Err(unexpected(&other)),
         },
-        Mcp::Import { name, from } => match ask(dir,&Request::McpImport{name:name.clone(),from:from.clone(),place:None}).await? {
+        Mcp::Import { name, from, as_name } => match ask(dir,&Request::McpImport{name:name.clone(),from:from.clone(),place:None,as_name:as_name.clone()}).await? {
             Reply::Done{said}=>Ok(said),
             other=>Err(unexpected(&other)),
         },
-        Mcp::Forget { name } => {
+        Mcp::Forget { name, from } => {
             match ask(
                 dir,
                 &Request::McpForget {
                     name: name.clone(),
-                    from: None,
+                    from: from.clone(),
                 },
             )
             .await?

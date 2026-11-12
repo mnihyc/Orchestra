@@ -13,6 +13,7 @@ export const PAGE_ROUTES = [
   "/help/$article/",
   "/help/",
   "/inbox/",
+  "/messages/$id/",
   "/inspect/$kind/$id/",
   "/org/$slug/",
   "/org/$slug/messages/",

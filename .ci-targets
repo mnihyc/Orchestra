@@ -1,0 +1,4 @@
+# Where and the type's default, round three: the engine's programs that hold its cases, whole.
+test -p orch-engine --lib -- a_native_helper_is_created_only_where a_service_candidate_is_used_only_where image_services
+test -p orch-engine --test credentials --test use_where --test call_recovery
+test -p orch-engine --test forks

@@ -1,4 +1,9 @@
+import type * as RouterModule from '@tanstack/react-router';
+import type * as OrgState from '@/shell/org';
 /** UA-07: each screen keeps one creation entry, including empty lists and inline starters. */
+import type * as OrgOverviewModule from '@/api/orgOverview';
+import type * as FirstStepsModule from '@/api/firstSteps';
+import type * as UsageBoardModule from '@/features/usage/Board';
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { Box } from 'lucide-react';
@@ -18,6 +23,7 @@ import { i18n, setLocale } from '@/i18n';
 import { useAppearance } from '@/lib/appearance';
 import { acmeTree, me, org, userRef } from '../doubles/fixtures';
 import { show } from './support';
+import { overviewFixture } from './overview-fixture';
 
 const calls = vi.hoisted(() => ({ dialog: vi.fn(), document: vi.fn() }));
 const owner = userRef(me(1, 'ada', 'Ada'));
@@ -42,11 +48,17 @@ function emptyPages(key: readonly unknown[]) {
   return { queryKey: key, initialPageParam: null, queryFn: () => Promise.resolve({ items: [], next_cursor: null }), getNextPageParam: () => undefined };
 }
 
-vi.mock('@tanstack/react-router', () => ({
+vi.mock('@tanstack/react-router', async (loadRouter) => ({ ...await loadRouter<typeof RouterModule>(),
   Link: ({ to, params, children, className }: { to: string; params?: Record<string, string>; children: ReactNode; className?: string }) => <a href={`${to}/${Object.values(params ?? {}).join('/')}`} className={className}>{children}</a>,
   // The project's "…" names its Settings and goes there with the router.
   useRouter: () => ({ navigate: vi.fn() }),
 }));
+vi.mock('@/api/orgOverview', async (original) => {
+  const actual = await original<typeof OrgOverviewModule>();
+  return { ...actual, orgOverviewQuery: (...args: Parameters<typeof actual.orgOverviewQuery>) => ({
+    ...actual.orgOverviewQuery(...args), queryFn: () => Promise.resolve(overviewFixture(root, children)),
+  }) };
+});
 vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>(),
   orgBySlugQuery: (slug: string) => ({ queryKey: ['one-create-org', slug], queryFn: () => Promise.resolve(root) }),
   projectQuery: (id: string) => ({ queryKey: ['one-create-project', id], staleTime: Infinity, queryFn: () => Promise.resolve(projectData) }),
@@ -57,13 +69,13 @@ vi.mock('@/api/nodes', async (original) => ({ ...await original<typeof NodesApi>
 vi.mock('@/api/directory', async (original) => ({ ...await original<object>(), membersQuery: (id: string) => emptyPages(['one-create-members', id]) }));
 vi.mock('@/api/personal', async (original) => ({ ...await original<object>(), meStateQuery: { queryKey: ['one-create-preferences'], queryFn: () => Promise.resolve({}) } }));
 vi.mock('@/api/day100', async (original) => ({ ...await original<object>(), saveProjectView: () => Promise.resolve({}) }));
-vi.mock('@/api/firstSteps', () => ({ firstStepsQuery: (id: string | null) => ({ queryKey: ['one-create-checklist', id], queryFn: () => Promise.resolve(null) }) }));
+vi.mock('@/api/firstSteps', async (original) => ({ ...await original<typeof FirstStepsModule>(), firstStepsQuery: (id: string | null) => ({ queryKey: ['one-create-checklist', id], queryFn: () => Promise.resolve(null) }) }));
 vi.mock('@/api/documents', async (original) => ({ ...await original<object>(), documentsOfNodeQuery: (id: string, filters: unknown) => emptyPages(['one-create-documents', id, filters]) }));
 vi.mock('@/api/chats', async (original) => ({ ...await original<object>(), orgChatsQuery: (id: string) => emptyPages(['one-create-chats', id]) }));
 vi.mock('@/realtime/live', async (original) => ({ ...await original<object>(), useOrgTreeFeed: vi.fn() }));
 vi.mock('@/realtime/stores/tree', async (original) => ({ ...await original<object>(), useOrgTree: () => ({ nodes, loaded: true, error: null }) }));
 vi.mock('@/shell/screen', () => ({ useScreenHeading: vi.fn() }));
-vi.mock('@/shell/org', () => ({ selectOrg: vi.fn() }));
+vi.mock('@/shell/org', async (load) => ({ ...await load<typeof OrgState>(), selectOrg: vi.fn() }));
 vi.mock('@/features/navigation/NodeDialogs', () => ({ openNodeDialog: calls.dialog }));
 vi.mock('@/features/navigation/NodeMenu', () => ({ NodeMenuButton: () => null }));
 vi.mock('@/features/navigation/places', async (original) => ({ ...await original<object>(),
@@ -75,7 +87,7 @@ vi.mock('@/features/resources/trail', () => ({ useResourceHeading: vi.fn(), reme
 vi.mock('@/features/resources/ResourceNav', () => ({ ResourceNav: () => null }));
 vi.mock('@/features/topic/TagPicker', () => ({ TagPicker: () => <span data-place-tags /> }));
 vi.mock('@/features/announcements/Composer', () => ({ PlaceAnnouncements: () => null }));
-vi.mock('@/features/usage/Board', () => ({ UsageSection: () => null }));
+vi.mock('@/features/usage/Board', async (original) => ({ ...await original<typeof UsageBoardModule>(), UsageSection: () => null }));
 vi.mock('@/features/ports/Outside', () => ({ OutsideOpenings: () => null }));
 vi.mock('@/features/onboarding/Checklist', () => ({ Checklist: () => null }));
 vi.mock('@/features/documents/Readme', () => ({ PlaceReadme: () => null }));

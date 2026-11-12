@@ -43,7 +43,8 @@ import { UserChip } from '@/ui/UserChip';
 import { ResourceSentence } from '@/features/resource-facts/ResourceSentence';
 import { resourceSubjectOf } from '@/features/resource-facts/facts';
 
-import type { EnvironmentRef, Item, MarkerPayload, UserRef } from '@/generated/api-types';
+import type { EnvironmentRef, Item, UserRef } from '@/generated/api-types';
+import type { MarkerPayload } from '../markerTypes';
 import { useFormatContext } from '@/lib/appearance';
 import { formatSpan } from '@/lib/time';
 import { formatBytes, formatNumber } from '@/lib/format';
@@ -52,8 +53,13 @@ import { Button } from '@/ui/Button';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { openGiven } from '@/features/inspector/givenFocus';
 import { useTimelineContext } from '../context';
+import { useThreadPart } from '@/realtime/stores/thread';
+import { effortDisplayName, modelDisplayName } from '@/features/models/names';
 import { CallModel } from '@/features/calls/Model';
 import { recoveryCause, recoverySentence, RecoveryRuleLink } from '@/features/calls/History';
+import { BackgroundWakeMarker } from '@/features/running/BackgroundWakeMarker';
+import { environmentLocation } from '@/features/change/jobWords';
+import { wakeCauses } from '@/features/running/backgroundWake';
 
 type MarkerItem = Extract<Item, { kind: 'marker' }>;
 
@@ -61,6 +67,8 @@ const who = (user: UserRef | null, t: TFunction): string => user?.display_name ?
 const environment = (ref: EnvironmentRef | null, t: TFunction): string => ref?.name ?? t('timeline.marker.anEnvironment');
 
 const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
+  harness_changed: Settings2,
+  background_wake: Play,
   resource_resumed: Play,
   resource_stopped: Square,
   call_recovery: Play,
@@ -112,9 +120,120 @@ const ICONS: Record<MarkerPayload['marker'], LucideIcon> = {
   goal_cleared: Target,
 };
 
+const nativeRecord=(value:unknown):value is Record<string,unknown>=>typeof value==='object' && value!==null && !Array.isArray(value);
+
+/** Native enum words are interpreted here; instruction text never reaches this projection. */
+export function nativeChangeValue(change:string,value:unknown,t:TFunction):string {
+  const named=(name:string)=>t(`harnessChanges.values.${name}` as 'harnessChanges.values.default');
+  if(change==='environment_connection' && (value==='connected' || value==='disconnected'))return t(value==='connected'?'harnessChanges.environmentConnected':'harnessChanges.environmentDisconnected');
+  if(change==='reply_buffering' && nativeRecord(value) && typeof value.show_ui==='boolean')return t(value.show_ui?'harnessChanges.bufferingVisible':'harnessChanges.bufferingHidden');
+  if(change==='system_event' && nativeRecord(value)) {
+    const kind=typeof value.kind==='string' ? value.kind : '';
+    const label=t(`harnessChanges.events.${kind}` as 'harnessChanges.events.informational',{defaultValue:t('harnessChanges.programEvent')});
+    const words=[value.title,value.message,value.reason,value.hook_name].filter((part):part is string=>typeof part==='string' && part.length>0);
+    return [label,...new Set(words)].join(t('harnessChanges.separator'));
+  }
+  if(change==='mcp_startup' && nativeRecord(value)) {
+    const status=typeof value.status==='string' ? value.status : '';
+    const words=t(`harnessChanges.mcpStates.${status}` as 'harnessChanges.mcpStates.failed',{defaultValue:t('harnessChanges.values.custom')});
+    const reason=value.failure_reason==='reauthenticationRequired' ? t('harnessChanges.mcpSignIn') : null;
+    return [words,reason,typeof value.message==='string'?value.message:null].filter((part):part is string=>part!==null).join(t('harnessChanges.separator'));
+  }
+  if(change==='session_status' && nativeRecord(value)) {
+    const state=typeof value.type==='string' ? value.type : '';
+    const parts=[t(`harnessChanges.sessionStates.${state}` as 'harnessChanges.sessionStates.idle',{defaultValue:t('harnessChanges.values.custom')})];
+    if(Array.isArray(value.active_flags))for(const flag of value.active_flags) {
+      if(flag==='waitingOnApproval')parts.push(t('harnessChanges.waitingApproval'));
+      if(flag==='waitingOnUserInput')parts.push(t('harnessChanges.waitingInput'));
+    }
+    return parts.join(t('harnessChanges.separator'));
+  }
+  if(change==='managed_setting') {
+    if(typeof value==='boolean')return named(value?'on':'off');
+    if(typeof value==='string' || typeof value==='number')return String(value);
+    return t('harnessChanges.notReported');
+  }
+  if(change==='managed_settings_readback')return t('harnessChanges.notReported');
+  if(change==='collaboration_instructions')return named(value===null?'noAddedInstructions':'privateInstructions');
+  if(value===null)return named('default');
+  if(change==='model' && typeof value==='string')return modelDisplayName(value,t);
+  if(change==='effort' && typeof value==='string')return effortDisplayName(value,t);
+  if(change==='approval_mode' && nativeRecord(value)) {
+    if(typeof value.native_mode==='string') {
+      const modes:Record<string,string>={default:'ask',acceptEdits:'onRequest',auto:'automatic',bypassPermissions:'bypass',plan:'plan'};
+      const mode=modes[value.native_mode];
+      return mode===undefined ? value.native_mode : named(mode);
+    }
+    const policy=value.policy;
+    if(policy==='never')return named('bypass');
+    if(value.reviewer==='auto_review')return named('automatic');
+    if(policy==='untrusted')return named('ask');
+    if(policy==='on-request')return named('onRequest');
+    if(policy==='on-failure')return named('onFailure');
+    return named('custom');
+  }
+  if(change==='sandbox_mode' && nativeRecord(value)) {
+    const modes:Record<string,string>={readOnly:'readOnly',workspaceWrite:'workspace',dangerFullAccess:'open',externalSandbox:'external'};
+    const mode=typeof value.type==='string' ? modes[value.type] : undefined;
+    const parts=[mode===undefined ? named('custom') : named(mode)];
+    if(typeof value.networkAccess==='boolean')parts.push(named(value.networkAccess?'networkAllowed':'networkBlocked'));
+    if(Array.isArray(value.writableRoots)) {
+      const roots=value.writableRoots.filter((root):root is string=>typeof root==='string');
+      parts.push(t('harnessChanges.roots',{roots:roots.length===0?named('noFoldersListed'):roots.join(', ')}));
+    }
+    if(typeof value.excludeTmpdirEnvVar==='boolean')parts.push(named(value.excludeTmpdirEnvVar?'systemTmpExcluded':'systemTmpIncluded'));
+    if(typeof value.excludeSlashTmp==='boolean')parts.push(named(value.excludeSlashTmp?'tmpExcluded':'tmpIncluded'));
+    return parts.join(t('harnessChanges.separator'));
+  }
+  if(change==='collaboration_mode' && nativeRecord(value)) {
+    const parts=[named(value.mode==='plan'?'plan':value.mode==='default'?'work':'custom')];
+    if(nativeRecord(value.settings)) {
+      if(typeof value.settings.model==='string')parts.push(modelDisplayName(value.settings.model,t));
+      if(typeof value.settings.reasoning_effort==='string')parts.push(effortDisplayName(value.settings.reasoning_effort,t));
+    }
+    return parts.join(t('harnessChanges.separator'));
+  }
+  if(typeof value==='boolean')return named(value?'on':'off');
+  if(typeof value==='string' || typeof value==='number')return String(value);
+  return named('custom');
+}
+
 /** The sentence of a line of history. */
-export function markerSentence(payload: MarkerPayload, t: TFunction, context: { locale: string; timeZone?: string | undefined }, includeActor = true): string {
+export function markerSentence(payload: MarkerPayload, t: TFunction, context: { locale: string; timeZone?: string | undefined; providerName?: string | undefined }, includeActor = true): string {
   switch (payload.marker) {
+    case 'harness_changed': {
+      const data=payload.data;
+      if(data.change==='rate_limit') {
+        const value=nativeRecord(data.value)?data.value:{};
+        const words=[value.message,value.reason].filter((part):part is string=>typeof part==='string' && part.length>0);
+        const status=value.status;
+        const fallback=status==='allowed'?t('harnessChanges.rateLimitStates.allowed'):status==='allowed_warning'?t('harnessChanges.rateLimitStates.warning'):status==='rejected'?t('harnessChanges.rateLimitStates.rejected'):typeof status==='string'?status:t('harnessChanges.rateLimitStates.updated');
+        return t('harnessChanges.rateLimit',{provider:context.providerName === undefined || context.providerName === '' ? t('harnessChanges.provider') : context.providerName,message:words.length>0?[...new Set(words)].join(t('harnessChanges.separator')):fallback});
+      }
+      if(data.change==='unrecognized_event' && typeof data.subject==='string') {
+        const count=nativeRecord(data.value)?data.value.count:undefined;
+        return typeof count==='number' && Number.isFinite(count) && count>1
+          ? t('harnessChanges.unrecognizedCount',{program:data.program,name:data.subject,number:formatNumber(count,context.locale)})
+          : t('harnessChanges.unrecognized',{program:data.program,name:data.subject});
+      }
+      if(data.change==='context_compaction')return t('timeline.marker.compacted');
+      if(data.change==='managed_settings_readback')return t(nativeRecord(data.value) && data.value.status==='mismatch' ? 'harnessChanges.pinsDiffer' : nativeRecord(data.value) && data.value.status==='reported' ? 'harnessChanges.pinsReported' : 'harnessChanges.pinsIncomplete',{program:data.program});
+      if(data.change==='system_event')return t('harnessChanges.event',{program:data.program,value:nativeChangeValue(data.change,data.value,t)});
+      if(data.change==='hook' && nativeRecord(data.value)) {
+        const status=data.value.status;
+        const name=data.subject===null || data.subject===undefined ? null : t(`harnessChanges.hookEvents.${data.subject}` as 'harnessChanges.hookEvents.preToolUse',{defaultValue:data.subject});
+        const key=status==='running'?'hookRunning':status==='failed'?'hookFailed':status==='blocked'?'hookBlocked':status==='stopped'?'hookStopped':status==='completed'?'hookRan':'hookReported';
+        return name===null ? t(`harnessChanges.${key}Unnamed`) : t(`harnessChanges.${key}`,{name});
+      }
+      if(data.change==='session_lifecycle' && data.value==='closed')return t('harnessChanges.closed',{program:data.program});
+      if(data.change==='session_lifecycle' && data.value==='resumed')return t('harnessChanges.resumed',{program:data.program});
+      const program=data.subject===undefined || data.subject===null ? data.program : t('harnessChanges.subject',{program:data.program,subject:data.subject});
+      const changed=data.changed;
+      const line=t(changed?'harnessChanges.changed':'harnessChanges.reported',{program,setting:t(`harnessChanges.settings.${data.change}` as 'harnessChanges.settings.model',{defaultValue:t('harnessChanges.setting')}),value:nativeChangeValue(data.change,data.value,t)});
+      return data.next_turn ? `${line} ${t('harnessChanges.future')}` : line;
+    }
+    case 'background_wake':
+      return t(payload.data.admitted ? 'backgroundWake.wokenBy' : 'backgroundWake.waitingBy', { causes: wakeCauses(payload.data.causes, t) || t('backgroundWake.work') });
     case 'resource_resumed':
       return t(payload.data.input_id === null ? 'storage.resumed.refused' : 'storage.resumed.continued', { name: payload.data.name, by: who(payload.data.by, t) });
     case 'resource_stopped':
@@ -170,15 +289,22 @@ export function markerSentence(payload: MarkerPayload, t: TFunction, context: { 
       return t('timeline.marker.switchedCarried', { ...words, count: carried });
     }
     case 'forked_from':
-      return t('timeline.marker.forkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forkedFrom' : 'timeline.marker.agentForkedFrom', { by: who(payload.data.by, t), thread: payload.data.thread.name ?? t('timeline.marker.aThread') });
     case 'forked':
-      return t('timeline.marker.forked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
+      return t(payload.data.by_agent === undefined || payload.data.by_agent === null ? 'timeline.marker.forked' : 'timeline.marker.agentForked', { by: who(payload.data.by, t), into: payload.data.into.name ?? t('timeline.marker.aThread') });
     case 'environment_recreated':
       return t('timeline.marker.environmentRecreated', { template: payload.data.template.name, reason: t(`timeline.marker.recreated.${payload.data.reason}`) });
     case 'environment_restarted':
       return t('timeline.marker.environmentRestarted',{by:payload.data.by===null?t('environmentRestart.system'):who(payload.data.by,t),name:environment(payload.data.environment,t)});
-    case 'environment_moved':
-      return t('timeline.marker.environmentMoved', { by: who(payload.data.by, t), from: environment(payload.data.from, t), to: environment(payload.data.to, t) });
+    case 'environment_moved': {
+      const data = payload.data;
+      const located = (ref: EnvironmentRef, host: typeof data.from_host, machine: typeof data.from_machine): string => {
+        const location = environmentLocation(host, machine);
+        return location === null ? t('timeline.marker.environmentLocationUnrecorded', { environment: environment(ref, t) }) : t('timeline.marker.environmentOn', { environment: environment(ref, t), location });
+      };
+      const moved = t('timeline.marker.environmentMoved', { by: who(data.by, t), from: located(data.from, data.from_host, data.from_machine), to: located(data.to, data.to_host, data.to_machine) });
+      return data.mounts_detached.length === 0 ? moved : `${moved} · ${t('timeline.marker.mountsDetached', { mounts: data.mounts_detached.join(t('startFlow.separator')) })}`;
+    }
     case 'environment_stopped':
       return payload.data.by === null
         ? t('timeline.marker.environmentStoppedBecause', { name: environment(payload.data.environment, t), reason: t(`timeline.marker.stopped.${payload.data.reason}`) })
@@ -287,11 +413,24 @@ function GoalMetLine({ item, payload, Icon }: { item: MarkerItem; payload: Extra
   );
 }
 
+function RateLimitMarker({item,threadId}:{item:MarkerItem;threadId:string}) {
+  const {t}=useTranslation();
+  const context=useFormatContext();
+  // The historical segment's already bounded provider name; a later switch cannot rename this notice.
+  const providerName=useThreadPart(threadId,view=>view.segments.find(segment=>segment.id===item.segment_id)?.provider?.name);
+  return <div className="flex items-center justify-center gap-2 py-1 text-center text-sm text-text-subtle">
+    <Settings2 aria-hidden/><span className="wrap-anywhere">{markerSentence(item.payload,t,{...context,providerName})}</span>
+    <TimeOfDay at={item.created_at} className="text-xs"/>
+  </div>;
+}
+
 export function MarkerLine({ item, count = 1 }: { item: MarkerItem; count?: number }) {
   const { t } = useTranslation();
   const context = useFormatContext();
   const timeline = useTimelineContext();
+  if(item.payload.marker==='harness_changed' && item.payload.data.change==='rate_limit')return <RateLimitMarker item={item} threadId={timeline.threadId}/>;
   const Icon = ICONS[item.payload.marker];
+  if (item.payload.marker === 'background_wake') return <BackgroundWakeMarker threadId={timeline.threadId} data={item.payload.data} at={item.created_at} />;
   if (item.payload.marker === 'resource_resumed') {
     const data=item.payload.data;
     const reason=data.reason==='original_author_unavailable'||data.reason==='original_input_unavailable'?t(`storage.resumed.reasons.${data.reason}`):null;

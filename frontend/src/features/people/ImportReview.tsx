@@ -47,7 +47,7 @@ function Preview({ node, request, item }: { node: string; request: ImportRequest
   const preview = useQuery({ queryKey: importKeys.preview(node, body), queryFn: ({ signal }) => previewImport(node, body, signal), enabled: open, retry: false, gcTime: 0 });
   const label = t('importWizard.review.previewFor', { name: item.name });
   return <Popover open={open} onOpenChange={setOpen} label={label} trigger={<IconButton size="sm" label={label} icon={<Eye aria-hidden />} />}>
-    {preview.isPending ? <SkeletonRows rows={3} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} />
+    {preview.isPending ? <SkeletonRows read={preview} rows={3} /> : preview.isError ? <ErrorAlert error={preview.error} action={<Button size="sm" onClick={() => void preview.refetch()}>{t('common.tryAgain')}</Button>} />
       : <div className="flex min-w-0 flex-col gap-2"><strong className="break-words">{preview.data.name}</strong>
         <Markdown text={preview.data.text} compact />{preview.data.truncated && <span className="text-sm text-text-muted">{t('importWizard.review.shortened')}</span>}
       </div>}
