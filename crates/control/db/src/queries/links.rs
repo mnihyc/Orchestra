@@ -527,15 +527,16 @@ pub async fn among(conn: &mut Conn, members: &[Whole<'_>]) -> Result<Vec<Link>, 
         "SELECT DISTINCT a.kind from_kind,a.id from_id,b.kind to_kind,b.id to_id
            FROM unnest($1::uuid[],$2::text[]) a(id,kind)
            CROSS JOIN unnest($1::uuid[],$2::text[]) b(id,kind)
-          WHERE a.id<>b.id
-            AND (a.kind<>'conversation' OR NOT EXISTS (SELECT 1 FROM threads side WHERE side.node_id=a.id AND side.side_of IS NOT NULL))
-            AND (b.kind<>'conversation' OR NOT EXISTS (SELECT 1 FROM threads side WHERE side.node_id=b.id AND side.side_of IS NOT NULL))
-            AND EXISTS (SELECT 1 FROM related_references r
+           CROSS JOIN LATERAL (SELECT 1 FROM related_references r
                  WHERE r.source_kind=ANY(CASE a.kind WHEN 'document' THEN ARRAY['document','comment'] ELSE ARRAY[a.kind] END)
                    AND r.source_id=a.id AND r.target_kind=CASE b.kind WHEN 'conversation' THEN 'node' ELSE b.kind END
                    AND r.target_id=b.id AND r.target_path_key=''::bytea
                    AND (r.source_kind<>'conversation' OR EXISTS (SELECT 1 FROM items i
-                         WHERE i.id=r.part_id AND i.thread_id=r.source_id AND {LIVE_ITEM} OFFSET 0)))
+                         WHERE i.id=r.part_id AND i.thread_id=r.source_id AND {LIVE_ITEM} OFFSET 0))
+                 LIMIT 1) hit
+          WHERE a.id<>b.id
+            AND (a.kind<>'conversation' OR NOT EXISTS (SELECT 1 FROM threads side WHERE side.node_id=a.id AND side.side_of IS NOT NULL))
+            AND (b.kind<>'conversation' OR NOT EXISTS (SELECT 1 FROM threads side WHERE side.node_id=b.id AND side.side_of IS NOT NULL))
           ORDER BY from_id,to_id"
     )))
     .bind(ids)

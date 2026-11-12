@@ -161,7 +161,7 @@ export function TerminalPanel({ access, tab }: { access: EnvironmentWorkspaceAcc
   const openingBlocked = environment?.terminal === false ? t('terminal.refused.environment_switch_off') : false;
 
   if (shells.error !== null && shells.data === undefined) return <ErrorState compact className="h-full" error={shells.error} onRetry={() => void shells.refetch()} />;
-  if (shells.data === undefined) return <SkeletonRows rows={3} />;
+  if (shells.data === undefined) return <SkeletonRows read={shells} rows={3} />;
 
   const keptHours = (() => {
     const sample = shells.data.find((shell) => shell.closes_at !== null && shell.detached_at !== null);

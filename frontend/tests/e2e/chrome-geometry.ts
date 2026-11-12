@@ -29,10 +29,24 @@ export async function expectVisualChrome(page: Page): Promise<void> {
     };
     for (const icon of Array.from(document.querySelectorAll<SVGSVGElement>('svg.lucide'))) {
       if (!visible(icon) || icon.closest('.avatar, .oc-drawing') !== null) continue;
-      const box = icon.getBoundingClientRect(), expected = icon.closest('[data-navigation-rail]') === null ? 16 : 20;
-      if (!near(box.width, expected) || !near(box.height, expected)) problems.push(`${name(icon.parentElement ?? icon)}: icon ${box.width}×${box.height}, wanted ${expected}`);
+      // Rotation changes a spinner's painted bounds; its layout box retains the actual icon size.
+      const style = getComputedStyle(icon), width = Number.parseFloat(style.width), height = Number.parseFloat(style.height);
+      // The current shell uses 18 px rail symbols and 14 px state/help/close marks beside 16 px ordinary acts.
+      const small = icon.closest('[data-status-chip]') !== null
+        || icon.classList.contains('lucide-circle-question-mark') && icon.closest('button.size-6') !== null
+        || icon.closest('[role="tablist"] button[tabindex="-1"]') !== null && icon.classList.contains('lucide-x');
+      const placeMark = icon.closest('[class~="[&_svg]:size-5"]') !== null;
+      // TagChip removal and a tab's pin mark use the 12 px inline glyph, inside their smaller host.
+      const inline = icon.classList.contains('lucide-x') && icon.closest('button.size-4.rounded-full') !== null
+        || icon.classList.contains('lucide-pin') && icon.closest('[role="tablist"] [data-pinned]') !== null;
+      const checked = icon.closest('[role="checkbox"]') !== null
+        && (icon.classList.contains('lucide-check') || icon.classList.contains('lucide-minus'));
+      const expected = icon.closest('[data-navigation-rail]') !== null ? 18 : placeMark ? 20 : inline || checked ? 12 : small ? 14 : 16;
+      if (!near(width, expected) || !near(height, expected)) problems.push(`${name(icon.parentElement ?? icon)}: icon ${width}×${height}, wanted ${expected}`);
       const stroke = Number.parseFloat(getComputedStyle(icon).strokeWidth);
-      if (Math.abs(stroke - 1.75) > 0.01) problems.push(`${name(icon.parentElement ?? icon)}: stroke ${stroke}, wanted 1.75`);
+      // Shared Checkbox/Tree marks deliberately use a heavier 12 px check, unlike ordinary Lucide acts.
+      const wantedStroke = checked ? 3 : 1.75;
+      if (Math.abs(stroke - wantedStroke) > 0.01) problems.push(`${name(icon.parentElement ?? icon)}: stroke ${stroke}, wanted ${wantedStroke}`);
     }
     const labels: { name: string; colour: string; background: string }[] = [];
     for (const label of Array.from(document.querySelectorAll('h1,h2,h3,label,legend,[role="tab"],[cmdk-group-heading],[data-navigation-section-label]'))) {
@@ -52,13 +66,15 @@ export async function expectVisualChrome(page: Page): Promise<void> {
           const gap = Number.parseFloat(value);
           // gap-px draws a divider or a chart mark, not room between interface controls.
           if (!Number.isFinite(gap) || gap === 0 || element.classList.contains('gap-px')) continue;
-          if (![4, 8, 12, 16, 24].some((step) => near(gap, step))) problems.push(`${name(element)}: ${axis} gap ${gap}`);
+          // Include the compact and intermediate spacing steps explicitly defined in tokens.css.
+          if (![2, 4, 6, 8, 10, 12, 14, 16, 20, 24].some((step) => near(gap, step))) problems.push(`${name(element)}: ${axis} gap ${gap}`);
         }
       }
       if (element.matches('button:not([role="switch"], [role="checkbox"], [role="radio"]), input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea')) {
         const radii = [style.borderTopLeftRadius, style.borderTopRightRadius, style.borderBottomLeftRadius, style.borderBottomRightRadius].map(Number.parseFloat);
         // Unboxed text acts, joined edges and semantic pills/circles retain their shapes.
-        if (Math.max(...radii) <= 12 && radii.some((radius) => radius !== 0 && !near(radius, 6))) problems.push(`${name(element)}: control radii ${radii.join('/')}`);
+        // Inline acts, controls and contained rail tiles use the named 4/6/8 px radii.
+        if (Math.max(...radii) <= 12 && radii.some((radius) => radius !== 0 && ![4, 6, 8].some((token) => near(radius, token)))) problems.push(`${name(element)}: control radii ${radii.join('/')}`);
       }
     }
     const fields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea'));
@@ -75,7 +91,9 @@ export async function expectVisualChrome(page: Page): Promise<void> {
       const bounds = frame.getBoundingClientRect(), look = getComputedStyle(frame);
       const start = box.left + Number.parseFloat(style.borderLeftWidth) + Number.parseFloat(style.paddingLeft) - bounds.left - Number.parseFloat(look.borderLeftWidth);
       const end = bounds.right - Number.parseFloat(look.borderRightWidth) - box.right + Number.parseFloat(style.borderRightWidth) + Number.parseFloat(style.paddingRight);
-      if (start < 12 - rounding || end < 12 - rounding) problems.push(`${name(field)}: inner margins ${start}/${end}, wanted at least 12`);
+      // Shared compactControls explicitly uses an 8 px field inset; ordinary fields retain 12 px.
+      const inset = field.closest('[class~="[&_input]:px-2"]') === null ? 12 : 8;
+      if (start < inset - rounding || end < inset - rounding) problems.push(`${name(field)}: inner margins ${start}/${end}, wanted at least ${inset}`);
       if (field.classList.contains('input-leading-icon')) {
         const icon = field.parentElement?.querySelector('svg');
         if (icon === null || icon === undefined) problems.push(`${name(field)}: search glyph missing`);

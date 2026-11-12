@@ -2,7 +2,7 @@
 import { screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { expect, it, vi } from 'vitest';
-import { PerformanceComparison, PerformanceFigures } from '@/features/usage/Performance';
+import { PerformanceComparison, PerformanceFigures, PerformanceErrors } from '@/features/usage/Performance';
 import { UsageChart } from '@/features/usage/Chart';
 import { barsOf } from '@/features/usage/series';
 import { i18n } from '@/i18n';
@@ -101,4 +101,14 @@ it('offers the chart values as a labelled table with median and percentile units
   expect(within(table).getByRole('columnheader', { name: 'When' })).toBeInTheDocument();
   expect(table).toHaveTextContent('61 tok/s');
   expect(table).toHaveTextContent('90th: 61 tok/s');
+});
+
+
+it('offers separate actionable rate, overload and interrupted-stream error classes',async()=>{
+  const changed=vi.fn();const errors={rate_limited:2,overloaded:3,stream_interrupted:4};
+  show(<PerformanceErrors performance={measured({requests:20,errors})} onOutcome={changed}/>);
+  for(const [code,count] of Object.entries(errors)) {
+    await userEvent.click(screen.getByRole('button',{name:`${i18n.t(`usagePerf.outcomes.${code}` as 'usagePerf.outcomes.done')} (${count})`}));
+    expect(changed).toHaveBeenLastCalledWith(code);
+  }
 });

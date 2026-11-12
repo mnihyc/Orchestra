@@ -49,7 +49,7 @@ function FolderContents({ place, onChoose }: { place: string; onChoose: (folder:
         {trail.length > 1 && <Button size="sm" variant="ghost" icon={<ChevronLeft aria-hidden />} onClick={() => setTrail((before) => before.slice(0, -1))}>{t('importWizard.destination.folderParent')}</Button>}
         <span ref={pathRef} tabIndex={-1} className="focus-inset min-w-0 truncate text-sm text-text-muted" title={path}>{path}</span>
       </div>
-      {page.isPending ? <SkeletonRows rows={3} /> : page.isError ? <ErrorAlert error={page.error} action={<Button size="sm" onClick={() => void page.refetch()}>{t('common.tryAgain')}</Button>} /> : <>
+      {page.isPending ? <SkeletonRows read={page} rows={3} /> : page.isError ? <ErrorAlert error={page.error} action={<Button size="sm" onClick={() => void page.refetch()}>{t('common.tryAgain')}</Button>} /> : <>
         <Tooltip content={allowed ? undefined : t(page.isFetching ? 'importWizard.destination.checking' : 'importWizard.destination.folderDenied')}><Button size="sm" blocked={!allowed} onClick={() => {
           onChoose(current.at.kind === 'node_docs' ? null : { id: current.at.id, label: directory?.folder?.entry.title ?? current.name ?? t('ui.nameUnknown') });
         }}>{t('importWizard.destination.folderUse')}</Button></Tooltip>

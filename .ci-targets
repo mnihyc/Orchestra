@@ -1,0 +1,4 @@
+# The engine's settling round, final head: the contract, the adapter and the neighbouring engine programs.
+test -p orch-agent-contract --lib
+test -p orch-adapter-claude-code --lib --test child_usage --test performance --test recorded_transitions --test turns --test background_wake
+test -p orch-engine --test agent_history --test background_wake --test native_capability_counts

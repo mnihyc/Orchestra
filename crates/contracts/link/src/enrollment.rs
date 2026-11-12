@@ -175,6 +175,9 @@ pub struct EnrollReplySystem {
 /// The system's answer to an enrollment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EnrollReply {
+    /// Labelled gateways beside the legacy ordered entrance list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateways: Vec<crate::gateways::GatewayInstance>,
     /// The machine's identifier from now on.
     pub machine_id: Id,
     /// Its certificate.

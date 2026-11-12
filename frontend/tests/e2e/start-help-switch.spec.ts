@@ -2,11 +2,11 @@
 import { expect, type Page, test } from '@playwright/test';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import chinese from '../../src/i18n/zh-CN.json' with { type: 'json' };
-import type { BindingOptions } from '../../src/generated/api-types';
+import type { BindingOptions, Place, PlaceHost } from '../../src/generated/api-types';
 import { expectOrdinaryWizardControls, expectSameActionRow } from './change-control-geometry';
 import { MAIN, openHistory } from './change-support';
 import { requestsOf } from './start-support';
-import { bodySent, ACME, scenario, signIn } from './support';
+import { ACME, scenario, signIn } from './support';
 
 async function language(page: Page, locale: 'en' | 'zh-CN'): Promise<void> {
   if (locale === 'zh-CN') {
@@ -31,13 +31,20 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await page.goto(`/topic/${ACME.fixLogin}`);
       const starter = page.locator('[data-quick-start]');
       await starter.getByRole('textbox').fill('Keep this first message');
+      const topicAddress = page.url();
       await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
       const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
       await expect(form).toBeVisible();
       await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
-      await expect(form.getByRole('combobox')).toHaveCount(4);
+      // The four main bindings now sit beside More environments and General access.
+      await expect(form.getByRole('combobox')).toHaveCount(6);
+      for (const label of [words.start.provider.title, words.start.agent.title, words.start.model.model, words.start.where.title]) {
+        await expect(form.getByRole('combobox', { name: label, exact: true })).toBeVisible();
+      }
       await expect(form.getByRole('textbox')).toHaveCount(0);
-      await expect(form.getByRole('radiogroup')).toHaveCount(0);
+      // Existing and new placement are explicit modes, rather than an entry inside the environment list.
+      await expect(form.getByRole('radiogroup')).toHaveCount(1);
+      await expect(form.getByRole('radio', { name: words.start.where.useExisting, exact: true })).toBeChecked();
       await expectOrdinaryWizardControls(form, 'four initial choices');
       await expectSameActionRow(form.locator('[data-start-actions]'));
       await info.attach('start-four-choices', { body: await page.screenshot(), contentType: 'image/png' });
@@ -51,7 +58,7 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await expect(help).toBeVisible();
       await expect(page.getByRole('dialog')).toHaveCount(0);
       await expect(page.getByRole('alertdialog')).toHaveCount(0);
-      await expect(page).toHaveURL(new RegExp(`/topic/${ACME.fixLogin}$`));
+      await expect(page).toHaveURL(topicAddress);
       await help.getByRole('tab', { name: new RegExp(`^${words.help.parts.articles}`) }).click();
       await help.getByRole('button', { name: words.craftGuides.gettingStarted, exact: true }).click();
       const article = help.getByRole('region', { name: words.craftGuides.gettingStarted, exact: true });
@@ -80,12 +87,20 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     test('an impossible new-environment setup is disabled before any creation request', async ({ page }, info) => {
       await signIn(page); await language(page, locale);
       const words = locale === 'en' ? english : chinese;
+      let hosts: PlaceHost[] | null = null;
       await page.route(`**/nodes/${ACME.fixLogin}/binding/options**`, async (route) => {
-        if (new URL(route.request().url()).searchParams.get('environment_new') !== 'true') { await route.continue(); return; }
         const response = await route.fetch();
         const payload: unknown = await response.json();
         const offered = payload as BindingOptions;
-        await route.fulfill({ response, json: { ...offered, providers: offered.providers.map((provider) => ({ ...provider,
+        if (hosts === null) {
+          // The minimal binding fixture omits hosts; reuse the same reader's actual place judgements.
+          const placements = await route.fetch({ url: new URL(`/api/v1/nodes/${ACME.fixLogin}/places`, route.request().url()).href });
+          expect(placements.ok()).toBe(true);
+          hosts = (await placements.json() as Place[]).filter((place): place is PlaceHost => !('environment' in place) && 'host' in place && place.usable);
+          expect(hosts.length).toBeGreaterThan(0);
+        }
+        const fresh = new URL(route.request().url()).searchParams.get('environment_new') === 'true';
+        await route.fulfill({ response, json: { ...offered, hosts, providers: !fresh ? offered.providers : offered.providers.map((provider) => ({ ...provider,
           agents: provider.agents.map((agent) => ({ ...agent, usable: false, reason: 'executor_missing',
             arrangements: agent.arrangements.map((arrangement) => ({ ...arrangement, available: false, reason: 'executor_missing', detail: null })),
           })),
@@ -96,9 +111,8 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await starter.getByRole('textbox').fill('Keep this first message');
       await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
       const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
-      await form.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
       const judged = page.waitForResponse((response) => response.url().includes(`/nodes/${ACME.fixLogin}/binding/options`) && new URL(response.url()).searchParams.get('environment_new') === 'true');
-      await page.getByRole('option', { name: words.choiceCatalog.environmentDestination.new.name, exact: true }).click();
+      await form.getByRole('radio', { name: words.start.where.createNew, exact: true }).click();
       await judged;
       await expect(form.getByRole('button', { name: words.start.create, exact: true })).toBeDisabled();
       await form.getByRole('combobox', { name: words.start.agent.title, exact: true }).click();
@@ -128,16 +142,21 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       await expectSameActionRow(confirm.locator('..'));
       let release: () => void = () => undefined;
       const held = new Promise<void>((resolve) => { release = resolve; });
-      await page.route('**/api/v1/threads/*/forks/preflight', async (route) => { await held; await route.continue(); }, { times: 1 });
+      let body: unknown;
+      await page.route('**/api/v1/threads/*/forks/preflight', async (route) => {
+        // Interception materializes the streamed body; a server receipt cannot exist while this route is held.
+        body = route.request().postDataJSON();
+        await held; await route.continue();
+      }, { times: 1 });
       try {
         const provider = form.getByRole('combobox', { name: words.switchChoice.picker, exact: true });
-        const fromOpenAI = (await provider.textContent())?.includes('OpenAI key') === true;
-        const [request] = await Promise.all([
+        await expect(provider).toHaveAttribute('placeholder', /OpenAI key|Team Anthropic/);
+        const fromOpenAI = (await provider.getAttribute('placeholder'))?.includes('OpenAI key') === true;
+        await Promise.all([
           page.waitForRequest('**/api/v1/threads/*/forks/preflight'),
           (async () => { await provider.click(); await page.getByRole('option', { name: fromOpenAI ? /Team Anthropic/ : /OpenAI key/ }).first().click(); })(),
         ]);
-        const body: unknown = (await bodySent(request));
-        expect(body).toMatchObject({ to: { model: fromOpenAI ? 'claude-sonnet-5' : 'gpt-5.4' } });
+        await expect.poll(() => body).toMatchObject({ to: { model: fromOpenAI ? 'claude-sonnet-5' : 'gpt-5.4' } });
         await expect(confirm).toHaveAttribute('aria-disabled', 'true');
         await expect(form.locator('[data-change-reason]')).toHaveText(words.changeReady.checking);
         await expectSameActionRow(confirm.locator('..'));
@@ -154,5 +173,87 @@ for (const width of [1440, 400]) for (const locale of ['en', 'zh-CN'] as const) 
         await info.attach('switch-reviewed', { body: await page.screenshot(), contentType: 'image/png' });
       } finally { release(); }
     });
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`marks the environment reported as this topic's default (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario();
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    const preview: { defaultName: string | null } = { defaultName: null };
+    await page.route('**/api/v1/nodes/*/binding/options**', async (route) => {
+      const response = await route.fetch();
+      const options: unknown = await response.json();
+      if (typeof options !== 'object' || options === null || !('environments' in options) || !Array.isArray(options.environments)) throw new Error('The native binding preview supplies environment choices.');
+      const first: unknown = options.environments[0];
+      if (typeof first !== 'object' || first === null || !('environment' in first) || typeof first.environment !== 'object' || first.environment === null
+        || !('name' in first.environment) || typeof first.environment.name !== 'string') throw new Error('This default-mark fixture needs one native environment.');
+      preview.defaultName = first.environment.name;
+      await route.fulfill({ response, json: { ...options, environments: options.environments.map((entry: unknown, index: number) => {
+        if (typeof entry !== 'object' || entry === null) throw new Error('A binding environment is an object.');
+        return { ...entry, is_default: index === 0 };
+      }) } });
+    });
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/topic/${ACME.fixLogin}`);
+    await page.locator('[data-quick-start]').getByRole('button', { name: words.start.quick.change, exact: true }).click();
+    const form = page.getByRole('dialog', { name: words.start.title.replace('{{parent}}', 'Fix login'), exact: true });
+    await form.getByRole('button', { name: words.start.options.title, exact: true }).click();
+    const where = form.locator('[data-start-where]');
+    await where.getByRole('radio', { name: words.start.where.useExisting, exact: true }).click();
+    // The selected binding carries its origin in the field heading.
+    const heading = form.getByRole('heading').filter({ hasText: words.start.where.title });
+    await expect(heading.getByText(words.startImplicit.origin.shared_default, { exact: true })).toBeVisible();
+    await where.getByRole('combobox', { name: words.start.where.title, exact: true }).click();
+    if (preview.defaultName === null) throw new Error('The default environment must come from the native preview.');
+    const option = page.getByRole('option', { name: preview.defaultName, exact: true });
+    await expect(option).toHaveAttribute('aria-selected', 'true');
+    await expect(option.getByText(words.start.topicDefault, { exact: true })).toHaveCount(0);
+  });
+}
+
+for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'dark'] as const) for (const width of [400, 1440]) {
+  test(`opens complete reference documentation from the Arrangement heading (${locale}/${theme}/${width})`, async ({ page }) => {
+    await scenario(); await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
+    await signIn(page); await language(page, locale);
+    const words = locale === 'en' ? english : chinese;
+    await page.goto(`/topic/${ACME.fixLogin}`);
+    const starter = page.locator('[data-quick-start]');
+    await starter.getByRole('textbox').fill('Keep the setup while reading');
+    await starter.getByRole('button', { name: words.start.quick.change, exact: true }).click();
+    const form = page.getByRole('dialog').filter({ has: page.locator('[data-start-actions]') });
+    await form.getByRole('button', { name: words.start.options.title, exact: true }).click();
+    const question = form.getByRole('button', { name: words.help.hint.label.replace('{{term}}', words.start.arrangement.label), exact: true });
+    await expect(question).toHaveCount(1);
+    await question.click();
+    await page.getByRole('button', { name: words.help.hint.more, exact: true }).click();
+    const help = page.locator('[data-help-reading]');
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Choose an arrangement' : '选择运行方式', exact: true })).toBeVisible();
+    await help.getByRole('link', { name: locale === 'en' ? 'option field reference' : '选项字段参考', exact: true }).click();
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Option field reference' : '选项字段参考', exact: true })).toBeVisible();
+    await expect(help.getByText('option:ChangeOptions.active_turn', { exact: true })).toBeVisible();
+    await expect(help).toContainText(locale === 'en' ? 'How to treat a turn that is under way.' : '如何处理正在运行的轮次。');
+    const summaryOption = help.getByText('option:SummaryTargetOptions.automatic', { exact: true });
+    await summaryOption.scrollIntoViewIfNeeded();
+    await expect(summaryOption).toBeVisible();
+    await expect(help).toContainText(locale === 'en' ? 'Allow automatic refresh for this target. Off as shipped; explicit Refresh is separate.' : '允许此目标自动刷新。默认关闭；手动刷新是独立操作。');
+    const groupOption = help.getByText('option:ModelGroupOptions.request_options', { exact: true });
+    await groupOption.scrollIntoViewIfNeeded();
+    await expect(groupOption).toBeVisible();
+    await help.getByRole('link', { name: locale === 'en' ? 'settings reference' : '设置参考', exact: true }).click();
+    await expect(help.getByRole('heading', { name: locale === 'en' ? 'Settings reference' : '设置参考', exact: true })).toBeVisible();
+    const askSetting = help.getByRole('row').filter({ has: page.getByText('setting:ask.max_steps', { exact: true }) });
+    await askSetting.scrollIntoViewIfNeeded();
+    await expect(askSetting).toContainText(words.settingRegistry.ask.max_steps.description);
+    await help.getByRole('link', { name: locale === 'en' ? 'state reference' : '状态参考', exact: true }).click();
+    const closed = help.getByRole('row').filter({ has: page.getByText('state:AskState.closed', { exact: true }) });
+    await closed.scrollIntoViewIfNeeded();
+    await expect(closed).toContainText(locale === 'en' ? 'The owner can no longer enter the conversation’s root organization.' : '所有者已无法进入此会话的根组织。');
+    const unfinished = help.getByRole('row').filter({ has: page.getByText('state:UploadInventoryState.partial', { exact: true }) });
+    await unfinished.scrollIntoViewIfNeeded();
+    await expect(unfinished).toContainText(locale === 'en' ? 'The upload is unfinished; this does not claim that a sender is active now.' : '上传尚未完成；不能据此认定发送方此刻仍在活动。');
+    await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
   });
 }

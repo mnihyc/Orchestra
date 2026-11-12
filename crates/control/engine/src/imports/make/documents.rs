@@ -4,8 +4,8 @@ use super::{Batch, Made, MakeError, Staged, note_origin, refuse, settle_name};
 use crate::document_tree::{Actor, Directory};
 use crate::imports::identity;
 use crate::imports::model::Object;
-use crate::imports::plain;
 use crate::imports::remap::{Found, Maps, remap};
+use crate::imports::{ImportError, plain};
 use futures::StreamExt;
 use orch_access_contract::audit::AuditAction;
 use orch_access_contract::permissions::Permission;
@@ -384,6 +384,7 @@ async fn put_embedded(
     document: Id,
     embedded: &[Embedded],
     made: &mut Made,
+    prepared: Option<&HashMap<Hash, Result<(), String>>>,
 ) -> Result<(), MakeError> {
     if embedded.is_empty() {
         return Ok(());
@@ -398,17 +399,29 @@ async fn put_embedded(
     for each in embedded {
         let hash = Hash::of(&each.bytes);
         let size = i64::try_from(each.bytes.len()).unwrap_or(i64::MAX);
-        let content: ByteStream = futures::stream::once(std::future::ready(Ok::<_, BlobError>(
-            bytes::Bytes::from(each.bytes.clone()),
-        )))
-        .boxed();
-        if let Err(error) = store.put(&hash, Some(size), content).await {
+        let stored = match prepared.and_then(|values| values.get(&hash)) {
+            Some(value) => value.clone(),
+            None => {
+                let content: ByteStream =
+                    futures::stream::once(std::future::ready(Ok::<_, BlobError>(
+                        bytes::Bytes::from(each.bytes.clone()),
+                    )))
+                    .boxed();
+                store
+                    .put(&hash, Some(size), content)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }
+        };
+        if let Err(error) = stored {
             made.warn(
                 "missing_file",
                 format!("the file {} could not be kept: {error}", each.name),
             );
             continue;
         }
+        batch.live()?;
         storage::register_blob(tx, &hash, size, batch.now).await?;
         if storage::pin_blobs(tx, &[hash]).await? != 1 {
             continue;
@@ -491,6 +504,78 @@ pub(super) async fn make_document(
     batch: &Batch<'_>,
     object: &Object,
 ) -> Result<Made, MakeError> {
+    make_document_ready(tx, batch, object, None).await
+}
+/// One native document body opened before its action transaction.
+pub struct PreparedDocument {
+    read: Read,
+    embedded: HashMap<Hash, Result<(), String>>,
+}
+pub(super) async fn prepare_document(
+    batch: &Batch<'_>,
+    object: &Object,
+) -> Result<Option<PreparedDocument>, MakeError> {
+    if unchanged(object) {
+        return Ok(None);
+    }
+    let read = if batch.plan.opened.plain.contains_key(&object.object.id) {
+        read_plain(batch, object).await?
+    } else {
+        read_package(batch, object).await?
+    };
+    let mut embedded = HashMap::new();
+    if let Some(store) = batch.engine.blobs() {
+        for file in &read.embedded {
+            let hash = Hash::of(&file.bytes);
+            let size = i64::try_from(file.bytes.len()).unwrap_or(i64::MAX);
+            if embedded.contains_key(&hash) {
+                continue;
+            }
+            let content: ByteStream = futures::stream::once(std::future::ready(Ok(
+                bytes::Bytes::from(file.bytes.clone()),
+            )))
+            .boxed();
+            let content = match batch.operation {
+                Some((request, _)) => request.stream(batch.engine.clone(), content),
+                None => content,
+            };
+            let stored = store
+                .put(&hash, Some(size), content)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            if stored.is_ok() {
+                // Exact owned preparation remains collectible even if later source admission closes.
+                let mut conn = batch
+                    .engine
+                    .inner
+                    .db
+                    .acquire()
+                    .await
+                    .map_err(ImportError::from)?;
+                storage::register_blob(&mut conn, &hash, size, batch.now).await?;
+            }
+            embedded.insert(hash, stored);
+        }
+    }
+    Ok(Some(PreparedDocument { read, embedded }))
+}
+fn unchanged(object: &Object) -> bool {
+    object.action == ImportAction::Replace
+        && object
+            .existing
+            .as_ref()
+            .and_then(|existing| existing.origin.as_ref())
+            .is_some_and(|origin| {
+                origin.source_sha256.is_some() && origin.source_sha256 == object.object.sha256
+            })
+}
+pub(super) async fn make_document_ready(
+    tx: &mut Tx,
+    batch: &Batch<'_>,
+    object: &Object,
+    prepared: Option<PreparedDocument>,
+) -> Result<Made, MakeError> {
     let importer = batch.principal.user();
     // What an earlier import wrote of it, if it is the same record: nothing to do.
     if object.action == ImportAction::Replace
@@ -499,15 +584,23 @@ pub(super) async fn make_document(
         && origin.source_sha256.is_some()
         && origin.source_sha256 == object.object.sha256
     {
+        let mut operation_cut = batch.before(tx, object).await?;
+        batch.cut(&mut operation_cut)?;
         note_origin(tx, batch, object, existing.id, Some(object.lies_in), false).await?;
         let mut made = Made::done(object, existing.id);
         made.outcome = ImportOutcome::Unchanged;
         return Ok(made);
     }
-    let read = if batch.plan.opened.plain.contains_key(&object.object.id) {
-        read_plain(batch, object).await?
-    } else {
-        read_package(batch, object).await?
+    let (read, prepared_embedded) = match prepared {
+        Some(prepared) => (prepared.read, Some(prepared.embedded)),
+        None => {
+            let read = if batch.plan.opened.plain.contains_key(&object.object.id) {
+                read_plain(batch, object).await?
+            } else {
+                read_package(batch, object).await?
+            };
+            (read, None)
+        }
     };
     let source_creator = read
         .creator
@@ -551,6 +644,12 @@ pub(super) async fn make_document(
         )
         .await?;
     }
+    let mut operation_cut = batch.before(tx, object).await?;
+    let current_principal = operation_cut.as_ref().map(|cut| cut.principal.clone());
+    let current_batch = current_principal
+        .as_ref()
+        .map(|principal| batch.with_principal(principal));
+    let batch = current_batch.as_ref().unwrap_or(batch);
     if replacing {
         // The document that is there keeps its identifier, its place and its sharing; what it said is kept as a version.
         let Some(row) = rows::lock(tx, document).await? else {
@@ -567,6 +666,7 @@ pub(super) async fn make_document(
         if !holds {
             return refuse("you may not change the document that is there");
         }
+        batch.cut(&mut operation_cut)?;
         history::cut(tx, &row, VersionCause::Rewrite, batch.now).await?;
         if row.title != title {
             // What the source calls it now is what it is called here, and the version just cut keeps the name it had.
@@ -591,6 +691,7 @@ pub(super) async fn make_document(
                 .unwrap_or(usize::MAX)
                 .max(1),
         ) {
+            batch.live()?;
             apply(tx, document, &writer, chunk, &settings, rules, batch).await?;
         }
         // Its files go with what said them: the new ones are put in below.
@@ -599,7 +700,7 @@ pub(super) async fn make_document(
             rows::remove_file(tx, document, file.id).await?;
         }
     } else {
-        let created = crate::document_tree::create_text_in(
+        let header = crate::document_tree::prepare_text_creation_in(
             tx,
             Actor::Person(batch.principal),
             parent,
@@ -609,6 +710,14 @@ pub(super) async fn make_document(
             Time::new(batch.now),
         )
         .await?;
+        let created = crate::document_tree::apply_text_creation_in(
+            tx,
+            Actor::Person(batch.principal),
+            header,
+            Time::new(batch.now),
+            || batch.cut(&mut operation_cut),
+        )
+        .await??;
         if !created.created {
             // A retry of what was made: it stands.
             note_origin(tx, batch, object, document, Some(object.lies_in), true).await?;
@@ -622,7 +731,15 @@ pub(super) async fn make_document(
         made.warn(code, message.clone());
     }
     let files = put_files(tx, batch, document, &read.files, &mut made).await?;
-    put_embedded(tx, batch, document, &read.embedded, &mut made).await?;
+    put_embedded(
+        tx,
+        batch,
+        document,
+        &read.embedded,
+        &mut made,
+        prepared_embedded.as_ref(),
+    )
+    .await?;
     let mut found = Found::default();
     let mut combined: HashMap<Id, Id> = batch.maps.files.clone();
     combined.extend(files);
@@ -646,6 +763,7 @@ pub(super) async fn make_document(
             .unwrap_or(usize::MAX)
             .max(1),
     ) {
+        batch.live()?;
         apply(tx, document, &writer, chunk, &settings, rules, batch).await?;
     }
     if let Body::Records(records) = &read.blocks {

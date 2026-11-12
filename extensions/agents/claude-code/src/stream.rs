@@ -133,6 +133,51 @@ impl Frame {
         self.value.get("message")
     }
 
+    /// Native echoes may carry an explicit origin or only the synthetic-message flag.
+    /// Neither form by itself identifies an owned task or grants authority to act.
+    pub(crate) fn has_native_notice_origin(&self) -> bool {
+        self.kind() == FrameKind::User
+            && match self.get("origin") {
+                Some(Json::Object(origin)) => {
+                    origin.get("kind").and_then(Json::as_str) == Some("task-notification")
+                }
+                None | Some(Json::Null) => {
+                    self.get("isSynthetic").and_then(Json::as_bool) == Some(true)
+                }
+                _ => false,
+            }
+    }
+
+    /// Native task notices can omit run metadata on the user echo. Their task/tool
+    /// fields are protocol data only after the harness identifies the frame's origin.
+    pub(crate) fn stopped_task_notice(&self) -> Option<(&str, &str)> {
+        if !self.has_native_notice_origin() {
+            return None;
+        }
+        let content = self.message()?.get("content")?;
+        let text = match content {
+            Json::String(text) => text.as_str(),
+            Json::Array(blocks) => {
+                let mut notices = blocks
+                    .iter()
+                    .filter(|block| block["type"] == "text")
+                    .filter_map(|block| block["text"].as_str())
+                    .filter(|text| text.contains("<task-notification>"));
+                let first = notices.next()?;
+                if notices.next().is_some() {
+                    return None;
+                }
+                first
+            }
+            _ => return None,
+        };
+        let packet = one_tag(text, "task-notification")?;
+        if !matches!(one_tag(packet, "status"), Some("killed" | "stopped")) {
+            return None;
+        }
+        Some((one_tag(packet, "task-id")?, one_tag(packet, "tool-use-id")?))
+    }
+
     /// The content blocks of the `message`; a text content counts as one text block.
     #[must_use]
     pub fn blocks(&self) -> Vec<Json> {
@@ -142,6 +187,17 @@ impl Frame {
             _ => Vec::new(),
         }
     }
+}
+
+fn one_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    if text.matches(open.as_str()).count() != 1 || text.matches(close.as_str()).count() != 1 {
+        return None;
+    }
+    let (_, content) = text.split_once(open.as_str())?;
+    let (value, _) = content.split_once(close.as_str())?;
+    (!value.is_empty()).then_some(value)
 }
 
 /// A block of text for a user message.
@@ -266,6 +322,52 @@ mod tests {
         let frame =
             Frame::parse(r#"{"type":"user","message":{"role":"user","content":"plain"}}"#).unwrap();
         assert_eq!(frame.blocks(), vec![text_block("plain")]);
+    }
+
+    #[test]
+    fn a_native_stopped_notice_keeps_task_and_tool_ids_without_optional_origin_fields() {
+        let packet = "<task-notification>\n<task-id>task:α</task-id>\n<tool-use-id>tool&1</tool-use-id>\n<status>killed</status>\n</task-notification>";
+        for content in [json!(packet), json!([{"type":"text","text":packet}])] {
+            let frame = Frame::from_value(
+                json!({"type":"user","origin":{"kind":"task-notification"},"message":{"role":"user","content":content}}),
+            );
+            assert_eq!(frame.stopped_task_notice(), Some(("task:α", "tool&1")));
+        }
+        let synthetic = Frame::from_value(
+            json!({"type":"user","isSynthetic":true,"message":{"content":packet}}),
+        );
+        assert_eq!(synthetic.stopped_task_notice(), Some(("task:α", "tool&1")));
+        let conflicting = Frame::from_value(
+            json!({"type":"user","isSynthetic":true,"origin":{"kind":"sdk"},"message":{"content":packet}}),
+        );
+        assert!(conflicting.stopped_task_notice().is_none());
+        for content in [
+            format!("{packet}{packet}"),
+            packet.replace("<status>killed</status>", "<status>failed</status>"),
+            packet.replace(
+                "<task-id>task:α</task-id>",
+                "<task-id>task:α</task-id><task-id>other</task-id>",
+            ),
+            packet.replace("<tool-use-id>tool&1</tool-use-id>", ""),
+        ] {
+            let frame = Frame::from_value(
+                json!({"type":"user","origin":{"kind":"task-notification"},"message":{"content":content}}),
+            );
+            assert!(frame.stopped_task_notice().is_none());
+        }
+        for origin in [json!(null), json!({"kind":"sdk"})] {
+            let frame = Frame::from_value(
+                json!({"type":"user","origin":origin,"message":{"content":packet}}),
+            );
+            assert!(
+                frame.stopped_task_notice().is_none(),
+                "text alone is never native provenance"
+            );
+        }
+        let assistant = Frame::from_value(
+            json!({"type":"assistant","origin":{"kind":"task-notification"},"message":{"content":packet}}),
+        );
+        assert!(assistant.stopped_task_notice().is_none());
     }
 
     #[test]

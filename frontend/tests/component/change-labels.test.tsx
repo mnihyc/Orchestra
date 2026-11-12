@@ -7,13 +7,14 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { initialChoices, type Choices } from '@/features/change/choices';
 import { RunsOn, useModelFor } from '@/features/change/RunsOn';
 import type { Thread } from '@/generated/api-types';
-import { setLocale } from '@/i18n';
+import { i18n, setLocale } from '@/i18n';
 
 import { show } from './support';
 
 // These are only the reported facts read by this picker; provider usage/arrangement are independent views.
 const reported = vi.hoisted(() => ({
   reads: vi.fn(),
+  usableIds: null as string[] | null,
   providers: [{ id: 'target-provider', name: 'Provider display name', status: 'ready', protocols: ['openai'], owner: { display_name: 'Owner' }, home: { id: 'topic', name: 'Team', redacted: false }, placement: 'managed', machine: null }],
   agents: [{ id: 'agent', name: 'Agent display name', disabled: false, descriptor: { kind: 'mock' }, harness_kind: 'private_harness_key' }],
   models: [
@@ -23,14 +24,43 @@ const reported = vi.hoisted(() => ({
   ],
 }));
 vi.mock('@/api/resources', async (original) => ({ ...await original<object>(),
-  providersQuery: (holding: string) => ({ queryKey: ['display-providers', holding], initialData: reported.providers, queryFn: () => Promise.resolve(reported.providers) }),
+  providersQuery: (holding: string) => {
+    const providers=holding==='usable' && reported.usableIds!==null ? reported.providers.filter((provider)=>reported.usableIds?.includes(provider.id)) : reported.providers;
+    return { queryKey: ['display-providers', holding], initialData: providers, queryFn: () => Promise.resolve(providers) };
+  },
   agentsQuery: () => ({ queryKey: ['display-agents'], initialData: reported.agents, queryFn: () => Promise.resolve(reported.agents) }),
   providerModelsQuery: () => ({ queryKey: ['display-models'], initialData: reported.models, queryFn: () => { reported.reads(); return Promise.resolve(reported.models); } }),
 }));
 vi.mock('@/features/resources/providers/ProviderUsageCard', () => ({ ProviderUsageCard: () => null }));
 vi.mock('@/features/start/Arrangement', () => ({ ProviderArrangementChoice: () => null }));
 
-afterEach(async () => { await setLocale('en'); });
+afterEach(async () => { reported.providers[0]!.status='ready';reported.usableIds=null;await setLocale('en'); });
+
+it.each([true,false])('an exhausted provider remains selectable in the ordinary switch picker (compact=%s)',async(compact)=>{
+  reported.providers[0]!.status='exhausted';
+  const thread={model:'private_route_from',model_display:'Earlier Model',effort:null,binding:{provider:{id:'source-provider'},agent:{id:'source-agent'}}} as unknown as Thread;
+  const changed=vi.fn();
+  show(<RunsOn compact={compact} thread={thread} choices={initialChoices('replace')} onChange={changed}/>);
+  const picker=await screen.findByRole('combobox',{name:i18n.t(compact?'switchChoice.picker':'change.runs.provider')});
+  await userEvent.click(picker);
+  const option=screen.getByRole('option',{name:compact?'Agent display name on Provider display name':'Provider display name'});
+  expect(option).not.toHaveAttribute('aria-disabled','true');
+  await userEvent.click(option);
+  expect(changed).toHaveBeenCalledWith({providerId:'target-provider',agentId:'agent',model:null,effort:undefined,arrangement:null,automaticRuns:compact?{}:{profile:{providerId:'target-provider',agentId:'agent',by:'first',previous:'unavailable'}}});
+});
+
+it.each(['needs_setup','error','offline','disabled','no_use'] as const)('keeps %s providers unavailable even when selecting a replacement',async(reason)=>{
+  reported.providers[0]!.status=reason==='no_use'?'exhausted':reason;
+  if(reason==='no_use')reported.usableIds=[];
+  const thread={model:'private_route_from',model_display:'Earlier Model',effort:null,binding:{provider:{id:'source-provider'},agent:{id:'source-agent'}}} as unknown as Thread;
+  const changed=vi.fn();
+  show(<RunsOn compact thread={thread} choices={initialChoices('replace')} onChange={changed}/>);
+  await userEvent.click(await screen.findByRole('combobox',{name:i18n.t('switchChoice.picker')}));
+  const option=screen.getByRole('option',{name:'Agent display name on Provider display name'});
+  expect(option).toHaveAttribute('aria-disabled','true');
+  await userEvent.click(option);
+  expect(changed).not.toHaveBeenCalled();
+});
 
 for (const locale of ['en', 'zh-CN'] as const) it(`uses one named provider/profile picker for an ordinary switch (${locale})`, async () => {
   await setLocale(locale);
@@ -47,8 +77,8 @@ for (const locale of ['en', 'zh-CN'] as const) it(`uses one named provider/profi
   await userEvent.click(choice);
   const name = locale === 'en' ? 'Agent display name on Provider display name' : 'Agent display name，使用 Provider display name';
   await userEvent.click(screen.getByRole('option', { name }));
-  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null });
-  expect(choice).toHaveTextContent(name);
+  expect(changed).toHaveBeenCalledWith({ providerId: 'target-provider', agentId: 'agent', model: null, effort: undefined, arrangement: null, automaticRuns: {} });
+  expect(choice).toHaveValue(name);
   expect(screen.getByRole('combobox', { name: locale === 'en' ? 'Model' : '模型' })).toBeVisible();
 });
 
@@ -63,7 +93,7 @@ it('settles a switch when the new provider lists the same model as the current p
   show(<Form />);
   await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('private_route_to'));
   expect(changed).toHaveBeenCalledOnce();
-  expect(changed).toHaveBeenCalledWith({ model: 'private_route_to', effort: null });
+  expect(changed).toHaveBeenCalledWith({ model: 'private_route_to', effort: null, automaticRuns: { model: { providerId: 'target-provider', model: 'private_route_to', by: 'retained', replaced: false }, effort: { providerId: 'target-provider', model: 'private_route_to', value: null, by: 'unreported', replaced: false } } });
 });
 
 for (const locale of ['en', 'zh-CN'] as const) it(`keeps routing and harness keys out of the form and the open model list (${locale})`, async () => {
@@ -88,7 +118,7 @@ for (const locale of ['en', 'zh-CN'] as const) it(`keeps routing and harness key
   expect(screen.queryByText('private_route_to')).toBeNull();
   expect(screen.queryByText('private_route_other')).toBeNull();
   await user.click(screen.getByRole('option', { name: 'Second Model' }));
-  expect(changed).toHaveBeenLastCalledWith({ model: 'private_route_other', effort: null });
+  expect(changed).toHaveBeenLastCalledWith({ model: 'private_route_other', effort: null, automaticRuns: { profile: undefined, effort: { providerId: 'target-provider', model: 'private_route_other', value: null, by: 'unreported', replaced: false } } });
   expect(picker).toHaveTextContent('Second Model');
 });
 

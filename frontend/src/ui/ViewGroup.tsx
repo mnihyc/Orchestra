@@ -130,7 +130,7 @@ export function ViewGroup({
           role="tablist"
           aria-label={label}
           aria-orientation="horizontal"
-          className="flex max-h-[calc(var(--tab-strip-height)*2)] min-w-0 flex-1 flex-wrap items-stretch overflow-y-auto"
+          className="flex max-h-[calc(var(--tab-strip-height)*2)] min-w-0 flex-1 flex-wrap items-stretch overflow-y-auto snap-y snap-mandatory"
           onKeyDown={onKeyDown}
         >
           {tabIds.map((tabId) => <Fragment key={tabId}>{renderTab(tabId, { active: tabId === activeId, tabbable: tabId === tabbableId })}</Fragment>)}
