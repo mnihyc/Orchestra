@@ -83,7 +83,7 @@ enum Raw {
     Paths(Vec<PathBuf>),
     Rescan,
     Degraded,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     Ready(tokio::sync::oneshot::Sender<()>),
 }
 
@@ -378,7 +378,7 @@ fn admit(root: &Path, admission: Option<&Admission>, raw: &Raw) {
         }
         Raw::Rescan => admission(Change::Rescan),
         Raw::Degraded => admission(Change::Unavailable),
-        #[cfg(test)]
+        #[cfg(all(test, unix))]
         Raw::Ready(_) => {}
     }
 }
@@ -448,7 +448,7 @@ async fn collect(
                         was_degraded = true;
                         if out.send(Change::Unavailable).is_err() { break }
                     }
-                    #[cfg(test)]
+                    #[cfg(all(test, unix))]
                     Some(Raw::Ready(ready)) => { let _ = ready.send(()); }
                 }
             }

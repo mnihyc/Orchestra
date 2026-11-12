@@ -204,26 +204,35 @@ async fn session_on(line: Line) {
 
     // What the machine saw of the line.
     let rates = machine.link.rates();
+    let up_bps = rates
+        .up_bps
+        .expect("the upstream transfer produced a sample");
+    let down_bps = rates
+        .down_bps
+        .expect("the downstream transfer produced a sample");
+    let round_trip_ms = rates
+        .round_trip_ms
+        .expect("the connected link produced a round-trip sample");
     let bits = |bytes_per_second: u64| i64::try_from(bytes_per_second * 8).unwrap();
     let near = |measured: i64, expected: i64| {
         measured >= expected * 5 / 10 && measured <= expected * 16 / 10
     };
     assert!(
-        near(rates.up_bps, bits(line.up)),
+        near(up_bps, bits(line.up)),
         "up {} bits/s of {}",
-        rates.up_bps,
+        up_bps,
         bits(line.up)
     );
     assert!(
-        near(rates.down_bps, bits(line.down)),
+        near(down_bps, bits(line.down)),
         "down {} bits/s of {}",
-        rates.down_bps,
+        down_bps,
         bits(line.down)
     );
     assert!(
-        (200..=1_500).contains(&rates.round_trip_ms),
+        (200..=1_500).contains(&round_trip_ms),
         "the round trip is reported as a fact: {} ms",
-        rates.round_trip_ms
+        round_trip_ms
     );
     // Data frames are sized to a quarter of a second of the line, never under 4 KiB.
     let frame = machine.link.data_frame_bytes().unwrap();
@@ -489,6 +498,7 @@ fn enrollment_and_renewal_requests_fit_the_limit_of_thirty_seconds_on_both_lines
         roles: vec![Role::Agent, Role::Environment],
     };
     let reply = EnrollReply {
+        gateways: Vec::new(),
         machine_id: new_id(),
         certificate_pem: "-".repeat(1_100),
         ca_pem: "-".repeat(700),

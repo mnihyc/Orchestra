@@ -281,12 +281,24 @@ async fn million_measurements_and_audits_return_only_bounded_chart_and_pace_rows
         now: end,
         bucket: "day",
     };
+    // An independent real query distinguishes a disabled observer from the measured read's lifetime.
+    let witness = Statements::default();
+    sqlx::query("SELECT 1")
+        .execute(&mut *conn)
+        .with_subscriber(witness.clone())
+        .await
+        .unwrap();
     let before = Statements::default();
     let empty = provider_plan::chart(&mut conn, &read)
         .with_subscriber(before.clone())
         .await
         .unwrap();
     assert_eq!(empty.len(), 1);
+    eprintln!(
+        "SQL observation: direct_query={}, chart_scope={}",
+        witness.0.load(Ordering::Relaxed),
+        before.0.load(Ordering::Relaxed)
+    );
     assert_eq!(before.0.load(Ordering::Relaxed), 1);
 
     sqlx::query("INSERT INTO metric_samples(at,name,labels,value)

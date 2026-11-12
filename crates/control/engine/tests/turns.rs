@@ -6,6 +6,8 @@
 )]
 
 mod common;
+#[path = "turns/offline_deadline.rs"]
+mod offline_deadline;
 
 use common::{
     World, eventually, interrupting, meanwhile, message_done, queued, said, steering, turn_ended,
@@ -1180,3 +1182,6 @@ async fn a_person_who_may_not_use_the_provider_cannot_send_any_kind_of_input() {
         .unwrap();
     assert!(accepted.created);
 }
+
+#[path = "turns/prompt_cache_ttl.rs"]
+mod prompt_cache_ttl;

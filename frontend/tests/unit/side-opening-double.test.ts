@@ -27,6 +27,7 @@ it('opens the side conversation and its metadata without borrowing the parent dr
   expect(opening.sync.items.some((item) => item.kind === 'user_message' && item.payload.parts.some((part) => part.type === 'text' && part.text === 'Which tests cover the redirect?'))).toBe(true);
   expect(opening.draft).toBeNull();
   expect(opening.parameters).not.toBeNull();
+  expect(opening.gateway).toMatchObject({ status: 'ready', data: { thread_id: side, state: 'unknown' } });
   expect(opening.outline.entries.some((entry) => entry.title === 'Which tests cover the redirect?')).toBe(true);
   expect(opening.outline.entries.every((entry) => opening.sync.items.some((item) => item.id === entry.item_id))).toBe(true);
 });

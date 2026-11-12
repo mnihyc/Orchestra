@@ -8,6 +8,7 @@ import english from '@/i18n/en.json';
 import chinese from '@/i18n/zh-CN.json';
 import developmentEnglish from '@/i18n/dev-en.json';
 import developmentChinese from '@/i18n/dev-zh-CN.json';
+import { translationKeys, textAt, present, type UsedKey } from '../../build/translation-keys.ts';
 
 const root=resolve(import.meta.dirname,'../../src');
 /** Match the existing source-audit suites' 20-second ceiling; parse each authored file once for both languages. */
@@ -20,61 +21,6 @@ function sourceFiles(directory:string):string[]{
     return /\.tsx?$/.test(entry.name) && !entry.name.endsWith('.d.ts') && entry.name!=='routeTree.gen.ts'?[path]:[];
   });
 }
-function unwrapped(node:ts.Expression):ts.Expression{
-  return ts.isAsExpression(node)||ts.isTypeAssertionExpression(node)||ts.isParenthesizedExpression(node)||ts.isSatisfiesExpression(node)?unwrapped(node.expression):node;
-}
-function literalKeys(given:ts.Expression):string[]{
-  const node=unwrapped(given);
-  if(ts.isStringLiteralLike(node))return [node.text];
-  if(ts.isConditionalExpression(node))return [...literalKeys(node.whenTrue),...literalKeys(node.whenFalse)];
-  if(ts.isArrayLiteralExpression(node))return node.elements.flatMap((entry)=>ts.isOmittedExpression(entry)?[]:literalKeys(entry));
-  // A parameter/computed template belongs to the exhaustive registry/choice tests; never invent its values here.
-  return [];
-}
-interface UsedKey{key:string;line:number;count:boolean|null;context:string|null;ordinal:boolean}
-function translationKeys(text:string,file='screen.tsx'):UsedKey[]{
-  const source=ts.createSourceFile(file,text,ts.ScriptTarget.Latest,true,file.endsWith('.tsx')?ts.ScriptKind.TSX:ts.ScriptKind.TS);
-  const found:UsedKey[]=[];
-  const visit=(node:ts.Node)=>{
-    if(ts.isCallExpression(node)){
-      const expression=node.expression;
-      const translates=ts.isIdentifier(expression)?expression.text==='t':ts.isPropertyAccessExpression(expression)&&expression.name.text==='t';
-      const first=node.arguments[0],options=node.arguments[1];
-      if(translates && first!==undefined){
-        const fields=options!==undefined && ts.isObjectLiteralExpression(options)?options.properties:[];
-        const field=(name:string):ts.Expression|undefined=>{
-          for(const entry of fields){
-            if(!ts.isPropertyAssignment(entry)&&!ts.isShorthandPropertyAssignment(entry))continue;
-            const key=ts.isIdentifier(entry.name)||ts.isStringLiteralLike(entry.name)?entry.name.text:entry.name.getText(source);
-            if(key===name)return ts.isShorthandPropertyAssignment(entry)?entry.name:entry.initializer;
-          }
-          return undefined;
-        };
-        const context=field('context');
-        const count=field('count')!==undefined?true:options!==undefined && (!ts.isObjectLiteralExpression(options)||options.properties.some(ts.isSpreadAssignment))?null:false;
-        for(const key of literalKeys(first))found.push({key,line:source.getLineAndCharacterOfPosition(node.getStart(source)).line+1,count,ordinal:field('ordinal')?.kind===ts.SyntaxKind.TrueKeyword,context:context!==undefined && ts.isStringLiteralLike(context)?context.text:null});
-      }
-    }
-    ts.forEachChild(node,visit);
-  };
-  visit(source);return found;
-}
-function textAt(catalogue:unknown,path:string):string|null{
-  let value=catalogue;
-  for(const key of path.split('.'))value=typeof value==='object'&&value!==null&&!Array.isArray(value)?(value as Record<string,unknown>)[key]:undefined;
-  return typeof value==='string'&&value.trim()!==''?value:null;
-}
-function present(catalogue:unknown,used:UsedKey,language:'en'|'zh-CN'):boolean{
-  const keys=used.context===null?[used.key]:[`${used.key}_${used.context}`,used.key];
-  for(const key of keys){
-    if(textAt(catalogue,key)!==null)return true;
-    if(used.count===false)continue;
-    const plural=used.ordinal?`${key}_ordinal`:key;
-    if((language==='en'?['one','other']:['other']).every((form)=>textAt(catalogue,`${plural}_${form}`)!==null))return true;
-  }
-  return false;
-}
-
 /** The development route explicitly installs its own bilingual bundle; production source cannot borrow from it. */
 function presentForSource(file:string,used:UsedKey,language:'en'|'zh-CN'):boolean{
   const ordinary=language==='en'?english:chinese;
@@ -128,9 +74,73 @@ describe('translation keys used by the product',()=>{
     expect(present({},fallback,'en')).toBe(false);
     expect(translationKeys("t('rows',{count});")[0]?.count).toBe(true);
   });
+  it('rejects an unknown authored key through aliases, finite choices and Trans without a type checker', () => {
+    const source = [
+      "const fixed = 'common.misspelled'; t(fixed);",
+      "const prefix = 'common'; t(`${prefix}.alsoMissing`);",
+      "function row(kind: 'next' | 'notAKnownKey') { return t(`common.${kind}`); }",
+      "(['back', 'anotherMissing'] as const).map((kind) => t(`common.${kind}`));",
+      "for (const kind of ['add', 'oneMoreMissing'] as const) t(`common.${kind}`);",
+      "const words = { ready: 'common.next', broken: 'common.missingInMap' }; t(words[state]);",
+      "const english = i18n.getFixedT('en'); english('common.fixedMissing');",
+      "const { t: say } = useTranslation(); say('common.aliasMissing');",
+      '<Trans i18nKey={ok ? "common.next" : "common.transMissing"} />',
+      "t2('common.secondTranslatorMissing');",
+      "t('common.missingEvenWithFallback', { defaultValue: 'Readable fallback' });",
+    ].join('\n');
+    const requested = translationKeys(source);
+    const missing = requested.filter((key) => !presentForSource('screen.tsx', key, 'en')).map((key) => key.key);
+    expect(missing).toEqual(['common.misspelled', 'common.alsoMissing', 'common.notAKnownKey', 'common.anotherMissing',
+      'common.oneMoreMissing', 'common.missingInMap', 'common.fixedMissing', 'common.aliasMissing', 'common.transMissing',
+      'common.secondTranslatorMissing', 'common.missingEvenWithFallback']);
+    expect(requested.filter((key) => presentForSource('screen.tsx', key, 'en')).map((key) => key.key))
+      .toEqual(['common.next', 'common.back', 'common.add', 'common.next', 'common.next']);
+  });
+
+  it('checks every member of finite indexed and destructured local sets', () => {
+    const source = [
+      "const names=['common.next','common.indexMissing']; t(names[index]);",
+      "const rows=[{key:'common.back'},{key:'common.objectMissing'}]; rows.map((entry)=>t(entry.key));",
+      "rows.map(({key})=>t(key));",
+      "for (const {key} of rows) t(key);",
+      "const {key: selected}={key:'common.bindingMissing'}; t(selected);",
+      "const nested={first:{title:'common.next'},last:{title:'common.nestedMissing'}}; t(nested[index].title);",
+    ].join('\n');
+    expect(translationKeys(source).filter((key) => !presentForSource('screen.tsx', key, 'en')).map((key) => key.key))
+      .toEqual(['common.indexMissing','common.objectMissing','common.objectMissing','common.objectMissing','common.bindingMissing','common.nestedMissing']);
+  });
+
+  it('rejects a misspelled dynamic family without guessing native values', () => {
+    const used = translationKeys('t(`common.${native}`); t(`commmon.${native}`); t(native);', 'screen.tsx', true);
+    expect(used.map((key) => key.key)).toEqual(['common.${…}', 'commmon.${…}']);
+    expect(used.map((key) => presentForSource('screen.tsx', key, 'en'))).toEqual([true, false]);
+    const flat = translationKeys('t(`zzzzNoSuchKeyPrefix${native}`); t(`${native}`);', 'screen.tsx', true);
+    expect(flat.map((key) => key.key)).toEqual(['zzzzNoSuchKeyPrefix${…}', '${…}']);
+    expect(flat.map((key) => presentForSource('screen.tsx', key, 'en'))).toEqual([false, true]);
+  });
+
+  it('keeps object and context readers strict while native templates check fixed parts only', () => {
+    const rows = translationKeys("t('labels',{returnObjects:true}); t('unknown',{returnObjects:true}); t('row',{context:native,defaultValue:'fallback'}); t('missing',{context:native,defaultValue:'fallback'});", 'screen.tsx', true);
+    expect(rows.map((key) => present({ labels: { name: 'Name' }, row_ready: 'Ready' }, key, 'en'))).toEqual([true,false,true,false]);
+    expect(rows.map((key) => present({ labels: { name: 'Name' }, rowboat_ready: 'Wrong family' }, key, 'en'))).toEqual([true,false,false,false]);
+    const native = translationKeys("const kind = typeof value.kind==='string'?value.kind:''; t(`event.${kind}`);", 'screen.tsx', true);
+    expect(native.map((key) => key.key)).toEqual(['event.${…}']);
+    expect(present({event:{ready:'Ready'}}, native[0]!, 'en')).toBe(true);
+    const mixed = translationKeys("function field(name:'title'|'description'|'name') { t(`driver.${native}.${name}`); }", 'screen.tsx', true);
+    expect(mixed.map((key) => key.key)).toEqual(['driver.${…}.${…}']);
+    expect(present({driver:{sample:{title:'Name'}}}, mixed[0]!, 'en')).toBe(true);
+  });
+
+  it('does not read a shadowed binding, a cycle, comments or an unrelated literal as a translation', () => {
+    const source = "const key='common.outerMissing'; function row(key:string) { t(key); } "
+      + "{ const key='common.next'; t(key); } const first=second; const second=first; t(first); "
+      + "const cache='common.cacheMissing'; // t('common.commentMissing')";
+    expect(translationKeys(source).map((key) => key.key)).toEqual(['common.next']);
+  });
+
   it('has every literal t key in English and Chinese, including a call with its own defaultValue',()=>{
     const failures:string[]=[];
-    for(const file of sourceFiles(root))for(const used of translationKeys(readFileSync(file,'utf8'),file)){
+    for(const file of sourceFiles(root))for(const used of translationKeys(readFileSync(file,'utf8'),file,true)){
       const path=relative(root,file).replaceAll('\\','/');
       for(const language of ['en','zh-CN'] as const)if(!presentForSource(path,used,language))failures.push(`${path}:${used.line} ${language}:${used.key}`);
     }

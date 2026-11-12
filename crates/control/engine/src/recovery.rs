@@ -171,6 +171,30 @@ impl Engine {
                 volumes[role] = json!({"name":format!("{prefix}-{environment}"),"storage":null});
             }
         }
+        use orch_access_contract::{
+            decisions::ObjectRef,
+            permissions::{ObjectKind, Permission},
+        };
+        crate::jobs::environment_move::preparation::select_destinations(
+            conn,
+            &[
+                (
+                    ObjectRef {
+                        kind: ObjectKind::Host,
+                        id: chosen.host.id,
+                    },
+                    Permission::HostUse,
+                ),
+                (
+                    ObjectRef {
+                        kind: ObjectKind::Template,
+                        id: template.id,
+                    },
+                    Permission::TemplateUse,
+                ),
+            ],
+        )
+        .await?;
         Ok(Prepared {
             environment,
             revision: state.revision,
@@ -221,17 +245,16 @@ impl Engine {
                 storage: volumes[&role]["storage"].as_str().map(str::to_owned),
                 environment_id: environment,
             };
-            let answer = self
-                .ask_bounded(
-                    Outgoing::new(
-                        orch_types::new_id(),
-                        machine,
-                        SerialKey::Volume(request.name.clone()),
-                        &request,
-                    )
-                    .map_err(EngineError::from)?,
-                )
-                .await?;
+            let command = Outgoing::new(
+                orch_types::new_id(),
+                machine,
+                SerialKey::Volume(request.name.clone()),
+                &request,
+            )
+            .map_err(EngineError::from)?;
+            let command = crate::jobs::lifecycle_commands::planning::observe(self, command).await?;
+            let answer = self.ask_bounded(command.clone()).await?;
+            crate::jobs::lifecycle_commands::planning::delivered(self, &command).await?;
             let result: NodeVolumeInspectResult = match answer {
                 Some(Outcome::Succeeded(value)) => {
                     serde_json::from_value(value).map_err(EngineError::from)?
@@ -358,13 +381,26 @@ impl Engine {
 }
 
 /// Accepts the reviewed lost environment as an ordinary independently limited provisioning job.
-pub async fn queue(
-    engine: &Engine,
-    conn: &mut Conn,
-    recipe: &Recipe,
-    batch: Option<Id>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Result<jobs::JobRow, UpdateError> {
+/// Locked native recovery operands; preparation performs no mutation or remote IO.
+#[derive(Clone)]
+pub struct PreparedQueue {
+    environment: envs::EnvironmentState,
+    recipe: Recipe,
+    config_after: Json,
+}
+impl PreparedQueue {
+    pub fn recipe(&self) -> &Recipe {
+        &self.recipe
+    }
+    pub fn config_change(&self) -> Result<(Id, Hash, Hash), EngineError> {
+        Ok((
+            self.environment.id,
+            crate::jobs::command_identity::hash(&self.environment.config)?,
+            crate::jobs::command_identity::hash(&self.config_after)?,
+        ))
+    }
+}
+pub async fn prepare_queue(conn: &mut Conn, recipe: &Recipe) -> Result<PreparedQueue, UpdateError> {
     let environment = envs::lock_environment(conn, recipe.environment)
         .await?
         .filter(|row| row.status == "lost" && row.revision == recipe.revision)
@@ -372,11 +408,50 @@ pub async fn queue(
     if let Some(job) = jobs::changes::environment_hold(conn, environment.id).await? {
         return Err(UpdateError::Held(job.id));
     }
+    let mut config_after = environment.config.clone();
+    let fields = config_after.as_object_mut().ok_or_else(|| {
+        EngineError::unreadable("the recovery source configuration is not an object")
+    })?;
+    fields.insert(
+        "env.data_sources".into(),
+        json!({"workspace":{"kind":"made_by_orch"},"home":{"kind":"made_by_orch"}}),
+    );
+    Ok(PreparedQueue {
+        environment,
+        recipe: recipe.clone(),
+        config_after,
+    })
+}
+
+/// The ordinary entry keeps the same native prepared writer and transaction.
+pub async fn queue(
+    engine: &Engine,
+    conn: &mut Conn,
+    recipe: &Recipe,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let prepared = prepare_queue(conn, recipe).await?;
+    queue_prepared(engine, conn, &prepared, batch, now, || Ok(())).await
+}
+
+/// The actual first recovery SQL follows the opaque caller check on the locked operands.
+pub async fn queue_prepared(
+    engine: &Engine,
+    conn: &mut Conn,
+    prepared: &PreparedQueue,
+    batch: Option<Id>,
+    now: chrono::DateTime<chrono::Utc>,
+    before: impl FnOnce() -> Result<(), UpdateError>,
+) -> Result<jobs::JobRow, UpdateError> {
+    let environment = &prepared.environment;
+    let recipe = &prepared.recipe;
+    before()?;
     sqlx::query("UPDATE environments SET placement='managed',template_id=$2,config=jsonb_set(config,'{env.data_sources}',$3) WHERE id=$1").bind(environment.id).bind(recipe.template).bind(json!({"workspace":{"kind":"made_by_orch"},"home":{"kind":"made_by_orch"}})).execute(&mut *conn).await.map_err(DbError::from)?;
     let mut job = crate::jobs::provision::queue(
         conn,
         now,
-        &environment,
+        environment,
         crate::jobs::provision::Mode::Make,
         Some(recipe.by),
     )
@@ -884,6 +959,10 @@ pub(crate) async fn materialize_artifacts(
 }
 
 /// Renews native sessions only when their home traveled; every other local agent receives its recorded Carry history.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the native session commit receives recorded move facts beside its existing recovery operands"
+)]
 pub(crate) async fn commit_threads(
     job: &crate::jobs::runner::Job,
     conn: &mut Conn,
@@ -892,6 +971,7 @@ pub(crate) async fn commit_threads(
     by: Id,
     home: bool,
     recreated: bool,
+    move_notice: Option<&crate::jobs::environment_move::notice::MoveNotice>,
 ) -> Result<(), crate::jobs::runner::Stop> {
     let ids = envs::threads_of(conn, environment).await?;
     let plan = jobs::job(conn, job.id())
@@ -935,21 +1015,25 @@ pub(crate) async fn commit_threads(
                 )
                 .into());
             }
-            let text = format!(
-                "The environment was {} on another machine. Your directory is {}. Earlier processes are not running here.{}\n{}",
-                if recreated { "re-created" } else { "moved" },
-                row.workspace_dir,
-                if plan
-                    .pointer("/recovery/missing")
-                    .and_then(Json::as_array)
-                    .is_some_and(|paths| !paths.is_empty())
-                {
-                    " Some files could not be recovered; see .orch/handoff/missing-files.txt."
-                } else {
-                    ""
-                },
-                history
-            );
+            let text = if let Some(notice) = move_notice {
+                notice.text(&row.workspace_dir, history)
+            } else {
+                format!(
+                    "The environment was {} on another machine. Your directory is {}. Earlier processes are not running here.{}\n{}",
+                    if recreated { "re-created" } else { "moved" },
+                    row.workspace_dir,
+                    if plan
+                        .pointer("/recovery/missing")
+                        .and_then(Json::as_array)
+                        .is_some_and(|paths| !paths.is_empty())
+                    {
+                        " Some files could not be recovered; see .orch/handoff/missing-files.txt."
+                    } else {
+                        ""
+                    },
+                    history
+                )
+            };
             orch_db::queries::threads::notices::append(
                 unit.conn,
                 id,

@@ -112,9 +112,35 @@ pub struct ModelInputListQuery {
     pub limit: Option<i64>,
 }
 
+/// Model inputs retain the native sources protecting every recorded prompt.
+pub const fn input_facets() -> [crate::operations::FacetSpec; 2] {
+    use crate::operations::{FacetSpec as F, TargetResolver as T};
+    use orch_access_contract::{
+        key_scope::{KeyAction as A, KeyTargetKind as K},
+        permissions::ObjectKind as O,
+    };
+    [
+        F::required(
+            A::Read,
+            &[
+                K::Object(O::Org),
+                K::Object(O::Project),
+                K::Object(O::Topic),
+                K::Object(O::Thread),
+            ],
+            T::Path("id"),
+        ),
+        F::required(
+            A::Read,
+            crate::summaries::SUMMARY_FAMILIES,
+            T::ResolvedCollection("model_input_sources"),
+        ),
+    ]
+}
+
 crate::endpoints! {
     /// Reads what Orch supplied to a model for a node, as it was sent: the newest first, a page at a time (`next_cursor` is the `before` of the next page).
-    NodeModelInputList: GET "/nodes/{id}/model-inputs", Permission("node.view"), query ModelInputListQuery, none, json Page<ModelInput>, 200;
+    NodeModelInputList: GET "/nodes/{id}/model-inputs", Permission("node.view"), query ModelInputListQuery, none, json Page<ModelInput>, 200, operation crate::operations::OperationSpec::facets(&input_facets());
     /// Reads a long block of one model-input record under the same node's current view permission.
-    NodeModelInputBlobGet: GET "/nodes/{id}/model-inputs/{model_input_id}/blobs/{hash}", Permission("node.view"), none, none, raw, 200;
+    NodeModelInputBlobGet: GET "/nodes/{id}/model-inputs/{model_input_id}/blobs/{hash}", Permission("node.view"), none, none, raw, 200, operation crate::operations::OperationSpec::facets(&input_facets());
 }

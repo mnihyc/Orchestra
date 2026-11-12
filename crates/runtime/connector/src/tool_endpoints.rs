@@ -24,7 +24,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use orch_agent_contract::loopback::Route;
 use orch_link::tunnels::channel::OpenError;
-use orch_link_contract::tunnels::OpenErrorCode;
+use orch_link_contract::tunnels::{OpenErrorCode, Ticket, TicketSource, TunnelKind};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
@@ -205,7 +205,17 @@ impl Endpoint for McpEndpoint {
                 &format!("this session was given no way to reach {server}"),
             );
         };
-        let tunnel = match self.relay.link().open_tunnel(&ticket).await {
+        let route_key = if is_exec {
+            "exec".to_owned()
+        } else {
+            format!("mcp/{server}")
+        };
+        let tunnel = match self
+            .relay
+            .link()
+            .open_tunnel_with_route(&ticket, session.tickets.routes.get(&route_key))
+            .await
+        {
             Ok(tunnel) => tunnel,
             Err(error) => return open_failure(&error),
         };
@@ -220,6 +230,7 @@ impl Endpoint for McpEndpoint {
             path: TUNNEL_PATH.to_owned(),
             token: None,
             takes_session: false,
+            registered_executor: None,
         };
         exchange(tunnel, request, &beyond, &extra).await
     }
@@ -249,6 +260,40 @@ fn asks_for_a_websocket(request: &Request<Incoming>) -> Option<String> {
         .get("sec-websocket-key")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
+}
+
+/// This is metadata from the authenticated session.open command, not a request-supplied ticket.
+/// Parsing does not verify a signature: the stored session binding already supplies local authority.
+/// Remote channels still verify their tickets at the gateway; local authority ends with the session.
+fn local_executor_version(
+    session: &SessionBinding,
+    reach: &crate::loopback::Reach,
+    executor: &str,
+) -> Result<String, &'static str> {
+    let ticket = session
+        .tickets
+        .exec
+        .as_deref()
+        .ok_or("this local program's session does not name an admitted executor build")?;
+    let parsed =
+        Ticket::parse(ticket).map_err(|_| "the session's executor ticket cannot be read")?;
+    let claims = parsed.claims();
+    if claims.kind != TunnelKind::Exec
+        || claims.service != format!("exec/{executor}")
+        || claims.src != TicketSource::Machine(claims.dst)
+        || claims.thread_id != Some(session.thread_id)
+        || claims.tool_environment_id != Some(reach.environment_id)
+        || claims.tool_environment_generation != Some(reach.generation)
+        || claims.tool_set != reach.tool_set
+    {
+        return Err("the stored executor ticket does not match this local session");
+    }
+    claims
+        .tool_executor_version
+        .as_deref()
+        .filter(|version| !version.is_empty())
+        .map(str::to_owned)
+        .ok_or("this local program's session does not name an admitted executor build")
 }
 
 /// What the harness's messages are carried to.
@@ -300,6 +345,28 @@ impl Endpoint for ExecEndpoint {
                     "this session's environment was made anew",
                 );
             }
+            let local = if let Some(host) = self.relay.host() {
+                host.executor_uses_local_program(reach.environment_id, &executor)
+                    .await
+            } else {
+                false
+            };
+            let version = if local {
+                match local_executor_version(&session, &reach, &executor) {
+                    Ok(version) => Some(version),
+                    Err(error) => return text(StatusCode::FORBIDDEN, error),
+                }
+            } else {
+                None
+            };
+            let local = match self
+                .relay
+                .prepare_exec(reach.environment_id, &executor, version.as_deref())
+                .await
+            {
+                Ok(local) => local,
+                Err(error) => return text(StatusCode::FORBIDDEN, &error),
+            };
             let targets = self.relay.exec_targets(&executor).await;
             let target = ToolRelay::pick(targets, reach.environment_id);
             let Some(target) = target else {
@@ -308,18 +375,26 @@ impl Endpoint for ExecEndpoint {
                     &format!("{executor} is not running in this environment"),
                 );
             };
-            match connect_websocket(&target).await {
-                Ok(socket) => Upstream::Here(Box::new(socket)),
+            let (socket, target) = match connect_websocket(&target).await {
+                Ok(socket) => (socket, target),
                 Err(first) => {
                     let Some(again) = self.relay.restarted(&target).await else {
                         return text(StatusCode::BAD_GATEWAY, &first);
                     };
                     match connect_websocket(&again).await {
-                        Ok(socket) => Upstream::Here(Box::new(socket)),
+                        Ok(socket) => (socket, again),
                         Err(error) => return text(StatusCode::BAD_GATEWAY, &error),
                     }
                 }
+            };
+            if let Err(error) = self
+                .relay
+                .check_exec_target(&target, version.as_deref(), local)
+                .await
+            {
+                return text(StatusCode::FORBIDDEN, &error);
             }
+            Upstream::Here(Box::new(socket))
         } else {
             let Some(ticket) = session.tickets.exec.clone() else {
                 return text(
@@ -327,7 +402,12 @@ impl Endpoint for ExecEndpoint {
                     "this session was given no way to reach its executor",
                 );
             };
-            match self.relay.link().open_tunnel(&ticket).await {
+            match self
+                .relay
+                .link()
+                .open_tunnel_with_route(&ticket, session.tickets.routes.get("exec"))
+                .await
+            {
                 Ok(tunnel) => Upstream::Through(tunnel),
                 Err(error) => return open_failure(&error),
             }

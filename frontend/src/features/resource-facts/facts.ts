@@ -75,13 +75,13 @@ function atLimit(reset: string | null | undefined, context: FactContext): Hint {
 export function providerHint(provider: ProviderFacts, context: FactContext, scope: 'choice' | 'window' = 'choice'): Hint {
   const { t, locale } = context;
   if (provider.status === undefined) return hint(t('providerPlan.notReported'));
-  if (provider.status === 'exhausted') return atLimit(fullProvider(provider) ? provider.facts.limit_reached?.resets_at : null, context);
-  if (provider.status !== 'ready') return hint(t('resourceFacts.unavailable'), true);
+  if (provider.status !== 'ready' && provider.status !== 'exhausted') return hint(t('resourceFacts.unavailable'), true);
   if (!fullProvider(provider)) return hint(t('providerPlan.notReported'));
   if (privateProvider(provider)) return hint(t('providerPlan.roomHidden'));
   const caps = (provider.choice_usage?.caps ?? []).filter(({ cap }) => cap.models.length === 0 && cap.tiers.length === 0 && cap.harness_kinds.length === 0 && cap.node === null && (scope === 'choice' || cap.meter !== 'running'));
   const reached = caps.find((cap) => cap.state === 'reached');
   if (reached !== undefined) return atLimit(reached.period_ends_at, context);
+  if (provider.status === 'exhausted') return atLimit(provider.facts.limit_reached?.resets_at, context);
   if (detailState(provider, 'limit_reached') === 'told' && provider.facts.limit_reached !== null) return atLimit(provider.facts.limit_reached.resets_at, context);
   const windows = detailState(provider, 'windows') === 'told' ? reportedList(provider.facts.windows).filter((window) => Number.isFinite(window.used_percent)) : [];
   const binding = windows.some((window) => window.is_active !== null) ? windows.filter((window) => window.is_active === true) : windows;

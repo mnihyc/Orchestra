@@ -33,3 +33,14 @@ it('translates shipped live-application guidance and keeps an authored consequen
   expect(capabilityConsequence(shipped)).toBe(i18n.t('approvals.capability.liveEffect'));
   expect(capabilityConsequence('Ask the operations team before using this device.')).toBe('Ask the operations team before using this device.');
 });
+
+it.each(['en', 'zh-CN'] as const)('keeps gateway-only guidance truthful and localized in %s', async (locale) => {
+  const gateway = 'This capability becomes available without stopping anything. Existing processes and all files are kept.';
+  expect(i18n.getFixedT('en')('approvals.capability.gatewayEffect')).toBe(gateway);
+  await setLocale(locale);
+  expect(capabilityConsequence(gateway)).toBe(locale === 'en'
+    ? gateway
+    : '此能力可立即使用，无需停止任何工作。现有进程和所有文件均会保留。');
+  const authored = `${gateway} Ask the operations team first.`;
+  expect(capabilityConsequence(authored)).toBe(authored);
+});

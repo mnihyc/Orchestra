@@ -1,7 +1,7 @@
 /** Production edit/review UI with exact native-shaped responses; native receipt semantics have separate DB proofs. */
 import { expect, test } from '@playwright/test';
 import type { DocumentDiscussion } from '../../src/generated/api-types';
-import { scenario, signIn } from './support';
+import { scenario, signIn, arrived } from './support';
 import { DOCS, openDocument } from './documents-support';
 import { showWorkbenchView } from './workbench-support';
 
@@ -11,7 +11,7 @@ for (const theme of ['light', 'dark'] as const) test(`a stale comment draft revi
   const panel = page.getByRole('region', { name: 'Comments on this document' });
   await panel.getByRole('button', { name: 'Start a discussion', exact: true }).click();
   await panel.getByRole('textbox', { name: 'New discussion' }).fill('Original comment');
-  const created = page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith(`/documents/${DOCS.plan}/discussions`));
+  const created = arrived(page.waitForResponse((response) => response.request().method() === 'POST' && new URL(response.url()).pathname.endsWith(`/documents/${DOCS.plan}/discussions`)));
   await panel.getByRole('button', { name: 'Send', exact: true }).click();
   const discussion = await (await created).json() as DocumentDiscussion;
   const original = discussion.comments[0]; if (original === undefined) throw new Error('The UI-created discussion must contain its actual comment');

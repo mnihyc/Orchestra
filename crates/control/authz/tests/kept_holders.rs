@@ -506,3 +506,28 @@ async fn what_is_never_read_for_holders_is_never_recorded_as_a_change() {
         "a deletion is a change"
     );
 }
+
+#[tokio::test]
+async fn a_person_made_or_removed_is_a_change_and_one_renamed_is_not() {
+    let w = World::new().await;
+    let mut conn = w.conn().await;
+    let before = changes(&mut conn).await;
+    let person = w.user("newcomer").await;
+    let made = changes(&mut conn).await;
+    assert!(made > before, "making a person is a change");
+    sqlx::query("UPDATE users SET display_name = 'Renamed' WHERE id = $1")
+        .bind(person)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(changes(&mut conn).await, made, "a name is not read");
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(person)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    assert!(
+        changes(&mut conn).await > made,
+        "removing a person is a change"
+    );
+}

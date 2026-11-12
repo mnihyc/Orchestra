@@ -10,10 +10,19 @@ test('the account menu leads to last week for a place and a visible thread break
   await page.getByRole('button',{name:'Your account'}).click();
   await page.getByRole('menuitem',{name:'Usage',exact:true}).click();
   await expect(page).toHaveURL(/\/usage/);
-  const header=page.locator('header').filter({has:page.getByRole('heading',{name:'Usage',level:1,exact:true})});
-  await header.getByRole('combobox',{name:'Scope'}).click();
+  // Report controls live in the filter bar and adapt to the report pane's width.
+  const filters=page.locator('[data-filter-bar]');
+  const scope=filters.getByRole('combobox',{name:'Scope'});
+  await scope.click();
+  // The shared name locator searches places on demand rather than preloading all orgs.
+  await scope.fill('Acme');
   await page.getByRole('option',{name:'Acme',exact:true}).click();
-  await header.getByRole('button',{name:'Last week',exact:true}).click();
+  const week=filters.getByRole('button',{name:'Last week',exact:true});
+  if(await week.isVisible()) await week.click();
+  else {
+    await filters.getByRole('combobox',{name:'Span',exact:true}).click();
+    await page.getByRole('option',{name:'Last week',exact:true}).click();
+  }
   await expect.poll(()=>new URL(page.url()).searchParams.get('scope')).toBe(`node:${ACME.org}`);
   await expect.poll(()=>new URL(page.url()).searchParams.get('range')).toBe('last_week');
   const totals=page.getByRole('list',{name:'Figures of the span'});

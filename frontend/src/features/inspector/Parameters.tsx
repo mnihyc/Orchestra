@@ -6,12 +6,14 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Check, Lock, SlidersHorizontal } from 'lucide-react';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { PortTools } from './PortTools';
 import { programNameIn } from '@/features/resources/programNames';
 import { EmptyState } from '@/ui/EmptyState';
 import { choiceOption, offeredChoice } from '@/i18n/choices';
 
 import { parametersQuery } from '@/api/threads';
 import { isApprovalMode } from '@/features/composer/ApprovalMode';
+import { ContextAvailability } from '@/features/composer/ContextAvailability';
 import { forceLabel, kindOf, readDef } from '@/features/composer/modelState';
 import { isSettingConflict, type RunsWith, useRunsWith } from '@/features/composer/runsWith';
 import { SettingConflict } from '@/features/composer/SettingConflict';
@@ -22,6 +24,8 @@ import type { WorkspaceAccess } from '@/features/files/door';
 import type { ParameterView, SettingSource, Thread } from '@/generated/api-types';
 import type { ViewProps } from '@/features/workbench/views';
 import { holds } from '@/lib/permissions';
+import { useThreadReadRef } from '@/realtime/threadReadContext';
+import { threadReadState, useThreadView } from '@/realtime/stores/thread';
 import { useAppearance } from '@/lib/appearance';
 import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { IconButton } from '@/ui/IconButton';
@@ -30,9 +34,15 @@ import { ChoiceLocator, type ChoiceLocatorOption } from '@/ui/ChoiceLocator';
 import { SkeletonRows } from '@/ui/Skeleton';
 import { Switch } from '@/ui/Switch';
 
+import { SchemaInput } from '@/features/resources/templates/SchemaForm';
+
 import { ThreadRules } from '@/features/approvals/ThreadRules';
+import { ThreadLinks } from '@/features/source/Links';
+import { ArticleGuideLink } from '@/features/help/ArticleGuideLink';
 
 import { ThreadPanel } from './ThreadPanel';
+import { CapabilityRoutes } from './CapabilityRoutes';
+import { PersonalReads } from './PersonalReads';
 import { ProgramBuild } from '@/features/resources/agents/ProgramBuild';
 import { applyWord } from './words';
 
@@ -47,7 +57,8 @@ interface Declared {
 
 function declared(parameter: ParameterView): Declared {
   const def = (typeof parameter.def === 'object' && parameter.def !== null ? parameter.def : {}) as Record<string, unknown>;
-  const options = Array.isArray(def.options) ? (def.options as { value?: unknown; label?: unknown }[]).filter((one) => typeof one.value === 'string').map((one) => ({ value: String(one.value), label: typeof one.label === 'string' ? one.label : String(one.value) })) : null;
+  const choices = def.resolved_options ?? def.options;
+  const options = Array.isArray(choices) ? (choices as { value?: unknown; label?: unknown }[]).filter((one) => typeof one.value === 'string').map((one) => ({ value: String(one.value), label: typeof one.label === 'string' ? one.label : String(one.value) })) : null;
   return {
     title: typeof def.title === 'string' ? def.title : parameter.key,
     description: typeof def.description === 'string' ? def.description : '',
@@ -57,7 +68,7 @@ function declared(parameter: ParameterView): Declared {
   };
 }
 
-const GROUPS = ['model', 'behaviour', 'safety', 'advanced'] as const;
+const GROUPS = ['model', 'behaviour', 'safety', 'advanced', 'provider'] as const;
 
 /** Where a value comes from, in words: set here, from a place above, or the default. */
 function Provenance({ source }: { source: SettingSource }) {
@@ -78,11 +89,17 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
   const { t } = useTranslation();
   const [saved, setSaved] = useState(false);
   const [open, setOpen] = useState(false);
+  const [providerDraft, setProviderDraft] = useState<{ value: unknown; read: string | undefined } | null>(null);
   const refused = async (error: unknown) => {
     await runs.refuse(error, parameter.key);
     if (isSettingConflict(error)) setOpen(true);
   };
   const info = declared(parameter);
+  if (parameter.key === 'web_search') {
+    info.title = t('webSearch.title');
+    info.description = t('webSearch.perUseHint');
+    info.options = info.options?.map((option) => ({...option, label: offeredChoice(t, 'webSearch', option.value)?.label ?? option.label})) ?? null;
+  }
   const set = useMutation({
     mutationFn: (value: unknown) => runs.write(parameter.key, value),
     onError: refused,
@@ -91,19 +108,25 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
       setTimeout(() => setSaved(false), 2_000);
     },
   });
-  const reset = useMutation({ mutationFn: () => runs.reset(parameter.key), onError: refused });
+  const reset = useMutation({ mutationFn: () => runs.reset(parameter.key), onError: refused, onSuccess: () => setProviderDraft(null) });
   const locked = parameter.locked_by !== null;
   const can = writable && runs.ready && parameter.writable && !locked;
   const why = !writable && manageReason ? t('inspector.parameters.needsManage', { name: access.thread.owner.display_name }) : null;
-  const current = parameter.value ?? (typeof parameter.def === 'object' && parameter.def !== null ? (parameter.def as Record<string, unknown>).default : null);
+  const definition = typeof parameter.def === 'object' && parameter.def !== null ? parameter.def as Record<string, unknown> : {};
+  const providerInterface = typeof definition.provider_interface === 'string' ? definition.provider_interface : null;
+  const providerFixed = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null && Object.hasOwn(definition.provider_constraint, 'const');
+  const current = providerDraft !== null ? providerDraft.value : parameter.value ?? definition.resolved_default ?? definition.default ?? null;
+  if (providerDraft !== null && set.status === 'success' && providerDraft.read !== JSON.stringify(parameter.value)) setProviderDraft(null);
   const shownValue = typeof current === 'string' || typeof current === 'number' ? String(current) : '';
-  const isSwitch = info.type === 'bool' || info.type === 'boolean';
+  const constraint = typeof definition.provider_constraint === 'object' && definition.provider_constraint !== null ? definition.provider_constraint as Record<string, unknown> : null;
+  const isSwitch = constraint === null && (info.type === 'bool' || info.type === 'boolean');
   return (
-    <li className="flex flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row">
+    <li className="flex min-w-0 flex-col gap-1 border-b border-border px-3 py-2 last:border-b-0" data-testid="parameter-row" data-provider-interface={providerInterface ?? undefined}>
       <div className="flex flex-wrap items-center gap-2">
         {isSwitch ? <Switch className="min-w-0 flex-1" label={info.title} checked={current === true} disabled={!can || set.isPending} onCheckedChange={(on) => set.mutate(on)} />
           : <span className="min-w-0 flex-1 text-sm font-medium text-text">{info.title}</span>}
-        <Provenance source={parameter.source} />
+        {!providerFixed && <Provenance source={parameter.source} />}
+        {providerFixed && <span className="text-xs text-text-muted">{t('providerOptions.fixedByProvider')}</span>}
         {locked && (
           <span className="inline-flex items-center gap-1 text-xs text-text-muted" title={t('inspector.parameters.locked')}>
             <Lock aria-hidden />
@@ -111,7 +134,7 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
           </span>
         )}
         {parameter.source.scope === 'thread' && can && (
-          <IconButton action="inheritSetting" size="sm" label={t('inspector.parameters.reset', { name: info.title })} pending={reset.isPending} onClick={() => reset.mutate()} />
+          <IconButton action="inheritSetting" size="sm" label={t('inspector.parameters.reset', { name: info.title })} disabled={providerInterface !== null && set.isPending} pending={reset.isPending} onClick={() => reset.mutate()} />
         )}
         {saved && (
           <span role="status" className="inline-flex items-center gap-1 text-xs text-success-text">
@@ -120,7 +143,10 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
           </span>
         )}
       </div>
-      {!isSwitch && (info.options !== null ? (
+      {constraint !== null ? <SchemaInput root={constraint} schema={providerInterface === null ? constraint : { ...constraint, title: info.title }} value={current} parts={[parameter.key]} hideHeading={providerInterface !== null} disabled={!can || set.isPending || reset.isPending} problems={[]} driver="provider-options" onChange={(value) => {
+        if (providerInterface !== null) setProviderDraft({ value, read: JSON.stringify(parameter.value) });
+        set.mutate(value);
+      }} /> : !isSwitch && (info.options !== null ? (
         <ChoiceLocator<string>
           size="sm"
           label={info.title}
@@ -159,12 +185,14 @@ export function ParameterRow({ parameter, access, writable, runs, manageReason =
 /** The inspector reads the composer's choices and edits only the other native parameters. */
 export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thread'> }) {
   const { t } = useTranslation();
+  const read = useThreadReadRef(access.thread.id);
+  const view = useThreadView(read);
   const query = useQuery(parametersQuery(access.thread.id));
   const runs = useRunsWith(access.thread, true);
   const locale = useAppearance((state) => state.locale);
   const writable = holds(access.thread.access, 'thread.manage');
   if (query.error !== null && query.data === undefined) return <ErrorState compact className="h-full" error={query.error} onRetry={() => void query.refetch()} />;
-  if (query.data === undefined) return <SkeletonRows rows={6} />;
+  if (query.data === undefined) return <SkeletonRows read={query} rows={6} />;
   const data = query.data;
   const subagentsOff = access.thread.binding?.program?.build?.check?.off.includes('subagents') === true;
   const supportsAtOnce = !subagentsOff && (data.subagent_limits?.supported.includes('at_once') ?? false);
@@ -186,29 +214,37 @@ export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thr
   return (
     <div className="h-full overflow-auto" data-testid="parameters-panel">
       <section aria-label={t('inspector.parameters.currentChoices')} className="flex flex-col gap-2 border-b border-border px-3 py-2">
-        <dl className="flex flex-col gap-2 text-sm">
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <ul role="list" className="flex list-none flex-col gap-2 text-sm">
+          <li><dl className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <dt className="font-medium text-text">{t('inspector.parameters.model')}</dt>
             <dd className="flex min-w-0 flex-wrap items-baseline gap-2 wrap-anywhere text-text-muted"><span>{modelWords}</span><Provenance source={data.model.source} /></dd>
-          </div>
-          <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          </dl></li>
+          <li><dl className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <dt className="font-medium text-text">{t('composer.mode.title')}</dt>
             <dd className="text-text-muted">{approvalWords}</dd>
-          </div>
-          {data.effort.supported && efforts.length > 0 && <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          </dl></li>
+          {data.effort.supported && efforts.length > 0 && <li><dl className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
             <dt className="font-medium text-text">{t('inspector.parameters.effort')}</dt>
             <dd className="flex min-w-0 flex-wrap items-baseline gap-2 wrap-anywhere text-text-muted"><span>{effortWords}</span><Provenance source={data.effort.source} /></dd>
-          </div>}
-        </dl>
+          </dl></li>}
+        </ul>
         {states.map((state) => <div key={state.key} className="min-w-0 wrap-anywhere"><ChoiceHead
           title={t(state.kind === 'context' ? 'composer.model.context.title' : state.kind === 'speed' ? 'composer.model.speed.title' : 'composer.model.access.title')}
           value={state.kind === 'context' ? formatContext(state.force, locale) : forceLabel(state) ?? t(state.kind === 'speed' ? 'composer.model.speed.standard' : 'composer.model.access.none')}
           state={state} chooser={runs.chooser(state.key)} /></div>)}
+        <ContextAvailability parameters={data} states={runs.states} />
         <p className="text-xs text-text-muted">{t('inspector.parameters.changeInComposer')}</p>
         {data.approval_reviewer !== null && <p className="text-xs wrap-anywhere text-text-muted">
           {t('inspector.parameters.reviewer', { model: data.approval_reviewer.model })} · {t(data.approval_reviewer.usage_apart ? 'inspector.parameters.reviewUseApart' : 'inspector.parameters.reviewUseInside')}
         </p>}
       </section>
+      <section aria-label={t('source.links.list')} className="flex min-w-0 flex-wrap items-center gap-2 border-b border-border px-3 py-2 text-sm">
+        <h3 className="font-medium">{t('source.links.list')}</h3>
+        <ThreadLinks thread={access.thread} readOnly={threadReadState(view).readOnly} />
+      </section>
+      <CapabilityRoutes value={'capabilities' in data ? data.capabilities : undefined} />
+      <PortTools value={'port_tools' in data ? data.port_tools : undefined} error={query.error} onRetry={() => void query.refetch()} />
+      <PersonalReads threadId={access.thread.id} />
       {!writable && grouped.length > 0 && <p className="px-3 py-2 text-xs text-text-muted">{t('inspector.parameters.needsManage', { name: access.thread.owner.display_name })}</p>}
       <SettingConflict refusal={runs.refusal} />
       {grouped.length === 0 ? (
@@ -216,7 +252,10 @@ export function ParametersPanel({ access }: { access: Pick<WorkspaceAccess, 'thr
       ) : (
         grouped.map(({ group, rows }) => (
           <section key={group} aria-label={t(`inspector.parameters.group.${group}`)}>
-            <h3 className="bg-bg-subtle px-3 py-1 text-xs font-medium text-text-muted">{t(`inspector.parameters.group.${group}`)}</h3>
+            <div className="flex flex-wrap items-center justify-between gap-2 bg-bg-subtle px-3 py-1">
+              <h3 className="text-xs font-medium text-text-muted">{t(`inspector.parameters.group.${group}`)}</h3>
+              {group === 'provider' && <ArticleGuideLink article="provider-details" heading="thread-options" title={t('inspector.parameters.optionsGuide')} />}
+            </div>
             <ul>
               {rows.map((parameter) => (
                 <ParameterRow key={parameter.key} parameter={parameter} access={access} writable={writable} runs={runs} manageReason={false} />

@@ -38,11 +38,13 @@ struct State {
 struct Acme {
     state: Mutex<State>,
     wants_key: bool,
+    admin_field: bool,
 }
 impl Acme {
     fn new(wants_key: bool) -> Self {
         Self {
             wants_key,
+            admin_field: false,
             state: Mutex::new(State {
                 facts: json!({"plan":"Acme"}),
                 models: None,
@@ -76,6 +78,12 @@ impl Acme {
             ..SourceDescriptorFacts::default()
         });
         descriptor.models = Some(SourceDescriptorModels::default());
+        if self.admin_field {
+            descriptor.set_admin_credential(orch_provider_contract::source::AdminCredential {
+                labels: std::collections::BTreeMap::from([("en".into(), "Admin key".into())]),
+                reports: vec![FactMember::Plan],
+            });
+        }
         descriptor
     }
 }
@@ -443,4 +451,67 @@ async fn revoking_the_servers_http_permission_does_not_reuse_an_opened_address_b
         2,
         "no old grant can send a later HTTP request"
     );
+}
+
+#[tokio::test]
+async fn a_source_secret_reaches_only_its_fixed_recipient_and_never_becomes_the_model_key() {
+    let mut source = Acme::new(false);
+    source.admin_field = true;
+    let source = Arc::new(source);
+    let p = rig(source.clone()).await;
+    p.start_responses_provider().await;
+    for recipient in ["another-source", "acme"] {
+        let command = new_id();
+        let mut spec = selected(&p);
+        spec.secret_source = Some(recipient.into());
+        spec.secrets.insert(
+            "admin_key".into(),
+            serde_json::from_value(p.sealed_key_for(command, "source-only-admin-fixture")).unwrap(),
+        );
+        let body = ProviderRefresh {
+            provider_id: p.rig.provider,
+            retry: None,
+            renew: None,
+            facts: Some(spec),
+        };
+        let result = p.command_with_id(command, &p.provider_key(), &body).await;
+        assert!(
+            matches!(result, orch_link::commands::Progress::Succeeded(_)),
+            "{result:?}"
+        );
+    }
+    let state = source.state.lock().unwrap();
+    assert_eq!(state.asks.len(), 2);
+    assert!(
+        state.asks[0].secrets.is_empty(),
+        "a source selected later cannot inherit a previous recipient's administrative key"
+    );
+    assert_eq!(
+        state.asks[1].secrets["admin_key"].expose(),
+        "source-only-admin-fixture"
+    );
+    assert!(
+        state.asks.iter().all(|ask| ask.credential.is_none()),
+        "the model key was not requested by this source"
+    );
+}
+
+#[tokio::test]
+async fn source_only_facts_do_not_make_a_provider_ready_when_its_required_model_key_is_missing() {
+    let program = Arc::new(Acme::new(false));
+    let p = rig(program.clone()).await;
+    let started = p
+        .start_provider_with_key(
+            &[("openai-responses", p.mock.responses_base_url(), json!({}))],
+            None,
+        )
+        .await;
+    assert!(
+        matches!(started, orch_link::commands::Progress::Succeeded(_)),
+        "{started:?}"
+    );
+    let report = refresh(&p, selected(&p)).await;
+    assert_eq!(report["facts"]["plan"], "Acme");
+    assert_eq!(report["status"], "needs_setup");
+    assert_ne!(report["facts"]["credential_verified"], true);
 }

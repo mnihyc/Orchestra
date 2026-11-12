@@ -50,7 +50,7 @@ export function ColourDialog({ place, open, onClose }: DialogProps & { place: Pl
       footer={<Button onClick={onClose}>{t('common.close')}</Button>}
     >
       {node.isPending ? (
-        <SkeletonRows rows={3} className="py-2" />
+        <SkeletonRows read={node} rows={3} className="py-2" />
       ) : node.isError ? (
         <ErrorState compact error={node.error} retrying={node.isRefetching} onRetry={() => void node.refetch()} />
       ) : (

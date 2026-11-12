@@ -1,8 +1,8 @@
 //! Stream messages to neutral events: each tool use as a step of its kind, with the call as Claude Code made it kept whole beside it; sub-agent streams, usage, and unknown frames kept raw.
 //!
 //! [`EventMapper`] reads the harness's messages one at a time and says what happened, in the neutral
-//! vocabulary of Orch. It does no input or output of its own, so every rule here is tested with literal
-//! messages. What it keeps between messages is only what the stream itself forces: which blocks of which
+//! vocabulary of Orch. An explicitly supplied output directory keeps native image bytes as blobs;
+//! ordinary frame mapping needs no filesystem. What it keeps between messages is what the stream forces: which blocks of which
 //! message are open, which tool uses wait for their result, the list of things to do, and the tokens used.
 //!
 //! The harness writes each content block of a message twice, as growing pieces and then whole, and the
@@ -84,6 +84,7 @@ struct Message {
 
 #[derive(Debug, Clone)]
 struct ToolState {
+    native_web: bool,
     name: String,
     family: Family,
     input: Json,
@@ -93,6 +94,42 @@ struct ToolState {
     parent: Option<String>,
     item_started: bool,
     async_launched: bool,
+    generation: u64,
+    progress_title: Option<String>,
+    native_terminal: Option<ItemStatus>,
+    origin_turn: Option<TurnId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeTaskKey {
+    pub task_id: String,
+    pub run_id: Option<String>,
+}
+
+impl NativeTaskKey {
+    pub(crate) fn from_value(value: &Json) -> Option<Self> {
+        let task_id = value.get("task_id")?.as_str()?.to_owned();
+        if task_id.is_empty() {
+            return None;
+        }
+        Some(Self {
+            task_id,
+            run_id: value
+                .get("run_id")
+                .and_then(Json::as_str)
+                .filter(|run| !run.is_empty())
+                .map(str::to_owned),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct NativeTask {
+    key: NativeTaskKey,
+    tool_ref: String,
+    local_bash: bool,
+    resumed: bool,
+    tool_reused: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -103,6 +140,10 @@ struct Task {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredTool {
+    #[serde(default)]
+    native_web: bool,
+    #[serde(default)]
+    native_web_terminal: Option<ItemStatus>,
     name: String,
     input: Json,
     partial_input: String,
@@ -111,11 +152,19 @@ struct StoredTool {
     parent: Option<String>,
     item_started: bool,
     async_launched: bool,
+    #[serde(default)]
+    origin_turn: Option<TurnId>,
 }
 
 impl From<ToolState> for StoredTool {
     fn from(tool: ToolState) -> Self {
         Self {
+            native_web: tool.native_web,
+            native_web_terminal: if tool.native_web {
+                tool.native_terminal
+            } else {
+                None
+            },
             name: tool.name,
             input: tool.input,
             partial_input: tool.partial_input,
@@ -124,12 +173,14 @@ impl From<ToolState> for StoredTool {
             parent: tool.parent,
             item_started: tool.item_started,
             async_launched: tool.async_launched,
+            origin_turn: tool.origin_turn,
         }
     }
 }
 impl From<StoredTool> for ToolState {
     fn from(tool: StoredTool) -> Self {
         Self {
+            native_web: tool.native_web,
             family: family_of(&tool.name),
             name: tool.name,
             input: tool.input,
@@ -139,6 +190,10 @@ impl From<StoredTool> for ToolState {
             parent: tool.parent,
             item_started: tool.item_started,
             async_launched: tool.async_launched,
+            generation: 0,
+            progress_title: None,
+            native_terminal: tool.native_web_terminal,
+            origin_turn: tool.origin_turn,
         }
     }
 }
@@ -155,6 +210,10 @@ pub(crate) struct HistoryMapper {
 }
 
 impl HistoryMapper {
+    pub(crate) fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
+        self.mapper.set_image_outputs(directory);
+    }
+
     pub(crate) fn new(
         settings: MapperSettings,
         clock: Arc<dyn Clock>,
@@ -198,8 +257,10 @@ impl HistoryMapper {
         }
         for block in frame.blocks() {
             let id = match block.get("type").and_then(Json::as_str) {
-                Some("tool_use") => block.get("id"),
-                Some("tool_result") => block.get("tool_use_id"),
+                Some("tool_use" | "server_tool_use") => block.get("id"),
+                Some("tool_result" | "web_search_tool_result" | "web_fetch_tool_result") => {
+                    block.get("tool_use_id")
+                }
                 _ => None,
             }
             .and_then(Json::as_str);
@@ -264,6 +325,9 @@ impl HistoryMapper {
         self.mapper.messages.clear();
         self.mapper.blocks.clear();
         self.mapper.pending_reasoning.clear();
+        self.mapper.background_changes.clear();
+        // Nobody settles the sub-agents of a past: what the replay heard of them is not kept.
+        self.mapper.child_heard.clear();
         Ok(out)
     }
 
@@ -451,6 +515,9 @@ impl HistoryMapper {
                 continue;
             }
             self.tools.remove(&id)?;
+            if tool.native_web && tool.native_web_terminal.is_some() {
+                continue;
+            }
             self.mapper.tools.insert(id, tool.into());
             self.mapper.close_open_items(
                 if self.mapper.interrupted {
@@ -492,8 +559,13 @@ impl HistoryMapper {
 /// Reads the harness's messages and says what happened.
 #[derive(Debug)]
 pub struct EventMapper {
+    native_counts: orch_provider_contract::capabilities::counters::NativeCounters,
+    native_counter_declarations: BTreeMap<String, orch_provider_contract::capabilities::Counter>,
+    image_outputs: Option<std::path::PathBuf>,
     requests: crate::performance::Requests,
     request_reports: Vec<(TurnId, UsageRequest)>,
+    child_heard: Vec<crate::child_usage::Heard>,
+    request_owners: HashMap<String, TurnId>,
     active_messages: HashMap<String, String>,
     settings: MapperSettings,
     clock: Arc<dyn Clock>,
@@ -507,6 +579,12 @@ pub struct EventMapper {
     pending_message: Option<ItemCompleted>,
     messages: HashMap<(String, String), Message>,
     tools: HashMap<String, ToolState>,
+    native_session: Option<String>,
+    native_generation: u64,
+    resuming_process: bool,
+    native_tasks: HashMap<String, NativeTask>,
+    background_records: BTreeMap<String, orch_agent_contract::background::BackgroundTask>,
+    background_changes: Vec<orch_agent_contract::background::BackgroundTask>,
     tasks: BTreeMap<String, Task>,
     plan_for: Option<TurnId>,
     turn_tally: TokenUsage,
@@ -530,9 +608,19 @@ pub struct EventMapper {
     compacting: bool,
     announced_compaction: bool,
     echoed: Vec<String>,
+    native_changes: native_changes::NativeChanges,
     retry_noticed: bool,
+    retry_notice_attempt: u64,
+    retrying: bool,
+    retry_attempt: Option<i64>,
     /// The model, by the name the harness's last start states (`system/init`), suffix of a larger window and all.
     running_model: Option<String>,
+    /// The original routing name and the exact context-qualified argument sent to the process.
+    requested_model: Option<(String, String)>,
+    requested_permission_mode: Option<String>,
+    reported_permission_mode: Option<(Frame, String)>,
+    /// Replayed init frames do not repeat the same current-turn notice.
+    reroute_noticed: Option<String>,
     /// What the stream has said of a failure during this turn, for the `result` that ends it.
     failure: Notes,
     /// The row of the table of failures that found the last failed turn, for a log and for the tests.
@@ -558,8 +646,11 @@ impl EventMapper {
     #[must_use]
     pub fn new(settings: MapperSettings, clock: Arc<dyn Clock>) -> Self {
         Self {
+            image_outputs: None,
             requests: crate::performance::Requests::default(),
             request_reports: Vec::new(),
+            child_heard: Vec::new(),
+            request_owners: HashMap::new(),
             active_messages: HashMap::new(),
             settings,
             clock,
@@ -571,6 +662,12 @@ impl EventMapper {
             pending_message: None,
             messages: HashMap::new(),
             tools: HashMap::new(),
+            native_session: None,
+            native_generation: 0,
+            resuming_process: false,
+            native_tasks: HashMap::new(),
+            background_records: BTreeMap::new(),
+            background_changes: Vec::new(),
             tasks: BTreeMap::new(),
             plan_for: None,
             turn_tally: TokenUsage::default(),
@@ -578,6 +675,8 @@ impl EventMapper {
             context_used: None,
             sub_tally: BTreeMap::new(),
             model_base: None,
+            native_counts: Default::default(),
+            native_counter_declarations: BTreeMap::new(),
             window: None,
             compact_at: None,
             pending_shortening: None,
@@ -586,8 +685,16 @@ impl EventMapper {
             compacting: false,
             announced_compaction: false,
             echoed: Vec::new(),
+            native_changes: native_changes::NativeChanges::default(),
             retry_noticed: false,
+            retry_notice_attempt: RETRY_NOTICE_ATTEMPT,
+            retrying: false,
+            retry_attempt: None,
             running_model: None,
+            requested_model: None,
+            requested_permission_mode: None,
+            reported_permission_mode: None,
+            reroute_noticed: None,
             failure: Notes::default(),
             last_failure_row: None,
         }
@@ -602,7 +709,9 @@ impl EventMapper {
     /// A turn begins: what follows belongs to it.
     pub fn begin_turn(&mut self, turn: TurnId) {
         self.request_reports.clear();
-        self.requests = crate::performance::Requests::default();
+        if !self.background_running() {
+            self.requests = crate::performance::Requests::default();
+        }
         let asked = self.requests.asked(self.clock.time());
         self.request_reports.push((turn, asked));
         self.active_messages.clear();
@@ -612,14 +721,148 @@ impl EventMapper {
         self.turn_tally = TokenUsage::default();
         self.sub_tally.clear();
         self.retry_noticed = false;
+        self.retrying = false;
+        self.retry_attempt = None;
+        self.requested_model = None;
+        self.reroute_noticed = None;
         self.announced_compaction = false;
         self.failure = Notes::default();
+    }
+
+    /// Set the profile's notice threshold; the live phase is reported from the first retry.
+    pub fn set_retry_notice_attempt(&mut self, attempt: u64) {
+        self.retry_notice_attempt = attempt;
+    }
+
+    /// Bind the turn's actual request after process init, or retain it for an init that arrives later.
+    pub fn begin_turn_with_model(
+        &mut self,
+        turn: TurnId,
+        model: &str,
+        context: Option<i64>,
+    ) -> Vec<SessionEvent> {
+        self.begin_turn(turn);
+        self.requested_model = Some((
+            model.to_owned(),
+            crate::parameters::model_argument(model, context),
+        ));
+        let mut out = Vec::new();
+        self.report_model_reroute(&mut out);
+        self.report_permission_mode(&mut out);
+        out
+    }
+    /// Reconfiguring the mapper keeps the report of a still-running native process.
+    pub(crate) fn inherit_process_report(&mut self, previous: &Self) {
+        self.running_model = previous.running_model.clone();
+        self.reported_permission_mode = previous.reported_permission_mode.clone();
+        self.requested_permission_mode = previous.requested_permission_mode.clone();
+        self.native_generation = previous.native_generation;
+        self.resuming_process = previous.resuming_process;
+        self.native_changes = previous.native_changes.clone();
+        self.native_counts = previous.native_counts.clone();
+        self.model_base = previous.model_base.clone();
+    }
+
+    /// The actual launch's credential path selects only this program's declared report fields.
+    pub(crate) fn configure_native_counters(
+        &mut self,
+        provider: &orch_agent_contract::session::ProviderAccess,
+    ) {
+        use orch_agent_contract::session::ProviderAccess;
+        let path = match provider {
+            ProviderAccess::Native { .. } => "native",
+            ProviderAccess::Forwarded { .. } => "forwarded",
+            ProviderAccess::Shared { .. } => "shared",
+            ProviderAccess::Handover { .. } => "handover",
+        };
+        let program: orch_provider_contract::capabilities::Program =
+            serde_json::from_str(include_str!("capability-program.json")).unwrap_or_default();
+        self.native_counter_declarations = program
+            .access
+            .get(path)
+            .map(|access| access.counters.clone())
+            .unwrap_or_default();
+    }
+    fn report_model_reroute(&mut self, out: &mut Vec<SessionEvent>) {
+        let (Some(turn), Some((requested, argument)), Some(actual)) = (
+            self.turn,
+            self.requested_model.as_ref(),
+            self.running_model.as_ref(),
+        ) else {
+            return;
+        };
+        if actual == requested
+            || actual == argument
+            || self.reroute_noticed.as_ref() == Some(actual)
+        {
+            return;
+        }
+        let requested = requested.clone();
+        let actual = actual.clone();
+        self.reroute_noticed = Some(actual.clone());
+        let native_ref = format!("model-rerouted:{turn}:{}:{actual}", self.native_generation);
+        let payload = ErrorPayload {
+            details: None,
+            window: None,
+            resets_at: None,
+            code: orch_agent_contract::events::turn_error::MODEL_REROUTED.to_owned(),
+            message: format!(
+                "The harness ran this turn on {actual} instead of {requested}: its init frame reported the model."
+            ),
+            retryable: false,
+        };
+        out.extend(self.started(
+            &native_ref,
+            MAIN_STREAM,
+            None,
+            ItemContent::Error(payload.clone()),
+        ));
+        if let Ok(mut payload) = serde_json::to_value(payload) {
+            payload["details"] = json!({"turn_id":turn,"from_model":requested,"to_model":actual,"change":"model","next_turn":false});
+            out.push(SessionEvent::ItemCompleted(ItemCompleted {
+                native_ref,
+                status: ItemStatus::Completed,
+                payload,
+                output_blob: None,
+            }));
+        }
+    }
+
+    /// Rejected native work is metered under its origin without reusing its request ids.
+    pub(crate) fn begin_rejected_wake(&mut self, turn: TurnId) {
+        self.retrying = false;
+        self.retry_attempt = None;
+        self.retry_noticed = false;
+        self.turn = Some(turn);
+        self.last_turn = Some(turn);
+        self.interrupted = true;
+        self.requested_model = None;
+        self.reroute_noticed = None;
+        self.turn_tally = TokenUsage::default();
+        self.sub_tally.clear();
+        self.failure = Notes::default();
+        let asked = self.requests.asked(self.clock.time());
+        self.request_reports.push((turn, asked));
     }
 
     /// A process of the session was started: one that began the conversation counts its use from nothing;
     /// one that resumed or forked it starts from totals the harness restored, which are not known here.
     pub fn process_started(&mut self, fresh: bool) {
+        self.native_changes = native_changes::NativeChanges::default();
         self.model_base = fresh.then(BTreeMap::new);
+        self.native_counts.start(fresh);
+        self.running_model = None;
+        self.reported_permission_mode = None;
+        self.reroute_noticed = None;
+        self.native_generation = self.native_generation.saturating_add(1);
+        self.resuming_process = false;
+        self.native_tasks.clear();
+        self.background_records.clear();
+        self.background_changes.clear();
+    }
+
+    pub(crate) fn set_native_session(&mut self, session: &str) {
+        self.native_session = Some(session.to_owned());
     }
 
     /// The turn was asked to stop.
@@ -655,6 +898,164 @@ impl EventMapper {
         std::mem::take(&mut self.request_reports)
     }
 
+    /// What was heard of sub-agents since the last call, in order, for [`crate::child_usage`].
+    pub fn take_child_heard(&mut self) -> Vec<crate::child_usage::Heard> {
+        std::mem::take(&mut self.child_heard)
+    }
+
+    fn add_native_counts(&mut self, frame: &Frame, models: &mut Vec<ModelTokens>) {
+        let mut native_counts: BTreeMap<(String, String), Option<i64>> = BTreeMap::new();
+        for (reported_model, counts) in self.native_counts.observe(
+            frame.get("modelUsage"),
+            &self.native_counter_declarations,
+            frame.text("uuid"),
+        ) {
+            // Only our own exact launch argument proves its original wire name. Never parse another model's id.
+            let model = self
+                .requested_model
+                .as_ref()
+                .filter(|(_, argument)| argument == &reported_model)
+                .map(|(original, _)| original.clone())
+                .unwrap_or(reported_model);
+            for (capability, count) in counts {
+                let slot = native_counts
+                    .entry((model.clone(), capability))
+                    .or_insert(Some(0));
+                *slot = slot.and_then(|previous| previous.checked_add(count));
+            }
+        }
+        for ((model, capability), count) in native_counts {
+            let Some(count) = count else {
+                continue;
+            };
+            if let Some(known) = models.iter_mut().find(|known| known.model == model) {
+                known.counts.insert(capability, count);
+            } else {
+                models.push(ModelTokens {
+                    model,
+                    tokens: TokenUsage::default(),
+                    tokens_reported: false,
+                    counts: BTreeMap::from([(capability, count)]),
+                });
+            }
+        }
+    }
+
+    /// Meter an owned native notice without creating a turn or publishing its model output.
+    pub(crate) fn observe_unadmitted_native(
+        &mut self,
+        frame: &Frame,
+        origin: TurnId,
+        notice: orch_types::Id,
+    ) -> Vec<SessionEvent> {
+        let arrived = self.clock.time();
+        self.observe_unadmitted_native_at(frame, origin, notice, arrived)
+    }
+
+    /// Use the original arrival time when a later result proved the reply's source.
+    pub(crate) fn observe_unadmitted_native_at(
+        &mut self,
+        frame: &Frame,
+        origin: TurnId,
+        notice: orch_types::Id,
+        arrived: orch_types::Time,
+    ) -> Vec<SessionEvent> {
+        let mut out = Vec::new();
+        let error = if frame.kind() == FrameKind::Result {
+            outcome_of(
+                frame,
+                false,
+                &Notes::default(),
+                arrived.get(),
+                &chrono::Local,
+            )
+            .1
+        } else {
+            None
+        };
+        let outcome = error.as_ref().map_or(("done", None), |error| {
+            (error.code.as_str(), Some(error.message.as_str()))
+        });
+        for request in self.requests.observe(frame, arrived, Some(outcome)) {
+            self.native_request_observation(request, origin, notice);
+        }
+        if frame.kind() == FrameKind::Result
+            && let Some(models) = self.model_changes(frame)
+        {
+            // Advance the process baseline so the next real input cannot count these calls again.
+            let delta = models
+                .iter()
+                .fold(TokenUsage::default(), |sum, model| sum.plus(model.tokens));
+            self.thread_tally = self.thread_tally.plus(delta);
+            if let Some(last) = self.last_usage.as_mut() {
+                last.thread = self.thread_tally;
+                let mut usage = last.clone();
+                // Per-request ledger rows retain their actual origin. This is only the thread total;
+                // a native notice cannot rewrite another turn's model breakdown or counters.
+                usage.report = None;
+                out.push(SessionEvent::UsageUpdated(usage));
+            }
+        }
+        if frame.kind() == FrameKind::Result {
+            let mut models = Vec::new();
+            self.add_native_counts(frame, &mut models);
+            if !models.is_empty() {
+                out.push(SessionEvent::UsageUpdated(UsageUpdated {
+                    turn_id: origin,
+                    turn: TokenUsage::default(),
+                    thread: TokenUsage::default(),
+                    context_window: None,
+                    context_used: None,
+                    report: Some(TurnUsageReport {
+                        counters_only: true,
+                        models,
+                        ..TurnUsageReport::default()
+                    }),
+                }));
+            }
+        }
+        if self.settings.raw_events {
+            out.push(raw_event(FROM_HARNESS, frame.raw()));
+        }
+        out
+    }
+
+    fn native_request_observation(
+        &mut self,
+        mut request: UsageRequest,
+        origin: TurnId,
+        notice: orch_types::Id,
+    ) {
+        // A later accepted turn may reset its local serial. Never reuse the older
+        // origin's main request ids for this separate, vendor-produced notice.
+        let scoped = |id: &str| format!("native:{notice}:{id}");
+        request.id = format!("native:{notice}:{}", request.id);
+        request.previous_ref = request.previous_ref.as_deref().map(scoped);
+        request.retry_of = request.retry_of.as_deref().map(scoped);
+        request.asked = None;
+        self.request_reports.push((origin, request));
+    }
+
+    pub(crate) fn abort_unadmitted_native(
+        &mut self,
+        origin: TurnId,
+        notice: orch_types::Id,
+        why: &str,
+    ) {
+        for request in self.requests.abort(
+            orch_agent_contract::events::turn_error::SESSION_LOST,
+            Some(why),
+            None,
+        ) {
+            self.native_request_observation(request, origin, notice);
+        }
+    }
+
+    /// The same hash-named output directory the host uses for retained native outputs.
+    pub fn set_image_outputs(&mut self, directory: std::path::PathBuf) {
+        self.image_outputs = Some(directory);
+    }
+
     /// Closes pending request reports when the process exits without a result frame.
     pub fn abort_requests(&mut self, code: &str, message: &str) {
         let Some(turn) = self.turn.or(self.last_turn) else {
@@ -670,20 +1071,68 @@ impl EventMapper {
 
     /// Reads one message of the harness and says what happened.
     pub fn on_frame(&mut self, frame: &Frame) -> Vec<SessionEvent> {
+        if let Some(name) = Self::unknown_stream_event_name(frame) {
+            let mut out = Vec::new();
+            self.native_marker(
+                frame,
+                "unrecognized_event",
+                Some(name),
+                json!({"count":1}),
+                false,
+                &mut out,
+            );
+            if self.settings.raw_events {
+                out.push(raw_event(FROM_HARNESS, frame.raw()));
+            }
+            return out;
+        }
         let arrived = self.clock.time();
         let mut out = Vec::new();
+        // Only real main-stream output ends a retry wait; heartbeats and child output do not.
+        let main = frame.get("parent_tool_use_id").is_none_or(Json::is_null);
+        let output = match frame.kind() {
+            FrameKind::StreamEvent => matches!(
+                frame
+                    .get("event")
+                    .and_then(|event| event.get("type"))
+                    .and_then(Json::as_str),
+                Some("message_start" | "content_block_start" | "content_block_delta")
+            ),
+            FrameKind::Assistant => {
+                frame.get("error").is_none_or(Json::is_null)
+                    && frame.get("api_error").is_none_or(Json::is_null)
+                    && frame.get("message").is_some()
+            }
+            _ => false,
+        };
+        if self.retrying && main && output {
+            self.retrying = false;
+            self.retry_attempt = None;
+            self.retry_noticed = false;
+            self.phase(TurnPhaseKind::Working, &mut out);
+        }
         match frame.kind() {
             FrameKind::StreamEvent => self.stream_event(frame, &mut out),
             FrameKind::Assistant => self.assistant(frame, &mut out),
             FrameKind::User => self.user(frame, &mut out),
             FrameKind::System => self.system(frame, &mut out),
             FrameKind::Result => self.result(frame, &mut out),
-            FrameKind::Other(name) if name == "rate_limit_event" => self.rate_limit_event(frame),
+            FrameKind::Other(name) if name == "rate_limit_event" => {
+                self.rate_limit_event(frame, &mut out)
+            }
+            FrameKind::Other(name) if name == "auth_status" => {} // The provider status observer consumes it.
+            FrameKind::Other(name) => self.native_marker(
+                frame,
+                "unrecognized_event",
+                Some(name),
+                json!({"count":1}),
+                false,
+                &mut out,
+            ),
             FrameKind::ControlRequest
             | FrameKind::ControlResponse
             | FrameKind::ControlCancelRequest
-            | FrameKind::KeepAlive
-            | FrameKind::Other(_) => {}
+            | FrameKind::KeepAlive => {}
         }
         let completed = out.iter().find_map(|event| match event {
             SessionEvent::TurnCompleted(end) => Some(end),
@@ -706,6 +1155,10 @@ impl EventMapper {
             .map(|error| error.message.as_str());
         let requests = self.requests.observe(frame, arrived, Some((code, message)));
         for mut request in requests {
+            if let Some(error) = completed.and_then(|end| end.error.as_ref()) {
+                request.error_reason = request.error_reason.or_else(|| error.reason.clone());
+                request.upstream_status = request.upstream_status.or(error.status);
+            }
             if let Some(orch_agent_contract::requests::RequestOutcome::Error { said, .. }) =
                 &mut request.outcome
                 && let Some(words) = completed
@@ -714,7 +1167,39 @@ impl EventMapper {
             {
                 *said = Some(words);
             }
+            if request.subagent && !self.request_owners.contains_key(&request.id) {
+                let owner = frame
+                    .parent_tool_use_id()
+                    .and_then(|parent| self.parent_turn(parent));
+                if let Some(owner) = owner {
+                    self.request_owners.insert(request.id.clone(), owner);
+                }
+            }
             self.request_observation(request);
+        }
+        // The messages a sub-agent printed are settled from its transcript, for the turn that started it. One whose
+        // turn cannot be named is dropped here, as it always was, and not held.
+        for printed in self.requests.take_printed() {
+            match self.parent_turn(&printed.parent) {
+                Some(turn) => self.child_heard.push(crate::child_usage::Heard::Printed {
+                    turn,
+                    printed: Box::new(printed),
+                }),
+                None => tracing::debug!(
+                    request = %printed.request.id,
+                    "a sub-agent's request names no turn of this session and is not reported"
+                ),
+            }
+        }
+        if !self.background_changes.is_empty() {
+            out.push(SessionEvent::BackgroundTasks(
+                orch_agent_contract::background::BackgroundTasks {
+                    tasks: std::mem::take(&mut self.background_changes),
+                    self_waking: true,
+                    native_idle: false,
+                    native_wake: None,
+                },
+            ));
         }
         if self.settings.raw_events && !matches!(frame.kind(), FrameKind::KeepAlive) {
             out.push(raw_event(FROM_HARNESS, frame.raw()));
@@ -791,6 +1276,27 @@ impl EventMapper {
                     Some("text") => self.open_text(key, &stream, parent_ref.as_deref(), false, out),
                     Some("thinking") => {
                         self.open_text(key, &stream, parent_ref.as_deref(), true, out);
+                    }
+                    Some("server_tool_use") => {
+                        if self.native_web_start(block, &stream, parent_ref.as_deref(), out) {
+                            self.blocks.insert(
+                                key,
+                                Block {
+                                    native_ref: block
+                                        .get("id")
+                                        .and_then(Json::as_str)
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    kind: BlockKind::ToolUse,
+                                    text: String::new(),
+                                    chars: 0,
+                                    completed: false,
+                                },
+                            );
+                        }
+                    }
+                    Some("web_search_tool_result" | "web_fetch_tool_result") => {
+                        self.native_web_result(block, &stream, out);
                     }
                     Some("tool_use") => {
                         let id = block.get("id").and_then(Json::as_str).unwrap_or_default();
@@ -915,9 +1421,15 @@ impl EventMapper {
     }
 
     fn request_observation(&mut self, request: UsageRequest) {
-        let Some(turn_id) = self.turn_id() else {
-            return;
+        let turn_id = if request.subagent {
+            self.request_owners.get(&request.id).copied()
+        } else {
+            self.turn_id()
         };
+        let Some(turn_id) = turn_id else { return };
+        if request.subagent && request.outcome.is_some() && request.tokens.total_tokens.is_some() {
+            self.request_owners.remove(&request.id);
+        }
         self.request_reports.push((turn_id, request));
     }
 
@@ -1213,6 +1725,7 @@ impl EventMapper {
         models: Vec<ModelTokens>,
     ) -> TurnUsageReport {
         TurnUsageReport {
+            counters_only: false,
             api_time_ms: None,
             subagents: Some(subagents),
             by_subagent: self
@@ -1352,6 +1865,12 @@ impl EventMapper {
                         }
                     }
                 }
+                Some("server_tool_use") => {
+                    self.native_web_start(&block, &stream, parent_ref.as_deref(), out);
+                }
+                Some("web_search_tool_result" | "web_fetch_tool_result") => {
+                    self.native_web_result(&block, &stream, out);
+                }
                 Some("tool_use") => {
                     let id = block.get("id").and_then(Json::as_str).unwrap_or_default();
                     let name = block.get("name").and_then(Json::as_str).unwrap_or_default();
@@ -1384,6 +1903,19 @@ impl EventMapper {
         parent: Option<&str>,
         out: &mut Vec<SessionEvent>,
     ) {
+        self.open_tool_kind(id, (name, false), input, stream, parent, out);
+    }
+
+    fn open_tool_kind(
+        &mut self,
+        id: &str,
+        source: (&str, bool),
+        input: &Json,
+        stream: &str,
+        parent: Option<&str>,
+        out: &mut Vec<SessionEvent>,
+    ) {
+        let (name, native_web) = source;
         if self.tools.contains_key(id) {
             return;
         }
@@ -1393,6 +1925,7 @@ impl EventMapper {
         let family = family_of(name);
         let hidden = matches!(family, Family::Plan(_));
         let state = ToolState {
+            native_web,
             name: name.to_owned(),
             family: family.clone(),
             input: input.clone(),
@@ -1402,7 +1935,28 @@ impl EventMapper {
             parent: parent.map(str::to_owned),
             item_started: !hidden,
             async_launched: false,
+            generation: self.native_generation,
+            progress_title: None,
+            native_terminal: None,
+            origin_turn: self.turn_id(),
         };
+        if matches!(family, Family::Subagent) && !id.is_empty() {
+            let origin = match parent {
+                Some(parent) => self.parent_turn(parent),
+                None => self.turn,
+            };
+            if let Some(origin) = origin {
+                self.native_changes
+                    .parent_turns
+                    .entry(id.to_owned())
+                    .and_modify(|previous| {
+                        if *previous != Some(origin) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert(Some(origin));
+            }
+        }
         if !hidden {
             let payload = self.call_payload(&state, id, None);
             out.extend(self.started(id, stream, parent, ItemContent::ToolCall(payload)));
@@ -1417,12 +1971,39 @@ impl EventMapper {
         outcome: Option<&ToolOutcome>,
     ) -> ToolCallPayload {
         let ctx = self.tool_context();
-        let tool = tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx);
+        let mut tool = if state.native_web {
+            native_web::payload(&state.name, &state.input, outcome)
+        } else {
+            tool_payload(&state.family, &state.name, id, &state.input, outcome, &ctx)
+        };
+        if outcome.is_none()
+            && let ToolPayload::Subagent {
+                state: native_state,
+                ..
+            } = &mut tool
+            && let Some(terminal) = &state.native_terminal
+        {
+            *native_state = match terminal {
+                ItemStatus::Completed => orch_agent_contract::events::SubagentState::Completed,
+                ItemStatus::Cancelled => orch_agent_contract::events::SubagentState::Interrupted,
+                _ => orch_agent_contract::events::SubagentState::Failed,
+            };
+        }
         let duration_ms = outcome
             .map(|_| (self.clock.time().unix_millis() - state.started_at.unix_millis()).max(0));
         ToolCallPayload {
             tool,
-            title: call_title(&state.family, &state.name, &state.input, &ctx),
+            title: outcome
+                .is_none()
+                .then(|| state.progress_title.clone())
+                .flatten()
+                .unwrap_or_else(|| {
+                    if state.native_web {
+                        native_web::title(&state.name, &state.input)
+                    } else {
+                        call_title(&state.family, &state.name, &state.input, &ctx)
+                    }
+                }),
             started_at: state.started_at,
             duration_ms,
             raw: raw_call(&state.name, &state.input, outcome),
@@ -1448,6 +2029,9 @@ impl EventMapper {
         let Some(state) = self.tools.get_mut(id) else {
             return;
         };
+        if state.native_web && state.native_terminal.is_some() {
+            return;
+        }
         state.input = input;
         state.partial_input.clear();
         let state = state.clone();
@@ -1487,6 +2071,10 @@ impl EventMapper {
         let structured = frame.get("tool_use_result");
         for block in frame.blocks() {
             match block.get("type").and_then(Json::as_str) {
+                Some("web_search_tool_result" | "web_fetch_tool_result") => {
+                    let (stream, _) = stream_of(frame.parent_tool_use_id());
+                    self.native_web_result(&block, &stream, out);
+                }
                 Some("tool_result") => {
                     let Some(id) = block.get("tool_use_id").and_then(Json::as_str) else {
                         continue;
@@ -1530,9 +2118,21 @@ impl EventMapper {
                 self.tools.insert(id.to_owned(), state);
                 return;
             }
+            // The sub-agent's answer is the end of what it made.
+            self.child_heard.push(crate::child_usage::Heard::Ended {
+                parent: id.to_owned(),
+            });
         }
+        let native_background = outcome
+            .structured
+            .as_ref()
+            .and_then(|result| result.get("backgroundTaskId"))
+            .and_then(Json::as_str)
+            .filter(|id| !id.is_empty());
         if matches!(state.family, Family::Command)
-            && state.input.get("run_in_background").and_then(Json::as_bool) == Some(true)
+            && (state.input.get("run_in_background").and_then(Json::as_bool) == Some(true)
+                || state.async_launched
+                || native_background.is_some())
             && !outcome.is_error
         {
             // A native launch is not an exit. Keep the command open until a native task result,
@@ -1555,6 +2155,16 @@ impl EventMapper {
                 }));
             }
             self.tools.insert(id.to_owned(), state);
+            if let Some(task) = native_background {
+                self.bind_native_task(
+                    NativeTaskKey {
+                        task_id: task.to_owned(),
+                        run_id: None,
+                    },
+                    id,
+                    false,
+                );
+            }
             return;
         }
         let status = if self.interrupted && outcome.is_error {
@@ -1572,6 +2182,11 @@ impl EventMapper {
                 payload,
                 output_blob: None,
             }));
+        }
+        self.tool_image_results(id, &state, &outcome, status, out);
+        if state.native_web {
+            state.native_terminal = Some(status);
+            self.tools.insert(id.to_owned(), state);
         }
     }
 
@@ -1719,9 +2334,32 @@ impl EventMapper {
     // --- system messages ---------------------------------------------------------------------------------
 
     fn system(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        if matches!(
+            frame.subtype(),
+            Some("task_started" | "task_progress" | "task_updated" | "task_notification")
+        ) && self
+            .native_session
+            .as_ref()
+            .is_some_and(|session| frame.text("session_id") != Some(session.as_str()))
+        {
+            return;
+        }
+        self.observe_process_resume(frame, out);
+        self.observe_permission_mode(frame, out);
+        self.observe_system(frame, out);
         match frame.subtype() {
             Some("init") => {
-                self.running_model = frame.text("model").map(str::to_owned);
+                if frame
+                    .raw()
+                    .get("parent_tool_use_id")
+                    .is_none_or(Json::is_null)
+                {
+                    self.running_model = frame
+                        .text("model")
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_owned);
+                    self.report_model_reroute(out);
+                }
                 for server in frame
                     .get("mcp_servers")
                     .and_then(Json::as_array)
@@ -1750,6 +2388,8 @@ impl EventMapper {
             Some("status") => {
                 let compacting = frame.text("status") == Some("compacting");
                 if compacting && !self.compacting {
+                    self.retrying = false;
+                    self.retry_attempt = None;
                     self.compacting = true;
                     self.announced_compaction = true;
                     self.phase(TurnPhaseKind::Compacting, out);
@@ -1802,20 +2442,34 @@ impl EventMapper {
                 }
             }
             Some("api_retry") => {
+                if !frame.get("parent_tool_use_id").is_none_or(Json::is_null) {
+                    return;
+                }
                 self.failure.retries.note(frame);
-                let attempt = frame.get("attempt").and_then(Json::as_u64).unwrap_or(0);
-                if attempt >= RETRY_NOTICE_ATTEMPT && !self.retry_noticed {
+                let attempt = frame
+                    .get("attempt")
+                    .and_then(Json::as_i64)
+                    .filter(|n| *n > 0);
+                self.retry_phase(attempt, out);
+                if let Some(attempt) = attempt
+                    && self.turn.is_some()
+                    && u64::try_from(attempt).is_ok_and(|n| n >= self.retry_notice_attempt)
+                    && !self.retry_noticed
+                {
                     self.retry_noticed = true;
                     let status = frame
                         .get("error_status")
                         .and_then(Json::as_i64)
                         .map_or_else(|| "no answer".to_owned(), |status| status.to_string());
                     let kind = frame.text("error").unwrap_or("an error");
-                    let max = frame.get("max_retries").and_then(Json::as_u64).unwrap_or(0);
+                    let count = frame.get("max_retries").and_then(Json::as_u64).map_or_else(
+                        || format!("attempt {attempt}"),
+                        |max| format!("attempt {attempt} of {max}"),
+                    );
                     self.error_item(
                         "upstream_retrying",
                         &format!(
-                            "The model service answers {status} ({kind}); the harness tries again (attempt {attempt} of {max})."
+                            "The model service answers {status} ({kind}); the harness tries again ({count})."
                         ),
                         true,
                         frame.uuid().unwrap_or("retry"),
@@ -1834,15 +2488,402 @@ impl EventMapper {
                     out,
                 );
             }
+            Some("background_tasks_changed") => self.background_set(frame, out),
+            Some("task_started") => self.task_started(frame, out),
+            Some("task_progress") => self.task_progress(frame, out),
+            Some("task_updated") => self.task_updated(frame, out),
             Some("task_notification") => self.task_ended(frame, out),
             _ => {}
         }
     }
 
-    /// A `rate_limit_event`: where the plan's windows stand. Only what a rejection says is kept for a failure.
-    fn rate_limit_event(&mut self, frame: &Frame) {
-        if let Some(info) = frame.get("rate_limit_info") {
-            self.failure.limit = Some(LimitInfo::read(info));
+    /// Current owned work, retaining terminal facts until a follow-up consumes them.
+    pub(crate) fn background_tasks(&self) -> Vec<orch_agent_contract::background::BackgroundTask> {
+        self.background_records.values().cloned().collect()
+    }
+
+    pub(crate) fn background_running(&self) -> bool {
+        self.background_records
+            .values()
+            .any(|task| task.state == orch_agent_contract::background::BackgroundTaskState::Running)
+    }
+
+    fn observe_background(&mut self, frame: &Frame, tool_ref: &str, status: Option<&str>) {
+        use orch_agent_contract::background::{
+            BackgroundTask, BackgroundTaskKind, BackgroundTaskState,
+        };
+        let Some(tool) = self.tools.get(tool_ref) else {
+            return;
+        };
+        let Some(origin_turn) = tool.origin_turn.or(self.turn_id()) else {
+            return;
+        };
+        let key = NativeTaskKey::from_value(frame.raw()).or_else(|| {
+            self.native_tasks
+                .values()
+                .find(|task| task.tool_ref == tool_ref)
+                .map(|task| task.key.clone())
+        });
+        let Some(key) = key else { return };
+        let identity = serde_json::json!([key.task_id, key.run_id]).to_string();
+        let prior = self.background_records.get(&identity);
+        if prior.is_none()
+            && self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS
+        {
+            self.background_records
+                .retain(|_, task| task.state == BackgroundTaskState::Running);
+            if self.background_records.len() >= orch_agent_contract::background::SNAPSHOT_COMMANDS {
+                return;
+            }
+        }
+        let prior = self.background_records.get(&identity);
+        let is_background = tool.async_launched
+            || frame.get("is_backgrounded").and_then(Json::as_bool) == Some(true)
+            || frame
+                .get("patch")
+                .and_then(|patch| patch.get("is_backgrounded"))
+                .and_then(Json::as_bool)
+                == Some(true)
+            || tool.input.get("run_in_background").and_then(Json::as_bool) == Some(true);
+        if !is_background && prior.is_none() {
+            return;
+        }
+        let state = if prior.is_some_and(|task| task.state == BackgroundTaskState::Stopped) {
+            BackgroundTaskState::Stopped
+        } else {
+            match native_task_terminal(status) {
+                Some(ItemStatus::Completed) => BackgroundTaskState::Completed,
+                Some(ItemStatus::Failed) => BackgroundTaskState::Failed,
+                Some(ItemStatus::Cancelled) => BackgroundTaskState::Stopped,
+                _ => prior.map_or(BackgroundTaskState::Running, |task| task.state),
+            }
+        };
+        let kind = match tool.family {
+            Family::Command => BackgroundTaskKind::Command,
+            Family::Subagent => BackgroundTaskKind::Subagent,
+            _ => return,
+        };
+        let label = frame
+            .text("description")
+            .or_else(|| {
+                frame
+                    .get("patch")
+                    .and_then(|patch| patch.get("description"))
+                    .and_then(Json::as_str)
+            })
+            .or_else(|| prior.map(|task| task.label.as_str()))
+            .or_else(|| tool.input.get("name").and_then(Json::as_str))
+            .or_else(|| tool.input.get("description").and_then(Json::as_str))
+            .or_else(|| tool.input.get("command").and_then(Json::as_str))
+            .unwrap_or(&key.task_id);
+        let mut end = label
+            .len()
+            .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
+        while !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        let label = label[..end].to_owned();
+        let task = BackgroundTask {
+            id: key.task_id,
+            run_id: key.run_id,
+            native_item_ref: tool_ref.to_owned(),
+            origin_turn,
+            kind,
+            label,
+            name: tool
+                .input
+                .get("name")
+                .and_then(Json::as_str)
+                .map(str::to_owned),
+            nickname: None,
+            role: tool
+                .input
+                .get("subagent_type")
+                .and_then(Json::as_str)
+                .map(str::to_owned),
+            state,
+            exit_code: frame
+                .get("exit_code")
+                .and_then(Json::as_i64)
+                .or_else(|| prior.and_then(|task| task.exit_code)),
+            can_end: true,
+        };
+        if prior != Some(&task) {
+            self.background_records.insert(identity, task.clone());
+            self.background_changes.push(task);
+        }
+    }
+
+    fn background_set(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(tasks) = frame.get("tasks").and_then(Json::as_array) else {
+            return;
+        };
+        for task in tasks
+            .iter()
+            .take(orch_agent_contract::background::SNAPSHOT_COMMANDS)
+        {
+            if task.get("ambient").and_then(Json::as_bool) == Some(true) {
+                continue;
+            }
+            let mut value = task.clone();
+            value["type"] = json!("system");
+            value["subtype"] = json!("task_started");
+            value["is_backgrounded"] = json!(true);
+            self.task_started(&Frame::from_value(value), out);
+        }
+    }
+
+    fn bind_native_task(&mut self, key: NativeTaskKey, id: &str, local_bash: bool) -> bool {
+        let Some(tool) = self.tools.get(id) else {
+            return false;
+        };
+        if tool.generation != self.native_generation
+            || !matches!(tool.family, Family::Command | Family::Subagent)
+        {
+            return false;
+        }
+        let mut resumed = false;
+        let mut tool_reused = false;
+        let mut local_bash = local_bash;
+        if let Some(old) = self.native_tasks.get(&key.task_id) {
+            if old.key.run_id.is_some() && key.run_id.is_none() {
+                return old.tool_ref == id;
+            }
+            if let (Some(old_run), Some(run)) = (&old.key.run_id, &key.run_id)
+                // Native run ids sort by when the runs opened; their format is otherwise opaque.
+                && (run < old_run || (run == old_run && old.tool_ref != id))
+            {
+                return false;
+            }
+            let newer = old.key.run_id.is_some() && old.key.run_id != key.run_id;
+            resumed = old.resumed || newer;
+            tool_reused = old.tool_ref == id && (old.tool_reused || newer);
+            local_bash |= old.local_bash && old.tool_ref == id;
+        }
+        self.native_tasks
+            .retain(|_, task| self.tools.contains_key(&task.tool_ref));
+        if !self.native_tasks.contains_key(&key.task_id)
+            && self.native_tasks.len() == orch_agent_contract::background::SNAPSHOT_COMMANDS
+        {
+            return false;
+        }
+        let weight = |task: &NativeTask| {
+            std::mem::size_of::<NativeTask>()
+                .saturating_add(task.key.task_id.capacity().saturating_mul(2))
+                .saturating_add(task.key.run_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(task.tool_ref.capacity())
+        };
+        let task = NativeTask {
+            key,
+            tool_ref: id.to_owned(),
+            local_bash,
+            resumed,
+            tool_reused,
+        };
+        let used = self
+            .native_tasks
+            .values()
+            .map(weight)
+            .fold(0usize, usize::saturating_add)
+            .saturating_sub(self.native_tasks.get(&task.key.task_id).map_or(0, weight));
+        if used.saturating_add(weight(&task)) > crate::config::FRAME_MAX_BYTES {
+            return false;
+        }
+        self.native_tasks.insert(task.key.task_id.clone(), task);
+        true
+    }
+
+    fn task_tool(&self, frame: &Frame, legacy: bool) -> Option<String> {
+        let explicit = frame.text("tool_use_id");
+        let frame_key = NativeTaskKey::from_value(frame.raw());
+        let compatible = |task: &NativeTask| {
+            frame_key.as_ref() == Some(&task.key)
+                || (!task.resumed
+                    && frame_key.as_ref().is_some_and(|key| {
+                        key.task_id == task.key.task_id
+                            && (key.run_id.is_none() || task.key.run_id.is_none())
+                    }))
+                || (!task.tool_reused
+                    && explicit == Some(task.tool_ref.as_str())
+                    && frame_key.as_ref().is_none_or(|key| {
+                        key.task_id == task.key.task_id
+                            && (key.run_id.is_none() || task.key.run_id.is_none())
+                    }))
+        };
+        let id = if let Some(key) = &frame_key {
+            if let Some(task) = self.native_tasks.get(&key.task_id) {
+                if !compatible(task) || explicit.is_some_and(|id| id != task.tool_ref) {
+                    return None;
+                }
+                task.tool_ref.as_str()
+            } else if legacy {
+                explicit?
+            } else {
+                return None;
+            }
+        } else if legacy {
+            explicit?
+        } else {
+            return None;
+        };
+        if legacy
+            && self
+                .native_tasks
+                .values()
+                .any(|task| task.tool_ref == id && !compatible(task))
+        {
+            return None;
+        }
+        let tool = self.tools.get(id)?;
+        (tool.generation == self.native_generation).then(|| id.to_owned())
+    }
+
+    fn task_started(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(key) = NativeTaskKey::from_value(frame.raw()) else {
+            return;
+        };
+        let resumed = self.native_tasks.get(&key.task_id).is_some_and(|old| {
+            old.key.run_id.is_some() && key.run_id.is_some() && old.key.run_id != key.run_id
+        });
+        if let Some(old) = self.native_tasks.get(&key.task_id)
+            && old.key.run_id.is_some()
+            && key.run_id.is_none()
+            && (old.tool_reused
+                || (old.resumed && frame.text("tool_use_id") != Some(old.tool_ref.as_str())))
+        {
+            return;
+        }
+        let Some(id) = frame.text("tool_use_id").map(str::to_owned).or_else(|| {
+            self.native_tasks
+                .get(&key.task_id)
+                .map(|task| task.tool_ref.clone())
+        }) else {
+            return;
+        };
+        let Some(tool) = self.tools.get(&id) else {
+            return;
+        };
+        if tool.native_terminal.is_some() && !resumed {
+            return;
+        }
+        match (frame.text("task_type"), &tool.family) {
+            (Some("local_bash"), Family::Command)
+            | (Some("local_agent"), Family::Subagent)
+            // The native kind is optional; an observed call already supplies its kind.
+            | (None, Family::Command | Family::Subagent) => {}
+            _ => return,
+        }
+        if !self.bind_native_task(key, &id, frame.text("task_type") == Some("local_bash")) {
+            return;
+        }
+        self.observe_background(frame, &id, Some("running"));
+        self.update_native_task(
+            &id,
+            frame.get("is_backgrounded").and_then(Json::as_bool) == Some(true),
+            frame.text("description"),
+            resumed.then_some("running"),
+            out,
+        );
+    }
+
+    fn task_progress(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(id) = self.task_tool(frame, false) else {
+            return;
+        };
+        if self
+            .tools
+            .get(&id)
+            .is_some_and(|tool| tool.native_terminal.is_some())
+        {
+            return;
+        }
+        self.observe_background(frame, &id, None);
+        self.update_native_task(
+            &id,
+            false,
+            frame.text("summary").or_else(|| frame.text("description")),
+            None,
+            out,
+        );
+    }
+
+    fn task_updated(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
+        let Some(id) = self.task_tool(frame, false) else {
+            return;
+        };
+        // Only a newer registered run reopens a task; a late same-run patch cannot do so.
+        if self
+            .tools
+            .get(&id)
+            .is_some_and(|tool| tool.native_terminal.is_some())
+        {
+            return;
+        }
+        let Some(patch) = frame.get("patch") else {
+            return;
+        };
+        self.observe_background(frame, &id, patch.get("status").and_then(Json::as_str));
+        self.update_native_task(
+            &id,
+            patch.get("is_backgrounded").and_then(Json::as_bool) == Some(true),
+            patch.get("description").and_then(Json::as_str),
+            patch.get("status").and_then(Json::as_str),
+            out,
+        );
+    }
+
+    fn update_native_task(
+        &mut self,
+        id: &str,
+        backgrounded: bool,
+        title: Option<&str>,
+        status: Option<&str>,
+        out: &mut Vec<SessionEvent>,
+    ) {
+        let Some(state) = self.tools.get_mut(id) else {
+            return;
+        };
+        let mut changed = backgrounded && !state.async_launched;
+        state.async_launched |= backgrounded;
+        if status == Some("running") {
+            changed |= state.native_terminal.take().is_some();
+        }
+        let terminal = native_task_terminal(status);
+        if let Some(terminal) = terminal {
+            changed |= state.native_terminal.as_ref() != Some(&terminal);
+            state.native_terminal = Some(terminal);
+        }
+        if let Some(title) = title.filter(|title| !title.is_empty()) {
+            let mut end = title
+                .len()
+                .min(orch_agent_contract::background::COMMAND_PREVIEW_BYTES);
+            while !title.is_char_boundary(end) {
+                end -= 1;
+            }
+            let title = title[..end].to_owned();
+            changed |= state.progress_title.as_ref() != Some(&title);
+            state.progress_title = Some(title);
+        }
+        if !changed {
+            return;
+        }
+        let state = state.clone();
+        let mut payload = self.call_payload(&state, id, None);
+        if state.async_launched
+            && let ToolPayload::Command {
+                background,
+                exit_code,
+                ..
+            } = &mut payload.tool
+        {
+            *background = true;
+            *exit_code = None;
+        }
+        if let Ok(payload) = serde_json::to_value(payload) {
+            out.push(SessionEvent::ItemUpdated(ItemUpdated {
+                native_ref: id.to_owned(),
+                payload,
+            }));
         }
     }
 
@@ -1869,10 +2910,27 @@ impl EventMapper {
         });
     }
 
+    fn retry_phase(&mut self, attempt: Option<i64>, out: &mut Vec<SessionEvent>) {
+        if self.turn.is_none() || (self.retrying && self.retry_attempt == attempt) {
+            return;
+        }
+        self.retrying = true;
+        self.retry_attempt = attempt;
+        if let Some(turn_id) = self.turn {
+            out.push(SessionEvent::TurnPhase(TurnPhase {
+                turn_id,
+                kind: TurnPhaseKind::Retrying,
+                retry_attempt: attempt,
+                at: self.clock.time(),
+            }));
+        }
+    }
+
     fn phase(&self, kind: TurnPhaseKind, out: &mut Vec<SessionEvent>) {
         if let Some(turn_id) = self.turn {
             out.push(SessionEvent::TurnPhase(TurnPhase {
                 turn_id,
+                retry_attempt: None,
                 kind,
                 at: self.clock.time(),
             }));
@@ -1889,6 +2947,9 @@ impl EventMapper {
     ) {
         let native_ref = format!("error:{native_ref}");
         let payload = ErrorPayload {
+            details: None,
+            window: None,
+            resets_at: None,
             code: code.to_owned(),
             message: message.to_owned(),
             retryable,
@@ -1911,42 +2972,44 @@ impl EventMapper {
 
     /// A sub-agent that ran in the background is done: its call, which stayed open, is closed.
     fn task_ended(&mut self, frame: &Frame, out: &mut Vec<SessionEvent>) {
-        let Some(id) = frame.text("tool_use_id") else {
+        let Some(id) = self.task_tool(frame, true) else {
             return;
         };
-        let Some(state) = self.tools.get(id) else {
+        let Some(state) = self.tools.get(&id) else {
             return;
         };
         if !state.async_launched {
             return;
         }
-        if !matches!(
-            frame.text("status"),
-            Some("completed" | "failed" | "killed")
-        ) {
+        let Some(terminal) = native_task_terminal(frame.text("status")) else {
             return;
-        }
-        let summary = frame.text("summary").unwrap_or_default().to_owned();
-        let failed = matches!(frame.text("status"), Some("failed" | "killed"));
-        let outcome = ToolOutcome {
-            text: summary,
-            is_error: failed,
-            structured: None,
         };
         let state = state.clone();
-        self.tools.remove(id);
-        let mut payload = self.call_payload(&state, id, Some(&outcome));
+        self.child_heard
+            .push(crate::child_usage::Heard::Ended { parent: id.clone() });
+        self.observe_background(frame, &id, frame.text("status"));
+        let summary = frame.text("summary").unwrap_or_default().to_owned();
+        let failed = terminal == ItemStatus::Failed;
+        let stopped = terminal == ItemStatus::Cancelled;
+        let outcome = ToolOutcome {
+            images: Vec::new(),
+            text: summary,
+            is_error: failed || stopped,
+            structured: None,
+        };
+        self.tools.remove(&id);
+        self.native_tasks.retain(|_, task| task.tool_ref != id);
+        let mut payload = self.call_payload(&state, &id, Some(&outcome));
         if let ToolPayload::Command { exit_code, .. } = &mut payload.tool {
             *exit_code = frame.get("exit_code").and_then(Json::as_i64);
+        }
+        if stopped && let ToolPayload::Subagent { state, .. } = &mut payload.tool {
+            *state = orch_agent_contract::events::SubagentState::Interrupted;
         }
         if let Ok(payload) = serde_json::to_value(&payload) {
             out.push(SessionEvent::ItemCompleted(ItemCompleted {
                 native_ref: id.to_owned(),
-                status: if failed {
-                    ItemStatus::Failed
-                } else {
-                    ItemStatus::Completed
-                },
+                status: terminal,
                 payload,
                 output_blob: None,
             }));
@@ -2021,7 +3084,7 @@ impl EventMapper {
         // process used, its sub-agents and its shortenings of the conversation included. The turn's whole use is
         // what that total grew by since the result before, where the total it grew from is known.
         let main = self.turn_tally;
-        let (whole, models) = match self.model_changes(frame) {
+        let (whole, mut models) = match self.model_changes(frame) {
             Some(models) => (
                 Some(
                     models
@@ -2032,6 +3095,7 @@ impl EventMapper {
             ),
             None => (None, Vec::new()),
         };
+        self.add_native_counts(frame, &mut models);
         let counted = self.subagent_total();
         // Sub-agents whose messages said no numbers are what the whole holds beyond the main conversation.
         let subagents = match whole {
@@ -2090,10 +3154,11 @@ impl EventMapper {
             .filter_map(|id| self.tools.remove(&id).map(|state| (id, state)))
             .collect();
         for (id, state) in open {
-            if !state.item_started {
+            if !state.item_started || state.native_web && state.native_terminal.is_some() {
                 continue;
             }
             let outcome = ToolOutcome {
+                images: Vec::new(),
                 text: "The call did not finish.".to_owned(),
                 is_error: true,
                 structured: None,
@@ -2200,9 +3265,11 @@ impl EventMapper {
     /// Whether the harness waits for something other than the model: a tool that runs.
     #[must_use]
     pub fn waiting_on_a_tool(&self) -> bool {
-        self.tools
-            .values()
-            .any(|tool| tool.item_started && !tool.async_launched)
+        self.tools.values().any(|tool| {
+            tool.item_started
+                && !tool.async_launched
+                && !(tool.native_web && tool.native_terminal.is_some())
+        })
     }
 
     /// The turn ended because the process did: no result will come, and what was open is closed.
@@ -2226,6 +3293,17 @@ fn json_id(value: &Json) -> String {
     match value {
         Json::String(text) => text.clone(),
         other => other.to_string(),
+    }
+}
+
+// The task roster uses killed for a native stop before task_notification says stopped.
+// Both are control outcomes; neither may briefly appear as a failure that wakes the owner.
+fn native_task_terminal(status: Option<&str>) -> Option<ItemStatus> {
+    match status {
+        Some("completed") => Some(ItemStatus::Completed),
+        Some("failed") => Some(ItemStatus::Failed),
+        Some("killed" | "stopped") => Some(ItemStatus::Cancelled),
+        _ => None,
     }
 }
 
@@ -2367,6 +3445,8 @@ impl EventMapper {
                         less(*total, before)
                     };
                     (grew.total_tokens > 0).then(|| ModelTokens {
+                        tokens_reported: true,
+                        counts: Default::default(),
                         model: model.clone(),
                         tokens: grew,
                     })
@@ -2889,6 +3969,190 @@ mod tests {
         base
     }
 
+    fn native_counts(events: &[SessionEvent]) -> BTreeMap<(String, String), i64> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
+                _ => None,
+            })
+            .flat_map(|report| &report.models)
+            .flat_map(|model| {
+                model
+                    .counts
+                    .iter()
+                    .map(|(capability, count)| ((model.model.clone(), capability.clone()), *count))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn subscription_model_search_totals_share_the_counter_hook_without_changing_tokens_or_requests()
+    {
+        use orch_agent_contract::session::ProviderAccess;
+        for provider in [
+            ProviderAccess::Native {
+                provider_id: new_id(),
+            },
+            ProviderAccess::Shared {
+                provider_id: new_id(),
+                form: "oauth_token".into(),
+            },
+            ProviderAccess::Handover {
+                provider_id: new_id(),
+                form: "login".into(),
+            },
+        ] {
+            let (mut native, _) = mapper(false);
+            native.configure_native_counters(&provider);
+            native.process_started(true);
+            let first = result_frame(
+                json!({"uuid":"first-result","modelUsage":{"main":{"inputTokens":100,"outputTokens":2,"webSearchRequests":2},"helper":{"webSearchRequests":3}}}),
+            );
+            let events = feed(&mut native, vec![first.clone()]);
+            let counts = native_counts(&events);
+            assert_eq!(counts[&("main".into(), "web_search".into())], 2);
+            assert_eq!(
+                counts[&("helper".into(), "web_search".into())],
+                3,
+                "a search-only model report does not depend on token totals"
+            );
+            let helper = events
+                .iter()
+                .find_map(|event| match event {
+                    SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
+                    _ => None,
+                })
+                .unwrap()
+                .models
+                .iter()
+                .find(|model| model.model == "helper")
+                .unwrap();
+            assert!(
+                !helper.tokens_reported,
+                "known searches do not claim a known zero token share"
+            );
+            let (mut control, _) = mapper(false);
+            control.process_started(true);
+            let plain = feed(&mut control, vec![first.clone()]);
+            let usage = |events: Vec<SessionEvent>| {
+                events
+                    .into_iter()
+                    .find_map(|event| match event {
+                        SessionEvent::UsageUpdated(usage) => Some((usage.turn, usage.thread)),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            assert_eq!(usage(events), usage(plain));
+            assert_eq!(
+                native.take_requests().len(),
+                control.take_requests().len(),
+                "no inner native request is invented"
+            );
+            assert!(native_counts(&feed(&mut native, vec![first])).is_empty());
+            native.begin_turn(new_id());
+            let next = feed(
+                &mut native,
+                vec![result_frame(
+                    json!({"uuid":"next-result","modelUsage":{"main":{"webSearchRequests":3},"helper":{"webSearchRequests":3}}}),
+                )],
+            );
+            assert_eq!(
+                native_counts(&next)[&("main".into(), "web_search".into())],
+                1
+            );
+            assert_eq!(
+                native_counts(&next)[&("helper".into(), "web_search".into())],
+                0
+            );
+            let (mut reconfigured, _) = mapper(false);
+            reconfigured.inherit_process_report(&native);
+            reconfigured.configure_native_counters(&provider);
+            let after = feed(
+                &mut reconfigured,
+                vec![result_frame(
+                    json!({"uuid":"same-process","modelUsage":{"main":{"webSearchRequests":5},"helper":{"webSearchRequests":3}}}),
+                )],
+            );
+            assert_eq!(
+                native_counts(&after)[&("main".into(), "web_search".into())],
+                2
+            );
+            reconfigured.process_started(false);
+            reconfigured.begin_turn(new_id());
+            assert!(
+                native_counts(&feed(
+                    &mut reconfigured,
+                    vec![result_frame(
+                        json!({"uuid":"resumed","modelUsage":{"main":{"webSearchRequests":90}}})
+                    )]
+                ))
+                .is_empty()
+            );
+            reconfigured.begin_turn(new_id());
+            assert_eq!(
+                native_counts(&feed(
+                    &mut reconfigured,
+                    vec![result_frame(
+                        json!({"uuid":"resumed-next","modelUsage":{"main":{"webSearchRequests":92}}})
+                    )]
+                ))[&("main".into(), "web_search".into())],
+                2
+            );
+            reconfigured.begin_turn(new_id());
+            assert_eq!(
+                native_counts(&feed(
+                    &mut reconfigured,
+                    vec![result_frame(
+                        json!({"uuid":"cleared","modelUsage":{"main":{"webSearchRequests":1}}})
+                    )]
+                ))[&("main".into(), "web_search".into())],
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_search_totals_stay_with_the_forwarder_and_own_context_arguments_keep_the_wire_model()
+     {
+        use orch_agent_contract::session::ProviderAccess;
+        let (mut forwarded, _) = mapper(false);
+        forwarded.configure_native_counters(&ProviderAccess::Forwarded {
+            provider_id: new_id(),
+            protocol: "anthropic-messages".into(),
+        });
+        forwarded.process_started(true);
+        assert!(
+            native_counts(&feed(
+                &mut forwarded,
+                vec![result_frame(
+                    json!({"uuid":"forwarded","modelUsage":{"main":{"webSearchRequests":8}}})
+                )]
+            ))
+            .is_empty()
+        );
+        let (mut native, _) = mapper(false);
+        native.configure_native_counters(&ProviderAccess::Native {
+            provider_id: new_id(),
+        });
+        native.process_started(true);
+        native.begin_turn_with_model(new_id(), "opaque-model", Some(1_000_000));
+        let counts = native_counts(&feed(
+            &mut native,
+            vec![result_frame(
+                json!({"uuid":"context","modelUsage":{"opaque-model":{"webSearchRequests":1},"opaque-model[1m]":{"webSearchRequests":2},"other[1m]":{"webSearchRequests":4}}}),
+            )],
+        ));
+        assert_eq!(counts[&("opaque-model".into(), "web_search".into())], 3);
+        assert_eq!(
+            counts[&("other[1m]".into(), "web_search".into())],
+            4,
+            "another model's routing name remains opaque"
+        );
+        assert!(!counts.contains_key(&("opaque-model[1m]".into(), "web_search".into())));
+    }
+
     #[test]
     fn a_turn_ends_with_its_use_counted_as_the_contract_counts_it() {
         let (mut mapper, turn) = mapper(false);
@@ -3125,11 +4389,11 @@ mod tests {
         );
         assert_eq!(
             code(failure(Some(429), "api_error", "Request rejected (429)")),
-            ("provider_busy".into(), true)
+            ("rate_limited".into(), true)
         );
         assert_eq!(
             code(failure(Some(500), "api_error", "Internal server error")),
-            ("provider_busy".into(), true)
+            ("overloaded".into(), true)
         );
         assert_eq!(
             code(failure(None, "api_error", "Connection lost (ECONNRESET)")),
@@ -3310,8 +4574,7 @@ mod tests {
     }
 
     #[test]
-    fn a_background_command_keeps_its_live_line_until_a_native_task_result_without_promising_exact_end()
-     {
+    fn a_background_command_keeps_its_live_line_until_a_native_task_result() {
         let (mut mapper, _) = mapper(false);
         feed(
             &mut mapper,
@@ -3346,12 +4609,682 @@ mod tests {
         let SessionEvent::ItemCompleted(command) = &ended[0] else {
             panic!("the native task result ends the command")
         };
-        assert_eq!(command.status, ItemStatus::Failed);
+        assert_eq!(command.status, ItemStatus::Cancelled);
         assert!(
             command.payload["tool"]["exit_code"].is_null(),
             "a missing native exit code stays unknown"
         );
-        assert!(!crate::descriptor::capabilities().background_commands);
+        assert!(crate::descriptor::capabilities().background_commands);
+    }
+
+    #[test]
+    fn a_native_stopped_task_closes_its_existing_background_item_once() {
+        for (name, input, launched) in [
+            (
+                "Bash",
+                json!({"command":"sleep 300","run_in_background":true}),
+                json!({"backgroundTaskId":"task"}),
+            ),
+            (
+                "Agent",
+                json!({"description":"Look","prompt":"Read the code","subagent_type":"general-purpose"}),
+                json!({"status":"async_launched","agentId":"task"}),
+            ),
+        ] {
+            let (mut mapper, _) = mapper(false);
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":name,"input":input}]}}),
+                    json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]},"tool_use_result":launched}),
+                ],
+            );
+            let turn_end = feed(&mut mapper, vec![result_frame(json!({}))]);
+            assert!(
+                !turn_end.iter().any(
+                    |event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "bg")
+                ),
+                "the turn ending is not native task completion"
+            );
+            let stopped = json!({
+                "type":"system","subtype":"task_notification","session_id":"session",
+                "uuid":"stopped","task_id":"task","run_id":"run-1","tool_use_id":"bg",
+                "status":"stopped","output_file":"/workspace/task-output","summary":"Stopped by the user"
+            });
+            let ended = feed(&mut mapper, vec![stopped.clone()]);
+            let ended_items: Vec<_> = ended
+                .iter()
+                .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+                .cloned()
+                .collect();
+            let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+                panic!("the native stopped notification closes {name}: {ended:?}");
+            };
+            assert_eq!(item.native_ref, "bg");
+            assert_eq!(item.status, ItemStatus::Cancelled);
+            assert_eq!(item.payload["raw"]["name"], name);
+            assert_eq!(
+                serde_json::from_str::<Json>(
+                    item.payload["raw"]["input"]["inline"].as_str().unwrap()
+                )
+                .unwrap(),
+                input
+            );
+            if name == "Bash" {
+                assert!(item.payload["tool"]["exit_code"].is_null());
+            } else {
+                assert_eq!(item.payload["tool"]["state"], "interrupted");
+                assert_eq!(item.payload["tool"]["child_stream"], "sub:bg");
+            }
+            assert!(feed(&mut mapper, vec![stopped]).is_empty());
+        }
+    }
+
+    #[test]
+    fn unadmitted_native_usage_keeps_its_origin_and_advances_the_process_baseline_once() {
+        let (mut mapper, origin) = mapper(false);
+        mapper.process_started(true);
+        feed(
+            &mut mapper,
+            vec![result_frame(json!({
+                "usage":{"input_tokens":10,"output_tokens":2},
+                "modelUsage":{"mock-large":{"inputTokens":10,"outputTokens":2}}
+            }))],
+        );
+        let recent = new_id();
+        mapper.begin_turn(recent);
+        feed(
+            &mut mapper,
+            vec![result_frame(json!({
+                "usage":{"input_tokens":5,"output_tokens":1},
+                "modelUsage":{"mock-large":{"inputTokens":15,"outputTokens":3}}
+            }))],
+        );
+        mapper.take_requests();
+        assert!(!mapper.turn_active());
+        let frames = [
+            json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"native-stop-call","model":"mock-large","usage":{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+            json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Native response must stay unpublished"}}}),
+            json!({"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}}),
+            json!({"type":"stream_event","event":{"type":"message_stop"}}),
+            result_frame(
+                json!({"uuid":"native-result","usage":{"input_tokens":3,"output_tokens":4},"modelUsage":{"mock-large":{"inputTokens":18,"outputTokens":7}}}),
+            ),
+        ];
+        let observed: Vec<_> = frames
+            .iter()
+            .flat_map(|value| {
+                mapper.observe_unadmitted_native(
+                    &frame(value.clone()),
+                    origin,
+                    orch_types::Id::from_u128(10),
+                )
+            })
+            .collect();
+        assert!(!mapper.turn_active());
+        assert!(
+            observed
+                .iter()
+                .all(|event| matches!(event, SessionEvent::UsageUpdated(_)))
+        );
+        let current = observed
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::UsageUpdated(usage) => Some(usage),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(current.turn_id, recent);
+        assert_eq!(
+            current.turn.total_tokens, 6,
+            "the older task's notice cannot rewrite the newer accepted turn"
+        );
+        assert_eq!(current.thread.total_tokens, 25);
+        let reports = mapper.take_requests();
+        let completed: Vec<_> = reports
+            .iter()
+            .filter(|(_, request)| request.outcome.is_some())
+            .collect();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].0, origin);
+        assert!(
+            completed[0]
+                .1
+                .id
+                .starts_with("native:00000000-0000-0000-0000-00000000000a:")
+        );
+        assert_eq!(
+            completed[0].1.provider_request_id.as_deref(),
+            Some("native-stop-call")
+        );
+        assert_eq!(completed[0].1.tokens.input_tokens, Some(3));
+        assert_eq!(completed[0].1.tokens.output_tokens, Some(4));
+        assert!(completed[0].1.asked.is_none());
+        assert!(completed[0].1.check().is_ok());
+        assert_eq!(mapper.thread_tally.total_tokens, 25);
+        mapper.observe_unadmitted_native(
+            &frame(frames.last().unwrap().clone()),
+            origin,
+            orch_types::Id::from_u128(10),
+        );
+        assert!(
+            mapper.take_requests().is_empty(),
+            "the same native result cannot count the call again"
+        );
+        assert_eq!(mapper.thread_tally.total_tokens, 25);
+        mapper.begin_turn(new_id());
+        let next = feed(
+            &mut mapper,
+            vec![result_frame(json!({
+                "usage":{"input_tokens":5,"output_tokens":1},
+                "modelUsage":{"mock-large":{"inputTokens":23,"outputTokens":8}}
+            }))],
+        );
+        let usage = next
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::UsageUpdated(usage) => Some(usage),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            usage.turn.total_tokens, 6,
+            "the new input does not inherit the stop-notice tokens"
+        );
+        assert_eq!(usage.thread.total_tokens, 31);
+    }
+
+    #[test]
+    fn unadmitted_native_process_loss_retains_the_origin_and_unknown_final_usage() {
+        let (mut mapper, origin) = mapper(false);
+        feed(&mut mapper, vec![result_frame(json!({}))]);
+        mapper.take_requests();
+        let notice = orch_types::Id::from_u128(10);
+        mapper.observe_unadmitted_native(&frame(json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"native-lost-call","model":"mock-large","usage":{"input_tokens":3,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":0}}}})), origin, notice);
+        mapper.take_requests();
+        mapper.abort_unadmitted_native(origin, notice, "the native process ended");
+        let observed = mapper.take_requests();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].0, origin);
+        assert_eq!(
+            observed[0].1.provider_request_id.as_deref(),
+            Some("native-lost-call")
+        );
+        assert!(
+            observed[0]
+                .1
+                .id
+                .starts_with("native:00000000-0000-0000-0000-00000000000a:")
+        );
+        assert!(observed[0].1.asked.is_none());
+        assert!(observed[0].1.tokens.output_tokens.is_none());
+        assert!(observed[0].1.outcome.is_some());
+        assert!(observed[0].1.check().is_ok());
+        assert!(!mapper.turn_active());
+    }
+
+    #[test]
+    fn native_stop_patches_never_publish_a_waking_failure_before_the_terminal_notice() {
+        use orch_agent_contract::background::BackgroundTaskState;
+        for native_status in ["killed", "stopped"] {
+            let (mut mapper, origin) = mapper(false);
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":"Agent","input":{"description":"Review","prompt":"Read the code","run_in_background":true,"subagent_type":"general-purpose"}}]}}),
+                    json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]},"tool_use_result":{"status":"async_launched","agentId":"task"}}),
+                    json!({"type":"system","subtype":"task_started","task_id":"task","run_id":"run-1","tool_use_id":"bg","task_type":"local_agent","is_backgrounded":true}),
+                    result_frame(json!({})),
+                ],
+            );
+            let stopped = feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_updated","task_id":"task","run_id":"run-1","patch":{"status":native_status}}),
+                ],
+            );
+            assert!(stopped.iter().any(|event| {
+                matches!(event, SessionEvent::ItemUpdated(item)
+                    if item.native_ref == "bg" && item.payload["tool"]["state"] == "interrupted")
+            }));
+            let tasks = mapper.background_tasks();
+            assert_eq!(tasks.len(), 1);
+            assert_eq!(tasks[0].origin_turn, origin);
+            assert_eq!(tasks[0].run_id.as_deref(), Some("run-1"));
+            assert_eq!(tasks[0].state, BackgroundTaskState::Stopped);
+            assert!(!tasks[0].state.wakes());
+            assert!(stopped.iter().any(|event| {
+                matches!(event, SessionEvent::BackgroundTasks(report)
+                    if report.tasks.iter().any(|task| task.state == BackgroundTaskState::Stopped))
+            }));
+            assert!(
+                !stopped
+                    .iter()
+                    .any(|event| matches!(event, SessionEvent::ItemCompleted(_)))
+            );
+            assert!(feed(
+                &mut mapper,
+                vec![json!({"type":"system","subtype":"task_updated","task_id":"task","run_id":"run-1","patch":{"status":"failed"}})],
+            ).is_empty(), "a late patch cannot rewrite the native stop");
+            let notice = json!({"type":"system","subtype":"task_notification","task_id":"task","run_id":"run-1","tool_use_id":"bg","status":native_status,"summary":"Stopped by the user"});
+            let terminal = feed(&mut mapper, vec![notice.clone()]);
+            let items: Vec<_> = terminal
+                .iter()
+                .filter_map(|event| match event {
+                    SessionEvent::ItemCompleted(item) => Some(item),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].native_ref, "bg");
+            assert_eq!(items[0].status, ItemStatus::Cancelled);
+            assert_eq!(items[0].payload["tool"]["state"], "interrupted");
+            assert!(
+                mapper
+                    .background_tasks()
+                    .iter()
+                    .all(|task| task.state == BackgroundTaskState::Stopped)
+            );
+            assert!(feed(&mut mapper, vec![notice]).is_empty());
+        }
+    }
+
+    #[test]
+    fn owned_background_events_keep_the_origin_across_turns_and_refresh_the_native_live_set() {
+        use orch_agent_contract::background::BackgroundTaskState;
+        let (mut mapper, origin) = mapper(false);
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"start","content":[{"type":"tool_use","id":"bg","name":"Bash","input":{"command":"sleep 1","run_in_background":true,"description":"Build"}}]}}),
+                json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"bg","content":"started"}]},"tool_use_result":{"backgroundTaskId":"task"}}),
+                json!({"type":"system","subtype":"task_started","task_id":"task","run_id":"run","tool_use_id":"bg","task_type":"local_bash","description":"Build","is_backgrounded":true}),
+            ],
+        );
+        let refreshed = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+                    {"task_id":"task","run_id":"run","task_type":"local_bash","description":"Build assets"},
+                    {"task_id":"ambient","task_type":"local_agent","description":"Watcher","ambient":true}
+                ]}),
+            ],
+        );
+        assert!(refreshed.iter().any(
+            |event| matches!(event, SessionEvent::BackgroundTasks(report)
+            if report.tasks.iter().any(|task| task.label == "Build assets"))
+        ));
+        feed(&mut mapper, vec![result_frame(json!({}))]);
+        mapper.begin_turn(orch_types::new_id());
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","task_id":"task","run_id":"run","tool_use_id":"bg","status":"failed","exit_code":2,"summary":"Build failed"}),
+            ],
+        );
+        let report = ended
+            .iter()
+            .find_map(|event| match event {
+                SessionEvent::BackgroundTasks(report) => Some(report),
+                _ => None,
+            })
+            .expect("the native completion has a separate owned task report");
+        assert!(report.self_waking);
+        assert_eq!(report.tasks.len(), 1);
+        assert_eq!(report.tasks[0].origin_turn, origin);
+        assert_eq!(report.tasks[0].native_item_ref, "bg");
+        assert_eq!(report.tasks[0].state, BackgroundTaskState::Failed);
+        assert_eq!(report.tasks[0].exit_code, Some(2));
+        assert!(!mapper.background_running());
+    }
+
+    #[test]
+    fn a_native_background_transition_keeps_the_original_command_until_its_task_ends() {
+        let (mut mapper, _) = mapper(false);
+        let input = json!({"command":"printf ready","description":"Wait"});
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"bg","name":"Bash","input":input}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","uuid":"started","task_id":"task","run_id":"run-1","tool_use_id":"bg","task_type":"local_bash","description":"Wait","is_backgrounded":false}),
+            ],
+        );
+        let backgrounded = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_updated","session_id":"session","uuid":"backgrounded","task_id":"task","run_id":"run-1","patch":{"is_backgrounded":true}}),
+            ],
+        );
+        let backgrounded_items: Vec<_> = backgrounded
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = backgrounded_items.as_slice() else {
+            panic!("the native transition updates the existing command: {backgrounded:?}");
+        };
+        assert_eq!(item.native_ref, "bg");
+        assert_eq!(item.payload["tool"]["background"], true);
+        assert!(item.payload["tool"]["exit_code"].is_null());
+        assert_eq!(
+            serde_json::from_str::<Json>(item.payload["raw"]["input"]["inline"].as_str().unwrap())
+                .unwrap(),
+            input
+        );
+        let turn_end = feed(&mut mapper, vec![result_frame(json!({}))]);
+        assert!(
+            !turn_end.iter().any(
+                |event| matches!(event, SessionEvent::ItemCompleted(item) if item.native_ref == "bg")
+            ),
+            "a natively backgrounded command outlives its turn"
+        );
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","uuid":"stopped","task_id":"task","run_id":"run-1","status":"stopped","output_file":"/workspace/task-output","summary":"Stopped by the user"}),
+            ],
+        );
+        let ended_items: Vec<_> = ended
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+            panic!("the exact task identity closes its original command: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "bg");
+        assert_eq!(item.status, ItemStatus::Cancelled);
+        assert!(item.payload["tool"]["exit_code"].is_null());
+    }
+
+    #[test]
+    fn native_subagent_progress_updates_its_existing_lane_without_inventing_usage() {
+        let (mut mapper, _) = mapper(false);
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read the code","subagent_type":"general-purpose"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","uuid":"started","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let progress = json!({
+            "type":"system","subtype":"task_progress","session_id":"session","uuid":"progress",
+            "task_id":"task","run_id":"run-1","tool_use_id":"ag","description":"Look",
+            "summary":"Reading the request handler","usage":{"total_tokens":12,"tool_uses":2,"duration_ms":100}
+        });
+        let events = feed(&mut mapper, vec![progress.clone()]);
+        let events_items: Vec<_> = events
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = events_items.as_slice() else {
+            panic!("native progress updates only the existing subagent: {events:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["title"], "Reading the request handler");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        assert_eq!(item.payload["tool"]["prompt"], "Read the code");
+        assert_eq!(item.payload["tool"]["state"], "running");
+        assert!(item.payload["duration_ms"].is_null());
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","uuid":"completed","task_id":"task","run_id":"run-1","status":"completed","output_file":"/workspace/task-output","summary":"Read it"}),
+            ],
+        );
+        let ended_items: Vec<_> = ended
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+            panic!("native completion closes the same subagent: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["state"], "completed");
+        assert!(feed(&mut mapper, vec![progress]).is_empty());
+    }
+
+    #[test]
+    fn native_task_updates_require_the_known_tool_session_and_current_run() {
+        let older_run = "7f4dd67e-a8bb-487f-98a0-83e1b656c13a";
+        let current_run = "b1ee84f0-5d27-45ae-9a6a-f418fe710387";
+        let newer_run = "f01e7336-ab7f-4b14-9768-1f54d1c98080";
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}},{"type":"tool_use","id":"plan","name":"TaskCreate","input":{"subject":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let refused = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"unknown","run_id":older_run,"tool_use_id":"unowned","task_type":"local_agent","description":"Other"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"plan","run_id":older_run,"tool_use_id":"plan","task_type":"local_agent","description":"Not a subagent"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"wrong-kind","run_id":older_run,"tool_use_id":"ag","task_type":"local_bash","description":"Not a shell"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"other","task_id":"task","run_id":current_run,"summary":"Wrong session"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":older_run,"summary":"Older run"}),
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"unknown","run_id":current_run,"tool_use_id":"ag","summary":"Unknown task"}),
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"unowned","status":"completed","summary":"Wrong tool"}),
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"other-task","run_id":current_run,"tool_use_id":"ag","status":"completed","summary":"Wrong task"}),
+                json!({"type":"system","subtype":"task_notification","task_id":"task","run_id":current_run,"tool_use_id":"ag","status":"completed","summary":"Missing session"}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","task_type":"local_agent","description":"Late start"}),
+            ],
+        );
+        assert!(
+            refused.is_empty(),
+            "unknown or stale tasks change no owned line"
+        );
+        let valid = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":current_run,"summary":"Still reading"}),
+            ],
+        );
+        let valid_items: Vec<_> = valid
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = valid_items.as_slice() else {
+            panic!("the current owned task still updates: {valid:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["title"], "Still reading");
+        mapper.process_started(false);
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":newer_run,"tool_use_id":"ag","task_type":"local_agent","description":"Old process tool"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"tool_use_id":"ag","status":"stopped","summary":"Old process result"}),
+                ],
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_native_terminal_update_keeps_the_completion_bookend_and_rejects_late_progress() {
+        let (mut mapper, _) = mapper(false);
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let updated = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":"run-1","patch":{"status":"completed","description":"Finished"}}),
+            ],
+        );
+        let updated_items: Vec<_> = updated
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = updated_items.as_slice() else {
+            panic!("the native terminal patch updates its existing subagent: {updated:?}");
+        };
+        assert_eq!(item.payload["tool"]["state"], "completed");
+        assert!(item.payload["raw"]["output"].is_null());
+        let late = json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":"run-1","summary":"Late running description"});
+        assert!(feed(&mut mapper, vec![late.clone()]).is_empty());
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":"run-1","patch":{"status":"running","description":"Late running patch"}}),
+                    json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"run-1","tool_use_id":"ag","task_type":"local_agent","description":"Duplicate same-run start","is_backgrounded":true}),
+                ],
+            )
+            .is_empty()
+        );
+        let completed = json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":"run-1","status":"completed","summary":"The full native completion summary"});
+        let ended = feed(&mut mapper, vec![completed.clone()]);
+        let ended_items: Vec<_> = ended
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+            panic!("the bookend retains the actual native summary: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(
+            item.payload["raw"]["output"]["inline"],
+            "The full native completion summary"
+        );
+        assert!(feed(&mut mapper, vec![completed, late]).is_empty());
+    }
+
+    #[test]
+    fn native_optional_fields_preserve_an_explicit_known_tool_bookend() {
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":"b1ee84f0-5d27-45ae-9a6a-f418fe710387","tool_use_id":"ag","description":"Look","is_backgrounded":true}),
+            ],
+        );
+        let progress = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","tool_use_id":"ag","summary":"Known tool, optional run"}),
+            ],
+        );
+        let progress_items: Vec<_> = progress
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = progress_items.as_slice() else {
+            panic!("an explicit known tool still updates without optional fields: {progress:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","tool_use_id":"ag","status":"completed","summary":"Read it"}),
+            ],
+        );
+        let ended_items: Vec<_> = ended
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+            panic!("the explicit known tool retains its completion: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.status, ItemStatus::Completed);
+    }
+
+    #[test]
+    fn native_resumption_can_keep_its_tool_and_rejects_only_stale_or_ambiguous_bookends() {
+        let older_run = "7f4dd67e-a8bb-487f-98a0-83e1b656c13a";
+        let current_run = "b1ee84f0-5d27-45ae-9a6a-f418fe710387";
+        let (mut mapper, _) = mapper(false);
+        mapper.set_native_session("session");
+        feed(
+            &mut mapper,
+            vec![
+                json!({"type":"assistant","message":{"id":"m","content":[{"type":"tool_use","id":"ag","name":"Agent","input":{"description":"Look","prompt":"Read"}}]}}),
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","task_type":"local_agent","description":"Look","is_backgrounded":true}),
+                json!({"type":"system","subtype":"task_updated","session_id":"session","task_id":"task","run_id":older_run,"patch":{"status":"completed","description":"Finished an earlier run"}}),
+            ],
+        );
+        let resumed = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"session","task_id":"task","run_id":current_run,"description":"Resumed","is_backgrounded":true}),
+            ],
+        );
+        let resumed_items: Vec<_> = resumed
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemUpdated(item)] = resumed_items.as_slice() else {
+            panic!("the known logical task resumes in its existing lane: {resumed:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["state"], "running");
+        assert_eq!(item.payload["tool"]["child_stream"], "sub:ag");
+        assert!(
+            feed(
+                &mut mapper,
+                vec![
+                    json!({"type":"system","subtype":"task_progress","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","summary":"Late old progress"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":older_run,"tool_use_id":"ag","status":"completed","summary":"Late old result"}),
+                    json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","tool_use_id":"ag","status":"completed","summary":"Cannot identify which of two runs ended"}),
+                ],
+            )
+            .is_empty()
+        );
+        let ended = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_notification","session_id":"session","task_id":"task","run_id":current_run,"status":"completed","summary":"The resumed run finished"}),
+            ],
+        );
+        let ended_items: Vec<_> = ended
+            .iter()
+            .filter(|event| !matches!(event, SessionEvent::BackgroundTasks(_)))
+            .cloned()
+            .collect();
+        let [SessionEvent::ItemCompleted(item)] = ended_items.as_slice() else {
+            panic!("the current run closes the same owned line: {ended:?}");
+        };
+        assert_eq!(item.native_ref, "ag");
+        assert_eq!(item.payload["tool"]["prompt"], "Read");
+        assert_eq!(
+            item.payload["raw"]["output"]["inline"],
+            "The resumed run finished"
+        );
+    }
+
+    #[test]
+    fn a_foreign_task_frame_is_retained_only_as_a_raw_diagnostic() {
+        let (mut mapper, _) = mapper(true);
+        mapper.set_native_session("session");
+        let events = feed(
+            &mut mapper,
+            vec![
+                json!({"type":"system","subtype":"task_started","session_id":"other","task_id":"task","run_id":"run","tool_use_id":"unowned","task_type":"local_agent","description":"Other"}),
+            ],
+        );
+        assert_eq!(kinds(&events), ["raw.frame"]);
     }
 
     #[test]
@@ -3361,10 +5294,14 @@ mod tests {
             json!({ "type": "system", "subtype": "api_retry", "attempt": n, "max_retries": 10,
                 "error_status": 529, "error": "overloaded", "uuid": format!("r{n}") })
         };
-        assert!(feed(&mut mapper, vec![attempt(1), attempt(4)]).is_empty());
+        let early = feed(&mut mapper, vec![attempt(1), attempt(4)]);
+        assert_eq!(kinds(&early), ["turn.phase", "turn.phase"]);
         let fifth = feed(&mut mapper, vec![attempt(5), attempt(6)]);
-        assert_eq!(kinds(&fifth), ["item.started", "item.completed"]);
-        let SessionEvent::ItemStarted(notice) = &fifth[0] else {
+        assert_eq!(
+            kinds(&fifth),
+            ["turn.phase", "item.started", "item.completed", "turn.phase"]
+        );
+        let SessionEvent::ItemStarted(notice) = &fifth[1] else {
             panic!("a notice");
         };
         let ItemContent::Error(error) = &notice.content else {
@@ -3383,14 +5320,30 @@ mod tests {
                 json!({ "type": "mystery", "blob": "x".repeat(RAW_FRAME_MAX_BYTES + 1) }),
             ],
         );
-        assert_eq!(kinds(&events), ["raw.frame", "raw.frame"]);
-        let SessionEvent::RawFrame(stub) = &events[1] else {
+        assert_eq!(
+            kinds(&events),
+            [
+                "item.started",
+                "item.completed",
+                "raw.frame",
+                "item.started",
+                "item.completed",
+                "raw.frame"
+            ]
+        );
+        let SessionEvent::RawFrame(stub) = &events[5] else {
             panic!("a raw frame");
         };
         assert_eq!(stub.payload["truncated"], true);
         assert_eq!(stub.direction, FROM_HARNESS);
         let (mut quiet, _) = mapper_quiet();
-        assert!(feed(&mut quiet, vec![json!({ "type": "mystery" })]).is_empty());
+        let observed = feed(&mut quiet, vec![json!({ "type": "mystery" })]);
+        assert_eq!(kinds(&observed), ["item.started", "item.completed"]);
+        let SessionEvent::ItemCompleted(item) = &observed[1] else {
+            panic!("the passive unknown-event marker completes");
+        };
+        assert_eq!(item.payload["data"]["change"], "unrecognized_event");
+        assert_eq!(item.payload["data"]["subject"], "mystery");
     }
 
     fn mapper_quiet() -> (EventMapper, TurnId) {
@@ -3449,3 +5402,23 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "events/model_transitions.rs"]
+mod model_transitions;
+
+#[cfg(test)]
+#[path = "events/retry_transitions.rs"]
+mod retry_transitions;
+
+#[path = "events/native_changes.rs"]
+mod native_changes;
+mod permission_modes;
+mod rate_limits;
+mod session_lifecycle;
+
+#[path = "events/settings_observation.rs"]
+mod settings_observation;
+mod tool_images;
+
+mod native_web;

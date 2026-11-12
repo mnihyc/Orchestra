@@ -203,6 +203,8 @@ async fn content_requests_reach_the_system_with_who_asks_and_nothing_a_machine_c
     let established = connect(
         connection,
         &ClientIdentity {
+            purpose: Default::default(),
+            gateway_id: None,
             hosted_endpoints: None,
             endpoints: None,
             machine_id: enrolled.identity.machine_id,

@@ -66,6 +66,18 @@ pub enum Credential {
     Link(String),
 }
 
+impl Credential {
+    fn surface(&self) -> Result<orch_api_contract::surface::HttpSurface, ForwardError> {
+        use orch_api_contract::surface::HttpSurface;
+        match self {
+            Self::Link(_) => Ok(HttpSurface::Browser),
+            Self::Token { token, .. } => HttpSurface::for_token(token).ok_or_else(|| {
+                ForwardError::Address("use a browser access token or account API key".into())
+            }),
+        }
+    }
+}
+
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -211,13 +223,14 @@ fn tls() -> Result<Arc<rustls::ClientConfig>, ForwardError> {
 async fn take_use(forward: &Forward) -> Result<PortUse, ForwardError> {
     let client = HttpsClient::new(tls()?);
     let json = ("content-type", "application/json".to_owned());
+    let base_path = forward.credential.surface()?.base_path();
     let (path, headers, body) = match &forward.credential {
         Credential::Token {
             token,
             environment,
             port,
         } => (
-            format!("/api/v1/environments/{environment}/ports/{port}/use"),
+            format!("{base_path}/environments/{environment}/ports/{port}/use"),
             vec![json, ("authorization", format!("Bearer {token}"))],
             serde_json::to_vec(&EnvironmentPortUseCreateBody {
                 transport: forward.transport,
@@ -293,8 +306,9 @@ async fn open_socket(forward: &Forward, taken: &PortUse) -> Result<UseSocket, Fo
         .connect(name, socket)
         .await
         .map_err(|error| ForwardError::Socket(error.to_string()))?;
+    let base_path = forward.credential.surface()?.base_path();
     let mut request = format!(
-        "wss://{authority}/api/v1/ws/ports/{}?ticket={}",
+        "wss://{authority}{base_path}/ws/ports/{}?ticket={}",
         taken.id, taken.ticket
     )
     .into_client_request()
@@ -438,6 +452,26 @@ async fn carry_sender(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn surface_keeps_key_use_and_socket_separate_from_browser_and_public_link() {
+        let token = |value: &str| Credential::Token {
+            token: value.into(),
+            environment: orch_types::new_id(),
+            port: 8080,
+        };
+        assert_eq!(
+            token("opat_synthetic").surface().unwrap().base_path(),
+            "/openapi/v1"
+        );
+        assert_eq!(
+            token("oat_synthetic").surface().unwrap().base_path(),
+            "/api/v1"
+        );
+        assert!(token("unknown").surface().is_err());
+        let link = Credential::Link("https://orch.example/api/v1/ports/links/x#synthetic".into());
+        assert_eq!(link.surface().unwrap().base_path(), "/api/v1");
+    }
 
     #[test]
     fn a_link_names_the_installation_it_is_used_at() {
