@@ -11,6 +11,10 @@ use std::collections::HashMap;
 /// Decode no more than the ordinary largest timeline page at once, including full exports.
 pub const PAGE: i64 = 500;
 
+/// A decode page buffers at most one ordinary 64 KiB copy quantum per row, plus one oversized item.
+/// This is an IO buffer target, not a history/content limit.
+pub const PAGE_BYTES: i64 = PAGE * 64 * 1024;
+
 /// The current default read view. Explicit retained readers pass their captured view instead.
 pub async fn active_view(conn: &mut Conn, thread: Id) -> Result<Option<Id>, DbError> {
     Ok(
@@ -355,13 +359,12 @@ pub struct RangeCounts {
     /// The main-stream items by kind: those made in the turns (the agent's reasoning is not among them) and, when the
     /// range begins at the first turn, those from before Orch.
     pub items: std::collections::BTreeMap<String, i64>,
-    /// How much room the payloads of those items take, as the database keeps them (a large one is compressed there, so
-    /// this is not more than their length): what a reader that would load them all is measured against.
+    /// Exact decoded payload bytes at the selected revision, independent of database compression.
     pub bytes: i64,
 }
 
-/// Counts what the turns `low` to `high` of the history seen through `view` hold. Both come from indexes: the turns by
-/// their numbers, the items by the position the history keeps them in.
+/// Counts selected per-turn metadata and immutable prefix summaries, resolving individual metadata only
+/// where a sequence boundary bisects a group. Payloads are not loaded to plan a complete turn range.
 pub async fn range_counts(
     conn: &mut Conn,
     thread: Id,
@@ -384,12 +387,10 @@ pub async fn range_counts(
     let mut bytes = 0_i64;
     if turns > 0 {
         let sql = format!(
-            "{OWNERS} SELECT i.kind,count(*)::bigint,COALESCE(sum(i.payload_bytes),0)::bigint FROM owners o
-          JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner AND i.stream='main' AND i.kind<>'reasoning'
-            AND i.seq_created BETWEEN o.first_seq AND o.last_seq
-          JOIN turns t ON t.id=i.turn_id AND t.ordinal BETWEEN $3 AND $4
-            AND t.ordinal BETWEEN o.first_turn AND o.last_turn
-          GROUP BY i.kind"
+            "{OWNERS} SELECT c.kind,sum(c.item_count)::bigint,sum(c.payload_bytes)::bigint FROM owners o
+          CROSS JOIN LATERAL thread_history_count_range(o.owner,o.first_seq,o.last_seq,o.frozen_at,
+            GREATEST(o.first_turn,$3::bigint),LEAST(o.last_turn,$4::bigint),false) c
+          WHERE c.turn_id IS NOT NULL AND c.stream='main' AND c.kind<>'reasoning' GROUP BY c.kind"
         );
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(thread)
@@ -406,12 +407,12 @@ pub async fn range_counts(
     if low <= 1 {
         // The lines from before Orch lie before the first turn, so the scan stops at it.
         let sql = format!(
-            "{OWNERS} SELECT i.kind,count(*)::bigint,COALESCE(sum(i.payload_bytes),0)::bigint FROM owners o
-          JOIN items i ON i.thread_id=$1 AND i.continuation_id=o.owner AND i.before_orch AND i.turn_id IS NULL
-            AND i.stream='main' AND i.seq_created BETWEEN o.first_seq AND o.last_seq
-            AND i.seq_created<COALESCE((SELECT x.seq_created FROM items x WHERE x.thread_id=$1
-              AND x.continuation_id=o.owner AND x.turn_id IS NOT NULL ORDER BY x.seq_created LIMIT 1),9223372036854775807)
-          GROUP BY i.kind"
+            "{OWNERS} SELECT c.kind,sum(c.item_count)::bigint,sum(c.payload_bytes)::bigint FROM owners o
+          CROSS JOIN LATERAL thread_history_count_range(o.owner,o.first_seq,
+            LEAST(o.last_seq,COALESCE((SELECT x.seq_created-1 FROM items x WHERE x.thread_id=$1
+              AND x.continuation_id=o.owner AND x.turn_id IS NOT NULL
+              AND (o.frozen_at IS NULL OR x.seq_created<=o.frozen_at) ORDER BY x.seq_created LIMIT 1),9223372036854775807)),
+            o.frozen_at,1,0,true) c WHERE c.turn_id IS NULL AND c.before_orch AND c.stream='main' GROUP BY c.kind"
         );
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(thread)
@@ -643,4 +644,71 @@ pub async fn complete_segment(
     .bind(segment)
     .fetch_one(conn)
     .await?)
+}
+
+/// One current selected-history source page, retaining its native creation cursor.
+#[derive(sqlx::FromRow)]
+pub struct SummaryActivityRow {
+    /// Native item kind.
+    pub kind: String,
+    /// Actual retained payload, not a current-body fallback.
+    pub payload: Json,
+    /// Native creation time.
+    pub at: chrono::DateTime<chrono::Utc>,
+    /// Stable creation position in this selected history.
+    pub seq_created: Seq,
+    /// Current retained content revision.
+    pub seq_updated: Seq,
+}
+
+// Candidate eligibility is shared by the text pages and their exact total. It reads no tool output.
+const SUMMARY_ROWS: &str = ",summary_rows AS (SELECT *, CASE kind
+    WHEN 'user_message' THEN (SELECT string_agg(p->>'text',E'\\n') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'payload'->'parts')='array' THEN body->'payload'->'parts' ELSE '[]'::jsonb END) p WHERE p->>'text' IS NOT NULL)
+    WHEN 'agent_message' THEN body->'payload'->>'text'
+    WHEN 'reasoning' THEN body->'payload'->>'summary'
+    WHEN 'tool_call' THEN body->'payload'->>'title'
+    WHEN 'plan' THEN (SELECT string_agg(p->>'text',E'\\n') FROM jsonb_array_elements(CASE WHEN jsonb_typeof(body->'payload'->'steps')='array' THEN body->'payload'->'steps' ELSE '[]'::jsonb END) p)
+    WHEN 'error' THEN body->'payload'->>'message' END AS words
+    FROM visible_items WHERE stream='main' AND (body IS NULL OR
+      ((body->>'seq_updated')::bigint>$3 AND kind IN ('user_message','agent_message','reasoning','plan','tool_call','error'))))";
+
+/// A bounded newest-first page; empty native text never takes an input slot.
+pub async fn summary_activity_page(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    since: Seq,
+    before: Option<Seq>,
+    limit: i64,
+) -> Result<Vec<SummaryActivityRow>, DbError> {
+    let sql = format!("{OWNERS}{FROZEN}{SUMMARY_ROWS} SELECT kind,body->'payload' AS payload,
+        (body->>'created_at')::timestamptz AS at,seq_created,(body->>'seq_updated')::bigint AS seq_updated
+        FROM summary_rows WHERE (body IS NULL OR btrim(COALESCE(words,''))<>'')
+        AND ($4::bigint IS NULL OR seq_created<$4) ORDER BY seq_created DESC LIMIT $5");
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(view)
+        .bind(since)
+        .bind(before)
+        .bind(limit)
+        .fetch_all(conn)
+        .await?)
+}
+
+/// Exact eligible-item total from the same frozen history as the bounded text pages.
+pub async fn summary_activity_total(
+    conn: &mut Conn,
+    thread: Id,
+    view: Id,
+    since: Seq,
+) -> Result<i64, DbError> {
+    let sql = format!(
+        "{OWNERS}{FROZEN}{SUMMARY_ROWS} SELECT count(*) FROM summary_rows WHERE body IS NULL OR btrim(COALESCE(words,''))<>''"
+    );
+    Ok(sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+        .bind(thread)
+        .bind(view)
+        .bind(since)
+        .fetch_one(conn)
+        .await?)
 }

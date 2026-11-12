@@ -3,7 +3,7 @@ import { useCallback, useContext, useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { client } from '@/api/client';
 import type { ChatViewProps } from './ChatView';
-import { ViewRouteContext } from '@/features/workbench/viewOpening';
+import { useViewShown, ViewRouteContext } from '@/features/workbench/viewOpening';
 import { openingId } from '@/lib/opening';
 
 const useChatFocus = create<{ pending: { chatId: string; route: string } | null }>(() => ({ pending: null }));
@@ -21,13 +21,30 @@ export function clearChatFocus(): void { useChatFocus.setState({ pending: null }
 
 export function useComposerFocus(chatId: string, onReady: NonNullable<ChatViewProps['onReady']>): NonNullable<ChatViewProps['onReady']> {
   const route = useContext(ViewRouteContext) ?? openingId();
+  const shown = useViewShown();
   const box = useRef<Parameters<NonNullable<ChatViewProps['onReady']>>[0] | null>(null);
+  const frame = useRef<number | null>(null);
   const give = useCallback(() => {
     const request = useChatFocus.getState().pending;
-    if (request?.chatId !== chatId || request.route !== route || box.current === null) return;
-    box.current.focus();
-    useChatFocus.setState({ pending: null });
-  }, [chatId, route]);
-  useEffect(() => useChatFocus.subscribe(give), [give]);
+    // A hidden view with an unsent draft can keep its effects alive.
+    if (!shown || request?.chatId !== chatId || request.route !== route || box.current === null || frame.current !== null) return;
+    // The shortcut can move a visible floating composer into its docked slot.
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null;
+      const current = useChatFocus.getState().pending;
+      if (current?.chatId !== chatId || current.route !== route || box.current === null) return;
+      box.current.focus();
+      if (useChatFocus.getState().pending === current) clearChatFocus();
+    });
+  }, [chatId, route, shown]);
+  useEffect(() => {
+    give();
+    const stop = useChatFocus.subscribe(give);
+    return () => {
+      stop();
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+      frame.current = null;
+    };
+  }, [give]);
   return useCallback((api) => { box.current = api; onReady(api); give(); }, [onReady, give]);
 }

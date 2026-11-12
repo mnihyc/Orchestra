@@ -13,6 +13,7 @@ pub mod id;
 pub mod measurements;
 pub mod media;
 pub mod revision;
+pub mod schema;
 pub mod time;
 
 pub use fields::{Choice, Field, FieldType};

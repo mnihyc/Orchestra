@@ -2,15 +2,14 @@
 //!
 //! The model and the reasoning effort are not parameters of the adapter: the engine states both with every
 //! session and turn, and this adapter passes both to the harness every time, in the harness's terms. What
-//! the adapter does publish are five parameters of its own ([`definitions`]), and the rule by which the
+//! the adapter does publish are parameters of its own ([`definitions`]), and the rule by which the
 //! models of the harness's helper steps are kept on the thread's model ([`model_environment`]).
 //!
-//! Two of the five read the model's entry at its provider: the **service tier**, which for this harness is its
+//! Several parameters read the model's entry at its provider: the **service tier**, which for this harness is its
 //! fast mode on the models that have one, and the **context**. The harness is told the context and nothing
 //! else: it keeps room for the answer by a margin of its own, so there is no point for the adapter to work out
 //! ([`ONE_MILLION_ABOVE`], [`auto_compact_window`], [`model_argument`]).
 
-use orch_agent_contract::credentials::CredentialPath;
 use orch_agent_contract::parameters::{
     Condition, DefaultFromModel, MODEL_WINDOW_KEY, ModelFeature, ModelLimit, ModelList,
     ParameterApply, ParameterDef, ParameterDefault, ParameterGroup, ParameterOption,
@@ -182,11 +181,7 @@ pub fn definitions() -> Vec<ParameterDef> {
             },
             scopes: scopes.clone(),
             apply: ParameterApply::NextTurn,
-            // Behind another endpoint the harness cannot learn whether the mode is there.
-            eligible_when: Some(Condition::All(vec![
-                Condition::ModelHas(ModelFeature::ServiceTiers),
-                Condition::Not(Box::new(Condition::CredentialPath(CredentialPath::Forwarded))),
-            ])),
+            eligible_when: Some(Condition::ModelHas(ModelFeature::ServiceTiers)),
             feature: None,
         },
         ParameterDef {
@@ -241,7 +236,7 @@ pub fn definitions() -> Vec<ParameterDef> {
         ParameterDef {
             key: WEBFETCH_PREFLIGHT.to_owned(),
             title: "Check pages with the vendor".to_owned(),
-            description: "Before it loads a page, the harness tells the vendor's API the page's host to check it against a blocklist. Automatic keeps that for the vendor's own upstream and turns it off for any other, where it would tell a third party which hosts are fetched. It applies where the harness has its own tools.".to_owned(),
+            description: "Before it loads a page, the harness tells the vendor's API the page's host to check it against a blocklist. Automatic keeps that for the vendor's own upstream and turns it off for any other, where it would tell a third party which hosts are fetched. It applies to native WebFetch in either arrangement.".to_owned(),
             group: ParameterGroup::Safety,
             kind: ParameterType::Enum,
             options: Some(ParameterOptions::Listed(vec![
@@ -256,6 +251,7 @@ pub fn definitions() -> Vec<ParameterDef> {
             eligible_when: None,
             feature: None,
         },
+        orch_agent_contract::parameters::managed_web_search_parameter(false),
     ]
 }
 
@@ -276,8 +272,186 @@ mod tests {
                 CONTEXT,
                 SMALL_MODEL,
                 TOOL_SEARCH,
-                WEBFETCH_PREFLIGHT
+                WEBFETCH_PREFLIGHT,
+                "web_search"
             ]
+        );
+    }
+
+    #[test]
+    fn the_ordinary_search_control_offers_service_without_native_search_and_never_selects_it_by_default()
+     {
+        use orch_agent_contract::{
+            credentials::CredentialPath,
+            descriptor::{Placement, ProviderKind},
+            parameters::{Eligibility, Resolution},
+        };
+        let search =
+            crate::descriptor::descriptor(crate::config::PORTABLE_ARCHIVE_CANDIDATE, false)
+                .parameters
+                .into_iter()
+                .find(|definition| definition.key == "web_search")
+                .unwrap();
+        for model in [
+            json!({}),
+            json!({"offered":{"web_search":["live"]},"request_options":{
+                "native":{"type":"object","properties":{"web_search":false}}
+            }}),
+        ] {
+            for (credential_path, provider_kind) in [
+                (CredentialPath::Native, ProviderKind::Subscription),
+                (CredentialPath::Forwarded, ProviderKind::Api),
+            ] {
+                let context = Eligibility {
+                    credential_path,
+                    provider_kind,
+                    environment_placement: Placement::Managed,
+                    model: serde_json::from_value(model.clone()).unwrap(),
+                    harness_version: Some(crate::config::PORTABLE_ARCHIVE_CANDIDATE.into()),
+                };
+                let features = std::collections::BTreeMap::new();
+                assert!(search.is_shown(&context, &features));
+                assert!(
+                    search
+                        .options_for(&context.model)
+                        .iter()
+                        .any(|option| option.value == "service")
+                );
+                assert_eq!(
+                    search.resolve(&context, &features, None),
+                    Resolution::SendNothing
+                );
+                assert_eq!(
+                    search.resolve(&context, &features, Some(&json!("service"))),
+                    Resolution::Send(json!("service"))
+                );
+                let projection = search.projection(&context.model);
+                assert_eq!(projection["capability"], "web_search");
+                assert_eq!(projection["resolved_default"], Json::Null);
+                assert_eq!(search.apply, ParameterApply::NewSession);
+            }
+        }
+    }
+
+    #[test]
+    fn managed_search_keeps_native_defaults_and_cannot_leave_a_fixed_native_search_running() {
+        use orch_agent_contract::parameters::{ModelParameters, Resolution};
+
+        let search = definitions()
+            .into_iter()
+            .find(|definition| definition.key == "web_search")
+            .unwrap();
+        let native: ModelParameters = serde_json::from_value(json!({
+            "web_search":["cached","indexed","live"],"default_web_search":"live"
+        }))
+        .unwrap();
+        assert_eq!(search.start_for(&native), Some(json!("live")));
+        assert_eq!(
+            search
+                .options_for(&native)
+                .iter()
+                .map(|option| option.value.as_str())
+                .collect::<Vec<_>>(),
+            ["disabled", "live", "service"]
+        );
+        let fixed: ModelParameters = serde_json::from_value(json!({
+            "web_search":["live"],"request_options":{"native":{"type":"object",
+                "properties":{"web_search":{"const":"live"}}
+            }}
+        }))
+        .unwrap();
+        assert_eq!(
+            search.resolve_value(&fixed, Some(&json!("service"))),
+            Resolution::Stale(json!("service"))
+        );
+    }
+
+    #[test]
+    fn a_literal_native_profile_search_key_still_accepts_only_native_values() {
+        use orch_agent_contract::{
+            parameters::{ModelParameters, web_search_parameter},
+            profile_parameters::{Binding, ProfileParameters},
+        };
+        use std::collections::BTreeMap;
+
+        let native = ProfileParameters {
+            version: 1,
+            bindings: vec![Binding {
+                pointer: "/web_search".into(),
+                parameter: web_search_parameter(false),
+                values: BTreeMap::new(),
+            }],
+        };
+        let model: ModelParameters = serde_json::from_value(json!({
+            "web_search":["live"],"default_web_search":"live"
+        }))
+        .unwrap();
+        for value in ["disabled", "live"] {
+            assert_eq!(
+                native
+                    .validate(&json!({"web_search":value}), &model, &BTreeMap::new())
+                    .unwrap()
+                    .get("web_search"),
+                Some(&json!(value))
+            );
+        }
+        for value in ["service", "cached", "indexed"] {
+            assert!(
+                native
+                    .validate(&json!({"web_search":value}), &model, &BTreeMap::new())
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn forwarded_speed_uses_only_the_model_tiers_a_manager_enabled() {
+        use orch_agent_contract::{
+            credentials::CredentialPath,
+            descriptor::{Placement, ProviderKind},
+            parameters::{Eligibility, Resolution},
+        };
+        let speed = definitions()
+            .into_iter()
+            .find(|def| def.key == SERVICE_TIER)
+            .unwrap();
+        let mut ctx = Eligibility {
+            credential_path: CredentialPath::Forwarded,
+            provider_kind: ProviderKind::Api,
+            environment_placement: Placement::Managed,
+            model: serde_json::from_value(json!({
+                "service_tiers":[{"id":"fast","label":"Fast"}],
+                "offered":{"service_tiers":[{"id":"fast","label":"Fast"},{"id":"flex","label":"Flex"}]}
+            })).unwrap(),
+            harness_version: Some(crate::config::PORTABLE_ARCHIVE_CANDIDATE.into()),
+        };
+        assert_eq!(
+            speed.resolve(
+                &ctx,
+                &std::collections::BTreeMap::new(),
+                Some(&json!("fast"))
+            ),
+            Resolution::Send(json!("fast"))
+        );
+        assert_eq!(
+            speed.resolve(
+                &ctx,
+                &std::collections::BTreeMap::new(),
+                Some(&json!("flex"))
+            ),
+            Resolution::Stale(json!("flex"))
+        );
+        ctx.model = serde_json::from_value(
+            json!({"offered":{"service_tiers":[{"id":"fast","label":"Fast"}]}}),
+        )
+        .unwrap();
+        assert_eq!(
+            speed.resolve(
+                &ctx,
+                &std::collections::BTreeMap::new(),
+                Some(&json!("fast"))
+            ),
+            Resolution::Hidden
         );
     }
 

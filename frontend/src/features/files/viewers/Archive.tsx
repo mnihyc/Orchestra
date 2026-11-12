@@ -10,7 +10,7 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { archiveQuery, readArchiveEntry } from '@/api/workspace';
-import type { ArchiveEntry } from '@/generated/api-types';
+import type { ArchiveEntry, ArchiveListing } from '@/generated/api-types';
 import { useFormatContext } from '@/lib/appearance';
 import { formatBytes } from '@/lib/format';
 import { cx } from '@/ui/cx';
@@ -22,7 +22,7 @@ import { SkeletonRows } from '@/ui/Skeleton';
 import { extensionOf, languageOf } from '../languages';
 import { type ViewerProps } from '../viewers';
 import { useObjectUrl } from './Image';
-import { sourceArchive, sourceArchiveEntry, useFileSource } from '../source';
+import { sourceArchive, sourceArchiveEntry, sourceQueryAuthority, sourceReaderKey, useFileSource } from '../source';
 
 const baseName = (path: string): string => path.replace(/\/+$/, '').slice(path.replace(/\/+$/, '').lastIndexOf('/') + 1);
 const IMAGE_TYPES: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif' };
@@ -40,12 +40,12 @@ function Listing({ shared, inside, depth }: { shared: Shared; inside: string; de
   const { locale } = useFormatContext();
   const provided = useFileSource();
   const source = provided?.workspace === undefined ? provided : null;
-  const listing = useQuery(source === null ? archiveQuery(shared.door, shared.path, inside) : {
-    queryKey: ['workspace-archive', source.url, shared.path, inside] as const, queryFn: ({ signal }) => sourceArchive(source, inside, signal), retry: false,
+  const listing = useQuery<ArchiveListing>(source === null ? archiveQuery(shared.door, shared.path, inside) : {
+    ...sourceQueryAuthority(source), queryKey: ['workspace-archive', source.url, shared.path, inside, ...sourceReaderKey(source)] as const, queryFn: ({ signal }) => sourceArchive(source, inside, signal), retry: false,
   });
   const [open, setOpen] = useState<ReadonlySet<string>>(new Set());
   if (listing.error !== null) return <ErrorState compact error={listing.error} onRetry={() => void listing.refetch()} />;
-  if (listing.data === undefined) return <SkeletonRows rows={3} />;
+  if (listing.data === undefined) return <SkeletonRows read={listing} rows={3} />;
   const rows = listing.data.entries;
   return (
     <ul role={depth === 0 ? 'tree' : 'group'} aria-label={depth === 0 ? t('files.archive.label') : undefined}>
@@ -86,12 +86,12 @@ function Entry({ door, path, entry }: { door: ViewerProps['door']; path: string;
   const { t } = useTranslation();
   const provided = useFileSource();
   const source = provided?.workspace === undefined ? provided : null;
-  const query = useQuery({ queryKey: ['archive-entry', source?.url ?? door.environmentId, path, entry], queryFn: ({ signal }) => source === null ? readArchiveEntry(door, path, entry, signal) : sourceArchiveEntry(source, entry, signal), staleTime: Number.POSITIVE_INFINITY, retry: false });
+  const query = useQuery({ queryKey: ['archive-entry', source?.url ?? door.environmentId, path, entry, ...sourceReaderKey(source)], queryFn: ({ signal }) => source === null ? readArchiveEntry(door, path, entry, signal) : sourceArchiveEntry(source, entry, signal), staleTime: Number.POSITIVE_INFINITY, retry: false, ...sourceQueryAuthority(source) });
   const extension = extensionOf(entry);
   const imageType = IMAGE_TYPES[extension];
   const url = useObjectUrl(imageType === undefined ? null : (query.data ?? null), imageType ?? 'image/png');
   if (query.error !== null) return <ErrorState compact className="h-full" title={t('files.archive.tooLarge')} error={query.error} />;
-  if (query.data === undefined) return <SkeletonRows rows={4} />;
+  if (query.data === undefined) return <SkeletonRows read={query} rows={4} />;
   if (imageType !== undefined) return url === null ? <SkeletonRows rows={4} /> : <img src={url} alt={entry} className="mx-auto max-h-full max-w-full object-contain p-2" />;
   const text = new TextDecoder('utf-8', { fatal: true });
   let shown: string;
@@ -119,8 +119,8 @@ export default function ArchiveViewer({ door, path, head }: ViewerProps) {
   const provided = useFileSource();
   const source = provided?.workspace === undefined ? provided : null;
   const [chosen, setChosen] = useState<string | null>(null);
-  const top = useQuery(source === null ? archiveQuery(door, path, '') : {
-    queryKey: ['workspace-archive', source.url, path, ''] as const, queryFn: ({ signal }) => sourceArchive(source, '', signal), retry: false,
+  const top = useQuery<ArchiveListing>(source === null ? archiveQuery(door, path, '') : {
+    ...sourceQueryAuthority(source), queryKey: ['workspace-archive', source.url, path, '', ...sourceReaderKey(source)] as const, queryFn: ({ signal }) => sourceArchive(source, '', signal), retry: false,
   });
   const encrypted = top.data?.encrypted === true;
   const shared: Shared = { door, path, encrypted, chosen, choose: (entry) => (encrypted ? undefined : setChosen(entry)) };

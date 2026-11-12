@@ -14,7 +14,7 @@ type Layout = (typeof layouts)[number];
 const OBSERVE_MS = 500;
 interface Call { method: string; path: string; query: Record<string, string> }
 interface Body { path: string; method: string; body: unknown }
-type ObservedWindow = typeof window & { __metadataWrites: Body[] };
+type ObservedWindow = typeof window & { __metadataWrites: Body[]; __metadataKinds: HarnessKindInfo[] };
 
 const businessPath = (path: string) => path === '/api/v1/harness-kinds' || path === '/api/v1/drivers' || path === '/api/v1/notifiers'
   || path === '/api/v1/everything' || path === '/api/v1/provider-setup'
@@ -37,17 +37,30 @@ async function bodyObserver(page: Page) {
   await page.addInitScript(() => {
     const observed = window as ObservedWindow;
     observed.__metadataWrites = [];
+    observed.__metadataKinds = [];
     const send = window.fetch.bind(window);
     window.fetch = (input, init) => {
       if (input instanceof Request && input.method === 'PATCH' && /^\/api\/v1\/agents\/[^/]+$/u.test(new URL(input.url).pathname)) {
         const entry = { method: input.method, path: new URL(input.url).pathname };
         void input.clone().json().then((body: unknown) => observed.__metadataWrites.push({ ...entry, body }), () => observed.__metadataWrites.push({ ...entry, body: 'Unreadable JSON' }));
       }
-      return send(input, init);
+      const sent = send(input, init);
+      // Several registry observers can retire a network response once its JSON is read.
+      // Keep a clone in the page, without relying on Chromium retaining its CDP body.
+      if (input instanceof Request && input.method === 'GET' && new URL(input.url).pathname === '/api/v1/harness-kinds') {
+        void sent.then(async (response) => {
+          if (response.ok) observed.__metadataKinds = await response.clone().json() as HarnessKindInfo[];
+        }).catch(() => undefined);
+      }
+      return sent;
     };
   });
 }
 async function bodies(page: Page): Promise<Body[]> { return await page.evaluate(() => (window as ObservedWindow).__metadataWrites); }
+async function nativeKinds(page: Page): Promise<HarnessKindInfo[]> {
+  await expect.poll(() => page.evaluate(() => (window as ObservedWindow).__metadataKinds.length)).toBeGreaterThan(0);
+  return await page.evaluate(() => (window as ObservedWindow).__metadataKinds);
+}
 
 function answer(page: Page, path: string, method = 'GET', matches: (query: URLSearchParams) => boolean = () => true) {
   return page.waitForResponse((response) => {
@@ -57,20 +70,21 @@ function answer(page: Page, path: string, method = 'GET', matches: (query: URLSe
 }
 
 async function settled(page: Page) {
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    await Promise.all(document.getAnimations().filter((animation) => {
+  await expect.poll(() => page.evaluate(() => ({
+    fonts: document.fonts.status,
+    animations: document.getAnimations().filter((animation) => {
       const end = animation.effect?.getComputedTiming().endTime;
       return animation.playState === 'running' && typeof end === 'number' && Number.isFinite(end);
-    }).map((animation) => animation.finished.catch(() => undefined)));
-    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-  });
+    }).map((animation) => animation instanceof CSSAnimation ? animation.animationName : animation.id),
+  }))).toEqual({ fonts: 'loaded', animations: [] });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 async function layout(page: Page, mode: Layout) {
   await page.setViewportSize({ width: mode.width, height: 900 }); await page.emulateMedia({ colorScheme: mode.theme });
   await expect(page.locator('html')).toHaveAttribute('data-theme', mode.theme); await settled(page);
 }
 async function prepare(page: Page) {
+  await bodyObserver(page);
   await page.setViewportSize({ width: 1440, height: 900 }); await page.emulateMedia({ colorScheme: 'light' });
   await signIn(page); await expect(page.locator('html')).toHaveAttribute('lang', 'en'); await layout(page, layouts[0]);
 }
@@ -187,7 +201,7 @@ test('native Add Agent searches its complete machine and adapter choices without
   try {
     const registryRead = answer(page, '/api/v1/harness-kinds'); await page.goto('/resources/agents');
     const registryReply = await registryRead; expect(registryReply.status()).toBe(200);
-    const registry = await registryReply.json() as HarnessKindInfo[];
+    const registry = await nativeKinds(page);
     const codex = registry.find((entry) => entry.kind === 'codex');
     if (codex === undefined) throw new Error('The native registry needs its Codex adapter');
     await page.locator('[data-resource-kind="agents"]').getByRole('button', { name: words.agents.list.add, exact: true }).click();
@@ -219,7 +233,7 @@ test('native Add Agent searches its complete machine and adapter choices without
 });
 
 test('native agent metadata keeps pending/error identity, filters by raw kind and saves both build workflows explicitly', async ({ page }, info) => {
-  await scenario(); await bodyObserver(page); await prepare(page);
+  await scenario(); await prepare(page);
   const observed = observe(page), written: Body[] = [];
   let release: () => void = () => undefined, arrived: () => void = () => undefined, first = true;
   const gate = new Promise<void>((resolve) => { release = resolve; }), waiting = new Promise<void>((resolve) => { arrived = resolve; });
@@ -234,15 +248,20 @@ test('native agent metadata keeps pending/error identity, filters by raw kind an
     await page.getByRole('button', { name: words.resources.controls.filter, exact: true }).click();
     const panel = page.locator('[data-resource-filter-panel]'), filter = panel.getByRole('combobox', { name: words.agents.list.harnessFilter, exact: true });
     await closeSearch(filter);
-    await expect(filter).toHaveValue('Codex'); await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
+    // The address keeps its raw choice while the catalogue owns its display name.
+    await expect(filter).toHaveValue(words.resources.harnessNameUnknown);
+    expect(new URL(page.url()).searchParams.get('harness')).toBe('codex');
+    await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
     await capture(page, info, 'agent-filter-pending-1440-light', filter);
     release(); await expect(panel.getByRole('alert')).toBeVisible();
-    await layout(page, layouts[1]); await expect(filter).toHaveValue('Codex');
+    await layout(page, layouts[1]); await expect(filter).toHaveValue(words.resources.harnessNameUnknown);
+    expect(new URL(page.url()).searchParams.get('harness')).toBe('codex');
     await expect(panel).not.toContainText('Private registry diagnostic'); await expect(panel.getByText(words.agents.overview.notReported, { exact: true })).toHaveCount(0);
     await capture(page, info, 'agent-filter-error-400-dark', filter);
     expect(observed.calls.filter((call) => call.path === '/api/v1/harness-kinds')).toHaveLength(1);
     const retry = answer(page, '/api/v1/harness-kinds'); await panel.getByRole('button', { name: words.common.tryAgain, exact: true }).click();
-    const replied = await retry; expect(replied.status()).toBe(200); const catalogue = await replied.json() as HarnessKindInfo[];
+    const replied = await retry; expect(replied.status()).toBe(200); const catalogue = await nativeKinds(page);
+    await expect(filter).toHaveValue('Codex');
     expect(observed.calls.filter((call) => call.path === '/api/v1/harness-kinds')).toHaveLength(2);
     const other = catalogue.find((kind) => kind.kind !== 'codex');
     if (other === undefined) throw new Error('The real registry has no second adapter for this workflow');
@@ -295,7 +314,7 @@ test('native system, machine, template and notifier forms retain local choice dr
   await scenario(); await prepare(page); const observed = observe(page);
   try {
     await asAdmin(page, true);
-    const kinds = answer(page, '/api/v1/harness-kinds'); await page.goto('/admin/agents'); const reply = await kinds; expect(reply.status()).toBe(200); const catalogue = await reply.json() as HarnessKindInfo[];
+    const kinds = answer(page, '/api/v1/harness-kinds'); await page.goto('/admin/agents'); const reply = await kinds; expect(reply.status()).toBe(200); const catalogue = await nativeKinds(page);
     const target = catalogue.find((kind) => kind.kind === 'acme-agent'); if (target === undefined) throw new Error('The native Acme adapter is missing');
     await page.getByRole('button', { name: words.admin.agents.newTitle, exact: true }).click();
     let dialog = page.getByRole('dialog', { name: words.admin.agents.newTitle, exact: true });

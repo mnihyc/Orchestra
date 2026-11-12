@@ -37,7 +37,7 @@ export function PlaceInbox({ filter }: { filter: InboxFilter }) {
   if (denied || query.data === undefined && query.isError) return <ErrorState error={query.error} onRetry={() => void query.refetch()} />;
   return <div className="flex flex-col gap-3">
     {reads.acts.map((act) => <ReadReceipt key={act.key} act={act} onRetry={() => reads.retry(act)} onUndo={() => reads.undo(act)} />)}
-    {query.isPending ? <SkeletonGroup className="flex flex-col gap-3">{[0, 1, 2].map((id) => <div key={id} className="rounded-lg border border-border p-4"><Skeleton className="mb-3 h-5 w-1/3" /><Skeleton className="h-12 w-full" /></div>)}</SkeletonGroup> : groups.length === 0 ? <EmptyState icon={<InboxIcon aria-hidden />} title={t(filter === 'unread' ? 'away.inbox.nothingUnread' : 'away.inbox.empty')} /> : groups.map((group) => {
+    {query.isPending ? <SkeletonGroup read={query} className="flex flex-col gap-3">{[0, 1, 2].map((id) => <div key={id} className="rounded-lg border border-border p-4"><Skeleton className="mb-3 h-5 w-1/3" /><Skeleton className="h-12 w-full" /></div>)}</SkeletonGroup> : groups.length === 0 ? <EmptyState icon={<InboxIcon aria-hidden />} title={t(filter === 'unread' ? 'away.inbox.nothingUnread' : 'away.inbox.empty')} /> : groups.map((group) => {
       const name = group.place?.name ?? t('away.inbox.other');
       const url = placeUrl(group.place);
       const act = reads.acts.findLast((one) => one.groupKey === group.key);

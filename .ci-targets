@@ -1,0 +1,2 @@
+# The engine's settling round, final head: the engine's unit-test program whole, at the whole CI's thread count.
+test -p orch-engine --lib -- --test-threads=3

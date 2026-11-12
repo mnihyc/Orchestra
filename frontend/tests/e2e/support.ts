@@ -11,7 +11,7 @@ import { expectUniqueGuideEntries } from '../accessibility/guide-entries.ts';
 import { expectOneScrollerPerArea } from '../accessibility/scrolling.ts';
 import { expectOneCurrentSection } from '../accessibility/navigation.ts';
 
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
+export const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 
 /** The people of the fake API's team, with what each proves who they are by. */
 export const PEOPLE = {
@@ -58,6 +58,22 @@ export async function replySent(response: Response): Promise<unknown> {
   const reply = received.find((entry) => entry.id === id)?.reply;
   if (reply?.status !== response.status()) throw new Error(`No matching JSON answer to ${response.url()}`);
   return reply.body;
+}
+
+/** The Defaults editor reads a place's registry and values through the place's joined opening, and reads them separately
+ * only when that opening omits them. A case that supplies its own registry or values gives them here as well as to the
+ * separate readers; each supplier is called once for every opening that is read. */
+export async function supplyDefaults(page: Page, nodeId: string, supply: { registry?: () => unknown[]; settings?: () => unknown[] }): Promise<void> {
+  await page.route(`**/api/v1/nodes/${nodeId}/chat-opening?*`, async (route) => {
+    const response = await route.fetch(); const body: unknown = await response.json();
+    const defaults = typeof body === 'object' && body !== null && 'defaults' in body ? body.defaults : null;
+    if (typeof defaults === 'object' && defaults !== null) {
+      const opened = defaults as Record<string, unknown>;
+      if (supply.registry !== undefined) Object.assign(opened, { registry: supply.registry(), registry_problem: null, registry_retry_after: null });
+      if (supply.settings !== undefined) Object.assign(opened, { settings: supply.settings(), settings_problem: null, settings_retry_after: null });
+    }
+    await route.fulfill({ response, json: body });
+  });
 }
 
 /** Puts the fake API into a scenario: a team at work unless something else is asked for. */
@@ -185,15 +201,23 @@ const AUDIT_ALLOWANCE_MS = 20_000;
  * page off for a screen reader is asked on its own, with the selector `within`: the page behind it is
  * hidden by design, and what it holds that can take the keyboard is held away from it by the list.
  */
-export async function expectAccessible(page: Page, theme: 'light' | 'dark' = 'light', within?: string): Promise<void> {
+/** The dialog in front, which shuts the page behind it off: what it covers is hidden from a screen reader and inert. */
+const OPEN_PROMPT = '[data-prompt-current="true"]';
+
+export async function expectAccessible(page: Page, theme: 'light' | 'dark' = 'light', asked?: string): Promise<void> {
   test.info().setTimeout(test.info().timeout + AUDIT_ALLOWANCE_MS);
   await page.emulateMedia({ colorScheme: theme });
   // The theme follows the system on a page that was told nothing else; let it be drawn.
   await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+  // With a dialog open only the dialog is asked. The page behind is shut off, though the reader keeps its live regions
+  // announced, which leaves their ancestors seeming reachable while everything else in them is inert.
+  const within = asked ?? (await page.locator(OPEN_PROMPT).count() > 0 ? OPEN_PROMPT : undefined);
   await expectUniqueGuideEntries(page, within);
   await expectOneScrollerPerArea(page, within);
   await expectOneCurrentSection(page, within);
-  const audit = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']);
+  // What an open dialog covers is hidden from a screen reader (marked by the dialog) and inert: nobody can reach or read it,
+  // so it is no barrier and is not asked.
+  const audit = new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']).exclude('[inert]').exclude('[data-aria-hidden="true"]');
   const results = await (within === undefined ? audit : audit.include(within)).analyze();
   const grave = results.violations.filter((violation) => violation.impact === 'serious' || violation.impact === 'critical');
   expect(

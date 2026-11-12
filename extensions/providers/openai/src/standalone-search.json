@@ -1,0 +1,25 @@
+{
+  "paths": ["/alpha/search"],
+  "tool": {},
+  "identities": [],
+  "root_selection_identity": {"commands": null},
+  "root_mode_pointer": "/settings/external_web_access",
+  "root_options_pointer": "/settings",
+  "root_mode_values": {"cached": [false, "cached"], "indexed": ["indexed"], "live": [true, "live"]},
+  "root_option_names": {
+    "external_web_access": "/settings/external_web_access",
+    "search_context_size": "/settings/search_context_size",
+    "filters": "/settings/filters",
+    "user_location": "/settings/user_location"
+  },
+  "modes": {
+    "cached": {"external_web_access": false},
+    "indexed": {"external_web_access": "indexed"},
+    "live": {"external_web_access": true}
+  },
+  "native_session": {
+    "enabled_setting": "supports_standalone_web_search",
+    "owned_fields": ["id", "commands", "settings"],
+    "parameter_fields": ["web_search", "reasoning", "effort"]
+  }
+}

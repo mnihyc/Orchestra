@@ -5,6 +5,7 @@ import { useState } from 'react';
 import { expect, it, vi } from 'vitest';
 import { ChoiceLocator, type ChoiceLocatorOption } from '@/ui/ChoiceLocator';
 import { Combobox } from '@/ui/Combobox';
+import { i18n } from '@/i18n';
 import { show } from './support';
 
 const options = Array.from({ length: 12 }, (_, index) => ({ value: `native-${index + 1}`, name: `Choice ${index + 1}`, description: `Description ${index + 1}` }));
@@ -146,7 +147,11 @@ it('retains the ordinary lazy Combobox query, open notifications and string-disa
   show(<ExistingCaller />);
   const input = screen.getByRole('combobox', { name: 'Existing search' });
   await user.click(input); await user.type(input, 'a');
-  expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+  const list = screen.getByRole('listbox', { name: 'Existing search' });
+  expect(within(list).getByText(i18n.t('ui.combobox.minimumQuery', { count: 2 }))).toBeVisible();
+  expect(within(list).queryByRole('option')).not.toBeInTheDocument();
+  expect(opened).not.toHaveBeenCalledWith(true);
+  await user.keyboard('{Enter}'); expect(selected).not.toHaveBeenCalled();
   await user.type(input, 'b');
   expect(opened).toHaveBeenLastCalledWith(true);
   expect(typed).toHaveBeenLastCalledWith('ab');

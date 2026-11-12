@@ -19,7 +19,7 @@ test('new requests wait under a count while paused and resume without losing the
   await expect(log.getByRole('row').nth(1)).toContainText('research');
   const filters = page.getByRole('button', { name: 'Filter requests', exact: true });
   if (await filters.isVisible()) await filters.click();
-  await page.getByRole('combobox', { name: 'Access programme', exact: true }).click();
+  await page.getByRole('combobox', { name: 'Access program', exact: true }).click();
   await page.getByRole('option', { name: 'research', exact: true }).click();
   await expect(page).toHaveURL(/program=research/);
   await expect(log.getByRole('row')).toHaveCount(2);

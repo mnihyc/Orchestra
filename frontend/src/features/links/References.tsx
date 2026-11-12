@@ -33,7 +33,7 @@ export function References({ list }: { list: ListState }) {
   const { t } = useTranslation();
   const rows = list.rows;
   const labels = usePlaceLabels(rows.filter((row) => row.readable && row.name !== null).map((row) => ({ id: row.id, name: row.name ?? '', above: row.context })));
-  if (list.pending) return <SkeletonRows rows={LOADING_ROWS} />;
+  if (list.pending) return <SkeletonRows read={list.read} rows={LOADING_ROWS} />;
   if (list.failed) return <ErrorAlert error={list.error} action={<Button size="sm" onClick={list.retry}>{t('common.tryAgain')}</Button>} />;
   if (rows.length === 0 && !list.hasMore) return <StateLine title={t('links.references.empty')} compact />;
   return <div className="flex min-w-0 flex-col" data-links-list="references">

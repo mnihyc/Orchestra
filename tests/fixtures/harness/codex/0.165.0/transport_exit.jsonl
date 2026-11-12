@@ -1,0 +1,2 @@
+{"direction":"from_harness","frame":{"method":"turn/started","params":{"threadId":"fixture-thread","turn":{"id":"fixture-turn","status":"inProgress","items":[]}}}}
+{"direction":"exit","code":7}

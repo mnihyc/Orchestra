@@ -21,6 +21,8 @@ import { IconButton } from '@/ui/IconButton';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { Select } from '@/ui/Select';
+import { OptionSchemaEditor } from '@/features/models/OptionSchemaEditor';
+import { EndpointHeaders } from '@/features/models/EndpointHeaders';
 
 /** An endpoint as it is being edited. */
 export interface EndpointDraft {
@@ -53,6 +55,8 @@ export function draftOf(upstream: Upstream, protocol: ProviderSetupProtocol | un
       options[field.name] = Array.isArray(value) ? Object.fromEntries(value.filter((name): name is string => typeof name === 'string').map((name) => [name, ''])) : {};
     } else if (field.type === 'map') {
       options[field.name] = typeof value === 'object' && value !== null && !Array.isArray(value) ? Object.fromEntries(Object.entries(value).map(([name, text]) => [name, String(text)])) : {};
+    } else if (field.type === 'json' && value !== undefined) {
+      options[field.name] = JSON.stringify(value, null, 2);
     } else if (typeof value === 'string') {
       options[field.name] = value;
     }
@@ -67,7 +71,15 @@ export function upstreamOf(draft: EndpointDraft, protocol: ProviderSetupProtocol
   for (const field of protocol?.endpoint_options ?? []) {
     const value: FormValue | undefined = draft.options[field.name];
     if (value === undefined) continue;
-    if (field.type === 'secret_map' && typeof value === 'object') {
+    if (field.type === 'json' && typeof value === 'string') {
+      if (value.trim() !== '') {
+        try {
+          const parsed: unknown = JSON.parse(value);
+          const empty = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length === 0;
+          if (field.required || !empty) options[field.name] = parsed;
+        } catch { options[field.name] = value; }
+      }
+    } else if (field.type === 'secret_map' && typeof value === 'object') {
       const names = Object.keys(value).filter((name) => name !== '');
       if (names.length > 0) options[field.name] = names;
       for (const [name, text] of Object.entries(value)) if (name !== '' && text !== '') secrets[name] = text;
@@ -147,6 +159,9 @@ export function EndpointsEditor({ value, onChange, protocols, httpAllowed, error
       {value.map((row, index) => {
         const protocol = protocols.find((candidate) => candidate.name === row.protocol);
         const fields: readonly Field[] = (protocol?.endpoint_options ?? []).filter((field) => !compact || field.name !== 'auth' && field.type !== 'secret' && field.type !== 'secret_text' && field.type !== 'secret_map');
+        const schemaField = fields.find((field) => field.name === 'request_options' && field.type === 'json');
+        const ordinaryFields = fields.filter((field) => field !== schemaField);
+        const headersField = fields.find((field) => field.name === 'headers' && field.type === 'map');
         const agents = protocol?.agents ?? [];
         const clear = row.baseUrl.trim().toLowerCase().startsWith('http://') && !runtimeLoopback(row.baseUrl.trim());
         const { fields: optionErrors, ...rowErrors } = endpointErrors(row.id, errors);
@@ -198,10 +213,14 @@ export function EndpointsEditor({ value, onChange, protocols, httpAllowed, error
                   ? t('resources.endpoint.oneAgent', { agents: agents.map((agent) => agent.name).join(', ') })
                   : t('resources.endpoint.manyAgents', { agents: agents.map((agent) => agent.name).join(', ') })}
             </p>}
-            {fields.length > 0 && (
+            {headersField !== undefined && <EndpointHeaders protocol={row.protocol} value={row.options.headers} disabled={disabled}
+              onChange={(headers) => change(row.id, { options: { ...row.options, headers } })} />}
+            {schemaField !== undefined && <OptionSchemaEditor protocols={[row.protocol]} value={typeof row.options.request_options === 'string' ? row.options.request_options : JSON.stringify(row.options.request_options ?? {}, null, 2)} disabled={disabled} error={optionErrors.request_options}
+              onChange={(request_options) => change(row.id, { options: { ...row.options, request_options } })} />}
+            {ordinaryFields.length > 0 && (
               <details className="group" open={advanced || Object.keys(optionErrors).length>0} onToggle={(event) => { if (event.currentTarget.open !== advanced) chooseAdvanced(event.currentTarget.open); }}>
                 <summary className="cursor-default rounded-md text-sm font-medium text-accent-text select-none hover:underline">{t('resources.endpoint.advanced')}</summary>
-                <FieldForm className="pt-3" fields={fields} values={row.options} errors={optionErrors} helpFor={(field) => <DeclaredHint term={field.label} help={field.help} />} onChange={(name, next) => change(row.id, { options: { ...row.options, [name]: next } })} />
+                <FieldForm className="pt-3" fields={ordinaryFields} values={row.options} errors={optionErrors} helpFor={(field) => <DeclaredHint term={field.label} help={field.help} />} onChange={(name, next) => change(row.id, { options: { ...row.options, [name]: next } })} />
               </details>
             )}
             {(rowErrors.options!==undefined || otherOptions.length>0) && <InlineAlert tone="warning">{[rowErrors.options,...otherOptions].filter((message)=>message!==undefined).join(' ')}</InlineAlert>}

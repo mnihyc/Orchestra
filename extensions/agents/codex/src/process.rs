@@ -57,17 +57,101 @@ pub const DAEMON_SETTINGS_FILE: &str = "settings.json";
 // These helpers can act outside an issued turn; Orch supplies their supervised equivalents.
 const MANAGED_OFF_FEATURES: &[&str] = &[
     "daemon_auto_start",
+    "wake_on_agent_messages",
+    "multi_agent_v2",
     "goals",
     "hooks",
     "codex_hooks",
     "shell_snapshot",
     "skill_mcp_dependency_install",
     "memories",
+    "memory_tool",
+    "external_agent_memory_import",
+    "async_compaction",
+    "sleep_tool",
+    "send_async_message",
+    "send_message_to_user_async",
     "apps",
     "plugins",
+    "plugin_hooks",
+    "plugin_discovery_prefetch",
+    "recommended_plugins",
     "remote_plugin",
+    "remote_control",
+    "in_app_updates",
     "tool_suggest",
 ];
+
+/// One declaration is used at process launch and every new, resumed or forked thread.
+pub fn automation_pins() -> BTreeMap<String, Json> {
+    let mut pins: BTreeMap<_, _> = MANAGED_OFF_FEATURES
+        .iter()
+        .map(|feature| (format!("features.{feature}"), Json::Bool(false)))
+        .collect();
+    for key in [
+        "memories.generate_memories",
+        "memories.use_memories",
+        "memories.dual_write",
+    ] {
+        pins.insert(key.to_owned(), Json::Bool(false));
+    }
+    pins.insert("check_for_update_on_startup".into(), Json::Bool(false));
+    pins.insert(
+        "model_post_turn_compact_threshold_percent".into(),
+        Json::from(0),
+    );
+    pins.insert("notify".into(), Json::Array(Vec::new()));
+    pins
+}
+
+/// Compare only effective settings the native server actually returned. An absent key is unknown.
+pub(crate) fn managed_pin_mismatches(config: &Json) -> Vec<String> {
+    automation_pins()
+        .into_iter()
+        .filter_map(|(key, expected)| {
+            let value = key
+                .split('.')
+                .try_fold(config, |value, part| value.get(part));
+            value.filter(|actual| **actual != expected).map(|_| key)
+        })
+        .collect()
+}
+
+fn apply_automation_pins(config: &mut toml::Table) {
+    for (key, value) in automation_pins() {
+        let Some(value) = toml_of(&value) else {
+            continue;
+        };
+        if let Some((section, member)) = key.split_once('.') {
+            let table = config
+                .entry(section.to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if !table.is_table() {
+                *table = toml::Value::Table(toml::Table::new());
+            }
+            if let Some(table) = table.as_table_mut() {
+                table.insert(member.to_owned(), value);
+            }
+        } else {
+            config.insert(key, value);
+        }
+    }
+    if let Some(providers) = config
+        .get_mut("model_providers")
+        .and_then(toml::Value::as_table_mut)
+    {
+        for (_, provider) in providers.iter_mut() {
+            if let Some(auth) = provider
+                .as_table_mut()
+                .and_then(|provider| provider.get_mut("auth"))
+                .and_then(toml::Value::as_table_mut)
+            {
+                // Token helpers may answer an issued request, never run their own idle refresh loop.
+                auth.insert("refresh_interval_ms".into(), toml::Value::Integer(0));
+            }
+        }
+    }
+}
 
 fn isolate_managed_config(config: &mut toml::Table) {
     for section in ["analytics", "feedback"] {
@@ -89,32 +173,7 @@ fn isolate_managed_config(config: &mut toml::Table) {
         toml::Value::Boolean(false),
     );
     config.insert("notify".into(), toml::Value::Array(Vec::new()));
-    if let Some(providers) = config
-        .get_mut("model_providers")
-        .and_then(toml::Value::as_table_mut)
-    {
-        for (_, provider) in providers.iter_mut() {
-            if let Some(auth) = provider
-                .as_table_mut()
-                .and_then(|provider| provider.get_mut("auth"))
-                .and_then(toml::Value::as_table_mut)
-            {
-                // Token helpers may answer an issued request, never run their own idle refresh loop.
-                auth.insert("refresh_interval_ms".into(), toml::Value::Integer(0));
-            }
-        }
-    }
-    let features = config
-        .entry("features")
-        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
-    if !features.is_table() {
-        *features = toml::Value::Table(toml::Table::new());
-    }
-    if let Some(features) = features.as_table_mut() {
-        for feature in MANAGED_OFF_FEATURES {
-            features.insert((*feature).into(), toml::Value::Boolean(false));
-        }
-    }
+    apply_automation_pins(config);
 }
 
 /// Immediate native unloading lets a later resume discard an earlier instruction-root override.
@@ -374,6 +433,50 @@ fn table_of(entries: &[(&str, toml::Value)]) -> toml::Table {
         .collect()
 }
 
+/// The same native provider shape is installed at startup and narrowed to the real session URL.
+pub(crate) fn forwarded_provider(base_url: &str) -> toml::Table {
+    table_of(&[
+        ("name", toml::Value::String("Orch".to_owned())),
+        ("base_url", toml::Value::String(base_url.to_owned())),
+        ("wire_api", toml::Value::String("responses".to_owned())),
+        (
+            "env_key",
+            toml::Value::String(LLM_TOKEN_VARIABLE.to_owned()),
+        ),
+        ("requires_openai_auth", toml::Value::Boolean(false)),
+    ])
+}
+
+/// Startup knows the account but no session. Its reserved unbound URL cannot admit a model request.
+pub(crate) fn configure_forwarded(
+    config: &mut toml::Table,
+    provider: orch_types::Id,
+    loopback: &orch_agent_contract::loopback::Loopback,
+) -> Vec<String> {
+    let name = crate::sessions::forwarded_provider_name(provider);
+    config.insert(
+        "model_provider".to_owned(),
+        toml::Value::String(name.clone()),
+    );
+    let providers = config
+        .entry("model_providers".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if !providers.is_table() {
+        *providers = toml::Value::Table(toml::Table::new());
+    }
+    if let Some(providers) = providers.as_table_mut() {
+        providers.insert(
+            name.clone(),
+            toml::Value::Table(forwarded_provider(&format!(
+                "{}/v1",
+                loopback.llm("unbound")
+            ))),
+        );
+    }
+    // CLI selection wins over a workspace's provider default when the native client rechecks it.
+    overrides(&table_of(&[("model_provider", toml::Value::String(name))]))
+}
+
 /// The settings every harness process of the adapter starts with.
 ///
 /// Quiet: no usage statistics, no error reports, no feedback, no check for a newer version, and no export
@@ -429,6 +532,7 @@ pub fn base_config(options: &HomeOptions) -> toml::Table {
             toml::Value::String("file".to_owned()),
         );
     }
+    apply_automation_pins(&mut config);
     if let Some(workspace) = &options.workspace_id {
         config.insert(
             "forced_chatgpt_workspace_id".into(),
@@ -490,6 +594,7 @@ pub fn effective_config(options: &HomeOptions, profile_config: &Json) -> toml::T
             )])),
         );
     }
+    apply_automation_pins(&mut config);
     config.insert(
         "thread_unload_delay_secs".to_owned(),
         toml::Value::Integer(NATIVE_UNLOAD_DELAY_SECONDS),
@@ -649,6 +754,126 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn forwarded_startup_pins_a_non_vendor_identity_without_a_session_or_a_credential()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let provider = orch_types::new_id();
+        let name = crate::sessions::forwarded_provider_name(provider);
+        let loopback = orch_agent_contract::loopback::Loopback::new(
+            41701,
+            orch_plugin_contract::Secret::new("fixture-loopback-token".to_owned()),
+        );
+        let mut config = effective_config(
+            &home_options(&json!({}), true),
+            &json!({
+                "model_provider":"openai", "unrelated_option":"retained",
+                "model_providers":{(name.clone()):{"base_url":"https://outside.invalid", "env_key":"PROFILE_KEY", "requires_openai_auth":true}}
+            }),
+        );
+        let pins = configure_forwarded(&mut config, provider, &loopback);
+        assert_ne!(name, "openai");
+        assert_eq!(
+            config.get("model_provider").and_then(toml::Value::as_str),
+            Some(name.as_str())
+        );
+        let entry = config
+            .get("model_providers")
+            .and_then(toml::Value::as_table)
+            .and_then(|providers| providers.get(&name))
+            .and_then(toml::Value::as_table)
+            .ok_or("the selected provider entry")?;
+        assert_eq!(
+            entry.get("base_url").and_then(toml::Value::as_str),
+            Some("http://127.0.0.1:41701/llm/unbound/v1")
+        );
+        assert_eq!(
+            entry.get("env_key").and_then(toml::Value::as_str),
+            Some(LLM_TOKEN_VARIABLE)
+        );
+        assert_eq!(
+            entry
+                .get("requires_openai_auth")
+                .and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            config.get("unrelated_option").and_then(toml::Value::as_str),
+            Some("retained")
+        );
+        assert!(
+            pins.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1].contains(&name))
+        );
+        assert!(!toml::to_string(&config)?.contains("fixture-loopback-token"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_managed_shared_home_preserves_the_native_image_generation_default() {
+        let options = HomeOptions {
+            managed: true,
+            ..HomeOptions::default()
+        };
+        let profile = json!({"features":{"image_generation":true}});
+        let config = effective_config(&options, &profile);
+        assert_eq!(config["features"]["image_generation"].as_bool(), Some(true));
+        let ordinary = effective_config(&options, &json!({}));
+        assert!(ordinary["features"].get("image_generation").is_none());
+    }
+
+    #[test]
+    fn a_profile_cannot_enable_background_memory_hooks_plugins_or_idle_compaction_on_either_home() {
+        let profile = serde_json::json!({"features":{"memories":true,"memory_tool":true,"hooks":true,"plugins":true,"plugin_discovery_prefetch":true,"async_compaction":true,"wake_on_agent_messages":true},"memories":{"generate_memories":true,"use_memories":true,"dual_write":true},"model_post_turn_compact_threshold_percent":50,"check_for_update_on_startup":true});
+        for managed in [false, true] {
+            let config = effective_config(
+                &HomeOptions {
+                    managed,
+                    ..HomeOptions::default()
+                },
+                &profile,
+            );
+            for field in [
+                "memories",
+                "memory_tool",
+                "hooks",
+                "plugins",
+                "plugin_discovery_prefetch",
+                "async_compaction",
+                "wake_on_agent_messages",
+            ] {
+                assert_eq!(
+                    config["features"][field].as_bool(),
+                    Some(false),
+                    "{managed}: {field}"
+                );
+            }
+            for field in ["generate_memories", "use_memories", "dual_write"] {
+                assert_eq!(config["memories"][field].as_bool(), Some(false));
+            }
+            assert_eq!(
+                config["model_post_turn_compact_threshold_percent"].as_integer(),
+                Some(0)
+            );
+            assert_eq!(config["check_for_update_on_startup"].as_bool(), Some(false));
+            let overrides = overrides(&config);
+            assert!(
+                overrides
+                    .iter()
+                    .any(|value| value == "memories.generate_memories=false")
+            );
+            assert!(
+                overrides
+                    .iter()
+                    .any(|value| value == "features.hooks=false")
+            );
+            assert!(
+                overrides
+                    .iter()
+                    .any(|value| value == "features.plugins=false")
+            );
+        }
+    }
+
+    #[test]
     fn a_managed_home_cannot_enable_an_unattended_daemon_or_helper_through_a_profile() {
         let options = HomeOptions {
             managed: true,
@@ -673,10 +898,14 @@ mod tests {
         assert!(config["notify"].as_array().unwrap().is_empty());
         let personal = effective_config(&HomeOptions::default(), &profile);
         assert_eq!(
-            personal["features"]["daemon_auto_start"].as_bool(),
-            Some(true)
+            personal["model_providers"]["custom"]["auth"]["refresh_interval_ms"].as_integer(),
+            Some(0)
         );
-        assert_eq!(personal["notify"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            personal["features"]["daemon_auto_start"].as_bool(),
+            Some(false)
+        );
+        assert!(personal["notify"].as_array().unwrap().is_empty());
     }
 
     #[test]
