@@ -8,9 +8,15 @@
  * loading it is drawn as rows, when it could not be loaded it says so with a way to try again, and when
  * it is empty it says why and offers the one act that fills it.
  */
+import { linkTo } from '@/lib/links';
+import { copyText } from '@/ui/clipboard';
 import { useListChoice } from '@/lib/listState';
 import { useViewedOrgState } from './HomePicker';
 import { LibraryCounts } from './Library';
+import { ResourceGroupControl, ResourceGroupHeader } from './GroupHeader';
+import { groupResourceRows, RESOURCE_GROUP_MODES, resourceGroupMeta, type ResourceGroupMeta, type ResourceGroupMode } from './groups';
+import { useFormatContext } from '@/lib/appearance';
+import { MachineLink } from './machines/MachineLink';
 import { Hint } from '@/features/help/Hint';
 import { useResourceCleanup } from '@/features/storage/acts';
 import { holds } from '@/lib/permissions';
@@ -26,7 +32,7 @@ import { everythingQuery, type EverythingFilter, type ResourceFilter } from '@/a
 import type { EverythingResource, EverythingScope, EverythingSort, ProviderListScope, ResourceFacts } from '@/generated/api-types';
 import { INVENTORY_KINDS } from '@/features/resources/inventory';
 
-import { AllBox, BulkBar, type ListActs, RowBox, RowMenuCell, RowPrimaryCell, useSelection, adminRow, secondaryEntries } from '@/features/resources/acts';
+import { AllBox, BulkBar, type ListActs, type RowActs, RowBox, RowMenuCell, RowPrimaryCell, useSelection, adminRow, secondaryEntries } from '@/features/resources/acts';
 import { ResourceNav } from '@/features/resources/ResourceNav';
 import { ResourceListControls } from '@/features/resources/ListControls';
 import { ResourceOwner, type ResourceOwnership } from '@/features/resources/ResourceOwner';
@@ -89,6 +95,8 @@ export interface ResourceListFrameProps<Row extends ResourceRow> {
   /** The nested resource view, before search. */
   viewControl?: ReactNode;
   library?: ReadonlyMap<string, { facts: ResourceFacts; threads?: number | null }>;
+  /** Native outer inventory metadata, retained beside each existing kind-specific body. */
+  grouping?: ReadonlyMap<string, ResourceGroupMeta>;
   widen?: () => void;
   emptyView?: string;
   widerView?: string;
@@ -138,9 +146,9 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
   const sort=sorting.some((value)=>value===keptSort)?keptSort:'name';
   const direction=keptDirection==='desc'?'desc':'asc';
   const {org:viewed,load:orgLoad} = useViewedOrgState();
-  const defaultView: ProviderListScope = props.kind === 'environments' ? 'viewable' : 'usable';
+  const defaultView: ProviderListScope = 'usable';
   const [keptView, chooseView] = useListChoice<ProviderListScope>(`resources.${props.kind}`, 'view', resource?.view ?? defaultView);
-  const offered: ProviderListScope[] = ['mine', 'managed', ...(props.kind === 'environments' ? [] : ['usable' as const]), 'viewable', ...(viewed?.access.administers === true ? ['all' as const] : [])];
+  const offered: ProviderListScope[] = ['mine', 'managed', 'usable', 'viewable', ...(viewed?.access.administers === true ? ['all' as const] : [])];
   const view = offered.includes(keptView) ? keptView : defaultView;
   useEffect(()=>{
     if(keptView!==view&&(keptView!=='all'||orgLoad.isSuccess))chooseView(view);
@@ -163,7 +171,8 @@ export function ResourceList<Row extends ResourceRow>({ readRow, filter: resourc
   const filtersActive = hasFilters || view !== defaultView;
   const hasSorting = sort !== 'name' || direction !== 'asc';
   const library = new Map((load.data?.pages.flatMap((page) => page.items) ?? []).flatMap((row) => row.library === null || row.library === undefined ? [] : [[row.id, {facts:row.library,threads:row.library_threads}] as const]));
-  return <ResourceListFrame {...props} library={library}
+  const grouping = new Map((load.data?.pages.flatMap((page) => page.items) ?? []).map((item) => [item.id, resourceGroupMeta(item, item.resource?.value)]));
+  return <ResourceListFrame {...props} library={library} grouping={grouping}
     emptyView={t(`library.empty.${view}`)} widerView={wider === undefined ? undefined : t(`library.widen.${wider}`)} widen={wider === undefined ? undefined : () => chooseView(wider)}
     viewControl={<Select size="sm" hideLabel label={t('library.show')} value={view} onValueChange={chooseView}
       fieldClassName="min-w-0 max-w-[45%] shrink-0" className="max-w-full"
@@ -201,6 +210,7 @@ export function ResourceListFrame<Row extends ResourceRow>({
   filters,
   viewControl,
   library,
+  grouping,
   widen,
   emptyView,
   widerView,
@@ -220,6 +230,15 @@ export function ResourceListFrame<Row extends ResourceRow>({
 }: ResourceListFrameProps<Row>) {
   const { t } = useTranslation();
   const { embedded } = useContext(ListScope);
+  const { locale } = useFormatContext();
+  const { org: currentHome } = useViewedOrgState();
+  const [keptGroup, setGroup] = useListChoice<string>(`resources.${kind}`, 'groupBy', 'home');
+  const mode: ResourceGroupMode = RESOURCE_GROUP_MODES.includes(keptGroup as ResourceGroupMode) ? keptGroup as ResourceGroupMode : 'home';
+  const [collapsed, setCollapsed] = useListChoice<readonly string[]>(`resources.${kind}`, `collapsedGroups.${mode}`, []);
+  const metadata = (row: Row) => grouping?.get(row.id) ?? resourceGroupMeta(row);
+  const groups = groupResourceRows(matches, mode, metadata, t, locale, currentHome === null ? [] : [currentHome.id]);
+  const toggleGroup = (id: string) => setCollapsed((before) => before.includes(id) ? before.filter((value) => value !== id) : [...before, id]);
+
   // One owner renderer and one narrow fallback serve every resource kind, including machines and profiles.
   const emptyAction = action ? undefined : empty.action;
   const hasHeaderActions = Boolean(action) || Boolean(headerActions);
@@ -230,9 +249,13 @@ export function ResourceListFrame<Row extends ResourceRow>({
     : column.id !== 'name' ? column : { ...column, cell: (row: Row, shown: ReadonlySet<string>) => {
       const showOwner = !shown.has('owner');
       const entry=library?.get(row.id);
+      const origin=metadata(row).origin_machine;
       return <div className="flex min-w-0 flex-col gap-1">
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1"><div data-resource-name className="min-w-0 flex-1 basis-[min(100%,12rem)]">{column.cell(row, shown)}</div><AsAdminMark of={adminAccessOf(row)?.place} responsive /></div>
       {showOwner && <ResourceOwner {...row} />}
+      {origin !== null && origin !== undefined && <span data-resource-origin className="flex min-w-0 items-center gap-1 text-sm text-text-muted">
+        <span>{t('resourceGroups.from')}</span><MachineLink machine={origin} />
+      </span>}
       {entry !== undefined && <LibraryCounts facts={entry.facts} threads={entry.threads} />}
     </div>; } });
   const participating = suppliedParticipation ?? false;
@@ -244,7 +267,11 @@ export function ResourceListFrame<Row extends ResourceRow>({
   const retainsStorage = kind !== 'agents' && kind !== 'mcp';
   const actsOf = (row: Row) => {
     if (acts === undefined) return undefined;
-    const current = acts.of(row);
+    const supplied = acts.of(row);
+    const current: RowActs = supplied.entries.some((entry) => entry.id === 'copy-link') ? supplied : { ...supplied, entries: [...supplied.entries, {
+      id: 'copy-link', action: 'copyLink' as const, label: t('actions.copyLink.label'),
+      onSelect: () => void copyText(linkTo({ kind: objectKind, id: row.id }), t('common.linkCopied')),
+    }] };
     const entries = !retainsStorage || current.entries.some((entry) => entry.type === undefined && entry.id === 'cleanup') ? current.entries : [...current.entries, {type:'separator' as const,id:'before-cleanup'}, entryOf(cleanup.act({kind:objectKind,id:row.id},holds(row.access,Array.isArray(permission) ? 'machine.manage' : permission)))];
     return adminRow({...current,entries},adminSpec(row,permission));
   };
@@ -306,14 +333,14 @@ export function ResourceListFrame<Row extends ResourceRow>({
         actions={hasHeaderActions ? <>{action}{headerActions}</> : undefined}
       /></div>}
       {embedded && hasHeaderActions && <div className="flex flex-wrap items-center justify-end gap-2">{action}{headerActions}</div>}
-      <FilterBar wrap={false} leading={viewControl===undefined?undefined:<>{viewControl}<Hint id="resource-library" popover /></>}
+      <FilterBar wrap={false} leading={viewControl===undefined?undefined:<>{viewControl}<Hint id="resource-library" popover className="self-center" /></>}
         search={<SearchBox text={text} onText={onText} label={searchLabel} placeholder={searchPlaceholder} />}>
-        <ResourceListControls filters={filters} sorting={sorting} participating={participating} onParticipation={setParticipating} filtered={filtersActive ?? (hasFilters || participating)} sorted={hasSorting} />
+        <ResourceListControls filters={filters} sorting={sorting} grouping={<ResourceGroupControl value={mode} onChange={setGroup} />} participating={participating} onParticipation={setParticipating} filtered={filtersActive ?? (hasFilters || participating)} sorted={hasSorting} />
       </FilterBar>
       {ticking && selection.selected.length > 0 && <BulkBar rows={selection.selected} acts={bulk} onClear={selection.clear} permission={permission} />}
       {notice}
       {load.isPending ? (
-        <SkeletonRows rows={4} />
+        <SkeletonRows read={load} rows={4} />
       ) : load.isError && all.length === 0 ? (
         <ErrorState compact error={load.error} retrying={load.isRefetching} onRetry={() => void load.refetch()} />
       ) : all.length === 0 && !hasFilters && emptyView !== undefined ? (
@@ -328,6 +355,9 @@ export function ResourceListFrame<Row extends ResourceRow>({
           label={label}
           columns={shown}
           rows={rows}
+          sections={mode === 'none' ? undefined : groups.map((group) => ({id:group.id,
+            heading:<ResourceGroupHeader group={group} kinds={[INVENTORY_KINDS[kind]]} collapsed={collapsed.includes(group.id)} onToggle={() => toggleGroup(group.id)} />,
+            rows:collapsed.includes(group.id) ? [] : group.rows}))}
           rowKey={rowKey}
           {...(rowClassName === undefined ? {} : { rowClassName })}
           {...(acts === undefined ? {} : { rowMenu: { label: (row: Row) => t('resources.act.menuOf', { name: acts.menuName?.(row) ?? acts.name(row) }), entries: (row: Row) => secondaryEntries(actsOf(row) ?? acts.of(row)), keys: (row: Row) => acts.of(row).keys } })}

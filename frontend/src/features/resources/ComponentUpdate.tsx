@@ -58,13 +58,13 @@ export function useComponentUpdateAct(): (target: Target) => Act | null {
     onError: () => toast({ tone: 'danger', title: t('componentUpdates.failed') }),
   });
   return (target) => {
-    if (!target.manage || target.update === null || target.update === undefined || (!target.update.behind && !updatePending(target.update))) return null;
+    if (target.update === null || target.update === undefined || (!target.update.behind && !updatePending(target.update))) return null;
     const pending = updatePending(target.update) || (request.isPending && request.variables.id === target.id);
     return {
       ...(target.admin === undefined ? {} : {admin:target.admin}),
       id: 'update-now', label: t(pending ? 'componentUpdates.updating' : 'componentUpdates.action'), icon: <Download aria-hidden />,
-      description: t('componentUpdates.idle'), disabled: pending ? t('componentUpdates.updating') : !target.online ? t('componentUpdates.offline') : false,
-      pending, run: () => request.mutate(target),
+      description: t('componentUpdates.idle'), disabled: !target.manage ? t('resources.act.manageRequired') : pending ? t('componentUpdates.updating') : !target.online ? t('componentUpdates.offline') : false,
+      pending, run: () => { if (target.manage) request.mutate(target); },
     };
   };
 }

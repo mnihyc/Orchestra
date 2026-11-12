@@ -72,6 +72,20 @@ fn starting_a_profile_preserves_its_vendor_configuration_but_refuses_unknown_req
     let Command::AgentStart(start) = frame.command().unwrap() else {
         panic!("wrong command");
     };
+    assert!(
+        start.provider_kind.is_none(),
+        "an older command preserves its unspecified account kind"
+    );
+    let mut current = literal.clone();
+    current["b"]["provider_kind"] = json!("api");
+    let frame: Cmd = serde_json::from_value(current).unwrap();
+    let Command::AgentStart(current) = frame.command().unwrap() else {
+        panic!("wrong command");
+    };
+    assert_eq!(
+        current.provider_kind,
+        Some(orch_agent_contract::descriptor::ProviderKind::Api)
+    );
     let profile: orch_agent_contract::facts::AgentProfile = start.profile;
     assert_eq!(profile.config["vendor_setting"], "kept");
     assert_eq!(profile.env["LANG"], "C.UTF-8");
@@ -173,4 +187,30 @@ fn a_runtime_recipe_keeps_its_command_bound_sealed_credential_and_refuses_plaint
     let mut invalid = recipe;
     invalid["unknown_launch_member"] = json!(true);
     assert!(serde_json::from_value::<foreign::RuntimeSpec>(invalid).is_err());
+}
+
+#[test]
+fn structured_native_error_facts_survive_the_started_and_completed_link_envelopes() {
+    for payload in [
+        json!({"code":"model_rerouted","message":"Native sentence","retryable":false,"details":{"turn_id":ID,"from_model":"chosen","to_model":"actual"}}),
+        json!({"code":"mcp_server_failed","message":"Native sentence","retryable":false,"details":{"turn_id":null,"server":"Source catalog","message":"Sign in again"}}),
+        json!({"code":"legacy_error","message":"Old sentence","retryable":false}),
+    ] {
+        let started = json!({"native_ref":"native-error","turn_id":ID,"stream":"main","kind":"error","payload":payload});
+        assert_eq!(
+            Event::decode("item.started", started.clone())
+                .unwrap()
+                .body()
+                .unwrap(),
+            started
+        );
+        let completed = json!({"native_ref":"native-error","status":"completed","payload":payload});
+        assert_eq!(
+            Event::decode("item.completed", completed.clone())
+                .unwrap()
+                .body()
+                .unwrap(),
+            completed
+        );
+    }
 }

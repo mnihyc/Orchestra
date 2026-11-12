@@ -80,6 +80,8 @@ pub struct MetricMinutes {
     pub partitions_dropped: u32,
     /// Hourly figures removed.
     pub hours_removed: u64,
+    /// Exact vendor-credit observations removed under the same retained metrics duration.
+    pub credit_observations_removed: u64,
 }
 
 /// The moment before which the minutes of metric samples may be dropped: the
@@ -121,6 +123,8 @@ pub async fn metric_minutes(
     if config.retention.metrics_days > 0 {
         let before = now - spans::days(config.retention.metrics_days);
         done.hours_removed = upkeep::drop_metric_hours_before(&mut tx, before).await?;
+        done.credit_observations_removed =
+            orch_db::queries::provider_credits::trim(&mut tx, before).await?;
     }
     tx.commit().await.map_err(DbError::from)?;
     Ok(Some(done))

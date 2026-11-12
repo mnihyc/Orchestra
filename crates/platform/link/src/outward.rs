@@ -85,6 +85,16 @@ impl std::fmt::Debug for Route {
 }
 
 impl Route {
+    /// Open this explicit HTTP CONNECT route; another proxy scheme is refused.
+    pub async fn connect_tunnel(&self, host: &str, port: u16) -> io::Result<TcpStream> {
+        if self.via != Via::Tunnel {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "this parent proxy does not speak HTTP CONNECT",
+            ));
+        }
+        tunnel(self, host, port).await
+    }
     /// The proxy as a person may be shown it: its scheme, host and port, without credentials.
     #[must_use]
     pub fn shown(&self) -> String {
@@ -426,6 +436,17 @@ async fn tunnel(route: &Route, host: &str, port: u16) -> io::Result<TcpStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn explicit_parent_connect_refuses_an_unspoken_scheme_before_any_connection() {
+        let proxy = OutwardProxy::from_values(Some("https://127.0.0.1:1"), None).unwrap();
+        let route = proxy.route("destination.invalid", 443, true).unwrap();
+        let error = route
+            .connect_tunnel("destination.invalid", 443)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
     use tokio::net::TcpListener;
 
     #[test]

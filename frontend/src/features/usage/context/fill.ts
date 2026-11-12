@@ -11,6 +11,14 @@
 
 import type { ContextCount, ContextFill, ContextPartKind, Thread, TokenUsage, TurnUsageDetail, TurnUsageRow } from '@/generated/api-types';
 
+/** The ring belongs to the explicitly reported model, with the native name retained if no entry was known. */
+export function contextModelName(thread: Pick<Thread,'model'|'model_display'|'usage'>): string | null {
+  const model=thread.usage?.context_model;
+  if (model === undefined || model === null || model === '') return null;
+  const display = model === thread.model ? thread.model_display : thread.usage?.context_model_display;
+  return display === '' ? model : display ?? model;
+}
+
 /** From this share of the window the ring is amber: the conversation will be shortened before long. */
 export const CONTEXT_AMBER_FROM = 60;
 /** Above this share it is red: the harness is about to shorten the conversation, or is past its point. */

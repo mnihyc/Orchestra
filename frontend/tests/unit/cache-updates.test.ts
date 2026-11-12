@@ -3,6 +3,7 @@ import { QueryClient, QueryObserver } from '@tanstack/react-query';
 import { describe, expect, it, vi } from 'vitest';
 import { applyChanges, findAct, resourceChanges } from '@/api/acts';
 import { applyRow, cachedRow } from '@/api/cache';
+import { resourceRows, type ResourceRows } from '@/api/listed';
 import { LiveQueryClient, queryClient } from '@/api/query';
 import { createApiClient, type Act } from '@/api/client';
 import { targetSettingsKey } from '@/api/settings';
@@ -12,12 +13,46 @@ import { jobQuery as forkJob } from '@/api/forks';
 import { jobQuery as exportJob } from '@/api/exports';
 import { retentionJobQuery } from '@/api/trace';
 import { answerChanges } from '@/api/actAnswers';
-import type { Environment } from '@/generated/api-types';
+import type { Environment, HiddenItem } from '@/generated/api-types';
 
 const before = { id: 'p1', name: 'Team provider', status: 'active', home: { id: 'o1', name: 'Acme' }, access: { permissions: ['provider.view', 'provider.use'], administers: false }, revision: 1 };
 const after = { ...before, name: 'Research provider', revision: 2 };
 
 describe('answers replace rows', () => {
+  it('keeps unrelated tree projections intact and replaces only the changed path through a loaded page', async () => {
+    // Projection identity must not depend on Query's optional deep structural sharing.
+    const cache = new QueryClient({ defaultOptions: { queries: { structuralSharing: false } } });
+    const alpha = { id: 'alpha', kind: 'topic', parent_id: 'project', name: 'Alpha' };
+    const beta = { id: 'beta', kind: 'topic', parent_id: 'project', name: 'Beta' };
+    const key = ['topics', 'project'];
+    const original = { pages: [{ items: [alpha, beta], next_cursor: 'next' }], pageParams: [null] };
+    cache.setQueryData(key, original, { updatedAt: 1 });
+    try {
+      await applyChanges([{ row: { kind: 'node', id: 'elsewhere', value: { id: 'elsewhere', kind: 'thread', name: 'Elsewhere' }, partial: true } }], cache);
+      expect(cache.getQueryData(key)).toBe(original);
+      expect(cache.getQueryState(key)?.dataUpdatedAt).toBe(1);
+      await applyChanges([{ row: { kind: 'node', id: 'alpha', value: { ...alpha, name: 'Renamed' }, partial: true } }], cache);
+      const updated = cache.getQueryData<typeof original>(key);
+      expect(updated?.pages[0]?.items[0]?.name).toBe('Renamed');
+      expect(updated?.pages[0]?.items[1]).toBe(beta);
+      expect(updated?.pageParams).toBe(original.pageParams);
+      expect(updated?.pages[0]?.next_cursor).toBe('next');
+    } finally { cache.clear(); }
+  });
+
+  it.each(['before', 'after', 'overlap'] as const)('keeps renamed profile answers unique %s their live row', async (timing) => {
+    const cache = new QueryClient();
+    const old = { name: 'twitter', marker: 'old' }, live = { name: 'twitter-team', marker: 'live' };
+    const accepted = { ...live, marker: 'accepted' }, other = { name: 'untouched' };
+    const profiles = timing === 'before' ? [old] : timing === 'after' ? [live] : [old, live];
+    const key = ['environment-browsers', 'one'];
+    cache.setQueryData(key, { browsers: ['retained'], profiles: [...profiles, other] });
+    cache.setQueryData(['environment-browsers', 'two'], { profiles: [old] });
+    await applyChanges(findAct('PATCH', '/environments/one/browser-profiles/twitter', { answer: accepted })?.changes ?? [], cache);
+    expect(cache.getQueryData(key)).toEqual({ browsers: ['retained'], profiles: [accepted, other] });
+    expect(cache.getQueryData(['environment-browsers', 'two'])).toEqual({ profiles: [old] });
+  });
+
   it('replaces the successful empty catalogue read with the upload answer without reloading usage',async()=>{
     const cache=new QueryClient();cache.setQueryData(['usage','catalogue',null],null);
     cache.setQueryData(['usage','report','me'],{turns:19});
@@ -153,6 +188,19 @@ describe('answers replace rows', () => {
     cache.setQueryData(['providers'], [before]);
     expect(cachedRow(cache, 'provider', 'p1')).toEqual(before);
     cache.clear();
+  });
+
+  it('removes a withdrawn private name stored beside readable resource rows', () => {
+    const cache = new QueryClient();
+    const hidden: HiddenItem = { id: 'hidden-provider', kind: 'provider', name: 'Private', parent_id: null, owner: null, private: true, content_hidden: true };
+    cache.setQueryData(['providers'], resourceRows<typeof before>([before, hidden]));
+    try {
+      applyRow(cache, { kind: 'provider', id: hidden.id, value: null });
+      const rows = cache.getQueryData<ResourceRows<typeof before>>(['providers']);
+      expect(rows).toHaveLength(1);
+      expect(rows?.[0]).toEqual(before);
+      expect(rows?.privateRows).toEqual([]);
+    } finally { cache.clear(); }
   });
 
   it('keeps a known nested-home row when a rename does not carry its ancestor path',()=>{

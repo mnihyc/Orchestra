@@ -8,6 +8,7 @@ import { PlugZap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { providerQuery } from '@/api/resources';
+import { CopySetupResult } from '@/features/duplicate/CopySetup';
 import { HeadingActs } from '@/features/resources/acts';
 import { adminSpec } from '@/ui/AdminAct';
 import { HarnessSessions, harnessesOfProvider, ProviderActivityStatus } from '@/features/resources/adopt/Sessions';
@@ -33,7 +34,7 @@ import { useNow } from '@/lib/time';
 import { Page, PageHeader, PlaceMark } from '@/shell/Page';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { Button } from '@/ui/Button';
-import { Skeleton, SkeletonGroup, SkeletonRows } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, SkeletonRows, type SkeletonReads } from '@/ui/Skeleton';
 import { StatusDot } from '@/ui/StatusDot';
 import { Tabs } from '@/ui/Tabs';
 
@@ -43,10 +44,10 @@ import type { SearchPatch } from '@/features/usage/choices';
 
 export { PROVIDER_TABS, providerTab, type ProviderTab };
 
-function Skeletons() {
+function Skeletons(props: SkeletonReads) {
   return (
     <Page>
-      <SkeletonGroup className="flex flex-col gap-6">
+      <SkeletonGroup {...props} className="flex flex-col gap-6">
         <div className="flex items-center gap-4">
           <Skeleton className="size-10 rounded-lg" />
           <div className="flex flex-1 flex-col gap-2">
@@ -83,7 +84,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
   const acts = useProviderActs({ onTab: (_provider, next) => onTab(next), afterDelete: () => void navigate({ to: '/resources/providers' }) });
   const back = useResourceHeading('providers', PlugZap, query.data?.name ?? t('common.loading'), query.data?.id);
 
-  if (query.isPending) return <Skeletons />;
+  if (query.isPending) return <Skeletons read={query} />;
   if (query.data === undefined) return <ProviderReadFailure id={providerId} error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />;
   const provider = query.data;
   const manage = holds(provider.access, 'provider.manage');
@@ -132,6 +133,7 @@ export function ProviderScreen({ providerId, tab, onTab,usageSearch,onUsageSearc
         actions={<HeadingActs admin={adminSpec(provider, 'provider.manage')} name={provider.name} primary={shown === 'settings' ? null : page.primary} edit={page.edit} menu={page.menu} />}
       />
       <ProviderSetupNotice provider={provider} manage={manage} currentTab={shown} onTab={(next) => onTab(providerTab(next) ?? 'overview')} />
+      <CopySetupResult kind="provider" id={provider.id} />
       {query.isError && <ErrorAlert error={query.error} action={<Button size="sm" pending={query.isRefetching} onClick={()=>void query.refetch()}>{t('common.tryAgain')}</Button>}/>}
       <Tabs label={t('providers.tabs.label')} value={shown} onValueChange={onTab} tabs={tabs} panelClassName="pt-3" />
       {acts.dialogs}

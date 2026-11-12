@@ -51,7 +51,7 @@ function NativeLogin({ provider,allowed }: { provider:Provider;allowed:boolean }
   const method = methods.find((row) => row.id === chosen) ?? preferredLoginMethod(methods);
   const answer = useMutation({ mutationFn: () => answerProviderLogin(provider.id,textValues(progress.data?.asks ?? [],values)), onSuccess:(state) => { setValues({}); cache.setQueryData(loginStateQuery(provider.id).queryKey,state); } });
   const cancel = useMutation({ mutationFn:() => cancelProviderLogin(provider.id),onSuccess:(state)=>{setValues({});cache.setQueryData(loginStateQuery(provider.id).queryKey,state);} });
-  if ((allowed && setup.isPending) || progress.isPending) return <SkeletonRows rows={4} />;
+  if ((allowed && setup.isPending) || progress.isPending) return <SkeletonRows reads={[setup, progress]} rows={4} />;
   if ((allowed && setup.isError) || progress.isError) return <ErrorState compact error={setup.error ?? progress.error} onRetry={() => { if(allowed) void setup.refetch(); void progress.refetch(); }} />;
   const state = progress.data;
   const active = state.state === 'starting' || state.state === 'awaiting_user';

@@ -9,6 +9,8 @@
 )]
 
 mod common;
+#[path = "fake/model_processes.rs"]
+mod model_processes;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,6 +66,7 @@ impl Setup {
     fn start_request(&self) -> AgentStart {
         AgentStart {
             provider_id: new_id(),
+            provider_kind: None,
             agent_id: new_id(),
             harness_kind: "codex".into(),
             profile: AgentProfile::default(),
@@ -131,6 +134,8 @@ async fn resuming_or_adopting_does_not_report_a_successful_first_turn_as_an_erro
             assert_eq!(opened.native_session_ref, "thr_1");
             assert!(setup.fake.state.calls("turn/start").is_empty());
             let turn = TurnStart {
+                native_model: None,
+                native_wake: None,
                 plan: false,
                 thread_id: thread,
                 turn_id: new_id(),
@@ -210,6 +215,8 @@ async fn a_plan_turn_plans_read_only_and_the_turn_after_it_goes_back_to_the_defa
     );
     for (n, plan) in [(1, true), (2, false), (3, false)] {
         let turn = TurnStart {
+            native_model: None,
+            native_wake: None,
             plan,
             turn_id: new_id(),
             ..first.clone()
@@ -314,6 +321,8 @@ async fn a_resumed_session_explains_pinned_instructions_once_without_reporting_a
         setup
             .adapter
             .start_turn(TurnStart {
+                native_model: None,
+                native_wake: None,
                 plan: false,
                 thread_id: thread,
                 turn_id: turn,
@@ -397,6 +406,8 @@ async fn running_turn_in_mode(
     );
     setup.adapter.open_session(spec).await.unwrap();
     let turn = TurnStart {
+        native_model: None,
+        native_wake: None,
         plan,
         thread_id: thread,
         turn_id: new_id(),
@@ -431,7 +442,7 @@ async fn running_turn_in_mode(
 async fn no_thread_is_opened_with_a_history_mode_of_orchs_choosing() {
     // The vendor's own choice of how a thread's history is kept is the only one: it is never forced for a managed
     // home, on any build, for a new thread or an existing one.
-    for version in ["0.162.1", "0.165.0", "0.166.0"] {
+    for version in ["0.162.1", "0.165.0", "0.166.0", "0.167.0", "0.170.2"] {
         for (personal, mode) in [
             (false, SessionMode::New),
             (true, SessionMode::New),
@@ -444,7 +455,7 @@ async fn no_thread_is_opened_with_a_history_mode_of_orchs_choosing() {
                 start.home = None;
             }
             let started = setup.adapter.start(start, setup.sink.clone()).await;
-            if version == "0.162.1" {
+            if matches!(version, "0.162.1" | "0.165.0" | "0.166.0") {
                 // Older builds cannot open a thread at all; changing the history mode must not bypass that boundary.
                 let error = started.unwrap_err();
                 assert_eq!(error.code(), "harness_unavailable");
@@ -653,7 +664,7 @@ async fn a_busy_native_initialize_can_finish_after_the_old_default() {
         .start(setup.start_request(), setup.sink.clone())
         .await
         .unwrap();
-    assert_eq!(started.harness_version, "0.165.0");
+    assert_eq!(started.harness_version, "0.167.0");
     assert!(began.elapsed() >= Duration::from_secs(75));
     assert_eq!(setup.fake.state.kills.load(Ordering::SeqCst), 0);
     setup.adapter.stop().await.unwrap();
@@ -1417,6 +1428,8 @@ async fn the_frames_of_a_session_are_kept_as_raw_frames_when_it_asks_for_them() 
         json!({ "threadId": "thr_1", "anything": [1, 2, 3] }),
     );
     let turn = TurnStart {
+        native_model: None,
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),
@@ -1740,8 +1753,7 @@ async fn the_servers_the_harness_says_it_loads_and_those_of_a_kept_out_projects_
 }
 
 #[tokio::test]
-async fn a_workspace_configuration_nobody_answered_for_is_refused_one_the_harness_made_empty_is_not_and_a_trusted_one_keeps_its_servers()
- {
+async fn a_trusted_workspace_configuration_still_loads_only_the_servers_the_session_was_given() {
     let mut setup = setup(loading_two_servers());
     setup
         .adapter
@@ -1806,7 +1818,7 @@ async fn a_workspace_configuration_nobody_answered_for_is_refused_one_the_harnes
         "no thread was started"
     );
 
-    // Trusted: the harness reads it as in a folder it trusts, and its servers are its own to keep.
+    // Trusted: the harness reads its other settings, while servers still require an explicit import.
     let mut trusted = open(&configured_directory);
     trusted.settings.workspace_configuration = Some(WorkspaceConfiguration {
         answer: ConfigTrust::Trust,
@@ -1819,7 +1831,7 @@ async fn a_workspace_configuration_nobody_answered_for_is_refused_one_the_harnes
         config["projects"],
         json!({ configured_directory.clone(): { "trust_level": "trusted" } })
     );
-    assert_eq!(config["mcp_servers"].get("project"), None);
+    assert_eq!(config["mcp_servers"]["project"]["enabled"], false);
     assert_eq!(
         config["mcp_servers"]["github"]["enabled"], false,
         "the home's servers are switched off all the same"
@@ -1915,6 +1927,8 @@ async fn a_remote_session_resolves_its_executor_before_opening_and_before_sendin
     setup
         .adapter
         .start_turn(TurnStart {
+            native_model: None,
+            native_wake: None,
             plan: false,
             thread_id: thread,
             turn_id: new_id(),
@@ -2050,6 +2064,8 @@ async fn a_lost_executor_keeps_input_unsent_and_its_session_can_retry_after_reco
     spec.exec.executor = Some("codex-exec-server".to_owned());
     setup.adapter.open_session(spec).await.unwrap();
     let turn = TurnStart {
+        native_model: None,
+        native_wake: None,
         plan: false,
         thread_id: thread,
         turn_id: new_id(),
@@ -2097,4 +2113,470 @@ async fn a_profile_that_asks_to_attach_to_a_daemon_is_refused_and_nothing_is_sta
         .unwrap_err();
     assert_eq!(error.code(), "unsupported", "{error}");
     assert_eq!(setup.fake.state.launches.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn effective_models_returned_when_opening_start_resume_and_fork_use_the_existing_turn_notice()
+{
+    for (mode, method) in [
+        (SessionMode::New, "thread/start"),
+        (SessionMode::Resume, "thread/resume"),
+        (SessionMode::Fork, "thread/fork"),
+    ] {
+        for answered in [
+            json!("mock-effective"),
+            json!("mock-large"),
+            Json::Null,
+            json!("  "),
+        ] {
+            let response_model = answered.clone();
+            let mut setup = setup(FakeLauncher::new(move |requested, _| {
+                if requested == method {
+                    return Ok(
+                        json!({"thread":{"id":"thr_opened","path":null},"model":response_model}),
+                    );
+                }
+                match requested {
+                    "environment/info" => Ok(executor_info()),
+                    "turn/start" => Ok(json!({"turn":{"id":"turn_1","status":"inProgress"}})),
+                    _ => Ok(json!({})),
+                }
+            }));
+            setup
+                .adapter
+                .start(setup.start_request(), setup.sink.clone())
+                .await
+                .unwrap();
+            let thread = new_id();
+            let native = match mode {
+                SessionMode::New => None,
+                SessionMode::Fork => Some("source_thread"),
+                _ => Some("thr_opened"),
+            };
+            let spec = plain_spec(
+                "/workspace/web",
+                new_id(),
+                new_id(),
+                new_id(),
+                thread,
+                mode,
+                native,
+            );
+            assert_eq!(spec.settings.model, "mock-large");
+            let opened = setup.adapter.open_session(spec).await.unwrap();
+            assert_eq!(opened.native_session_ref, "thr_opened");
+            let asked = setup.fake.state.calls(method);
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0]["params"]["model"], "mock-large");
+            let turn = TurnStart {
+                native_model: None,
+                native_wake: None,
+                plan: false,
+                thread_id: thread,
+                turn_id: new_id(),
+                text: "Use the answered session model.".into(),
+                images: Vec::new(),
+                model: "mock-large".into(),
+                effort: None,
+                params: json!({}),
+                approval_mode: ApprovalMode::Ask,
+                sandbox_mode: orch_agent_contract::descriptor::SandboxMode::Workspace,
+            };
+            setup.adapter.start_turn(turn.clone()).await.unwrap();
+            setup.fake.state.notify(
+                "turn/started",
+                json!({"threadId":"thr_opened","turn":{"id":"turn_1","status":"inProgress"}}),
+            );
+            setup.fake.state.notify("thread/tokenUsage/updated",json!({"threadId":"thr_opened","turnId":"turn_1","tokenUsage":{
+                "total":{"totalTokens":120,"inputTokens":100,"outputTokens":20},
+                "last":{"totalTokens":120,"inputTokens":100,"outputTokens":20},"modelContextWindow":258400}}));
+            setup.fake.state.notify("turn/completed",json!({"threadId":"thr_opened","turn":{"id":"turn_1","status":"completed","error":null}}));
+            let events = setup
+                .until(|event| {
+                    matches!(
+                        event,
+                        AdapterEvent::Session {
+                            event: SessionEvent::TurnCompleted(_),
+                            ..
+                        }
+                    )
+                })
+                .await;
+            let events = session_events(&events);
+            let notices: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    SessionEvent::ItemStarted(item) => match &item.content {
+                        ItemContent::Error(error)
+                            if error.code
+                                == orch_agent_contract::events::turn_error::MODEL_REROUTED =>
+                        {
+                            Some(error)
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let changed = answered == json!("mock-effective");
+            assert_eq!(notices.len(), usize::from(changed), "{mode:?}: {answered}");
+            if changed {
+                assert!(
+                    notices[0]
+                        .message
+                        .contains("mock-effective instead of mock-large")
+                );
+                assert!(!notices[0].retryable);
+            }
+            let usage = events
+                .iter()
+                .find_map(|event| match event {
+                    SessionEvent::UsageUpdated(usage) => usage.report.as_ref(),
+                    _ => None,
+                })
+                .unwrap();
+            if changed {
+                assert_eq!(usage.models.len(), 1);
+                assert_eq!(usage.models[0].model, "mock-effective");
+                assert_eq!(usage.models[0].tokens.total_tokens, 120);
+            } else {
+                assert!(usage.models.is_empty());
+            }
+            assert!(
+                matches!(events.last(),Some(SessionEvent::TurnCompleted(done)) if done.turn_id==turn.turn_id && done.status==TurnOutcome::Completed)
+            );
+            assert_eq!(
+                setup.fake.state.calls("turn/start").len(),
+                1,
+                "reading opening metadata never asks for another turn"
+            );
+            setup.adapter.stop().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_unscoped_mcp_startup_failure_stays_on_its_program_status_not_an_unrelated_thread() {
+    let mut setup = setup(working());
+    setup
+        .adapter
+        .start(setup.start_request(), setup.sink.clone())
+        .await
+        .unwrap();
+    let thread = new_id();
+    setup
+        .adapter
+        .open_session(plain_spec(
+            "/workspace/web",
+            new_id(),
+            new_id(),
+            new_id(),
+            thread,
+            SessionMode::New,
+            None,
+        ))
+        .await
+        .unwrap();
+    let _ = setup.drain();
+    setup.fake.state.notify("mcpServer/startupStatus/updated",json!({"threadId":null,"name":"Global source","status":"failed","error":"Credentials expired","failureReason":"reauthenticationRequired"}));
+    let seen=setup.until(|event|matches!(event,AdapterEvent::Status(status) if status.detail.as_deref().is_some_and(|words|words.contains("Global source") && words.contains("Credentials expired")))).await;
+    assert!(seen.iter().any(
+        |event| matches!(event,AdapterEvent::Status(status) if status.status==HarnessState::Online)
+    ));
+    assert!(!session_events(&seen).iter().any(|event|matches!(event,SessionEvent::ItemCompleted(item) if item.payload["marker"]=="harness_changed")));
+}
+
+#[tokio::test]
+async fn a_native_idle_close_forces_the_existing_resume_repair_and_reports_that_resume() {
+    let mut setup = setup(working());
+    setup
+        .adapter
+        .start(setup.start_request(), setup.sink.clone())
+        .await
+        .unwrap();
+    let thread = new_id();
+    let spec = plain_spec(
+        "/workspace/web",
+        new_id(),
+        new_id(),
+        new_id(),
+        thread,
+        SessionMode::New,
+        None,
+    );
+    let segment = spec.settings.segment_id;
+    let mut resume = spec.clone();
+    let opened = setup.adapter.open_session(spec).await.unwrap();
+    let _ = setup.drain();
+    setup
+        .fake
+        .state
+        .notify("thread/closed", json!({"threadId":"thr_1"}));
+    setup.until(|event|matches!(event,AdapterEvent::Session {event:SessionEvent::ItemCompleted(item),..} if item.payload["data"]["change"]=="session_lifecycle" && item.payload["data"]["value"]=="closed")).await;
+    let turn = TurnStart {
+        native_model: None,
+        native_wake: None,
+        plan: false,
+        thread_id: thread,
+        turn_id: new_id(),
+        text: "Next input".into(),
+        images: Vec::new(),
+        model: "mock-large".into(),
+        effort: Some("high".into()),
+        params: json!({}),
+        approval_mode: ApprovalMode::Ask,
+        sandbox_mode: orch_agent_contract::descriptor::SandboxMode::Workspace,
+    };
+    assert!(matches!(
+        setup.adapter.start_turn(turn.clone()).await,
+        Err(AdapterError::SessionNotFound(_))
+    ));
+    assert!(
+        setup.fake.state.calls("turn/start").is_empty(),
+        "an unloaded thread is never sent the input"
+    );
+    resume.settings.mode = SessionMode::Resume;
+    resume.settings.native_session_ref = Some(opened.native_session_ref.clone());
+    setup.adapter.open_session(resume).await.unwrap();
+    let seen=setup.until(|event|matches!(event,AdapterEvent::Session {event:SessionEvent::ItemCompleted(item),..} if item.payload["data"]["value"]=="resumed")).await;
+    assert!(seen.iter().any(|event|matches!(event,AdapterEvent::Session {segment_id,event:SessionEvent::ItemCompleted(item),..} if *segment_id==segment && item.payload["data"]["value"]=="resumed")));
+    assert_eq!(setup.fake.state.calls("thread/resume").len(), 1);
+    assert!(
+        setup.fake.state.calls("thread/unsubscribe").is_empty(),
+        "the native unload is already known"
+    );
+    setup.adapter.start_turn(turn).await.unwrap();
+    assert_eq!(setup.fake.state.calls("turn/start").len(), 1);
+}
+
+#[tokio::test]
+async fn recorded_native_transitions_and_declared_boundaries_reach_their_existing_public_items() {
+    let opened: Json =
+        serde_json::from_str(include_str!("fixtures/transitions/captured-open.json")).unwrap();
+    let mut setup = setup(FakeLauncher::new(move |method, _| match method {
+        "environment/info" => Ok(executor_info()),
+        "thread/start" | "thread/resume" => Ok(opened.clone()),
+        "turn/start" => Ok(json!({"turn":{"id":"turn_1","status":"inProgress"}})),
+        _ => Ok(json!({})),
+    }));
+    let (_, asked) = running_turn(&mut setup).await;
+    for source in [
+        include_str!("fixtures/transitions/captured-settings-status.jsonl"),
+        include_str!("fixtures/transitions/schema-derived-boundaries.jsonl"),
+    ] {
+        for line in source.lines().filter(|line| !line.trim().is_empty()) {
+            let frame: Json = serde_json::from_str(line).unwrap();
+            setup.fake.state.say(frame);
+        }
+    }
+    let seen=setup.until(|event|matches!(event,AdapterEvent::Session {event:SessionEvent::ItemCompleted(item),..} if item.payload.pointer("/data/change")==Some(&json!("session_lifecycle")) && item.payload.pointer("/data/value")==Some(&json!("closed")))).await;
+    let events = session_events(&seen);
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            if let SessionEvent::ItemCompleted(item) = event {
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .collect();
+    for change in [
+        "model",
+        "effort",
+        "approval_mode",
+        "sandbox_mode",
+        "collaboration_mode",
+        "session_status",
+        "mcp_startup",
+        "hook",
+        "session_lifecycle",
+    ] {
+        assert!(
+            completed
+                .iter()
+                .any(|item| item.payload.pointer("/data/change") == Some(&json!(change))),
+            "no public marker for {change}"
+        );
+    }
+    for code in ["harness_diverged", "mcp_server_failed", "model_rerouted"] {
+        assert!(
+            completed.iter().any(|item| item.payload["code"] == code),
+            "no diagnostic for {code}"
+        );
+    }
+    for item in &completed {
+        if item.payload.get("marker").is_some() {
+            let api: orch_api_contract::threads::MarkerPayload =
+                serde_json::from_value(item.payload.clone()).unwrap();
+            assert_eq!(serde_json::to_value(api).unwrap(), item.payload);
+            assert!(
+                !item
+                    .payload
+                    .to_string()
+                    .contains("fixture-private-hook-text")
+            );
+        }
+        if item.payload.get("code").is_some() {
+            let api: orch_api_contract::threads::ErrorPayload =
+                serde_json::from_value(item.payload.clone()).unwrap();
+            assert_eq!(serde_json::to_value(api).unwrap(), item.payload);
+        }
+    }
+    assert!(events.iter().any(|event|matches!(event,SessionEvent::ItemUpdated(item) if item.native_ref=="plan-turn_1" && item.payload["explanation"]=="Final authoritative plan")));
+    assert_eq!(
+        completed
+            .iter()
+            .filter(
+                |item| item.payload.pointer("/data/change") == Some(&json!("mcp_startup"))
+                    && item.payload.pointer("/data/value/status") == Some(&json!("ready"))
+            )
+            .count(),
+        1,
+        "the repeated captured ready observation has one marker"
+    );
+    assert!(
+        !completed
+            .iter()
+            .any(|item| item.payload.pointer("/data/subject") == Some(&json!("Unscoped source"))),
+        "no guessed thread for a null native source"
+    );
+    let verdicts: Vec<_> = completed
+        .iter()
+        .filter_map(|item| {
+            item.payload
+                .pointer("/tool/result/outcome")
+                .and_then(Json::as_str)
+        })
+        .collect();
+    assert_eq!(verdicts, ["approved", "denied"]);
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SessionEvent::ApprovalRequested(_)))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, SessionEvent::TurnCompleted(_)))
+            .count(),
+        1,
+        "native status snapshots do not end a turn"
+    );
+    assert!(events.iter().any(|event|matches!(event,SessionEvent::TurnCompleted(turn) if turn.turn_id==asked.turn_id && turn.status==TurnOutcome::Completed)));
+    assert_eq!(
+        setup.fake.state.calls("turn/start").len(),
+        1,
+        "observations never send another input"
+    );
+    assert_eq!(
+        setup.fake.state.calls("turn/start")[0]["params"]["model"],
+        "mock-large"
+    );
+    setup.adapter.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn managed_command_checkpoints_and_network_prompts_always_wait_for_each_person_decision() {
+    let frames: Vec<Json> = serde_json::from_str(include_str!(
+        "fixtures/transitions/0.167-approval-callbacks.json"
+    ))
+    .unwrap();
+    for mode in [ApprovalMode::Ask, ApprovalMode::Auto, ApprovalMode::Bypass] {
+        let mut setup = setup(working());
+        let (thread, _) = running_turn_in_mode(&mut setup, mode, false).await;
+        let initialized = setup.fake.state.calls("initialize");
+        assert_eq!(
+            initialized[0]["params"]["capabilities"]["requiredHumanApproval"],
+            true
+        );
+        assert_eq!(
+            initialized[0]["params"]["capabilities"]["explicitGatewayOauth"],
+            true
+        );
+        for frame in &frames {
+            let id = frame["id"].as_i64().unwrap();
+            setup.fake.state.say(frame.clone());
+            let seen = setup
+                .until(|event| {
+                    matches!(
+                        event,
+                        AdapterEvent::Session {
+                            event: SessionEvent::ApprovalRequested(_),
+                            ..
+                        }
+                    )
+                })
+                .await;
+            assert!(
+                setup.fake.state.answer_to(id).is_none(),
+                "{mode:?}: no automatic response for {id}"
+            );
+            let events = session_events(&seen);
+            let asked = events
+                .iter()
+                .find_map(|event| {
+                    if let SessionEvent::ApprovalRequested(asked) = event {
+                        Some(asked)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert!(
+                asked
+                    .request
+                    .options
+                    .iter()
+                    .all(|option| option.rule.is_none()),
+                "native checkpoints offer no reusable controller rule"
+            );
+            let choice = if frame["params"]["kind"] == "humanCommand" {
+                assert_eq!(
+                    asked
+                        .request
+                        .options
+                        .iter()
+                        .map(|option| option.id.as_str())
+                        .collect::<Vec<_>>(),
+                    ["once", "deny", "abort"]
+                );
+                assert!(!events.iter().any(|event|matches!(event,SessionEvent::ItemStarted(item) if matches!(&item.content,ItemContent::ToolCall(_)))),"a prospective checkpoint is not an execution item");
+                "once"
+            } else {
+                assert!(
+                    matches!(&asked.request.detail,HarnessRequestDetail::Permissions {permissions,..} if permissions.pointer("/network/host")==Some(&json!("api.example.invalid")))
+                );
+                "host_allow"
+            };
+            setup
+                .adapter
+                .resolve_approval(
+                    thread,
+                    &asked.request_ref,
+                    ApprovalDecision::Option {
+                        option_id: choice.into(),
+                        note: None,
+                    },
+                )
+                .await
+                .unwrap();
+            wait_for_answer(&setup, id).await;
+            let result = setup.fake.state.answer_to(id).unwrap()["result"].clone();
+            if choice == "once" {
+                assert_eq!(result, json!({"decision":"accept"}));
+            } else {
+                assert_eq!(
+                    result,
+                    json!({"decision":{"applyNetworkPolicyAmendment":{"network_policy_amendment":{"host":"api.example.invalid","action":"allow"}}}})
+                );
+            }
+            setup.fake.state.notify(
+                "serverRequest/resolved",
+                json!({"threadId":"thr_1","requestId":id}),
+            );
+        }
+        assert_eq!(setup.fake.state.calls("turn/start").len(), 1);
+        setup.adapter.stop().await.unwrap();
+    }
 }

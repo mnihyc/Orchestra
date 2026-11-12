@@ -7,18 +7,70 @@ import { readViewChoice, writeViewChoice } from '@/lib/viewChoices';
 import { useHelpState } from '@/features/help/state';
 
 const revealed = new Set<() => void>();
+interface ViewAdmission { userId: string; readerVersion: number; ready: boolean }
+let viewAdmission: ViewAdmission | null = null;
+const admissionChanged = new Set<() => void>();
+
+/** The shell releases global view acts after routing and the admitted view hosts are mounted. */
+export function holdViewReveals(userId: string, readerVersion: number) {
+  const admission = { userId, readerVersion, ready: false };
+  viewAdmission = admission;
+  const notify = () => { for (const listener of admissionChanged) listener(); };
+  notify();
+  return {
+    admit: () => { if (viewAdmission === admission && !admission.ready) { admission.ready = true; notify(); } },
+    pause: () => { if (viewAdmission === admission && admission.ready) { admission.ready = false; notify(); } },
+    release: () => { if (viewAdmission === admission) { viewAdmission = null; notify(); } },
+  };
+}
+
+function frameAdmitted(userId: string, readerVersion: number): boolean {
+  return viewAdmission === null || viewAdmission.userId === userId && viewAdmission.readerVersion === readerVersion && viewAdmission.ready;
+}
+
 /** A sheet choosing an externally revealed view gives up its previous navigation surface. */
 export function onViewRevealed(listener: () => void): () => void {
   revealed.add(listener);
   return () => { revealed.delete(listener); };
 }
 
+/** A visible global act can precede the first admitted workspace; keep it scoped to that reader. */
+function afterWorkspaceEntry(userId: string, readerVersion: number, reveal: () => void): void {
+  const requestedFrame = viewAdmission;
+  let active = true;
+  let offWorkspace: () => void = () => undefined;
+  let offSession: () => void = () => undefined;
+  const sameReader = () => {
+    const reader = client.session.getState();
+    return reader.userId === userId && (reader.readerVersion ?? 0) === readerVersion;
+  };
+  const sameFrame = () => requestedFrame === null || viewAdmission === requestedFrame;
+  const stop = () => { active = false; offWorkspace(); offSession(); admissionChanged.delete(check); };
+  const check = () => {
+    if (!active) return;
+    if (!sameReader() || !sameFrame()) { stop(); return; }
+    if (useWorkbench.getState().userId !== userId || !frameAdmitted(userId, readerVersion)) return;
+    stop();
+    // Entry's routing/focus work finishes first, so it cannot cover the view just requested.
+    queueMicrotask(() => { if (sameReader() && sameFrame() && useWorkbench.getState().userId === userId && frameAdmitted(userId, readerVersion)) reveal(); });
+  };
+  offWorkspace = useWorkbench.subscribe(check);
+  offSession = client.session.subscribe(check);
+  admissionChanged.add(check);
+  check();
+}
+
 /** Opens one view visibly; the narrow layout reads the same named choice. */
 export function revealView(name: string, of?: Tab['of'], options: { focus?: boolean } = {}): void {
   const definition = viewOf(name);
   if (definition === undefined) return;
-  if (options.focus !== false && name !== 'help' && useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
   const workbench = useWorkbench.getState();
+  const reader = client.session.getState();
+  if (reader.userId !== null && (workbench.userId !== reader.userId || !frameAdmitted(reader.userId, reader.readerVersion ?? 0))) {
+    afterWorkspaceEntry(reader.userId, reader.readerVersion ?? 0, () => revealView(name, of, options));
+    return;
+  }
+  if (options.focus !== false && name !== 'help' && useHelpState.getState().overlay) useHelpState.setState({ overlay: false });
   const single = definition.singleton === true ? allTabs(workbench.layout).find((tab) => tab.view === name) : undefined;
   const target = of ?? single?.of ?? (definition.available === undefined ? undefined : allTabs(workbench.layout).findLast((tab) => tab.view === name)?.of);
   workbench.change((layout) => {

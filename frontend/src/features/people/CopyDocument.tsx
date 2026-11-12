@@ -67,7 +67,7 @@ export function CopyDocumentDialog({ source, destination, onClose }: { source?: 
     <Button variant="primary" icon={<Copy aria-hidden />} pending={pending} disabled={!allowed} onClick={() => void act()}>{t('people.createCopy')}</Button>
   </>}>
     <div className="flex flex-col gap-3">
-      <NamePicker label={t('people.source')} kinds={['document']} chosen={read.isSuccess ? read.data.title : null} anything={t('people.source')} placeholder={t('people.source')} nothing={t('people.noReaders')} onChoose={(hit) => setSourceId(hit?.id ?? null)} />
+      <NamePicker pickerKey="people.CopyDocument.people.source" label={t('people.source')} kinds={['document']} chosen={read.isSuccess ? read.data.title : null} anything={t('people.source')} placeholder={t('people.source')} nothing={t('people.noReaders')} onChoose={(hit) => setSourceId(hit?.id ?? null)} />
       {read.isSuccess && <p className="text-sm text-text-muted">{t('people.copySource', { title: read.data.title })}</p>}
       {sourceId !== null && read.isPending && <p role="status">{t('common.loading')}</p>}
       {read.isError && <ErrorAlert error={read.error} />}

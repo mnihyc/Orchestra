@@ -368,6 +368,13 @@ impl Engine {
             outcome => {
                 if let Ok(Err(error)) = &outcome {
                     tracing::warn!(%error,"optional related meaning lookup failed");
+                } else if let Err(error) = sqlx::Connection::flush(&mut *conn).await {
+                    // A dropped lookup can leave its server timeout response on this connection.
+                    // Consume that response before sending the savepoint rollback.
+                    if error.as_database_error().is_none() {
+                        return Err(DbError::from(error).into());
+                    }
+                    tracing::debug!(%error, "optional related meaning query ended after its deadline");
                 }
                 sqlx::query("ROLLBACK TO SAVEPOINT related_meaning")
                     .execute(&mut *conn)
@@ -418,7 +425,7 @@ impl Engine {
         };
         let present: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM search_item_vectors v
            JOIN search_sources s ON s.generation_id=v.generation_id AND s.kind=v.kind AND s.source_id=v.source_id
-           WHERE v.generation_id=$1 AND v.kind=$2 AND v.source_id=$3 AND v.marker=$4 AND s.marker=$4 AND s.title=$5 AND vector_norm(v.embedding)>0)")
+           WHERE v.generation_id=$1 AND v.kind=$2 AND v.source_id=$3 AND v.marker=$4 AND s.marker=$4 AND s.title=$5 AND l2_norm(v.embedding)>0)")
             .bind(active.id).bind(&source.kind).bind(source.source_id).bind(source.marker)
             .bind(&source.name)
             .fetch_one(&mut *conn).await.map_err(DbError::from)?;
@@ -459,9 +466,7 @@ impl Engine {
         {
             return Ok(None);
         }
-        let projection =
-            orch_authz::everything::project_search(conn, principal, None, &[document], &[], &[])
-                .await?;
+        let projection = orch_authz::everything::project_related(conn, principal, document).await?;
         let candidates = self
             .related_candidates(conn, &source, &projection.search_candidates(principal))
             .await?;

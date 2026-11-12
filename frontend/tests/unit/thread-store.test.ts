@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Item, ThreadInput, Turn } from '@/generated/api-types';
 import { codePoints } from '@/realtime/deltas';
-import { applyDeltas, applyRows, comparePositions, EMPTY_VIEW, runningTurn, type ThreadView, viewFromRows } from '@/realtime/stores/thread';
+import { applyDeltas, applyRows, comparePositions, currentTurnOver, EMPTY_VIEW, runningTurn, type ThreadView, viewFromRows } from '@/realtime/stores/thread';
 
 import { agentMessage, command, threadInput, turn, userMessage } from '../doubles/thread-rows';
 import { ACME, me, userRef } from '../doubles/fixtures';
@@ -43,6 +43,28 @@ describe('a thread as rows arrive', () => {
     // A new pointer whose turn has not arrived must not choose another turn from history.
     const starting = applyRows(settled, { thread: { ...native, state: 'starting', current_turn_id: 'next-turn', seq: 10 } });
     expect(runningTurn(starting)).toBeNull();
+  });
+
+  it('knows that the turn the thread names is over when the answer to a Stop comes before the frame that moves the thread on', () => {
+    const world = new World();
+    const person = world.people.get('ada');
+    const row = world.places.rowOf(ACME.mainThread);
+    if (person === undefined || row === undefined) throw new Error('The fixture needs a complete native thread');
+    const native = world.threads.thread(person, row);
+    const current = turnAt(turn('current-turn', { ordinal: 1, state: 'running', inputId: 'first' }), 8);
+    const running = viewFromRows(EMPTY_VIEW, { thread: { ...native, state: 'running', current_turn_id: current.id, seq: 8 }, turns: [current] }, true);
+    expect(currentTurnOver(running)).toBe(false);
+    // The answer carries the turn only: the thread still says that it works, and the turn it names says that it does not.
+    const answered = applyRows(running, { turns: [{ ...current, state: 'interrupted', seq_updated: 9 }] });
+    expect(answered.thread?.state).toBe('running');
+    expect(runningTurn(answered)).toBeNull();
+    expect(currentTurnOver(answered)).toBe(true);
+    // The frame that follows moves the thread on: no turn is named.
+    expect(currentTurnOver(applyRows(answered, { thread: { ...native, state: 'idle', current_turn_id: null, seq: 9 } }))).toBe(false);
+    // A turn that is named and not held yet is not over, and a turn that is held and runs is not.
+    expect(currentTurnOver(applyRows(answered, { thread: { ...native, state: 'running', current_turn_id: 'next-turn', seq: 10 } }))).toBe(false);
+    expect(currentTurnOver(viewFromRows(EMPTY_VIEW, { thread: { ...native, state: 'running', current_turn_id: current.id, seq: 8 }, turns: [{ ...current, state: 'starting' }] }, true))).toBe(false);
+    expect(currentTurnOver(EMPTY_VIEW)).toBe(false);
   });
 
   it('keeps previously requested historical references when a bounded tail replaces its item window', () => {

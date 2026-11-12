@@ -13,6 +13,7 @@ import { useFormatContext } from '@/lib/appearance';
 import { Button } from '@/ui/Button';
 import { DateField } from '@/ui/DateField';
 import { Popover } from '@/ui/Popover';
+import { Select } from '@/ui/Select';
 import { SegmentedControl } from '@/ui/SegmentedControl';
 
 export interface PeriodProps {
@@ -94,8 +95,9 @@ export function Period({ span, onSearch, now,actions }: PeriodProps) {
   const zoneId = useId();
   const pick = (range: Range) => onSearch({ range });
   return (
-    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-2">
-      <SegmentedControl
+    <div className="@container/usage-period min-w-0 flex-1 basis-[min(100%,20rem)]" data-usage-period><div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+      <div className="hidden shrink-0 @min-[36rem]/usage-period:block"><SegmentedControl
+        wrap={false}
         label={t('usage.period.label')}
         size="sm"
         // A custom span marks its own button, leaving the named ranges unselected.
@@ -103,11 +105,18 @@ export function Period({ span, onSearch, now,actions }: PeriodProps) {
         onValueChange={pick}
         segments={RANGES.map((range) => ({ value: range, name: t(`usagePerf.periodNames.${range}`) }))}
       />
+      </div>
+      <div className="w-40 max-w-full @min-[36rem]/usage-period:hidden"><Select
+        size="sm" label={t('usage.period.label')} hideLabel
+        value={span.range === 'custom' ? '' : span.range} placeholder={t('usage.period.custom')}
+        onValueChange={(next) => { if (next !== '') pick(next); }}
+        options={RANGES.map((range) => ({ value: range, name: t(`usagePerf.periodNames.${range}`) }))}
+      /></div>
       <CustomSpan span={span} onSearch={onSearch} now={now} zoneId={zoneId} />
       {span.range !== 'all' && span.range !== 'custom' && <span className="text-sm text-text-muted">{t('usage.period.words', { from: dayWords(span.from, locale, now), to: dayWords(span.to, locale, now) })}</span>}
       {span.range==='all' && <span className="text-sm text-text-muted">{t('usage.period.utcShort')}</span>}
       <span id={zoneId} className="sr-only">{t('usage.period.utc')}</span>
       {actions!==undefined && <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">{actions}</div>}
-    </div>
+    </div></div>
   );
 }

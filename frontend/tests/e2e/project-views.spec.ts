@@ -1,7 +1,7 @@
 /** Personal List/Board parameters, explicit addresses, readable folder scope and saved stars work without moving another open screen. */
 import { expect, test, type Page } from '@playwright/test';
 
-import { ACME, PEOPLE, scenario, signIn } from './support.ts';
+import { ACME, PEOPLE, scenario, signIn, mainArea } from './support.ts';
 
 const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41871'}`;
 const shipped = { view: 'list', status: 'open', tag_ids: [], attention: null, sort: 'activity', q: '', show_archived: false, with_folders: false };
@@ -15,7 +15,7 @@ async function view(project: string, value: Record<string, unknown>) {
 async function filter(page: Page, name: 'With folders' | 'Show archived') {
   const menu = page.getByRole('menu', { name: 'Filters' });
   await expect(async () => {
-    if (!(await menu.isVisible())) await page.getByTestId('main').getByRole('button', { name: 'Filters', exact: true }).click();
+    if (!(await menu.isVisible())) await mainArea(page).getByRole('button', { name: 'Filters', exact: true }).click();
     await expect(menu).toBeVisible({ timeout: 2_000 });
   }).toPass();
   return menu.getByRole('menuitemcheckbox', { name, exact: true });
@@ -68,7 +68,7 @@ test('each device keeps its own previous project view and projects do not share 
   await page.goto(`/project/${ACME.shop}`);
   await expect(page.getByRole('radio',{name:'List',exact:true})).toBeChecked();
   await expectFilter(page,'With folders',false);
-  await expect(page.getByTestId('main').getByRole('searchbox')).toHaveValue('');
+  await expect(mainArea(page).getByRole('searchbox')).toHaveValue('');
   await page.goto(`/project/${ACME.web}`);
   await expect(page.getByRole('radio',{name:'Board',exact:true})).toBeChecked();
   await expectFilter(page,'With folders',true);
@@ -98,7 +98,7 @@ test('With folders includes actual descendant paths on the list and board withou
   await expect(table.getByRole('link', { name: 'Acme', exact: true }).first()).toHaveAttribute('href', '/org/acme');
   await expect(table.getByRole('link', { name: 'Fix login', exact: true })).toHaveCount(0);
   await page.getByRole('radio', { name: 'Board', exact: true }).click();
-  await expect(page.getByTestId('main').getByRole('link', { name: 'Cart rewrite', exact: true })).toBeVisible();
+  await expect(mainArea(page).getByRole('link', { name: 'Cart rewrite', exact: true })).toBeVisible();
   await expectFilter(page, 'With folders', true);
-  await expect(page.getByTestId('main').getByRole('link', { name: 'Card fees', exact: true })).toBeVisible();
+  await expect(mainArea(page).getByRole('link', { name: 'Card fees', exact: true })).toBeVisible();
 });
