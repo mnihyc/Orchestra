@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+jsonschema.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true

@@ -46,10 +46,12 @@ export function useStop(threadId: string, turnId: string | null, live: boolean) 
   return { stop, armed, escape };
 }
 
-export function StopControl({ stop, entries, disabled = false, reason, inlineFeedback = true }: {
+export function StopControl({ stop, entries, disabled = false, menuDisabled, reason, inlineFeedback = true }: {
   stop: ReturnType<typeof useStop>;
   entries?: readonly MenuEntry[];
   disabled?: boolean;
+  /** Delivery choices can be ready before the current turn can be stopped. */
+  menuDisabled?: boolean;
   reason?: string | undefined;
   inlineFeedback?: boolean;
 }) {
@@ -60,7 +62,7 @@ export function StopControl({ stop, entries, disabled = false, reason, inlineFee
       {entries === undefined ? <Button size="sm" data-tutorial-target="thread-stop" variant="secondary" icon={<Square aria-hidden />} pending={stop.stop.isPending} disabled={disabled} onClick={() => stop.stop.mutate()}>
         {t('composer.stop')}
       </Button> : <SplitButton size="sm" variant="secondary" className={compact ? '[&_button]:gap-1 [&_button]:px-1 [&_button]:text-xs [&_button[data-action=stop]>svg:not(.animate-spin)]:hidden' : undefined} icon={<Square aria-hidden />} pending={stop.stop.isPending} disabled={disabled}
-        menuDisabled={disabled || stop.stop.isPending} tutorialTarget="thread-stop" menuLabel={t('composer.deliveryMenu')} entries={entries} onClick={() => stop.stop.mutate()} {...(reason === undefined ? {} : { reason })}>
+        menuDisabled={(menuDisabled ?? disabled) || stop.stop.isPending} tutorialTarget="thread-stop" menuLabel={t('composer.deliveryMenu')} entries={entries} onClick={() => stop.stop.mutate()} {...(reason === undefined ? {} : { reason })}>
         {t('composer.stop')}
       </SplitButton>}
       {inlineFeedback && <StopFeedback stop={stop} />}

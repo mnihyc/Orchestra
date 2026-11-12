@@ -20,24 +20,88 @@ use serde::{Deserialize, Serialize};
 /// What the upstream says a response used.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ObservedUsage {
+    /// Successful native search operations, only where the vendor reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_searches: Option<i64>,
+    /// Successful native page fetches; absence never proves zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetches: Option<i64>,
+    /// Other declared native quantities; missing is unsupported and a present null is unreported.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub declared_counters: std::collections::BTreeMap<String, Option<i64>>,
+    /// The processing tier or speed the upstream actually reported, never the requested choice.
+    pub service_tier: Option<String>,
+    /// The independently reported capacity class, where this interface supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_tier: Option<String>,
+    /// One-hour writes, a subset of cache_write_tokens, where independently known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_1h_tokens: Option<i64>,
+    /// Twelve-hour writes inside the inclusive cache-write count; absent is not measured zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_12h_tokens: Option<i64>,
     /// The model that answered, as the response names it.
     pub model: Option<String>,
     /// What was used, in tokens.
     pub tokens: TokenUsage,
     /// What the upstream states it charged, as a decimal string in its own unit, where it states one.
     pub cost: Option<String>,
+    /// The extension-declared original cost unit, only when the corresponding actual cost was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_unit: Option<String>,
     /// The upstream's own id for the response.
     pub request_ref: Option<String>,
 }
 
+/// Facts observed independently of whether the response contained a usage object.
+#[derive(Debug, Clone, Default)]
+pub struct ResponseFacts {
+    /// The upstream response identity, even before its final token report.
+    pub request_id: Option<String>,
+    /// A real output delta was observed, rather than a keepalive or opening event.
+    pub output_started: bool,
+    /// The protocol supplied its terminal event or a complete JSON envelope.
+    pub completed: bool,
+    /// A structured upstream error or refusal, with its original words.
+    pub failure: Option<serde_json::Value>,
+}
+
+/// Native endpoint declarations for this exact request, not manager enablement or an authority proof.
+pub type NativeBindings =
+    std::collections::BTreeMap<String, Option<orch_provider_contract::capabilities::Binding>>;
+
 /// Reads one response as it streams by.
 pub trait UsageObserver: Send {
+    /// Header status belongs to this same exchange, independent of the reply's JSON vocabulary.
+    fn response_status(&mut self, _status: u16) {}
+
+    /// A successful whole-body side result is not proved by an otherwise valid prefix of a cut body.
+    fn finish(&mut self, _whole: bool) {}
+
+    /// Counter-only side replies make no claim about generation tokens.
+    fn tokens_reported(&self) -> bool {
+        true
+    }
+
+    /// Configure actual endpoint/model counters on the SAME byte parser. Unsupported readers keep tokens
+    /// and make the additional quantities unknown rather than borrowing incompatible native counts.
+    fn configure_capabilities(&mut self, bindings: &NativeBindings) -> bool {
+        bindings
+            .values()
+            .flatten()
+            .all(|binding| binding.counters.is_empty())
+    }
     /// Feeds the next piece of the response body, as it passes. It must not buffer the body or hold it up.
     fn observe(&mut self, chunk: &[u8]);
 
     /// What has been seen so far, or `None` when the response said nothing about use. Best-effort: it may
     /// be asked at any time, also after the stream was cut.
     fn usage(&self) -> Option<ObservedUsage>;
+
+    /// Optional facts from the same parser, without a second body buffer or usage requirement.
+    fn response_facts(&self) -> ResponseFacts {
+        ResponseFacts::default()
+    }
 }
 
 /// One event of a server-sent event stream.
@@ -189,6 +253,14 @@ mod tests {
     #[test]
     fn usage_that_is_observed_reads_and_writes_as_a_figure() {
         let seen = ObservedUsage {
+            capacity_tier: None,
+            cache_write_1h_tokens: None,
+            cache_write_12h_tokens: None,
+            web_searches: None,
+            web_fetches: None,
+            declared_counters: Default::default(),
+            cost_unit: None,
+            service_tier: None,
             model: Some("gpt-6-sol".into()),
             tokens: TokenUsage::from_parts(orch_agent_contract::events::TokensReportedApart {
                 input: 10,

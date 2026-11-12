@@ -8,14 +8,24 @@ export async function noteView(world: World, person: Person, route: string, valu
   if (!record(value)) return;
   const path = route.split('?')[0] ?? '';
   const parts = path.split('/').filter(Boolean);
-  let row: unknown = value.thread ?? value.document ?? (record(value.sync) ? value.sync.thread : undefined) ?? value;
   const category = parts[0] === 'resources' ? parts[1] : parts[0];
   const kind = category === undefined ? undefined : kinds[category];
   if (kind === undefined) return;
   const target = parts[parts[0] === 'resources' ? 2 : 1];
-  if (kind === 'org' && Array.isArray(value.orgs)) row = (value.orgs as unknown[]).find((one) => record(one) && one.address === target);
+  let overviewRow: unknown;
+  if (kind === 'org') {
+    const listed = Array.isArray(value.orgs)
+      ? (value.orgs as unknown[]).find((one) => record(one) && one.address === target)
+      : undefined;
+    const tagged = value.mode === 'overview' && record(value.data) ? value.data.org : undefined;
+    overviewRow = listed ?? value.org ?? tagged;
+  } else if (kind === 'project' || kind === 'topic') {
+    overviewRow = value.node;
+  }
+  const row: unknown = value.thread ?? value.document ?? (record(value.sync) ? value.sync.thread : undefined) ?? overviewRow ?? value;
   if (!record(row) || typeof row.id !== 'string' || !record(row.access) || row.content_hidden === true) return;
   if (kind === 'org' ? row.address !== target : row.id !== target) return;
+  if (['org', 'project', 'topic', 'thread'].includes(kind) && row.kind !== kind) return;
   async function invoke(method: string, path: string, body: Record<string, unknown>) {
     for (const { part } of world.parts) {
       const answer = await part.handle?.(person, method, path, new URLSearchParams(), body);

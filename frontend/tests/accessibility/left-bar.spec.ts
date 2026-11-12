@@ -16,7 +16,7 @@ test.beforeEach(async () => {
   await scenario();
 });
 
-const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation' });
+const bar = (page: Page) => page.getByRole('navigation', { name: 'Navigation', exact: true });
 const rail = (page: Page) => page.getByRole('navigation', { name: 'Orgs and your own places' });
 const tree = (page: Page) => page.getByRole('tree', { name: 'Orgs, projects, topics and threads' });
 const row = (page: Page, name: string): Locator => tree(page).getByRole('treeitem', { name: new RegExp(`^(Waiting for approval |Blocked |Running |Starting |Idle )?${name}( |$)`) });
@@ -52,7 +52,7 @@ test('the bar as it comes, and with everything a row can carry: unread threads, 
   await expectAccessibleInBothThemes(page);
 
   // Every section folded: each heading with what waits inside.
-  for (const name of ['Starred', 'Projects']) await bar(page).getByRole('button', { name, exact: true }).click();
+  for (const name of ['Starred', 'Work']) await bar(page).getByRole('button', { name, exact: true }).click();
   await expect(tree(page)).toHaveCount(0);
   await expectAccessibleInBothThemes(page);
 });
@@ -71,7 +71,8 @@ test('the tree with chats in it, the tree’s own menu and a place’s menu open
   await chats('/say', { node: 'Fix login', as: 'dora', text: '@ada can you look?' });
   await row(page, 'Upgrade deps').press('ArrowRight');
   await expect(tree(page).getByRole('treeitem', { name: /^Chat not followed/ })).toBeVisible();
-  await expect(tree(page).getByRole('treeitem', { name: /^Team chat/ })).toBeVisible();
+  // The org's own chat is the shortcut at the bar's head, above the tree.
+  await expect(bar(page).getByRole('button', { name: 'Team chat', exact: true })).toBeVisible();
   await expect(tree(page).getByRole('treeitem', { name: /^Group chats/ })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
@@ -104,7 +105,7 @@ test('a tree narrowed to a place, with the line of a thing that lies outside it,
 test('the Resources view of the left bar, with a kind open and a thing of it in view', async ({ page }) => {
   await signIn(page);
   await page.goto('/org/acme');
-  await rail(page).getByRole('button', { name: 'Resources' }).click();
+  await rail(page).getByRole('button', { name: 'Resource navigation', exact: true }).click();
   const kinds = page.getByRole('tree', { name: 'Kinds of resource and what each holds' });
   await kinds.getByRole('treeitem', { name: /^Agents / }).press('ArrowRight');
   await kinds.locator('[role="treeitem"][aria-level="2"]').first().getByRole('link').click();
@@ -122,8 +123,9 @@ test('the bar in the drawer of a phone: the way to another org at its head, a na
   await expect(drawer.getByRole('treeitem', { name: /^Shop / })).toBeVisible();
   await expectAccessibleInBothThemes(page);
 
-  await drawer.getByRole('button', { name: /Acme/ }).first().click();
-  await expect(page.getByRole('menuitem', { name: 'Shared with me' })).toHaveCount(0);
+  // The way to another org is the list of orgs at the head; what the rail has after its orgs is in the menu beside it.
+  await expect(drawer.getByRole('combobox', { name: 'Your orgs' })).toBeVisible();
+  await drawer.getByRole('button', { name: 'Other places', exact: true }).click();
   await expect(page.getByRole('menuitem', { name: 'Resources', exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.keyboard.press('Escape');

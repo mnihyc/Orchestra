@@ -148,9 +148,10 @@ fn new_close(
 pub(super) async fn retain_command(
     conn: &mut orch_db::Conn,
     mut command: Outgoing,
-    at: chrono::DateTime<chrono::Utc>,
+    job: &Job,
     fresh: bool,
 ) -> Result<Outgoing, Stop> {
+    let at = job.now();
     let recorded = orch_db::queries::link::command(conn, command.id).await?;
     let deadline = match (command.deadline, recorded.as_ref()) {
         (Some(deadline), _) => deadline,
@@ -167,19 +168,58 @@ pub(super) async fn retain_command(
     };
     command.deadline = Some(deadline);
     let key = command.key.wire();
-    orch_db::queries::link::insert_command(
-        conn,
-        &orch_db::queries::link::NewCommand {
-            id: command.id,
-            machine_id: command.machine,
-            kind: command.kind.as_str(),
-            body: &command.body,
-            serial_key: key.as_deref(),
-            deadline_at: deadline.get(),
-        },
-        at,
-    )
-    .await?;
+    let proposed = orch_db::queries::link::NewCommand {
+        id: command.id,
+        machine_id: command.machine,
+        kind: command.kind.as_str(),
+        body: &command.body,
+        serial_key: key.as_deref(),
+        deadline_at: deadline.get(),
+    };
+    let authority = command
+        .authority
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .map_err(internal)?;
+    if let Some(authority) = &command.authority {
+        let current = authority
+            .current_issue_callers(
+                conn,
+                &proposed,
+                job.engine().inner.clock.as_ref(),
+                job.engine().inner.access.as_ref(),
+            )
+            .await?;
+        let Some(current) = current else {
+            return Err(failed(
+                "authz.denied",
+                "The original continuation command source has ended.",
+            ));
+        };
+        if !current.iter().all(|(caller, end)| {
+            caller
+                .as_ref()
+                .is_none_or(|caller| caller.key_deadline_allows(job.engine().inner.clock.as_ref()))
+                && end.is_none_or(|end| job.engine().inner.clock.now() < end.get())
+        }) {
+            return Err(failed(
+                "auth.invalid_token",
+                "The continuation command source has expired.",
+            ));
+        }
+    }
+    orch_db::queries::link::insert_command_with_authority(conn, &proposed, at, authority.as_ref())
+        .await?;
+    let retained = orch_db::queries::link::lock_command_with_authority(conn, command.id)
+        .await?
+        .ok_or_else(|| failed("continuation.identity", "The native command disappeared."))?;
+    if command.authority.is_some() && retained.authority.as_ref() != authority.as_ref() {
+        return Err(failed(
+            "continuation.identity",
+            "The retained native command has a different original source.",
+        ));
+    }
     let row = orch_db::queries::link::command(conn, command.id)
         .await?
         .ok_or_else(|| {
@@ -300,7 +340,7 @@ async fn close_receipt(
             "The reducing receipt names another native lane.",
         ));
     }
-    receipt.command = retain_command(&mut tx, receipt.command, job.now(), false).await?;
+    receipt.command = retain_command(&mut tx, receipt.command, job, false).await?;
     receipts.insert(segment, receipt.clone());
     if receipts.len() > 3 {
         return Err(failed(

@@ -7,18 +7,18 @@
  * picks every item of it at once.
  */
 import { useMutation } from '@tanstack/react-query';
-import { ListChecks, RotateCcw, ScrollText } from 'lucide-react';
 import { memo, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 
-import { retryTurn, sendInput } from '@/api/threads';
-import { hasParams, RanWith } from '@/features/composer/RanWith';
+import { sendInput } from '@/api/threads';
+import { hasParams, RanWith, effectiveTurnModel, effectiveTurnModelName } from '@/features/composer/RanWith';
 import { effortDisplayName, modelDisplayName } from '@/features/models/names';
-import { RestoreFromTurn } from '@/features/source/Restore';
 import { useTimelineContext } from '@/features/timeline/context';
+import { TurnFiles, useTurnChanges } from '@/features/timeline/TurnFiles';
+import { TurnActions } from '@/features/timeline/TurnActions';
+import { openTurnReview } from '@/features/inspector/reviewTarget';
 import { turnActiveMs } from '@/features/timeline/turnTime';
-import { openGiven } from '@/features/inspector/givenFocus';
 import { TurnCost } from '@/features/usage/context/TurnCost';
 import { useFormatContext } from '@/lib/appearance';
 import { turnPasteSource } from '@/lib/turnPasteSource';
@@ -29,9 +29,7 @@ import { useThreadReadRef } from '@/realtime/threadReadContext';
 import type { Turn, TurnLimit } from '@/generated/api-types';
 import type { TFunction } from 'i18next';
 import { Button } from '@/ui/Button';
-import { IconButton } from '@/ui/IconButton';
 import { ErrorAlert } from '@/ui/ErrorState';
-import { RelativeTime } from '@/ui/RelativeTime';
 import { Tooltip } from '@/ui/Tooltip';
 import { failureGroup, manualFailureActions } from './failures';
 import { FailureAlert } from './FailureAlert';
@@ -77,11 +75,6 @@ function TurnFailure({ threadId, turn, canInteract, live, manual, attempts, owne
       {error.code === 'context_overflow' && canInteract && sourceParts.some((part) => part.type === 'pasted_text') && <Button size="sm" variant="secondary" pending={asFile.isPending} disabled={!live} onClick={() => asFile.mutate()}>{t('uploads.sendAsFile')}</Button>}
       {asFile.error !== null && <ErrorAlert error={asFile.error}/>}
       {typeof error.limit === 'object' && error.limit !== null && <p className="text-text-muted">{limitWords(error.limit, t)}</p>}
-      {typeof error.resets_at === 'string' && (
-        <p className="text-text-muted">
-          {t('timeline.failure.resets')} <RelativeTime at={error.resets_at} />
-        </p>
-      )}
       {error.incomplete && manual && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-text-muted">{t('timeline.failure.incomplete')}</span>
@@ -106,8 +99,7 @@ function TurnFailure({ threadId, turn, canInteract, live, manual, attempts, owne
 function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:string }) {
   const { t } = useTranslation();
   const format = useFormatContext();
-  const { threadId, canInteract, live, inspection, selection, readOnly } = useTimelineContext();
-  const read = useThreadReadRef(threadId);
+  const { threadId, canInteract, live, detail, inspection } = useTimelineContext();
   const turn = useThreadPart(threadId, (view) => view.turns.get(turnId));
   const manual = useThreadPart(threadId, (view) => turn !== undefined && manualFailureActions(view, turn));
   const group = useThreadPart(threadId, useShallow((view) => turn === undefined ? { owner: turnId, attempts: 1 } : failureGroup(view, turn)));
@@ -128,27 +120,7 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
     const item = view.items.get(id);
     return item?.turn_id === turnId && item.kind === 'marker' && item.payload.marker === 'orch_context' ? [item.payload.data.model_input_id] : [];
   }))]));
-  const changed = useThreadPart(
-    threadId,
-    useShallow((view) => {
-      let files = 0;
-      let added = 0;
-      let removed = 0;
-      for (const item of view.items.values()) {
-        if (item.turn_id !== turnId || item.kind !== 'tool_call' || item.payload.tool.kind !== 'file_change') continue;
-        files += item.payload.tool.changes.length;
-        for (const change of item.payload.tool.changes) {
-          added += change.added;
-          removed += change.removed;
-        }
-      }
-      return [files, added, removed] as const;
-    }),
-  );
-  const retry = useMutation({
-    mutationFn: () => retryTurn(read, turnId, newActKey()),
-    onSuccess: (reply) => threadWriter.apply(read, { inputs: [reply.input] }),
-  });
+  const changed = useTurnChanges(threadId, turnId);
   if (turn === undefined) return null;
   const took = turn.completed_at === null ? null : turnActiveMs(turn, Date.parse(turn.completed_at));
   const usage = turn.usage;
@@ -165,42 +137,39 @@ function TurnFooterView({ turnId,inputItemId }: { turnId: string;inputItemId?:st
     // and the keyboard, and one click opens the turn's details.
     parts.push(<TurnCost key="usage" threadId={threadId} turn={turn} />);
   }
-  const model = turn.effort === null ? modelDisplayName(turn.model_display,t) : `${modelDisplayName(turn.model_display,t)} (${effortDisplayName(turn.effort, t)})`;
-  if (previous !== undefined && previous.model !== turn.model) parts.push(
+  const effective=effectiveTurnModel(turn), previousModel=previous===undefined ? undefined : effectiveTurnModel(previous);
+  const rerouted=effective!==turn.model;
+  const modelName=modelDisplayName(effectiveTurnModelName(turn),t);
+  const model=turn.effort===null ? modelName : `${modelName} (${effortDisplayName(turn.effort,t)})`;
+  if (rerouted || previous !== undefined && previousModel !== effective) parts.push(
     <Tooltip key="model" content={model}>
       <span>
         {model}
       </span>
     </Tooltip>,
   );
-  if (previous?.model === turn.model && previous.effort !== turn.effort) parts.push(<span key="effort">{turn.effort === null ? t('timeline.footer.effortDefault') : t('timeline.footer.effort', { effort: effortDisplayName(turn.effort, t) })}</span>);
-  const paramsChanged = hasParams(turn.params) && (previous === undefined || JSON.stringify(previous.params) !== JSON.stringify(turn.params));
-  const [files, added, removed] = changed;
-  if (files > 0) parts.push(<span key="changed">{t('timeline.footer.changed', { count: files, added, removed })}</span>);
-  if (records.length > 0) parts.push(<IconButton key="context" size="sm" label={t('threadViews.given.context')} title={t('threadViews.given.received')} icon={<ScrollText aria-hidden />}
-    onClick={() => {
-      const record = records[0];
-      if (records.length === 1 && record !== undefined) openGiven(threadId, { record });
-      else openGiven(threadId, { turn: turnId });
-    }} />);
+  if (!rerouted && previous !== undefined && previousModel === effective && previous.effort !== turn.effort) parts.push(<span key="effort">{turn.effort === null ? t('timeline.footer.effortDefault') : t('timeline.footer.effort', { effort: effortDisplayName(turn.effort, t) })}</span>);
+  const paramsChanged = hasParams(turn.params) && (rerouted || previous === undefined || JSON.stringify(previous.params) !== JSON.stringify(turn.params));
+  const files = changed.files.length;
+  const { added, removed } = changed;
+  if (files > 0) parts.push(<span key="changed" className="inline-flex flex-wrap items-center gap-1" data-turn-changes={turnId}>
+    {detail === 'summary' ? t('thread.viewModes.files', { count: files }) : t('timeline.footer.changed', { count: files, added, removed })}
+    {inspection === undefined && <><span aria-hidden>·</span><button type="button" className="rounded-sm underline underline-offset-2 hover:text-text" onClick={() => openTurnReview(threadId, turnId)}>{t('thread.turnFiles.review')}</button></>}
+  </span>);
   return (
-    <>
+    <TurnActions turn={turn} ids={ofTurn} records={records} {...(inputItemId === undefined ? {} : { inputItemId })}>
+      {(actions) => <>
     <TurnFailure threadId={threadId} turn={turn} canInteract={canInteract} live={live} manual={manual} attempts={group.attempts} owner={group.owner} inputItemId={inputItemId} />
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-subtle" data-footer={turnId}>
+    <div className="group/turn flex min-h-(--control-sm) flex-wrap items-center gap-x-2 gap-y-1 text-xs text-text-subtle" data-footer={turnId}>
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1" data-turn-facts>
       {parts}
       {paramsChanged && <RanWith threadId={threadId} turn={turn} />}
-      {(turn.state === 'failed' || turn.state === 'interrupted') && canInteract && manual && (
-        <Button action="retryTurn" size="sm" variant="ghost" icon={<RotateCcw aria-hidden />} pending={retry.isPending} disabled={!live} onClick={() => retry.mutate()}>
-          {t('timeline.footer.retry')}
-        </Button>
-      )}
-      {inspection === undefined && readOnly !== true && ofTurn.length > 0 && (
-        <IconButton action="selectTurn" size="sm" label={t('timeline.selection.turn')} icon={<ListChecks aria-hidden />} onClick={() => selection.pick(ofTurn)} />
-      )}
-      {inspection === undefined && turn.completed_at !== null && <RestoreFromTurn threadId={threadId} turn={turn} compact />}
-      {retry.error !== null && <ErrorAlert error={retry.error} />}
+      </div>
+      {actions}
+      {detail !== 'summary' && <TurnFiles turn={turn} changes={changed} />}
     </div>
-    </>
+    </>}
+    </TurnActions>
   );
 }
 

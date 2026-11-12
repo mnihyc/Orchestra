@@ -28,9 +28,13 @@ struct DecisionCommands {
 
 #[async_trait]
 impl Commands for DecisionCommands {
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         self.attempted.fetch_add(1, Ordering::SeqCst);
-        self.commands.issue(command).await
+        self.commands.issue_prepared(command, before).await
     }
 
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
@@ -244,7 +248,11 @@ impl Commands for AfterCommit {
     ) -> Result<Option<orch_engine::commands::RetainedCommand>, CommandsError> {
         self.commands.retained_command(id).await
     }
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         let committed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM providers p JOIN audit_log a
             ON a.object_id = p.id WHERE p.id = $1 AND p.name = 'Authorized' AND a.details->>'decision' = 'accepted')")
             .bind(self.provider).fetch_one(&self.pool).await.unwrap();
@@ -252,7 +260,7 @@ impl Commands for AfterCommit {
             committed,
             "another connection sees both the caller's write and the decision before a command"
         );
-        self.commands.issue(command).await
+        self.commands.issue_prepared(command, before).await
     }
 
     async fn status(&self, id: Id) -> Result<Option<Info>, CommandsError> {

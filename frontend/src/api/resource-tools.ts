@@ -9,6 +9,12 @@ import type { MachineEnvironmentData, MachineMounts, McpServer, McpServerCreateB
 export const mcpKey = (id: string) => ['mcp-server', id] as const;
 export const mountKey = (id: string) => ['mount', id] as const;
 export const mcpServersQuery = queryOptions({ queryKey: ['mcp-servers'] as const, queryFn: ({ signal }) => ok(api.GET('/mcp-servers', { signal })).then(resourceRows<McpServer>) });
+/** The same catalogue, judged by its native resolver in the setting's actual environment. */
+export const mcpChoicesQuery = (environment: string | null) => queryOptions({
+  queryKey: ['mcp-servers', 'choices', environment] as const,
+  queryFn: ({signal}) => ok(api.GET('/mcp-servers', {...(environment === null ? {} : {params:{query:{org_id:undefined,...{environment_id:environment}}}}),signal})).then(resourceRows<McpServer>),
+});
+
 export const mountsQuery = queryOptions({ queryKey: ['mounts'] as const, queryFn: ({ signal }) => ok(api.GET('/mounts', { signal })).then(resourceRows<Mount>) });
 export const machineMountsKey = (machine: string) => ['mounts', 'machine', machine] as const;
 export const machineEnvironmentDataQuery = (machine: string) => queryOptions({ queryKey: ['machine-environment-data', machine] as const, queryFn: ({ signal }): Promise<MachineEnvironmentData> => ok(api.GET('/machines/{id}/environment-data', { params: { path: { id: machine } }, signal })) });

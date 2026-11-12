@@ -62,7 +62,7 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
   const layer = usePrompt(open);
-  const opener = useOpener();
+  const opener = useOpener(layer.id);
   return (
     <PromptScope layer={layer}><Primitive.Root open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
       <Primitive.Portal>

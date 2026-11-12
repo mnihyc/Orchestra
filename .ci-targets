@@ -1,0 +1,2 @@
+# The forks program of the API whole, with the source-wait helper's failure report.
+test -p orch-api-core --test forks

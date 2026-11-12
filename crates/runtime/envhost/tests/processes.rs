@@ -534,3 +534,134 @@ async fn a_process_carries_the_thread_and_the_tool_call_its_executor_started_it_
     let ordered = Processes::ordered_for(listed.clone(), Some(other_thread));
     assert_eq!(ordered[0].info.thread_id, Some(other_thread));
 }
+
+#[cfg(target_os = "linux")]
+fn start_owned_hold_control(procs: &Processes, started: &mut Started) -> u32 {
+    let mut command = Command::new("sleep");
+    command
+        .arg("300")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let pid = started.adopt(
+        procs
+            .spawn_tracked(&mut command, RootKind::Executor)
+            .unwrap(),
+    );
+    wait_until("the actual tracked process identity", || {
+        procs.list().iter().any(|item| item.info.pid == pid)
+    });
+    pid
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_unknown_job_cannot_resume_another_jobs_native_hold_or_a_legacy_global_hold() {
+    let procs = processes(ScopeKind::Started);
+    let mut started = Started::new();
+    let pid = start_owned_hold_control(&procs, &mut started);
+    let bystander = started.bystander();
+    let owner = orch_types::new_id();
+    let other = orch_types::new_id();
+    let held = procs.suspend_owned(owner).unwrap();
+    assert!(held >= 1);
+    wait_until("the owned native STOP", || {
+        platform::os::state_of(pid) == Some('T')
+    });
+    assert_eq!(procs.resume_owned(other).unwrap(), 0);
+    assert_eq!(platform::os::state_of(pid), Some('T'));
+    assert!(alive(bystander));
+    assert_eq!(procs.resume_owned(owner).unwrap(), held);
+    wait_until("the original owner's CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+    let legacy = procs.suspend().unwrap();
+    assert!(legacy >= 1);
+    wait_until("the legacy native STOP", || {
+        platform::os::state_of(pid) == Some('T')
+    });
+    assert_eq!(procs.resume_owned(owner).unwrap(), 0);
+    assert_eq!(platform::os::state_of(pid), Some('T'));
+    assert_eq!(procs.resume().unwrap(), legacy);
+    wait_until("the legacy global CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+    assert!(alive(bystander));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn exact_owned_hold_survives_restart_and_an_old_journal_does_not_invent_a_job_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("processes.json");
+    let procs =
+        Processes::with_store(ScopeKind::Started, Arc::new(SystemClock), path.clone()).unwrap();
+    let mut started = Started::new();
+    let pid = start_owned_hold_control(&procs, &mut started);
+    let owner = orch_types::new_id();
+    let held = procs.suspend_owned(owner).unwrap();
+    assert!(held >= 1);
+    wait_until("the persisted native STOP", || {
+        platform::os::state_of(pid) == Some('T')
+    });
+    drop(procs);
+    let restarted =
+        Processes::with_store(ScopeKind::Started, Arc::new(SystemClock), path.clone()).unwrap();
+    assert_eq!(restarted.resume_owned(orch_types::new_id()).unwrap(), 0);
+    assert_eq!(platform::os::state_of(pid), Some('T'));
+    assert_eq!(restarted.resume_owned(owner).unwrap(), held);
+    wait_until("the restored owner's CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+    let legacy = restarted.suspend().unwrap();
+    assert!(legacy >= 1);
+    drop(restarted);
+    let mut old: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    old.as_object_mut().unwrap().remove("suspensions");
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let legacy = (
+        legacy,
+        Processes::with_store(ScopeKind::Started, Arc::new(SystemClock), path).unwrap(),
+    );
+    assert_eq!(legacy.1.resume_owned(owner).unwrap(), 0);
+    assert_eq!(platform::os::state_of(pid), Some('T'));
+    assert_eq!(legacy.1.resume().unwrap(), legacy.0);
+    wait_until("the old journal's global CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_new_native_hold_after_an_external_continue_cannot_be_released_by_the_older_job() {
+    let procs = processes(ScopeKind::Started);
+    let mut started = Started::new();
+    let pid = start_owned_hold_control(&procs, &mut started);
+    let first = orch_types::new_id();
+    let second = orch_types::new_id();
+    let identity = procs
+        .list()
+        .into_iter()
+        .find(|item| item.info.pid == pid)
+        .unwrap();
+    assert!(procs.suspend_owned(first).unwrap() >= 1);
+    wait_until("the first owned STOP", || {
+        platform::os::state_of(pid) == Some('T')
+    });
+    platform::send_signal(pid, Some(identity.start_ms), Sig::Continue).unwrap();
+    wait_until("the independent CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+    let held = procs.suspend_owned(second).unwrap();
+    assert!(held >= 1);
+    wait_until("the second owned STOP", || {
+        platform::os::state_of(pid) == Some('T')
+    });
+    assert_eq!(procs.resume_owned(first).unwrap(), 0);
+    assert_eq!(platform::os::state_of(pid), Some('T'));
+    assert_eq!(procs.resume_owned(second).unwrap(), held);
+    wait_until("the second owner's CONT", || {
+        platform::os::state_of(pid).is_some_and(|state| state != 'T')
+    });
+}

@@ -1,4 +1,5 @@
 /** The actual shell opens Find before its single bootstrap answers; pending screens never own the binding. */
+import type * as LiveModule from '@/realtime/live';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createMemoryHistory, createRootRoute, createRouter, RouterProvider } from '@tanstack/react-router';
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -8,6 +9,7 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as ClientModule from '@/api/client';
 import { client } from '@/api/client';
 import { meStateKey } from '@/api/personal';
+import { scheduledReads } from '@/api/readScheduler';
 import { closeFinder, useFinder } from '@/features/finder/store';
 import { useHelpState } from '@/features/help/state';
 import { i18n, setLocale } from '@/i18n';
@@ -18,7 +20,8 @@ import { ShellControls } from '@/shell/ShellControls';
 import { ScreenLoading } from '@/shell/ScreenLoading';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ get: vi.fn<(path: string) => Promise<unknown>>() }));
+const calls = vi.hoisted(() => ({ get: vi.fn<(path: string) => Promise<unknown>>(), admitted: vi.fn<() => Promise<void>>() }));
+vi.mock('@/realtime/live', async (original) => ({ ...await original<typeof LiveModule>(), ensurePersonalSource: calls.admitted }));
 vi.mock('@/api/client', async (original) => {
   const actual = await original<typeof ClientModule>();
   return { ...actual, api: { ...actual.api, GET: calls.get }, ok: (request: Promise<unknown>) => request };
@@ -28,6 +31,8 @@ const finder = useFinder.getState();
 const help = useHelpState.getState();
 const caches: QueryClient[] = [];
 beforeEach(() => {
+  scheduledReads.advance();
+  calls.admitted.mockReset().mockResolvedValue(undefined);
   calls.get.mockReset();
   calls.get.mockImplementation((path) => {
     if (path === '/me/bootstrap') return new Promise<unknown>(() => { /* Held until this mounted test shell is retired. */ });
@@ -41,6 +46,7 @@ beforeEach(() => {
 });
 afterEach(async () => {
   cleanup(); for (const cache of caches.splice(0)) cache.clear();
+  scheduledReads.advance();
   client.session.setState(session); useFinder.setState(finder); useHelpState.setState(help); setKeyChoices(SHIPPED_CHOICES);
   document.documentElement.removeAttribute('data-theme'); await setLocale('en');
 });

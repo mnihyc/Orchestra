@@ -1,4 +1,5 @@
 /** Addressed tab commands share explicit group/workspace scopes with their named menus. */
+import { linkTo } from '@/lib/links';
 import { copyText } from '@/ui/clipboard';
 import { moveScoped, panelScopeEntries } from '@/features/workbench/panelScope';
 import { useWorkbench } from '@/features/workbench/store';
@@ -71,7 +72,7 @@ export function tabEntries(
   );
   const href = contentAddress(place.tab);
   if (href !== null) entries.unshift(
-    { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), onSelect: () => { void copyText(`${location.origin}${href}`); } },
+    { id: 'copy-link', action: 'copyLink', label: t('actions.copyLink.label'), onSelect: () => { void copyText(linkTo({ href })); } },
     { id: 'new-tab', label: t('workbench.workspace.newTab'), onSelect: () => { openContent(href, 'new'); } },
     { id: 'beside', label: t('workbench.workspace.beside'), onSelect: () => { openContent(href, 'beside'); } },
   );

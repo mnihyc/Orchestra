@@ -265,6 +265,8 @@ pub fn token_of(token: Option<&str>, file: Option<&Path>) -> anyhow::Result<Opti
 
 /// What the node enrolls with.
 pub struct Enrollment {
+    /// Explicit local primary gateway choice, independent of the host-role consent.
+    pub gateway: Option<String>,
     /// Explicit local consent to hand the node's policy to Orch.
     pub delegate_policy: bool,
     /// The system's address; the configuration's gateway when none is given.
@@ -325,15 +327,21 @@ pub async fn enroll_if_needed(
         return Ok(None);
     };
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let enrolled = enroll_host(
-        data,
-        &host,
-        build.version,
-        &HttpsEnroll::new(Arc::clone(&clock), None),
-        clock.as_ref(),
-    )
-    .await
-    .context("enrolling")?;
+    let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    if enrollment.gateway.is_some() {
+        orch_connector_core::gateway_selector::configure_enrollment(
+            data,
+            &host.address,
+            &host.token,
+            &transport,
+            enrollment.gateway.as_deref(),
+            false,
+        )
+        .await?;
+    }
+    let enrolled = enroll_host(data, &host, build.version, &transport, clock.as_ref())
+        .await
+        .context("enrolling")?;
     Ok(Some(enrolled_line(&enrolled)))
 }
 
@@ -435,16 +443,24 @@ pub async fn enroll(
         .with_context(|| format!("opening {}", settings.data_dir.display()))?;
     let host = host_of(&settings, &data, enrollment, true)?.context("no enrollment command")?;
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let enrolled = enroll_host(
+    let transport = HttpsEnroll::new(Arc::clone(&clock), None);
+    let gateway = orch_connector_core::gateway_selector::configure_enrollment(
         &data,
-        &host,
-        build.version,
-        &HttpsEnroll::new(Arc::clone(&clock), None),
-        clock.as_ref(),
+        &host.address,
+        &host.token,
+        &transport,
+        enrollment.gateway.as_deref(),
+        true,
     )
-    .await
-    .context("enrolling")?;
-    Ok(enrolled_line(&enrolled))
+    .await?;
+    let enrolled = enroll_host(&data, &host, build.version, &transport, clock.as_ref())
+        .await
+        .context("enrolling")?;
+    Ok(format!(
+        "{}\nPrimary gateway choice: {}.",
+        enrolled_line(&enrolled),
+        orch_connector_core::gateway_selector::choice_name(&gateway, &enrolled.record.gateways)
+    ))
 }
 
 /// `status`: who this host is to the system, and what it was told to load.
@@ -911,6 +927,7 @@ mod tests {
                 other => EnrollError::Unreachable(other.to_string()),
             })?;
             Ok(EnrollReply {
+                gateways: Vec::new(),
                 machine_id: enrolled.machine_id,
                 certificate_pem: enrolled.certificate.pem(),
                 ca_pem: self.authority.certificate_pem(),

@@ -1,12 +1,43 @@
 ---
+group: getting-started
 title: Register your own program
-screens: /resources/machines, /resources/agents, /resources/providers
-keywords: register, program, custom agent, adapter, provider source, command, GPU, describe, 注册, 程序, 代理适配器, 提供方数据源
+screens: /resources/machines, /resources/environments, /resources/agents, /resources/providers, /thread
+keywords: register, program, custom agent, adapter, provider source, command, GPU, describe, Codex, Claude Code, agent version, 注册, 程序, 代理适配器, 提供方数据源
+summary: Confirm an installed program or register an agent adapter or provider source.
 ---
 
 # Register your own program
 
+## Use an installed agent program
+
+Open the connected machine's **Programs** section. Agent programs found on that machine show
+their version and path. **Version unknown** means the program did not report a recognizable version.
+Choose **Use** to confirm a found program; its row then reads **Confirmed** and offers **Remove**.
+These actions need Manage on the machine and its local permission to manage agent programs.
+If that permission is kept locally, use the policy command shown for that machine. **Refresh**
+searches again and reads the machine's current report.
+
+Removing a confirmation keeps the program file. It stops executors using that program, and
+affected threads are checked again before they run. An unconfirmed discovery is not available
+for execution.
+
+## Allow the environment's program version
+
+On the environment's **Tools** page, **Codex tools** shows the confirmed program's version and
+path when it supplies the tools there. Its version normally must match the agent's version.
+An environment manager can switch on **Any agent version**; the current approver's name appears
+beside the switch. This allows the displayed path and version, including **Version unknown**.
+A changed path or version needs approval again. Switching it off restores version matching.
+The decision takes effect when a thread next opens a session.
+The adapter's supported versions and the environment's other rules still apply.
+
+A thread blocked by different versions links to this environment page. After a manager allows
+the current program, the thread is checked again and continues if it can run. Environments made
+from a template keep their own tools build.
+
 ## 1. Choose a machine and kind
+
+To register an adapter or provider source of your own, continue below.
 
 Open the connected machine's **Programs** section and choose **Agent adapter** or **Provider source**,
 then **Add**. The program must already be available on that machine; a path on your laptop
@@ -45,3 +76,20 @@ Administrator access does not override the machine's local choice.
 
 For implementation details, read the [agent adapter contract](/help/agent-adapters) or
 [provider source contract](/help/provider-readme).
+
+
+## Choose an arrangement
+
+The **Where the agent runs** heading in thread setup opens this guide from its existing question. Read where the agent and tools run and whether a credential leaves the provider before choosing. The offered ways come from the program, provider and environment declarations; an unavailable way keeps its reason. A selected arrangement does not grant Use or change a provider's limits. The first ranked usable choice may be suggested, and your explicit choice stays yours.
+
+Use the [settings reference](settings-reference.md) for every built-in setting and structured field, the [option field reference](option-reference.md) for shipped interface options, the [state reference](state-reference.md) for reported states, and the [error reference](error-reference.md) for a refusal's meaning and recovery. In Help → Settings, each full setting entry also gives its default, example and allowed scopes. Opening it from a control can show its actual current source.
+
+## Detected profile details
+
+In **Add agent → A program on a machine**, the first confirmed program fills the program field. With **An available adapter**, a sole catalogue choice is filled; several choices stay yours to pick. **From machine**, **From catalogue** and **Your choice** identify the source. A refresh keeps the chosen program, name and home. If the program disappears, its name stays with **This program is no longer available**; choose another before creating the profile. Changing the mode or machine starts a new program choice.
+
+**Version** is the installed harness version reported by that machine, including a custom adapter's harness declaration. It is never the adapter's own build number or an assumed catalogue build. **Version unknown** means no usable version was reported; **Choose a machine to detect** means there is no machine observation yet. The version is an observation, not a new version pin.
+
+**Accounts** lists already registered subscription providers for that program on that machine, with each provider's reported state. Existing sign-ins are discovered through the connector's normal discovery path. A listed account does not prove a fresh login or grant Use. **No account reported** leaves that fact unknown; it does not say the machine has no sign-in. Open the account's card to inspect it.
+
+**Program supports** comes from a ready machine declaration where available, otherwise from the catalogue; **Machine allows** separately shows the machine's reported arrangement policy. **None** is an explicitly empty list, and **Not reported** means no list was supplied. **Arrangement → Automatic · From thread defaults** keeps the existing shared selector: at thread setup it considers the actual provider, environment, machine and access, puts the configured preferences first, and takes the first available and permitted arrangement. These profile facts do not select a capability route, copy a credential or enable a service. An explicit arrangement selected there remains the person's choice.

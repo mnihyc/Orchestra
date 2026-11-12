@@ -1,10 +1,10 @@
 /** All four quick grants use the server clock, and the same card handles a late answer and a group membership. */
-import {cleanup,screen,waitFor,within} from '@testing-library/react';
+import {act,cleanup,screen,waitFor,within} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import type * as Api from '@/api/approvals';
 import {ApiError} from '@/api/client';
-import {AccessCard} from '@/features/approvals/Access';
+import {AccessCard,QuickGrant} from '@/features/approvals/Access';
 import {AccessRequest} from '@/features/access/AccessRequest';
 import type * as Access from '@/api/access';
 import type {Approval,UserRef} from '@/generated/api-types';
@@ -22,6 +22,25 @@ vi.mock('@/api/access',async original=>({...await original<typeof Access>(),requ
 vi.mock('@/ui/UserChip',()=>({UserChip:({user}:{user:UserRef})=><button data-person-chip={user.id}>{user.display_name}</button>}));
 beforeEach(()=>{vi.clearAllMocks();sessionStorage.clear();calls.decide.mockResolvedValue({...approval,state:'approved',decided_at:'2026-10-26T12:01:00Z',decided_by:ada});calls.join.mockResolvedValue({batch_id:'batch',approvals:[approval]});calls.read.mockResolvedValue({batch_id:'batch',approvals:[approval],complete:false});});
 afterEach(async()=>{cleanup();useAppearance.setState(originalAppearance);await setLocale('en');});
+for (const locale of ['en', 'zh-CN'] as const) it.each([false, true])('explains a grant waiting on '+locale+' authority or its connection (live: %s)', async (live) => {
+ await setLocale(locale);
+ show(<QuickGrant approval={{...approval, can_decide: !live}} live={live} onSettled={vi.fn()} onOther={vi.fn()} />);
+ const control = screen.getByRole('button', { name: i18n.t('approvals.quick.always') }), target = control.parentElement;
+ if (target === null) throw new Error('The disabled grant reason must be focusable');
+ expect(control).toBeDisabled(); act(() => target.focus());
+ expect(await screen.findByRole('tooltip')).toHaveTextContent(i18n.t(live ? 'approvals.cannotAnswer' : 'approvals.waitForLine'));
+ expect(calls.decide).not.toHaveBeenCalled();
+});
+for (const locale of ['en', 'zh-CN'] as const) it.each([null, []])('keeps only the explicit Other choice without server quick durations in '+locale+' (%s)', async (durations) => {
+ await setLocale(locale);
+ const other = vi.fn();
+ show(<QuickGrant approval={{...approval, quick_grant_durations: durations}} onSettled={vi.fn()} onOther={other} />);
+ const button = screen.getByRole('button', { name: i18n.t('approvals.quick.other') });
+ expect(screen.getAllByRole('button')).toEqual([screen.getByRole('button', { name: bo.display_name }), button]);
+ await userEvent.click(button);
+ expect(other).toHaveBeenCalledOnce();
+ expect(calls.decide).not.toHaveBeenCalled();
+});
 for(const locale of ['en','zh-CN'] as const)it(`each membership duration submits exactly the configured server-duration choice (${locale})`,async()=>{
  await setLocale(locale);
  for(const duration of approval.quick_grant_durations){

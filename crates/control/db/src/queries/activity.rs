@@ -35,7 +35,7 @@ pub async fn read(
     actions: &[String],
 ) -> Result<Vec<Row>, DbError> {
     Ok(sqlx::query_as(
-        "WITH scoped AS (
+        concat!("WITH scoped AS (
             SELECT a.*, COALESCE(n.parent_id, s.home_node_id) AS parent_id,
                    COALESCE(n.kind, NULLIF(a.object_kind, 'node'), 'thread') AS node_kind,
                    (n.id IS NULL OR EXISTS (SELECT 1 FROM nodes d WHERE d.id = ANY(n.path) AND d.deleted_at IS NOT NULL)) AS node_removed
@@ -63,10 +63,10 @@ pub async fn read(
                 ORDER BY at DESC, id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
          )
          SELECT id, at, actor_kind, actor_id, action, history, override, object_kind, object_id,
-                node_id, summary, details, host(ip) AS ip, count, parent_id, node_kind, node_removed
-           FROM grouped
+                node_id, summary, ", crate::queries::upload_history::details!("0", "2"), " AS details, host(ip) AS ip, count, parent_id, node_kind, node_removed
+           FROM grouped a
           WHERE ordinal = 1 AND ($3::uuid IS NULL OR (at, id) < ($4, $3))
-          ORDER BY at DESC, id DESC LIMIT $7",
+          ORDER BY at DESC, id DESC LIMIT $7"),
     )
     .bind(place)
     .bind(since)

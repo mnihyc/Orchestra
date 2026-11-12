@@ -38,18 +38,20 @@ export interface HolderChipProps {
   pending?: boolean;
   /** Draws no frame of its own: the chip stands inside one that holds more than the chip, such as a cross to take it out. */
   bare?: boolean;
+  /** A full-detail surface may wrap the complete name instead of shortening it. */
+  wrap?: boolean;
   /** What stands after the name inside the chip: where it comes from, until when. */
   note?: ReactNode;
   className?: string;
 }
 
-const CHIP = 'inline-flex h-(--control-sm) max-w-full min-w-0 items-center gap-1 rounded-full border px-2 text-sm';
+const CHIP = 'inline-flex max-w-full min-w-0 items-center gap-1 rounded-full border px-2 text-sm';
 
-function Look({ name, count, icon, note }: Pick<HolderChipProps, 'name' | 'count' | 'icon' | 'note'>) {
+function Look({ name, count, icon, note, wrap }: Pick<HolderChipProps, 'name' | 'count' | 'icon' | 'note' | 'wrap'>) {
   return (
     <>
       {icon !== undefined && <span className="flex shrink-0 text-text-muted [&_svg]:size-[0.875rem]">{icon}</span>}
-      <span className="min-w-0 truncate font-medium">{name}</span>
+      <span className={cx('min-w-0 font-medium', wrap ? 'whitespace-normal wrap-anywhere' : 'truncate')}>{name}</span>
       {count !== undefined && <span className="shrink-0 text-text-muted tabular-nums">· {count}</span>}
       {note !== undefined && <span className="min-w-0 truncate text-text-muted">{note}</span>}
     </>
@@ -61,7 +63,7 @@ function People({ name, source }: { name: string; source: PeopleSource }) {
   const { t } = useTranslation();
   const list = useInfiniteQuery(source);
   const people = list.data?.pages.flatMap((page) => page.items) ?? [];
-  if (list.isPending) return <SkeletonRows rows={3} />;
+  if (list.isPending) return <SkeletonRows read={list} rows={3} />;
   if (list.isError && people.length === 0) {
     return <ErrorState compact error={list.error} title={t('access.holder.notLoaded')} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
   }
@@ -92,18 +94,18 @@ function People({ name, source }: { name: string; source: PeopleSource }) {
   );
 }
 
-export function HolderChip({ name, count, icon, people, inherited = false, pending = false, bare = false, note, className }: HolderChipProps) {
+export function HolderChip({ name, count, icon, people, inherited = false, pending = false, bare = false, wrap = false, note, className }: HolderChipProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const resting = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const look = bare
-    ? cx('inline-flex h-full max-w-full min-w-0 items-center gap-1 rounded-full pr-1 pl-2 text-sm text-text', className)
-    : cx(CHIP, inherited ? 'border-border bg-bg-subtle text-text' : 'border-border-strong bg-surface text-text', pending && 'opacity-60', className);
+    ? cx('inline-flex max-w-full min-w-0 items-center gap-1 rounded-full pr-1 pl-2 text-sm text-text', wrap ? 'min-h-(--control-sm) py-1' : 'h-full', className)
+    : cx(CHIP, wrap ? 'min-h-(--control-sm) py-1' : 'h-(--control-sm)', inherited ? 'border-border bg-bg-subtle text-text' : 'border-border-strong bg-surface text-text', pending && 'opacity-60', className);
 
   if (people === undefined) {
     return (
       <span className={look}>
-        <Look name={name} count={count} icon={icon} note={note} />
+        <Look name={name} count={count} icon={icon} note={note} wrap={wrap} />
       </span>
     );
   }
@@ -120,7 +122,7 @@ export function HolderChip({ name, count, icon, people, inherited = false, pendi
           onPointerEnter={prefetch}
           onPointerLeave={() => clearTimeout(resting.current)}
         >
-          <Look name={name} count={count} icon={icon} note={note} />
+          <Look name={name} count={count} icon={icon} note={note} wrap={wrap} />
         </button>
       }>
           <People name={name} source={people} />

@@ -1,5 +1,5 @@
 /** The route suite's browser evidence: actual accessible names and whole cut values by both inputs. */
-import { expect, type CDPSession, type Page } from '@playwright/test';
+import { expect, test, type CDPSession, type Page } from '@playwright/test';
 import { inspectLayout, prepareLayoutPointer, trackLayoutPointer, type LayoutPointer, type DuplicateAllowance, type LayoutFault, type LayoutInput, type LayoutResult } from './layout-rules-dom.ts';
 import { RAW_VALUES } from './layout-routes.ts';
 
@@ -53,7 +53,8 @@ interface TransientResult { result: LayoutResult; next: LayoutPointer | null; in
 async function transientLayout(page: Page, mode: 'choices' | 'icons', pointerTarget?: string, next: string[] = [], afterInput?: LayoutInput['afterInput']): Promise<TransientResult> {
   const session = await layoutSession(page);
   const options = JSON.stringify({ mode, settle: true, pointerTarget, afterInput });
-  const reply = await session.send('Runtime.evaluate', { expression: `(async()=>{const result=await globalThis.__orchLayoutInspect({...globalThis.__orchLayoutInput,...${options}});return {result,next:globalThis.__orchLayoutPrepare(${JSON.stringify(next)}),inputs:{key:globalThis.__layoutPointer.keySerial,pointer:globalThis.__layoutPointer.pointerSerial}}})()`, awaitPromise: true, returnByValue: true });
+  const reply = await test.step(`Measure ${mode} after ${afterInput?.kind ?? 'input'} at ${pointerTarget ?? 'the highlighted option'}`, () =>
+    session.send('Runtime.evaluate', { expression: `(async()=>{const result=await globalThis.__orchLayoutInspect({...globalThis.__orchLayoutInput,...${options}});return {result,next:globalThis.__orchLayoutPrepare(${JSON.stringify(next)}),inputs:{key:globalThis.__layoutPointer.keySerial,pointer:globalThis.__layoutPointer.pointerSerial}}})()`, awaitPromise: true, returnByValue: true }));
   if (reply.exceptionDetails !== undefined) throw new Error(reply.exceptionDetails.exception?.description ?? reply.exceptionDetails.text);
   return reply.result.value as TransientResult;
 }
@@ -68,11 +69,47 @@ async function pointerWalk(page: Page, mode: 'choices' | 'icons', selectors: str
       if (refreshed === false) { target = await measureInBrowser(page, prepareLayoutPointer, remaining); continue; }
       target = { ...target, ...refreshed };
     }
-    const moved = hoverMeasured(page, target);
-    const [, measured] = await Promise.all([moved, transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer })]);
+    let measured: TransientResult;
+    if (mode === 'choices') {
+      const point = await measureInBrowser(page, async (selector: string) => {
+        await document.fonts.ready;
+        await new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done())));
+        const element = document.querySelector(selector);
+        if (!(element instanceof HTMLElement)) throw new Error('The option lost its pointer target.');
+        const box = element.getBoundingClientRect(), x = box.left + box.width / 2, y = box.top + box.height / 2;
+        const hit = document.elementFromPoint(x, y);
+        return { x, y, direct: hit !== null && element.contains(hit) };
+      }, target.selector);
+      // Use the measured centre only when it really hits the settled option. Clipped or
+      // covered choices retain native hover's actionability; every path is checked after input.
+      if (point.direct) await hoverMeasured(page, point);
+      else await page.locator(target.selector).hover({ timeout: REVEAL_DEADLINE_MS });
+      measured = await transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer });
+    } else {
+      const moved = hoverMeasured(page, target);
+      [, measured] = await Promise.all([moved, transientLayout(page, mode, target.selector, remaining, { kind: 'pointer', sequence: inputs.pointer })]);
+    }
     faults.push(...measured.result.faults); target = measured.next; inputs = measured.inputs;
   }
   return faults;
+}
+
+/**
+ * Where the pointer rests between probes: the viewport's corner, unless a control or a cut value stands there (a bare page, a header, a rail
+ * or a narrow cell can put the very owner under the corner). A pointer that rests on the owner has already entered it: its pointerover fires at
+ * the rest, its hint is dismissed with Escape before the probe, and the next move inside the owner is no entrance, so no hint comes back and a
+ * disclosure that works is reported as missing. So the rest is a point outside the owner (and, where one can be found, outside every control).
+ */
+async function restingPoint(page: Page, owner?: string): Promise<{ x: number; y: number }> {
+  return measureInBrowser(page, (selector: string | undefined) => {
+    const root = selector === undefined ? null : document.querySelector(selector);
+    const width = document.documentElement.clientWidth, height = document.documentElement.clientHeight;
+    const corners = [{ x: 0, y: 0 }, { x: width - 1, y: 0 }, { x: 0, y: height - 1 }, { x: width - 1, y: height - 1 }];
+    const onOwner = (point: { x: number; y: number }) => root?.contains(document.elementFromPoint(point.x, point.y)) === true;
+    const onControl = (point: { x: number; y: number }) => (document.elementFromPoint(point.x, point.y)
+      ?.closest('a[href],button,input,select,textarea,summary,[tabindex],[role="button"],[role="tab"],[role="menuitem"],[role="option"],[data-layout-probe]') ?? null) !== null;
+    return corners.find((point) => !onOwner(point) && !onControl(point)) ?? corners.find((point) => !onOwner(point)) ?? corners[0]!;
+  }, owner);
 }
 
 /** A tooltip from the preceding probe must not cover the next control's real pointer target. */
@@ -92,6 +129,23 @@ async function dismissTooltips(page: Page, selector?: string): Promise<{ x: numb
     await expect(page.getByRole('tooltip')).toHaveCount(0);
   } else expect(state.tooltips).toBe(0);
   return { x: state.x, y: state.y };
+}
+
+/** A preceding full-value probe may leave a focused name's inspection card open.
+ * Close only identified information layers before starting another independent input walk.
+ */
+async function dismissPageDisclosures(page: Page): Promise<void> {
+  // Release the preceding probe's hover/focus before dismissing its card. Otherwise a pending
+  // hover can reopen it during the next independent menu walk and cover the pointer target.
+  await page.evaluate(() => { if (document.activeElement instanceof HTMLElement) document.activeElement.blur(); });
+  const rest = await restingPoint(page);
+  await page.mouse.move(rest.x, rest.y);
+  const selector = ':is([role="tooltip"],[data-inspection-card],[data-reference-card]):visible';
+  const layers = page.locator(selector);
+  const open = page.locator(`${selector}:not([data-state="closed"],[data-state="closed"] *)`);
+  const limit = await layers.count() + 1;
+  for (let attempt = 0; attempt < limit && await open.count() > 0; attempt += 1) await pressLayoutKey(page, 'Escape');
+  await expect(layers).toHaveCount(0);
 }
 
 /** The measurement proves the actual pointer hit after its two render frames. Repeated menu probes
@@ -116,14 +170,17 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
     // shared floating content identify that boundary; no word grants an exemption.
     // Existing row/landmark context still rejects duplicate controls within a layer.
     const layers = new Map<number, number>();
-    if (await page.locator('[data-content-role],[role="dialog"],[role="alertdialog"],[role="menu"],dialog[open],.floating-layer').count() > 0) {
+    const timelineRows = new Map<number, number>();
+    if (await page.locator('[data-content-role],[data-item],[data-footer],[data-timeline-row],[role="dialog"],[role="alertdialog"],[role="menu"],dialog[open],.floating-layer').count() > 0) {
       const dom = await session.send('DOM.getDocument', { depth: -1, pierce: true });
       type DomNode = typeof dom.root;
-      function visit(node: DomNode, source = false, documentRoot = 0, block = 0, toolbar = false, control = false, layer = 0): void {
+      function visit(node: DomNode, source = false, documentRoot = 0, block = 0, toolbar = false, control = false, layer = 0, timelineRow = 0): void {
         const attrs = new Map<string, string>();
         for (let index = 0; index < (node.attributes?.length ?? 0); index += 2) attrs.set(node.attributes![index]!, node.attributes![index + 1]!);
         if (['dialog', 'alertdialog', 'menu'].includes(attrs.get('role') ?? '') || node.nodeName === 'DIALOG' && attrs.has('open') || (attrs.get('class') ?? '').split(/\s+/).includes('floating-layer')) layer = node.backendNodeId;
         if (layer !== 0) layers.set(node.backendNodeId, layer);
+        if (attrs.has('data-item') || attrs.has('data-footer') || attrs.has('data-timeline-row')) timelineRow = node.backendNodeId;
+        if (timelineRow !== 0) timelineRows.set(node.backendNodeId, timelineRow);
         const content = attrs.get('data-content-role');
         if (content === 'source' || content === 'document') { source = content === 'source'; documentRoot = content === 'document' ? node.backendNodeId : 0; block = documentRoot; toolbar = false; control = false; }
         else {
@@ -133,7 +190,7 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
         }
         if (documentRoot !== 0 && ['block', 'leaf'].includes(attrs.get('data-ob') ?? '')) block = node.backendNodeId;
         if ((/^H[1-6]$/.test(node.nodeName) || attrs.get('role') === 'heading') && !control && !toolbar && (source || documentRoot !== 0)) authored.set(node.backendNodeId, { source, block });
-        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child, source, documentRoot, block, toolbar, control, layer);
+        for (const child of [...(node.children ?? []), ...(node.shadowRoots ?? [])]) visit(child, source, documentRoot, block, toolbar, control, layer, timelineRow);
       }
       visit(dom.root);
     }
@@ -166,8 +223,12 @@ export async function duplicateAccessibleNames(page: Page): Promise<LayoutFault[
       while (parent !== undefined && !landmarks.has(word(parent.role?.value)) && !rows.has(word(parent.role?.value))) parent = parent.parentId === undefined ? undefined : byId.get(parent.parentId);
       const landmark = content !== undefined ? `authored block ${content.block}` : parent === undefined ? 'document' : `${word(parent.role?.value)} ${word(parent.name?.value)} [AX ${parent.nodeId}]`;
       const layer = node.backendDOMNodeId === undefined ? 0 : layers.get(node.backendDOMNodeId) ?? 0;
-      const key = `${layer}:${content === undefined ? parent?.nodeId ?? 'document' : `authored:${content.block}`}:${name}`;
-      const group: NameGroup = grouped.get(key) ?? { name, landmark, nodes: [] };
+      const timelineRow = node.backendDOMNodeId === undefined ? undefined : timelineRows.get(node.backendDOMNodeId);
+      // The timeline's actual message rows carry the same repeated-row context as
+      // the DOM rules. An author's name may recur across messages, not twice in one.
+      const context = content !== undefined ? `authored:${content.block}` : timelineRow !== undefined ? `timeline:${timelineRow}` : parent?.nodeId ?? 'document';
+      const key = `${layer}:${context}:${name}`;
+      const group: NameGroup = grouped.get(key) ?? { name, landmark: timelineRow === undefined ? landmark : `timeline row ${timelineRow}`, nodes: [] };
       // A heading containing its own link/button is one rendered occurrence, not two controls.
       if (group.nodes.some((prior) => contains(node.nodeId, prior))) continue;
       group.nodes = group.nodes.filter((prior) => !contains(prior.nodeId, node));
@@ -191,38 +252,68 @@ export async function screenReady(page: Page, locale: string, theme: string): Pr
   });
 }
 
-export async function auditPage(page: Page): Promise<LayoutResult> {
-  const result = await page.evaluate(inspectLayout, LAYOUT_INPUT);
+export async function auditPage(page: Page, cutWithin?: string): Promise<LayoutResult> {
+  const result = await page.evaluate(inspectLayout, { ...LAYOUT_INPUT, ...(cutWithin === undefined ? {} : { cutWithin }) });
   result.faults.push(...await duplicateAccessibleNames(page));
-  for (const cut of result.cuts) {
+  // The settled page already revealed every underlying value. A menu pass still
+  // measures all rules, but only exercises disclosures belonging to its open layer.
+  // Hovering the page behind a picker repeats tooltip delays and can close the picker.
+  // Read a card before probing its underlying menu: that next pointer/focus entrance
+  // can legitimately close the card and retire the values captured in this snapshot.
+  const ordered = await measureInBrowser(page, (selectors: string[]) => selectors.map((selector, index) => {
+    let depth = 0;
+    for (let at = document.querySelector(selector); at !== null; at = at.parentElement) {
+      if (at.matches('[data-inspection-card],[data-reference-card]')) depth += 1;
+    }
+    return { index, depth };
+  }).sort((one, other) => other.depth - one.depth || one.index - other.index).map((cut) => cut.index), result.cuts.map((cut) => cut.selector));
+  for (const index of ordered) {
+    const cut = result.cuts[index]!;
     try {
-      await dismissTooltips(page);
-      const source = page.locator(cut.selector);
-      await source.hover();
-      if (!cut.title?.replace(/\s+/g, ' ').includes(cut.text)) {
-        await expect.poll(() => page.locator('[role="tooltip"]').allTextContents().then((texts) => texts.map((text) => text.replace(/\s+/g, ' ').trim()).join('\n')),
-          { timeout: REVEAL_DEADLINE_MS, message: `Hover must reveal ${cut.text}` }).toContain(cut.text);
-      }
-      // Locator.focus calls this same native method. Batch its observations through the
-      // existing browser session, retaining both real focus and its owned full-value hint.
-      await measureInBrowser(page, (selector: string) => {
-        const owner = document.querySelector<HTMLElement>(selector);
-        if (owner === null) throw new Error('The cut value lost its focus owner.');
-        owner.focus();
-      }, cut.focus);
-      await expect.poll(() => measureInBrowser(page, (selector: string) => {
-        const owner = document.querySelector(selector);
-        return { focused: owner !== null && document.activeElement === owner,
-          text: (owner?.getAttribute('aria-describedby') ?? '').split(/\s+/)
-            .map((id) => document.getElementById(id)).filter((description): description is HTMLElement => description?.getAttribute('role') === 'tooltip')
-            .map((description) => description.textContent.replace(/\s+/g, ' ').trim()).join('\n') };
-      }, cut.focus), { timeout: REVEAL_DEADLINE_MS, message: `Keyboard focus must reveal ${cut.text} on its actual owner` })
-        .toEqual({ focused: true, text: expect.stringContaining(cut.text) });
+      await test.step(`Reveal complete value: ${cut.text}`, async () => {
+        const source = page.locator(cut.selector);
+        // A preceding keyboard probe can leave its name card and focused trigger live.
+        // Start this independent hover outside them, preserving a card that owns this value.
+        if (await source.evaluate((element) => {
+          if (element.closest('[data-inspection-card],[data-reference-card]') !== null) return false;
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+          return true;
+        }, undefined, { timeout: REVEAL_DEADLINE_MS })) {
+          // Outside this owner, so that the hover below is an entrance into it.
+          const rest = await restingPoint(page, cut.selector);
+          await page.mouse.move(rest.x, rest.y);
+        }
+        await dismissTooltips(page);
+        await source.hover({ timeout: REVEAL_DEADLINE_MS });
+        if (!cut.title?.replace(/\s+/g, ' ').includes(cut.text)) {
+          await expect.poll(() => page.locator('[role="tooltip"]').allTextContents().then((texts) => texts.map((text) => text.replace(/\s+/g, ' ').trim()).join('\n')),
+            { timeout: REVEAL_DEADLINE_MS, message: `Hover must reveal ${cut.text}` }).toContain(cut.text);
+        }
+        // Locator.focus calls this same native method. Batch its observations through the
+        // existing browser session, retaining both real focus and its owned full-value hint.
+        await measureInBrowser(page, (selector: string) => {
+          const owner = document.querySelector<HTMLElement>(selector);
+          if (owner === null) throw new Error('The cut value lost its focus owner.');
+          // Escape intentionally leaves focus in place. A real re-entry must fire focusin,
+          // even when two clipped values share that same native keyboard control.
+          if (document.activeElement === owner) owner.blur();
+          owner.focus();
+        }, cut.focus);
+        await expect.poll(() => measureInBrowser(page, (selector: string) => {
+          const owner = document.querySelector(selector);
+          return { focused: owner !== null && document.activeElement === owner,
+            text: (owner?.getAttribute('aria-describedby') ?? '').split(/\s+/)
+              .map((id) => document.getElementById(id)).filter((description): description is HTMLElement => description?.getAttribute('role') === 'tooltip')
+              .map((description) => description.textContent.replace(/\s+/g, ' ').trim()).join('\n') };
+        }, cut.focus), { timeout: REVEAL_DEADLINE_MS, message: `Keyboard focus must reveal ${cut.text} on its actual owner` })
+          .toEqual({ focused: true, text: expect.stringContaining(cut.text) });
+      });
     } catch (error) {
       result.faults.push({ rule: 'cut-text', text: cut.text, selectors: [cut.selector, cut.focus], detail: error instanceof Error ? error.message : String(error) });
     }
   }
-  await page.mouse.move(0, 0);
+  const rest = await restingPoint(page);
+  await page.mouse.move(rest.x, rest.y);
   return result;
 }
 
@@ -230,11 +321,16 @@ export async function auditPage(page: Page): Promise<LayoutResult> {
 export async function auditOpenMenus(page: Page, selectors: string[]): Promise<LayoutFault[]> {
   const faults: LayoutFault[] = [];
   for (const selector of selectors) {
+    await dismissPageDisclosures(page);
     const trigger = page.locator(selector);
     if (!await dismissTooltips(page, selector)) continue;
-    await trigger.click();
+    // A tab's click selects it; its announced context menu has a separate keyboard entrance.
+    if (await trigger.getAttribute('role') === 'tab') {
+      await trigger.focus();
+      await trigger.press('Shift+F10');
+    } else await trigger.click();
     await expect(page.locator('[role="menu"]:visible,[role="listbox"]:visible').first()).toBeVisible();
-    faults.push(...(await auditPage(page)).faults);
+    faults.push(...(await auditPage(page, '[role="menu"],[role="listbox"],[data-inspection-card],[data-reference-card]')).faults);
     faults.push(...await auditHighlightedOptions(page));
     // Close only the open pickers, including a submenu exposed by hover. An extra Escape may
     // dismiss a tooltip; never keep sending Escape into the underlying dialog after they close.
@@ -274,6 +370,7 @@ export async function auditHighlightedOptions(page: Page): Promise<LayoutFault[]
 
 /** CSS opacity on a row's resting actions cannot hide a misplaced icon from the suite. */
 export async function auditHoverIcons(page: Page, selectors: string[]): Promise<LayoutFault[]> {
+  await dismissPageDisclosures(page);
   await page.evaluate(trackLayoutPointer);
   const inputs = await installLayoutProbe(page);
   const first = await measureInBrowser(page, prepareLayoutPointer, selectors);

@@ -27,7 +27,7 @@ pub fn compact(count: i64) -> String {
     }
 }
 
-/// The first line of a goal's turn: "Goal: keep working until <condition>. Turn 7 of up to 30 · 1.2M tokens".
+/// The first line of a goal's turn: `Goal: keep working until <condition>. Turn 7 of up to 30 · 1.2M tokens`.
 #[must_use]
 pub fn headline(facts: &GoalInputFacts) -> String {
     let turn = if facts.max_turns > 0 {

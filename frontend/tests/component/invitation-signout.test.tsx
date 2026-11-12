@@ -32,7 +32,7 @@ vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router
   useRouter: () => ({ navigate: vi.fn() }),
   Link: ({ to, children, className }: Pick<AnchorHTMLAttributes<HTMLAnchorElement>, 'children' | 'className'> & { to: string }) => <a href={to} className={className}>{children}</a>,
 }));
-const invitation: InvitationPreview = { kind: 'system', org: null, what: null, role: null, permissions: [], inviter: ADA, email_bound: false, expires_at: '2027-01-01T00:00:00Z' };
+const invitation: InvitationPreview = { terms: null, kind: 'system', org: null, what: null, role: null, permissions: [], inviter: ADA, email_bound: false, expires_at: '2027-01-01T00:00:00Z' };
 const previous = useAppearance.getState();
 const previousSession = client.session.getState();
 beforeEach(() => {
@@ -66,7 +66,7 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
 
 it('does not accept an invitation while the account switch is pending', async () => {
   await setLocale('en');
-  const pending = deferred<void>();
+  const pending = deferred<undefined>();
   calls.signOut.mockReturnValueOnce(pending.promise);
   show(<Invitation token="valid" system="Workshop" />);
   await userEvent.click(await screen.findByRole('button', { name: i18n.t('auth.invite.notYou') }));

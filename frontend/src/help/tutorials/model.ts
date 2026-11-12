@@ -1,6 +1,6 @@
 /** A short authored walk. Navigation is to read screens; a step never contains an API call or a credential. */
-import type { TranslationKey } from '@/i18n';
-import type { TargetId } from '@/help/targets';
+import type { TranslationKey } from '../../i18n';
+import type { TargetId } from '../targets';
 
 export type TutorialDestination = 'thread-parameters' | 'thread-access' | 'environment-ports'
   | 'environment-settings' | 'environment-overview';
