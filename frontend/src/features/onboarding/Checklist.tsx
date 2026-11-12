@@ -76,7 +76,7 @@ export function StepList({ data, contextPath, onReadChoices }: { data: FirstStep
           </span>
           <div className="flex min-w-0 flex-1 flex-col gap-1">
             <p className="flex min-h-(--control-sm) items-center font-medium text-text">{t(`firstSteps.steps.${step.id}`)}</p>
-            {step.id === 'away' && data.org !== null ? <ConfiguredAway configured={step.fact === 'outward_enabled'} nodeId={data.org.id} /> : <p className="text-sm text-text-muted">{t(`firstSteps.facts.${FACT_KEYS[step.fact]}`)}</p>}
+            {step.id === 'away' && step.fact !== 'unknown' && data.org !== null ? <ConfiguredAway configured={step.fact === 'outward_enabled'} nodeId={data.org.id} /> : <p className="text-sm text-text-muted">{t(`firstSteps.facts.${FACT_KEYS[step.fact]}`)}</p>}
             {step.scripted && <span className="w-fit rounded-sm bg-warning-subtle px-2 text-sm text-warning-text">{t('firstSteps.scripted')}</span>}
             {step.source !== null && !step.source.redacted && step.source.id !== data.org?.id && <p className="text-sm wrap-anywhere text-text-subtle">{t('firstSteps.observedIn', { name: step.source.name })}</p>}
             {step.id === 'away' && done && <p className="text-sm text-text-muted">{t('firstSteps.awayMeaning')}</p>}
@@ -136,7 +136,6 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
   if (personal.isPending || !needsFirstSteps({ ...data, work_mode: mode }, org)) return null;
   const solo = orgs.data?.find((candidate) => candidate.id === me.data?.personal_org_id && candidate.access.permissions.includes('org.view'));
   return <div className="flex flex-col gap-4" data-testid="first-steps">
-    {loadError === null && <StartHere document={data.start_here} />}
     {!dismissed ? <section aria-label={t('firstSteps.title')} className={`${boxClasses} @container p-4`}>
       <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
         <div className="min-w-0 flex-[1_1_8rem]">
@@ -159,5 +158,6 @@ function ChecklistCard({ org, data, loadError, retrying, onRetry }: { org: Org; 
           <StepList data={{ ...data, work_mode: mode }} contextPath={contextPath} />
         </details>}
     </section> : <Button action="show" className="self-start" size="sm" variant="ghost" pending={mutation.isPending} onClick={() => saveDismissal(false)}>{t('firstSteps.show')}</Button>}
+    {loadError === null && <StartHere document={data.start_here} />}
   </div>;
 }

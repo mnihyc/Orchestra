@@ -15,7 +15,7 @@ import { useViewShown } from '@/features/workbench/viewOpening';
 import type { FetchState, FetchUnavailable, FileStat } from '@/generated/api-types';
 
 import { PREVIEW_BYTES } from './viewers';
-import { sourceBytes, sourceDownload, useFileSource, workspaceSource, type FileSource } from './source';
+import { sourceBytes, sourceDownload, sourceQueryAuthority, sourceReaderKey, useFileSource, workspaceSource, type FileSource } from './source';
 
 /** How many times the environment is asked again while it brings a file: each ask holds for up to 25 seconds. */
 const BRINGING_ASKS = 12;
@@ -81,11 +81,12 @@ export async function invalidateHead(client: QueryClient, door: Door, path: stri
 /** The bytes of one version of a file, the first `limit` of them. */
 export const bytesQuery = (door: Door, path: string, hash: string, limit: number | undefined, source: FileSource | null = null) =>
   queryOptions({
-    queryKey: ['workspace-bytes', source?.url ?? door.environmentId, path, hash, limit ?? 0] as const,
+    queryKey: ['workspace-bytes', source?.url ?? door.environmentId, path, hash, limit ?? 0, ...sourceReaderKey(source)] as const,
     queryFn: ({ signal }) => source === null ? readFileBytes(door, path, hash, limit, signal) : sourceBytes(source, hash, limit, signal),
     // A hash names one content for ever; the copy is kept a short while for going back and forth.
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: 30_000,
+    ...sourceQueryAuthority(source),
   });
 
 export interface FileText {

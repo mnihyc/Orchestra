@@ -7,8 +7,9 @@
 import type { ThreadIconFacts } from '@/ui/ThreadState';
 import type { LucideIcon } from 'lucide-react';
 import type { NodeRef, PersonalTarget } from '@/generated/api-types';
-import { useContext, useEffect } from 'react';
+import { useContext, useEffect, useMemo } from 'react';
 import { create } from 'zustand';
+import { useShallow } from 'zustand/react/shallow';
 
 import { useNodeLabel } from '@/features/navigation/placeLabels';
 import { usePageTitle } from '@/lib/title';
@@ -55,6 +56,14 @@ export interface ScreenHeading {
 }
 
 interface Headings { heading: ScreenHeading | null; route: ScreenHeading | null }
+/** Native identity owns readiness and names; its matching admitted body may supply the resource trail. */
+function resolvedHeading(held: Headings | null | undefined): ScreenHeading | null {
+  const route = held?.route, body = held?.heading;
+  if (route === null || route === undefined) return body ?? null;
+  if (route.views?.ready === false || body?.target === undefined) return route;
+  if (route.target?.kind !== body.target.kind || route.target.id !== body.target.id) return route;
+  return { ...route, section: route.section ?? body.section, trail: route.trail ?? body.trail };
+}
 const useHeading = create<Headings & { focused: string | null; byView: ReadonlyMap<string, Headings> }>(() => ({ heading: null, route: null, focused: null, byView: new Map() }));
 function report(owner: string | undefined, kind: keyof Headings, heading: ScreenHeading | null): void {
   if (owner === undefined) { useHeading.setState({ [kind]: heading }); return; }
@@ -75,19 +84,21 @@ export function forgetScreenHeading(owner: string): void {
 export function useRouteHeading(heading: ScreenHeading): void {
   const instance = useViewInstance();
   const owner = instance?.id;
-  const { title, tabTitle, tabPending, icon, nodeId, leaf, target } = heading;
+  const { title, tabTitle, tabPending, icon, nodeId, leaf, target, section, trail } = heading;
   const presented = JSON.stringify(heading.thread ?? null);
   const path = JSON.stringify(heading.path ?? null);
   const views = JSON.stringify(heading.views ?? null);
+  const ancestry = trail === undefined ? '' : JSON.stringify(trail);
   const targetKind = target?.kind, targetId = target?.id;
   usePageTitle(useNodeLabel(nodeId, title), instance === null);
   useEffect(() => {
-    const route: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, ...(tabPending === undefined ? {} : { tabPending }),
+    const route: ScreenHeading = { thread: presented === 'null' ? undefined : JSON.parse(presented) as ThreadIconFacts, title, tabTitle, icon, nodeId, leaf, section,
+      trail: ancestry === '' ? undefined : JSON.parse(ancestry) as readonly TrailPart[], ...(tabPending === undefined ? {} : { tabPending }),
       path: path === 'null' ? undefined : JSON.parse(path) as ScreenHeading['path'], views: views === 'null' ? undefined : JSON.parse(views) as ScreenHeading['views'],
       target: targetKind === undefined || targetId === undefined ? undefined : { kind: targetKind, id: targetId } };
     report(owner, 'route', route);
     return () => { if (owner === undefined && useHeading.getState().route === route) report(owner, 'route', null); };
-  }, [title, tabTitle, tabPending, icon, nodeId, leaf, presented, path, views, targetKind, targetId, owner]);
+  }, [title, tabTitle, tabPending, icon, nodeId, leaf, section, ancestry, presented, path, views, targetKind, targetId, owner]);
 }
 
 /** Says what the screen in view is, for as long as the calling component is in view. */
@@ -99,7 +110,8 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
   const targetKind = target?.kind;
   const targetId = target?.id;
   // The browser's tab names a place with where it is when another place the reader sees has its name.
-  usePageTitle(useNodeLabel(nodeId, title), enabled && instance === null);
+  const ownsBrowserTitle = enabled && instance === null;
+  usePageTitle(useNodeLabel(ownsBrowserTitle ? nodeId : null, title), ownsBrowserTitle);
   // A trail is made again by every draw of the screen; what it says is what counts, so it is compared by that.
   const said = trail === undefined ? '' : JSON.stringify(trail);
   const availability = views === undefined ? '' : JSON.stringify(views);
@@ -122,15 +134,16 @@ export function useScreenHeading(heading: ScreenHeading, enabled = true): void {
 /** What the screen in view said of itself, or `null` while it has said nothing. */
 export function useCurrentHeading(): ScreenHeading | null {
   const instance = useViewInstance();
-  return useHeading((state) => {
+  const held = useHeading(useShallow((state) => {
     const owner = instance === null ? state.focused : instance.headingOwner;
-    const held = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
-    return held?.route ?? held?.heading ?? null;
-  });
+    const current = owner === null ? (instance === null ? state : null) : state.byView.get(owner);
+    return { route: current?.route ?? null, heading: current?.heading ?? null };
+  }));
+  return useMemo(() => resolvedHeading(held), [held]);
 }
 
 /** The current availability for non-React commands and view offers. */
-export function currentHeading(): ScreenHeading | null { const state = useHeading.getState(); const held = state.focused === null ? state : state.byView.get(state.focused); return held?.route ?? held?.heading ?? null; }
+export function currentHeading(): ScreenHeading | null { const state = useHeading.getState(); const held = state.focused === null ? state : state.byView.get(state.focused); return resolvedHeading(held); }
 
 /** A new addressed page must not inherit the previous page's names or availability. */
 export function clearScreenHeading(): void { useHeading.setState({ heading: null, route: null }); }

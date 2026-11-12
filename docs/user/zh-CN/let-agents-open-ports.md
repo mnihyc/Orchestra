@@ -7,6 +7,7 @@ heading_id.允许后续开放: allow-later-openings
 heading_id.把链接当作秘密: treat-links-as-secrets
 heading_id.理解向外连接: understand-the-outbound-path
 heading_id.在环境内的程序中读取端口: read-ports-from-a-program-inside-the-environment
+summary: 选择哪些人可访问环境服务，以及代理可申请哪些端口开放方式。
 ---
 
 # 让代理无需询问即可开放端口

@@ -58,6 +58,12 @@ export function notificationText(row: Notification, t: TFunction, language: stri
   const details = row.details;
   const structured = details?.v === ACTION_VERSION && details.action === row.kind;
   const data = fields(structured ? details.parameters : row.data);
+  if (row.kind === 'admin_message' && (structured || details === null || details === undefined)) {
+    const caption = typeof data.org_name === 'string' && data.org_name !== ''
+      ? t('adminMessages.fromOrg', { org: data.org_name })
+      : typeof data.org_id === 'string' ? t('adminMessages.fromAdmins') : t('adminMessages.fromSystem');
+    return { title: row.title, body: caption };
+  }
   if (isPersonNotice(row.kind) && (structured || details === null || details === undefined)) {
     const action = t('inbox.actions.personNotify');
     const subject = typeof data.subject === 'string' ? data.subject : '';

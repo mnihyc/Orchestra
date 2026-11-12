@@ -101,22 +101,25 @@ export async function waitUntilSaved(page: Page): Promise<void> {
   await expect(saveState(page)).toHaveAttribute('data-save', 'saved');
 }
 
-/** Puts the caret at the end of the line that has these words, by pressing in it, and waits until it is there: a page still settling can move it after the press. */
+/** Puts the caret at the end of the line that has these words, by pressing in it, and waits until it is there: a page still settling can move it after the press, so the press is made again until the caret stays. */
 export async function caretAtEndOf(page: Page, words: string | RegExp): Promise<void> {
   const line = lineOf(page, words);
-  await line.click();
-  await page.keyboard.press('End');
   await expect
-    .poll(() =>
-      line.evaluate((element) => {
-        const selection = element.ownerDocument.getSelection();
-        if (selection === null || selection.rangeCount === 0 || !element.contains(selection.anchorNode)) return false;
-        const range = selection.getRangeAt(0);
-        const after = element.ownerDocument.createRange();
-        after.selectNodeContents(element);
-        after.setStart(range.endContainer, range.endOffset);
-        return after.toString() === '';
-      }),
+    .poll(
+      async () => {
+        await line.click();
+        await page.keyboard.press('End');
+        return line.evaluate((element) => {
+          const selection = element.ownerDocument.getSelection();
+          if (selection === null || selection.rangeCount === 0 || !element.contains(selection.anchorNode)) return false;
+          const range = selection.getRangeAt(0);
+          const after = element.ownerDocument.createRange();
+          after.selectNodeContents(element);
+          after.setStart(range.endContainer, range.endOffset);
+          return after.toString() === '';
+        });
+      },
+      { intervals: [0, 250, 500, 1000, 2000] },
     )
     .toBe(true);
 }

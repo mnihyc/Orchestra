@@ -147,6 +147,7 @@ struct State {
     protected: BTreeMap<u32, i64>,
     environments: HashMap<(u32, i64), BTreeMap<String, String>>,
     held: Vec<Held>,
+    suspensions: BTreeMap<Id, Vec<Held>>,
 }
 
 /// What `suspend` held still, so that `resume` lets go of exactly that.
@@ -165,6 +166,8 @@ struct SavedProcesses {
     roots: BTreeMap<u32, Root>,
     seen: BTreeMap<u32, i64>,
     held: Vec<Held>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    suspensions: BTreeMap<Id, Vec<Held>>,
 }
 
 /// The processes of one environment.
@@ -215,6 +218,7 @@ impl Processes {
             protected: BTreeMap::new(),
             environments: HashMap::new(),
             held: Vec::new(),
+            suspensions: BTreeMap::new(),
         };
         Self {
             inner: Arc::new(Inner {
@@ -246,6 +250,12 @@ impl Processes {
                 state.roots = saved.roots;
                 state.seen = saved.seen;
                 state.held = saved.held;
+                state.suspensions = saved.suspensions;
+                let held = state.held.clone();
+                state.suspensions.retain(|owner, items| {
+                    items.retain(|item| held.contains(item));
+                    !owner.is_nil() && !items.is_empty()
+                });
                 *this
                     .inner
                     .launcher
@@ -286,6 +296,7 @@ impl Processes {
             roots: state.roots.clone(),
             seen: state.seen.clone(),
             held: state.held.clone(),
+            suspensions: state.suspensions.clone(),
         })
         .map_err(|error| {
             HostError::Internal(format!("writing the suspended-process journal: {error}"))
@@ -1151,6 +1162,20 @@ impl Processes {
     /// so that the files stand still while they are copied. Says how many
     /// processes were held. Where the platform cannot, it says so.
     pub fn suspend(&self) -> Result<i64> {
+        self.suspend_for(None)
+    }
+
+    /// Holds exact native process identities for this actual job. Intent is durable before STOP.
+    pub fn suspend_owned(&self, owner: Id) -> Result<i64> {
+        if owner.is_nil() {
+            return Err(HostError::Unsupported(
+                "a suspension needs its native job identity".into(),
+            ));
+        }
+        self.suspend_for(Some(owner))
+    }
+
+    fn suspend_for(&self, owner: Option<Id>) -> Result<i64> {
         if !platform::CAN_SUSPEND {
             return Err(HostError::Unsupported(
                 "this platform cannot hold processes still".to_owned(),
@@ -1179,7 +1204,12 @@ impl Processes {
                 })
                 .collect();
             if pending.is_empty() {
-                let held = self.state().held.clone();
+                let state = self.state();
+                let held = match owner {
+                    Some(owner) => state.suspensions.get(&owner).cloned().unwrap_or_default(),
+                    None => state.held.clone(),
+                };
+                drop(state);
                 return Ok(i64::try_from(
                     rows.iter()
                         .filter(|row| {
@@ -1200,6 +1230,15 @@ impl Processes {
                     if !state.held.contains(&item) {
                         state.held.push(item);
                     }
+                    // A running identity has escaped an earlier hold. A new STOP belongs
+                    // only to this native act, never to a prior owner's cleanup.
+                    state.suspensions.retain(|_, items| {
+                        items.retain(|saved| *saved != item);
+                        !items.is_empty()
+                    });
+                    if let Some(owner) = owner {
+                        state.suspensions.entry(owner).or_default().push(item);
+                    }
                 }
                 // Save the intent before STOP, so a crash at either side of the signal can resume it.
                 self.persist()?;
@@ -1217,22 +1256,56 @@ impl Processes {
 
     /// Lets go of what `suspend` held still. Says how many processes were let go.
     pub fn resume(&self) -> Result<i64> {
-        if !platform::CAN_SUSPEND {
+        self.resume_for(None)
+    }
+
+    /// Releases only this job's durable native held identities. Absence is a safe no-op.
+    pub fn resume_owned(&self, owner: Id) -> Result<i64> {
+        if owner.is_nil() {
             return Err(HostError::Unsupported(
-                "this platform cannot hold processes still".to_owned(),
+                "a resume needs its native job identity".into(),
             ));
         }
+        self.resume_for(Some(owner))
+    }
+
+    fn resume_for(&self, owner: Option<Id>) -> Result<i64> {
         let _operation = self
             .inner
             .suspension
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let held = self.state().held.clone();
+        if owner.is_some_and(|owner| {
+            self.state()
+                .suspensions
+                .get(&owner)
+                .is_none_or(Vec::is_empty)
+        }) {
+            return Ok(0);
+        }
+        if !platform::CAN_SUSPEND {
+            return Err(HostError::Unsupported(
+                "this platform cannot hold processes still".to_owned(),
+            ));
+        }
+        let state = self.state();
+        let held = match owner {
+            Some(owner) => state.suspensions.get(&owner).cloned().unwrap_or_default(),
+            None => state.held.clone(),
+        };
+        drop(state);
         let rows = self.rows();
         let visible = self.visible(&rows);
         let mut count = 0i64;
         for item in held {
-            if item.pid > 1
+            let held_by_another = owner.is_some_and(|owner| {
+                self.state()
+                    .suspensions
+                    .iter()
+                    .any(|(other, items)| *other != owner && items.contains(&item))
+            });
+            if !held_by_another
+                && item.pid > 1
                 && item.pid != platform::own_pid()
                 && visible.contains(&item.pid)
                 && rows
@@ -1244,7 +1317,18 @@ impl Processes {
                 count += 1;
             }
             // The identity ended, was reused or is outside this environment: forget it without a signal.
-            self.state().held.retain(|saved| *saved != item);
+            {
+                let mut state = self.state();
+                state.suspensions.retain(|saved_owner, items| {
+                    if owner.is_none_or(|owner| owner == *saved_owner) {
+                        items.retain(|saved| *saved != item);
+                    }
+                    !items.is_empty()
+                });
+                if !held_by_another {
+                    state.held.retain(|saved| *saved != item);
+                }
+            }
             self.persist()?;
         }
         Ok(count)

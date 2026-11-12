@@ -18,6 +18,7 @@ import { ReportFigure } from '@/features/usage/ReportFrame';
 import { cacheHitRate, costSegments, COST_LOOKS } from './context/fill';
 import { PartsBar, Swatch } from './context/PartsBar';
 import { TOKEN_KINDS } from './series';
+import {serviceUnitsWords} from './services';
 
 export function ChangeLine({ change, before }: { change: Change; before: string }) {
   const { t } = useTranslation();
@@ -90,7 +91,9 @@ export function Figures({ totals, previous, before, onRates }: FiguresProps) {
             )}
           </p>
         )}
+        {(totals.unrated_services??0)>0 && <p className="text-sm text-text-muted">{t('usage.serviceUnits.unpriced',{count:totals.unrated_services??0,value:formatNumber(totals.unrated_services??0,locale)})}</p>}
       </Tile>
+      {Object.keys(totals.service_units??{}).length>0 && <Tile label={t('usage.serviceUnits.title')} value={serviceUnitsWords(totals.service_units,t,locale)} change={{kind:'none'}} before={before} />}
     </ul>
   );
 }

@@ -1,7 +1,9 @@
 ---
+group: work
 title: Plan and goals
 screens: /thread/$threadId, /approvals, /org/$slug/settings/$section, /project/$projectId/settings, /admin/$section
 keywords: Plan, Proceed, Keep planning, plan mode, approval, read only, thread.plan_first, thread.plan_answered_by, goal, /goal, Done when, keep working, thread.goal.max_turns, thread.goal.max_minutes, thread.goal.max_credits, summary.handoff_input_share
+summary: Review an agent’s plan before changes and use goals to guide continued work.
 ---
 
 # Plan and goals
@@ -103,6 +105,10 @@ on until a limit is reached or you pause it; the line's chip says so on hover.
 Whoever may drive the thread sets, pauses, edits and clears its goal. Setting
 one also needs your own use of the thread's model, since each turn runs on your
 access. Each act is named in the conversation and in the audit trail.
+
+Archived threads and side threads cannot hold a goal. `/goal` and the thread
+menu keep the goal action visible with that reason. Unarchive a main thread
+before setting its goal; missing Interact access has its own reason.
 
 ## Plan and goal
 

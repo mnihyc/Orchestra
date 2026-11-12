@@ -339,7 +339,11 @@ impl Commands for SideGap {
     async fn observe(&self, command: Outgoing) -> Result<Outcome, CommandsError> {
         self.inner().observe(command).await
     }
-    async fn issue(&self, command: Outgoing) -> Result<(), CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<orch_engine::commands::BeforeCommand<'_>>,
+    ) -> Result<(), CommandsError> {
         if command.kind == CommandKind::SessionOpenFenced
             && command.body["thread_id"] != json!(self.parent)
             && command.body["session"]["mode"] != "resume"
@@ -349,7 +353,7 @@ impl Commands for SideGap {
                 *original = Some(command.clone());
             }
         }
-        self.inner().issue(command).await
+        self.inner().issue_prepared(command, before).await
     }
     async fn wait(&self, id: Id) -> Result<Outcome, CommandsError> {
         let outcome = self.inner().wait(id).await?;

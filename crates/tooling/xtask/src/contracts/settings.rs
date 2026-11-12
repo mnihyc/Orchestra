@@ -10,14 +10,26 @@ pub fn data() -> Result<Value, String> {
         let mut row = serde_json::to_value(def).map_err(|error| format!("{}: {error}", def.key))?;
         row["text_key"] = json!(format!("day100.builtin.{}", def.key));
         row["keywords"] = json!([]);
-        if let orch_settings_contract::registry::Schema::Int { unit, .. } = def.schema {
+        if let Some(unit) = def.numeric_unit() {
             let unit = if unit == orch_settings_contract::registry::Unit::Count {
                 "raw"
             } else {
                 unit.as_str()
             };
-            row["display"] = json!({ "unit": unit, "zero": def.zero_disables().then_some("off") });
+            let zero = if def.zero_means_no_limit() {
+                Some("no_limit")
+            } else {
+                def.zero_disables().then_some("off")
+            };
+            row["display"] = json!({ "unit": unit, "zero": zero });
         }
+        let _: orch_api_contract::settings::SettingDef = serde_json::from_value(row.clone())
+            .map_err(|error| {
+                format!(
+                    "{} does not meet the API settings contract: {error}",
+                    def.key
+                )
+            })?;
         rows.push(row);
     }
     Ok(Value::Array(rows))
@@ -44,6 +56,7 @@ mod tests {
         assert_eq!(rows.len(), defs.len());
         for (row, def) in rows.iter().zip(defs) {
             assert_eq!(row["key"], def.key);
+            assert_eq!(row["merge"], def.merge.as_str());
             assert_eq!(
                 row["example"],
                 def.example_value()

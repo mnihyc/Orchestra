@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "as_of": "2026-10-10",
+  "as_of": "2026-11-08",
   "unit": "USD",
   "families": [
     {
@@ -15,7 +15,9 @@
         "cache_write_per_mtok": "12.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "20",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -30,7 +32,9 @@
         "cache_write_per_mtok": "12.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "20",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -45,7 +49,9 @@
         "cache_write_per_mtok": "12.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "20",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -60,7 +66,9 @@
         "cache_write_per_mtok": "12.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "20",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -77,7 +85,9 @@
         "tiers": {
           "batch": "0.5",
           "fast": "2"
-        }
+        },
+        "cache_write_1h_per_mtok": "8",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -94,7 +104,9 @@
         "tiers": {
           "batch": "0.5",
           "fast": "2"
-        }
+        },
+        "cache_write_1h_per_mtok": "10",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -111,7 +123,9 @@
         "tiers": {
           "batch": "0.5",
           "fast": "2"
-        }
+        },
+        "cache_write_1h_per_mtok": "10",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -126,7 +140,9 @@
         "cache_write_per_mtok": "6.25",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "10",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -141,7 +157,9 @@
         "cache_write_per_mtok": "6.25",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "10",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -156,7 +174,9 @@
         "cache_write_per_mtok": "6.25",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "10",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -171,7 +191,9 @@
         "cache_write_per_mtok": "18.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "30",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -186,7 +208,9 @@
         "cache_write_per_mtok": "18.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "30",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -201,7 +225,9 @@
         "cache_write_per_mtok": "18.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "30",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -216,7 +242,9 @@
         "cache_write_per_mtok": "2.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "4",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -231,7 +259,9 @@
         "cache_write_per_mtok": "2.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "4",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -246,7 +276,9 @@
         "cache_write_per_mtok": "3.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "6",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -261,7 +293,9 @@
         "cache_write_per_mtok": "3.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "6",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -276,7 +310,9 @@
         "cache_write_per_mtok": "3.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "6",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -291,7 +327,9 @@
         "cache_write_per_mtok": "3.75",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "6",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -314,9 +352,12 @@
             "input_per_mtok": "0.5",
             "cached_input_per_mtok": "0.05",
             "output_per_mtok": "2.5",
-            "cache_write_per_mtok": "0.625"
+            "cache_write_per_mtok": "0.625",
+            "cache_write_1h_per_mtok": "1"
           }
-        ]
+        ],
+        "cache_write_1h_per_mtok": "0.2",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -331,7 +372,9 @@
         "cache_write_per_mtok": "1.25",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "2",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -346,7 +389,9 @@
         "cache_write_per_mtok": "1",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "1.6",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -362,7 +407,9 @@
         "cache_write_per_mtok": "5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "8",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -378,7 +425,9 @@
         "cache_write_per_mtok": "2.5",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "4",
+        "web_search_per_call": "0.01"
       }
     },
     {
@@ -394,15 +443,17 @@
         "cache_write_per_mtok": "0.125",
         "tiers": {
           "batch": "0.5"
-        }
+        },
+        "cache_write_1h_per_mtok": "0.2",
+        "web_search_per_call": "0.01"
       }
     },
     {
       "match": "gpt-6-astra*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "10",
         "cached_input_per_mtok": "1",
@@ -411,24 +462,29 @@
           "batch": "0.5",
           "flex": "0.5",
           "fast": "2",
-          "ultrafast": "6"
+          "ultrafast": "6",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "20",
             "cached_input_per_mtok": "2",
-            "output_per_mtok": "75"
+            "output_per_mtok": "75",
+            "cache_write_per_mtok": "25",
+            "cache_write_12h_per_mtok": "50"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "12.5",
+        "cache_write_12h_per_mtok": "25"
       }
     },
     {
       "match": "gpt-6.1-sol*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "2",
         "cached_input_per_mtok": "0.1",
@@ -437,14 +493,49 @@
           "batch": "0.5",
           "flex": "0.5",
           "fast": "2",
-          "ultrafast": "6"
+          "ultrafast": "6",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "4",
             "cached_input_per_mtok": "0.2",
-            "output_per_mtok": "15"
+            "output_per_mtok": "15",
+            "cache_write_per_mtok": "5",
+            "cache_write_12h_per_mtok": "10"
+          }
+        ],
+        "cache_write_per_mtok": "2.5",
+        "cache_write_12h_per_mtok": "5"
+      }
+    },
+    {
+      "match": "gpt-6.1-terra*",
+      "vendor": "OpenAI",
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
+      "rate": {
+        "input_per_mtok": "1",
+        "cached_input_per_mtok": "0.05",
+        "output_per_mtok": "5",
+        "cache_write_per_mtok": "1.25",
+        "cache_write_12h_per_mtok": "2.5",
+        "tiers": {
+          "batch": "0.5",
+          "flex": "0.5",
+          "fast": "2",
+          "priority": "2"
+        },
+        "above": [
+          {
+            "context_tokens": 272000,
+            "input_per_mtok": "2",
+            "cached_input_per_mtok": "0.1",
+            "output_per_mtok": "7.5",
+            "cache_write_per_mtok": "2.5",
+            "cache_write_12h_per_mtok": "5"
           }
         ]
       }
@@ -453,8 +544,8 @@
       "match": "gpt-6-luna*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "0.1",
         "cached_input_per_mtok": "0.01",
@@ -462,24 +553,29 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "0.2",
             "cached_input_per_mtok": "0.02",
-            "output_per_mtok": "0.75"
+            "output_per_mtok": "0.75",
+            "cache_write_per_mtok": "0.25",
+            "cache_write_12h_per_mtok": "0.5"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "0.125",
+        "cache_write_12h_per_mtok": "0.25"
       }
     },
     {
       "match": "gpt-6-sol*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "2",
         "cached_input_per_mtok": "0.2",
@@ -487,24 +583,29 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "4",
             "cached_input_per_mtok": "0.4",
-            "output_per_mtok": "15"
+            "output_per_mtok": "15",
+            "cache_write_per_mtok": "5",
+            "cache_write_12h_per_mtok": "10"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "2.5",
+        "cache_write_12h_per_mtok": "5"
       }
     },
     {
       "match": "gpt-5.6-sol*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "4",
         "cached_input_per_mtok": "0.4",
@@ -512,24 +613,29 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "8",
             "cached_input_per_mtok": "0.8",
-            "output_per_mtok": "30"
+            "output_per_mtok": "30",
+            "cache_write_per_mtok": "10",
+            "cache_write_12h_per_mtok": "20"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "5",
+        "cache_write_12h_per_mtok": "10"
       }
     },
     {
       "match": "gpt-5.6-terra*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "2",
         "cached_input_per_mtok": "0.2",
@@ -537,24 +643,29 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "4",
             "cached_input_per_mtok": "0.4",
-            "output_per_mtok": "18"
+            "output_per_mtok": "18",
+            "cache_write_per_mtok": "5",
+            "cache_write_12h_per_mtok": "10"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "2.5",
+        "cache_write_12h_per_mtok": "5"
       }
     },
     {
       "match": "gpt-5.6-luna*",
       "vendor": "OpenAI",
       "source": "https://developers.openai.com/api/docs/pricing",
-      "as_of": "2026-10-10",
-      "note": "A prompt over 272 000 tokens pays twice for input and one and a half times for output.",
+      "as_of": "2026-11-08",
+      "note": "A prompt over 272 000 tokens pays twice for input and cache and one and a half times for output.",
       "rate": {
         "input_per_mtok": "0.2",
         "cached_input_per_mtok": "0.02",
@@ -562,16 +673,21 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
             "context_tokens": 272000,
             "input_per_mtok": "0.4",
             "cached_input_per_mtok": "0.04",
-            "output_per_mtok": "1.8"
+            "output_per_mtok": "1.8",
+            "cache_write_per_mtok": "0.5",
+            "cache_write_12h_per_mtok": "1"
           }
-        ]
+        ],
+        "cache_write_per_mtok": "0.25",
+        "cache_write_12h_per_mtok": "0.5"
       }
     },
     {
@@ -602,7 +718,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2.5"
+          "fast": "2.5",
+          "priority": "2.5"
         },
         "above": [
           {
@@ -649,7 +766,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -665,7 +783,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -682,7 +801,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         },
         "above": [
           {
@@ -706,7 +826,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -737,7 +858,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -753,7 +875,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -769,7 +892,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -785,7 +909,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -801,7 +926,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -817,7 +943,8 @@
         "tiers": {
           "batch": "0.5",
           "flex": "0.5",
-          "fast": "2"
+          "fast": "2",
+          "priority": "2"
         }
       }
     },
@@ -1314,11 +1441,13 @@
       "vendor": "DeepSeek",
       "source": "https://api-docs.deepseek.com/quick_start/pricing",
       "as_of": "2026-10-10",
-      "note": "The peak price. Off-peak hours cost half, which a rate has no member for.",
+      "note": "The peak price. Off-peak hours cost half, which a rate has no member for. Successful native search and fetch fees are quoted separately at https://api-docs.deepseek.com/guides/search/ (2026-11-08).",
       "rate": {
         "input_per_mtok": "1.32",
         "cached_input_per_mtok": "0.044",
-        "output_per_mtok": "3.96"
+        "output_per_mtok": "3.96",
+        "web_search_per_call": "0.00075",
+        "web_fetch_per_call": "0.00075"
       }
     },
     {

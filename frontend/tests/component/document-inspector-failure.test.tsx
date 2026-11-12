@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-libra
 import { useRef } from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type * as Documents from '@/api/documents';
+import type * as NoticeJobs from '@/api/documentNoticeJobs';
 import type * as Router from '@tanstack/react-router';
 import { ApiError, client } from '@/api/client';
 import { commentDraftGuard, commentSlotKey, forgetCommentDraftDeviceData, getCommentDrafts, retireCommentDraftSession, setCommentText } from '@/features/documents/commentDrafts';
@@ -14,7 +15,7 @@ import { findTab, makeGroup } from '@/features/workbench/layout';
 import { panelTarget, setPanelScope } from '@/features/workbench/panelScope';
 import { useWorkbench } from '@/features/workbench/store';
 import { viewOf } from '@/features/workbench/views';
-import type { Document, DocumentBlock, DocumentDiscussion, DocumentSync } from '@/generated/api-types';
+import type { Document, DocumentBlock, DocumentDiscussion, DocumentSync, Job } from '@/generated/api-types';
 import { i18n } from '@/i18n';
 import { feeds, socket, useDocumentFeed } from '@/realtime/live';
 import type { FeedListener } from '@/realtime/socket';
@@ -23,9 +24,17 @@ import { World } from '../doubles/world';
 import { show } from './support';
 
 const calls = vi.hoisted(() => ({ read: vi.fn<typeof Documents.fetchDocumentSync>(), start: vi.fn<typeof Documents.startDiscussion>(),
-  reply: vi.fn<typeof Documents.answerDiscussion>(), edit: vi.fn<typeof Documents.editComment>() }));
+  reply: vi.fn<typeof Documents.answerDiscussion>(), edit: vi.fn<typeof Documents.editComment>(),
+  notices: vi.fn<(id: string, cursor: string | null) => Promise<{ items: Job[]; next_cursor: string | null }>>() }));
 vi.mock('@/api/documents', async (load) => ({ ...await load<typeof Documents>(), fetchDocumentSync: calls.read,
   startDiscussion: calls.start, answerDiscussion: calls.reply, editComment: calls.edit }));
+// Notification work is an independent read mounted after recovery, not the document follower.
+vi.mock('@/api/documentNoticeJobs', async (load) => {
+  const actual = await load<typeof NoticeJobs>();
+  return { ...actual, documentNoticeJobsQuery: (id: string, reader = 0) => ({ ...actual.documentNoticeJobsQuery(id, reader),
+    queryFn: ({ pageParam }: { pageParam: string | null }) => calls.notices(id, pageParam),
+  }) };
+});
 // An addressed inspector must never fall back to the unrelated browser route's document.
 vi.mock('@tanstack/react-router', async (load) => ({ ...await load<typeof Router>(), useParams: () => ({ documentId: 'route-only-document' }) }));
 
@@ -59,7 +68,7 @@ const noWrites = () => { expect(calls.start).not.toHaveBeenCalled(); expect(call
 
 beforeEach(() => {
   state().leave(); feeds.clear(); documentWriter.clear(); retireCommentDraftSession(); retireDocumentMarks(); localStorage.clear();
-  calls.read.mockReset(); calls.start.mockReset(); calls.reply.mockReset(); calls.edit.mockReset(); listeners.length = 0;
+  calls.read.mockReset(); calls.start.mockReset(); calls.reply.mockReset(); calls.edit.mockReset(); calls.notices.mockReset(); calls.notices.mockResolvedValue({ items: [], next_cursor: null }); listeners.length = 0;
   const world = new World(), person = world.people.get('ada');
   const stored = [...world.documents.docs.values()].find((value) => value.owner === 'ada' && !value.deleted);
   if (person === undefined || stored === undefined) throw new Error('A readable native document fixture is required.');
@@ -108,6 +117,8 @@ it.each(['comments', 'outline'] as const)('%s retries a transient native failure
   await screen.findByText('Confidential comment'); await panel('outline').findByText('Confidential heading');
   expect(calls.read.mock.calls.map(([id, since]) => [id, since])).toEqual([[doc.id, null], [doc.id, null]]);
   expect(first?.aborted).toBe(true); expect(listeners.map((entry) => entry.feed)).toEqual([`doc:${doc.id}`]);
+  expect(documentStateNow(doc.id).error).toBeNull();
+  expect(calls.notices).toHaveBeenCalledExactlyOnceWith(doc.id, null);
   expect(panel('comments').queryByRole('alert')).toBeNull(); expect(panel('outline').queryByRole('alert')).toBeNull(); noWrites();
 });
 
