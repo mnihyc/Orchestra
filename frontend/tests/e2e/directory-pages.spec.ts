@@ -65,7 +65,7 @@ test('a dirty late-page file follows a wide invalidation, and search opens its p
   await panel.getByRole('button', { name: 'Search the files', exact: true }).click();
   await panel.getByRole('textbox', { name: 'Search the files', exact: true }).fill('file-05006');
   await page.getByTestId('search-results').getByRole('button', { name: 'Open parent folder', exact: true }).click();
-  await expect(panel.getByRole('heading', { name: 'many/ in Workspace', exact: true })).toBeVisible();
+  await expect(panel.getByRole('heading', { name: 'Files · many/ in Workspace', exact: true })).toBeVisible();
   await expect(code).toContainText('unsaved');
   await panel.getByRole('button', { name: 'Restart directory listing', exact: true }).click();
   await expect(panel.getByText('Page 1', { exact: true })).toBeVisible();

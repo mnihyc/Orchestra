@@ -82,16 +82,14 @@ pub async fn page(
                 AND ($6::text IS NULL OR p->>'kind'=$6)
                 AND ($3='' OR orch_program_search_text(p->>'kind',p->'names') LIKE $3)
          ), picked AS (
-            SELECT * FROM kinds k WHERE
+            SELECT k.* FROM kinds k LEFT JOIN agent_program_kinds totals ON totals.kind=k.kind WHERE
                 EXISTS (SELECT 1 FROM jsonb_array_elements($1) p WHERE p->>'kind'=k.kind)
-                OR EXISTS (SELECT 1 FROM agents a WHERE a.harness_kind=k.kind AND a.deleted_at IS NULL)
-                OR EXISTS (SELECT 1 FROM agent_program_reports r WHERE r.kind=k.kind)
-                OR EXISTS (SELECT 1 FROM agent_program_builds b WHERE b.kind=k.kind)
-            ORDER BY kind LIMIT $5
+                OR COALESCE(totals.profile_count,0)>0 OR COALESCE(totals.machine_count,0)>0 OR COALESCE(totals.build_count,0)>0
+            ORDER BY k.kind LIMIT $5
          ) SELECT p.kind,p.manifest,d.descriptor,d.descriptor_overrides,
-             (SELECT count(*) FROM agents a WHERE a.harness_kind=p.kind AND a.deleted_at IS NULL) profiles,
-             (SELECT count(*) FROM agent_program_reports r WHERE r.kind=p.kind) machines
-         FROM picked p LEFT JOIN LATERAL (
+             COALESCE(totals.profile_count,0)::bigint profiles,
+             COALESCE(totals.machine_count,0)::bigint machines
+         FROM picked p LEFT JOIN agent_program_kinds totals ON totals.kind=p.kind LEFT JOIN LATERAL (
              SELECT descriptor,descriptor_overrides FROM agents a WHERE a.harness_kind=p.kind AND a.deleted_at IS NULL
                  AND a.descriptor IS NOT NULL AND a.descriptor<>'{}'::jsonb
              ORDER BY (org_id IS NULL AND machine_id IS NULL) DESC,updated_at DESC,created_at,id LIMIT 1

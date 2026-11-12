@@ -12,6 +12,7 @@ import { hostRuntimesQuery, removeHostRuntime, stopHostRuntime } from '@/api/res
 import { Hint } from '@/features/help/Hint';
 import type { Host, Runtime } from '@/generated/api-types';
 import { DetailPages } from '@/features/resources/DetailSections';
+import { runtimeDetail } from '@/features/resources/runtimeDetail';
 import { Section } from '@/shell/Page';
 import { Badge } from '@/ui/Badge';
 import { Button } from '@/ui/Button';
@@ -102,7 +103,7 @@ export function HostRuntimes({ host }: { host: Host }) {
     },
   });
 
-  if (list.isPending) return <SkeletonRows rows={4} />;
+  if (list.isPending) return <SkeletonRows read={list} rows={4} />;
   if (list.isError) return <ErrorState compact title={t('hosts.runtimes.title')} error={list.error} retrying={list.isRefetching} onRetry={() => void list.refetch()} />;
 
   const columns: Column<Runtime>[] = [
@@ -141,7 +142,7 @@ export function HostRuntimes({ host }: { host: Host }) {
       cell: (runtime) => (
         <span className="flex flex-col gap-1">
           <StatusDot tone={stateTone(runtime.state)} label={words(runtime.state)} showLabel />
-          {runtime.state_detail !== null && <span className="text-sm text-text-muted">{runtime.state_detail}</span>}
+          {runtime.state_detail !== null && <span className="text-sm text-text-muted">{runtimeDetail(runtime.state_detail, t)}</span>}
           {runtime.successor_of !== null && <span className="text-sm text-text-muted">{t('hosts.runtimes.successor')}</span>}
           {runtime.remove_at !== null && (
             <span className="text-sm text-text-muted">

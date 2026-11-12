@@ -1,7 +1,9 @@
 ---
+group: operations
 title: Move a project between orgs or deployments
 screens: /org/$slug, /project/$projectId, /topic/$topicId, /doc/$documentId, /settings/exports, /settings/imports, /thread/$threadId
 keywords: import, export, package, orch package, move, copy, project, org, deployment, archive, zip, undo, conflicts, people, plain files, markdown, 导入, 导出, 包, 移动, 项目, 撤销, 冲突
+summary: Export an Orch package and review its import into another organization or deployment.
 ---
 
 # Move a project between orgs or deployments

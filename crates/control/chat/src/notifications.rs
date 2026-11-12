@@ -124,7 +124,7 @@ pub async fn after_post(
     // The screens.
     if people_chat {
         let present = loaded.present();
-        chats::tell_members(conn, chat.id, message.seq_created, act.now, &present).await?;
+        chats::tell_members(conn, chat.id, act.now, &present).await?;
     }
     let mut changed: Vec<Id> = named_users.clone();
     changed.extend(brought_back);

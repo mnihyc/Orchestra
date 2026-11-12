@@ -10,7 +10,7 @@ import type { Job, RestorePlan, Snapshot, Thread } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ plans: [] as { snapshot: string; options: unknown }[], confirmed: [] as { preflight: string; key: string }[], job: null as Job | null, stale: false, snapshotReason: null as string | null }));
+const calls = vi.hoisted(() => ({ plans: [] as { snapshot: string; options: unknown; overwrite: string[] }[], confirmed: [] as { preflight: string; key: string }[], job: null as Job | null, stale: false, snapshotReason: null as string | null }));
 
 const environment = { id: 'env-1', name: 'Main', owner: { id: 'u1', username: 'ada', display_name: 'Ada Lovelace' } } as unknown as Thread['environment'];
 
@@ -28,6 +28,7 @@ function planFor(snapshotId: string, count: number): RestorePlan {
     { action: 'add', expected: 'none', later_change: null, later_writers: [], path: 'src/old.ts' },
   ];
   return {
+    form: calls.snapshotReason === null ? { kind: 'whole_directory' } : { kind: 'touched_files', count: 2, whole_unavailable: calls.snapshotReason },
     blockers: [], directory: 'web', environment: environment!, expires_at: '2026-10-14T10:15:00.000Z', generation: 1, ignore_fingerprint: 'i', ignored: ['node_modules'],
     namespace_fingerprint: 'n', options: { active_turn: 'wait', keep_previous: false, stop_processes: false, verify_timeout_secs: 60, wait_minutes: 10 },
     paths: paths.slice(0, count),
@@ -38,8 +39,8 @@ function planFor(snapshotId: string, count: number): RestorePlan {
 
 vi.mock('@/api/source', () => ({
   snapshotQuery: (id: string) => ({ queryKey: ['test-snapshot', id], queryFn: () => Promise.resolve(snapshot(id)) }),
-  planRestore: (_environment: string, snapshotId: string, options: unknown) => {
-    calls.plans.push({ snapshot: snapshotId, options });
+  planRestore: (_environment: string, snapshotId: string, options: unknown, overwrite: string[] = []) => {
+    calls.plans.push({ snapshot: snapshotId, options, overwrite });
     return Promise.resolve(planFor(snapshotId, 2));
   },
   restoreFiles: (_environment: string, preflight: string, key: string) => {
@@ -86,7 +87,9 @@ for (const locale of ['en', 'zh-CN'] as const) for (const theme of ['light', 'da
     calls.snapshotReason = reason;
     try {
       draw();
-      expect(await screen.findByText(i18n.t(key))).toBeVisible();
+      expect(await screen.findByText(i18n.t('source.restore.toolCoverage'))).toBeVisible();
+      expect(screen.getByText((text) => text.includes(i18n.t(key)), { selector: '[data-restore-form]' })).toBeVisible();
+      expect(calls.plans).toHaveLength(1);
       expect(screen.queryByText(new RegExp(reason))).not.toBeInTheDocument();
       expect(calls.confirmed).toHaveLength(0);
     } finally {
@@ -145,4 +148,25 @@ describe('a restore is planned before anything is written', () => {
     expect(await screen.findByRole('button', { name: 'Undo the restore' })).toBeInTheDocument();
     expect(calls.confirmed).toHaveLength(1);
   });
+});
+
+it.each(['en', 'zh-CN'] as const)('requires explicit touched-path overwrite and keeps it through fresh plans in %s', async (locale) => {
+  await setLocale(locale);
+  calls.snapshotReason = 'off';
+  try {
+    const user = userEvent.setup(); draw();
+    const confirm = await screen.findByRole('button', { name: i18n.t('source.restore.confirm') });
+    expect(confirm).toBeDisabled();
+    expect(screen.getByText(i18n.t('source.restore.toolCoverage'))).toBeVisible();
+    await user.click(screen.getByRole('checkbox', { name: i18n.t('source.restore.overwrite', { path: 'src/login.ts' }) }));
+    await waitFor(() => expect(calls.plans.at(-1)?.overwrite).toEqual(['src/login.ts']));
+    await user.click(await screen.findByRole('checkbox', { name: i18n.t('source.restore.overwrite', { path: 'src/old.ts' }) }));
+    await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('source.restore.confirm') })).toBeEnabled());
+    expect(calls.plans.at(-1)?.overwrite).toEqual(['src/login.ts', 'src/old.ts']);
+    calls.stale = true;
+    await user.click(screen.getByRole('button', { name: i18n.t('source.restore.confirm') }));
+    await user.click(await screen.findByRole('button', { name: i18n.t('source.restore.freshPlan') }));
+    await waitFor(() => expect(screen.getByRole('button', { name: i18n.t('source.restore.confirm') })).toBeEnabled());
+    expect(calls.plans.at(-1)?.overwrite).toEqual(['src/login.ts', 'src/old.ts']);
+  } finally { await setLocale('en'); }
 });

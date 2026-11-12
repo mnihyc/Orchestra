@@ -2,6 +2,10 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { useEffect, useMemo, useState } from 'react';
 import { usePageNavigate, usePageSearch } from '@/features/workbench/pageContext';
+import { OwnUploads } from '@/features/uploads/Inventory';
+import { PersonalFrame } from '@/features/settings/PersonalFrame';
+import { Button } from '@/ui/Button';
+import { useTranslation } from 'react-i18next';
 import { Storage } from '@/features/storage/Storage';
 import { Cleanup } from '@/features/storage/Cleanup';
 import { patchStorageSearch, readStorageSearch, type StorageSearch } from '@/features/storage/search';
@@ -21,6 +25,7 @@ function savedSearch(value: string): StorageSearch {
 }
 
 function Screen() {
+  const { t } = useTranslation();
   const search = usePageSearch(Route);
   const navigate = usePageNavigate(Route);
   const [kept, remember] = useViewChoice<string>('storage', 'filters', '{}');
@@ -32,6 +37,7 @@ function Screen() {
   useEffect(() => {
     if (!ignoreSaved && Object.keys(search).length === 0 && Object.keys(restored).length > 0) void navigate({ search: restored, replace: true });
   }, [ignoreSaved, navigate, restored, search]);
+  if (shown.view === 'uploads') return <PersonalFrame page="uploads" lead={null}><div className="flex min-w-0 flex-col gap-4"><div><Button size="sm" onClick={() => { const report: StorageSearch = { ...restored, view: 'report' }; setIgnoreSaved(true); void navigate({ search: report, replace: true }); }}>{t('storage.title')}</Button></div><OwnUploads /></div></PersonalFrame>;
   return <><Storage search={shown} onCleanup={setSelection} onReportReady={() => {
     const stored = {...shown};
     delete stored.cursor;

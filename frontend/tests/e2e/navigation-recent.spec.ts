@@ -1,8 +1,8 @@
 /** The shipping workbench carries Recent scope, reveals rows, slides hidden bars and retains tab pins. */
-import { expect, type Page, test } from '@playwright/test';
+import { expect, type Page, type Request, test } from '@playwright/test';
 import { writeFile } from 'node:fs/promises';
-import { ACME, PEOPLE, configureThread, emit, scenario, signIn } from './support.ts';
-import { agentMessage, turn } from '../doubles/thread-rows.ts';
+import { ACME, PEOPLE, bodySent, configureThread, emit, scenario, signIn } from './support.ts';
+import { recordedConversation } from '../doubles/recorded-conversation.ts';
 import { DOCS } from './documents-support.ts';
 
 test.beforeEach(async () => { await scenario(); });
@@ -73,20 +73,25 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
     // The Projects menu, rather than any row's menu, carries this complete listing state.
     await bar.getByRole('button', { name: 'View options', exact: true }).click();
     await page.getByRole('menuitem', { name: 'Open in Everything', exact: true }).click();
-    if (width === 400 && await bar.isVisible()) await page.locator('[data-container-choice="left:navigation"]').click();
     await expect(page).toHaveURL(/\/everything\?/);
     const address = new URL(page.url());
     expect(address.searchParams.get('parent')).toBe(ACME.web);
     expect(address.searchParams.get('arrangement')).toBe('recent');
     expect(address.searchParams.get('order')).toBe('active');
     const table = page.getByRole('treegrid', { name: 'Everything I can see' });
+    if (width === 400) {
+      const close = page.getByRole('dialog', { name: 'Navigation', exact: true }).getByRole('button', { name: 'Close', exact: true });
+      await expect(table.or(close).first()).toBeVisible();
+      if (await close.isVisible()) await close.click();
+    }
     await expect(table.locator(`a[href="/thread/${ACME.mainThread}"]`)).toBeVisible();
     await expect(table.getByRole('link', { name: /Baseline/ })).toHaveCount(0);
     if (width === 1440) {
       const first = table.locator('[data-everything-row]').first();
       const bounds = await first.boundingBox();
       expect(bounds?.height).toBeLessThanOrEqual(40);
-      expect(await table.getByRole('link').first().evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(24);
+      // The name link uses the current 28px small control line height.
+      expect(await table.getByRole('link').first().evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(28);
       const heading = page.locator('[data-workbench-bar="right"] [data-section-header]').first();
       await expect(heading).toBeVisible();
       expect((await heading.boundingBox())?.height).toBe(40);
@@ -166,21 +171,19 @@ for (const width of [1440, 400]) for (const theme of ['light', 'dark'] as const)
 
 test('Recent reports cold and warm frame reads against the shared opening goals without per-row reads', async ({ page }) => {
   await configureThread(ACME.mainThread, { reset: true });
-  const completed = '2026-10-15T10:00:01Z';
-  await emit(ACME.mainThread, { turns: [
-    { ...turn('recorded-one', { ordinal: 1, state: 'completed', inputId: 'input-one', completedAt: completed }), before_snapshot_id: 'copy-one' },
-    { ...turn('recorded-two', { ordinal: 2, state: 'completed', inputId: 'input-two', completedAt: completed }), before_snapshot_id: 'copy-two' },
-  ], items: [agentMessage('result-one', 'The first change is ready.', { turn: 'recorded-one' }), agentMessage('result-two', 'The second change is ready.', { turn: 'recorded-two' })] });
+  await emit(ACME.mainThread, recordedConversation());
   await page.setViewportSize({ width: 1440, height: 1000 });
   await signIn(page);
   await page.goto(`/thread/${ACME.mainThread}`);
   await expect(page.locator('[data-restore-turn]')).toHaveCount(2);
   await expect(page.locator('[data-main-area]').getByRole('heading', { name: 'Main thread', exact: true })).toBeVisible();
   const counts: Record<string, string[]> = {};
+  const warmSummaries: Request[] = [];
   let phase = '';
   page.on('request', (request) => {
     const url = new URL(request.url());
     if (phase !== '' && url.pathname.startsWith('/api/v1/') && url.pathname !== '/api/v1/ws') (counts[phase] ??= []).push(`${request.method()} ${url.pathname}${url.search}`);
+    if (phase === 'recent-warm' && request.method() === 'POST' && url.pathname === '/api/v1/summaries/batch') warmSummaries.push(request);
   });
   for (const arrangement of ['tree', 'recent'] as const) {
     let bar = await navigation(page, 1440);
@@ -205,7 +208,7 @@ test('Recent reports cold and warm frame reads against the shared opening goals 
     await page.waitForLoadState('networkidle');
     phase = '';
   }
-  // The frame goal includes admission and all visible metadata; a cache return asks nothing.
+  // Warm frame data is reused. Summary snapshots revalidate when their sole readers remount.
   const goals = { cold: 8, warm: 0 };
   const summary = Object.fromEntries(Object.entries(counts).map(([key, requests]) => [key, { total: requests.length, requests }]));
   const figures = JSON.stringify({ goals, summary }, null, 2);
@@ -214,7 +217,13 @@ test('Recent reports cold and warm frame reads against the shared opening goals 
   await test.info().attach('frame-requests', { body: figures, contentType: 'application/json' });
   expect(counts['recent-cold']?.length, figures).toBeLessThanOrEqual(goals.cold);
   expect((counts['recent-cold'] ?? []).filter((url) => url.startsWith('GET /api/v1/everything?'))).toHaveLength(1);
-  expect(counts['recent-warm']).toHaveLength(goals.warm);
+  expect((counts['recent-warm'] ?? []).filter((read) => read !== 'POST /api/v1/summaries/batch')).toHaveLength(goals.warm);
+  const targets = (await Promise.all(warmSummaries.map(async (request) =>
+    (await bodySent(request) as { targets: { kind: string; id: string }[] }).targets,
+  ))).flat();
+  expect(targets.map((target) => target.kind).sort()).toEqual(['chat', 'chat_title', 'thread']);
+  expect(targets.find((target) => target.kind === 'thread')?.id).toBe(ACME.mainThread);
+  expect(targets.find((target) => target.kind === 'chat_title')?.id).toBe(targets.find((target) => target.kind === 'chat')?.id);
   for (const request of [...(counts['recent-cold'] ?? []), ...(counts['recent-warm'] ?? [])]) {
     const thread = /^GET \/api\/v1\/threads\/([^/]+)/.exec(request)?.[1];
     if (thread !== undefined) expect(thread).toBe(ACME.mainThread);

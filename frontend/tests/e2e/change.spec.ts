@@ -1,9 +1,18 @@
 /** Changing what a thread runs on and where: a switch planned, blocked, carried out, failed and made again; a fork of a message in the middle; a side thread; an environment updated and moved; several threads at once. */
 import { expect, type Page, test } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
 
 import { RUNS_ON } from '../doubles/fixtures.ts';
-import { BUILD_HOST, change, conversation, HOST_ONE, MAIN, openBlocked, openHistory, shot, tabTo, wizard } from './change-support.ts';
-import { ACME, bodySent, scenario, signIn } from './support.ts';
+import { BLOCKED, BUILD_HOST, change, confirmNoAgentAccess, conversation, HOST_ONE, MAIN, openBlocked, openHistory, shot, tabTo, wizard } from './change-support.ts';
+import { ACME, bodySent, dropConnections, scenario, signIn, mainArea } from './support.ts';
+
+async function chooseSwitchDestination(page: Page, dialog: ReturnType<typeof wizard>) {
+  const pair = dialog.getByRole('combobox', { name: 'Agent and provider', exact: true });
+  await pair.click();
+  await pair.fill('OpenAI key');
+  await page.getByRole('option', { name: /Codex.*OpenAI key/, disabled: false }).first().click();
+  await expect(pair).toHaveValue(/Codex.*OpenAI key/);
+}
 
 test.beforeEach(async () => {
   await scenario();
@@ -18,8 +27,9 @@ test('a switch of a blocked thread: planned, a blocker resolved in the dialog, c
   await expect(dialog).toBeVisible();
 
   // The plan is made for the provider that can take it: what changes, what stays, what ends.
-  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toContainText('OpenAI key');
-  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toContainText('Codex');
+  await chooseSwitchDestination(page, dialog);
+  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toHaveValue(/OpenAI key/);
+  await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toHaveValue(/Codex/);
   await expect(dialog.getByRole('list', { name: 'Steps' })).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
   await shot(page, 'switch-2-plan');
@@ -71,6 +81,7 @@ test('a switch that fails in its checks says where, why, and what was undone, an
   await openBlocked(page);
   await page.getByRole('button', { name: 'Switch provider…' }).click();
   const dialog = wizard(page, 'Switch “Main thread”');
+  await chooseSwitchDestination(page, dialog);
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
   // The new side does not pass its checks: what it had made is taken away.
@@ -110,19 +121,40 @@ test('a plan that is more than fifteen minutes old is not carried out: it is mad
   const dialog = wizard(page, 'Switch “Main thread”');
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
+  if (await page.getByRole('listbox').first().isVisible()) await page.keyboard.press('Escape');
+
   // The page knows the plan is old: it says so, and will not carry it out until it is made again.
   await page.clock.fastForward('16:00');
   await change.clock(16);
   await expect(dialog.getByText('This plan is out of date')).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeDisabled();
   await shot(page, 'expired-1-page');
-  await dialog.getByRole('button', { name: 'Make the plan again' }).click();
+  const renew = dialog.getByRole('button', { name: 'Make the plan again', exact: true });
+  await expect(renew).toBeVisible();
+  await expect(renew).toBeEnabled();
+  // The pickers above the notice open on focus, and the plan is made again when one of them closes: a walk forward from the
+  // first field never meets the notice. Its button stands between the History field and the report disclosure, so a person
+  // reaches it backwards from that disclosure.
+  await dialog.locator('summary', { hasText: 'What is kept, converted and dropped' }).focus();
+  await page.keyboard.press('Shift+Tab');
+  await expect(renew).toBeFocused();
+  await page.keyboard.press('Enter');
   await expect(dialog.getByText('This plan is out of date')).toHaveCount(0);
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
   // The server says it when the page did not know: the plan is made again and looked over before it is confirmed.
-  await change.expire();
+  const confirmationPath = /\/api\/v1\/threads\/[^/]+\/forks$/u;
+  let expireNext = true;
+  await page.route(confirmationPath, async (route) => {
+    if (expireNext && route.request().method() === 'POST') {
+      expireNext = false;
+      await change.expire();
+    }
+    await route.continue();
+  });
+  const expired = page.waitForResponse((response) => response.request().method() === 'POST' && confirmationPath.test(new URL(response.url()).pathname));
   await dialog.getByRole('button', { name: 'Switch', exact: true }).click();
+  expect((await expired).status()).toBe(409);
   await expect(dialog.getByText('The plan was older than 15 minutes and has been made again. Look it over, then confirm.')).toBeVisible();
   await shot(page, 'expired-2-server');
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
@@ -147,7 +179,7 @@ test('a fork from a message in the middle goes to a new environment with some of
   // A new environment, with only some of the files.
   await dialog.getByRole('combobox', { name: 'Environment', exact: true }).click();
   await page.getByRole('option', { name: 'Copy to new', exact: true }).click();
-  await expect(dialog.getByRole('combobox', { name: 'Place', exact: true })).toContainText('Automatic');
+  await expect(dialog.getByRole('combobox', { name: 'Place', exact: true })).toHaveValue('Automatic · host-1');
   await dialog.getByRole('radio', { name: 'By pattern', exact: true }).click();
   await dialog.getByRole('textbox', { name: 'Take these' }).fill('src/**');
   await expect(dialog.getByText('A new environment, Main thread environment, on host-1: yours')).toBeVisible();
@@ -158,6 +190,7 @@ test('a fork from a message in the middle goes to a new environment with some of
   await dialog.getByRole('button', { name: /^Options…/ }).click();
   await dialog.getByRole('textbox', { name: 'Name of the new thread' }).fill('Redirect experiment');
   await dialog.getByRole('radio', { name: /^Private/ }).click();
+  await confirmNoAgentAccess(dialog);
   await shot(page, 'fork-4-options');
 
   await dialog.getByRole('button', { name: 'Fork', exact: true }).click();
@@ -177,12 +210,12 @@ test('a side thread is asked from a message, answered inline and in its panel, a
   await openHistory(page);
   await conversation(page).getByText('Please fix it, and run the tests.').first().click({ button: 'right' });
   await page.getByRole('menuitem', { name: 'Side thread from here…' }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByText('Side mode: Enforced read-only files', { exact: true })).toBeVisible();
   await expect(ask.getByText('It starts from the conversation up to turn 1.')).toBeVisible();
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('Which tests cover the redirect?');
   await shot(page, 'side-1-ask');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
 
   // Where the thread screen places it: under the line that says it began, with its own box.
   const lane = conversation(page).getByRole('region', { name: /^Side thread/ });
@@ -232,6 +265,7 @@ test('a side thread is asked from a message, answered inline and in its panel, a
   await expect(keep.getByRole('region', { name: 'Changes', exact: true })).toContainText('The new thread will be yours');
   await expect(keep.getByRole('region', { name: 'Stays as it is', exact: true })).toContainText('The source thread is not touched');
   await shot(page, 'side-3-keep');
+  await confirmNoAgentAccess(keep);
   await keep.getByRole('button', { name: 'Keep as a thread', exact: true }).click();
   await change.finish();
   await expect(keep.getByText('The new thread is made, and it is yours.')).toBeVisible();
@@ -243,16 +277,16 @@ test('a side thread is asked from a message, answered inline and in its panel, a
 test('a thread with as many side threads open as it may have says so, and one is closed to ask again', async ({ page }) => {
   await openHistory(page);
   await change.sides(MAIN, 4);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).click();
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).click();
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await ask.getByRole('textbox', { name: 'What to ask' }).fill('One more question');
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask.getByText('Main thread has 4 side threads open')).toBeVisible();
   await expect(ask.getByText('Close one to start another.')).toBeVisible();
   await shot(page, 'side-5-limit');
   await ask.getByRole('list', { name: 'The open side threads' }).getByRole('button', { name: 'Close' }).first().click();
   await expect(ask.getByText('Main thread has 4 side threads open')).toHaveCount(0);
-  await ask.getByRole('button', { name: 'Ask', exact: true }).click();
+  await ask.getByRole('button', { name: 'Start side thread', exact: true }).click();
   await expect(ask).toHaveCount(0);
   await expect(conversation(page).getByText('One more question').first()).toBeVisible();
 });
@@ -269,7 +303,7 @@ test('an environment that is behind is brought up to date: its thread is told an
   await expect(dialog.getByRole('region', { name: 'Changes', exact: true })).toContainText('Exec node: 0.1.0 → 0.1.1');
   await expect(dialog.getByText('Image: orch-env-base:0.1.0 → orch-env-base:0.1.1')).toBeVisible();
   await expect(dialog.getByText('1 thread in it')).toBeVisible();
-  await expect(dialog.getByText('This environment and its 1 thread stop taking turns until it is done.')).toBeVisible();
+  await expect(dialog.getByText(english.change.env.lock_one, { exact: true })).toBeVisible();
   await shot(page, 'update-1-plan');
 
   // The threads are told first, then held while the new unit takes over.
@@ -294,7 +328,7 @@ test('a move of an environment to another host is cancelled before its commit: w
   await signIn(page);
   await page.goto(`/resources/environments/${SANDBOX}`);
   await page.getByRole('button', { name: 'Actions for Sandbox' }).click();
-  await page.getByRole('menuitem', { name: 'Move…', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Move to another machine…', exact: true }).click();
   const dialog = wizard(page, 'Move Sandbox');
   await expect(dialog).toBeVisible();
   await dialog.getByRole('combobox', { name: 'Place', exact: true }).click();
@@ -315,7 +349,8 @@ test('a move of an environment to another host is cancelled before its commit: w
   await expect(dialog.getByText('Everything it had made was removed. Sandbox is as it was before.')).toBeVisible();
   await shot(page, 'move-4-cancelled');
   await dialog.getByRole('button', { name: 'Close' }).last().click();
-  await expect(page.getByText('On host host-1')).toBeVisible();
+  // Placement is now the structured Runs fact, using the same exact host identity.
+  await expect(mainArea(page).getByRole('definition').getByRole('button', { name: 'host-1', exact: true })).toBeVisible();
 });
 
 /** The menu of a topic in the tree of places: its entries are looked for in the tree, where each place has its own. */
@@ -330,9 +365,11 @@ test('the threads of a topic are switched together: the one that cannot be is na
   await signIn(page);
   await page.goto(`/topic/${ACME.fixLogin}`);
   await openTopicMenu(page, 'Fix login');
-  await page.getByRole('menuitem', { name: 'Switch provider for all threads…' }).click();
+  await page.getByRole('menuitem', { name: english.change.menu.switchTopic, exact: true }).click();
   const dialog = wizard(page, 'Switch the threads of “Fix login”');
-  await expect(dialog.getByRole('combobox', { name: 'Provider', exact: true })).toContainText('Choose a provider');
+  const provider = dialog.getByRole('combobox', { name: 'Provider', exact: true });
+  await expect(provider).toHaveValue('');
+  await expect(provider).toHaveAttribute('placeholder', english.change.batch.chooseProvider);
   await expect(dialog.getByRole('combobox', { name: 'Agent', exact: true })).toBeDisabled();
   await expect(dialog.getByRole('combobox', { name: 'Model', exact: true })).toBeDisabled();
   await expect(dialog.getByRole('checkbox', { name: 'Main thread' })).toBeChecked();
@@ -369,7 +406,7 @@ test('a batch is watched while it runs, counts the threads that its reader canno
   await signIn(page);
   await page.goto(`/resources/environments/${RUNS_ON.workspace}`);
   await page.getByRole('tab', { name: /^Threads/ }).click();
-  await page.getByRole('button', { name: "Switch every thread's provider…" }).click();
+  await page.getByRole('button', { name: english.change.env.menu.moveThreads, exact: true }).click();
   const dialog = wizard(page, 'Switch the threads in “Workspace”');
   await expect(dialog.getByText('1 more that you cannot see')).toBeVisible();
   await dialog.getByRole('combobox', { name: 'Provider' }).click();
@@ -421,14 +458,17 @@ test('what is idle on a host is listed exactly as it will be stopped, and stoppe
   await shot(page, 'recycle-2-stopped');
 });
 
-test('a fork is made from the keyboard alone: the menu, the choices, the confirmation, the way to the new thread', async ({ page }) => {
+test('a duplicate is made from the keyboard alone: the menu, the choices, the confirmation, the way to the new thread', async ({ page }) => {
   await openHistory(page);
   await page.locator('[data-thread-header]').getByRole('button', { name: 'Actions for Main thread', exact: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page.getByRole('menu')).toBeVisible();
-  // The header's Fork to action opens the choices this keyboard flow exercises.
-  await page.keyboard.press('Escape');
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Fork to…', exact: true }).focus();
+  // Duplicate to hands the thread to the native Fork wizard, including its Fork confirmation.
+  const duplicate = page.locator('[data-thread-header]').getByRole('button', { name: 'Duplicate to…', exact: true });
+  if (await duplicate.isVisible()) {
+    await page.keyboard.press('Escape');
+    await duplicate.focus();
+  } else await page.getByRole('menuitem', { name: 'Duplicate to…', exact: true }).focus();
   await page.keyboard.press('Enter');
   const dialog = wizard(page, 'Fork “Main thread”');
   await expect(dialog).toBeVisible();
@@ -446,8 +486,18 @@ test('a fork is made from the keyboard alone: the menu, the choices, the confirm
   }
   await page.keyboard.press('Enter');
   await expect(history).toContainText('None');
+  await expect(dialog.getByRole('region', { name: 'Changes', exact: true })).toContainText('History: none, a fresh start');
+
+  // The native creation gate requires an explicit confirmation even for Nothing; keep this path keyboard-only.
+  const access = dialog.getByRole('region', { name: english.agentAccess.title, exact: true });
+  await access.getByRole('button', { name: english.agentAccess.change, exact: true }).focus();
+  await page.keyboard.press('Enter');
+  await expect(access.getByRole('combobox', { name: english.agentAccess.scope, exact: true })).toContainText(english.agentAccess.where.nothing);
+  await tabTo(page, english.agentAccess.confirm);
+  await page.keyboard.press('Enter');
 
   // Confirmed with the key that presses a button, and the job is followed to the way into the new thread.
+  await expect(dialog.getByRole('button', { name: 'Fork', exact: true })).toBeEnabled();
   await tabTo(page, 'Fork');
   await page.keyboard.press('Enter');
   await expect(dialog.getByText('Forking “Main thread”')).toBeVisible();
@@ -467,6 +517,10 @@ test('a switch is planned, confirmed and hidden from the keyboard alone, and Esc
   await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
 
   // Escape leaves it: nothing was started.
+  if (await page.getByRole('listbox').first().isVisible()) {
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeVisible();
+  }
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
   expect(await change.jobs()).toEqual([]);
@@ -488,9 +542,9 @@ test('a switch is planned, confirmed and hidden from the keyboard alone, and Esc
 
 test('a side thread is asked, kept in view and closed from the keyboard alone', async ({ page }) => {
   await openHistory(page);
-  await page.locator('[data-thread-header]').getByRole('button', { name: 'Ask on the side…', exact: true }).focus();
+  await page.locator('[data-thread-header]').getByRole('button', { name: 'Side thread…', exact: true }).focus();
   await page.keyboard.press('Enter');
-  const ask = page.getByRole('dialog', { name: 'Ask on the side' });
+  const ask = page.getByRole('dialog', { name: 'Side thread' });
   await expect(ask.getByRole('textbox', { name: 'What to ask' })).toBeFocused();
   await page.keyboard.type('Is the redirect covered?');
   await page.keyboard.press('Enter');
@@ -523,8 +577,8 @@ test('a composer aside with a lost reply retries its original act after navigati
   try {
     await box.fill(original);
     await page.getByRole('button', { name: 'More ways to send', exact: true }).click();
-    await page.getByRole('menuitem', { name: 'Ask on the side', exact: true }).click();
-    const retry = page.getByRole('button', { name: 'Retry aside', exact: true });
+    await page.getByRole('menuitem', { name: 'Side thread', exact: true }).click();
+    const retry = page.getByRole('button', { name: 'Retry side thread', exact: true });
     await expect(retry).toBeVisible();
     await expect(box).toHaveValue(original);
     await box.fill(newer);
@@ -551,3 +605,77 @@ test('a composer aside with a lost reply retries its original act after navigati
     expect(bodies).toHaveLength(2);
   } finally { release(); }
 });
+
+// After a reconnect every read of a person's reach starts over, the thread's own among them (src/api/peopleChanges.ts), and the wizard of the
+// thread must stay what it is: the same dialog, its refusal told, its confirm button still holding the keyboard, and no picker open that nobody opened.
+// The connection is dropped at a chosen moment (the answer is held back until the page has read the thread again), not found by repetition.
+for (const width of [1440, 400]) for (const moment of ['after', 'while'] as const) {
+  test(`a refusal of Switch and its wizard survive the page reading the thread again after a reconnect, ${moment} the answer (${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openBlocked(page);
+    await page.getByRole('button', { name: 'Switch provider…' }).click();
+    const dialog = wizard(page, 'Switch “Main thread”');
+    const confirm = dialog.getByRole('button', { name: 'Switch', exact: true });
+    await expect(confirm).toBeEnabled();
+    if (await page.getByRole('listbox').first().isVisible()) await page.keyboard.press('Escape');
+    const notice = dialog.getByText('The plan was older than 15 minutes and has been made again. Look it over, then confirm.');
+    const readAgain = () => page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/nodes/${BLOCKED}`);
+    const settle = () => page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+    const forks = /\/api\/v1\/threads\/[^/]+\/forks$/u;
+    let refuse = true;
+    await page.route(forks, async (route) => {
+      if (route.request().method() !== 'POST' || !refuse) { await route.continue(); return; }
+      refuse = false;
+      await change.expire();
+      if (moment === 'while') { const answered = readAgain(); await dropConnections(); await answered; await settle(); }
+      await route.continue();
+    });
+    const refused = page.waitForResponse((response) => response.request().method() === 'POST' && forks.test(new URL(response.url()).pathname));
+    await confirm.click();
+    expect((await refused).status()).toBe(409);
+    if (moment === 'after') {
+      await expect(notice).toBeVisible();
+      const answered = readAgain(); await dropConnections(); await answered;
+    }
+    await settle();
+    await expect(notice).toBeVisible();
+    await expect(dialog).toBeVisible();
+    await expect(confirm).toBeFocused();
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(dialog.getByRole('combobox', { expanded: true })).toHaveCount(0);
+    // The person goes on: the plan is made again, and Switch carries it out.
+    await expect(confirm).toBeEnabled();
+    await confirm.click();
+    await expect(dialog.getByText('Switching to OpenAI key')).toBeVisible();
+  });
+}
+
+// The same for a switch that is under way, and for the failure it comes to: the job is the server's, and the wizard goes on showing it.
+for (const width of [1440, 400]) {
+  test(`a switch under way and the failure it comes to are kept when the page reads the thread again after a reconnect (${width})`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openBlocked(page);
+    await page.getByRole('button', { name: 'Switch provider…' }).click();
+    const dialog = wizard(page, 'Switch “Main thread”');
+    await chooseSwitchDestination(page, dialog);
+    await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
+    await change.fail('verify', 'verify_failed', 'the tools could not reach the new side', true);
+    await dialog.getByRole('button', { name: 'Switch', exact: true }).click();
+    await expect(dialog.getByText('Switching to OpenAI key')).toBeVisible();
+    const readAgain = page.waitForResponse((response) => response.request().method() === 'GET' && new URL(response.url()).pathname === `/api/v1/nodes/${BLOCKED}`);
+    await dropConnections();
+    await readAgain;
+    await page.evaluate(() => new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))));
+    await expect(dialog.getByText('Switching to OpenAI key')).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toHaveCount(0);
+    await change.finish();
+    await expect(dialog.getByRole('alert')).toContainText('The new side did not pass:');
+    // Tried again from the failure, it is the plan of the same choices.
+    await dialog.getByRole('button', { name: 'Try again' }).click();
+    // The plan view comes back with its first field in the keyboard's hand, which opens it, as it does whenever the plan is drawn.
+    await expect(page.getByRole('option', { name: /Codex.*OpenAI key/, selected: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog.getByRole('combobox', { name: 'Agent and provider', exact: true })).toHaveValue(/OpenAI key/);
+    await expect(dialog.getByRole('button', { name: 'Switch', exact: true })).toBeEnabled();
+  });
+}

@@ -17,7 +17,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await page.setViewportSize({ width, height: 1000 }); await page.emulateMedia({ colorScheme: theme });
     await signIn(page); await language(page, locale);
     const toggle = () => width === 400 ? page.locator('[data-container-choice="left:navigation"]') : page.getByRole('button', { name: /^(Left bar|左栏)$/, exact: true });
-    for (const path of ['/org/acme/settings/general', '/org/acme.research/settings/members', `/project/${ACME.web}/settings?section=tags`, `/topic/${ACME.fixLogin}?tab=settings&section=policies`]) {
+    for (const path of ['/org/acme/settings/general', '/org/acme.research/settings/members', `/project/${ACME.web}/settings?section=tags`, `/topic/${ACME.fixLogin}?tab=settings&section=defaults`]) {
       await page.goto(path);
       const frame = page.locator('[data-settings-frame]');
       const nav = frame.locator('[data-section-nav]');
@@ -33,11 +33,11 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
         await left.getByRole('button', { name: /^(Close|关闭)$/, exact: true }).press('Enter');
         await expect(frame).toBeVisible();
       }
-      const choose = async (id: 'general' | 'policies') => {
+      const choose = async (id: 'general' | 'defaults') => {
         const section = nav.locator(`[data-section-id="${id}"]`);
         const href = await section.getAttribute('href');
         if (href === null) throw new Error('The section has no native destination');
-        const destination = new URL(href, page.url()).href;
+        const destination = new URL(href, page.url());
         const picker = nav.getByRole('combobox');
         if (await picker.isVisible()) {
           const name = (await section.textContent())?.trim();
@@ -45,7 +45,20 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
           await picker.click();
           await page.getByRole('option', { name, exact: true }).click();
         } else { await section.focus(); await page.keyboard.press('Enter'); }
-        await expect(page).toHaveURL(destination);
+        // The canonical General address omits its default section and keeps paired list choices.
+        await expect(page).toHaveURL((url) => {
+          const actual = new URL(url);
+          if (actual.searchParams.get('_list') === 'true' && actual.searchParams.has('list')) {
+            actual.searchParams.delete('_list');
+            actual.searchParams.delete('list');
+          }
+          if (destination.searchParams.get('section') === 'general' && !actual.searchParams.has('section')) {
+            actual.searchParams.set('section', 'general');
+          }
+          actual.searchParams.sort();
+          destination.searchParams.sort();
+          return actual.href === destination.href;
+        });
         await expect(nav.locator('[aria-current="page"]')).toHaveCount(1);
         await expect(nav.locator(`[data-section-id="${id}"]`)).toHaveAttribute('aria-current', 'page');
       };
@@ -54,7 +67,7 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
       if (width === 1100) await toggle().click();
       await expect(page.locator('[data-workbench-bar="left"]:visible')).toHaveCount(0);
       await expect(page.locator('[data-settings-frame] [data-section-nav]:visible')).toHaveCount(1);
-      await choose('policies');
+      await choose('defaults');
       if (width === 1100) await toggle().click();
     }
     // A plain topic address returns to content and its tree, even after visiting Settings.
@@ -75,7 +88,8 @@ for (const width of [1100, 400]) for (const locale of ['en', 'zh-CN'] as const) 
     await expect(page.getByRole('menuitem', { name: /^(Copy link|复制链接)$/, exact: true })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /^(Hide|隐藏)$/, exact: true })).toBeVisible();
     await page.keyboard.press('Escape');
-    await left.getByRole('button', { name: /^(Add a view|添加视图)$/, exact: true }).click();
+    if (width === 400) await left.getByRole('button', { name: /^(Close|关闭)$/, exact: true }).press('Enter');
+    await page.locator('[data-screen-titlebar]').getByRole('button', { name: /^(Add a view|添加视图)$/, exact: true }).click();
     const chooser = page.getByRole('dialog', { name: /^(Views|视图)$/, exact: true });
     await expect(chooser.getByRole('heading', { name: /^(Views|视图)$/, exact: true })).toBeVisible();
     await expect(chooser.locator('[cmdk-group-heading], [data-choice-description], [data-choice-layout]')).toHaveCount(0);
@@ -104,7 +118,7 @@ test('the shown page offers Close and no Show, and layout toggles have short nam
   const title = page.locator('[data-screen-titlebar]');
   for (const name of ['Left bar', 'Bottom panel', 'Right bar']) await expect(title.getByRole('button', { name, exact: true })).toBeVisible();
   // A thread's tab is named with the topic it is in.
-  await page.getByRole('tab', { name: 'Main thread · Fix login', exact: true }).click({ button: 'right' });
+  await page.getByRole('tab', { name: /\bMain thread · Fix login$/ }).click({ button: 'right' });
   const menu = page.getByRole('menu');
   await expect(menu.getByRole('menuitem', { name: 'Show', exact: true })).toHaveCount(0);
   await expect(menu.getByRole('menuitem', { name: 'Close', exact: true })).toBeEnabled();

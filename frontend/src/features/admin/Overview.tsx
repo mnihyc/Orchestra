@@ -14,6 +14,7 @@ import { choiceOption } from '@/i18n/choices';
 
 import { systemQuery } from '@/api/admin';
 import { BannerEditor } from '@/features/admin/BannerEditor';
+import { MessagesSection } from '@/features/admin-messages/Sent';
 import { OverviewCharts } from '@/features/admin/Charts';
 import { Installation } from '@/features/admin/Installation';
 import { SPANS } from '@/features/admin/search';
@@ -25,7 +26,7 @@ import { cx } from '@/ui/cx';
 import { ErrorState } from '@/ui/ErrorState';
 import { RelativeTime } from '@/ui/RelativeTime';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Skeleton, SkeletonGroup } from '@/ui/Skeleton';
+import { Skeleton, SkeletonGroup, type SkeletonReads } from '@/ui/Skeleton';
 
 // A workbench pane may be much narrower than the window. Reflow the same cards within its
 // own container; the loading view uses the identical column rules.
@@ -91,9 +92,9 @@ function State({ system }: { system: SystemInfo }) {
   );
 }
 
-function Loading() {
+function Loading(props: SkeletonReads) {
   return (
-    <SkeletonGroup className="flex flex-col gap-6">
+    <SkeletonGroup {...props} className="flex flex-col gap-6">
       <Skeleton className="h-4 w-1/3" />
       <div className={PART_GRID}>
         {[0, 1, 2, 3].map((at) => (
@@ -116,7 +117,7 @@ export function Overview({ search, onSearch }: SectionProps) {
   return (
     <div className="@container flex min-w-0 flex-col gap-6">
       {system.isPending ? (
-        <Loading />
+        <Loading read={system} />
       ) : system.isError ? (
         <ErrorState error={system.error} retrying={system.isRefetching} onRetry={() => void system.refetch()} />
       ) : (
@@ -144,6 +145,7 @@ export function Overview({ search, onSearch }: SectionProps) {
       <Section id="admin-banner" title={t('admin.overview.banner.title')} lead={t('admin.overview.banner.lead')}>
         <BannerEditor />
       </Section>
+      <MessagesSection scope={{ kind: 'system' }} />
     </div>
   );
 }

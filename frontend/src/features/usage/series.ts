@@ -7,7 +7,7 @@
 import type { TFunction } from 'i18next';
 
 import type { UsageAnalytics, UsageBucket, UsageDimension } from '@/generated/api-types';
-import { creditsState, measureOf } from '@/features/usage/figures';
+import { creditsState, isEmpty, measureOf } from '@/features/usage/figures';
 import { keyDetail, keyId, keyLabel, isRest } from '@/features/usage/keys';
 import type { Measure, Split } from '@/features/usage/search';
 import { DAY_MS, HOUR_MS } from '@/lib/time';
@@ -89,16 +89,16 @@ export function barsOf(analytics: UsageAnalytics, measure: Measure, split: Split
     return made;
   };
   const dimension: UsageDimension | null = split === 'none' || split === 'token_kind' ? null : split;
-  // What a stack made over the whole span: its credits and the tokens it used without a rate, to tell whether it is all use without one.
-  const overSpan = new Map<string, { credits: number; unrated: number; used: boolean }>();
+  // Retain price coverage separately from the measured sum, including unpriced service observations.
+  const overSpan = new Map<string, { credits: number; unrated: boolean; used: boolean }>();
   const take = (stack: Stack, at: number, figures: Parameters<typeof measureOf>[0]) => {
     const value = measureOf(figures, measure);
     stack.values[at] = (stack.values[at] ?? 0) + value;
     stack.total += value;
     const state = creditsState(figures);
     stack.unrated[at] = state.none;
-    const sofar = overSpan.get(stack.id) ?? { credits: 0, unrated: 0, used: false };
-    overSpan.set(stack.id, { credits: sofar.credits + state.sum, unrated: sofar.unrated + state.unrated, used: sofar.used || figures.turns > 0 || figures.tokens.total_tokens > 0 });
+    const sofar = overSpan.get(stack.id) ?? { credits: 0, unrated: false, used: false };
+    overSpan.set(stack.id, { credits: sofar.credits + state.sum, unrated: sofar.unrated || state.unrated > 0 || (figures.unrated_services??0)>0, used: sofar.used || !isEmpty(figures) });
   };
 
   analytics.series.forEach((point, at) => {
@@ -112,7 +112,7 @@ export function barsOf(analytics: UsageAnalytics, measure: Measure, split: Split
   });
   for (const stack of stacks.values()) {
     const whole = overSpan.get(stack.id);
-    stack.allUnrated = whole !== undefined && whole.used && whole.credits === 0 && whole.unrated > 0;
+    stack.allUnrated = whole !== undefined && whole.used && whole.credits === 0 && whole.unrated;
   }
 
   // The largest first, the rest of the members last, whatever they add up to.

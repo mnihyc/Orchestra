@@ -5,6 +5,7 @@ keywords: 资源库, 资源, 已提供给, 已使用, 热门, 我拥有的, 我�
 heading_id.选择视图: choose-a-view
 heading_id.阅读提供与使用统计: read-given-and-used
 heading_id.返回列表: return-to-a-list
+summary: 选择资源视图、查看共享和使用情况，并返回上次的列表状态。
 ---
 
 # 资源库

@@ -1,7 +1,9 @@
 ---
+group: access
 title: How approvals work
 screens: /thread/$threadId, /approvals, /resources/environments/$id, /topic/$topicId, /project/$projectId
 keywords: how do I approve, approvals, permission, request, approval.mode, approval.allowed_modes, requests.expiry_hours, ask, on request, auto, bypass, reviewer, capability.policy, rules
+summary: Read a request’s effects and authority before approving work or changing a boundary.
 ---
 
 # How approvals work
@@ -24,8 +26,16 @@ The place's allowed modes and the environment's boundaries still apply.
 proves its model, permissions and behavior for that program and provider. An
 allowed action runs; a denied one does not, and the reported review shows its
 model and outcome in the thread. Auto is never the default. Its reviewer may
-use another model and consume provider use; separately reported use belongs
-to the thread, and otherwise remains inside the agent program's totals.
+use another model and consume provider use. Separately reported review usage
+belongs to the thread. When it is not reported separately, displayed totals are
+those reported by the agent program; they do not establish the reviewer's usage.
+
+Codex 0.167.0 offers Auto when its installed build passes the native compatibility
+check and your provider access permits the selected reviewer model. For a forwarded
+session, the admitted catalogue contains the thread's model, so Codex reviews with
+that model. A native sign-in keeps its declared preferred reviewer. The thread shows
+the selected model; a name supplied by Codex is marked as reported. An action that
+needs no approval runs without an extra review. Claude Code's Auto remains unavailable.
 
 **Bypass** lets the agent do anything in its environment without asking; whoever chooses it answers for it.
 It requires another boundary that confines the agent and a program running without

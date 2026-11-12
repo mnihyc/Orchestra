@@ -17,6 +17,7 @@ import { useTreeEntry } from '@/features/documents/useTreeEntry';
 import { documentMetadataRefused, documentWithPlacement } from '@/features/documents/placementView';
 import { DocumentsContext, FolderContext } from '@/features/documents/FolderContext';
 import { nodeQuery, orgBySlugQuery } from '@/api/nodes';
+import type { UsageParams } from '@/api/usage';
 import { isFolderPath } from '@/features/navigation/places';
 import { isThreadForScreen } from '@/features/thread/cached';
 import { allTabs } from '@/features/workbench/layout';
@@ -30,7 +31,9 @@ import { useCurrentHeading, useRouteHeading } from '@/shell/screen';
 import { useSettingsTabTitle } from '@/features/workbench/settingsTabTitle';
 import { sectionLabel } from '@/features/settings/sectionLabels';
 import { settingsNavigation } from '@/features/settings/navigation';
+import { useDefaultsOpening } from '@/features/settings/defaultsOpening';
 import { orgPageTitle } from '@/features/org/title';
+import { useUsageBoardParams, useWeeklyUsageParams } from '@/features/usage/Board';
 
 function ThreadContext({ id, continuation }: { id: string; continuation: string | null }) {
   const { t } = useTranslation();
@@ -55,11 +58,26 @@ function ThreadContext({ id, continuation }: { id: string; continuation: string 
   return null;
 }
 
-function NodeContext({ id, kind, settings, settingsSection = 'general' }: { id: string; kind: 'org' | 'project' | 'topic'; settings: boolean; settingsSection?: string | undefined }) {
+interface NodeContextProps { id: string; kind: 'org' | 'project' | 'topic'; settings: boolean; overview?: boolean; settingsSection?: string | undefined }
+function NodeContext(props: NodeContextProps) {
+  if (props.overview && props.kind === 'project') return <WeeklyNodeContext {...props} />;
+  if (props.overview && props.kind === 'topic') return <TopicOverviewContext {...props} />;
+  return <ReadNodeContext {...props} />;
+}
+function WeeklyNodeContext(props: NodeContextProps) {
+  const usage = useWeeklyUsageParams(props.id);
+  return <ReadNodeContext {...props} usage={usage} />;
+}
+function TopicOverviewContext(props: NodeContextProps) {
+  const usage = useUsageBoardParams(props.id);
+  return <ReadNodeContext {...props} usage={usage} />;
+}
+function ReadNodeContext({ id, kind, settings, usage, settingsSection = 'general' }: NodeContextProps & { usage?: UsageParams }) {
   const { t } = useTranslation();
   const user = useStore(client.session, (state) => state.userId);
   const focusedContent = useContentFocused();
-  const query = useQuery(nodeQuery(id));
+  const opening = useDefaultsOpening(id);
+  const query = useQuery({ ...nodeQuery(id, usage), enabled: !opening.waiting });
   const node = !query.isError && query.data?.kind === kind ? query.data : undefined;
   const tabTitle = useSettingsTabTitle(sectionLabel(settingsSection, t), settings ? node : undefined);
   useRouteHeading({ title: settings ? t('screens.sections.settings') : node?.kind === 'org' ? orgPageTitle(node, t) : node?.name ?? t(`screens.${kind}.title`),
@@ -121,8 +139,8 @@ export function RouteContext() {
   const continuation = (location.search as Record<string, unknown>).continuation;
   if (/^\/thread\/[^/]+$/.test(path) && typeof params.threadId === 'string') return <ThreadContext key={path} id={params.threadId}
     continuation={typeof continuation === 'string' && continuation !== '' ? continuation : null} />;
-  if (/^\/project\/[^/]+$/.test(path) && typeof params.projectId === 'string') return <NodeContext key={path} id={params.projectId} kind="project" settings={false} />;
-  if (/^\/topic\/[^/]+$/.test(path) && typeof params.topicId === 'string') return <NodeContext key={path} id={params.topicId} kind="topic" settings={(location.search as Record<string, unknown>).tab === 'settings'} settingsSection={navigation?.kind === 'topic' ? navigation.current : undefined} />;
+  if (/^\/project\/[^/]+$/.test(path) && typeof params.projectId === 'string') return <NodeContext key={path} id={params.projectId} kind="project" settings={false} overview />;
+  if (/^\/topic\/[^/]+$/.test(path) && typeof params.topicId === 'string') return <NodeContext key={path} id={params.topicId} kind="topic" settings={(location.search as Record<string, unknown>).tab === 'settings'} overview={(location.search as Record<string, unknown>).tab === undefined || (location.search as Record<string, unknown>).tab === 'overview'} settingsSection={navigation?.kind === 'topic' ? navigation.current : undefined} />;
   if (/^\/org\/[^/]+$/.test(path) && typeof params.slug === 'string') return <OrgContext key={path} slug={params.slug} />;
   if (/^\/doc\/[^/]+$/.test(path) && typeof params.documentId === 'string') return <DocumentContext key={path} id={params.documentId} />;
   if (/^\/document-folder\/[^/]+$/.test(path) && typeof params.folderId === 'string') return <FolderContext key={path} id={params.folderId} />;
@@ -146,8 +164,8 @@ export function TargetContext({ target }: { target: PageTarget }) {
   if (route === '/resources/environments/$id/') return <EnvironmentContext id={pageParam(target, 'id')} />;
   if (route === '/thread/$threadId/') return <ThreadContext id={pageParam(target, 'threadId')} continuation={typeof search.continuation === 'string' ? search.continuation : null} />;
   if (route === '/doc/$documentId/') return <DocumentContext id={pageParam(target, 'documentId')} />;
-  if (route === '/project/$projectId/') return <NodeContext id={pageParam(target, 'projectId')} kind="project" settings={false} />;
-  if (route === '/topic/$topicId/') return <NodeContext id={pageParam(target, 'topicId')} kind="topic" settings={search.tab === 'settings'} settingsSection={navigation?.kind === 'topic' ? navigation.current : undefined} />;
+  if (route === '/project/$projectId/') return <NodeContext id={pageParam(target, 'projectId')} kind="project" settings={false} overview />;
+  if (route === '/topic/$topicId/') return <NodeContext id={pageParam(target, 'topicId')} kind="topic" settings={search.tab === 'settings'} overview={search.tab === undefined || search.tab === 'overview'} settingsSection={navigation?.kind === 'topic' ? navigation.current : undefined} />;
   if (route === '/org/$slug/') return <OrgContext slug={pageParam(target, 'slug')} />;
   if (route === '/document-folder/$folderId/') return <FolderContext id={pageParam(target, 'folderId')} />;
   if (route === '/documents/$nodeId/') return <DocumentsContext id={pageParam(target, 'nodeId')} />;

@@ -20,7 +20,7 @@ export function VncView() {
   const query = useQuery({ ...environmentQuery(id ?? ''), enabled: id !== null && allowed });
   if (state.kind === 'loading') return <SkeletonRows rows={4} />;
   if (!allowed) return <EmptyState compact className="h-full" icon={<MonitorPlay aria-hidden />} title={t('vnc.view.notAllowed')} />;
-  if (query.isPending) return <SkeletonRows rows={4} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={4} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   return <DisplaysPanel environment={query.data} threadId={threadId} />;
 }

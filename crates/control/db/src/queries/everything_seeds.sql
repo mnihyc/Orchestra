@@ -34,4 +34,4 @@ SELECT 'mcp_server', id FROM mcp_servers WHERE $1::uuid IS NULL AND deleted_at I
 UNION
 SELECT 'skill', id FROM skills WHERE $1::uuid IS NULL AND deleted_at IS NULL
 UNION
-SELECT 'chat', id FROM chats WHERE node_id IS NULL AND ($1::uuid IS NULL OR org_id = $1)
+SELECT 'chat', c.id FROM chats c JOIN nodes home ON home.id=COALESCE(c.home_id,c.org_id) WHERE c.node_id IS NULL AND ($1::uuid IS NULL OR home.path @> ARRAY[$1::uuid])

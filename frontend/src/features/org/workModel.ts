@@ -25,7 +25,7 @@ function isWaiting(node: TreeNode): boolean {
 
 /** A pending request uses the waiting glyph even while the rest of the agent keeps working. */
 export function workDisplayState(node: TreeNode): ThreadDisplayState | null {
-  return node.thread === null ? null : threadDisplayState(node.thread.display);
+  return node.thread === null ? null : threadDisplayState(node.thread.display) ?? null;
 }
 
 /** Visits provide order and personal identity, never permission or stale names/state after a revoke. */
@@ -66,6 +66,8 @@ export function orgWork(tree: OrgTree, orgId: string, visits: readonly NameHit[]
 export function workReason(node: TreeNode, t: TFunction): string {
   const thread = node.thread;
   if (thread === null) return '';
+  const state = threadDisplayState(thread.display);
+  if (state === undefined) return '—';
   const waiting = thread.waiting;
   if (waiting !== null && waiting !== undefined) {
     if (waiting.kind === 'answer') return t(waiting.for_caller ? 'places.org.work.yourAnswer' : 'places.org.work.answer');
@@ -93,5 +95,5 @@ export function workReason(node: TreeNode, t: TFunction): string {
   }
   if (threadDisplayState(thread.display) === 'waiting_approval') return t(thread.display.waiting_inputs > 0 ? 'day100.views.needsAttention' : 'places.org.work.approval');
   if (threadDisplayState(thread.display) === 'running') return t(thread.state === 'starting' ? 'places.org.work.starting' : 'places.org.work.running');
-  return t(`state.${threadDisplayState(thread.display)}`);
+  return t(`state.${state}`);
 }

@@ -58,14 +58,21 @@ struct RecoveredCommands {
 
 #[async_trait]
 impl crate::commands::Commands for RecoveredCommands {
-    async fn issue(&self, command: Outgoing) -> Result<(), crate::commands::CommandsError> {
+    async fn issue_prepared(
+        &self,
+        command: Outgoing,
+        before: Option<crate::commands::BeforeCommand<'_>>,
+    ) -> Result<(), crate::commands::CommandsError> {
         if command.id != self.expected.id {
-            return self.inner.issue(command).await;
+            return self.inner.issue_prepared(command, before).await;
         }
         if command != self.expected {
             return Err(crate::commands::CommandsError::Body(
                 "The recovered command identity/body/key/machine changed.".into(),
             ));
+        }
+        if let Some(check) = before {
+            check().map_err(crate::commands::CommandsError::BeforeEffect)?;
         }
         *self.issued.lock().unwrap_or_else(PoisonError::into_inner) = Some(command);
         self.server.on_cmd(self.command.clone()).await;
@@ -85,6 +92,8 @@ impl crate::commands::Commands for RecoveredCommands {
         if id == self.expected.id {
             Ok(Some(crate::commands::RetainedCommand {
                 machine: self.expected.machine,
+                kind: self.command.kind.clone(),
+                key: self.command.key.clone(),
                 body: self.expected.body.clone(),
             }))
         } else {
@@ -140,6 +149,17 @@ impl crate::commands::Commands for RecoveredCommands {
                 .await;
         }
         Ok(active)
+    }
+    async fn stopped(&self, id: Id) -> Result<bool, crate::commands::CommandsError> {
+        if id != self.expected.id {
+            return self.inner.stopped(id).await;
+        }
+        // This recovered Started command writes its real refusal only after
+        // CommandServer has joined the handler's interrupted cleanup.
+        Ok(self
+            .server
+            .entry(id)
+            .is_some_and(|entry| entry.result().is_some()))
     }
     fn hears_behind(&self, machine: Id, stream: &orch_link_contract::streams::Stream) -> bool {
         self.inner.hears_behind(machine, stream)
@@ -704,6 +724,8 @@ impl Fixture {
             thread_id: self.thread,
             actor_id: self.world.ada,
             authorization_token: None,
+            operation_origin: None,
+            byte_sources: Vec::new(),
             authorization_scope: None,
             request_hash: recipe::request_hash(&request)?,
             request,

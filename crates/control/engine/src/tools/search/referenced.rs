@@ -14,7 +14,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use orch_access_contract::pages::StoredKind;
 use orch_api_contract::documents::{BlockContent, Inline, InlineRefKind};
 use orch_api_contract::search::RelatedKind;
-use orch_authz::reach::{AgentReach, DocumentPolicy};
 use orch_db::queries::{links as rows, search::CandidateSet, threads::ThreadRow};
 use orch_db::secrets::MasterKey;
 use orch_documents::links::{self, Names, Target};
@@ -130,6 +129,7 @@ impl Engine {
         thread: &ThreadRow,
         args: &Arguments,
         source: &str,
+        budgets: &super::SearchBudgets,
     ) -> Result<Answer, EngineError> {
         if !args.query.is_empty()
             || args.regex.is_some()
@@ -213,17 +213,14 @@ impl Engine {
         let limit = args
             .max_results
             .and_then(|value| usize::try_from(value).ok())
-            .map_or(RESULTS_DEFAULT, |value| value.max(1));
+            .unwrap_or(
+                RESULTS_DEFAULT.min(usize::try_from(budgets.results).unwrap_or(RESULTS_DEFAULT)),
+            );
         // The scopes the agent reaches, for the conservative narrowing; each source is then looked up in its tree.
         let mut scopes = vec![thread.node_id];
         let mut documents = vec![document];
         let mut chats = Vec::new();
-        if asking.documents_policy != DocumentPolicy::None || asking.policy == AgentReach::Topic {
-            scopes.push(asking.agent.topic);
-        }
-        if asking.policy == AgentReach::Project {
-            scopes.extend(asking.agent.project);
-        }
+
         for grant in orch_authz::reach::grants(&mut conn, &asking.agent, asking.now).await? {
             match grant.page.kind {
                 StoredKind::Node => scopes.push(grant.page.id),

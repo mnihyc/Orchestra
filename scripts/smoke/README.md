@@ -26,17 +26,39 @@ own; two runs of the same scenario at once need `ORCH_SMOKE_PORT`).
 | [managed-provider](managed-provider/README.md) | A subscription of each harness gets a runtime of its own on the bundled host, is signed in by importing a credential that is not real, is stopped and started without losing the sign-in, signed out and deleted with its unit and its volume |
 | [shipped-image](shipped-image/README.md) | The image every default environment is made from is run as a unit is run, with no server: root through `sudo` without a password and not under `no_new_privileges`; the browser and its command line, with its sandbox where the container allows one and without where it cannot, and fonts for Chinese, Japanese, Korean and emoji; a VNC display started as a display is started, with a viewer, a window manager and a browser with a window |
 
+Two sets of them are run together by `run-all.sh`:
+
+- `fresh` proves a fresh installation and its operation, and needs one packaged release: `first-start`, `restore`,
+  `installers`, `installation-records`, `managed-environment`, `managed-harness`, `managed-provider` and `shipped-image`.
+  This is the set that gates a release.
+- `upgrade` proves an update, a rollback or a recovery from an earlier release, and needs two real releases (the earlier
+  as `ORCH_SMOKE_RELEASE_A`, the later as `ORCH_SMOKE_RELEASE_B`): `update`, `rollback`, `recover` and
+  `release-distribution`. This first release has none before it to carry state from, so these are reported, not gating;
+  when a second real release exists they join the gating set.
+
 ```sh
 scripts/smoke/run-all.sh                     # every scenario, one after the other
-scripts/smoke/first-start/run.sh
+scripts/smoke/run-all.sh fresh               # the scenarios of a fresh installation
+scripts/smoke/run-all.sh upgrade             # the scenarios that need an earlier release
+ORCH_SMOKE_RELEASE_A=/path/to/release scripts/smoke/first-start/run.sh
 ORCH_SMOKE_RELEASE_A=/path/to/release-a ORCH_SMOKE_RELEASE_B=/path/to/release-b scripts/smoke/update/run.sh
 ```
 
-They need Docker with Compose, curl and zip (and `jq` and `node` for the managed ones), and the Rust toolchain the repository pins when they have to
-package a release (`cargo xtask package`; the first one compiles for a long while). `shipped-image` needs only Docker and the network: it builds the image
-from its recipe, or takes one that is named (`ORCH_SMOKE_IMAGE`), and makes no stack. The variables are described at the head of
-[lib.sh](lib.sh). No scenario touches a container, network or volume that it did not make: the stack is
+They need Docker with Compose, curl and zip (and `jq` and `node` for the managed ones). A release they are not given is
+packaged by `cargo xtask package`, which takes hours and the Rust toolchain the repository pins; give them the directory of a
+package that was made already. `managed-environment` and `managed-harness` also start the scripted model server,
+`orch-mock-llm` of `orch-testkit`: they build it with `cargo build`, or take a built one named by `ORCH_SMOKE_MOCK_LLM`.
+`installation-records` offers its stack a later manifest: the given `ORCH_SMOKE_RELEASE_B`, or the candidate's own manifest
+made out as the next patch release (it installs nothing from it). `shipped-image` needs only Docker and the network: it builds
+the image from its recipe, or takes one that is named (`ORCH_SMOKE_IMAGE`), and makes no stack. The variables are described at
+the head of [lib.sh](lib.sh). No scenario touches a container, network or volume that it did not make: the stack is
 named, and taken down with `docker compose down -v` for that project alone.
+
+In CI the Release workflow runs `fresh` in its `scenarios` job (`.github/workflows/scenarios.yml`) against the
+`package-x86_64` artifact its `package` job made, and `assemble` waits for it. A Release run dispatched with
+`scenarios_run_id` runs only that job, against the package of that earlier run (`gh workflow run release.yml --ref BRANCH
+-f scenarios_run_id=RUN_ID`), and with `earlier_run_id` also runs `upgrade` against an earlier release's package; that step
+reports and never fails the job.
 
 The scenarios use ports 41200 to 41217 (and 41250 to 41252, 41300 to 41302 and 41350 to 41351 for the three managed ones; `shipped-image` publishes none) of this host (the web edge on the loopback address, the gateway's
 pinned listener on the Docker bridge's address), which `ORCH_SMOKE_PORT` moves.

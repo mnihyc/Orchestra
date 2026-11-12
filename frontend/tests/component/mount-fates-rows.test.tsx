@@ -51,6 +51,41 @@ for (const locale of ['en', 'zh-CN'] as const) describe(locale, () => {
     expect(screen.getByRole('alert')).toHaveTextContent('The host is offline');
   });
 
+  it('brings the outcome of the check that was asked into view in the row that asked, and no other outcome', async () => {
+    await setLocale(locale);
+    const t = i18n.getFixedT(locale);
+    const user = userEvent.setup();
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView');
+    try {
+      const mount = (name: string): PlanMount => ({ ...fixed, mount: { id: name, name, address: `acme.${name}` }, fingerprints_available: true });
+      const [first, second] = [mount('first'), mount('second')];
+      const onCheck = vi.fn();
+      const checkedAt = '2026-10-25T14:03:00.000Z';
+      const { rerender } = show(<MountFates mounts={[first, second]} picks={{}} onPick={vi.fn()} onCheck={onCheck} />);
+      const again = (props: { checking?: boolean; checkError?: Error; same?: boolean }) => rerender(<MountFates mounts={[first, second].map((row) => props.same === undefined ? row : { ...row, fingerprints: { matches: props.same, checked_at: checkedAt } })} picks={{}} onPick={vi.fn()} onCheck={onCheck} checking={props.checking} checkError={props.checkError ?? null} />);
+      // Pressing the second row's Check: the request is for every row, and what is brought into view is that row's.
+      await user.click(screen.getAllByRole('button', { name: t('mountPlan.fingerprints.check') })[1]);
+      again({ checking: true });
+      expect(scrolled).not.toHaveBeenCalled();
+      again({ same: true });
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      expect(scrolled).toHaveBeenLastCalledWith({ block: 'nearest' });
+      const outcome = scrolled.mock.contexts[0] as HTMLElement;
+      expect(outcome).toHaveAttribute('data-fingerprint-check');
+      expect(outcome).toContainElement(screen.getAllByRole('status')[1]);
+      expect(outcome).not.toContainElement(screen.getAllByRole('status')[0]);
+      // An outcome nobody asked for here (a read another person began, a plan read again) does not move the screen.
+      again({ same: false });
+      expect(scrolled).toHaveBeenCalledTimes(1);
+      // A failure comes under the button that asked as well.
+      await user.click(screen.getAllByRole('button', { name: t('mountPlan.fingerprints.check') })[0]);
+      again({ same: false, checking: true });
+      again({ checkError: new ApiError({ type: 'orch:error:plan.blocked', code: 'plan.blocked', title: 'Blocked', status: 409, detail: 'The check failed', request_id: 'check', blockers: [{ code: 'mount_fingerprint_unavailable', message: 'The host is offline' }] }, null) });
+      expect(scrolled).toHaveBeenCalledTimes(2);
+      expect(scrolled.mock.contexts[1]).toBe(screen.getAllByRole('alert')[0]);
+    } finally { scrolled.mockRestore(); }
+  });
+
   it('offers each changeable mount its three fates, preselected, and sends only what the person changes', async () => {
     await setLocale(locale);
     const t = i18n.getFixedT(locale);

@@ -12,7 +12,7 @@ import { i18n, setLocale } from '@/i18n';
 import { choiceCopy } from '@/i18n/choices';
 import { show } from './support';
 
-const server = vi.hoisted(() => ({ definitions: vi.fn<() => Promise<SettingDef[]>>(), values: vi.fn<() => Promise<ResolvedSetting[]>>(), location: { pathname: '/topic/topic', searchStr: '?tab=settings&section=policies' } }));
+const server = vi.hoisted(() => ({ definitions: vi.fn<() => Promise<SettingDef[]>>(), values: vi.fn<() => Promise<ResolvedSetting[]>>(), location: { pathname: '/topic/topic', searchStr: '?tab=settings&section=defaults' } }));
 vi.mock('@/api/settings', async (load) => {
   const actual = await load<typeof SettingsApi>();
   return { ...actual, putSetting: vi.fn(),
@@ -28,7 +28,7 @@ const scroll = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoVie
 beforeEach(async () => {
   await setLocale('en');
   vi.clearAllMocks();
-  server.location = { pathname: '/topic/topic', searchStr: '?tab=settings&section=policies' };
+  server.location = { pathname: '/topic/topic', searchStr: '?tab=settings&section=defaults' };
   Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: vi.fn() });
   class Observer { observe = vi.fn(); unobserve = vi.fn(); disconnect = vi.fn(); }
   vi.stubGlobal('ResizeObserver', Observer);
@@ -66,7 +66,7 @@ it.each(['en', 'zh-CN'] as const)('keeps one full search field and its Only here
 it.each([false, true])('lands on a found setting while preserving an already opened choice: %s', async (interacting) => {
   const def: SettingDef = { ...definition(0), title: 'Work style', default: 'one', schema: { type: 'string', enum: ['one', 'two'] } };
   const initial = value(def, 'one', true);
-  server.location = { pathname: '/topic/topic', searchStr: `?tab=settings&section=policies&setting=${def.key}` };
+  server.location = { pathname: '/topic/topic', searchStr: `?tab=settings&section=defaults&setting=${def.key}` };
   server.definitions.mockResolvedValue([def]); server.values.mockResolvedValue([initial]);
   const cache = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
   cache.setQueryData(['settings-registry'], [def]); cache.setQueryData(targetSettingsKey(target), [initial]);

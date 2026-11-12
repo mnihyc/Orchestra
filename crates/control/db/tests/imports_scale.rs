@@ -366,7 +366,14 @@ async fn what_an_import_added_to_a_chat_is_taken_back_five_hundred_at_a_time_and
         .unwrap()
         .unwrap()
         .id;
-    // A hundred thousand messages the import added, and the rows that say so, by SQL.
+    // A hundred thousand messages the import added, and the rows that say so, by SQL, with the triggers of the table off
+    // for the making only, as for the items and documents below: one statement of a hundred thousand rows in one chat
+    // would otherwise raise that chat's summary events a hundred thousand times in one transaction, which no import does
+    // and which outlasts the statement timeout. Taking them back meets every trigger.
+    sqlx::query("ALTER TABLE chat_messages DISABLE TRIGGER USER")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO chat_messages (id, chat_id, kind, author_id, content, search_text, seq_created, seq_updated)
          SELECT gen_random_uuid(), $1, 'message', $2, '[{\"type\":\"text\",\"text\":\"hello\"}]'::jsonb, 'hello', g, g
@@ -378,6 +385,10 @@ async fn what_an_import_added_to_a_chat_is_taken_back_five_hundred_at_a_time_and
     .execute(&mut *conn)
     .await
     .unwrap();
+    sqlx::query("ALTER TABLE chat_messages ENABLE TRIGGER USER")
+        .execute(&mut *conn)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO import_origins (scope_id, source_id, kind, object_id, parent_id, created_by_import, last_import, imported_by, imported_at)
          SELECT $1, gen_random_uuid(), 'message', m.id, m.chat_id, $2, $2, $3, now() FROM chat_messages m WHERE m.chat_id = $4",

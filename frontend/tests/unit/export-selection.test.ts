@@ -1,3 +1,4 @@
+import { treeNode } from '../doubles/tree-node';
 /** Which rows of a place are ticked, what a tick on a place does to what is in it, and the request the ticks come to: everything as one word, whole places named, and the documents and chats of a place that is only partly in. */
 import { describe, expect, it } from 'vitest';
 
@@ -14,24 +15,7 @@ import {
   wantedOf,
 } from '@/features/export/selection';
 
-const row = (id: string, kind: TreeNode['kind'], name: string, parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  participating: true,
-  id,
-  address: null,
-  kind,
-  name,
-  parent_id: parent,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  color: null,
-  docs: 0,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const row = (id: string, kind: TreeNode['kind'], name: string, parent: string | null, more: Partial<TreeNode> = {}): TreeNode => treeNode({ id, kind, name, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 // Web has three folders (one with a topic and a thread), a topic of its own, and documents beside Web, a folder and the thread.
 const NODES = [

@@ -80,7 +80,9 @@ it('exposes Pin in both tab menus and closes a pin only through its explicit Clo
   useWorkbench.setState({ layout: { ...before.layout, main: makeGroup([{ id: 'everything', view: 'page', of: { href: '/everything' } }]) } });
   const user = userEvent.setup();
   show(<Tab />);
-  await user.click(screen.getByRole('button', { name: i18n.t('workbench.tab.menu', { title: 'Everything' }) }));
+  const pointerMenu = screen.getByLabelText(i18n.t('workbench.tab.menu', { title: 'Everything' }));
+  expect(pointerMenu).toBeVisible();
+  await user.click(pointerMenu);
   await user.click(screen.getByRole('menuitem', { name: 'Pin' }));
   expect(document.querySelector('[data-pinned]')).not.toBeNull();
   expect(screen.queryByRole('button', { name: i18n.t('workbench.tab.closeNamed', { title: 'Everything' }) })).not.toBeInTheDocument();
