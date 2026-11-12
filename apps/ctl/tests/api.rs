@@ -67,20 +67,22 @@ async fn answer(
     });
     match uri.path() {
         // Neither valid JSON nor ended by a line break: it must come out as it is.
-        "/api/v1/odd" => (
+        "/openapi/v1/odd" => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             "{ \"spaced\" :  [1,\n 2] }  ",
         )
             .into_response(),
-        "/api/v1/down" => (StatusCode::SERVICE_UNAVAILABLE, "down for the night").into_response(),
-        "/api/v1/moved" => (
+        "/openapi/v1/down" => {
+            (StatusCode::SERVICE_UNAVAILABLE, "down for the night").into_response()
+        }
+        "/openapi/v1/moved" => (
             StatusCode::FOUND,
             [(header::LOCATION, "http://127.0.0.1:1/elsewhere")],
             "",
         )
             .into_response(),
-        "/api/v1/echo" | "/api/other/echo" => {
+        "/openapi/v1/echo" | "/api/v1/echo" | "/api/other/echo" => {
             let named = |name: header::HeaderName| {
                 headers
                     .get(name)
@@ -146,13 +148,22 @@ async fn the_base_path_of_the_api_is_put_in_front_of_a_path_that_lacks_it() {
     for path in [
         "/echo?x=1&y=two",
         "echo?x=1&y=two",
-        "/api/v1/echo?x=1&y=two",
+        "/openapi/v1/echo?x=1&y=two",
     ] {
         let run = call(&world, &stand.url, "opat_any", &["api", "GET", path]).await;
         let echoed: Value = serde_json::from_str(run.succeeded()).unwrap();
-        assert_eq!(echoed["path"], "/api/v1/echo", "{path}");
+        assert_eq!(echoed["path"], "/openapi/v1/echo", "{path}");
         assert_eq!(echoed["query"], "x=1&y=two", "{path}");
     }
+    let explicit = call(
+        &world,
+        &stand.url,
+        "oat_browser",
+        &["api", "GET", "/api/v1/echo"],
+    )
+    .await;
+    let explicit: Value = serde_json::from_str(explicit.succeeded()).unwrap();
+    assert_eq!(explicit["path"], "/api/v1/echo");
     let run = call(
         &world,
         &stand.url,
@@ -260,7 +271,7 @@ async fn an_answer_that_refuses_is_printed_all_the_same_and_the_status_of_the_pr
     );
     assert_eq!(refused.err.lines().count(), 1, "{}", refused.err);
     assert!(
-        refused.err.contains("401") && refused.err.contains("/api/v1/me"),
+        refused.err.contains("401") && refused.err.contains("/openapi/v1/me"),
         "{}",
         refused.err
     );

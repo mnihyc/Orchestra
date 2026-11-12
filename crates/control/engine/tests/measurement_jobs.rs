@@ -6,7 +6,11 @@
 )]
 
 mod common;
+#[path = "measurement_jobs/host_inventory.rs"]
+mod host_inventory;
 mod hosting;
+#[path = "measurement_jobs/native_source.rs"]
+mod native_source;
 
 use common::World;
 use hosting::{ScriptedHost, bind, running, serve, template};

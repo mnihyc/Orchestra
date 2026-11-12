@@ -7,6 +7,7 @@ use std::collections::HashSet;
 #[derive(sqlx::FromRow)]
 struct Place {
     id: Id,
+    kind: String,
     path: Vec<Id>,
     owner_id: Option<Id>,
 }
@@ -177,7 +178,7 @@ impl Scope {
             .collect();
         let exact_nodes: Vec<_> = named.iter().chain(&chat_nodes).copied().collect();
         let places: Vec<Place> = sqlx::query_as(
-            "SELECT id,path,owner_id FROM nodes
+            "SELECT id,kind,path,owner_id FROM nodes
           WHERE path @> $5::uuid[] AND (id=ANY($1) OR path && $2::uuid[] OR owner_id=$3)
           LIMIT $4",
         )
@@ -205,13 +206,14 @@ impl Scope {
             }
             if owned
                 || named.contains(&place.id)
+                || (place.kind == "thread" && intersects(&place, &thread_paths))
                 || (readable.get("names").is_none() && intersects(&place, &general))
             {
                 scope.names.push(place.id);
             }
         }
         scope.chats = sqlx::query_scalar("SELECT c.id FROM chats c
-          JOIN nodes n ON n.id=COALESCE(c.node_id,c.org_id)
+          JOIN nodes n ON n.id=COALESCE(c.node_id,c.home_id,c.org_id)
           WHERE n.path @> $6::uuid[] AND (c.id=ANY($1) OR n.owner_id=$2
             OR (c.node_id IS NOT NULL AND (c.node_id=ANY($3) OR n.path && $4::uuid[]))
             OR EXISTS(SELECT 1 FROM chat_members m WHERE m.chat_id=c.id AND m.user_id=$2 AND m.left_at IS NULL)

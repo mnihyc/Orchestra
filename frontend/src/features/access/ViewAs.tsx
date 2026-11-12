@@ -122,7 +122,7 @@ export function ViewAs({ target, open, onClose }: { target: AccessTarget; open: 
         />
         {chosen !== null &&
           (access.isPending ? (
-            <SkeletonRows rows={4} />
+            <SkeletonRows read={access} rows={4} />
           ) : access.isError ? (
             <ErrorState compact error={access.error} action={<Button size="sm" action="retry" pending={access.isRefetching} onClick={() => void access.refetch()}>{t('common.tryAgain')}</Button>} />
           ) : (

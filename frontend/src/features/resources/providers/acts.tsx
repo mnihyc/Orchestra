@@ -1,3 +1,6 @@
+import { homeMoveEntries } from '@/features/duplicate/move';
+import { resourceDuplicateEntries } from '@/features/duplicate/target';
+import { providerCopySetup } from '@/features/duplicate/CopySetup';
 /** What can be done with a provider, from its row in the list and from its own page: take the next step of setting it up, open, switch on or off, edit, rename, copy its link and delete, each only where the reader may.
  *
  * The same acts serve the button and the menu at the end of a row, the menu under the right mouse button, the
@@ -15,7 +18,7 @@ import { type ReactNode, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { deleteProvider, disableProvider, enableProvider } from '@/api/resources';
-import { type Act, type BulkAct, BulkNames, entriesOf, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
+import { type Act, type BulkAct, BulkNames, entriesOf, managedAct, keysOf, type ListActs, type RowActs, useBusy, useCopyLink, shareAct } from '@/features/resources/acts';
 import { DeleteProviderDialog, DisableProviderDialog } from '@/features/resources/providers/DangerZone';
 import { EditProvider } from '@/features/resources/providers/Edit';
 import type { ProviderTab } from '@/features/resources/providers/Provider';
@@ -62,31 +65,30 @@ export function useProviderActs(options: { onTab?: (provider: Provider, tab: Pro
 
   const actsOf = (provider: Provider, where: 'row' | 'page'): RowActs & { edit: Act | null } => {
     const manage = holds(provider.access, 'provider.manage');
+    const guarded = (act: Act | null) => managedAct(act, manage, t('resources.act.manageRequired'));
     const state = providerState(provider, t, { locale, timeZone }, now);
     const step = state.next === null ? null : PROVIDER_NEXT[state.next];
     const open: Act | null =
       where === 'row' ? { id: 'open', label: t('resources.act.open'), icon: <ArrowRight aria-hidden />, run: () => void navigate({ to: '/resources/providers/$id', params: { id: provider.id } }) } : null;
     // The next step of setting it up, which is the act most wanted of a provider that is not ready.
     const next: Act | null =
-      manage && step !== null && where === 'row'
-        ? {
+      guarded(step !== null && where === 'row' ? {
             id: 'next',
             label: t(step.label),
             icon: <KeyRound aria-hidden />,
             run: () => toTab(provider, step.tab),
-          }
-        : null;
-    const enable: Act | null = manage && provider.status === 'disabled' ? { id: 'enable', label: t('resources.act.enable'), icon: <CirclePlay aria-hidden />, run: () => enablePlan.ask(enableResource(provider)) } : null;
-    const disable: Act | null = manage && provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', provider }) } : null;
-    const rename: Act | null = manage ? { id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', provider }) } : null;
+          } : null);
+    const enable: Act | null = guarded(provider.status === 'disabled' ? { id: 'enable', label: t('resources.act.enable'), icon: <CirclePlay aria-hidden />, run: () => enablePlan.ask(enableResource(provider)) } : null);
+    const disable: Act | null = guarded(provider.status !== 'disabled' ? { id: 'disable', label: t('resources.act.disable'), icon: <Ban aria-hidden />, run: () => setAsked({ what: 'disable', provider }) } : null);
+    const rename: Act | null = guarded({ id: 'rename', label: t('resources.act.rename'), icon: <TextCursorInput aria-hidden />, shortcut: 'F2', run: () => setAsked({ what: 'rename', provider }) });
     const share = shareAct(t, { kind: 'provider', id: provider.id, name: provider.name }, provider.access);
-    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink(`/resources/providers/${provider.id}`) };
+    const copy: Act = { id: 'copy-link', label: t('resources.act.copyLink'), icon: <Copy aria-hidden />, run: () => copyLink({ kind: 'provider', id: provider.id }) };
     const switchThreads: Act = {id:'switch-threads',label:t('resources.act.switchThreads'),icon:<ArrowRightLeft aria-hidden />,run:()=>openChange({kind:'provider',id:provider.id,name:provider.name},{kind:'switch'})};
-    const del: Act | null = manage ? { id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', provider }) } : null;
+    const del: Act | null = guarded({ id: 'delete', label: t('resources.act.delete'), icon: <Trash2 aria-hidden />, danger: true, run: () => setAsked({ what: 'delete', provider }) });
     return {
-      primary: next ?? enable ?? open,
+      primary: manage ? (next ?? enable ?? open) : open,
       edit: null,
-      entries: entriesOf([open], where === 'row' ? [next, enable, disable] : [], [rename], [switchThreads], [share, copy], [del], [cleanup.act({kind:'provider',id:provider.id}, manage)]),
+      entries: [...homeMoveEntries(t, 'provider', provider), ...resourceDuplicateEntries(t, 'provider', provider, { setup: providerCopySetup(provider) }), ...entriesOf([open], [next, enable, disable], [rename], [switchThreads], [share, copy], [del], [cleanup.act({kind:'provider',id:provider.id}, manage)])],
       keys: keysOf(rename),
       busy: busy(provider.id),
     };

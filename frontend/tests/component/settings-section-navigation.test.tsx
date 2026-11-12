@@ -39,8 +39,10 @@ vi.mock('@/features/navigation/OrgSwitcher', () => ({ orgInitial: () => 'R', org
 vi.mock('@/features/settings/org/General', () => ({ General: () => <p data-section-body>General content</p> }));
 vi.mock('@/features/admin/Overview', () => ({ Overview: () => <p data-section-body>Overview content</p> }));
 vi.mock('@tanstack/react-router', async (original) => ({ ...await original<typeof Router>(),
-  Link: ({ to, params, children, activeOptions: _activeOptions, ...props }: HTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string>; children?: ReactNode; activeOptions?: unknown }) => {
-    return <a {...props} href={to.replace(/\$(\w+)/g, (_match: string, key: string) => params?.[key] ?? '')}>{children}</a>;
+  Link: ({ to, params, search, children, activeOptions: _activeOptions, ...props }: HTMLAttributes<HTMLAnchorElement> & { to: string; params?: Record<string, string>; search?: Record<string, string>; children?: ReactNode; activeOptions?: unknown }) => {
+    const path = to.replace(/\$(\w+)/g, (_match: string, key: string) => params?.[key] ?? '');
+    const query = search === undefined ? '' : new URLSearchParams(search).toString();
+    return <a {...props} href={query === '' ? path : `${path}?${query}`}>{children}</a>;
   },
 }));
 
@@ -56,7 +58,7 @@ it.each(modes)('keeps complete section links and the compact picker on the same 
   await setLocale(locale); useAppearance.setState({ theme, resolvedTheme: theme });
   document.documentElement.dataset.theme = theme; document.documentElement.classList.toggle('dark', theme === 'dark');
   const frames = [
-    { body: <PersonalFrame page="profile" lead={null}><p>Profile content</p></PersonalFrame>, label: i18n.t('settings.personal.nav'), current: '/settings/profile', count: 9 },
+    { body: <PersonalFrame page="profile" lead={null}><p>Profile content</p></PersonalFrame>, label: i18n.t('settings.personal.nav'), current: '/settings/profile', count: 10 },
     { body: <OrgSettings slug="acme.research" section="general" />, label: i18n.t('settings.org.sections', { name: department.name }), current: '/org/acme.research/settings/general', count: sectionsOf(department).length },
     { body: <Management section="overview" search={{}} onSearch={() => undefined} onSection={() => undefined} />, label: i18n.t('admin.nav.label'), current: '/admin/overview', count: LISTED.length },
   ];
@@ -64,6 +66,7 @@ it.each(modes)('keeps complete section links and the compact picker on the same 
     const view = show(frame.body);
     const nav = await screen.findByRole('navigation', { name: frame.label });
     expect(within(nav).getAllByRole('link')).toHaveLength(frame.count);
+    if (frame.current === '/settings/profile') expect(within(nav).getByRole('link', { name: i18n.t('screens.uploads.title') })).toHaveAttribute('href', '/storage?view=uploads');
     const current = within(nav).getAllByRole('link').filter((link) => link.getAttribute('aria-current') === 'page');
     expect(current).toHaveLength(1); expect(current[0]).toHaveAttribute('href', frame.current);
     // jsdom has no container-query layout; the browser proof checks which presentation is visible.

@@ -65,7 +65,7 @@ function HostPortForm({ id, data, onClose }: { id: string; data: HostPortsReview
 export function HostPortsDeclaration({ hostId }: { hostId: string }) {
   const { t } = useTranslation(); const [editing, setEditing] = useState(false);
   const query = useQuery(hostPortsQuery(hostId));
-  if (query.isPending) return <SkeletonRows rows={2} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={2} />;
   if (query.isError) return <PortFault error={query.error} onRefresh={() => void query.refetch()} />;
   const data = query.data;
   return <section aria-label={t('ports.hostForm.title')} className="flex flex-col gap-3 rounded-lg border border-border p-4" data-testid="host-ports">

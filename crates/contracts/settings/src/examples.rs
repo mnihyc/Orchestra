@@ -5,12 +5,29 @@
 //! so adding a key without help data cannot compile. These are data, not code-generated output.
 
 pub const AGENT_MODEL: &str = r#""gpt-6""#;
+pub const ASK_MODELS: &str =
+    r#"[{"provider_id":"019a0000-0000-7000-8000-000000000001","model":"small"}]"#;
+pub const ASK_PAID_BY: &str = r#""person""#;
+pub const ASK_RETENTION_DAYS: &str = "30";
+pub const ASK_RETENTION_MIN_DAYS: &str = "7";
+pub const ASK_RETENTION_MAX_DAYS: &str = "90";
+pub const ASK_MAX_STEPS: &str = "16";
+pub const ASK_MAX_OUTPUT_TOKENS: &str = "4096";
+pub const ASK_CONTEXT_TOKENS: &str = "120000";
+pub const ASK_MAX_TOOLS: &str = "32";
+pub const ASK_TOOL_BYTES: &str = "65536";
+pub const ASK_TURN_TOOL_BYTES: &str = "262144";
 pub const AGENT_EFFORT: &str = r#""high""#;
 pub const AGENT_PARAMS: &str = "{}";
 pub const AGENT_FEATURES: &str = r#"{"vision":true}"#;
 pub const AGENT_INSTRUCTIONS: &str =
     r#""Run the relevant tests before describing a change as complete.""#;
+/// Joining text, inherited through the existing organization append setting.
+pub const ORG_TERMS: &str =
+    r#""Members use this organization's places for its work and keep its documents inside it.""#;
 pub const AGENT_MEMORY: &str = r#""on""#;
+pub const AGENTS_PAGE_FETCH: &str = "null";
+pub const AGENTS_IMAGE_GENERATION: &str = r#""on""#;
 pub const AGENTS_HARNESS_VERSIONS: &str =
     r#"{"codex":{"use":"newest_checked"},"claude-code":{"use":"exact","version":"2.1.309"}}"#;
 pub const AGENTS_HARNESS_CHANNEL_HOURS: &str = "12";
@@ -23,6 +40,8 @@ pub const AGENTS_HARNESS_CONFORMANCE_TIMEOUT_SECS: &str = "900";
 /// Mirror transport does not grant publisher authority by default.
 pub const AGENTS_HARNESS_TRUST_MIRROR: &str = "false";
 pub const AGENTS_HARNESS_MIRROR: &str = r#""https://mirror.example.invalid/releases""#;
+/// Unset leaves the native program's cache lifetime unchanged.
+pub const AGENTS_PROMPT_CACHE_TTL: &str = "null";
 pub const AGENTS_SUBAGENTS_AT_ONCE: &str = "8";
 pub const AGENTS_SUBAGENT_DEPTH: &str = "1";
 pub const AGENTS_SKILLS: &str = r#"{"019a0000-0000-7000-8000-000000000006":"latest","019a0000-0000-7000-8000-000000000007":"019a0000-0000-7000-8000-000000000008","019a0000-0000-7000-8000-000000000009":"off"}"#;
@@ -56,7 +75,6 @@ pub const FILES_VIEWER_BYTES: &str = "67108864";
 /// The example matches the ordinary whole-image upload allowance; zero uses files alone.
 pub const FILES_NATIVE_IMAGE_BYTES: &str = "20971520";
 /// A document's automatic description begins with the same short line as a place's.
-pub const DOCS_DESCRIPTION_CHARS: &str = "200";
 pub const THREAD_SIDE_THREADS: &str = "true";
 pub const THREAD_SIDE_MAX: &str = "4";
 pub const THREAD_SIDE_IDLE_HOURS: &str = "24";
@@ -79,6 +97,10 @@ pub const SANDBOX_MODE: &str = r#""workspace""#;
 pub const AGENT_MESSAGES: &str =
     r#"{"tool_read_shared":"Read a shared item at the requested depth."}"#;
 pub const MODELS_ALLOWED: &str = r#"["gpt-6*"]"#;
+pub const SERVICES_ALLOWED: &str = r#"["@web","image-*"]"#;
+pub const SUMMARY_TARGETS: &str = r#"{"thread":{"automatic":true,"on":["turn_completed","milestone"],"output_chars":600},"document":{"automatic":false}}"#;
+pub const SUMMARY_FOLLOW_INTERVAL_SECS: &str = "5";
+pub const SUMMARY_READ_BATCH_SIZE: &str = "100";
 pub const PROVIDERS_ALLOWED: &str = r#"["acme.*"]"#;
 pub const COLLAB_ATTRIBUTION: &str = r#""always""#;
 pub const COLLAB_DEFAULT_DELIVERY: &str = r#""queue""#;
@@ -104,11 +126,26 @@ pub const ENV_SECRET_NAMES: &str = r#"["PACKAGE_TOKEN"]"#;
 pub const NETWORK_ALLOWED_HOSTS: &str = r#"["pypi.org","registry.npmjs.org"]"#;
 pub const MCP_ENABLED: &str = r#"{"019a0000-0000-7000-8000-000000000004":true}"#;
 pub const EXEC_OFFERS: &str = r#"["orch"]"#;
+pub const EXEC_VERSION_OVERRIDES: &str = r#"{"codex":{"path":"/usr/local/bin/codex","version":"0.165.0","by":"0199c1a0-0000-7000-8000-00000000000a","at":"2026-10-31T00:00:00Z"}}"#;
 pub const EXEC_ORCH_TOOLS: &str = "true";
 pub const ORCH_TOOLS_ENABLED: &str = r#"["list_shared","read_shared","search_shared"]"#;
 pub const ORCH_TOOLS_CALLS_PER_MINUTE: &str = "120";
-pub const SHARING_AGENT_REACH: &str = r#""none""#;
-pub const SHARING_AGENT_DOCUMENTS: &str = r#""write""#;
+pub const ORCH_TOOLS_OWNER_READS: &str = "false";
+pub const ORCH_TOOLS_SEARCH_QUERY_CHARS: &str = "2000";
+pub const ORCH_TOOLS_SEARCH_RESULTS: &str = "300";
+pub const ORCH_TOOLS_SEARCH_CONTEXT: &str = "10";
+/// No final offline deadline is imposed by default.
+pub const THREADS_OFFLINE_DEADLINE: &str = "null";
+pub const THREADS_BACKGROUND_WAKE: &str = r#""on""#;
+pub const THREADS_AGENT_SCHEDULES: &str = r#""off""#;
+pub const THREADS_AGENT_SCHEDULE_HOURS: &str = "24";
+pub const THREADS_AGENT_SCHEDULE_RUNS: &str = "20";
+/// No paid search backend is selected until an organization chooses one.
+pub const AGENTS_WEB_SEARCH_BACKEND: &str = "null";
+/// A service backend is an explicit organization choice.
+pub const AGENTS_IMAGE_GENERATION_BACKEND: &str = "null";
+pub const THREADS_AGENT_ACCESS: &str = r#"{"where":"topic","parts":{"documents":"edit"}}"#;
+pub const THREADS_LET_VIEWERS_IN: &str = "false";
 pub const SHARING_SNAPSHOT_MAX_BYTES: &str = "67108864";
 pub const EXPORT_MAX_BYTES: &str = "2147483648";
 pub const EXPORT_MAX_ITEMS: &str = "10000";
@@ -152,7 +189,7 @@ pub const ENV_TEMPORARY_IDLE_HOURS: &str = "24";
 pub const ENV_RECYCLE_IDLE_MINUTES: &str = "60";
 pub const HOSTS_FULL_PERCENT: &str = "90";
 pub const HOSTS_WHEN_FULL: &str = r#""warn""#;
-pub const RUNTIME_IDLE_STOP_MINUTES: &str = "1440";
+pub const RUNTIME_IDLE_STOP_MINUTES: &str = "0";
 pub const RUNTIME_TEMPLATE_ID: &str = r#""019a0000-0000-7000-8000-000000000005""#;
 pub const RUNTIME_HOST_ID: &str = r#""019a0000-0000-7000-8000-000000000002""#;
 pub const RUNTIME_RESOURCES: &str = r#"{"cpu_millis":1000,"memory_mb":2048,"memory_swap_mb":2048,"pids":128,"blkio_weight":500,"disk_gb":10}"#;
@@ -165,8 +202,13 @@ pub const RUNTIME_VARIABLES: &str = r#"{"LANG":"C.UTF-8"}"#;
 pub const RUNTIME_SECRET_NAMES: &str = r#"["PROVIDER_TOKEN"]"#;
 pub const RUNTIME_UPDATE: &str = r#""manual""#;
 pub const RUNTIME_RENEW_DAYS: &str = "5";
+pub const PROVIDERS_FACTS_IDLE_MINUTES: &str = "60";
+pub const PROVIDERS_FACTS_ACTIVE_MINUTES: &str = "5";
+pub const PROVIDERS_FACTS_RECENT_MINUTES: &str = "15";
+pub const PROVIDERS_FACTS_REFUSED_MINUTES: &str = "5";
 pub const PROVIDERS_PRESETS: &str = r#"{"gateway":{"upstreams":[{"protocol":"openai-responses","base_url":"https://gateway.example.invalid/v1"}]}}"#;
 pub const PROVIDERS_ALLOW_HTTP_UPSTREAMS: &str = "false";
+pub const PROVIDERS_MODEL_GROUPS_MAX: &str = "8";
 pub const PROVIDERS_EXPIRY_NOTICE_DAYS: &str = "14";
 pub const PROVIDERS_SUBSCRIPTION_HARNESSES: &str = r#"["codex","claude-code"]"#;
 pub const PROVIDERS_SUBSCRIPTION_SHARING: &str = r#"["codex"]"#;
@@ -179,8 +221,13 @@ pub const BROADCAST_RATE_PER_HOUR: &str = "6";
 /// Turned on, the followers of a thread hear when one of its sub-agents ends.
 pub const NOTIFY_SUBAGENTS: &str = "true";
 pub const NOTIFY_OPERATIONS: &str = r#""always""#;
+/// An organization may choose a longer administrator-message limit than the shipped default.
+pub const MESSAGE_BODY_MAX_CHARS: &str = "30000";
+/// A longer replay window illustrates that one day is the default, not a ceiling.
+pub const API_IDEMPOTENCY_WINDOW: &str = "48";
 pub const BROADCAST_CHAT_MESSAGES_PER_HOUR: &str = "60";
-pub const BROADCAST_AGENT_SCOPE: &str = r#""topic""#;
+/// Messages to one thread have an hourly budget of their own, apart from announcements.
+pub const BROADCAST_THREAD_MESSAGES_PER_HOUR: &str = "60";
 pub const CAPABILITY_RECREATE_GRACE_SECS: &str = "120";
 pub const ACCESS_REQUEST_EXPIRY_DAYS: &str = "14";
 pub const ACCESS_MAX_PENDING_REQUESTS: &str = "10";
@@ -213,9 +260,7 @@ pub const BINDING_PREFER: &str = r#"["separated","key_separated"]"#;
 pub const BINDING_ALLOWED: &str = r#"["separated","key_separated"]"#;
 pub const CREDENTIAL_REFRESH_MARGIN_SECS: &str = "300";
 pub const AUTO_TITLE: &str = r#""harness""#;
-pub const AUTO_DESCRIPTION: &str = r#""off""#;
 pub const AUTO_TAGS: &str = r#""off""#;
-pub const AUTO_TOPIC_ROLLUP: &str = r#""rollup""#;
 pub const AUTO_SUMMARIZER: &str = r#"{"kind":"model"}"#;
 pub const CALLS_RULES: &str = orch_provider_contract::calls::DEFAULT_RULES;
 pub const CALLS_REPEAT_LIMIT: &str = "3";
@@ -225,7 +270,9 @@ pub const CALLS_RETURN: &str = "\"next_turn\"";
 pub const AUTO_TRIGGERS: &str = r#"{"on":["turn_completed","milestone"],"min_interval_secs":120}"#;
 pub const CAPABILITY_POLICY: &str = r#"{"kvm":{"decision":"ask","approver_scope":"host"},"port_place":{"decision":"allow","approver_scope":"environment"}}"#;
 pub const SHARING_ALLOW_EXTERNAL: &str = "true";
+pub const SHARING_ALLOW_COPY_OUT: &str = "true";
 pub const SHARING_ALLOW_HOLDERS: &str = "true";
+pub const SHARING_ON_LINK: &str = "true";
 pub const SHARING_EXTERNAL_MAX_DAYS: &str = "30";
 pub const USAGE_RATES: &str =
     r#"{"gpt-6*":{"input_per_mtok":"1","cached_input_per_mtok":"0.1","output_per_mtok":"4"}}"#;
@@ -311,3 +358,6 @@ pub const SYSTEM_BANNER: &str =
 pub const OUTBOUND_ALLOWED_PRIVATE_HOSTS: &str = r#"["mail.internal.example"]"#;
 pub const STORAGE_MAX_BLOB_BYTES: &str = "8589934592";
 pub const STORAGE_ENV_CACHE_QUOTA_BYTES: &str = "21474836480";
+
+/// A place may pin new tunnel plans to its executor primary.
+pub const GATEWAYS_TUNNEL_STRATEGY: &str = r#""executor""#;

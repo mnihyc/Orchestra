@@ -1,0 +1,2 @@
+# Where and the type's default, round two: the API's Ask cases (a long program).
+test -p orch-api-core --test ask

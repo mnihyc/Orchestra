@@ -7,6 +7,8 @@ paths remain available for target-runner work, but attachment is refused until
 their native containment, process, shell and reconnect checks have been proved.
 Compiling another target is a prerequisite and does not certify those effects.
 
+The full attachment, shell/tool-server integration and attached port-command scenarios run on Linux. On unverified targets, the direct host and connector-role controls require an explicit unsupported result with no registered environment or workspace change. Portable filesystem, policy, process and terminal primitive controls continue to run on their target platforms.
+
 The instruction-root control directory is prepared empty under the local write policy, without replacing a file, link or user content. It is excluded from ordinary workspace reads, listings, manifests and snapshots even when ignore patterns ask to include it.
 
 Files views and agents attaching workspace files use the same `fs.fetch` command.

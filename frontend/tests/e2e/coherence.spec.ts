@@ -70,7 +70,8 @@ test('the same names are allowed in two orgs and two parents, and refused beside
   // The screen says the same, and takes the free short name when asked.
   await signIn(page);
   await page.goto('/org/acme');
-  await page.getByRole('button', { name: 'New department', exact: true }).click();
+  await page.getByRole('button', { name: 'New in Acme', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'New department…', exact: true }).click();
   const dialog = page.getByRole('dialog', { name: 'New department in Acme' });
   await dialog.getByRole('textbox', { name: 'Name', exact: true }).fill('dep2');
   await expect(dialog.getByRole('textbox', { name: 'Short name' })).toHaveValue('dep2');
@@ -93,26 +94,37 @@ async function share(page: Page, path: string, thing: string): Promise<void> {
 test('a place whose name a place of the other org has is named with where it is, and one of its own name alone', async ({ page }) => {
   const { acme, beta } = await twoOrgs();
   await signIn(page);
-  // The browser's tab and the workbench's: "dep2 · Acme" against "dep2 · Beta".
-  await page.goto(`/org/acme.dep2`);
+  const rail = page.getByRole('navigation', { name: 'Orgs and your own places' });
+  const navigation = page.getByRole('navigation', { name: 'Navigation', exact: true });
+  const treeLink = (id: string) => navigation.locator(`[data-tree-row="${id}"]`).getByRole('link');
+  const openPlace = async (org: string, id: string) => {
+    await rail.getByRole('link', { name: org, exact: true }).click();
+    await treeLink(id).click();
+  };
+
+  // Visit both readable trees in the same workbench so their names are known.
+  await rail.getByRole('link', { name: 'Beta', exact: true }).click();
+  await expect(treeLink(beta.dep2)).toBeVisible();
+  await openPlace('Acme', acme.dep2);
   await expect(page).toHaveTitle(/^dep2 · Acme · /);
-  await page.goto(`/org/beta.dep2`);
+  await openPlace('Beta', beta.dep2);
   await expect(page).toHaveTitle(/^dep2 · Beta · /);
-  await page.goto(`/topic/${acme.login}`);
+  await openPlace('Acme', acme.login);
   await expect(page).toHaveTitle(/^login · Acme · /);
-  await page.goto(`/project/${beta.web}`);
+  await openPlace('Beta', beta.web);
   await expect(page).toHaveTitle(/^web · Beta · /);
   // The way down to it says the rest, as it always did.
   await expect(page.getByRole('navigation', { name: 'Where this is' })).toContainText('Beta');
   // The permission page of one of them says which.
-  await share(page, `/topic/${acme.login}`, 'login');
+  await openPlace('Acme', acme.login);
+  await page.getByRole('main').getByRole('button', { name: /^Actions for login\b/ }).click();
+  await page.getByRole('menuitem', { name: 'Share…' }).click();
   await expect(page.getByRole('dialog', { name: 'Access to “login · Acme”' })).toBeVisible();
   await page.keyboard.press('Escape');
   // A name nobody else has is said alone.
   await page.goto(`/topic/${ACME.fixLogin}`);
   await expect(page).toHaveTitle(/^Fix login · /);
   // The rail names both orgs, which have names of their own.
-  const rail = page.getByRole('navigation', { name: 'Orgs and your own places' });
   await expect(rail.getByRole('link', { name: 'Acme', exact: true })).toBeVisible();
   await expect(rail.getByRole('link', { name: 'Beta', exact: true })).toBeVisible();
 });
@@ -130,19 +142,27 @@ test('a role given in the permission page and taken away in its People shows at 
 
   // The People beside the form list her at once.
   await dialog.getByRole('tab', { name: 'People' }).click();
-  const roles = dialog.getByRole('table', { name: 'Roles held in Fix login' });
+  const people = dialog.getByRole('tabpanel', { name: 'People', exact: true });
+  const roles = people.getByRole('table', { name: 'Roles held in Fix login' });
   await expect(roles).toContainText('Grace Hopper');
-  const asked: string[] = [];
+  const permissionReads: string[] = [];
+  const documentLoads: string[] = [];
   page.on('request', (request) => {
-    if (request.method() === 'GET') asked.push(new URL(request.url()).pathname);
+    const path = new URL(request.url()).pathname;
+    if (request.isNavigationRequest() && request.resourceType() === 'document') documentLoads.push(path);
+    if (request.method() === 'GET' && path === `/api/v1/nodes/${ACME.fixLogin}/permissions`) permissionReads.push(path);
   });
 
-  // Taken away there, the role leaves the People, and the page it gave a line on is asked again: no reload.
+  // The accepted removal updates the displayed roster and preserves the current permission page.
   await roles.getByRole('button', { name: 'Grace Hopper: more' }).click();
   await page.getByRole('menuitem', { name: 'Take the role away…' }).click();
   await page.getByRole('alertdialog', { name: 'Take the role away from Grace Hopper?' }).getByRole('button', { name: 'Take the role from Grace Hopper' }).click();
-  await expect(roles).not.toContainText('Grace Hopper');
+  // The own-role table is removed when its last role is taken away.
+  await expect(roles).toHaveCount(0);
+  await expect(people.getByRole('list', { name: 'Roles held in places above', exact: true })).toBeVisible();
   await dialog.getByRole('tab', { name: 'This topic' }).click();
-  await expect.poll(() => asked.some((path) => path.endsWith(`/nodes/${ACME.fixLogin}/permissions`))).toBe(true);
-  await expect(dialog.getByRole('group', { name: 'Can interact' })).not.toContainText('Grace Hopper');
+  const topicAccess = dialog.getByRole('tabpanel', { name: 'This topic', exact: true });
+  await expect(topicAccess.getByRole('region', { name: 'Who has access', exact: true })).not.toContainText('Grace Hopper');
+  expect(permissionReads).toEqual([]);
+  expect(documentLoads).toEqual([]);
 });

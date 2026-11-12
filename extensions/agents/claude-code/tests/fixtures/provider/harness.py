@@ -20,6 +20,13 @@ for line in sys.stdin:
             continue
         if mode == "refused":
             response = {"subtype": "error", "request_id": frame.get("request_id"), "error": "Unknown control request: get_usage"}
+        elif mode == "raw_amounts":
+            if frame.get("request_id") != "usage":
+                raise SystemExit("the raw amount fixture needs the correlated usage request")
+            with open(answer_file, encoding="utf-8") as source:
+                raw = source.read().strip()
+            print('{"type":"control_response",' + raw[1:], flush=True)
+            continue
         else:
             with open(answer_file, encoding="utf-8") as source:
                 response = json.load(source)["response"]

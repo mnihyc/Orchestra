@@ -63,6 +63,8 @@ for (const opening of ['hover', 'focus', 'tap'] as const) it(`opens the token pl
   expect(calls.preview).toHaveBeenCalledTimes(1);
   if (opening !== 'hover') {
     if (opening === 'focus') await user.keyboard('{Enter}');
+    expect(document.querySelector('[data-reference-card][role="dialog"]')).toHaveFocus();
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(document.querySelector('[data-reference-card]')).toBeNull());
   }

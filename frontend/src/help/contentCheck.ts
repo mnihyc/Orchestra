@@ -1,4 +1,5 @@
 /** Pure content validation shared by the build and regression tests. A missing link or real control is a failure. */
+import { checkReferenceCoverage } from './referenceCoverage';
 import { articleAvailable, belongsTo, slugOf, type Guide } from './guide';
 import { screenAbout } from '../features/help/screenWords';
 import { GUIDANCE } from './guidance';
@@ -21,6 +22,7 @@ export interface HelpContentInput {
   /** User articles are checked separately from extension implementer references. */
   userArticles: readonly string[];
   settings?: readonly { key: string }[];
+  references: readonly string[];
 }
 
 export function contentWord(catalogue: unknown, key: string): string | null {
@@ -36,7 +38,7 @@ const codeOnly = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, '').rep
 const routeName = (route: string) => route === '/' ? '/' : route.replace(/\/$/, '');
 
 export function checkHelpContent(input: HelpContentInput): string[] {
-  const failures: string[] = [];
+  const failures: string[] = checkReferenceCoverage(input.guide, input.userArticles, input.references);
   const article = (id: string, heading?: string, language = 'en') => {
     const found = input.guide.articles.find((one) => one.id === id);
     if (found === undefined || !articleAvailable(found)) failures.push(`article.missing: ${id}`);
@@ -54,6 +56,8 @@ export function checkHelpContent(input: HelpContentInput): string[] {
     const one = userArticles.find((entry) => entry.id === id);
     if (one === undefined) { failures.push(`article.missing: ${id}`); continue; }
     const chinese = one.translations?.['zh-CN'];
+    if (one.summary === undefined || one.summary.trim() === '') failures.push(`article.summary_missing: ${id}:en`);
+    if (chinese?.summary === undefined || chinese.summary.trim() === '') failures.push(`article.summary_missing: ${id}:zh-CN`);
     if (chinese === undefined || !articleAvailable(chinese) || !/\p{Script=Han}/u.test(chinese.body) || chinese.body === one.body) {
       failures.push(`article.translation_missing: ${id}:zh-CN`);
       continue;

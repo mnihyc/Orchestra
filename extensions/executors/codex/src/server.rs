@@ -64,6 +64,7 @@ pub const DEFAULT_STOP_GRACE: Duration = Duration::from_secs(10);
 const PID_FILE: &str = "exec-server.pid";
 
 /// How long a server left behind by a node that died is given to end on `TERM` before it is killed.
+#[cfg(unix)]
 const LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
 /// How many ports of a range are tried before the range is given up on.
@@ -122,8 +123,9 @@ impl Default for CodexConfig {
 #[derive(Debug, Clone)]
 struct Found {
     program: PathBuf,
-    version: semver::Version,
+    version: String,
     modes: Vec<SandboxMode>,
+    local: bool,
 }
 
 /// A started server.
@@ -132,6 +134,7 @@ struct Running {
     child: Child,
     pid_file: PathBuf,
     tasks: Vec<JoinHandle<()>>,
+    local_program: Option<PathBuf>,
 }
 
 /// The vendor's exec server, run for an environment.
@@ -178,7 +181,22 @@ impl CodexExecServer {
     /// found anew.
     async fn examine(&self, env: &EnvironmentContext) -> Result<Found, String> {
         let build = descriptor::locate(env).map_err(|missing| missing.to_string())?;
-        let version = self.version_of(&build, env).await?;
+        let version = if build.local {
+            crate::program_version::reported(&build.program).await
+        } else {
+            self.version_of(&build, env).await?.to_string()
+        };
+        self.examine_at(env, build, version).await
+    }
+
+    async fn examine_at(
+        &self,
+        env: &EnvironmentContext,
+        build: Build,
+        version: String,
+    ) -> Result<Found, String> {
+        std::fs::create_dir_all(codex_home(env))
+            .map_err(|error| format!("the program's home could not be made: {error}"))?;
         let vars = environment(env, &codex_home(env));
         let scratch = sandbox::scratch_dir(Path::new(&env.data_dir));
         let enforceable = sandbox::probe(&Probe {
@@ -196,6 +214,7 @@ impl CodexExecServer {
             program: build.program,
             version,
             modes: enforceable.modes,
+            local: build.local,
         })
     }
 
@@ -293,13 +312,28 @@ impl Executor for CodexExecServer {
         }
         let mut found = self.found.lock().await;
         let usable = match (&*found, descriptor::locate(env)) {
-            (Some(known), Ok(build)) if known.program == build.program => Ok(known.clone()),
+            (known, Ok(build)) if build.local => {
+                let version = crate::program_version::reported(&build.program).await;
+                match known {
+                    Some(known)
+                        if known.local
+                            && known.program == build.program
+                            && known.version == version =>
+                    {
+                        Ok(known.clone())
+                    }
+                    _ => self.examine_at(env, build, version).await,
+                }
+            }
+            (Some(known), Ok(build)) if !known.local && known.program == build.program => {
+                Ok(known.clone())
+            }
             (_, Err(missing)) => Err(missing.to_string()),
             _ => self.examine(env).await,
         };
         match usable {
             Ok(now) => {
-                let report = descriptor::availability(&now.version, now.modes.clone());
+                let report = ExecutorAvailability::available(&now.version, now.modes.clone());
                 *found = Some(now);
                 report
             }
@@ -312,16 +346,49 @@ impl Executor for CodexExecServer {
             return Err(AdapterError::HarnessUnavailable("this executor is declared for Linux; this host's native execution has not been verified".into()));
         }
         if let Some(running) = &self.running {
-            return Ok(running.endpoint.clone());
+            let endpoint = running.endpoint.clone();
+            let Some(program) = running.local_program.clone() else {
+                return Ok(endpoint);
+            };
+            let unchanged = match descriptor::locate(env) {
+                Ok(build) if build.local && build.program == program => {
+                    crate::program_version::reported(&program).await == endpoint.version
+                }
+                _ => false,
+            };
+            if unchanged {
+                return Ok(endpoint);
+            }
+            self.stop().await?;
+            *self.found.lock().await = None;
+            return Err(AdapterError::HarnessUnavailable(
+                "the confirmed program changed; its executor must be admitted again".into(),
+            ));
         }
         let build = descriptor::locate(env)
             .map_err(|missing: Missing| AdapterError::HarnessUnavailable(missing.to_string()))?;
+        let checked = self.found.lock().await.clone();
         // The sandbox is probed at every start: the place may have changed since it was last asked.
         let found = self
             .examine(env)
             .await
             .map_err(AdapterError::HarnessUnavailable)?;
         *self.found.lock().await = Some(found.clone());
+        if build.local
+            && checked.as_ref().is_some_and(|checked| {
+                checked.local
+                    && checked.program == found.program
+                    && checked.version != found.version
+            })
+        {
+            return Err(AdapterError::HarnessUnavailable(format!(
+                "the confirmed program changed after its availability check (checked: {}; start: {})",
+                checked
+                    .as_ref()
+                    .map_or("unknown", |checked| checked.version.as_str()),
+                found.version
+            )));
+        }
 
         reap_leftover(Path::new(&env.data_dir)).await;
         let home = codex_home(env);
@@ -357,25 +424,44 @@ impl Executor for CodexExecServer {
                     let version = match handshake {
                         Ok(version) => version,
                         Err(why) => {
-                            let mut running = spawned.into_running(placeholder_endpoint());
+                            let mut running = spawned.into_running(
+                                placeholder_endpoint(),
+                                build.local.then_some(build.program.as_path()),
+                            );
                             terminate(&mut running, &self.config).await;
                             return Err(AdapterError::HarnessError(format!(
                                 "the exec server started but did not answer the handshake: {why}"
                             )));
                         }
                     };
-                    if version != found.version {
+                    if version.to_string() != found.version {
                         tracing::warn!(%version, listed = %found.version, "the exec server is not the build its program reported");
+                        if build.local && found.version != "unknown" {
+                            let mut running =
+                                spawned.into_running(placeholder_endpoint(), Some(&build.program));
+                            terminate(&mut running, &self.config).await;
+                            return Err(AdapterError::HarnessError(
+                                "the exec server is not the confirmed program's reported build"
+                                    .into(),
+                            ));
+                        }
                     }
                     let endpoint = ExecutorEndpoint {
                         address: format!("ws://127.0.0.1:{}", spawned.port),
                         token: Some(Secret::new(token)),
-                        version: version.to_string(),
+                        version: if build.local {
+                            found.version.clone()
+                        } else {
+                            version.to_string()
+                        },
                         tool_sets: Vec::new(),
                         sandbox_modes: found.modes,
                     };
                     tracing::info!(port = spawned.port, %version, "the exec server listens on the loopback address");
-                    self.running = Some(spawned.into_running(endpoint.clone()));
+                    self.running = Some(spawned.into_running(
+                        endpoint.clone(),
+                        build.local.then_some(build.program.as_path()),
+                    ));
                     return Ok(endpoint);
                 }
                 Err(why) => last = why,
@@ -410,12 +496,13 @@ struct Spawned {
 }
 
 impl Spawned {
-    fn into_running(self, endpoint: ExecutorEndpoint) -> Running {
+    fn into_running(self, endpoint: ExecutorEndpoint, local_program: Option<&Path>) -> Running {
         Running {
             endpoint,
             child: self.child,
             pid_file: self.pid_file,
             tasks: self.tasks,
+            local_program: local_program.map(Path::to_owned),
         }
     }
 }

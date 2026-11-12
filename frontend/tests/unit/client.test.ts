@@ -2,9 +2,9 @@
 /** The API client: the token renewed once and the refused request sent again, errors as typed values, the header of the cookie requests, and a wait that ends on silence alone. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, createApiClient, done, ok, RENEW_BEFORE_END_MS, repeatable } from '@/api/client';
+import { ApiError, createApiClient, done, ok, ReceiptAcknowledged, RENEW_BEFORE_END_MS, repeatable } from '@/api/client';
 import type { AuthResult, Me } from '@/generated/api-types';
-import { NetworkError } from '@/lib/requests';
+import { NetworkError, retryRead } from '@/lib/requests';
 import { beginOpening, openingId } from '@/lib/opening';
 
 const BASE = 'http://orch.test/api/v1';
@@ -258,7 +258,7 @@ describe('a page that was just loaded', () => {
     const answers = await Promise.all([client.restore(), client.restore(), client.restore()]);
 
     expect(answers).toEqual([true, true, true]);
-    expect(paths()).toEqual(['POST /auth/refresh']);
+    expect(paths()).toEqual(['POST /auth/session']);
     expect(client.session.getState().userId).toBe('u1');
   });
 
@@ -268,6 +268,27 @@ describe('a page that was just loaded', () => {
 
     await expect(client.restore()).resolves.toBe(false);
     expect(client.session.getState().status).toBe('signed_out');
+  });
+
+  it('discovers a first visitor quietly without guessing whether an HttpOnly cookie exists', async () => {
+    const { fetch, seen, paths } = server(() => json(200, null));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    await expect(Promise.all([client.restore(), client.restore()])).resolves.toEqual([false, false]);
+    expect(paths()).toEqual(['POST /auth/session']);
+    expect(seen[0]?.headers.get('x-orch-csrf')).toBe('1');
+    expect(seen[0]?.headers.has('authorization')).toBe(false);
+    expect(client.session.getState().status).toBe('signed_out');
+    await expect(client.restore()).resolves.toBe(false); expect(seen).toHaveLength(1);
+  });
+
+  it('ignores an anonymous discovery answer after a later sign-in became current', async () => {
+    let finish: (reply: Response) => void = () => { throw new Error('The discovery was not started'); };
+    const { fetch } = server(() => new Promise<Response>((resolve) => { finish = resolve; }));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const restoring = client.restore(); await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    client.adopt(grant('current-sign-in')); finish(json(200, null));
+    await expect(restoring).resolves.toBe(true);
+    expect(client.accessToken()).toBe('current-sign-in'); expect(client.session.getState().userId).toBe('u1');
   });
 });
 
@@ -319,5 +340,67 @@ describe('a request that creates something', () => {
     await done(client.api.POST('/auth/recovery', { body: { email: 'ada@example.org' }, ...repeatable('act-1') }));
 
     expect(seen[0]?.headers.get('Idempotency-Key')).toBe('act-1');
+  });
+});
+
+
+describe('an acknowledged mutation without full response content', () => {
+  it('keeps the committed receipt and request identity, tells act listeners once, and never retries', async () => {
+    const receipt = { projection: 'receipt', chat_id: 'c1', message_id: 'm1', seq: 7 };
+    const { fetch, paths } = server(() => json(201, receipt, { 'X-Request-Id': 'accepted-1' }));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const changed = vi.fn();
+    client.onAct(changed);
+    const result: unknown = await ok(client.api.POST('/chats/{id}/messages', {
+      params: { path: { id: 'c1' } },
+      body: { client_id: 'once', parts: [{ type: 'text', text: 'A submitted message' }] },
+    })).catch((caught: unknown) => caught);
+    expect(result).toBeInstanceOf(ReceiptAcknowledged);
+    if (!(result instanceof ReceiptAcknowledged)) throw new Error('Expected the committed acknowledgement');
+    expect(result.committed).toBe(true);
+    expect(result.status).toBe(201);
+    expect(result.requestId).toBe('accepted-1');
+    expect(result.receipt).toEqual(receipt);
+    expect(result).not.toBeInstanceOf(ApiError);
+    expect(result).not.toBeInstanceOf(NetworkError);
+    expect(retryRead(0, result)).toBe(false);
+    expect(paths()).toEqual(['POST /chats/c1/messages']);
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(changed.mock.calls[0]?.[0]).toMatchObject({ answer: receipt });
+  });
+
+  it('preserves a newly issued secret for its recipient without copying it into error serialization', async () => {
+    const receipt = { projection: 'receipt' as const, token_id: 'k1', token: 'new-secret-visible-once', already_created: false };
+    const result: unknown = await ok(Promise.resolve({ data: receipt, response: json(200, receipt) }))
+      .catch((caught: unknown) => caught);
+    expect(result).toBeInstanceOf(ReceiptAcknowledged);
+    if (!(result instanceof ReceiptAcknowledged)) throw new Error('Expected the committed acknowledgement');
+    expect(result.receipt.token).toBe('new-secret-visible-once');
+    expect(JSON.stringify(result)).not.toContain('new-secret-visible-once');
+    expect(result.message).not.toContain('new-secret-visible-once');
+    expect(result.stack).not.toContain('new-secret-visible-once');
+  });
+});
+
+
+describe('credential creation act observers', () => {
+  it.each(['full', 'receipt'] as const)('keeps %s token/proof material in the dedicated result only', async (projection) => {
+    const info = { id: 'new-key', name: 'A key', scopes: [], node: null, created_at: '2026-11-01T00:00:00Z', last_used_at: null, expires_at: null };
+    const answer = projection === 'full'
+      ? { token: 'issued-secret-once', info, already_created: false }
+      : { projection: 'receipt', token: 'issued-secret-once', token_id: info.id, created_at: info.created_at, expires_at: null, already_created: false };
+    const { fetch, paths } = server(() => json(200, answer));
+    const client = createApiClient({ baseUrl: BASE, fetch });
+    const changed = vi.fn();
+    client.onAct(changed);
+    const result = await client.api.POST('/me/tokens', { body: { name: 'A key', proof: { password: 'fresh-secret-proof' } } });
+    expect(result.data).toEqual(answer);
+    expect(changed).toHaveBeenCalledTimes(1);
+    const observed: unknown = changed.mock.calls[0]?.[0];
+    expect(observed).toMatchObject({ path: '/me/tokens', answer: { token_id: 'new-key', already_created: false } });
+    expect(observed).not.toHaveProperty('input');
+    expect(JSON.stringify(observed)).not.toContain('issued-secret-once');
+    expect(JSON.stringify(observed)).not.toContain('fresh-secret-proof');
+    expect(paths()).toEqual(['POST /me/tokens']);
   });
 });
