@@ -6,28 +6,34 @@ import { signInForManagement } from './admin-mode-support';
 
 test('Management Settings keeps the pane still and only its view scrolls', async ({ page }) => {
   await scenario();
+  await page.setViewportSize({ width: 1440, height: 900 });
   await signInForManagement(page);
   await page.goto('/admin/settings');
   await expect(page.locator('[data-management-content]')).toBeVisible();
   await expectOneScrollerPerArea(page);
-  // Read-only values expand on this scroller even when a code exception would allow another one.
-  const previews = page.locator('[data-management-content] [data-content-preview]');
-  await expect(previews.first()).toBeVisible();
-  const all = previews.getByRole('button', { name: 'Show all', exact: true });
-  if (await all.count() > 0) await all.first().click();
-  const nestedValues = await page.locator('[data-management-content] pre').evaluateAll((values) => values.filter((value) => {
-    const style = getComputedStyle(value);
-    return /^(auto|scroll)$/.test(style.overflowY) && value.scrollHeight > value.clientHeight + 1;
-  }).length);
-  expect(nestedValues).toBe(0);
+  const content = page.locator('[data-management-content]');
+  await expect(content.locator('[data-setting-row]').first()).toBeVisible();
+  // Writable settings now have compact typed summaries inside their edit controls;
+  // raw inline previews no longer exist here. The shared view owns the scroll.
+  // Use the measured content height so viewport chrome leaves an actual overflow.
+  const contentHeight = await content.evaluate((element) => element.scrollHeight);
+  await page.setViewportSize({ width: 1440, height: contentHeight });
   await expectOneScrollerPerArea(page);
   const scrollers = await page.locator('[data-view-group]').filter({ has: page.locator('[data-management-content]') }).evaluate((area) => Array.from(area.querySelectorAll<HTMLElement>('*')).filter((element) => {
     const style = getComputedStyle(element);
     return /^(auto|scroll)$/.test(style.overflowY) && element.scrollHeight > element.clientHeight + 1 && element.getClientRects().length > 0;
   }).filter((element) => element.contains(area.querySelector('[data-management-content]')) || element.hasAttribute('data-management-content')).length);
   expect(scrollers).toBe(1);
-  await page.locator('[data-management-content]').evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await expect.poll(() => page.locator('[data-management-content]').evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  const owner = await content.evaluateHandle((element) => {
+    for (let at: Element | null = element; at !== null; at = at.parentElement) {
+      if (/^(auto|scroll)$/.test(getComputedStyle(at).overflowY) && at.scrollHeight > at.clientHeight + 1) return at;
+    }
+    throw new Error('The settings view has a measured scroll owner');
+  });
+  await owner.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect.poll(() => owner.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+  await expectOneScrollerPerArea(page);
+  await owner.dispose();
 });
 
 test('the probe detects nested scrollers and permits explicitly declared code content', async ({ page }) => {

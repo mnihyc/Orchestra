@@ -17,6 +17,7 @@ pub mod merge;
 pub mod provenance;
 pub mod registry;
 pub mod unit;
+pub mod version_override;
 
 pub use merge::{Layer, resolve};
 pub use provenance::{Resolved, ResolvedSetting, Source, SourceScope};

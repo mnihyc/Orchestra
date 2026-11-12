@@ -5,7 +5,7 @@
  * `tests/unit/acts.test.ts`); once that has resolved, every view of what it changed shows the server's new answer, the
  * view of something else still shows the old one, and nothing is asked again of what was removed.
  * A session-authority change names every projection, including the otherwise unrelated view. */
-import { QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { QueryClientProvider, useQuery, type QueryKey } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -32,7 +32,7 @@ function request(entry: string): { method: string; path: string } {
 }
 
 /** A view's key for a change: the change's own key, with the one thing it names (or another thing of its kind). */
-const viewOf = (change: Stale): readonly string[] => (change.exact === true ? change.key : [...change.key, change.id ?? 'any-one']);
+const viewOf = (change: Stale): QueryKey => (change.exact === true ? change.key : [...change.key, change.id ?? 'any-one']);
 
 beforeEach(() => {
   state = 0;
@@ -79,7 +79,7 @@ describe('after an act', () => {
     const sessionChanged = changes.some((change) => 'session' in change);
     const stale = changes.filter((change): change is Stale => 'key' in change);
     const removed = stale.filter((change) => change.gone === true);
-    const views = new Map<string, readonly string[]>();
+    const views = new Map<string, QueryKey>();
     for (const change of stale) views.set(JSON.stringify(viewOf(change)), viewOf(change));
     const elsewhere = ['data-no-act-names', 'one'];
     views.set(JSON.stringify(elsewhere), elsewhere);

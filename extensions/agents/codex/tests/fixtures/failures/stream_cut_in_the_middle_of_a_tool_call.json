@@ -25,5 +25,5 @@
   {"method":"error","params":{"error":{"message":"stream disconnected before completion: Transport error: network error: error decoding response body","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"willRetry":false,"threadId":"01a12f91-270e-77b2-a292-6b099926bea5","turnId":"01a12f91-2743-74c1-bb0d-d926a8d9cfea"},"emittedAtMs":1791799411554},
   {"method":"turn/completed","params":{"threadId":"01a12f91-270e-77b2-a292-6b099926bea5","turn":{"id":"01a12f91-2743-74c1-bb0d-d926a8d9cfea","rootTurnId":"01a12f91-2743-74c1-bb0d-d926a8d9cfea","items":[],"itemsView":"notLoaded","status":"failed","error":{"message":"stream disconnected before completion: Transport error: network error: error decoding response body","codexErrorInfo":"other","additionalDetails":null,"misalignment":null},"startedAt":1791799404,"completedAt":1791799411,"durationMs":7198}},"emittedAtMs":1791799411557}
  ],
- "expect": {"outcome": "failed", "code": "provider_unreachable", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "error decoding response body"}
+ "expect": {"outcome": "failed", "code": "stream_interrupted", "retryable": true, "incomplete": true, "resets_at": null, "row": "out_of_reach", "said_contains": "error decoding response body"}
 }

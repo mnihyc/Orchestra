@@ -8,6 +8,7 @@ heading_id.工作区上传: workspace-uploads
 heading_id.文档文件: document-files
 heading_id.查看器与引用: viewers-and-references
 heading_id.排队与引导: queue-and-steer
+summary: 为粘贴文本、上传文件、附件和引用选择目标位置。
 ---
 
 # 粘贴与上传

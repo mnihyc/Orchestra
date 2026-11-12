@@ -17,7 +17,7 @@ async function appearance(locale: 'en' | 'zh-CN') {
 
 /** Compare to the actual scroll viewport and bottom navigation, rather than inventing a pixel cutoff. */
 async function firstContentFits(page: Page, selector: string) {
-  const content = page.getByTestId('main').locator(selector).first();
+  const content = page.locator('[data-main-area]').locator(selector).first();
   await expect(content).toBeVisible();
   const measurement = await content.evaluate((element) => {
     const box = element.getBoundingClientRect();
@@ -45,7 +45,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     page.on('requestfinished', (request) => pending.delete(request));
     page.on('requestfailed', (request) => pending.delete(request));
     await page.goto(`/project/${ACME.web}?view=list`);
-    const main = page.getByTestId('main');
+    const main = page.locator('[data-main-area]');
     const header = main.locator('header').filter({ has: page.getByRole('heading', { name: 'Web', exact: true, level: 1 }) });
     const createName = locale === 'en' ? 'New topic' : '新建话题';
     await expect(header.getByRole('button', { name: createName, exact: true })).toHaveCount(1);
@@ -90,7 +90,7 @@ for (const locale of ['en', 'zh-CN'] as const) {
     await changeTree([{ id: ACME.payroll, name: 'Payroll and benefits for the whole team, with a complete wrapping name' }]);
     for (const [path, title] of [['/org/acme', 'Acme'], ['/org/acme.research', 'Research']] as const) {
       await page.goto(path);
-      const main = page.getByTestId('main');
+      const main = page.locator('[data-main-area]');
       await expect(main.getByRole('heading', { name: title, level: 1, exact: true })).toBeVisible();
       await expect(main.locator('[data-places-list]').first()).toBeVisible();
       await expect(main.locator('[data-filter-bar]')).toHaveCount(1);
@@ -134,9 +134,13 @@ for (const locale of ['en', 'zh-CN'] as const) {
       };
     });
     await signIn(page); await appearance(locale);
-    await page.goto(`/project/${ACME.web}/settings?section=policies&setting=agent.default_provider_id`);
+    await page.goto(`/project/${ACME.web}/settings?section=defaults&setting=agent.default_provider_id`);
     const row = page.locator('[data-setting="agent.default_provider_id"]');
     const field = row.getByRole('combobox');
+    // A targeted setting read resolves its current provider name when the field is opened.
+    await field.focus();
+    await expect(page.getByRole('option', { name: 'OpenAI key', exact: true })).toBeVisible();
+    await field.press('Escape');
     await expect(field).toHaveValue('OpenAI key');
     await expect(row).not.toContainText(RUNS_ON.openAiKey);
     const settingsReads: string[] = [];
@@ -156,6 +160,11 @@ for (const locale of ['en', 'zh-CN'] as const) {
     expect(settingsReads).toEqual([]);
     await expect(row).not.toContainText(RUNS_ON.codexSubscription);
     await page.reload();
-    await expect(page.locator('[data-setting="agent.default_provider_id"]').getByRole('combobox')).toHaveValue('Codex subscription');
+    const reopened = page.locator('[data-setting="agent.default_provider_id"]').getByRole('combobox');
+    await reopened.focus();
+    await expect(page.getByRole('option', { name: 'Codex subscription', exact: true })).toBeVisible();
+    await reopened.press('Escape');
+    await expect(reopened).toHaveValue('Codex subscription');
+    expect(await page.evaluate(() => (window as DefaultWindow).__providerDefaultWrites)).toEqual([]);
   });
 }

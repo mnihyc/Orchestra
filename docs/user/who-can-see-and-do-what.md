@@ -1,8 +1,10 @@
 ---
+group: access
 title: Who can see and do what
 screens: /thread/$threadId, /topic/$topicId, /project/$projectId, /org/$slug, /resources/environments/$id, /doc/$documentId, /chat/$chatId, /place-chat/$nodeId, /shared, /inbox, /approvals
 keywords: how do I share, access, permission, permissions, holders, group, role, members, everyone, locator, override, create, make, new, start, project, topic, thread, sharing.allow_external, sharing.allow_holders, access.manage, access.external, capability.policy
 heading_keywords.who-may-make-projects-topics-and-threads: create project, make project, new project, create topic, open topic, new topic, create thread, start thread, new thread, permission, 创建项目, 创建话题, 开始线程, 权限
+summary: Understand access requests, holders, sharing limits and administrative overrides.
 ---
 
 # Who can see and do what

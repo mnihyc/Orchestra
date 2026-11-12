@@ -3,8 +3,8 @@ import type { CSSProperties } from 'react';
 
 /** Geometry shared by floating primitives; their inner list or card retains its native scrolling. */
 export const floatingClasses = 'floating-layer';
-/** A surface is hidden while its real trigger is outside its clipping boundary. */
-export const floatingAttachment = { hideWhenDetached: true } as const;
+/** Hide detached triggers and keep partially clipped anchors from pulling a surface outside the viewport. */
+export const floatingAttachment = { hideWhenDetached: true, sticky: 'always' } as const;
 /** The same small trigger gap used by all inspection cards. */
 export const FLOATING_GAP = 6;
 /** One design-system spacing step keeps a surface clear of each viewport edge. */

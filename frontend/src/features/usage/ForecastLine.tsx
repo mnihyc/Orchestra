@@ -42,5 +42,5 @@ export function ForecastLine({ forecast, usedPercent, resetsAt, lastAt, cap = fa
       : usable === null ? t('planUsage.insufficient')
         : usable.runs_out_at !== null ? t('planUsage.runsOut',{basis:t(`planUsage.basis.${usable.basis}`),time:forecastTime(Date.parse(usable.runs_out_at),now,format)})
           : t(cap ? 'planUsage.byEnd' : 'planUsage.atReset',{basis:t(`planUsage.basis.${usable.basis}`),percent:formatNumber(usable.percent_at_end,format.locale,{maximumFractionDigits:0}),time:reset === null ? '' : forecastTime(reset,now,format)});
-  return <p data-forecast-state={stale ? 'stale' : reached ? 'reached' : usable === null ? 'insufficient' : usable.runs_out_at !== null ? 'runs_out' : 'at_reset'} className={cx('text-sm tabular-nums',warning ? 'text-warning' : 'text-text-muted')}>{text}</p>;
+  return <p data-forecast-state={stale ? 'stale' : reached ? 'reached' : usable === null ? 'insufficient' : usable.runs_out_at !== null ? 'runs_out' : 'at_reset'} className={cx('text-sm tabular-nums',warning ? 'text-warning-text' : 'text-text-muted')}>{text}</p>;
 }

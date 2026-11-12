@@ -1,5 +1,13 @@
 //! Private authored input schedules, civil timing and visible occurrence outcomes.
 
+use crate::operations::{
+    FacetSpec as Facet, OperationSpec as Op, TargetResolver as Target, VariantSpec as Variant,
+};
+use orch_access_contract::key_scope::KeyAction::{Manage, Read, Write};
+use orch_access_contract::key_scope::KeyIdentityKind as I;
+use orch_access_contract::key_scope::KeyTargetKind::{Identity, Object};
+use orch_access_contract::permissions::ObjectKind as K;
+
 use crate::common::{Page, PageQuery};
 use crate::nodes::{CreateThread, NodeRef};
 use crate::routes::Access::{Permission, Rule, User};
@@ -44,6 +52,38 @@ pub enum InputTiming {
         /// ISO weekdays, 1..7; empty for daily.
         weekdays: Vec<u8>,
     },
+    /// An explicit five-field UTC cron expression used by managed agent schedules.
+    Cron {
+        /// Minute, hour, day of month, month and weekday; numeric lists/ranges/steps.
+        expression: String,
+        /// Always UTC; civil daily/weekly schedules keep their existing IANA-zone rules.
+        zone: String,
+    },
+}
+
+/// A managed future input created by the thread's own agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InputScheduleKind {
+    /// Ordinary agent-scheduled work, governed by the existing input queue.
+    Agent,
+}
+
+/// Safe origin and end conditions; the note remains ordinary thread content/private definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AgentInputSchedule {
+    /// The only thread this agent schedule can address.
+    pub thread_id: Id,
+    /// The profile which created it.
+    pub agent_id: Id,
+    /// The actual source turn which made the call.
+    pub source_turn_id: Id,
+    /// The inclusive final instant for recurring work.
+    pub until: Time,
+    /// The positive occurrence limit explicitly chosen or defaulted at creation.
+    pub max_runs: i64,
+    /// Occurrences already claimed, including visible refusals/skips.
+    pub runs: i64,
 }
 
 /// A repeating civil frequency.
@@ -86,6 +126,28 @@ pub enum InputScheduleState {
     Deleted,
 }
 
+/// One pending agent continuation visible beside the thread's timeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadPendingAgentSchedule {
+    /// The actual schedule controlled by the ordinary cancellation route.
+    pub id: Id,
+    /// Its safe authored name, without the private note or definition.
+    pub name: String,
+    /// The native future-work state; only active rows enter this projection.
+    pub state: InputScheduleState,
+    /// The next due instant recorded by the schedule producer.
+    pub next_run_at: Time,
+}
+
+/// The current thread's pending agent rows at one native topic-feed cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ThreadPendingAgentSchedules {
+    /// The topic feed sequence that supplied these pending rows.
+    pub seq: Seq,
+    /// Active agent schedules for this exact thread, next due first.
+    pub items: Vec<ThreadPendingAgentSchedule>,
+}
+
 /// The author's private frozen draft, shown to nobody else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct InputScheduleDefinition {
@@ -111,6 +173,12 @@ pub struct InputScheduleDestination {
 pub struct InputSchedule {
     /// Schedule identity.
     pub id: Id,
+    /// Present only for agent-created schedules; absent preserves existing people's schedules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<InputScheduleKind>,
+    /// Safe agent origin and end conditions, where this is an agent schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentInputSchedule>,
     /// Topic, redacted where unreadable.
     pub topic: Option<NodeRef>,
     /// The person whose current authority will be used.
@@ -232,17 +300,106 @@ pub struct InputScheduleListQuery {
     pub state: Option<InputScheduleState>,
 }
 
+/// A mutation receipt with no stored draft, timing or destination names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct InputScheduleReceipt {
+    /// This response contains only the accepted operation receipt.
+    pub projection: crate::common::ReceiptProjection,
+    /// The actual created or changed schedule.
+    pub schedule_id: Id,
+    /// Its resulting compare-and-set revision.
+    pub revision: i64,
+    /// The ordinary topic change stamp.
+    pub topic_seq: Seq,
+}
+
+crate::common::full_or_receipt! {
+    /// Ordinary full response, or a receipt when this operation cannot read its result.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    pub enum InputScheduleWriteResponse {
+        /// The existing ordinary schedule view.
+        Full(InputSchedule),
+        /// Only accepted identifiers and version.
+        Receipt(InputScheduleReceipt),
+    }
+}
+
 crate::endpoints! {
     /// Lists readable metadata, and each author's own draft.
-    TopicInputScheduleList: GET "/topics/{id}/input-schedules", Permission("topic.view"), query InputScheduleListQuery, none, json Page<InputSchedule>, 200;
+    TopicInputScheduleList: GET "/topics/{id}/input-schedules", Permission("topic.view"), query InputScheduleListQuery, none, json Page<InputSchedule>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Object(K::Topic)], Target::Path("id")),
+            Facet::required(Read, &[Identity(I::Schedule)], Target::ResolvedCollection("schedules")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+        ]);
     /// Freezes a future input, without starting a turn.
-    TopicInputScheduleCreate: POST "/topics/{id}/input-schedules", User, none, json InputScheduleCreateBody, json InputSchedule, 201;
+    TopicInputScheduleCreate: POST "/topics/{id}/input-schedules", User, none, json InputScheduleCreateBody, json InputScheduleWriteResponse, 201,
+        operation Op::legacy_tokens(&[], &Op::receipt(&Op::facets(&[
+            Facet::required(Manage, &[Identity(I::Schedule)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Resolved("scheduled_destinations")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("scheduled_management")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::response_content(&[Identity(I::Schedule)], Target::Resolved("created_schedule")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+        ])));
     /// Reads a schedule as author or current destination reader.
-    InputScheduleGet: GET "/input-schedules/{id}", User, none, none, json InputSchedule, 200;
+    InputScheduleGet: GET "/input-schedules/{id}", User, none, none, json InputSchedule, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Schedule)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+        ]);
     /// Lists readable occurrence outcomes, newest first.
-    InputScheduleRunList: GET "/input-schedules/{id}/runs", User, query PageQuery, none, json Page<InputScheduleRun>, 200;
+    InputScheduleRunList: GET "/input-schedules/{id}/runs", User, query PageQuery, none, json Page<InputScheduleRun>, 200,
+        operation Op::facets(&[
+            Facet::required(Read, &[Identity(I::Schedule)], Target::Path("id")),
+            Facet::required(Read, &[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+        ]);
     /// Edits an authored definition or controls future occurrences.
-    InputScheduleUpdate: PATCH "/input-schedules/{id}", Rule("author for definition; author or current destination controller for state"), none, json InputScheduleUpdateBody, json InputSchedule, 200;
+    InputScheduleUpdate: PATCH "/input-schedules/{id}", Rule("author for definition; author or current destination controller for state"), none, json InputScheduleUpdateBody, json InputScheduleWriteResponse, 200,
+        operation Op::legacy_tokens(&["InputScheduleUpdate.state"], &Op::receipt(&Op::variants(&[
+            Variant {
+                name: "definition",
+                selector: "definition fields are changed",
+                facets: &[
+            Facet::required(Manage, &[Identity(I::Schedule)], Target::Path("id")),
+            Facet::required(Write, &[Object(K::Thread)], Target::Resolved("scheduled_destinations")),
+            Facet::required(Manage, &[Object(K::Thread)], Target::ResolvedCollection("scheduled_management")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_environments")),
+            Facet::required(Manage, &[Object(K::Environment)], Target::ResolvedCollection("creator_reader_environments")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("creator_file_sources")),
+            Facet::required(Read, &[Identity(I::Chat)], Target::ResolvedCollection("message_source_chats")),
+            Facet::required(Read, &[Object(K::Thread)], Target::ResolvedCollection("message_source_threads")),
+            Facet::required(Read, &[Object(K::Document)], Target::ResolvedCollection("message_source_documents")),
+            Facet::required(Read, &[Object(K::Environment)], Target::ResolvedCollection("message_source_environments")),
+            Facet::required(Read, &[Identity(I::Upload)], Target::ResolvedCollection("message_retained_uploads")),
+            Facet::response_content(&[Identity(I::Schedule)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+                ],
+            },
+            Variant {
+                name: "state",
+                selector: "only paused or active state changes",
+                facets: &[
+                    Facet::required(Manage, &[Identity(I::Schedule)], Target::Path("id")),
+                    Facet::response_content(&[Identity(I::Schedule)], Target::Path("id")),
+            Facet::response_content(&[Object(K::Topic)], Target::ResolvedCollection("schedule_name_topics")),
+            Facet::response_content(&[Object(K::Thread)], Target::ResolvedCollection("schedule_name_threads")),
+                ],
+            },
+        ])));
     /// Stops future occurrences, leaving accepted inputs in the ordinary tray.
-    InputScheduleDelete: DELETE "/input-schedules/{id}", Rule("author or current destination controller"), none, none, none, 204;
+    InputScheduleDelete: DELETE "/input-schedules/{id}", Rule("author or current destination controller"), none, none, none, 204,
+        operation Op::single(Manage, &[Identity(I::Schedule)], Target::Path("id"));
 }

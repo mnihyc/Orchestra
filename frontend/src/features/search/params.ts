@@ -14,6 +14,8 @@ export interface SearchParams {
   document_id?: string;
   sort?: SearchSort;
   q?: string;
+  /** Root org, or an explicit all-org choice. Separate from a narrower place. */
+  org?: string;
   scope?: string;
   /** A comma list of kinds. */
   kinds?: string;
@@ -55,6 +57,7 @@ export function kindsOf(list: string | undefined): SearchKind[] {
 export function readParams(search: Record<string, unknown>): SearchParams {
   const q = text(search.q);
   const scope = identifier(search.scope);
+  const org = search.org === 'all' ? 'all' : identifier(search.org)?.toLowerCase();
   const rawKinds = typeof search.kinds === 'string' ? search.kinds : undefined;
   const kinds = kindsOf(rawKinds).join(',');
   const author = identifier(search.author);
@@ -70,6 +73,7 @@ export function readParams(search: Record<string, unknown>): SearchParams {
     ...(typeof search.tab === 'string' && SEARCH_TABS.includes(search.tab as SearchTab) ? { tab: search.tab as SearchTab } : {}),
     ...(search.sort === 'relevance' || search.sort === 'newest' ? { sort: search.sort } : {}),
     ...(q === undefined ? {} : { q }),
+    ...(org === undefined ? {} : { org }),
     ...(scope === undefined ? {} : { scope }),
     ...(rawKinds?.trim() === '' ? { kinds: '' } : kinds === '' ? {} : { kinds }),
     ...(author === undefined ? {} : { author }),
@@ -106,7 +110,7 @@ export function filtersOf(params: SearchParams): SearchFilters {
     ...(params.regex === 'true' ? {regex:true} : {}),
     ...(params.document_id === undefined ? {} : {document_id:params.document_id}),
     ...(params.sort === undefined ? {} : { sort: params.sort }),
-    scope: params.scope,
+    scope: params.scope ?? (params.org === 'all' ? undefined : params.org),
     kinds: noConversations || params.kinds === '' ? [] : kinds.length === 0 ? undefined : kinds,
     author: params.author,
     ...(params.created_by === undefined ? {} : { created_by: params.created_by }),
@@ -170,33 +174,38 @@ export function narrowing(params: SearchParams): number {
 }
 
 /** Keeps the person's query and filters while choosing this one current chat and message kind. */
-export function inChat(params: SearchParams, chatId: string, nodeId?: string): SearchParams {
-  return { ...params, tab: 'chats', chat_id: chatId, document_id: undefined, kinds: 'chat_message', ...(nodeId === undefined ? {} : { scope: nodeId }) };
+export function inChat(params: SearchParams, chatId: string, nodeId?: string, orgId?: string): SearchParams {
+  return { ...params, ...(orgId === undefined ? {} : { org: orgId }), tab: 'chats', chat_id: chatId, document_id: undefined, kinds: 'chat_message', ...(nodeId === undefined ? {} : { scope: nodeId }) };
 }
 
 /** A delayed query write changes its own fields while retaining newer filter actions in the address. */
 export function mergeParams(before: Record<string, unknown>, shown: SearchParams, next: SearchParams): SearchParams {
   const held = readParams(before);
-  const fields = ['q', 'tab', 'scope', 'kinds', 'author', 'created_by', 'edited_by', 'owner', 'date_field', 'title_only', 'shared_with_me', 'file_type', 'from', 'to', 'chat_id', 'document_id', 'regex', 'with_file', 'mentions_me', 'participating', 'sort'] as const;
+  const fields = ['q', 'tab', 'org', 'scope', 'kinds', 'author', 'created_by', 'edited_by', 'owner', 'date_field', 'title_only', 'shared_with_me', 'file_type', 'from', 'to', 'chat_id', 'document_id', 'regex', 'with_file', 'mentions_me', 'participating', 'sort'] as const;
   return readParams(Object.fromEntries(fields.map((field) => [field, shown[field] === next[field] ? held[field] : next[field]] as const)));
 }
 
 /** Stores the chosen view without the words a person typed. */
 export function savedView(params: SearchParams): string {
-  const view = readParams({ ...params, q: undefined });
+  const view = readParams({ ...params, q: undefined, org: undefined });
   return JSON.stringify(view);
 }
 
 /** A plain address resumes the validated device view; explicit filters and sort keep their address. */
 export function restoredView(params: SearchParams, saved: string): SearchParams | undefined {
-  if (savedView(params) !== '{}') return undefined;
+  if (params.org !== undefined || savedView(params) !== '{}') return undefined;
   try {
     const parsed: unknown = JSON.parse(saved);
     if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') return undefined;
-    const view = readParams({ ...parsed, q: undefined });
+    const view = readParams({ ...parsed, q: undefined, org: undefined });
     if (Object.keys(view).length === 0) return undefined;
     return { ...view, ...(params.q === undefined ? {} : { q: params.q }) };
   } catch { return undefined; }
 }
 
 export type { ItemKind };
+
+/** A broader root choice starts with all places in that root, keeping non-place criteria. */
+export function inOrg(params: SearchParams, org: string): SearchParams {
+  return readParams({ ...params, org, scope: undefined, document_id: undefined, chat_id: undefined });
+}

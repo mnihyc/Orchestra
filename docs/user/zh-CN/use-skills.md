@@ -6,6 +6,7 @@ heading_id.导入技能: import-a-skill
 heading_id.检查并发布: review-and-publish
 heading_id.启用已发布版本: enable-published-versions
 heading_id.知道变更何时到达: know-when-a-change-arrives
+summary: 导入、审核和发布技能，再选择代理可以使用的版本。
 ---
 
 # 给代理提供有版本的技能

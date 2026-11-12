@@ -255,6 +255,8 @@ pub fn file_change(path: &str, added: u32, removed: u32, diff_limit: usize) -> F
     let (diff, truncated) = synthetic_diff(path, added, removed, diff_limit);
     let (counted_added, counted_removed) = count_diff_lines(&diff);
     FileChange {
+        before: None,
+        after: None,
         path: path.to_owned(),
         change: FileChangeKind::Modify,
         old_path: None,
@@ -291,7 +293,7 @@ pub struct OpenItem {
 
 /// How one turn speaks.
 pub struct Emitter {
-    model: String,
+    model: Mutex<String>,
     requests: Mutex<RequestState>,
     sink: EventSink,
     live: Arc<LiveSession>,
@@ -332,7 +334,7 @@ impl Emitter {
         model: String,
     ) -> Self {
         Self {
-            model,
+            model: Mutex::new(model),
             requests: Mutex::new(RequestState::default()),
             sink,
             live,
@@ -409,10 +411,25 @@ impl Emitter {
         .await;
     }
 
+    /// Report the actual model change without ending the turn or relabelling an earlier request.
+    pub async fn reroute_model(&self, model: &str) {
+        self.request_ended("done", None, false).await;
+        let previous = std::mem::replace(&mut *lock(&self.model), model.to_owned());
+        // Arm the existing next-step boundary; only subsequent model work opens a request.
+        self.input_returned();
+        self.error_item(
+            "model_rerouted",
+            &format!("Fake rerouted {previous} to {model}"),
+            false,
+        )
+        .await;
+    }
+
     /// A phase of the turn began.
     pub async fn phase(&self, kind: TurnPhaseKind) {
         self.send(SessionEvent::TurnPhase(TurnPhase {
             turn_id: self.turn_id,
+            retry_attempt: None,
             kind,
             at: self.now(),
         }))
@@ -497,6 +514,7 @@ impl Emitter {
     /// The agent called a tool of the `orch` server.
     pub async fn orch_tool_call(&self, call_ref: &str, tool: &str, arguments: Json) {
         self.send(SessionEvent::OrchToolCall(OrchToolCall {
+            deadline: None,
             turn_id: self.turn_id,
             call_ref: call_ref.to_owned(),
             attempt: None,
@@ -686,7 +704,7 @@ impl Emitter {
             state.last_output = None;
             let request = orch_agent_contract::requests::UsageRequest {
                 id: format!("request-{}", state.serial),
-                model: Some(self.model.clone()),
+                model: Some(lock(&self.model).clone()),
                 asked: Some(state.next_asked.take().unwrap_or_else(|| self.now())),
                 ..Default::default()
             };
@@ -791,6 +809,9 @@ impl Emitter {
     pub async fn error_item(&self, code: &str, message: &str, retryable: bool) {
         let native_ref = self.next_item_ref();
         let payload = ErrorPayload {
+            details: None,
+            window: None,
+            resets_at: None,
             code: code.to_owned(),
             message: message.to_owned(),
             retryable,

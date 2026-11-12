@@ -207,3 +207,22 @@ place in the colour of its kind or the one it was given, named only where it sta
 - `provider-sources-host.test.tsx`: Actual provider-context query/write joins, keeper-only offers, learned template descriptors, local policy warnings and fresh drafts across provider routes.
 - `provider-source-create.test.tsx`: Collapsed default source choices, template programs written with their runtime template and programs scoped to the selected keeping machine.
 - `environment-data.test.tsx`: Independent workspace/home choices, driver refusals and the shared machine roots/uses section in English and Chinese.
+
+Thread familiarity controls: `thread-hover-actions.test.tsx` verifies the shared person/agent rows and
+checkpoint owner; `thread-change-review.test.tsx` and `thread-changes-shortcut.test.tsx` verify the
+addressed Review, five file acts, actual repository scopes and focused content key;
+`thread-line-review.test.tsx` verifies original side/line/hunk/hash, private draft and one sent review;
+`composer-mode-row.test.tsx` verifies native approval/sandbox/Plan/defaults and the shared read;
+`thread-approval-keyboard.test.tsx` verifies native scope, focused Enter and harmless Escape.
+The mode/approval/hover/detail frames cover both languages, both themes and400/1440 widths. These
+are component controls; the integrator's shipping-build walk and its twelve-row table live in the
+lane's UI.md. Native report identity indexing also has a unit control proving no history visit per
+streamed output update and live corrected-value reads. No test creates a permission the native
+request did not offer.
+
+Recovery countdown controls seed the measured `serverClock` sample as well as the local fake clock;
+without a sample, the expected state stays queued. A shared Copy row can contain an empty screen-reader
+announcement, so watch-notice controls identify their exact text and status semantic rather than counting
+all live regions. Temporary controls retain their lifecycle explanation through `aria-description` and
+hover/focus Help without an inline paragraph. The common checkpoint menu name remains within the same
+five-word rule as other visible actions.

@@ -33,7 +33,7 @@ test('an invitation says what it is before anything is asked, and a stranger reg
   await expect(page.getByText('You are in Acme.')).toBeVisible();
   await expect(page.getByText('You also have an org of your own, for work that is only yours.')).toBeVisible();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 });
 
 test('a personal link asks for the address it was sent to, and refuses another', async ({ page }) => {
@@ -76,7 +76,8 @@ test('checks a reset link before showing a password form and gives an invalid li
   });
   try {
     await page.goto('/reset/not-a-token');
-    await expect(page.getByRole('heading', { name: 'Password reset link' })).toBeVisible();
+    // Auth forms name the browser tab; the system name is the single page heading.
+    await expect(page).toHaveTitle(/Password reset link/);
     await expect(page.getByLabel('New password', { exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Set password' })).toHaveCount(0);
     release?.();
@@ -93,7 +94,7 @@ test('checks a reset link before showing a password form and gives an invalid li
 test('without an invitation the page says what the system allows', async ({ page }) => {
   await page.goto('/register');
   await expect(page).toHaveURL(/\/login$/);
-  await expect(page.getByText('This system takes new people by invitation. Ask somebody in the team you are joining for a link.')).toBeVisible();
+  await expect(page.getByText('New here? This system takes new people by invitation: open the link you were sent.')).toBeVisible();
   await expect(page.getByLabel('Username or email address')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Create account', exact: true })).toHaveCount(0);
   await expectAccessibleInBothThemes(page);
@@ -121,7 +122,7 @@ test('without an invitation the page says what the system allows', async ({ page
   await page.getByRole('button', { name: 'Create account' }).click();
   await expect(page.getByText('Your account is ready.')).toBeVisible();
   await page.getByRole('button', { name: 'Continue' }).click();
-  await expect(page).toHaveURL(/\/org\/newcomer$/);
+  await expect(page).toHaveURL(/\/org\/newcomer(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 });
 
 test('where addresses are confirmed first, the link that was mailed confirms the address and signs its person in, once', async ({ page }) => {
@@ -135,7 +136,7 @@ test('where addresses are confirmed first, the link that was mailed confirms the
   await page.getByLabel('Email address').fill('newbie@example.org');
   await page.getByRole('button', { name: 'Create account' }).click();
 
-  await expect(page.getByText('We sent a link to newbie@example.org.')).toBeVisible();
+  await expect(page.getByText('Check newbie@example.org for a confirmation link.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   const link = await mailed('newbie', 'confirm');
 
@@ -143,7 +144,7 @@ test('where addresses are confirmed first, the link that was mailed confirms the
   await expect(page.getByText('Your address is confirmed.')).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.getByRole('link', { name: 'Continue' }).click();
-  await expect(page).toHaveURL(/\/org\/newbie$/);
+  await expect(page).toHaveURL(/\/org\/newbie(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 
   // The link was good for one use.
   await page.goto(`/verify-email/${link}`);
@@ -157,7 +158,7 @@ test('somebody who is signed in accepts an invitation where it is shown', async 
   await expect(page.getByText('Signed in as Margaret Hamilton.')).toBeVisible();
   await page.getByRole('button', { name: 'Accept invitation' }).click();
 
-  await expect(page).toHaveURL(/\/org\/acme$/);
+  await expect(page).toHaveURL(/\/org\/acme\/?(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 });
 
 test('asking for a reset always answers the same, and the link sets a new password that then gets in', async ({ page }) => {
@@ -178,7 +179,8 @@ test('asking for a reset always answers the same, and the link sets a new passwo
   const link = await mailed('ada', 'reset');
 
   await page.goto(`/reset/${link}`);
-  await expect(page.getByRole('heading', { name: 'Set a new password' })).toBeVisible();
+  await expect(page).toHaveTitle(/Set a new password/);
+  await expect(page.getByLabel('New password', { exact: true })).toBeVisible();
   await expectAccessibleInBothThemes(page);
   await page.getByLabel('New password', { exact: true }).fill('short');
   await page.getByRole('button', { name: 'Set password' }).click();
@@ -196,15 +198,18 @@ test('asking for a reset always answers the same, and the link sets a new passwo
   await expect(page.getByText('Wrong name or password.')).toBeVisible();
   await page.getByLabel('Password', { exact: true }).fill('a brand new password');
   await page.getByRole('button', { name: 'Sign in' }).click();
-  await expect(page).toHaveURL(/\/org\/ada$/);
+  // Reset changes the credential; this established reader still returns to the selected team.
+  await expect(page).toHaveURL(/\/org\/acme(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 
   // The link was good for one use.
   await page.goto(`/reset/${link}`);
   await expect(page.getByText('This link was already used, or it has ended.')).toBeVisible();
   await expect(page.getByLabel('New password', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Set a new password' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Back to sign-in' })).toHaveAttribute('href', '/login');
   await page.getByRole('link', { name: 'Back to sign-in' }).click();
-  await expect(page).toHaveURL(/\/login$/);
+  // Sign-in returns an already authenticated reader to their selected team.
+  await expect(page).toHaveURL(/\/org\/acme(\?(?:list=[^&]*&_list=true|_list=true&list=[^&]*))?$/);
 });
 
 test('where the system sends no mail, the page says who can help instead of asking for an address', async ({ page }) => {

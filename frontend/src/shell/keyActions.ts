@@ -30,6 +30,7 @@ export const KEY_ACTIONS = {
   finder: { shipped: 'Mod+K', what: 'help.keys.finder' },
   search: { shipped: 'Mod+/', what: 'help.keys.search' },
   find: { shipped: 'Mod+F', what: 'search.find.action' },
+  'thread-changes': { shipped: 'Mod+Alt+G', what: 'thread.changeScopes.shortcut' },
   'left-bar': { shipped: 'Mod+\\', what: 'shell.shortcuts.leftBar' },
   // Not Ctrl+.: on Windows that key switches the punctuation of Microsoft's Chinese input method.
   'right-bar': { shipped: 'Mod+Shift+.', what: 'shell.shortcuts.rightBar' },
@@ -48,6 +49,7 @@ export const KEY_ACTIONS = {
   'close-tab': { shipped: 'Alt+W', what: 'shell.shortcuts.closeTab' },
   'focus-mode': { shipped: '', what: 'workbench.workspace.focus' },
   help: { shipped: 'F1', what: 'shell.shortcuts.help' },
+  ask: { shipped: 'Shift+F1', what: 'ask.shortcut' },
   inbox: { shipped: 'G I', what: 'shell.shortcuts.inbox' },
   approvals: { shipped: 'G A', what: 'shell.shortcuts.approvals' },
   messages: { shipped: 'G M', what: 'shell.shortcuts.messages' },

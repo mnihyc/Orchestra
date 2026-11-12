@@ -52,7 +52,7 @@ it.each(['en', 'zh-CN'] as const)('loads from the row itself and gives native ap
   await user.click(screen.getByRole('button', { name: i18n.t('settings.reach.openFor', { name: def.title }) }));
   const region = await screen.findByRole('region', { name: i18n.t('settings.reach.openFor', { name: def.title }) });
   expect(within(region).getByText(locale === 'en' ? 'Applies to 1 project, 1 topic, and 7 threads' : '适用于1 个项目、1 个主题和7 个线程')).toBeVisible();
-  expect(within(region).getByRole('link', { name: 'login' })).toHaveAttribute('href', '/topic/override-one?tab=settings&section=policies&setting=agent.web_search');
+  expect(within(region).getByRole('link', { name: 'login' })).toHaveAttribute('href', '/topic/override-one?tab=settings&section=defaults&setting=agent.web_search');
   expect(calls.read).toHaveBeenCalledOnce();
   expectRead(0, '/nodes/{id}/settings/{key}/reach', {
     path: { id: target.id, key: def.key }, query: { limit: PAGE_SIZE },
@@ -92,7 +92,7 @@ it('loads the next cursor on request, keeps all served counts, and Refresh makes
   show(<SettingReachDetails target={target} def={def} snapshot="confirmed-value" />);
   await screen.findByRole('link', { name: 'login' });
   await user.click(screen.getByRole('button', { name: 'More overrides' }));
-  expect(await screen.findByRole('link', { name: 'Web' })).toHaveAttribute('href', '/project/override-two/settings?section=policies&setting=agent.web_search');
+  expect(await screen.findByRole('link', { name: 'Web' })).toHaveAttribute('href', '/project/override-two/settings?section=defaults&setting=agent.web_search');
   expect(screen.getByRole('link', { name: 'login' })).toBeVisible();
   expect(screen.getByText('Applies to 1 project, 1 topic, and 7 threads')).toBeVisible();
   expectRead(1, '/nodes/{id}/settings/{key}/reach', {
