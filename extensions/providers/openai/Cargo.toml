@@ -1,0 +1,24 @@
+[package]
+name = "orch-provider-openai"
+description = "OpenAI organization cost observations through an optional administrative source credential."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+orch-plugin-contract.workspace = true
+orch-provider-contract.workspace = true
+orch-types.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

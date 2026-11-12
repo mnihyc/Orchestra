@@ -12,6 +12,8 @@ import { useTranslation } from 'react-i18next';
 import { type Article, type Guide } from '@/help';
 import { slugOf } from '@/help/guide';
 import { resolveArticleLink, rewriteGuideLinks } from '@/help/links';
+import { SummaryText } from '@/features/summaries/SummaryText';
+import { askAboutHelp } from '@/features/help/ask';
 import { Button } from '@/ui/Button';
 import { Markdown } from '@/ui/Markdown';
 
@@ -45,6 +47,12 @@ export function ArticleView({ article, heading, onArticle, onScreen, onBack, vis
   const { t } = useTranslation();
   const body = useRef<HTMLDivElement>(null);
   const text = useMemo(() => rewriteLinks(article.body, article.linkPrefix, article.files), [article.body, article.linkPrefix, article.files]);
+  const summary = <>
+    {article.summary !== undefined && <SummaryText text={article.summary} />}
+    <div className="flex justify-end py-1">
+      <Button size="sm" variant="ghost" onClick={() => askAboutHelp(t('summaryBox.ask'), [{ article: article.id, heading, title: article.title, ...(article.summary === undefined ? {} : { summary: article.summary }) }])}>{t('summaryBox.ask')}</Button>
+    </div>
+  </>;
   const landed = useRef<{ article: string; heading: string | null; target: string | null; visit: number; text: string } | null>(null);
 
   // Each heading gets its anchor, and the one that was asked for is brought into view.
@@ -57,7 +65,7 @@ export function ArticleView({ article, heading, onArticle, onScreen, onBack, vis
     const previous = landed.current;
     if (previous?.article === article.id && previous.heading === heading && previous.target === target && previous.visit === visit && previous.text === text) return;
     landed.current = { article: article.id, heading, target, visit, text };
-    for (const element of root.querySelectorAll<HTMLElement>('h1, h2, h3, h4')) {
+    for (const element of Array.from(root.querySelectorAll<HTMLElement>('h1, h2, h3, h4'))) {
       const section = article.headings.find((one) => one.level === Number(element.tagName.slice(1)) && slugOf(one.text) === slugOf(element.textContent));
       element.id = section?.id ?? slugOf(element.textContent);
     }
@@ -97,7 +105,7 @@ export function ArticleView({ article, heading, onArticle, onScreen, onBack, vis
       {/* An article is read in its authored language; Help names an English body when needed. */}
       {/* An article scrolls by itself, so that it takes the keyboard: its arrow keys and Page keys then read it. */}
       <div ref={body} role="region" aria-label={article.title} tabIndex={0} className="min-h-0 flex-1 overflow-y-auto p-4" onClick={follow}>
-        <Markdown text={text} />
+        <Markdown text={text} afterTitle={summary} />
         {children}
       </div>
     </div>

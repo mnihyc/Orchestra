@@ -24,7 +24,9 @@ export async function expectOrdinaryWizardControls(dialog: Locator, stage: strin
       const style=getComputedStyle(element);
       if(style.visibility!=='visible') continue;
       const name=element.getAttribute('aria-label') ?? element.textContent;
-      if(rect.height>ordinary+rounding) issues.push(`${name}: height ${rect.height}, ordinary ${ordinary}`);
+      // A resource name can wrap its facts. Its full control must still fit the dialog.
+      const showsResourceFacts=element.querySelector('[data-resource-hint]')!==null;
+      if(!showsResourceFacts && rect.height>ordinary+rounding) issues.push(`${name}: height ${rect.height}, ordinary ${ordinary}`);
       if(rect.left<bounds.left-rounding || rect.right>bounds.right+rounding) issues.push(`${name}: outside its dialog`);
       const role=element.getAttribute('role');
       // Form fields and selector options have their own shared layout contract. Check action widths.

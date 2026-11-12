@@ -47,6 +47,21 @@ afterEach(async () => {
 });
 
 describe('a draft shared by an aside lane and its panel', () => {
+  it('saves an existing local draft after its first delayed server read without another keystroke', async () => {
+    let finishRead: (draft: Draft) => void = () => undefined;
+    calls.read.mockImplementation(() => new Promise((resolve) => { finishRead = resolve; }));
+    useComposerStore.setState({ text: { [THREAD]: 'Written before allocation finished' }, parts: { [THREAD]: [] } });
+    render(showEditors(true, false));
+    await advance(DRAFT_SAVE_AFTER_MS);
+    expect(calls.save).not.toHaveBeenCalled();
+    act(() => finishRead(saved));
+    await advance(1);
+    expect(calls.save).not.toHaveBeenCalled();
+    await advance(DRAFT_SAVE_AFTER_MS);
+    expect(calls.save).toHaveBeenCalledExactlyOnceWith(THREAD, [{ type: 'text', text: 'Written before allocation finished' }], 'queue');
+    expect(screen.getByRole('status', { name: 'lane' })).toHaveTextContent('Written before allocation finished');
+  });
+
   it('flushes the last editor’s dirty words before the debounce when browsing removes the composer', async () => {
     const view = render(showEditors(true, false)); await advance(1);
     act(() => composerWriter.setText(THREAD, 'Keep this while browsing history'));

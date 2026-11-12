@@ -1,0 +1,1570 @@
+//! One authorized storage report from existing retention records, content metadata and node inventories.
+
+use std::collections::BTreeSet;
+
+use std::collections::HashMap;
+
+use std::collections::HashSet;
+
+use chrono::DateTime;
+
+use chrono::Utc;
+
+use orch_access_contract::decisions::ObjectRef;
+
+use orch_access_contract::permissions::NodePermission;
+
+use orch_access_contract::permissions::ObjectKind;
+
+use orch_access_contract::permissions::PermissionName;
+
+use orch_api_contract::nodes::NodeRef;
+
+use orch_api_contract::resources::HostRef;
+
+use orch_api_contract::storage as api;
+
+use orch_api_contract::storage::KeptRecord;
+
+use orch_api_contract::storage::KeptWhy;
+
+use orch_api_contract::storage::StorageAvailability;
+
+use orch_api_contract::storage::StorageKind;
+
+use orch_api_contract::storage::StorageSourceIssue;
+
+use orch_authz::Act;
+
+use orch_authz::Principal;
+
+use orch_db::Conn;
+
+use orch_db::DbError;
+
+use orch_driver_contract::resources::ResourceInventory;
+
+use orch_engine::resource_facts;
+
+use orch_engine::storage as model;
+
+use orch_types::Id;
+
+use orch_types::Json;
+
+use orch_types::Time;
+
+use crate::middleware::authorization::refusals;
+
+use crate::middleware::requests::ApiError;
+
+use crate::middleware::requests::ApiResult;
+
+use crate::registry::Ctx;
+
+use crate::registry::Registry;
+
+use crate::key_operations::native;
+/// Binds the single storage report.
+pub fn mount(registry: &mut Registry) {
+    registry.on_snapshot_read_with_optional_initial_operation(
+        api::StorageGet,
+        native::effects::initial::<report_sources::Report>,
+        native::selected::<report_sources::Report>,
+        native::selected_read::<report_sources::Report>,
+    );
+    cleanup::mount(registry);
+}
+orch_api_base::__api_bind_9fa9b3986a!();
+
+#[derive(Clone, Copy)]
+pub(super) enum Scope {
+    Me,
+    Node(Id),
+    Host(Id),
+    System,
+    Resource(ObjectRef),
+}
+
+impl Scope {
+    fn parse(query: &api::StorageQuery) -> ApiResult<Self> {
+        if let Some(id) = query.resource_id {
+            let kind = query.resource_kind.ok_or_else(|| {
+                ApiError::invalid("resource_kind", "is required with resource_id")
+            })?;
+            return Ok(Self::Resource(ObjectRef { kind, id }));
+        }
+        let scope = query.scope.as_deref().unwrap_or("me");
+        if scope == "me" {
+            return Ok(Self::Me);
+        }
+        if scope == "system" {
+            return Ok(Self::System);
+        }
+        if let Some(id) = scope.strip_prefix("node:").and_then(|id| id.parse().ok()) {
+            return Ok(Self::Node(id));
+        }
+        if let Some(id) = scope.strip_prefix("host:").and_then(|id| id.parse().ok()) {
+            return Ok(Self::Host(id));
+        }
+        Err(ApiError::invalid(
+            "scope",
+            "is me, system, node:<id> or host:<id>",
+        ))
+    }
+    fn wire(self) -> String {
+        match self {
+            Self::Me => "me".into(),
+            Self::System => "system".into(),
+            Self::Host(id) => format!("host:{id}"),
+            Self::Node(id) => format!("node:{id}"),
+            Self::Resource(object) => format!("resource:{}:{}", object.kind, object.id),
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, sqlx::FromRow)]
+struct HostRow {
+    id: Id,
+    machine_id: Id,
+    name: String,
+    home_id: Option<Id>,
+    owner_id: Option<Id>,
+    online: bool,
+    resource_inventory: Option<Json>,
+}
+
+#[derive(Clone, serde::Serialize, sqlx::FromRow)]
+struct RuntimeOwner {
+    id: Id,
+    host_id: Id,
+    environment_id: Option<Id>,
+    provider_id: Option<Id>,
+    template_id: Id,
+    home_id: Option<Id>,
+    owner_id: Option<Id>,
+}
+
+impl RuntimeOwner {
+    fn object(&self) -> Option<ObjectRef> {
+        self.environment_id
+            .map(|id| ObjectRef {
+                kind: ObjectKind::Environment,
+                id,
+            })
+            .or_else(|| {
+                self.provider_id.map(|id| ObjectRef {
+                    kind: ObjectKind::Provider,
+                    id,
+                })
+            })
+    }
+}
+
+#[derive(Clone, serde::Serialize, sqlx::FromRow)]
+struct KeptEnvironment {
+    id: Id,
+    removal_revision: i64,
+    name: String,
+    owner_id: Id,
+    home_node_id: Id,
+    retained_bytes: Option<i64>,
+    retained_size_at: Option<DateTime<Utc>>,
+    deleted_at: Option<DateTime<Utc>>,
+    volumes_purge_at: Option<DateTime<Utc>>,
+    retained_volumes: Json,
+}
+
+#[derive(Clone, serde::Serialize, sqlx::FromRow)]
+struct KeptMount {
+    id: Id,
+    mount_id: Id,
+    machine_id: Id,
+    name: String,
+    home_id: Option<Id>,
+    owner_id: Option<Id>,
+    kind: String,
+    total_bytes: Option<i64>,
+    kept_at: DateTime<Utc>,
+}
+
+#[derive(Clone, serde::Serialize, sqlx::FromRow)]
+struct SkillVersion {
+    id: Id,
+    skill_id: Id,
+    name: String,
+    number: i32,
+    archive_hash: String,
+    owner_id: Id,
+    home_id: Id,
+    archive_size: i64,
+    created_at: DateTime<Utc>,
+    latest: bool,
+    retained: bool,
+}
+
+fn node_object_kind(kind: orch_api_contract::nodes::NodeKind) -> ObjectKind {
+    match kind {
+        orch_api_contract::nodes::NodeKind::Org => ObjectKind::Org,
+        orch_api_contract::nodes::NodeKind::Project => ObjectKind::Project,
+        orch_api_contract::nodes::NodeKind::Topic => ObjectKind::Topic,
+        orch_api_contract::nodes::NodeKind::Thread => ObjectKind::Thread,
+    }
+}
+
+type Records = (String, Vec<KeptRecord>, Vec<StorageSourceIssue>);
+
+struct PreparedRecords {
+    targets: HashMap<String, orch_engine::jobs::cleanup::Target>,
+    render: Box<dyn Fn() -> ApiResult<Records> + Send + Sync>,
+}
+
+impl PreparedRecords {
+    fn render(&self) -> ApiResult<Records> {
+        (self.render)()
+    }
+}
+
+/// Database and immutable supplier operands only; formatting happens after admission.
+async fn prepare_records(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    query: &api::StorageQuery,
+    operator: Option<&report_sources::OperatorSnapshot>,
+    mut book: Option<&mut report_sources::Book>,
+) -> ApiResult<PreparedRecords> {
+    let scope = Scope::parse(query)?;
+    if matches!(scope, Scope::System) && !principal.is_system_admin() {
+        return Err(ApiError::not_found());
+    }
+    if let Scope::Node(id) = scope {
+        let seen = orch_authz::nodes::holding(
+            conn,
+            principal,
+            &[id],
+            PermissionName::OfNode(NodePermission::View),
+            Act::Use,
+            Default::default(),
+        )
+        .await
+        .map_err(ApiError::internal)?;
+        if seen.is_empty() {
+            return Err(ApiError::not_found());
+        }
+    }
+    let hosts:Vec<HostRow>=sqlx::query_as("SELECT h.id,h.machine_id,h.name,h.home_id,h.owner_id,(m.online AND m.status='active' AND m.deleted_at IS NULL) AS online,h.resource_inventory FROM hosts h JOIN machines m ON m.id=h.machine_id")
+        .fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let environments:Vec<KeptEnvironment>=sqlx::query_as("SELECT id,removal_revision,name,owner_id,home_node_id,retained_bytes,retained_size_at,deleted_at,volumes_purge_at,retained_volumes FROM environments WHERE removal_phase IN ('removing','kept','restoring','purging') AND purged_at IS NULL")
+        .fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let mounts:Vec<KeptMount>=sqlx::query_as("SELECT k.id,k.mount_id,k.machine_id,m.name,m.home_id,m.owner_id,k.kind,k.total_bytes,k.kept_at FROM mount_kept_data k JOIN mounts m ON m.id=k.mount_id")
+        .fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let skills:Vec<SkillVersion>=sqlx::query_as("SELECT v.id,v.skill_id,v.name,v.number,encode(v.archive,'hex') AS archive_hash,s.owner_id,s.home_id,v.archive_size,v.created_at,(COALESCE(s.latest_version_id=v.id,false) AND s.deleted_at IS NULL) AS latest,EXISTS(SELECT 1 FROM turns t WHERE t.skill_versions @> ARRAY[v.id]) AS retained FROM skill_versions v JOIN skills s ON s.id=v.skill_id")
+        .fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let runtimes:Vec<RuntimeOwner>=sqlx::query_as("SELECT r.id,r.host_id,r.environment_id,r.provider_id,r.template_id,COALESCE(e.home_node_id,p.home_id) AS home_id,COALESCE(e.owner_id,p.owner_id) AS owner_id FROM runtimes r LEFT JOIN environments e ON e.id=r.environment_id LEFT JOIN providers p ON p.id=r.provider_id WHERE r.host_id=ANY($1)")
+        .bind(hosts.iter().map(|host|host.id).collect::<Vec<_>>()).fetch_all(&mut *conn).await.map_err(DbError::from)?;
+    let ids: Vec<_> = hosts
+        .iter()
+        .map(|row| row.id)
+        .chain(environments.iter().map(|row| row.id))
+        .chain(mounts.iter().map(|row| row.mount_id))
+        .chain(skills.iter().map(|row| row.skill_id))
+        .chain(
+            runtimes
+                .iter()
+                .flat_map(|row| [row.environment_id, row.provider_id, Some(row.template_id)])
+                .flatten(),
+        )
+        .chain(hosts.iter().map(|row| row.machine_id))
+        .chain(if let Scope::Resource(object) = scope {
+            Some(object.id)
+        } else {
+            None
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let rights = resource_facts::authorities(conn, principal, &ids)
+        .await
+        .map_err(ApiError::internal)?;
+    let rights: HashMap<_, _> = rights
+        .into_iter()
+        .map(|row| (row.resource.object(), row))
+        .collect();
+    let manages = |kind, id| {
+        rights
+            .get(&ObjectRef { kind, id })
+            .is_some_and(|row| row.manageable)
+    };
+    match scope {
+        Scope::Host(id) if !manages(ObjectKind::Host, id) => return Err(ApiError::not_found()),
+        Scope::Resource(object) if !rights.get(&object).is_some_and(|row| row.manageable) => {
+            return Err(ApiError::not_found());
+        }
+        _ => {}
+    }
+    let homes: Vec<_> = hosts
+        .iter()
+        .filter_map(|row| row.home_id)
+        .chain(environments.iter().map(|row| row.home_node_id))
+        .chain(mounts.iter().filter_map(|row| row.home_id))
+        .chain(skills.iter().map(|row| row.home_id))
+        .chain(runtimes.iter().filter_map(|row| row.home_id))
+        .collect();
+    let nodes = orch_db::queries::hierarchy::with_ancestors(conn, &homes).await?;
+    let seen_nodes = orch_authz::nodes::holding(
+        conn,
+        principal,
+        &homes,
+        PermissionName::OfNode(NodePermission::View),
+        Act::Use,
+        Default::default(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let seen_nodes: HashMap<_, _> = seen_nodes.into_iter().map(|row| (row.id, row)).collect();
+    let in_scope = |owner: Option<Id>,
+                    home: Option<Id>,
+                    host: Option<Id>,
+                    resource: Option<ObjectRef>| match scope {
+        Scope::Me => owner == Some(principal.user()),
+        Scope::System => true,
+        Scope::Host(id) => host == Some(id),
+        Scope::Node(id) => home
+            .and_then(|home| nodes.iter().find(|node| node.id == home))
+            .is_some_and(|node| node.path.contains(&id)),
+        Scope::Resource(object) => {
+            resource == Some(object) || object.kind == ObjectKind::Host && host == Some(object.id)
+        }
+    };
+    if let Some(book) = book.as_deref_mut() {
+        let accounts = hosts
+            .iter()
+            .filter_map(|row| row.owner_id)
+            .chain(environments.iter().map(|row| row.owner_id))
+            .chain(mounts.iter().filter_map(|row| row.owner_id))
+            .chain(skills.iter().map(|row| row.owner_id))
+            .chain(runtimes.iter().filter_map(|row| row.owner_id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        book.prepare_machines(
+            conn,
+            &hosts
+                .iter()
+                .map(|host| host.machine_id)
+                .chain(mounts.iter().map(|kept| kept.machine_id))
+                .collect::<Vec<_>>(),
+        )
+        .await?;
+        book.prime(
+            conn,
+            &rights.values().collect::<Vec<_>>(),
+            &homes,
+            &accounts,
+        )
+        .await?;
+        for node in seen_nodes.values() {
+            let kind = refusals::node_kind(node.kind.as_str()).ok_or_else(ApiError::not_found)?;
+            book.name(
+                conn,
+                ObjectRef {
+                    kind: node_object_kind(kind),
+                    id: node.id,
+                },
+            )
+            .await?;
+        }
+        for host in &hosts {
+            book.name(
+                conn,
+                ObjectRef {
+                    kind: ObjectKind::Host,
+                    id: host.id,
+                },
+            )
+            .await?;
+        }
+        for id in hosts
+            .iter()
+            .filter_map(|row| row.owner_id)
+            .chain(environments.iter().map(|row| row.owner_id))
+            .chain(mounts.iter().filter_map(|row| row.owner_id))
+            .chain(skills.iter().map(|row| row.owner_id))
+            .chain(runtimes.iter().filter_map(|row| row.owner_id))
+            .collect::<BTreeSet<_>>()
+        {
+            book.account_name(conn, id).await?;
+        }
+    }
+    let people = refusals::user_refs(
+        conn,
+        &hosts
+            .iter()
+            .filter_map(|row| row.owner_id)
+            .chain(environments.iter().map(|row| row.owner_id))
+            .chain(mounts.iter().filter_map(|row| row.owner_id))
+            .chain(skills.iter().map(|row| row.owner_id))
+            .chain(runtimes.iter().filter_map(|row| row.owner_id))
+            .collect::<Vec<_>>(),
+    )
+    .await?;
+    let at = Time::new(ctx.now);
+    let mut unavailable = Vec::new();
+    let policies = orch_settings::cleanup_at_hosts(
+        conn,
+        &hosts.iter().map(|host| host.id).collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(ApiError::internal)?;
+    let addresses: HashMap<_, _> = orch_authz::resources::addresses(
+        conn,
+        &hosts
+            .iter()
+            .filter(|host| {
+                rights
+                    .get(&ObjectRef {
+                        kind: ObjectKind::Host,
+                        id: host.id,
+                    })
+                    .is_some_and(|row| row.readable)
+            })
+            .map(|host| host.id)
+            .collect::<Vec<_>>(),
+    )
+    .await
+    .map_err(ApiError::internal)?
+    .into_iter()
+    .collect();
+    let mut sources = Vec::new();
+    let mut related = HashMap::<Id, std::collections::HashSet<ObjectRef>>::new();
+    for runtime in &runtimes {
+        let resources = related.entry(runtime.host_id).or_default();
+        if let Some(object) = runtime.object() {
+            resources.insert(object);
+        }
+        resources.insert(ObjectRef {
+            kind: ObjectKind::Template,
+            id: runtime.template_id,
+        });
+    }
+    for host in &hosts {
+        let scoped = match scope {
+            Scope::Resource(object) => {
+                related
+                    .get(&host.id)
+                    .is_some_and(|resources| resources.contains(&object))
+                    || object.kind == ObjectKind::Machine && host.machine_id == object.id
+            }
+            _ => false,
+        };
+        if !(manages(ObjectKind::Host, host.id) || scoped)
+            || matches!(scope, Scope::Host(_))
+                && !in_scope(
+                    host.owner_id,
+                    host.home_id,
+                    Some(host.id),
+                    Some(ObjectRef {
+                        kind: ObjectKind::Host,
+                        id: host.id,
+                    }),
+                )
+        {
+            continue;
+        }
+        if let Scope::Resource(object) = scope
+            && !scoped
+            && !(object.kind == ObjectKind::Host && host.id == object.id)
+        {
+            continue;
+        }
+        let reference = HostRef {
+            id: host.id,
+            name: host.name.clone(),
+            address: addresses.get(&host.id).cloned().unwrap_or_default(),
+        };
+        let Some(inventory) = host
+            .resource_inventory
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<ResourceInventory>(value.clone()).ok())
+        else {
+            if let Some(book) = book.as_deref_mut()
+                && !book.keep_object(conn, format!("inventory:{}", host.id), ObjectRef {kind: ObjectKind::Host, id: host.id}, serde_json::json!({"host": host.id, "online": host.online, "inventory": host.resource_inventory})).await? {continue;}
+            unavailable.push(StorageSourceIssue {
+                host: Some(reference),
+                reason: if host.online {
+                    "inventory_unrecorded"
+                } else {
+                    "node_away"
+                }
+                .into(),
+            });
+            continue;
+        };
+        sources.push((host.clone(), reference, inventory));
+    }
+    let subjects: Vec<_> = sources
+        .iter()
+        .flat_map(|(host, _, inventory)| {
+            inventory.resources.iter().map(move |item| {
+                orch_api_contract::resource_facts::FactSubject::Artifact {
+                    host_id: host.id,
+                    artifact_kind: serde_json::to_value(item.resource.kind)
+                        .ok()
+                        .and_then(|value| value.as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                    id: item.resource.id.clone(),
+                }
+            })
+        })
+        .collect();
+    let raw = resource_facts::read(conn, &subjects, at)
+        .await
+        .map_err(ApiError::internal)?;
+    let mut visibility =
+        resource_facts::prepare_projection(conn, principal, Default::default(), &raw)
+            .await
+            .map_err(ApiError::internal)?;
+    if let Some(book) = book.as_deref_mut() {
+        let mut allowed = std::collections::HashSet::new();
+        let references = visibility.sources().collect::<Vec<_>>();
+        book.prime_references(conn, &references).await?;
+        for object in references {
+            if book.name(conn, object).await? {
+                allowed.insert((object.kind, object.id));
+            }
+        }
+        visibility.restrict_to(&allowed);
+        visibility.restrict_system_names(book.system_name()?);
+    }
+    let facts = visibility.project(&raw);
+    let facts: HashMap<_, _> = facts
+        .into_iter()
+        .filter_map(|facts| match &facts.subject {
+            orch_api_contract::resource_facts::FactSubject::Artifact { host_id, id, .. } => {
+                Some(((*host_id, id.clone()), facts))
+            }
+            _ => None,
+        })
+        .collect();
+    let runtime_ids: HashMap<_, _> = runtimes.iter().map(|row| (row.id, row)).collect();
+    let mut retained_members = HashMap::new();
+    for environment in &environments {
+        if let Ok(volumes) = serde_json::from_value::<
+            Vec<orch_db::queries::environments::retained::Volume>,
+        >(environment.retained_volumes.clone())
+        {
+            for volume in volumes
+                .into_iter()
+                .filter(|volume| volume.environment_id == environment.id)
+            {
+                retained_members.insert((volume.host_id, volume.name), environment.id);
+            }
+        }
+    }
+    let mut admitted_sources = Vec::new();
+    for (host, reference, inventory) in sources {
+        let mut selection = None;
+        if let Some(book) = book.as_deref_mut() {
+            let mut admitted = BTreeSet::new();
+            for item in &inventory.resources {
+                let runtime = item
+                    .labels
+                    .get(orch_driver_contract::runtime::LABEL_RUNTIME_ID)
+                    .and_then(|id| id.parse::<Id>().ok())
+                    .and_then(|id| runtime_ids.get(&id));
+                let object = runtime
+                    .and_then(|runtime| runtime.object())
+                    .and_then(|object| rights.get(&object).filter(|row| row.readable))
+                    .map_or(
+                        ObjectRef {
+                            kind: ObjectKind::Host,
+                            id: host.id,
+                        },
+                        |row| row.resource.object(),
+                    );
+                let ordinary_owner = runtime
+                    .and_then(|runtime| runtime.object())
+                    .and_then(|object| rights.get(&object).filter(|row| row.readable));
+                let owner_id = ordinary_owner
+                    .and_then(|row| row.resource.first_owner)
+                    .or_else(|| runtime.is_none().then_some(host.owner_id).flatten());
+                let home = ordinary_owner
+                    .map_or(host.home_id, |row| row.resource.home)
+                    .filter(|id| seen_nodes.contains_key(id));
+                let in_native_scope = match scope {
+                    Scope::Resource(query) => {
+                        query.kind == ObjectKind::Machine && host.machine_id == query.id
+                            || query == object
+                            || query.kind == ObjectKind::Host && host.id == query.id
+                            || facts.get(&(host.id, item.resource.id.clone())).is_some_and(
+                                |facts| {
+                                    facts
+                                        .dependents
+                                        .iter()
+                                        .flat_map(|group| &group.visible)
+                                        .any(|edge| edge.object == Some(query))
+                                },
+                            )
+                    }
+                    _ => in_scope(owner_id, home, Some(host.id), Some(object)),
+                };
+                if !in_native_scope {
+                    continue;
+                }
+                let key = model::node_record_key(host.id, &item.resource);
+                let witness = serde_json::json!({"host": [host.id, host.machine_id], "host_name": host.name, "home": host.home_id, "owner_id": host.owner_id, "online": host.online, "item": item, "runtime": runtime, "days": policies.get(&host.id), "needed": inventory.resources.iter().any(|other| other.depends_on.contains(&item.resource)),
+                    "owner": rights.get(&object).map(|row| (&row.resource.name, row.resource.home, row.readable, row.manageable)),
+                    "facts": facts.get(&(host.id, item.resource.id.clone())).map(|facts| (&facts.dependents, facts.dependents_complete, &facts.uses))});
+                if book.keep_object(conn, key, object, witness).await? {
+                    book.row_names(
+                        conn,
+                        rights
+                            .get(&ObjectRef {
+                                kind: ObjectKind::Host,
+                                id: host.id,
+                            })
+                            .filter(|row| row.readable)
+                            .map(|_| host.id),
+                        home,
+                        owner_id,
+                    )
+                    .await?;
+                    if book.plan_names() {
+                        book.destination(conn, Some(host.id), host.machine_id)
+                            .await?;
+                        for edge in raw.iter().filter(|facts| matches!(&facts.subject, orch_api_contract::resource_facts::FactSubject::Artifact {host_id, id, ..} if *host_id == host.id && id == &item.resource.id)).flat_map(|facts| &facts.dependents) {
+                            if let Some(object) = edge.visibility {book.require_object_name(conn, object).await?;} else {book.require_name(crate::key_operations::targets::system().object);}
+                        }
+                    }
+                    admitted.insert(item.resource.clone());
+                }
+            }
+            if admitted.is_empty()
+                && !book.names.contains(&ObjectRef {
+                    kind: ObjectKind::Host,
+                    id: host.id,
+                })
+            {
+                continue;
+            }
+            selection = Some(admitted);
+        }
+        admitted_sources.push((host, reference, inventory, selection));
+    }
+    let mut admitted_environments = Vec::new();
+    for environment in environments {
+        if book.is_some() {
+            let refs = serde_json::from_value::<
+                Vec<orch_db::queries::environments::retained::Volume>,
+            >(environment.retained_volumes.clone())
+            .unwrap_or_default();
+            let hosts: BTreeSet<_> = refs.iter().map(|volume| volume.host_id).collect();
+            let host = (hosts.len() == 1).then(|| hosts.first().copied()).flatten();
+            if !manages(ObjectKind::Environment, environment.id)
+                || !in_scope(
+                    Some(environment.owner_id),
+                    Some(environment.home_node_id),
+                    host,
+                    Some(ObjectRef {
+                        kind: ObjectKind::Environment,
+                        id: environment.id,
+                    }),
+                )
+            {
+                continue;
+            }
+        }
+        if let Some(book) = book.as_deref_mut()
+            && !book
+                .keep_object(
+                    conn,
+                    format!("environment:{}", environment.id),
+                    ObjectRef {
+                        kind: ObjectKind::Environment,
+                        id: environment.id,
+                    },
+                    serde_json::to_value(&environment).map_err(ApiError::internal)?,
+                )
+                .await?
+        {
+            continue;
+        }
+        if let Some(book) = book.as_deref_mut() {
+            let volumes = serde_json::from_value::<
+                Vec<orch_db::queries::environments::retained::Volume>,
+            >(environment.retained_volumes.clone())
+            .unwrap_or_default();
+            let ids = volumes
+                .iter()
+                .map(|volume| volume.host_id)
+                .collect::<BTreeSet<_>>();
+            let host = (ids.len() == 1)
+                .then(|| ids.first().copied())
+                .flatten()
+                .filter(|id| manages(ObjectKind::Host, *id));
+            book.row_names(
+                conn,
+                host,
+                Some(environment.home_node_id),
+                Some(environment.owner_id),
+            )
+            .await?;
+            if book.plan_names() {
+                for id in ids {
+                    let host = hosts
+                        .iter()
+                        .find(|host| host.id == id)
+                        .ok_or_else(ApiError::not_found)?;
+                    book.destination(conn, Some(id), host.machine_id).await?;
+                }
+            }
+        }
+        admitted_environments.push(environment);
+    }
+    let mut admitted_mounts = Vec::new();
+    for kept in mounts {
+        if book.is_some()
+            && (!manages(ObjectKind::Mount, kept.mount_id)
+                || !in_scope(
+                    kept.owner_id,
+                    kept.home_id,
+                    hosts
+                        .iter()
+                        .find(|host| host.machine_id == kept.machine_id)
+                        .map(|host| host.id),
+                    Some(ObjectRef {
+                        kind: ObjectKind::Mount,
+                        id: kept.mount_id,
+                    }),
+                ))
+        {
+            continue;
+        }
+        if let Some(book) = book.as_deref_mut()
+            && !book
+                .keep_object(
+                    conn,
+                    format!("mount:{}", kept.id),
+                    ObjectRef {
+                        kind: ObjectKind::Mount,
+                        id: kept.mount_id,
+                    },
+                    serde_json::to_value(&kept).map_err(ApiError::internal)?,
+                )
+                .await?
+        {
+            continue;
+        }
+        if let Some(book) = book.as_deref_mut() {
+            book.row_names(conn, None, None, kept.owner_id).await?;
+            if book.plan_names() {
+                book.destination(conn, None, kept.machine_id).await?;
+            }
+        }
+        admitted_mounts.push(kept);
+    }
+    let mut admitted_skills = Vec::new();
+    for version in skills {
+        if book.is_some()
+            && (!manages(ObjectKind::Skill, version.skill_id)
+                || !in_scope(
+                    Some(version.owner_id),
+                    Some(version.home_id),
+                    None,
+                    Some(ObjectRef {
+                        kind: ObjectKind::Skill,
+                        id: version.skill_id,
+                    }),
+                ))
+        {
+            continue;
+        }
+        if let Some(book) = book.as_deref_mut()
+            && !book
+                .keep_object(
+                    conn,
+                    format!("skill-version:{}", version.id),
+                    ObjectRef {
+                        kind: ObjectKind::Skill,
+                        id: version.skill_id,
+                    },
+                    serde_json::to_value(&version).map_err(ApiError::internal)?,
+                )
+                .await?
+        {
+            continue;
+        }
+        if let Some(book) = book.as_deref_mut() {
+            book.row_names(conn, None, None, Some(version.owner_id))
+                .await?;
+        }
+        admitted_skills.push(version);
+    }
+    let server = if matches!(scope, Scope::System) {
+        Some(prepare_server(ctx, conn, at, query.page.limit(), book.as_deref_mut()).await?)
+    } else {
+        None
+    };
+    let (operator_rows, operator_issues) = if matches!(scope, Scope::System) {
+        prepare_operator(ctx, conn, principal, at, operator, book.as_deref_mut()).await?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let name_bounds = book
+        .as_ref()
+        .filter(|book| !book.plan_names())
+        .map(|book| (book.names.clone(), book.accounts.clone()));
+    let mut native_targets = HashMap::new();
+    for (host, _, inventory, selection) in &admitted_sources {
+        if !rights
+            .get(&ObjectRef {
+                kind: ObjectKind::Host,
+                id: host.id,
+            })
+            .is_some_and(|row| row.readable)
+        {
+            continue;
+        }
+        for item in inventory.resources.iter().filter(|item| {
+            selection
+                .as_ref()
+                .is_none_or(|selected| selected.contains(&item.resource))
+        }) {
+            native_targets.insert(
+                model::node_record_key(host.id, &item.resource),
+                orch_engine::jobs::cleanup::Target::Native {
+                    host: host.id,
+                    resource: item.resource.clone(),
+                    last_used_at: item.last_used_at,
+                },
+            );
+        }
+    }
+    for row in &admitted_environments {
+        native_targets.insert(
+            format!("environment:{}", row.id),
+            orch_engine::jobs::cleanup::Target::Environment {
+                environment: row.id,
+                revision: row.removal_revision,
+            },
+        );
+    }
+    for row in &admitted_mounts {
+        native_targets.insert(
+            format!("mount:{}", row.id),
+            orch_engine::jobs::cleanup::Target::MountData {
+                mount: row.mount_id,
+                kept: row.id,
+            },
+        );
+    }
+    for row in &admitted_skills {
+        native_targets.insert(
+            format!("skill-version:{}", row.id),
+            orch_engine::jobs::cleanup::Target::SkillVersion {
+                skill: row.skill_id,
+                version: row.id,
+            },
+        );
+    }
+    let user = principal.user();
+    Ok(PreparedRecords {
+        targets: native_targets,
+        render: Box::new(move || {
+            let manages = |kind, id| {
+                rights
+                    .get(&ObjectRef { kind, id })
+                    .is_some_and(|row| row.manageable)
+            };
+            let in_scope = |owner: Option<Id>,
+                            home: Option<Id>,
+                            host: Option<Id>,
+                            resource: Option<ObjectRef>| match scope {
+                Scope::Me => owner == Some(user),
+                Scope::System => true,
+                Scope::Host(id) => host == Some(id),
+                Scope::Node(id) => home
+                    .and_then(|home| nodes.iter().find(|node| node.id == home))
+                    .is_some_and(|node| node.path.contains(&id)),
+                Scope::Resource(object) => {
+                    resource == Some(object)
+                        || object.kind == ObjectKind::Host && host == Some(object.id)
+                }
+            };
+            let runtime_ids: HashMap<_, _> = runtimes.iter().map(|row| (row.id, row)).collect();
+            let mut facts = facts.clone();
+            let mut result = Vec::new();
+            let mut unavailable = unavailable.clone();
+            for (host, reference, inventory, selection) in admitted_sources.clone() {
+                let days = *policies
+                    .get(&host.id)
+                    .ok_or_else(|| ApiError::internal("the cleanup policy is missing"))?;
+                let mut items = model::node_records_selected(
+                    &reference,
+                    &inventory,
+                    days,
+                    host.online,
+                    selection.as_ref(),
+                );
+                for (item, native) in
+                    items
+                        .iter_mut()
+                        .zip(inventory.resources.iter().filter(|native| {
+                            selection
+                                .as_ref()
+                                .is_none_or(|selected| selected.contains(&native.resource))
+                        }))
+                {
+                    item.resource = Some(ObjectRef {
+                        kind: ObjectKind::Host,
+                        id: host.id,
+                    });
+                    item.place = host
+                        .home_id
+                        .and_then(|home| seen_nodes.get(&home))
+                        .map(|node| NodeRef {
+                            thread_display: None,
+                            id: node.id,
+                            kind: refusals::node_kind(node.kind.as_str())
+                                .unwrap_or(orch_api_contract::nodes::NodeKind::Org),
+                            name: Some(node.name.clone()),
+                            redacted: false,
+                        });
+                    item.facts = facts.remove(&(host.id, native.resource.id.clone()));
+                    if let Some(facts) = &item.facts {
+                        use orch_api_contract::resource_facts::DependentRelation;
+                        if facts.dependents.iter().any(|group| {
+                            matches!(
+                                group.relation,
+                                DependentRelation::Restore | DependentRelation::Attachment
+                            ) && group.count > 0
+                        }) {
+                            item.why = if facts.dependents.iter().any(|group| {
+                                group.relation == DependentRelation::Attachment && group.count > 0
+                            }) {
+                                KeptWhy::InUse
+                            } else {
+                                KeptWhy::Restore
+                            };
+                            item.until = facts
+                                .dependents
+                                .iter()
+                                .find(|group| group.relation == DependentRelation::Restore)
+                                .and_then(|group| group.until);
+                            item.blocker = Some("use_resource_cleanup".into());
+                        } else if !facts.dependents_complete && item.blocker.is_none() {
+                            item.why = KeptWhy::Unknown;
+                            item.blocker = Some("dependencies_unrecorded".into());
+                        } else if facts.dependents.iter().any(|group| {
+                            matches!(
+                                group.relation,
+                                DependentRelation::NativeDependency | DependentRelation::Operation
+                            )
+                        }) && item.blocker.is_none()
+                        {
+                            item.blocker = Some("in_use".into());
+                        }
+                    }
+                    let runtime = native
+                        .labels
+                        .get(orch_driver_contract::runtime::LABEL_RUNTIME_ID)
+                        .and_then(|id| id.parse::<Id>().ok())
+                        .and_then(|id| runtime_ids.get(&id));
+                    let owner = runtime
+                        .and_then(|runtime| runtime.object())
+                        .and_then(|object| rights.get(&object).filter(|row| row.readable));
+                    item.owner = owner
+                        .and_then(|owner| owner.resource.first_owner)
+                        .or_else(|| runtime.is_none().then_some(host.owner_id).flatten())
+                        .and_then(|id| people.get(&id).cloned());
+                    if let Some(owner) = owner {
+                        item.resource = Some(owner.resource.object());
+                        item.place = owner
+                            .resource
+                            .home
+                            .and_then(|home| seen_nodes.get(&home))
+                            .map(|node| NodeRef {
+                                thread_display: None,
+                                id: node.id,
+                                kind: refusals::node_kind(node.kind.as_str())
+                                    .unwrap_or(orch_api_contract::nodes::NodeKind::Topic),
+                                name: Some(node.name.clone()),
+                                redacted: false,
+                            });
+                    }
+                    if native.resource.kind == orch_driver_contract::resources::ResourceKind::Volume
+                        && let Some(environment) =
+                            retained_members.get(&(host.id, native.name.clone()))
+                    {
+                        item.included_in = Some(format!("environment:{environment}"));
+                    }
+                    if !rights
+                        .get(&ObjectRef {
+                            kind: ObjectKind::Host,
+                            id: host.id,
+                        })
+                        .is_some_and(|row| row.readable)
+                    {
+                        item.host = None;
+                    }
+                }
+                if !inventory.unavailable.is_empty() {
+                    unavailable.push(StorageSourceIssue {
+                        host: Some(reference),
+                        reason: "inventory_incomplete".into(),
+                    });
+                }
+                items.retain(|row| match scope {
+                    Scope::Me => row.owner.as_ref().is_some_and(|owner| owner.id == user),
+                    Scope::Node(id) => row
+                        .place
+                        .as_ref()
+                        .and_then(|place| nodes.iter().find(|node| node.id == place.id))
+                        .is_some_and(|node| node.path.contains(&id)),
+                    Scope::Resource(object) => {
+                        object.kind == ObjectKind::Machine && host.machine_id == object.id
+                            || row.resource == Some(object)
+                            || object.kind == ObjectKind::Host && host.id == object.id
+                            || row.facts.as_ref().is_some_and(|facts| {
+                                facts
+                                    .dependents
+                                    .iter()
+                                    .flat_map(|group| &group.visible)
+                                    .any(|edge| edge.object == Some(object))
+                            })
+                    }
+                    _ => true,
+                });
+                result.extend(items);
+            }
+            for environment in admitted_environments.clone() {
+                if !manages(ObjectKind::Environment, environment.id) {
+                    continue;
+                }
+                let refs = serde_json::from_value::<
+                    Vec<orch_db::queries::environments::retained::Volume>,
+                >(environment.retained_volumes)
+                .unwrap_or_default();
+                let host_ids: BTreeSet<_> = refs.iter().map(|volume| volume.host_id).collect();
+                let host = if host_ids.len() == 1 {
+                    host_ids.first().copied()
+                } else {
+                    None
+                };
+                let object = ObjectRef {
+                    kind: ObjectKind::Environment,
+                    id: environment.id,
+                };
+                if !in_scope(
+                    Some(environment.owner_id),
+                    Some(environment.home_node_id),
+                    host,
+                    Some(object),
+                ) {
+                    continue;
+                }
+                let mut row = model::record(
+                    format!("environment:{}", environment.id),
+                    StorageKind::EnvironmentFiles,
+                    environment.name,
+                    at,
+                );
+                row.resource = Some(object);
+                row.bytes = environment.retained_bytes;
+                row.why = KeptWhy::Restore;
+                row.since = environment.deleted_at.map(Time::new);
+                row.until = environment.volumes_purge_at.map(Time::new);
+                row.owner = people.get(&environment.owner_id).cloned();
+                row.observed_at = environment.retained_size_at.map_or(at, Time::new);
+                row.can_clean = true;
+                row.availability = StorageAvailability::Ready;
+                row.host = host
+                    .and_then(|id| {
+                        hosts
+                            .iter()
+                            .find(|host| host.id == id && manages(ObjectKind::Host, id))
+                    })
+                    .map(|host| HostRef {
+                        id: host.id,
+                        name: host.name.clone(),
+                        address: String::new(),
+                    });
+                row.place = seen_nodes
+                    .get(&environment.home_node_id)
+                    .map(|node| NodeRef {
+                        thread_display: None,
+                        id: node.id,
+                        kind: refusals::node_kind(node.kind.as_str())
+                            .unwrap_or(orch_api_contract::nodes::NodeKind::Topic),
+                        name: Some(node.name.clone()),
+                        redacted: false,
+                    });
+                if row.until.is_some_and(|until| until > at)
+                    && !rights
+                        .get(&object)
+                        .is_some_and(|authority| authority.administers)
+                {
+                    row.blocker = Some("restore_window".into());
+                }
+                result.push(row);
+            }
+            for kept in admitted_mounts.clone() {
+                let object = ObjectRef {
+                    kind: ObjectKind::Mount,
+                    id: kept.mount_id,
+                };
+                let host = hosts.iter().find(|host| host.machine_id == kept.machine_id);
+                let host_id = host.map(|host| host.id);
+                if !manages(ObjectKind::Mount, kept.mount_id)
+                    || !in_scope(kept.owner_id, kept.home_id, host_id, Some(object))
+                {
+                    continue;
+                }
+                let mut row = model::record(
+                    format!("mount:{}", kept.id),
+                    StorageKind::MountData,
+                    kept.name,
+                    Time::new(kept.kept_at),
+                );
+                row.resource = Some(object);
+                row.owner = kept.owner_id.and_then(|id| people.get(&id).cloned());
+                row.bytes = kept.total_bytes;
+                row.why = KeptWhy::Restore;
+                row.since = Some(Time::new(kept.kept_at));
+                row.availability = StorageAvailability::Ready;
+                row.can_clean = true;
+                if kept.kind == "path" {
+                    row.blocker = Some("borrowed_path".into());
+                }
+                result.push(row);
+            }
+            for version in admitted_skills.clone() {
+                let object = ObjectRef {
+                    kind: ObjectKind::Skill,
+                    id: version.skill_id,
+                };
+                if !manages(ObjectKind::Skill, version.skill_id)
+                    || !in_scope(
+                        Some(version.owner_id),
+                        Some(version.home_id),
+                        None,
+                        Some(object),
+                    )
+                {
+                    continue;
+                }
+                let mut row = model::record(
+                    format!("skill-version:{}", version.id),
+                    StorageKind::SkillVersion,
+                    format!("{} · {}", version.name, version.number),
+                    Time::new(version.created_at),
+                );
+                row.accounting_key = format!("blob:{}", version.archive_hash);
+                row.resource = Some(object);
+                row.owner = people.get(&version.owner_id).cloned();
+                row.bytes = Some(version.archive_size);
+                row.why = if version.latest || version.retained {
+                    KeptWhy::InUse
+                } else {
+                    KeptWhy::Cache
+                };
+                row.since = Some(Time::new(version.created_at));
+                row.availability = StorageAvailability::Ready;
+                row.can_clean = true;
+                if version.latest {
+                    row.blocker = Some("latest_version".into())
+                } else if version.retained {
+                    row.blocker = Some("in_use".into())
+                }
+                result.push(row);
+            }
+            if let Some(server) = &server {
+                result.extend(server());
+            }
+            result.extend(operator_rows.clone());
+            unavailable.extend(operator_issues.clone());
+            if let Some((names, accounts)) = &name_bounds {
+                for row in &mut result {
+                    // Native filters above use the original associations. This formatter only
+                    // narrows independently prepared reference names; it resolves no authority.
+                    if let Some(place) = &mut row.place
+                        && !names.contains(&ObjectRef {
+                            kind: node_object_kind(place.kind),
+                            id: place.id,
+                        })
+                    {
+                        place.name = None;
+                        place.redacted = true;
+                        place.thread_display = None;
+                    }
+                    if let Some(host) = &mut row.host
+                        && !names.contains(&ObjectRef {
+                            kind: ObjectKind::Host,
+                            id: host.id,
+                        })
+                    {
+                        host.name.clear();
+                        host.address.clear();
+                    }
+                    if row
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| !accounts.contains(&owner.id))
+                    {
+                        row.owner = None;
+                    }
+                    if let Some(upload) = &mut row.upload {
+                        if upload
+                            .uploader
+                            .as_ref()
+                            .is_some_and(|owner| !accounts.contains(&owner.id))
+                        {
+                            upload.uploader = None;
+                        }
+                        if upload.machine.as_ref().is_some_and(|machine| {
+                            !names.contains(&ObjectRef {
+                                kind: ObjectKind::Machine,
+                                id: machine.id,
+                            })
+                        }) {
+                            upload.machine = None;
+                        }
+                    }
+                }
+                for issue in &mut unavailable {
+                    if let Some(host) = &mut issue.host
+                        && !names.contains(&ObjectRef {
+                            kind: ObjectKind::Host,
+                            id: host.id,
+                        })
+                    {
+                        host.name.clear();
+                        host.address.clear();
+                    }
+                }
+            }
+            Ok((scope.wire(), result, unavailable))
+        }),
+    })
+}
+
+async fn operator_inventory(
+    ctx: &Ctx,
+) -> ApiResult<(Option<api::OperatorStorageInventory>, Option<&'static str>)> {
+    let directory = ctx.app.config.installation.records_dir.clone();
+    let system = ctx
+        .app
+        .link
+        .certificates()
+        .authority_certificate()
+        .fingerprint();
+    let read = tokio::task::spawn_blocking(move || {
+        orch_worker_core::backups::storage::inventory(&directory, &system)
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    Ok(match read {
+        Ok(Some(report)) => (Some(report), None),
+        Ok(None) => (None, Some("operator_metadata_unrecorded")),
+        Err(_) => (None, Some("operator_metadata_unavailable")),
+    })
+}
+
+async fn prepare_operator(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    principal: &Principal,
+    at: Time,
+    supplied: Option<&report_sources::OperatorSnapshot>,
+    mut book: Option<&mut report_sources::Book>,
+) -> ApiResult<(Vec<KeptRecord>, Vec<StorageSourceIssue>)> {
+    let fetched;
+    let (report, reason) = match supplied {
+        Some(snapshot) => (&snapshot.report, snapshot.reason),
+        None => {
+            fetched = operator_inventory(ctx).await?;
+            (&fetched.0, fetched.1)
+        }
+    };
+    let mut unavailable = Vec::new();
+    if let Some(reason) = reason {
+        unavailable.push(StorageSourceIssue {
+            host: None,
+            reason: reason.into(),
+        });
+    }
+    let Some(report) = report else {
+        return Ok((Vec::new(), unavailable));
+    };
+    let mut items = Vec::new();
+    for item in &report.items {
+        if let Some(book) = book.as_deref_mut()
+            && !book.keep(
+                item.record.id.clone(),
+                crate::key_operations::targets::system(),
+                serde_json::to_value(item).map_err(ApiError::internal)?,
+            )?
+        {
+            continue;
+        }
+        items.push(item.clone());
+    }
+    let raw = items
+        .iter()
+        .map(|item| resource_facts::operator_item(item, at))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(ApiError::internal)?;
+    if !report.issues.is_empty() {
+        unavailable.push(StorageSourceIssue {
+            host: None,
+            reason: "operator_metadata_unavailable".into(),
+        });
+    }
+    let mut visibility =
+        resource_facts::prepare_projection(conn, principal, Default::default(), &raw)
+            .await
+            .map_err(ApiError::internal)?;
+    if let Some(book) = book {
+        visibility.restrict_system_names(book.system_name()?);
+    }
+    let facts = visibility.project(&raw);
+    // Operator inventory is already a validated, protected native storage record.
+    let rows = items
+        .into_iter()
+        .zip(facts)
+        .map(|(item, facts)| {
+            let mut row = item.record;
+            row.facts = Some(facts);
+            row
+        })
+        .collect();
+    Ok((rows, unavailable))
+}
+
+async fn prepare_server(
+    ctx: &Ctx,
+    conn: &mut Conn,
+    at: Time,
+    preview: u32,
+    mut book: Option<&mut report_sources::Book>,
+) -> ApiResult<Box<dyn Fn() -> Vec<KeptRecord> + Send + Sync>> {
+    let bytes: i64 = sqlx::query_scalar("SELECT pg_database_size(current_database())")
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(DbError::from)?;
+    let blobs: Vec<(String, i64, i32, DateTime<Utc>)> =
+        sqlx::query_as("SELECT encode(hash,'hex'),size,pin_count,last_access_at FROM blobs")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(DbError::from)?;
+    let uploads = orch_db::queries::uploads::inventory::list(conn, None, None, None).await?;
+    let uploads = crate::upload_inventory::prepare(conn, uploads, None, preview).await?;
+    let machine_ids: Vec<_> = uploads
+        .iter()
+        .filter_map(|entry| entry.row.machine_id)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    let actual_machines =
+        crate::routes::resources::view::machine_refs(&ctx.app, conn, &machine_ids).await?;
+    let blob_sizes = blobs
+        .iter()
+        .map(|row| (row.0.clone(), row.1))
+        .collect::<HashMap<_, _>>();
+    let kept_artifacts = artifacts::prepare(conn, at, &blob_sizes, book.as_deref_mut()).await?;
+    let database = match book.as_deref_mut() {
+        Some(book) => book.keep(
+            "server:database".into(),
+            crate::key_operations::targets::system(),
+            serde_json::json!({"source": "database"}),
+        )?,
+        None => true,
+    };
+    let mut kept_blobs = Vec::new();
+    for row in blobs {
+        if let Some(book) = book.as_deref_mut()
+            && !book.keep(
+                format!("blob:{}", row.0),
+                crate::key_operations::targets::system(),
+                serde_json::to_value(&row).map_err(ApiError::internal)?,
+            )?
+        {
+            continue;
+        }
+        kept_blobs.push(row);
+    }
+    let mut kept_uploads = Vec::new();
+    let mut owner_names = HashSet::new();
+    let mut machine_names = HashSet::new();
+    for entry in uploads {
+        let row = &entry.row;
+        if let Some(book) = book.as_deref_mut() {
+            let target = if let Some(id) = row.session_id {
+                let Some(stored) = orch_db::queries::storage::session(conn, id).await? else {
+                    continue;
+                };
+                crate::key_operations::targets::from_upload_session(conn, &stored).await?
+            } else {
+                crate::key_operations::targets::system()
+            };
+            if !book.keep(
+                row.key.clone(),
+                target,
+                serde_json::to_value(&entry).map_err(ApiError::internal)?,
+            )? {
+                continue;
+            }
+            if let Some(owner) = row.user_id
+                && book.account_name(conn, owner).await?
+            {
+                owner_names.insert(owner);
+            }
+            if let Some(machine) = row.machine_id
+                && actual_machines.contains_key(&machine)
+                && book
+                    .name(
+                        conn,
+                        ObjectRef {
+                            kind: ObjectKind::Machine,
+                            id: machine,
+                        },
+                    )
+                    .await?
+            {
+                machine_names.insert(machine);
+            }
+        } else {
+            owner_names.extend(row.user_id);
+            if let Some(machine) = row.machine_id
+                && actual_machines.contains_key(&machine)
+            {
+                machine_names.insert(machine);
+            }
+        }
+        kept_uploads.push(entry);
+    }
+    let kept_uploads = crate::upload_inventory::project(
+        ctx,
+        conn,
+        &kept_uploads,
+        crate::upload_inventory::Projection {
+            owners: owner_names,
+            machines: machine_names,
+            administrative: true,
+            at,
+        },
+    )
+    .await?;
+    Ok(Box::new(move || {
+        let mut records = Vec::new();
+        if database {
+            let mut row = model::record(
+                "server:database".into(),
+                StorageKind::Database,
+                String::new(),
+                at,
+            );
+            row.bytes = Some(bytes);
+            row.why = KeptWhy::InUse;
+            row.availability = StorageAvailability::Ready;
+            row.blocker = Some("database_in_use".into());
+            records.push(row);
+        }
+        for (hash, bytes, pins, last) in kept_blobs.clone() {
+            let mut row = model::record(format!("blob:{hash}"), StorageKind::Content, hash, at);
+            row.bytes = Some(bytes);
+            row.why = if pins > 0 {
+                KeptWhy::InUse
+            } else {
+                KeptWhy::Cache
+            };
+            row.since = Some(Time::new(last));
+            row.availability = StorageAvailability::Ready;
+            row.can_clean = true;
+            if pins > 0 {
+                row.blocker = Some("in_use".into())
+            }
+            records.push(row);
+        }
+        for upload in kept_uploads.clone() {
+            use orch_api_contract::threads::UploadInventoryKind;
+            let mut row = model::record(
+                upload.id.clone(),
+                StorageKind::Upload,
+                upload.name.clone().unwrap_or_default(),
+                at,
+            );
+            row.owner = upload.uploader.clone();
+            row.machine = upload.machine.clone();
+            row.bytes = Some(upload.received);
+            row.since = Some(upload.created_at);
+            row.until = upload.expires_at;
+            row.availability = StorageAvailability::Ready;
+            row.why =
+                if upload.kind == UploadInventoryKind::Completed && upload.attachment_count == 0 {
+                    KeptWhy::Cache
+                } else {
+                    KeptWhy::InUse
+                };
+            if upload.kind == UploadInventoryKind::Completed
+                && let Some(blob) = upload.blob
+            {
+                row.accounting_key = format!("blob:{blob}");
+            }
+            if upload.kind == UploadInventoryKind::Session {
+                row.can_clean = upload
+                    .expires_at
+                    .is_some_and(|until| until.get() <= at.get());
+                row.blocker = (!row.can_clean).then(|| "upload_active".into());
+            }
+            row.upload = Some(upload);
+            records.push(row);
+        }
+        records.extend(kept_artifacts.clone());
+        records
+    }))
+}
+
+fn render_report(
+    (scope, mut records, unavailable): Records,
+    query: &api::StorageQuery,
+    at: Time,
+    name: String,
+) -> ApiResult<api::StorageReport> {
+    records.retain(|row| model::matches(row, query, at));
+    records.sort_by(|a, b| a.id.cmp(&b.id));
+    let totals = model::totals(&records);
+    let breakdowns = model::breakdowns(&records, at);
+    let after = query.page.cursor.as_deref().unwrap_or("");
+    let mut items: Vec<_> = records
+        .into_iter()
+        .filter(|row| row.id.as_str() > after)
+        .take(query.page.limit() as usize + 1)
+        .collect();
+    let next_cursor = if items.len() > query.page.limit() as usize {
+        items.pop();
+        items.last().map(|row| row.id.clone())
+    } else {
+        None
+    };
+    Ok(api::StorageReport {
+        scope,
+        name,
+        at,
+        totals,
+        breakdowns,
+        items,
+        next_cursor,
+        unavailable,
+    })
+}
+
+#[path = "storage/artifacts.rs"]
+pub mod artifacts;
+
+#[path = "storage/cleanup.rs"]
+pub mod cleanup;
+
+#[path = "storage/report_sources.rs"]
+pub mod report_sources;

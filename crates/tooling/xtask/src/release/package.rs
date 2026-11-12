@@ -48,6 +48,9 @@ pub struct PackageArgs {
     /// hashes, the contents of each archive) instead of building one.
     #[arg(long)]
     check: bool,
+    /// Also require a clean checkout of the manifest commit and its exact schema/deployment sources.
+    #[arg(long, requires = "check")]
+    check_source: bool,
     /// Write the manifest of the files the directory holds, keeping what the
     /// existing manifest says of the release itself.
     #[arg(long, conflicts_with = "check")]
@@ -74,18 +77,27 @@ pub struct PackageArgs {
     /// Verified native connector build directories to include in the server archive and release.
     #[arg(long, value_name = "DIR", action = clap::ArgAction::Append)]
     connectors: Vec<PathBuf>,
-    /// Require all five declared connector targets (the release workflow uses this).
+    /// Require every declared connector target (the release workflow uses this).
     #[arg(long)]
     require_all_connectors: bool,
+    /// Build only the command-line program, for this machine's musl target, into `--out` (`orchctl`). It takes as
+    /// long as the server programs, so the release workflow builds it on a runner of its own beside them.
+    #[arg(long, conflicts_with_all = ["check", "manifest_only", "native_connector", "connectors", "require_all_connectors", "cli"])]
+    cli_only: bool,
+    /// The command-line program `--cli-only` built for this release on this architecture, used instead of building it
+    /// here.
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["check", "manifest_only", "native_connector"])]
+    cli: Option<PathBuf>,
 }
 
 /// The programs compiled for the glibc the services run on.
-const SERVER_PROGRAMS: [&str; 3] = ["orch-api", "orch-gateway", "orch-worker"];
+pub(super) const SERVER_PROGRAMS: [&str; 3] = ["orch-api", "orch-gateway", "orch-worker"];
 /// The bundle of public roots inside the builder image: a service image holds
 /// none, and the services reach public servers (mail, bots, webhooks, push).
 const CA_BUNDLE_IN_IMAGE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The installers that go to the connectors' download directory.
-const INSTALLERS: [&str; 3] = ["install.sh", "install.ps1", "install-node.sh"];
+pub(super) const INSTALLERS: [&str; 3] = ["install.sh", "install.ps1", "install-node.sh"];
+pub(super) const DEPLOY_NOTICES: &str = "The deployment scripts are covered by LICENSE. Third-party program notices accompany the server and frontend archives.\n";
 /// The entries the user of an archive reaches in a release.
 const TOOLS_DIR_IN_ZIP: &str = "connectors";
 
@@ -94,8 +106,31 @@ pub fn run(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
     if let Some(target) = &args.native_connector {
         return connectors::build(root, &args.out, target);
     }
+    if args.cli_only {
+        return build_cli(root, &args.out);
+    }
     if args.check {
         check_release(&args.out)?;
+        if args.check_source {
+            if !git(root, &["status", "--porcelain"])?.is_empty() {
+                return Err(ReleaseError::Invalid(
+                    "source verification needs a clean candidate checkout".into(),
+                ));
+            }
+            let manifest = Manifest::read(&args.out)?;
+            let problems = super::source::problems(
+                root,
+                &args.out,
+                &manifest,
+                &git(root, &["rev-parse", "HEAD"])?,
+            )?;
+            if !problems.is_empty() {
+                return Err(ReleaseError::NotWhole {
+                    dir: args.out.clone(),
+                    problems: problems.join("\n"),
+                });
+            }
+        }
         if args.require_all_connectors {
             connectors::require_all(
                 &Manifest::read(&args.out)?
@@ -196,11 +231,18 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
         server_arguments.extend(["-p", program]);
     }
     builder.cargo(&server_arguments, &server_variables)?;
+    if let Some(cli) = &args.cli {
+        check_cli(cli, &arch)?;
+        eprintln!("reusing the command-line program built for {arch}");
+    }
     let mut static_arguments = vec!["build", "--release", "--locked", "--target", &triple];
-    for program in static_programs_to_build(&arch, &extra_connectors) {
+    let static_programs = static_programs_to_build(&arch, &extra_connectors, args.cli.is_some());
+    for program in &static_programs {
         static_arguments.extend(["-p", program]);
     }
-    builder.cargo(&static_arguments, &identity_variables)?;
+    if !static_programs.is_empty() {
+        builder.cargo(&static_arguments, &identity_variables)?;
+    }
     let glibc_dir = builder.target_dir().join("release");
     let musl_dir = builder.target_dir().join(&triple).join("release");
     let connector = static_source("orch-connector", &arch, &musl_dir, &extra_connectors);
@@ -217,7 +259,10 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
 
     // The files that are one program each.
     for (program, name) in [
-        (musl_dir.join("orchctl"), &names.ctl),
+        (
+            args.cli.clone().unwrap_or_else(|| musl_dir.join("orchctl")),
+            &names.ctl,
+        ),
         (connector.clone(), &names.connector),
         (node.clone(), &names.node),
     ] {
@@ -309,7 +354,11 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
         FILE_MODE,
     ));
     deploy.extend(licence_entries);
-    deploy.push(Entry::bytes("THIRD_PARTY_NOTICES", b"The deployment scripts are covered by LICENSE. Third-party program notices accompany the server and frontend archives.\n".to_vec(), FILE_MODE));
+    deploy.push(Entry::bytes(
+        "THIRD_PARTY_NOTICES",
+        DEPLOY_NOTICES.as_bytes().to_vec(),
+        FILE_MODE,
+    ));
     archive::write_tar_gz(&out.join(&names.deploy), &deploy)?;
 
     if !args.skip_image {
@@ -349,7 +398,7 @@ fn build(root: &Path, args: &PackageArgs) -> Result<(), ReleaseError> {
 
 /// What a deploy bundle leaves out: the state of an installation that lives in
 /// the directory, and anything that could hold a secret.
-fn skipped_in_deploy(path: &str) -> bool {
+pub(super) fn skipped_in_deploy(path: &str) -> bool {
     let first = path.split('/').next().unwrap_or_default();
     if first == "runtime" {
         return true;
@@ -369,7 +418,7 @@ fn skipped_in_deploy(path: &str) -> bool {
 }
 
 /// The builds of the harnesses `deploy/harness-builds.json` pins.
-fn harness_builds(root: &Path) -> Result<Vec<serde_json::Value>, ReleaseError> {
+pub(super) fn harness_builds(root: &Path) -> Result<Vec<serde_json::Value>, ReleaseError> {
     let path = root.join("deploy/harness-builds.json");
     let text = fs::read_to_string(&path).map_err(io_error(&path))?;
     serde_json::from_str(&text).map_err(|source| ReleaseError::Json { path, source })
@@ -407,8 +456,90 @@ fn static_source(
         .unwrap_or_else(|| musl_dir.join(program))
 }
 
-fn static_programs_to_build(arch: &str, inputs: &[(String, PathBuf)]) -> Vec<&'static str> {
-    let mut programs = vec!["orchctl"];
+/// Builds the command-line program alone, for this machine's musl target, in the pinned builder: what the packaging
+/// run would build after the server programs, built on a runner of its own.
+fn build_cli(root: &Path, out: &Path) -> Result<(), ReleaseError> {
+    if out.exists() && fs::read_dir(out).map_err(io_error(out))?.next().is_some() {
+        return Err(ReleaseError::Invalid(format!(
+            "{} is not empty; the command-line program is written to a directory of its own",
+            out.display()
+        )));
+    }
+    fs::create_dir_all(out).map_err(io_error(out))?;
+    let release = orch_build_support::release_identity(env!("CARGO_PKG_VERSION"))?;
+    let version = release.version;
+    let tag = release.tag.unwrap_or_else(|| format!("v{version}"));
+    let arch = Builder::architecture()?;
+    let triple = format!("{arch}-unknown-linux-musl");
+    let target_base =
+        std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let builder = Builder::new(root, &target_base.join("container"), &counters_dir(root))?;
+    builder.ensure_image()?;
+    let identity_variables = vec![
+        ("ORCH_RELEASE_VERSION".to_owned(), version),
+        ("ORCH_RELEASE_TAG".to_owned(), tag),
+    ];
+    builder.cargo(
+        &[
+            "build",
+            "--release",
+            "--locked",
+            "--target",
+            &triple,
+            "-p",
+            "orchctl",
+        ],
+        &identity_variables,
+    )?;
+    let built = builder
+        .target_dir()
+        .join(&triple)
+        .join("release")
+        .join("orchctl");
+    let target = out.join("orchctl");
+    fs::copy(&built, &target).map_err(io_error(&target))?;
+    check_cli(&target, &arch)?;
+    eprintln!("{}: the command-line program for {arch}", target.display());
+    Ok(())
+}
+
+/// A supplied command-line program is a Linux program for this architecture.
+fn check_cli(path: &Path, arch: &str) -> Result<(), ReleaseError> {
+    let mut head = [0_u8; 20];
+    fs::File::open(path)
+        .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut head))
+        .map_err(io_error(path))?;
+    // e_machine, little-endian, at offset 18 of an ELF header.
+    let machine = u16::from_le_bytes([head[18], head[19]]);
+    let expected = match arch {
+        "x86_64" => 0x3e,
+        "aarch64" => 0xb7,
+        other => {
+            return Err(ReleaseError::Invalid(format!(
+                "no command-line program is built for {other}"
+            )));
+        }
+    };
+    if head.starts_with(b"\x7fELF") && machine == expected {
+        Ok(())
+    } else {
+        Err(ReleaseError::Invalid(format!(
+            "{} is not a Linux program for {arch}",
+            path.display()
+        )))
+    }
+}
+
+fn static_programs_to_build(
+    arch: &str,
+    inputs: &[(String, PathBuf)],
+    cli_supplied: bool,
+) -> Vec<&'static str> {
+    let mut programs = if cli_supplied {
+        vec![]
+    } else {
+        vec!["orchctl"]
+    };
     for program in ["orch-connector", "orch-node"] {
         if native_input(program, arch, inputs).is_none() {
             programs.push(program);
@@ -999,10 +1130,21 @@ mod tests {
             ("orch-connector-linux-x86_64-musl".into(), connector.clone()),
             ("orch-node-linux-x86_64-musl".into(), node.clone()),
         ];
-        assert_eq!(static_programs_to_build("x86_64", &inputs), vec!["orchctl"]);
         assert_eq!(
-            static_programs_to_build("aarch64", &inputs),
+            static_programs_to_build("x86_64", &inputs, false),
+            vec!["orchctl"]
+        );
+        assert_eq!(
+            static_programs_to_build("aarch64", &inputs, false),
             vec!["orchctl", "orch-connector", "orch-node"]
+        );
+        assert!(
+            static_programs_to_build("x86_64", &inputs, true).is_empty(),
+            "a supplied command-line program and native connector and node leave nothing to build"
+        );
+        assert_eq!(
+            static_programs_to_build("aarch64", &inputs, true),
+            vec!["orch-connector", "orch-node"]
         );
         assert_eq!(
             static_source("orch-node", "x86_64", dir.path(), &inputs),
@@ -1061,11 +1203,14 @@ mod tests {
         fs::write(dir.path().join("orch-node"), b"\x7fELF linux node").unwrap();
         let mac = dir.path().join("orch-connector-macos-aarch64");
         let win = dir.path().join("orch-connector-windows-x86_64.exe");
+        let win_arm = dir.path().join("orch-connector-windows-aarch64.exe");
         fs::write(&mac, b"\xcf\xfa\xed\xfe native macOS bytes").unwrap();
         fs::write(&win, b"MZ native Windows bytes").unwrap();
+        fs::write(&win_arm, b"MZ native Windows ARM bytes").unwrap();
         let extra = vec![
             ("orch-connector-macos-aarch64".to_owned(), mac),
             ("orch-connector-windows-x86_64.exe".to_owned(), win),
+            ("orch-connector-windows-aarch64.exe".to_owned(), win_arm),
         ];
         let entries = connector_entries(
             root,
@@ -1095,6 +1240,12 @@ mod tests {
                 "windows",
                 "x86_64",
                 b"MZ native Windows bytes".as_slice(),
+            ),
+            (
+                "orch-connector-windows-aarch64.exe",
+                "windows",
+                "aarch64",
+                b"MZ native Windows ARM bytes".as_slice(),
             ),
         ] {
             let asset = listing.asset(name).unwrap();

@@ -55,9 +55,10 @@ for what the act needs, and the audit row of that change is marked as a
 override. The page shows them from then on, and nobody is notified. Nothing
 gets an admin past what is closed to everybody: a row locked from above, a
 subscription kept to its owner, a machine's local policy. A system
-administrator is an Admin of every organization by that inheritance, in a
-browser session only: an API token carries none of it, and nothing else
-marks them out.
+administrator uses the inherited private-access override through the browser's
+explicit As admin mode. Automation keys can perform selected administrative
+operations with the account's current standing. They keep their operation and
+target bounds and do not receive that private-access override.
 Archiving a project, a topic or a thread, and bringing it back, is a row of
 its page, held by whoever manages it and by whomever the row names.
 An environment is viewed or managed, with nothing between, since an agent

@@ -103,8 +103,8 @@ export const machineQuery = (id: string) =>
   });
 
 /** The native acknowledgement precedes a supervised reconnect; active roles arrive over the live row. */
-export function setMachineRoles(id:string,roles:readonly string[]):Promise<MachineRolesChange> {
-  return ok(api.PUT('/machines/{id}/roles',{params:{path:{id}},body:{roles:[...roles]}}));
+export function setMachineRoles(id:string,roles:readonly string[],expectedRevision?:number):Promise<MachineRolesChange> {
+  return ok(api.PUT('/machines/{id}/roles',{params:{path:{id}},body:{roles:[...roles],...(expectedRevision===undefined?{}:{expected_revision:expectedRevision})}}));
 }
 
 /** The local policy of a machine as it last reported it, and which keys this caller may change. */
@@ -163,8 +163,12 @@ export function registerAgent(machineId: string, body: MachineAgentCreateBody, k
   return ok(api.POST('/machines/{id}/agents', { params: { path: { id: machineId } }, body, ...repeatable(key) }));
 }
 
+/** An omitted home uses the native Machine registration default, for either provider kind. */
+type MachineHomeDefault<Body> = Body extends {home_id?: unknown} ? Omit<Body, 'home_id'> & {home_id?: string} : never;
+export type MachineProviderRegistration = MachineHomeDefault<MachineProviderCreateBody>;
+
 /** Registers a provider whose runtime is the machine: the login its harness holds there, or a key typed there. */
-export function registerProvider(machineId: string, body: MachineProviderCreateBody, key: string): Promise<Provider> {
+export function registerProvider(machineId: string, body: MachineProviderRegistration, key: string): Promise<Provider> {
   return ok(api.POST('/machines/{id}/providers', { params: { path: { id: machineId } }, body, ...repeatable(key) }));
 }
 

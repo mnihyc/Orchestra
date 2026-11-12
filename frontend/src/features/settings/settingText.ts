@@ -25,6 +25,8 @@ const SEARCH_FIELDS = {
   ef_search: 'searchTuning.fields.graphBreadth', iterative_scan: 'searchTuning.fields.graphScan',
 } as const;
 function knownSearchField(name: string): name is keyof typeof SEARCH_FIELDS { return Object.hasOwn(SEARCH_FIELDS, name); }
+const SUMMARY_FIELDS = ['thread', 'topic', 'document', 'chat', 'chat_title', 'help', 'search_results', 'automatic', 'on', 'min_interval_secs', 'context_tokens', 'output_chars'] as const;
+function knownSummaryField(name: string): name is typeof SUMMARY_FIELDS[number] { return (SUMMARY_FIELDS as readonly string[]).includes(name); }
 
 /** Search controls, summaries and full entries name their structured fields in the same words. */
 export function searchFieldName(name: string, t: TFunction): string | undefined {
@@ -33,6 +35,7 @@ export function searchFieldName(name: string, t: TFunction): string | undefined 
 
 /** Built-in resource members have translated names; variables keep the names their author entered. */
 export function settingFieldName(name: string, key: string | undefined, t: TFunction): string {
+  if ((key === 'summary.targets' || key === 'auto.summarizer') && knownSummaryField(name)) return t(`summaryOptions.fields.${name}`);
   if ((key === 'related.weights' || key === 'related.place_scores') && knownRelatedField(name)) return t(RELATED_FIELDS[name]);
   if (key === 'search.word_tuning' || key === 'search.semantic.tuning' || key === 'search.semantic.embeddings') return searchFieldName(name, t) ?? name.replaceAll('_', ' ').replaceAll('.', ' ');
   return key === 'env.variables' || key === 'runtime.variables' ? name : knownField(name) ? t(STRUCTURED_FIELDS[name]) : name.replaceAll('_', ' ').replaceAll('.', ' ');

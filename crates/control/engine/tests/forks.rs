@@ -5,6 +5,8 @@
     reason = "a test fails by panicking"
 )]
 
+#[path = "forks/agent_access.rs"]
+mod agent_access;
 #[path = "forks/approval_mode.rs"]
 mod approval_mode;
 #[path = "forks/call_recovery.rs"]
@@ -12,13 +14,19 @@ mod call_recovery;
 mod common;
 #[path = "forks/confirmed_source.rs"]
 mod confirmed_source;
+#[path = "forks/creator_provision.rs"]
+mod creator_provision;
 #[path = "forks/diagnostics.rs"]
 mod diagnostics;
+#[path = "forks/environment_switch.rs"]
+mod environment_switch;
 #[path = "forks/history_size.rs"]
 mod history_size;
 mod hosting;
 #[path = "forks/native_transfer.rs"]
 mod native_transfer;
+#[path = "shared/mod.rs"]
+mod shared;
 #[path = "forks/snapshot.rs"]
 mod snapshot;
 
@@ -106,6 +114,26 @@ impl Rig {
     ) -> Self {
         diagnostics::install().expect("the narrow fork database diagnostic sink must be installed");
         let world = World::new().await;
+        Self::with_world(
+            world,
+            source,
+            source_kind,
+            target_kind,
+            target,
+            physical_root,
+        )
+        .await
+    }
+
+    async fn with_world(
+        world: World,
+        source: Can,
+        source_kind: &str,
+        target_kind: &str,
+        target: Can,
+        physical_root: Option<&'static str>,
+    ) -> Self {
+        diagnostics::install().expect("the narrow fork database diagnostic sink must be installed");
         for kind in [source_kind, target_kind]
             .into_iter()
             .filter(|kind| *kind != "fake")
@@ -293,6 +321,7 @@ impl Rig {
             topic_id: None,
             name: None,
             access: None,
+            agent_access: None,
             history: None,
             to: Some(ForkTo {
                 provider_id: Some(self.other_provider),
@@ -1055,6 +1084,76 @@ async fn a_switch_that_fails_leaves_the_thread_exactly_as_it_was_and_what_was_qu
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_to_a_profile_whose_option_holds_back_a_turns_end_past_the_time_given_an_interrupt_fails_with_the_words_that_name_both_and_leaves_the_thread_as_it_was()
+ {
+    let can = Can {
+        export_native: true,
+        import_native: true,
+        ..Can::default()
+    };
+    let rig = Rig::with_world(
+        World::tuned(|waits| waits.interrupt_force = Duration::from_secs(30)).await,
+        can,
+        "fake",
+        "fake",
+        can,
+        None,
+    )
+    .await;
+    let thread = rig.thread_with_history("A wait too long").await;
+    let old_segment = rig.world.segment_of(thread).await;
+    let plan = rig.plan(thread, &rig.to_other()).await;
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    // The program of the second profile holds back the end of a turn for the option at the most and 8 seconds
+    // besides, and says so whenever it is started; the profile sets the option past what is left of the 30 seconds an
+    // unanswered interrupt is given.
+    let first = rig.world.agent;
+    let second = rig.other_agent;
+    rig.world
+        .machine
+        .handler
+        .on(CommandKind::AgentStart, move |command| {
+            let Command::AgentStart(start) = command else {
+                return Err(CommandError::new(ErrorCode::Internal, "not an agent.start"));
+            };
+            let mut descriptor = descriptor_with("fake", can);
+            if start.agent_id == second {
+                descriptor["x_turn_end_delays"] = json!({
+                    "version": 1,
+                    "delays": [{ "pointer": "/child_usage_wait_ms", "also_ms": 8000, "default_ms": 1000 }]
+                });
+            }
+            assert!(start.agent_id == first || start.agent_id == second);
+            Ok(CommandResult::AgentStart(AgentStartResult {
+                reused: false,
+                harness_version: "1.0.0".to_owned(),
+                descriptor: serde_json::from_value(descriptor).unwrap(),
+            }))
+        });
+    sqlx::query(
+        "UPDATE agents SET descriptor = descriptor || $1, profile = jsonb_set(profile, '{config}', $2) WHERE id = $3",
+    )
+    .bind(json!({ "x_turn_end_delays": {
+        "version": 1,
+        "delays": [{ "pointer": "/child_usage_wait_ms", "also_ms": 8000, "default_ms": 1000 }]
+    } }))
+    .bind(json!({ "child_usage_wait_ms": 22_001 }))
+    .bind(second)
+    .execute(rig.world.pool.pool())
+    .await
+    .unwrap();
+    let job = rig.confirm(thread, &plan).await;
+    let row = rig.wait_job_over(job.id, || "the switch".to_owned()).await;
+    assert_eq!(row.state, "failed", "{:?}", row.error);
+    let said = row.error.expect("the job says why").to_string();
+    assert!(
+        said.contains("child_usage_wait_ms") && said.contains("interrupt_force_secs"),
+        "{said}"
+    );
+    assert_eq!(rig.world.segment_of(thread).await, old_segment);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_switch_cancelled_before_its_commit_puts_everything_back() {
     let can = Can {
         export_native: true,
@@ -1223,6 +1322,7 @@ impl Rig {
             topic_id: None,
             name: Some("Trial".to_owned()),
             access: None,
+            agent_access: None,
             history: None,
             to: None,
             environment: None,
@@ -2153,17 +2253,31 @@ impl Rig {
     /// A second environment on the world's machine, running.
     async fn second_environment(&self) -> Id {
         let second = new_id();
-        sqlx::query(
+        let mut tx = self.world.pool.begin().await.unwrap();
+        let owner: Id = sqlx::query_scalar(
             "INSERT INTO environments (id, name, owner_id, org_id, placement, home_node_id, workspace_root, machine_id,
                                        template_id, generation, status)
              SELECT $1, 'Second', owner_id, org_id, 'managed', home_node_id, '/second', machine_id, template_id, 1, 'running'
-               FROM environments WHERE id = $2",
+               FROM environments WHERE id = $2 RETURNING owner_id",
         )
         .bind(second)
         .bind(self.world.environment)
-        .execute(self.world.pool.pool())
+        .fetch_one(&mut *tx)
         .await
         .unwrap();
+        orch_authz::ownership::start_resource(
+            &mut tx,
+            orch_access_contract::decisions::ObjectRef {
+                kind: orch_access_contract::permissions::ObjectKind::Environment,
+                id: second,
+            },
+            owner,
+            orch_authz::ownership::NewAccess::OnlyMe,
+            self.world.clock.time(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
         second
     }
 }
@@ -3011,6 +3125,17 @@ async fn a_side_thread_kept_by_a_fork_is_closed_with_that_reason() {
     .unwrap();
     assert_eq!(line["why"], json!("kept"));
     assert_eq!(line["into"]["id"], json!(kept));
+    let forked: i64 = rig
+        .world
+        .scalar(
+            "SELECT count(*) FROM audit_log WHERE object_id=$1 AND action='thread.forked'",
+            side,
+        )
+        .await;
+    assert_eq!(
+        forked, 1,
+        "the accepted fork and side ending commit together"
+    );
     let topic: Id = rig
         .world
         .scalar("SELECT parent_id FROM nodes WHERE id = $1", kept)
@@ -4215,4 +4340,289 @@ async fn an_aside_of_a_conversation_its_harness_can_neither_fork_nor_take_in_is_
         ),
         "{refused:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_fork_selection_precedes_suppliers_and_preserves_the_original_ordinary_draft() {
+    let can = Can {
+        import_neutral: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Prepared fork source").await;
+    let mut request = rig.to_other();
+    request.history = Some(ForkHistory {
+        mode: HistoryMode::Nothing,
+        from_turn: None,
+        to_turn: None,
+    });
+    request.directory = Some("selected-copy".into());
+    let kinds = [
+        CommandKind::FsStat,
+        CommandKind::GitStatus,
+        CommandKind::FsManifest,
+        CommandKind::GitWorktreeCopyPlan,
+        CommandKind::NodeMountMeasure,
+        CommandKind::NodeMountFingerprint,
+    ];
+    let before = kinds.map(|kind| rig.world.commands.issued_of(kind.as_str()));
+    let engine = rig.world.engine();
+    let caller = rig.caller();
+    let mut conn = rig.world.pool.acquire().await.unwrap();
+    let prepared = engine
+        .prepare_fork_in(
+            &mut conn,
+            &caller,
+            thread,
+            &request,
+            orch_engine::fork_plan::Reach::Seen,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(prepared.source().node_id, thread);
+    assert_eq!(prepared.agent().id, rig.other_agent);
+    assert_eq!(prepared.provider().id, rig.other_provider);
+    assert_eq!(
+        kinds.map(|kind| rig.world.commands.issued_of(kind.as_str())),
+        before,
+        "retryable native selection must not run any supplier"
+    );
+    let assembled = engine
+        .assemble_prepared_fork(&mut conn, &prepared)
+        .await
+        .unwrap();
+    let mut ordinary = engine.draft_fork(&caller, thread, &request).await.unwrap();
+    // These are two real observations, each with its own clock value. Keep
+    // every native operand equal while checking those observations advance.
+    assert!(ordinary.plan.expires_at >= assembled.plan.expires_at);
+    ordinary.plan.expires_at = assembled.plan.expires_at;
+    if let (Some(later), Some(earlier)) = (&mut ordinary.plan.files, &assembled.plan.files) {
+        assert!(later.source_as_of >= earlier.source_as_of);
+        later.source_as_of = earlier.source_as_of;
+    }
+    assert_eq!(
+        assembled, ordinary,
+        "the old entrypoint still consumes the same native selector and assembler"
+    );
+    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+        .bind(rig.other_provider)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let changed = engine
+        .prepare_fork_in(
+            &mut conn,
+            &caller,
+            thread,
+            &request,
+            orch_engine::fork_plan::Reach::Seen,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !prepared.preserves(&changed),
+        "a changed actual native prerequisite cannot validate the earlier prepared result"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_confirmation_prepares_without_effects_and_guards_its_original_first_insert_and_commit()
+ {
+    let can = Can {
+        import_neutral: true,
+        ..Can::default()
+    };
+    let rig = Rig::new(can, "fake", can).await;
+    let thread = rig.world.thread("Native confirmation source").await;
+    let engine = rig.world.engine();
+    let caller = rig.caller();
+    let mut request = rig.to_other();
+    request.history = Some(ForkHistory {
+        mode: HistoryMode::Nothing,
+        from_turn: None,
+        to_turn: None,
+    });
+    let plan = rig.plan(thread, &request).await;
+    assert!(plan.blockers.is_empty(), "{:?}", plan.blockers);
+    engine.stop();
+    let body = ForkCreateBody {
+        preflight_id: plan.preflight_id,
+        options: None,
+        notify: None,
+    };
+    let counts = || async {
+        sqlx::query_as::<_, (i64, i64, i64)>("SELECT (SELECT count(*) FROM jobs WHERE kind='thread_fork'), (SELECT count(*) FROM thread_history_cuts), (SELECT count(*) FROM preflights)")
+            .fetch_one(rig.world.pool.pool()).await.unwrap()
+    };
+    let initial = counts().await;
+    let before =
+        orch_db::queries::threads::thread(&mut rig.world.pool.acquire().await.unwrap(), thread)
+            .await
+            .unwrap()
+            .unwrap();
+    let kinds = [
+        CommandKind::FsStat,
+        CommandKind::GitStatus,
+        CommandKind::FsManifest,
+        CommandKind::GitWorktreeCopyPlan,
+        CommandKind::NodeMountMeasure,
+        CommandKind::NodeRuntimeVolumesMeasure,
+    ];
+    let commands = kinds.map(|kind| rig.world.commands.issued_of(kind.as_str()));
+    for stage in ["first", "commit", "live"] {
+        let mut tx = rig.world.pool.begin().await.unwrap();
+        let selected = engine
+            .prepare_fork_confirmation(&mut tx, &caller, thread, &body)
+            .await
+            .unwrap();
+        assert_eq!(selected.preflight_id(), plan.preflight_id);
+        assert_eq!(
+            counts().await,
+            initial,
+            "the selector must not write a job, cut or state"
+        );
+        assert_eq!(
+            kinds.map(|kind| rig.world.commands.issued_of(kind.as_str())),
+            commands
+        );
+        let draft = engine
+            .assemble_prepared_fork(&mut tx, selected.selected())
+            .await
+            .unwrap();
+        let result = engine
+            .commit_fork_confirmation(
+                tx,
+                &caller,
+                &selected,
+                draft,
+                || {
+                    if stage == "first" {
+                        Err(orch_engine::EngineError::unreadable("first insert refused"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || {
+                    if stage == "commit" {
+                        Err(orch_engine::EngineError::unreadable(
+                            "final native budget ended",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+            .await;
+        if stage == "live" {
+            let row = result.unwrap();
+            assert_eq!(row.kind, "thread_fork");
+            assert_eq!(row.node_id, Some(thread));
+            assert_eq!(
+                row.plan["confirmed_history_source"]["cut_id"],
+                json!(row.id)
+            );
+            assert_eq!(counts().await.0, initial.0 + 1);
+            assert_eq!(counts().await.2, initial.2 - 1);
+        } else {
+            assert!(matches!(result, Err(PlanError::Internal(_))));
+            assert_eq!(counts().await, initial);
+            let after = orch_db::queries::threads::thread(
+                &mut rig.world.pool.acquire().await.unwrap(),
+                thread,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(before.state, after.state);
+            assert_eq!(before.execution_revision, after.execution_revision);
+            assert_eq!(before.environment_id, after.environment_id);
+            assert_eq!(before.provider_id, after.provider_id);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_batch_selection_precedes_suppliers_and_preserves_duplicates_skips_and_ordinary_results()
+ {
+    let can = Can {
+        import_neutral: true,
+        ..Can::default()
+    };
+    let world = World::with_clock(Arc::new(orch_types::ManualClock::new(chrono::Utc::now()))).await;
+    let rig = Rig::with_world(world, can, "fake", "fake", can, None).await;
+    let first = rig.world.thread("First selected native member").await;
+    let second = rig.world.thread("Second selected native member").await;
+    let engine = rig.world.engine();
+    let caller = rig.caller();
+    let body = orch_api_contract::forks::ForkBatchPreflightBody {
+        thread_ids: Some(vec![first, second, first, new_id()]),
+        to: rig.to_other().to,
+        ..Default::default()
+    };
+    let kinds = [
+        CommandKind::FsStat,
+        CommandKind::GitStatus,
+        CommandKind::FsManifest,
+        CommandKind::GitWorktreeCopyPlan,
+        CommandKind::NodeMountMeasure,
+        CommandKind::NodeMountFingerprint,
+    ];
+    let before = kinds.map(|kind| rig.world.commands.issued_of(kind.as_str()));
+    let mut conn = rig.world.pool.acquire().await.unwrap();
+    let selected = engine
+        .prepare_batch_in(&mut conn, &caller, &body)
+        .await
+        .unwrap();
+    assert_eq!(
+        selected
+            .selections()
+            .iter()
+            .map(|member| member.member().thread)
+            .collect::<Vec<_>>(),
+        vec![first, second]
+    );
+    assert_eq!(
+        kinds.map(|kind| rig.world.commands.issued_of(kind.as_str())),
+        before
+    );
+    let assembled = engine
+        .assemble_prepared_batch(&mut conn, &caller, &selected, None)
+        .await
+        .unwrap();
+    let ordinary = engine.draft_batch(&caller, &body).await.unwrap();
+    assert_eq!(assembled, ordinary);
+    assert_eq!(assembled.plan.skipped.len(), 1);
+    assert_eq!(
+        assembled.plan.skipped[0].reason,
+        orch_api_contract::forks::SkipReason::NotFound
+    );
+    let mut tx = rig.world.pool.begin().await.unwrap();
+    let refused = engine
+        .keep_batch_plan_on(&mut tx, &caller, assembled.clone(), || {
+            Err(orch_engine::EngineError::unreadable(
+                "native private-plan insert refused",
+            ))
+        })
+        .await;
+    assert!(matches!(refused, Err(PlanError::Internal(_))));
+    tx.rollback().await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM preflights")
+        .fetch_one(rig.world.pool.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    sqlx::query("UPDATE providers SET status='disabled' WHERE id=$1")
+        .bind(rig.other_provider)
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+    let current = engine
+        .prepare_batch_in(&mut conn, &caller, &body)
+        .await
+        .unwrap();
+    assert!(!selected.preserves(&current));
 }

@@ -22,10 +22,12 @@
  * the "+" of an org, a project or a folder are the lists of `NodeMenu`, made only for the row that is
  * asked; a document's are a document's own.
  */
+import { useGroupActions } from '@/features/chat/groupActions';
+import { linkTo } from '@/lib/links';
 import { Link } from '@tanstack/react-router';
 import type { TFunction } from 'i18next';
 import { ChevronsDown, Copy, Ellipsis, ExternalLink, Focus, Lock, LoaderCircle, MessageSquare, MessagesSquare, RotateCw } from 'lucide-react';
-import { cloneElement, createContext, type DragEvent, type KeyboardEvent, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { cloneElement, createContext, type DragEvent, type KeyboardEvent, memo, type ReactElement, type ReactNode, type RefObject, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import type { DocumentRef } from '@/api/documents';
@@ -36,7 +38,7 @@ import { NodeContextMenu, NodeMakeButton, NodeMenuButton, useIsPending } from '@
 import { destinationsFor } from '@/features/org/Move';
 import { kindWord, PlaceLink, type PlaceRef, placeOfRow, placePath } from '@/features/navigation/places';
 import { loadMoreDocs, retryDocs } from '@/features/navigation/treeDocs';
-import { buildRows, type ChatMark, type NavItem, nameOf, newLayoutMemory, type TreeView } from '@/features/navigation/treeRows';
+import { buildRows, type ChatMark, type NavItem, nameOf, newLayoutMemory, type TreeView, visibleNodeSiblings } from '@/features/navigation/treeRows';
 import type { AdminAccess, TreeNode } from '@/generated/api-types';
 import type { OrgTree } from '@/realtime/stores/tree';
 import { Badge } from '@/ui/Badge';
@@ -224,13 +226,30 @@ function useDropOnto(target: TreeNode) {
   };
 }
 
+/** A state change leaves a place's name and actions as they were. */
+function useRowPlace(node: TreeNode, folder: boolean): PlaceRef {
+  const { id, kind, name, parent_id: parentId, archived } = node;
+  const status = node.topic?.status ?? null;
+  return useMemo(() => ({ id, kind, name, parentId, archived, status, folder }), [id, kind, name, parentId, archived, status, folder]);
+}
+
+// The buttons compute their names from the active catalogue, so language is also a rendering input.
+const RowActions = memo(function RowActions({ place, parentName, besideChat, end, endTitle, extraEntries }: { place: PlaceRef; parentName?: string | null | undefined; besideChat: boolean; language: string; end?: ReactNode; endTitle?: string | undefined; extraEntries?: MenuEntry[] | undefined }) {
+  const holdsPlaces = place.kind === 'org' || place.kind === 'project';
+  const buttons = <>
+    {holdsPlaces && <NodeMakeButton place={place} skipTab />}
+    <NodeMenuButton place={place} parentName={parentName} skipTab extraEntries={extraEntries} />
+  </>;
+  return end === undefined ? <span className={besideChat ? ROW_BUTTONS_BESIDE_GLYPH : ROW_BUTTONS}>{buttons}</span>
+    : <RowEnd time={end} title={endTitle}>{buttons}</RowEnd>;
+});
+
 export function NodeRow({ item, where, end, endTitle, extraEntries }: { item: Extract<NavItem, { type: 'node' }>; where?: RowPlaceValue | null; end?: ReactNode; endTitle?: string; extraEntries?: MenuEntry[] | undefined }) {
-  const { node, urgent, folder, waiting, unread, mentions, chat, chatMentions } = item;
-  const { t } = useTranslation();
+  const { node, parentName, urgent, folder, waiting, unread, mentions, chat, chatMentions } = item;
+  const { t, i18n } = useTranslation();
   const pending = useIsPending(node.id);
-  const place = placeOfRow(node, folder);
+  const place = useRowPlace(node, folder);
   const kind = kindWord(place);
-  const holdsPlaces = node.kind === 'org' || node.kind === 'project';
   // A project, a folder, a topic and an org inside another can be dragged onto another place to be moved there.
   const movable = node.kind === 'project' || node.kind === 'topic' || (node.kind === 'org' && node.parent_id !== null);
   const drop = useDropOnto(node);
@@ -280,13 +299,7 @@ export function NodeRow({ item, where, end, endTitle, extraEntries }: { item: Ex
         {chat !== 'none' && chatMentions > 0 && <Badge tone="accent" count={chatMentions} />}
         {chat !== 'none' && <ChatGlyph node={node} mark={chat} mentions={chatMentions} />}
       </span>
-      {end === undefined ? <span className={chat === 'none' ? ROW_BUTTONS : ROW_BUTTONS_BESIDE_GLYPH}>
-        {holdsPlaces && <NodeMakeButton place={place} skipTab />}
-        <NodeMenuButton place={place} skipTab extraEntries={extraEntries} />
-      </span> : <RowEnd time={end} title={endTitle}>
-        {holdsPlaces && <NodeMakeButton place={place} skipTab />}
-        <NodeMenuButton place={place} skipTab extraEntries={extraEntries} />
-      </RowEnd>}
+      <RowActions place={place} parentName={parentName} besideChat={chat !== 'none'} language={i18n.resolvedLanguage ?? i18n.language} end={end} endTitle={endTitle} extraEntries={extraEntries} />
     </>
   );
 }
@@ -349,7 +362,7 @@ function DocsRow({ nodeId, state }: { nodeId: string; state: 'loading' | 'failed
 
 /** The list of a chat's row: where it leads, and its link. */
 function chatEntries(path: string, t: TFunction, open: (path: string) => void): MenuEntry[] {
-  const copy = () => copyText(new URL(path, location.origin).href, t('common.linkCopied'));
+  const copy = () => copyText(linkTo({ href: path }), t('common.linkCopied'));
   return [
     { id: 'open', label: t('places.menu.open'), onSelect: () => open(path) },
     { id: 'open-tab', label: t('places.menu.openInTab'), icon: <ExternalLink aria-hidden />, shortcut: 'Mod+Enter', onSelect: () => window.open(path, '_blank', 'noopener') },
@@ -359,7 +372,7 @@ function chatEntries(path: string, t: TFunction, open: (path: string) => void): 
 }
 
 /** A chat's row: its glyph, its name, what says it is unread, and its menu. A chat its reader does not follow is quiet, and still says when they are mentioned. */
-function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess }: { name: string; of: string; path: string; unread: boolean; mentions: number; quiet: boolean; adminAccess?: AdminAccess | null }) {
+function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess, actions }: { name: string; of: string; path: string; unread: boolean; mentions: number; quiet: boolean; adminAccess?: AdminAccess | null; actions?: MenuEntry[] }) {
   const { t } = useTranslation();
   const open = useOpenPath();
   return (
@@ -379,12 +392,28 @@ function ChatRow({ name, of, path, unread, mentions, quiet, adminAccess }: { nam
         <Menu
           label={t('places.menu.of', { name: of })}
           align="end"
-          entries={chatEntries(path, t, open)}
+          entries={actions ?? chatEntries(path, t, open)}
           trigger={<IconButton size="sm" label={t('places.menu.more', { name: of })} icon={<Ellipsis aria-hidden />} tabIndex={-1} />}
         />
       </span>
     </>
   );
+}
+
+function GroupRow({ item, path }: { item: Extract<NavItem, { type: 'group' }>; path: string }) {
+  const { t } = useTranslation();
+  const open = useOpenPath();
+  const group = useGroupActions(item.chat, open);
+  const name = item.chat.name ?? t('navigation.chat.group');
+  const entries = [...group.entries, ...chatEntries(path, t, open).filter((entry) => !('id' in entry) || entry.id !== 'open')];
+  return <ChatRow name={name} of={name} path={path} unread={item.unread} mentions={item.mentions} quiet={item.quiet} adminAccess={adminAccessOf(item.chat)} actions={entries} />;
+}
+function GroupContextMenu({ item, path, children }: { item: Extract<NavItem, { type: 'group' }>; path: string; children: ReactElement }) {
+  const { t } = useTranslation();
+  const open = useOpenPath();
+  const group = useGroupActions(item.chat, open);
+  const entries = [...group.entries, ...chatEntries(path, t, open).filter((entry) => !('id' in entry) || entry.id !== 'open')];
+  return <ContextMenu label={t('places.menu.of', { name: item.chat.name ?? t('navigation.chat.group') })} entries={entries}>{children}</ContextMenu>;
 }
 
 /** Gives a chat's row its right-click menu: the same list as its "⋯". */
@@ -556,7 +585,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
   useEffect(() => {
     drop.current = {
       nodes: tree.nodes,
-      siblingsOf: (parentId) => rows.filter((row) => row.parentId === parentId && row.item.type === 'node').map((row) => row.id),
+      siblingsOf: (parentId) => visibleNodeSiblings(rows, parentId),
       arrange: onArrange,
     };
   });
@@ -606,10 +635,7 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
               </span>
             </>
           );
-        case 'group': {
-          const name = item.chat.name ?? t('navigation.chat.group');
-          return <ChatRow name={name} of={name} path={groupPath(item.chat.id)} unread={item.unread} mentions={item.mentions} quiet={item.quiet} adminAccess={adminAccessOf(item.chat)} />;
-        }
+        case 'group': return <GroupRow item={item} path={groupPath(item.chat.id)} />;
         case 'outside':
           return <OutsideRow node={item.node} where={item.where} place={item.place} onShow={onShow} />;
         case 'private':
@@ -645,9 +671,9 @@ export function NodeTree({ tree, rootId, view, expanded, onExpandedChange, curre
           );
         case 'group':
           return (
-            <ChatContextMenu of={item.chat.name ?? t('navigation.chat.group')} path={groupPath(item.chat.id)}>
+            <GroupContextMenu item={item} path={groupPath(item.chat.id)}>
               {element}
-            </ChatContextMenu>
+            </GroupContextMenu>
           );
         case 'docs':
           return item.state === 'more' ? pressed(() => loadMoreDocs(item.nodeId)) : item.state === 'failed' ? pressed(() => retryDocs(item.nodeId)) : element;

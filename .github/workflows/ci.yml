@@ -1,13 +1,14 @@
 name: CI
 
 on:
-  # Branches only: a release tag names a commit its branch's push has already tested.
   push:
-    branches: ['**']
+    # A branch under ci-t/ runs only its targeted checks (ci-targeted.yml).
+    branches: ['**', '!ci-t/**']
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
   # The deployment scenarios package two releases and run stacks on Docker: an hour and more,
-  # so they run each night and by hand, not on every push.
+  # so they run each night, by hand and for release tags, not on every branch push.
   schedule:
     - cron: "23 2 * * *"
 
@@ -21,13 +22,26 @@ concurrency:
 jobs:
   rust:
     name: Rust (${{ matrix.os }})
+    # The slowest platform leg, macOS on Intel, took 199 minutes on B27 and passed 210 on B28 (cancelled in its
+    # executable identity step, after 31 minutes of documentation). Keep about 45 minutes of headroom over the
+    # slowest leg without holding the release gate for six hours.
+    timeout-minutes: 270
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
     runs-on: ${{ matrix.os }}
+    env:
+      # These debug builds check and run executables, without needing debug info.
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare memory for Linux compilation
+        if: runner.os == 'Linux'
+        run: |
+          bash .github/scripts/ci_memory.sh
+          printf '%s\n' 'CARGO_BUILD_JOBS=1' >> "$GITHUB_ENV"
       - name: Install the repository toolchain
         run: rustup show
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -88,12 +102,27 @@ jobs:
       CC_aarch64_unknown_linux_musl: musl-gcc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare memory for static compilation
+        run: bash .github/scripts/ci_memory.sh
       - name: Install the musl C compiler
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+        # The distribution mirror's name at times does not resolve, for minutes or for hours: each attempt
+        # first puts the mirrors that answer at the head of the list, and a failed installation is tried
+        # again, up to four more times, after growing waits.
+        run: |
+          wait=30
+          for attempt in 1 2 3 4 5; do
+            bash .github/scripts/ci_apt_mirror.sh
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools && exit 0
+            echo "Installing the musl C compiler failed (attempt $attempt of 5)."
+            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
+          done
+          exit 1
       - name: Install the repository toolchain
         run: rustup show
       - name: Compile static machine placeholders and CLI
-        run: cargo build --release --locked -p orchctl -p orch-connector -p orch-node --target ${{ matrix.target }}
+        # Keep optimized static compilation on one Cargo job, with swap for the
+        # largest crate. Release settings are the same as native packaging.
+        run: cargo build --release --locked -j 1 -p orchctl -p orch-connector -p orch-node --target ${{ matrix.target }}
 
   dependencies:
     name: Dependencies
@@ -114,7 +143,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [api-0, api-1, api-2, api-3, api-4, api-5, engine-0, engine-1, engine-2, rest-0, rest-1, rest-2, rest-3]
+        shard: [api-0, api-1, api-2, api-3, api-4, api-5, api-6, api-7, engine-0, engine-1, engine-2, rest-0, rest-1, rest-2, rest-3]
     services:
       # The database the deployment runs, by the same digest.
       postgres:
@@ -135,6 +164,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_INCREMENTAL: '0'
+      # Keep the large libraries and their test harnesses from compiling concurrently.
+      CARGO_BUILD_JOBS: '1'
       # Debug futures of the API and the engine outgrow the default 2 MiB thread stack, as the servers' own 8 MiB
       # workers acknowledge; the cases that must hold on default stacks run themselves again without this.
       RUST_MIN_STACK: "33554432"
@@ -145,6 +176,20 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install the deployment database search extensions
+        if: startsWith(matrix.shard, 'api-') || startsWith(matrix.shard, 'engine-')
+        env:
+          ORCH_CI_POSTGRES: ${{ job.services.postgres.id }}
+        # Service containers start before checkout. Build the same pinned extension
+        # files as deployment and add them before any fixture template is migrated.
+        run: |
+          set -euo pipefail
+          docker build --tag orch-ci-database ./deploy/postgres
+          docker run --rm --entrypoint tar orch-ci-database -C /usr/local -cf - lib/postgresql/vector.so lib/postgresql/pg_bigm.so share/postgresql/extension |
+            docker exec -i "$ORCH_CI_POSTGRES" tar -C /usr/local -xf -
+          docker exec "$ORCH_CI_POSTGRES" psql -U orch -d postgres -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_bigm;'
+      - name: Prepare memory for test compilation
+        run: bash .github/scripts/ci_memory.sh
       - name: Install the repository toolchain
         run: rustup show
       # Every shard restores one dependency-only cache; the first API shard saves it once.
@@ -171,6 +216,29 @@ jobs:
       - name: Build the connector the tests start
         if: ${{ !cancelled() }}
         run: cargo build --locked -p orch-connector
+      - name: Plan the assigned native fixtures
+        if: ${{ !cancelled() }}
+        id: native-fixtures
+        run: |
+          fixture_plan=$(python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}' --plan)
+          printf 'plan=%s\n' "$fixture_plan" >> "$GITHUB_OUTPUT"
+      - name: Install the native fixtures' C compiler
+        if: ${{ !cancelled() && (fromJSON(steps.native-fixtures.outputs.plan).node_runner || fromJSON(steps.native-fixtures.outputs.plan).node_connector) }}
+        # The distribution mirror's name at times does not resolve, for minutes or for hours: each attempt
+        # first puts the mirrors that answer at the head of the list, and a failed installation is tried
+        # again, up to four more times, after growing waits.
+        run: |
+          wait=30
+          for attempt in 1 2 3 4 5; do
+            bash .github/scripts/ci_apt_mirror.sh
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools && exit 0
+            echo "Installing the musl C compiler failed (attempt $attempt of 5)."
+            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
+          done
+          exit 1
+      - name: Prepare the assigned tests' Docker fixtures
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_fixtures.py --shard '${{ matrix.shard }}'
       - name: Run every test program
         if: ${{ !cancelled() }}
         run: python3 .github/scripts/ci_test_shard.py --shard '${{ matrix.shard }}'
@@ -191,42 +259,187 @@ jobs:
           SHARD_RESULT: ${{ needs.tests.result }}
         run: test "$SHARD_RESULT" = success
 
-  web:
-    name: Web application
+  web-analysis:
+    name: Web types and lint
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # The Node release the repository pins (frontend/.nvmrc), as its official image.
-    container: node:24.16.0-bookworm@sha256:40ad9f3064e67d6860b4bc3fe1880b2953934fd6320ada990e45fe0efa6badd7 # node:24.16.0-bookworm
     defaults:
       run:
         working-directory: frontend
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Install from the lock file
-        run: npm ci
-      - name: Check the DeepSeek Harness plugin's committed bundle (rebuilt from its sources with this install's bundler)
-        run: npm run check
-        working-directory: extensions/agents/acp/dsh-bridge
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
       - name: Type-check
         run: npm run typecheck
       - name: Lint
+        if: ${{ !cancelled() }}
         run: npm run lint
+
+  web-build:
+    name: Web units and production build
+    runs-on: ubuntu-24.04
+    # The unit suite takes about twenty minutes; the limit keeps one stalled file from ending the job
+    # before the browser plan is made.
+    timeout-minutes: 120
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      artifact: ${{ steps.artifact.outputs.name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
+        working-directory: frontend
+      - name: Check the committed plugin bundle
+        run: npm run check
+        working-directory: extensions/agents/acp/dsh-bridge
       - name: Unit and component tests
+        if: ${{ !cancelled() }}
         run: npm run test
-      - name: Build
+        working-directory: frontend
+      - name: Build the one production artifact
+        if: ${{ !cancelled() }}
+        env:
+          ORCH_BUILD_NUMBER_DIR: ${{ github.workspace }}/.tmp/ci-web-build-numbers
         run: npm run build
-      - name: Install the browser of the end-to-end suites
-        run: npx playwright install --with-deps chromium
-      - name: End-to-end, accessibility and performance suites (against the tests' fake API)
-        run: npx playwright test
+        working-directory: frontend
+      - name: Discover this checkout's complete browser inventory
+        if: ${{ !cancelled() }}
+        env:
+          ORCH_E2E_NO_DEV_SERVER: '1'
+        run: |
+          mkdir -p ../.tmp/ci-web
+          node node_modules/playwright/cli.js test --list --reporter=json > ../.tmp/ci-web/inventory.json
+        working-directory: frontend
+      - name: Check allocation and report-reconciliation controls
+        if: ${{ !cancelled() }}
+        run: python3 -I -B -m unittest discover -s .github/scripts -p 'test_ci_web.py'
+      - name: Plan every discovered case exactly once
+        if: ${{ !cancelled() }}
+        id: plan
+        run: python3 -I -B .github/scripts/ci_web.py plan --inventory .tmp/ci-web/inventory.json
+      - name: Seal the production artifact to source and lock
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_web.py seal
+      - id: artifact
+        if: ${{ !cancelled() }}
+        run: echo "name=web-build-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ !cancelled() }}
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: |
+            frontend/dist/
+            .tmp/ci-web/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  web-browser:
+    name: Web browser (${{ matrix.name }})
+    needs: web-build
+    if: ${{ !cancelled() && needs.web-build.outputs.matrix != '' }}
+    runs-on: ubuntu-24.04
+    # A group is planned for half an hour of passing cases. Failing cases run to their timeouts and are
+    # retried, so the limit leaves a failing group the time to finish and report every case.
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.web-build.outputs.matrix || '{"include":[{"name":"unavailable"}]}') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: frontend/.nvmrc
+      - run: npm ci
+        working-directory: frontend
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.web-build.outputs.artifact }}
+      - name: Install the repository browser
+        # Its system packages come from a distribution mirror whose name at times does not resolve, for
+        # minutes or for hours: each attempt first puts the mirrors that answer at the head of the list, and
+        # a failed installation is tried again, up to four more times, after growing waits.
+        run: |
+          wait=30
+          for attempt in 1 2 3 4 5; do
+            bash ../.github/scripts/ci_apt_mirror.sh
+            npx playwright install --with-deps chromium && exit 0
+            echo "The browser installation failed (attempt $attempt of 5)."
+            if [ "$attempt" != 5 ]; then sleep "$wait"; wait=$((wait * 2)); fi
+          done
+          exit 1
+        working-directory: frontend
+      - name: Verify selectors and run the complete assigned inventory
+        run: python3 -I -B .github/scripts/ci_web.py run --group '${{ matrix.name }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: web-report-${{ matrix.name }}-${{ github.run_attempt }}
+          path: .tmp/ci-web-reports/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ failure() }}
+        with:
+          name: web-failure-${{ matrix.name }}-${{ github.run_attempt }}
+          path: .tmp/ci-web-results/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          compression-level: 0
+
+  web:
+    name: Web application
+    if: ${{ always() }}
+    needs: [web-analysis, web-build, web-browser]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ needs.web-build.outputs.artifact }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ !cancelled() }}
+        with:
+          pattern: web-report-*
+          path: .tmp/ci-web-reports/
+          merge-multiple: true
+      - name: Reconcile the actual report union with final discovery
+        if: ${{ !cancelled() }}
+        run: python3 -I -B .github/scripts/ci_web.py audit
+      - name: Require every static and browser result
+        if: ${{ always() }}
+        env:
+          ANALYSIS: ${{ needs.web-analysis.result }}
+          BUILD: ${{ needs.web-build.result }}
+          BROWSERS: ${{ needs.web-browser.result }}
+        run: test "$ANALYSIS" = success && test "$BUILD" = success && test "$BROWSERS" = success
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: ${{ always() }}
+        with:
+          name: web-coverage-${{ github.run_attempt }}
+          path: .tmp/ci-web/coverage.json
+          include-hidden-files: true
+          if-no-files-found: error
 
   deploy-smoke:
     name: Deployment scenarios
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    # Packaging compiles the control API's release build. On a hosted runner's memory that needs one build job
+    # and added swap, as the release workflow's package job has, and then takes hours: the limit is the host's.
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Prepare memory for server packaging
+        run: bash .github/scripts/ci_memory.sh
       - name: Install the repository toolchain
         run: rustup show
       - name: Package two releases and run every scenario on Docker

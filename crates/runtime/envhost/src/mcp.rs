@@ -69,6 +69,11 @@ pub enum ServerState {
         /// Why.
         reason: String,
     },
+    /// A requirement is missing, so no server process can be started.
+    Unavailable {
+        /// The missing requirement.
+        reason: String,
+    },
     /// Stopped on purpose.
     Stopped,
 }
@@ -238,7 +243,7 @@ impl McpServers {
         if let Some(there) = servers.get(name)
             && !matches!(
                 there.state,
-                ServerState::Stopped | ServerState::Failed { .. }
+                ServerState::Stopped | ServerState::Failed { .. } | ServerState::Unavailable { .. }
             )
         {
             return Err(HostError::Exists(format!(
@@ -310,6 +315,15 @@ impl McpServers {
     pub fn failed(&self, name: &str, reason: &str) {
         if let Some(server) = self.servers().get_mut(name) {
             server.state = ServerState::Failed {
+                reason: reason.to_owned(),
+            };
+        }
+    }
+
+    /// Keeps a missing startup requirement apart from a crashed or failed process.
+    pub fn unavailable(&self, name: &str, reason: &str) {
+        if let Some(server) = self.servers().get_mut(name) {
+            server.state = ServerState::Unavailable {
                 reason: reason.to_owned(),
             };
         }
@@ -429,28 +443,7 @@ impl McpServers {
         {
             return Err(HostError::Stale { current: None });
         }
-        let path = self.copy_path(request.server_id);
-        let dir = path
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| HostError::io("making the directory of the copies", error))?;
-        let text = serde_json::to_vec(definition)?;
-        let temp = dir.join(format!(".{}.tmp", orch_types::new_id().simple()));
-        write_private(&temp, &text)
-            .map_err(|error| HostError::io("keeping a copy of a definition", error))?;
-        std::fs::rename(&temp, &path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            HostError::io("keeping a copy of a definition", error)
-        })?;
-        let imported = definition.imported(tools);
-        Ok(McpImportResult {
-            definition_fingerprint: imported.definition_fingerprint,
-            transport: wire_word(&imported.transport),
-            digest: imported.digest,
-            tools: imported.tools,
-        })
+        keep_copy(&self.data_dir, request.server_id, definition, tools)
     }
 
     /// The definition kept under `server_id`, to start the server from.
@@ -476,6 +469,185 @@ impl McpServers {
     pub fn copy_has_digest(&self, server_id: Id, digest: &str) -> bool {
         self.load(server_id)
             .is_ok_and(|definition| definition.digest().to_string() == digest)
+    }
+}
+
+fn keep_copy(
+    data_dir: &std::path::Path,
+    server_id: Id,
+    definition: &McpDefinition,
+    tools: Option<i64>,
+) -> Result<McpImportResult> {
+    let path = copy_path_in(data_dir, server_id);
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| HostError::io("making the directory of the copies", error))?;
+    let text = serde_json::to_vec(definition)?;
+    let temp = dir.join(format!(".{}.tmp", orch_types::new_id().simple()));
+    write_private(&temp, &text)
+        .map_err(|error| HostError::io("keeping a copy of a definition", error))?;
+    std::fs::rename(&temp, &path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        HostError::io("keeping a copy of a definition", error)
+    })?;
+    Ok(result_of(definition, tools))
+}
+/// A managed stored snapshot has a source UUID and exact digest, never a replacement discovery result.
+pub(crate) fn copy_stored(
+    data_dir: &std::path::Path,
+    server_id: Id,
+    source: &orch_link_contract::commands::McpStoredCopy,
+) -> Result<McpImportResult> {
+    if server_id == source.server_id {
+        return Err(HostError::Unsupported(
+            "a duplicate needs a new server identity".into(),
+        ));
+    }
+    let definition = stored_snapshot(data_dir, source)?;
+    keep_snapshot(data_dir, server_id, &definition)
+}
+/// Native metadata of this exact definition, with no command, address or private values.
+pub(crate) fn result_of(definition: &McpDefinition, tools: Option<i64>) -> McpImportResult {
+    let imported = definition.imported(tools);
+    McpImportResult {
+        snapshot: None,
+        definition_fingerprint: imported.definition_fingerprint,
+        transport: wire_word(&imported.transport),
+        digest: imported.digest,
+        tools: imported.tools,
+    }
+}
+// Interpolation defaults and standard URL userinfo are credential values too. Preserve
+// placeholder names/configuration while leaving no private fallback literal in a nonowner file.
+fn without_url_credentials(value: &str, interpolate: bool) -> String {
+    let mut rendered = String::new();
+    let mut rest = value;
+    if interpolate {
+        while let Some(start) = rest.find("${") {
+            rendered.push_str(&rest[..start]);
+            let tail = &rest[start + 2..];
+            let Some(end) = tail.find('}') else {
+                rendered.push_str(&rest[start..]);
+                rest = "";
+                break;
+            };
+            let name = tail[..end]
+                .split_once(":-")
+                .map_or(&tail[..end], |(name, _)| name);
+            rendered.push_str("${");
+            rendered.push_str(name);
+            rendered.push('}');
+            rest = &tail[end + 1..];
+        }
+    }
+    rendered.push_str(rest);
+    if let Some(scheme) = rendered.find("://")
+        && (rendered[..scheme].eq_ignore_ascii_case("http")
+            || rendered[..scheme].eq_ignore_ascii_case("https"))
+    {
+        let start = scheme + 3;
+        let end = rendered[start..]
+            .find(['/', '?', '#'])
+            .map_or(rendered.len(), |end| start + end);
+        if let Some(userinfo) = rendered[start..end].rfind('@') {
+            rendered.replace_range(start..start + userinfo + 1, "");
+        }
+    }
+    rendered
+}
+/// The same original managed snapshot read and redaction for local and sealed machine copies.
+pub(crate) fn stored_snapshot(
+    data_dir: &std::path::Path,
+    source: &orch_link_contract::commands::McpStoredCopy,
+) -> Result<McpDefinition> {
+    let bytes = std::fs::read(copy_path_in(data_dir, source.server_id))
+        .map_err(|error| HostError::io("reading the exact stored source definition", error))?;
+    let mut definition: McpDefinition = serde_json::from_slice(&bytes)?;
+    if definition.digest().to_string() != source.expected_digest {
+        return Err(HostError::Stale { current: None });
+    }
+    definition.check().map_err(|faults| {
+        HostError::Unsupported(format!("the stored source is incomplete: {faults:?}"))
+    })?;
+    if !source.include_secrets {
+        for value in definition.secrets.values_mut() {
+            *value = orch_plugin_contract::Secret::new(String::new());
+        }
+        if let Some(http) = &mut definition.http_credentials {
+            if http.interpolate {
+                let mut names = Vec::new();
+                for text in http
+                    .headers
+                    .values()
+                    .map(orch_plugin_contract::Secret::expose)
+                    .chain(definition.spec.url.iter().map(String::as_str))
+                {
+                    let mut rest = text;
+                    while let Some(start) = rest.find("${") {
+                        let tail = &rest[start + 2..];
+                        let Some(end) = tail.find('}') else {
+                            break;
+                        };
+                        names.push(
+                            tail[..end]
+                                .split_once(":-")
+                                .map_or(&tail[..end], |(name, _)| name)
+                                .to_owned(),
+                        );
+                        rest = &tail[end + 1..];
+                    }
+                }
+                http.blocked_env.extend(names);
+            }
+            for value in http.headers.values_mut() {
+                *value = orch_plugin_contract::Secret::new(String::new());
+            }
+            http.blocked_env.extend(http.env_headers.values().cloned());
+            http.blocked_env
+                .extend(http.bearer_token_env_var.iter().cloned());
+            http.blocked_env
+                .extend(definition.spec.secret_env.iter().cloned());
+            http.blocked_env.sort();
+            http.blocked_env.dedup();
+        }
+    }
+    if !source.include_secrets {
+        let interpolate = definition
+            .http_credentials
+            .as_ref()
+            .is_some_and(|http| http.interpolate);
+        if let Some(url) = &mut definition.spec.url {
+            *url = without_url_credentials(url, interpolate);
+        }
+    }
+    Ok(definition)
+}
+/// A new copy may replay its own exact file, but never overwrite a different existing snapshot.
+pub(crate) fn keep_snapshot(
+    data_dir: &std::path::Path,
+    server_id: Id,
+    definition: &McpDefinition,
+) -> Result<McpImportResult> {
+    definition.check().map_err(|faults| {
+        HostError::Unsupported(format!("the copied definition is incomplete: {faults:?}"))
+    })?;
+    match std::fs::read(copy_path_in(data_dir, server_id)) {
+        Ok(bytes) => {
+            let existing: McpDefinition = serde_json::from_slice(&bytes)?;
+            if existing != *definition {
+                return Err(HostError::Exists(
+                    "a different native copy already occupies this identity".into(),
+                ));
+            }
+            Ok(result_of(&existing, None))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            keep_copy(data_dir, server_id, definition, None)
+        }
+        Err(error) => Err(HostError::io("reading an existing native copy", error)),
     }
 }
 
@@ -658,7 +830,9 @@ mod tests {
     fn request(server_id: Id) -> McpImport {
         McpImport {
             expected_fingerprint: None,
-            environment_id: orch_types::new_id(),
+            stored: None,
+            transfer: None,
+            environment_id: Some(orch_types::new_id()),
             server_id,
             source: "codex".into(),
             scope: "user".into(),
@@ -794,5 +968,108 @@ mod tests {
             !wire.contains("command") && !wire.contains("url") && !wire.contains("secret"),
             "{wire}"
         );
+    }
+    #[test]
+    fn a_stored_snapshot_copy_keeps_its_original_and_never_reselects_a_changed_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (servers, _) = registry(dir.path(), ALL);
+        let original_id = orch_types::new_id();
+        let original = definition("synthetic original credential");
+        let first = servers
+            .import(&request(original_id), &original, None)
+            .unwrap();
+        let copy_id = orch_types::new_id();
+        let source = orch_link_contract::commands::McpStoredCopy {
+            server_id: original_id,
+            expected_digest: first.digest.clone(),
+            include_secrets: true,
+        };
+        let copied = copy_stored(dir.path(), copy_id, &source).unwrap();
+        assert_eq!(copied.digest, first.digest);
+        assert_eq!(servers.load(copy_id).unwrap(), original);
+        assert_eq!(servers.load(original_id).unwrap(), original);
+        let changed = definition("a later credential");
+        servers
+            .import(&request(original_id), &changed, None)
+            .unwrap();
+        assert!(matches!(
+            copy_stored(dir.path(), copy_id, &source),
+            Err(HostError::Stale { .. })
+        ));
+        assert_eq!(
+            servers.load(copy_id).unwrap(),
+            original,
+            "a stale snapshot cannot replace an accepted copy"
+        );
+        assert!(copy_stored(dir.path(), original_id, &source).is_err());
+    }
+
+    #[test]
+    fn a_nonowner_snapshot_copy_empties_declared_and_native_http_values_and_blocks_machine_variable_fallbacks()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let (servers, _) = registry(dir.path(), ALL);
+        let original_id = orch_types::new_id();
+        let original:McpDefinition=serde_json::from_value(serde_json::json!({
+            "spec":{"transport":"http","url":"https://synthetic-user:synthetic-password@mcp.example.test/${URL_TOKEN:-synthetic-default}","secret_env":["AUTH"],"authentication":{"kind":"bearer","secret":"AUTH"}},
+            "secrets":{"AUTH":"synthetic bearer"},
+            "http_credentials":{"headers":{"Authorization":"synthetic header","X-Variable":"${MACHINE_TOKEN:-synthetic-fallback}"},"env_headers":{"X-Tenant":"TENANT_TOKEN"},"bearer_token_env_var":"ACCESS_TOKEN","interpolate":true}
+        })).unwrap();
+        let first = servers
+            .import(&request(original_id), &original, None)
+            .unwrap();
+        let copy_id = orch_types::new_id();
+        let reply = copy_stored(
+            dir.path(),
+            copy_id,
+            &orch_link_contract::commands::McpStoredCopy {
+                server_id: original_id,
+                expected_digest: first.digest,
+                include_secrets: false,
+            },
+        )
+        .unwrap();
+        let copied = servers.load(copy_id).unwrap();
+        copied.check().unwrap();
+        assert!(
+            copied
+                .secrets
+                .values()
+                .all(|value| value.expose().is_empty())
+        );
+        let http = copied.http_credentials.as_ref().unwrap();
+        assert!(http.headers.values().all(|value| value.expose().is_empty()));
+        for name in [
+            "AUTH",
+            "URL_TOKEN",
+            "MACHINE_TOKEN",
+            "TENANT_TOKEN",
+            "ACCESS_TOKEN",
+        ] {
+            assert!(
+                http.blocked_env.iter().any(|blocked| blocked == name),
+                "{name}"
+            );
+        }
+        let private_copy = serde_json::to_string(&copied).unwrap();
+        for value in [
+            "synthetic-default",
+            "synthetic-password",
+            "synthetic-user",
+            "synthetic-fallback",
+            "synthetic bearer",
+            "synthetic header",
+        ] {
+            assert!(
+                !private_copy.contains(value),
+                "a nonowner's native file cannot retain a credential fallback: {value}"
+            );
+        }
+        assert_eq!(servers.load(original_id).unwrap(), original);
+        assert_ne!(reply.digest, original.digest().to_string());
+        let public = serde_json::to_string(&reply).unwrap();
+        for value in ["synthetic bearer", "synthetic header", "synthetic-fallback"] {
+            assert!(!public.contains(value));
+        }
     }
 }

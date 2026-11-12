@@ -6,6 +6,7 @@
  */
 import { OctagonAlert, TriangleAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useId } from 'react';
 
 import { MeasurementSize } from '@/features/change/Measurements';
 import type { Line } from '@/features/change/plan';
@@ -21,11 +22,11 @@ function Mark({ tone }: { tone: Line['tone'] }) {
   return <span aria-hidden className="mt-2 mr-1 size-1 shrink-0 rounded-full bg-text-subtle" />;
 }
 
-function List({ title, lines, id }: { title: string; lines: readonly Line[]; id: string }) {
+function List({ title, lines, id, titleId }: { title: string; lines: readonly Line[]; id: string; titleId: string }) {
   const { t } = useTranslation();
   return (
-    <section aria-labelledby={`${id}-title`} className="grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-4" data-plan-list={id}>
-      <h4 id={`${id}-title`} className="text-sm font-semibold text-text">
+    <section aria-labelledby={titleId} className="grid gap-1 sm:grid-cols-[9rem_minmax(0,1fr)] sm:gap-4" data-plan-list={id}>
+      <h4 id={titleId} className="text-sm font-semibold text-text">
         {title}
       </h4>
       <ul className="flex flex-col gap-1">
@@ -34,7 +35,7 @@ function List({ title, lines, id }: { title: string; lines: readonly Line[]; id:
             <Mark tone={line.tone} />
             <div className="min-w-0 wrap-anywhere">
               {line.tone !== 'plain' && <span className="sr-only">{t(`change.plan.tone.${line.tone}`)} </span>}
-              <ResourceSentence text={line.text} resources={line.resources} />
+              <ResourceSentence text={line.text} resources={line.resources} people={line.people} />
               {line.size !== undefined && <>{' · '}<MeasurementSize size={line.size} /></>}
               {line.suffix !== undefined && <span className="text-sm text-text-muted">{' · '}{line.suffix}</span>}
               {line.technical !== undefined && <RuntimeChangeDetails change={line.technical} />}
@@ -60,12 +61,13 @@ export interface PlanListsProps {
 
 export function PlanLists({ changes, stays, ends, ifFails = [], className, compact = false }: PlanListsProps) {
   const { t } = useTranslation();
+  const id = useId();
   return (
     <div className={cx('flex flex-col gap-3', !compact && 'rounded-lg border border-border bg-surface p-4', className)}>
-      {(!compact || changes.length > 0) && <List id="changes" title={t('change.lists.changes')} lines={changes} />}
-      {(!compact || stays.length > 0) && <List id="stays" title={t('change.lists.stays')} lines={stays} />}
-      {(!compact && ifFails.length === 0 || ends.length > 0) && <List id="ends" title={t('change.lists.ends')} lines={ends} />}
-      {ifFails.length > 0 && <List id="if-fails" title={t('change.lists.ifFails')} lines={ifFails} />}
+      {(!compact || changes.length > 0) && <List id="changes" titleId={`${id}-changes`} title={t('change.lists.changes')} lines={changes} />}
+      {(!compact || stays.length > 0) && <List id="stays" titleId={`${id}-stays`} title={t('change.lists.stays')} lines={stays} />}
+      {(!compact && ifFails.length === 0 || ends.length > 0) && <List id="ends" titleId={`${id}-ends`} title={t('change.lists.ends')} lines={ends} />}
+      {ifFails.length > 0 && <List id="if-fails" titleId={`${id}-if-fails`} title={t('change.lists.ifFails')} lines={ifFails} />}
     </div>
   );
 }

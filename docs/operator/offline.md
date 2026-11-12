@@ -114,14 +114,21 @@ Serve `carry-in/mirror/` on an internal static HTTPS server. The layout is `<mir
 
 For the stack's outgoing HTTPS, put each internal authority's public certificate in a separate PEM file under `deploy/config/ca-certificates/`, make it readable by the services, and run `openssl rehash ./config/ca-certificates` from the deployment directory. Restart API, gateway, worker and node. They keep the bundled public roots and add this read-only directory; no Compose edit is needed. Standalone processes use their machine's store. Managed provider templates and Docker daemons need the trust of the authorities their own endpoints use. The directory follows the [native certificate loader's hashed-directory format](https://docs.rs/crate/rustls-native-certs/0.8.1/source/src/lib.rs).
 
-After signing in as system administrator, enable As admin for that session. Put its browser-session bearer token from the normal authentication flow in a private file and import the carried vendor checksum list. A narrowed API token cannot replace that browser session:
+Use a current system administrator's browser session in As admin mode, or an account-issued key explicitly allowed to perform `AdminHarnessChecksumsImport` with Manage on the system target. Put the credential in a private file and import the carried vendor checksum list:
+
+Choose the API root that matches the credential. The script uses that explicit root without aliases or rewriting:
 
 ```bash
+# Browser session access token (oat_):
 bash ./carry-in/install.sh --from ./carry-in --mode import \
   --api-url https://orch.internal.example/api/v1 --token-file ./admin-session
+
+# Account-issued API key (opat_), with the ordinary authority and key rule above:
+bash ./carry-in/install.sh --from ./carry-in --mode import \
+  --api-url https://orch.internal.example/openapi/v1 --token-file ./account-key
 ```
 
-The command prints the exact list's SHA-256, verifies the server's returned digest and records one administrator audit entry for the whole import. Tokens are read from the file, never placed in command arguments or printed. The request follows no redirects. Remove the temporary session file using your usual secret-handling procedure after use. The tool cache accepts a mirrored executable only when its bytes match a release checksum or a checksum the administrator explicitly imported or added.
+The command prints the exact list's SHA-256, verifies the server's returned digest and records one administrator audit entry for the whole import. Tokens are read from the file, never placed in command arguments or printed. The request follows no redirects. Remove the temporary credential file using your usual secret-handling procedure after use. The tool cache accepts a mirrored executable only when its bytes match a release checksum or a checksum the administrator explicitly imported or added.
 
 An ordinary mirror supplies executable bytes. Refreshing channels while a mirror is configured asks for an imported vendor list instead of trusting mirrored metadata. A connected administrator can gather a new exact vendor build with `--harness-builds ./builds.json`, using the same build-row format as `deploy/harness-builds.json`, then import its list internally. A new build reaches a running environment through its normal Update operation.
 

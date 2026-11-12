@@ -22,7 +22,7 @@ import { amountText } from '@/features/usage/capForm';
 import { decimal, formatCredits } from '@/features/usage/figures';
 import { allowanceWords, capSentence, capTitle, startsAgain, usedWords } from '@/features/usage/words';
 import { useFormatContext } from '@/lib/appearance';
-import { formatTokens } from '@/lib/format';
+import { formatNumber, formatTokens } from '@/lib/format';
 import { boxClasses,Section } from '@/shell/Page';
 import { ForecastLine } from './ForecastLine';
 import { CapTitle,CapSetter,CapShare } from './CapPeople';
@@ -50,7 +50,8 @@ export type LimitsOf =
   /** The caps defined on a provider. */
   | { kind: 'provider'; id: string; name: string; manage: boolean }
   /** The reader's own share of every cap counted per person that covers them. */
-  | { kind: 'mine' };
+  | { kind: 'mine' }
+  | { kind: 'system'; manage: boolean };
 
 export interface LimitsProps {
   of: LimitsOf;
@@ -86,7 +87,7 @@ export function CapMeter({ status, label }: { status: CapStatus; label: string }
 function Waiting({ capId }: { capId: string }) {
   const { t } = useTranslation();
   const query = useQuery(waitingQuery(capId));
-  if (query.isPending) return <SkeletonRows rows={2} />;
+  if (query.isPending) return <SkeletonRows read={query} rows={2} />;
   if (query.isError) return <ErrorState compact error={query.error} onRetry={() => void query.refetch()} />;
   if (query.data.items.length === 0) return <EmptyState compact title={t('caps.row.waitingNone')} />;
   return (
@@ -274,6 +275,7 @@ function CapRow({ status, here, readOnlyHere, metering, onRates }: { status: Cap
       </p>
       {running && showWaiting && <Waiting capId={cap.id} />}
 
+      {(status.left_out.unrated_services??0)>0 && <p className="text-sm text-text-muted">{t('usage.serviceUnits.unpriced',{count:status.left_out.unrated_services??0,value:formatNumber(status.left_out.unrated_services??0,locale)})}</p>}
       {status.left_out.unrated_tokens > 0 && (
         <p className="flex flex-wrap items-baseline gap-x-2 text-sm text-text-muted">
           <span>{t('caps.row.leftOut', { tokens: formatTokens(status.left_out.unrated_tokens, locale) })}</span>
@@ -309,16 +311,17 @@ function LimitsView({ of, metering, onRates, bare = false, className }: LimitsPr
   const node = useQuery({ ...placeLimitsQuery(of.kind === 'node' ? of.id : ''), enabled: of.kind === 'node' && !nodeReports });
   const nodeCaps = useQuery({ ...capsQuery({ kind: 'node', id: of.kind === 'node' ? of.id : '', covering: true }), enabled: nodeReports });
   const provider = useQuery({ ...capsQuery({ kind: 'provider', id: of.kind === 'provider' ? of.id : '' }), enabled: of.kind === 'provider' });
+  const system = useQuery({ ...capsQuery({ kind: 'system' }), enabled: of.kind === 'system' });
   const mine = useQuery({ ...myLimitsQuery, enabled: of.kind === 'mine' });
-  const query = of.kind === 'node' ? (nodeReports ? nodeCaps : node) : of.kind === 'provider' ? provider : mine;
-  const rows: CapStatus[] = (of.kind === 'node' ? (nodeReports ? nodeCaps.data : node.data?.caps) : of.kind === 'provider' ? provider.data : mine.data) ?? [];
+  const query = of.kind === 'node' ? (nodeReports ? nodeCaps : node) : of.kind === 'provider' ? provider : of.kind === 'system' ? system : mine;
+  const rows: CapStatus[] = (of.kind === 'node' ? (nodeReports ? nodeCaps.data : node.data?.caps) : of.kind === 'provider' ? provider.data : of.kind === 'system' ? system.data : mine.data) ?? [];
   const here = of.kind === 'node' ? { nodeId: of.id } : of.kind === 'provider' ? { providerId: of.id } : {};
   const mayAdd = of.kind !== 'mine' && of.manage;
 
   const add = () => openCap(of.kind === 'node' ? { node: { id: of.id } } : of.kind === 'provider' ? { provider: { id: of.id, name: of.name } } : {});
 
   const body = query.isPending ? (
-    <SkeletonRows rows={3} />
+    <SkeletonRows read={query} rows={3} />
   ) : query.isError ? (
     <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} />
   ) : rows.length === 0 ? (

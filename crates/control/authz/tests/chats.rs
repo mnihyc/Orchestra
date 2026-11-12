@@ -62,6 +62,11 @@ async fn people_chat(w: &World, kind: &str, people: &[Id], guests: &[Id], maker:
         .await
         .unwrap();
     }
+    if kind == rows::KIND_GROUP && people.contains(&maker) {
+        rows::set_manager(&mut conn, chat.id, maker, true, 0, w.now.get())
+            .await
+            .unwrap();
+    }
     chat
 }
 
@@ -450,8 +455,7 @@ async fn a_mention_names_only_people_who_can_read_the_chat() {
 }
 
 #[tokio::test]
-async fn a_developer_may_bring_an_outsider_into_a_group_and_a_viewer_may_not_unless_they_made_it_where_the_policy_lets()
- {
+async fn outside_naming_uses_the_home_row_or_the_current_group_manager_policy() {
     let w = World::new().await;
     let developer = w.member("dave").await;
     let viewer = w.member("vera").await;
@@ -477,7 +481,7 @@ async fn a_developer_may_bring_an_outsider_into_a_group_and_a_viewer_may_not_unl
     );
     assert!(
         ask(viewer, true).await.allowed(),
-        "the one who made the group, where sharing.allow_external lets"
+        "the current manager, where sharing.allow_external lets"
     );
 }
 

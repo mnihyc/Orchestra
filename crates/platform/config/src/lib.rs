@@ -18,4 +18,4 @@ pub mod server;
 pub use connector::ConnectorConfig;
 pub use loader::{ConfigError, load, load_text};
 pub use secrets::{DEFAULT_SECRETS_DIR, Secret, SecretError, read_secret, read_secret_hex};
-pub use server::ServerConfig;
+pub use server::{RuntimeComponent, ServerConfig};

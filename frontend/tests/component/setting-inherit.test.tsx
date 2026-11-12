@@ -176,7 +176,7 @@ it('shows its description once, keeps only supplementary constraints in the ques
   const { row } = draw(def, inherited(def, 12));
   expect(row.getAllByText(def.description)).toHaveLength(1);
   const source = await row.findByRole('link', { name: 'Inherited from Acme' });
-  expect(source).toHaveAttribute('href', '/org/acme/settings/policies?setting=test.limit');
+  expect(source).toHaveAttribute('href', '/org/acme/settings/defaults?setting=test.limit');
   const range = i18n.t('settings.editor.between', { min: 1, max: 24 });
   expect(screen.queryByText(range)).not.toBeInTheDocument();
   await user.click(row.getByRole('button', { name: i18n.t('help.hint.label', { term: def.title }) }));
@@ -199,7 +199,7 @@ it('uses a short linked refusal and the effective locked value, without a grey d
   expect(row.queryByRole('textbox')).not.toBeInTheDocument();
   expect(row.getByText('On')).toBeVisible();
   expect(row.queryByText('Off')).not.toBeInTheDocument();
-  expect(await row.findByRole('link', { name: 'Locked at Acme' })).toHaveAttribute('href', '/org/acme/settings/policies?setting=agent.web_search');
+  expect(await row.findByRole('link', { name: 'Locked at Acme' })).toHaveAttribute('href', '/org/acme/settings/defaults?setting=agent.web_search');
   expect(putSetting).not.toHaveBeenCalled();
 });
 

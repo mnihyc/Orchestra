@@ -26,24 +26,112 @@ use orch_db::queries::chats::{self as rows, ChatRow, StateRow};
 use orch_db::queries::{storage, uploads};
 use orch_realtime_contract::feeds::UserEvent;
 use orch_types::{Hash, Id, Seq, Time};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-/// Whether the caller retained these bytes or may currently read a saved source of them.
-pub async fn may_use_blob(
+/// A possible or selected source of supplied bytes. The identity alone grants no authority;
+/// a content hash is never an object identifier, and candidates may not be readable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+pub enum BlobOrigin {
+    /// The person already retained the bytes through an upload or authorized copy.
+    RetainedByCaller,
+    /// A saved chat source.
+    Chat(Id),
+    /// A saved thread source.
+    Thread(Id),
+    /// A saved document source.
+    Document(Id),
+    /// A saved environment-file source.
+    Environment(Id),
+}
+
+/// Current candidate identities associated with these bytes, without projecting resource names
+/// or content and without granting access to any candidate. Personal retention comes first.
+pub async fn blob_origins(
+    conn: &mut Conn,
+    user: Id,
+    hash: &Hash,
+) -> Result<Vec<BlobOrigin>, Error> {
+    let mut origins = Vec::new();
+    if uploads::owns(conn, user, hash).await? {
+        origins.push(BlobOrigin::RetainedByCaller);
+    }
+    origins.extend(saved_blob_origins(conn, user, hash).await?);
+    Ok(origins)
+}
+
+async fn saved_blob_origins(
+    conn: &mut Conn,
+    user: Id,
+    hash: &Hash,
+) -> Result<Vec<BlobOrigin>, Error> {
+    Ok(uploads::sources(conn, user, hash)
+        .await?
+        .into_iter()
+        .filter_map(|(kind, id)| match kind.as_str() {
+            "chat" => Some(BlobOrigin::Chat(id)),
+            "thread" => Some(BlobOrigin::Thread(id)),
+            "document" => Some(BlobOrigin::Document(id)),
+            "environment" => Some(BlobOrigin::Environment(id)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Selects the same authority source as the ordinary blob-use check: personal retention first,
+/// otherwise the first currently readable saved source. No policy or additional scope is inferred.
+pub async fn blob_origin(
     conn: &mut Conn,
     principal: &Principal,
     hash: &Hash,
-) -> Result<bool, Error> {
-    if uploads::owns(conn, principal.user(), hash).await? {
-        return Ok(true);
+) -> Result<Option<BlobOrigin>, Error> {
+    select_blob_origin(conn, principal, hash, None).await
+}
+
+/// Selects an allowed candidate only while its association with this hash and its ordinary read
+/// authority still hold. The central operation planner supplies `allowed`; this helper never
+/// evaluates key scope. A disallowed retained-upload path does not hide a valid saved-source path.
+pub async fn blob_origin_in(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+    allowed: &[BlobOrigin],
+) -> Result<Option<BlobOrigin>, Error> {
+    if allowed.is_empty() {
+        return Ok(None);
     }
-    for (kind, id) in uploads::sources(conn, principal.user(), hash).await? {
-        let allowed = match kind.as_str() {
-            "chat" => {
-                let origin = orch_db::audit::Origin::default();
+    // A hash may appear in many resources. Set membership avoids comparing every current source
+    // with every planner candidate while keeping the existing source traversal order.
+    let allowed: HashSet<_> = allowed.iter().copied().collect();
+    select_blob_origin(conn, principal, hash, Some(&allowed)).await
+}
+
+async fn select_blob_origin(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+    allowed: Option<&HashSet<BlobOrigin>>,
+) -> Result<Option<BlobOrigin>, Error> {
+    let permitted = |origin: BlobOrigin| allowed.is_none_or(|allowed| allowed.contains(&origin));
+    if permitted(BlobOrigin::RetainedByCaller)
+        && uploads::owns(conn, principal.user(), hash).await?
+    {
+        return Ok(Some(BlobOrigin::RetainedByCaller));
+    }
+    // Resolve associations again here: a candidate supplied earlier or by another caller is no proof.
+    for origin in saved_blob_origins(conn, principal.user(), hash).await? {
+        if !permitted(origin) {
+            continue;
+        }
+        let allowed = match origin {
+            BlobOrigin::RetainedByCaller => false,
+            BlobOrigin::Chat(id) => {
+                let audit_origin = orch_db::audit::Origin::default();
                 let act = Acting {
                     principal,
                     now: principal.now().get(),
-                    origin: &origin,
+                    origin: &audit_origin,
                 };
                 match crate::chats::load(conn, &act, id, crate::chats::Mode::Read).await {
                     Ok(_) => true,
@@ -52,7 +140,7 @@ pub async fn may_use_blob(
                     Err(_) => false,
                 }
             }
-            "thread" => matches!(
+            BlobOrigin::Thread(id) => matches!(
                 nodes::check(
                     conn,
                     principal,
@@ -64,11 +152,11 @@ pub async fn may_use_blob(
                 .await,
                 Ok(Decision::Allowed { .. })
             ),
-            "document" => matches!(
+            BlobOrigin::Document(id) => matches!(
                 documents::check(conn, principal, id, Permission::DocView, Policy::default()).await,
                 Ok(Decision::Allowed { .. })
             ),
-            "environment" => matches!(
+            BlobOrigin::Environment(id) => matches!(
                 resources::check(
                     conn,
                     principal,
@@ -82,13 +170,21 @@ pub async fn may_use_blob(
                 .await,
                 Ok(Decision::Allowed { .. })
             ),
-            _ => false,
         };
         if allowed {
-            return Ok(true);
+            return Ok(Some(origin));
         }
     }
-    Ok(false)
+    Ok(None)
+}
+
+/// Whether the caller retained these bytes or may currently read a saved source of them.
+pub async fn may_use_blob(
+    conn: &mut Conn,
+    principal: &Principal,
+    hash: &Hash,
+) -> Result<bool, Error> {
+    Ok(blob_origin(conn, principal, hash).await?.is_some())
 }
 
 /// Refuses a hash without an authorized upload or readable saved source, concealing its existence.
@@ -99,6 +195,29 @@ pub async fn require_blobs(
 ) -> Result<(), Error> {
     for hash in hashes {
         if !may_use_blob(conn, principal, hash).await? {
+            return Err(Error::NotFound);
+        }
+    }
+    Ok(())
+}
+
+/// Rechecks only the operation planner's selected source for each requested hash.
+/// An unselected readable source or newly retained personal copy grants no fallback.
+pub async fn require_blobs_in(
+    conn: &mut Conn,
+    principal: &Principal,
+    hashes: &[Hash],
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<(), Error> {
+    for hash in hashes {
+        let allowed: Vec<_> = selected
+            .iter()
+            .filter_map(|(selected_hash, origin)| (selected_hash == hash).then_some(*origin))
+            .collect();
+        if blob_origin_in(conn, principal, hash, &allowed)
+            .await?
+            .is_none()
+        {
             return Err(Error::NotFound);
         }
     }
@@ -209,12 +328,16 @@ pub fn effective_level(
 
 /// A person's state in a chat as the API has it.
 #[must_use]
-pub fn state_view(chat: Id, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
+pub fn state_view(chat: &ChatRow, state: Option<&StateRow>, effective: ChatLevel) -> ChatState {
     ChatState {
         read_revision: state.map_or(0, |state| state.read_revision),
         default_level: None,
         default_reason: None,
-        chat_id: chat,
+        chat_id: chat.id,
+        org_id: state.map_or(chat.org_id, |state| state.org_id),
+        last_message_seq: state.map_or(chat.last_message_seq, |state| {
+            state.last_message_seq.max(chat.last_message_seq)
+        }),
         level: state
             .and_then(|state| state.level.as_deref())
             .and_then(parse_level),
@@ -224,6 +347,35 @@ pub fn state_view(chat: Id, state: Option<&StateRow>, effective: ChatLevel) -> C
         mentions_unread: state.map_or(0, |state| i64::from(state.mentions_unread)),
         hidden: state.is_some_and(|state| state.hidden),
     }
+}
+
+/// Personal state for a current readable audience of a direct or group chat, including new members
+/// without a stored state. Both supporting reads are batched across that audience.
+pub(crate) async fn member_states(
+    conn: &mut Conn,
+    chat: &ChatRow,
+    users: &[Id],
+) -> Result<Vec<(Id, ChatState)>, Error> {
+    if !chat.is_people_chat() || users.is_empty() {
+        return Ok(Vec::new());
+    }
+    let states: HashMap<Id, StateRow> = rows::states_of_members(conn, chat.id, users)
+        .await?
+        .into_iter()
+        .map(|state| (state.user_id, state))
+        .collect();
+    let defaults = rows::default_levels(conn, users).await?;
+    Ok(users
+        .iter()
+        .map(|user| {
+            let state = states.get(user);
+            let defaults = Defaults::of(defaults.get(user));
+            let mut shown = state_view(chat, state, effective_level(true, true, state, defaults));
+            shown.default_level = Some(defaults.direct);
+            shown.default_reason = Some(ChatDefaultReason::Member);
+            (*user, shown)
+        })
+        .collect())
 }
 
 /// The caller's own state in a chat: always there in a direct or a group chat
@@ -268,7 +420,7 @@ pub async fn my_state(
         .and_then(|state| state.level.as_deref())
         .and_then(parse_level)
         .unwrap_or(default);
-    let mut shown = state_view(chat.id, state.as_ref(), level);
+    let mut shown = state_view(chat, state.as_ref(), level);
     shown.default_level = Some(default);
     shown.default_reason = Some(reason);
     Ok(Some(shown))
@@ -288,7 +440,7 @@ async fn tell_screens(
         act.now,
     )
     .await?
-    .unwrap_or_else(|| state_view(loaded.id(), None, ChatLevel::Off));
+    .unwrap_or_else(|| state_view(&loaded.row, None, ChatLevel::Off));
     notifications::tell_users(
         conn,
         &[act.user()],
@@ -456,7 +608,7 @@ pub async fn refresh_thread_people(
         let state = my_state(conn, user, &chat, false, now)
             .await?
             .unwrap_or_else(|| {
-                let mut state = state_view(chat.id, None, ChatLevel::Off);
+                let mut state = state_view(&chat, None, ChatLevel::Off);
                 state.default_level = Some(ChatLevel::Off);
                 state.default_reason = Some(ChatDefaultReason::Quiet);
                 state
@@ -505,15 +657,90 @@ pub async fn set_state(
     tell_screens(conn, act, loaded).await
 }
 
-/// Marks as read, up to now, every chat of a root org that the caller follows
-/// and has something unread in. The chats it marked.
-pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<Vec<Id>, Error> {
+/// Immutable native selection; its sequence bounds are the unread rows the act actually selected.
+#[derive(Debug, Clone)]
+pub struct AllReadSelection {
+    user: Id,
+    root: Id,
+    entries: Arc<Vec<ReadAllEntry>>,
+}
+
+impl PartialEq for AllReadSelection {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_sources(other)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReadAllEntry {
+    chat: ChatRow,
+    through: Seq,
+}
+
+impl AllReadSelection {
+    /// The native root selected from the requested org's actual current ancestry.
+    #[must_use]
+    pub fn root(&self) -> Id {
+        self.root
+    }
+
+    /// Actual source rows for a factual operation binder.
+    pub fn chats(&self) -> impl Iterator<Item = &ChatRow> {
+        self.entries.iter().map(|entry| &entry.chat)
+    }
+
+    /// Whether a current native source frame still names these exact original operands.
+    #[must_use]
+    pub fn same_sources(&self, other: &Self) -> bool {
+        self.user == other.user
+            && self.root == other.root
+            && self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .zip(other.entries.iter())
+                .all(|(left, right)| {
+                    left.chat.id == right.chat.id
+                        && left.chat.org_id == right.chat.org_id
+                        && left.chat.kind == right.chat.kind
+                        && left.chat.node_id == right.chat.node_id
+                        && left.through == right.through
+                })
+    }
+}
+
+/// The native state rows are inserted and locked on the caller's action connection.
+/// A caller must refresh its authority after this rollbackable prefix and before apply.
+pub struct ReadyAllRead {
+    selection: AllReadSelection,
+    states: Vec<ReadCounter>,
+}
+
+struct ReadCounter {
+    last_read_seq: Seq,
+    read_revision: i64,
+}
+
+impl ReadyAllRead {
+    /// Real source association, not retained permission or reusable admission.
+    #[must_use]
+    pub fn matches(&self, current: &AllReadSelection) -> bool {
+        self.selection.same_sources(current)
+    }
+}
+
+/// The ordinary unread/readable/followed selector, without changing a state or notification.
+pub async fn select_all_read(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    root: Id,
+) -> Result<AllReadSelection, Error> {
     use orch_access_contract::permissions::{Permission, PermissionName};
     use orch_authz::{Act, Policy, nodes};
     let unread = rows::unread_in_org(conn, act.user(), root).await?;
     let node_ids: Vec<Id> = unread.iter().filter_map(|(chat, _)| chat.node_id).collect();
-    let readable: Vec<Id> = if node_ids.is_empty() {
-        Vec::new()
+    let readable: HashSet<Id> = if node_ids.is_empty() {
+        HashSet::new()
     } else {
         nodes::holding(
             conn,
@@ -528,7 +755,7 @@ pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Resul
         .map(|listed| listed.id)
         .collect()
     };
-    let mut marked = Vec::new();
+    let mut entries = Vec::new();
     for (chat, _) in unread {
         let people = chat.is_people_chat();
         if chat.node_id.is_some_and(|node| !readable.contains(&node)) {
@@ -540,22 +767,182 @@ pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Resul
         {
             continue;
         }
-        rows::mark_read(conn, act.user(), chat.id, chat.last_message_seq).await?;
+        entries.push(ReadAllEntry {
+            through: chat.last_message_seq,
+            chat,
+        });
+    }
+    Ok(AllReadSelection {
+        user: act.user(),
+        root,
+        entries: Arc::new(entries),
+    })
+}
+
+/// Recheck the same selected identities under current ordinary visibility and following.
+/// New unread chats and newer messages cannot silently replace the act's original operands.
+pub async fn refresh_all_read(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    selected: &AllReadSelection,
+) -> Result<AllReadSelection, Error> {
+    if selected.user != act.user() {
+        return Err(Error::NotFound);
+    }
+    let node_ids: Vec<_> = selected
+        .entries
+        .iter()
+        .filter_map(|entry| entry.chat.node_id)
+        .collect();
+    let readable: HashSet<Id> = if node_ids.is_empty() {
+        HashSet::new()
+    } else {
+        nodes::holding(
+            conn,
+            act.principal,
+            &node_ids,
+            orch_access_contract::permissions::PermissionName::Exact(Permission::ChatView),
+            Act::Use,
+            Policy::default(),
+        )
+        .await?
+        .into_iter()
+        .map(|node| node.id)
+        .collect()
+    };
+    let mut entries = Vec::with_capacity(selected.entries.len());
+    for entry in selected.entries.iter() {
+        let chat = rows::chat(conn, entry.chat.id)
+            .await?
+            .ok_or(Error::NotFound)?;
+        // Keep the original unread selector's node-view or stored-membership gate.
+        // Personal bookkeeping does not introduce a new content-read prerequisite.
+        let belongs = match chat.node_id {
+            Some(node) => readable.contains(&node),
+            None => rows::members(conn, chat.id)
+                .await?
+                .iter()
+                .any(|member| member.user_id == act.user() && member.left_at.is_none()),
+        };
+        if !belongs
+            || chat.org_id != selected.root
+            || chat.kind != entry.chat.kind
+            || chat.node_id != entry.chat.node_id
+            || my_state(conn, act.user(), &chat, chat.is_people_chat(), act.now)
+                .await?
+                .is_none_or(|state| state.effective_level == ChatLevel::Off)
+        {
+            return Err(Error::NotFound);
+        }
+        entries.push(ReadAllEntry {
+            chat,
+            through: entry.through,
+        });
+    }
+    Ok(AllReadSelection {
+        user: selected.user,
+        root: selected.root,
+        entries: Arc::new(entries),
+    })
+}
+
+/// The existing missing-state INSERT/row-lock prefix, isolated from read-position effects.
+/// All locks survive until the caller commits or rolls the whole action back.
+pub async fn stage_all_read(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    selected: &AllReadSelection,
+) -> Result<ReadyAllRead, Error> {
+    if selected.user != act.user() {
+        return Err(Error::NotFound);
+    }
+    let mut order: Vec<_> = selected.chats().map(|chat| chat.id).collect();
+    order.sort_unstable();
+    if !order.is_empty() {
+        // The native INSERT/UPDATE already needs this mode. Take it before any row wait.
+        rows::lock_state_writes(conn).await?;
+    }
+    for id in &order {
+        let row = rows::lock_for_state(conn, *id)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if row.org_id != selected.root {
+            return Err(Error::NotFound);
+        }
+    }
+    let current = refresh_all_read(conn, act, selected).await?;
+    let mut states = std::collections::HashMap::new();
+    for id in order {
+        let state = rows::following::locked(conn, act.user(), id).await?;
+        states.insert(
+            id,
+            ReadCounter {
+                last_read_seq: state.last_read_seq,
+                read_revision: state.read_revision,
+            },
+        );
+    }
+    let states = current
+        .chats()
+        .map(|chat| states.remove(&chat.id).ok_or(Error::NotFound))
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok(ReadyAllRead {
+        selection: current,
+        states,
+    })
+}
+
+/// The native first await updates a state already held by the rollbackable prefix.
+/// Check the current guard/deadline on this same connection immediately before calling.
+pub async fn apply_all_read(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    ready: &ReadyAllRead,
+    current: &AllReadSelection,
+) -> Result<Vec<Id>, Error> {
+    if act.user() != current.user || !ready.matches(current) {
+        return Err(Error::NotFound);
+    }
+    let mut marked = Vec::with_capacity(current.entries.len());
+    for (entry, state) in current.entries.iter().zip(&ready.states) {
+        rows::following::put_read(
+            conn,
+            act.user(),
+            entry.chat.id,
+            entry.through.max(state.last_read_seq),
+            state.read_revision.saturating_add(1),
+        )
+        .await?;
         rows::read_notices_through(
             conn,
             act.user(),
-            chat.id,
-            Some(chat.last_message_seq),
+            entry.chat.id,
+            Some(entry.through),
             act.now,
         )
         .await?;
-        let state = my_state(conn, act.user(), &chat, people, act.now).await?;
-        if let Some(state) = state {
+        if let Some(state) = my_state(
+            conn,
+            act.user(),
+            &entry.chat,
+            entry.chat.is_people_chat(),
+            act.now,
+        )
+        .await?
+        {
             notifications::tell_users(conn, &[act.user()], &UserEvent::ChatState { state }).await?;
         }
-        marked.push(chat.id);
+        marked.push(entry.chat.id);
     }
     Ok(marked)
+}
+
+/// Marks precisely the ordinary selected set; callers retain their existing transaction/authority boundary.
+pub async fn mark_all_read(conn: &mut Conn, act: &Acting<'_>, root: Id) -> Result<Vec<Id>, Error> {
+    let selected = select_all_read(conn, act, root).await?;
+    let ready = stage_all_read(conn, act, &selected).await?;
+    let current = refresh_all_read(conn, act, &selected).await?;
+    apply_all_read(conn, act, &ready, &current).await
 }
 
 // ------------------------------------------------------------------ drafts
@@ -585,6 +972,28 @@ pub async fn save_draft(
     parts: &[ChatPart],
     reply_to: Option<Id>,
 ) -> Result<ChatDraft, Error> {
+    save_draft_in(conn, act, loaded, parts, reply_to, None).await
+}
+
+/// The same ordinary draft writer, restricted to the planner's admitted byte witnesses.
+pub async fn save_draft_with_blob_origins(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+    selected: &[(Hash, BlobOrigin)],
+) -> Result<ChatDraft, Error> {
+    save_draft_in(conn, act, loaded, parts, reply_to, Some(selected)).await
+}
+
+/// The writer's existing effect-free validation, also used before selecting stored sources.
+pub async fn check_draft(
+    conn: &mut Conn,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+) -> Result<(), Error> {
     loaded.ensure_send()?;
     ensure_own(loaded)?;
     if parts.len() > usize::try_from(CHAT_MESSAGE_MAX_PARTS).unwrap_or(usize::MAX) {
@@ -607,6 +1016,18 @@ pub async fn save_draft(
     {
         return Err(Error::invalid("reply_to", "is not a message of this chat"));
     }
+    Ok(())
+}
+
+async fn save_draft_in(
+    conn: &mut Conn,
+    act: &Acting<'_>,
+    loaded: &Loaded,
+    parts: &[ChatPart],
+    reply_to: Option<Id>,
+    selected: Option<&[(Hash, BlobOrigin)]>,
+) -> Result<ChatDraft, Error> {
+    check_draft(conn, loaded, parts, reply_to).await?;
     let content =
         serde_json::to_value(parts).map_err(|error| Error::Internal(error.to_string()))?;
     uploads::lock_chat_draft(conn, act.user(), loaded.id()).await?;
@@ -621,7 +1042,11 @@ pub async fn save_draft(
     let mut all = old.clone();
     all.extend(new.iter().copied());
     uploads::lock_blobs(conn, &all).await?;
-    require_blobs(conn, act.principal, &new).await?;
+    if let Some(selected) = selected {
+        require_blobs_in(conn, act.principal, &new, selected).await?;
+    } else {
+        require_blobs(conn, act.principal, &new).await?;
+    }
     let largest = attachments::largest(conn, &loaded.row).await?;
     attachments::check(conn, parts, largest).await?;
     let added: Vec<Hash> = new
@@ -703,6 +1128,8 @@ mod tests {
             read_revision: 0,
             user_id: new_id(),
             chat_id: new_id(),
+            org_id: new_id(),
+            last_message_seq: 0,
             level: level.map(str::to_owned),
             engaged,
             last_read_seq: 0,

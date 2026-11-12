@@ -156,6 +156,7 @@ const scrollBy = (page: Page, pixels: number, steps: number): Promise<Scrolled> 
       new Promise<Scrolled>((resolve) => {
         const log = document.querySelector<HTMLElement>('[role="log"]');
         if (log === null) throw new Error('no conversation');
+        const owner = (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner(log);
         const frames: number[] = [];
         const tasks: number[] = [];
         let rowsMax = 0;
@@ -168,7 +169,7 @@ const scrollBy = (page: Page, pixels: number, steps: number): Promise<Scrolled> 
         const tick = (now: number) => {
           if (count > 0) frames.push(now - last);
           last = now;
-          log.scrollTop += pixels;
+          owner.scrollTop += pixels;
           rowsMax = Math.max(rowsMax, log.querySelectorAll('[data-index]').length);
           count += 1;
           if (count <= steps) {
@@ -201,6 +202,15 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   await page.addInitScript(() => {
     // The development server hands over hundreds of modules: the default room for entries would be full.
     performance.setResourceTimingBufferSize(10_000);
+    // The thread gives its list the screen that its controls and its history share, so the log itself does not scroll: what scrolls
+    // a conversation is the nearest element around it that scrolls, which is taller inside than it is outside.
+    (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner = (log) => {
+      for (let at: HTMLElement | null = log; at !== null; at = at.parentElement) {
+        const overflow = getComputedStyle(at).overflowY;
+        if ((overflow === 'auto' || overflow === 'scroll') && at.scrollHeight > at.clientHeight + 1) return at;
+      }
+      return log;
+    };
     const note = { firstRow: null as number | null, previous: null as Element | null, clicked: 0 };
     (window as unknown as { __open: typeof note }).__open = note;
     new MutationObserver(() => {
@@ -228,8 +238,9 @@ test('a conversation of five thousand items opens at its end in moments, and hol
 
   const times = await page.evaluate((thread) => {
     const note = (window as unknown as { __open: { firstRow: number | null; clicked: number } }).__open;
-    const sync = performance.getEntriesByType('resource').filter((entry) => entry.name.includes(`/threads/${thread}/sync`)).at(-1) as PerformanceResourceTiming | undefined;
-    return { first: note.firstRow, clicked: note.clicked, start: sync?.startTime ?? null, end: sync?.responseEnd ?? null };
+    // Initial rows arrive through the native aggregate opening; sync pages are incremental.
+    const opening = performance.getEntriesByType('resource').filter((entry) => new URL(entry.name).pathname === `/api/v1/threads/${thread}/opening`).at(-1) as PerformanceResourceTiming | undefined;
+    return { first: note.firstRow, clicked: note.clicked, start: opening?.startTime ?? null, end: opening?.responseEnd ?? null };
   }, ACME.depsThread);
   expect(times.first).not.toBeNull();
   expect(times.start).not.toBeNull();
@@ -253,7 +264,7 @@ test('a conversation of five thousand items opens at its end in moments, and hol
   const reachedTop = async (): Promise<boolean> => {
     await page.evaluate(() => {
       const log = document.querySelector<HTMLElement>('[role="log"]');
-      if (log !== null) log.scrollTop = 0;
+      if (log !== null) (window as unknown as { __scrollOwner: (log: HTMLElement) => HTMLElement }).__scrollOwner(log).scrollTop = 0;
     });
     await page.waitForTimeout(120);
     return page.evaluate(() => (document.querySelector('[role="log"]')?.textContent ?? '').includes('Question 1:'));

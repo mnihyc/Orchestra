@@ -1,3 +1,4 @@
+import { listedTreeNode } from '../doubles/tree-node';
 /** What a place's menu offers to whom, how a project's board and filters read a topic, what an org's rules allow an invitation, and the small rules of the dialogs that make places. */
 import { describe, expect, it } from 'vitest';
 
@@ -322,25 +323,7 @@ describe("an org's rules for invitations", () => {
   });
 });
 
-const row = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => ({
-  id,
-  address: null,
-  kind,
-  content_hidden: false,
-  name: id,
-  parent_id: parent,
-  color: null,
-  docs: 0,
-  archived: false,
-  deleted: false,
-  restricted: false,
-  participating: true,
-  chat: { id: `chat-${id}`, seq: 0 },
-  thread: null,
-  topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null,
-  tree_seq: 1,
-  ...more,
-});
+const row = (id: string, kind: TreeNode['kind'], parent: string | null, more: Partial<TreeNode> = {}): TreeNode => listedTreeNode({ id, kind, parent_id: parent, tree_seq: 1, topic: kind === 'topic' ? { status: 'open', tag_ids: [] } : null, ...more });
 
 const thread = (id: string, parent: string, state: NonNullable<TreeNode['thread']>['state'], approvals = 0, at: string | null = null): TreeNode =>
   row(id, 'thread', parent, { thread: { state, display: display(state === 'starting' ? 'running' : state), blocked_reason: null, pending_approvals: approvals, activity_seq: 1, last_activity_at: at, attention: { failed: false, uncommitted: null, unpushed: null, stale: true, as_of: null, reason: null } } });
