@@ -8,6 +8,7 @@ import { type ReactNode, type SyntheticEvent, useEffect, useRef, useState } from
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/ui/Button';
+import { Tooltip } from '@/ui/Tooltip';
 import { ErrorAlert } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
@@ -113,7 +114,7 @@ export function EmailCode({
       />
       {refusal}
       {sendError !== null && sendError !== undefined && <ErrorAlert error={sendError} />}
-      <Button type="submit" variant="primary" block pending={pending} disabled={resending}>
+      <Button type="submit" variant="primary" block pending={pending} disabled={resending} reason={resending ? t('auth.code.sending') : pending ? t('ui.unavailable.checkingCode') : undefined}>
         {t('auth.login.submit')}
       </Button>
       <div className="flex flex-col items-start gap-2 text-sm">
@@ -128,7 +129,7 @@ export function EmailCode({
 function ResendButton({ sentAt, resending, onResend }: { sentAt: number | null; resending: boolean; onResend: () => void }) {
   const { t } = useTranslation();
   const wait = useSecondsUntil(sentAt === null ? 0 : sentAt + RESEND_AFTER_MS);
-  return <button type="button" className={linkButtonClasses} disabled={wait > 0 || resending} onClick={onResend}>
+  return <Tooltip content={resending ? t('auth.code.sending') : wait > 0 ? t('auth.code.resendIn', { count: wait }) : undefined}><span className="inline-flex" tabIndex={wait > 0 || resending ? 0 : undefined}><button type="button" className={linkButtonClasses} disabled={wait > 0 || resending} onClick={onResend}>
     {wait > 0 ? t('auth.code.resendIn', { count: wait }) : t(sentAt === null ? 'auth.code.send' : 'auth.code.resend')}
-  </button>;
+  </button></span></Tooltip>;
 }

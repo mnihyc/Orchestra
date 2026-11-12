@@ -88,7 +88,7 @@ export function AgentReach({ environment, compact = false }: { environment: Reac
   const query = useQuery(environmentReachQuery(environment.id));
   return <section aria-label={t('agentReach.title')} aria-busy={query.isFetching} className={compact ? 'flex min-w-0 flex-col gap-3 border-b border-border px-3 py-3' : 'flex min-w-0 flex-col gap-3'}>
     <h3 className="text-sm font-medium text-text">{t('agentReach.title')}</h3>
-    {query.isPending ? <SkeletonRows rows={5} /> : query.isError ? <div className="flex flex-col gap-2">
+    {query.isPending ? <SkeletonRows read={query} rows={5} /> : query.isError ? <div className="flex flex-col gap-2">
       {query.dataUpdatedAt > 0 && <p className="text-sm text-text-muted">{t('agentReach.lastRead')}{' '}<RelativeTime at={new Date(query.dataUpdatedAt).toISOString()} /></p>}
       <ErrorState compact error={query.error} retrying={query.isRefetching} onRetry={() => void query.refetch()} action={<Button size="sm" pending={query.isRefetching} onClick={() => void query.refetch()}>{t('common.tryAgain')}</Button>} />
     </div> : <>

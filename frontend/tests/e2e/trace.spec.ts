@@ -3,10 +3,9 @@ import { expect, test, type Page } from '@playwright/test';
 import { id } from '../doubles/fixtures';
 import english from '../../src/i18n/en.json' with { type: 'json' };
 import { openShare } from './give-support';
-import { ACME, PEOPLE, deny, scenario, signIn } from './support';
+import { ACME, DOUBLE, PEOPLE, deny, scenario, signIn } from './support';
 
 const removedPermission = english.trace.actionVerbs.removed.replace('{{thing}}', english.trace.actionThings.permission);
-const DOUBLE = `http://127.0.0.1:${process.env.ORCH_DOUBLE_PORT ?? '41800'}`;
 async function configure(body: Record<string, unknown>) { const response = await fetch(`${DOUBLE}/__double/trace/configure`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); expect(response.ok).toBe(true); }
 async function state() { return (await fetch(`${DOUBLE}/__double/trace/state`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json() as Promise<{ requests: { path: string; query: Record<string, string> }[] }>; }
 test.beforeEach(async () => { await scenario(); });

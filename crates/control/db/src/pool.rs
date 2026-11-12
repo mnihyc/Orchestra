@@ -437,8 +437,28 @@ impl Db {
         Ok(Self { pool })
     }
 
+    /// Notes that a caller asks for a connection, before it waits for one: a pool whose connections are all
+    /// held shows nowhere else, not to the database, which sees a statement only once it has a connection.
+    fn asking(&self, what: &'static str) {
+        tracing::debug!(
+            target: "orch_db::pool",
+            phase = what,
+            pool_size = self.pool.size(),
+            pool_idle = self.pool.num_idle(),
+            "database connection asked for"
+        );
+    }
+
     /// Notes how long a caller waited for a connection.
     fn measure(&self, waited: Duration) {
+        tracing::debug!(
+            target: "orch_db::pool",
+            phase = "acquire",
+            elapsed_secs = waited.as_secs_f64(),
+            pool_size = self.pool.size(),
+            pool_idle = self.pool.num_idle(),
+            "database connection acquired"
+        );
         metrics::histogram!(metrics_names::ACQUIRE_SECONDS).record(waited.as_secs_f64());
         if waited > ACQUIRE_BAR {
             metrics::counter!(metrics_names::ACQUIRE_OVER_BAR).increment(1);
@@ -460,6 +480,7 @@ impl Db {
     /// A connection for statements that need no transaction.
     pub async fn acquire(&self) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, DbError> {
         check_nested("acquire");
+        self.asking("acquire");
         let asked = Instant::now();
         let conn = self.pool.acquire().await?;
         self.measure(asked.elapsed());
@@ -478,6 +499,7 @@ impl Db {
 
     async fn begin_with_snapshot(&self, snapshot: bool) -> Result<Tx, DbError> {
         check_nested("begin");
+        self.asking("begin");
         let asked = Instant::now();
         let inner = self.pool.begin().await?;
         self.measure(asked.elapsed());
@@ -500,6 +522,7 @@ impl Db {
     /// runs when a transaction begins (a write's request reads its answer after its commit).
     pub(crate) async fn begin_isolated(&self, isolation: &'static str) -> Result<Tx, DbError> {
         check_nested("begin");
+        self.asking("begin");
         let asked = Instant::now();
         let mut inner = self.pool.begin().await?;
         self.measure(asked.elapsed());

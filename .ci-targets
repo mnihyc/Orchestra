@@ -1,0 +1,3 @@
+# The batch tree with the Where lane's head merged: every target compiled and linted, the contracts' difference.
+contracts
+clippy

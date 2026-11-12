@@ -1,0 +1,235 @@
+//! The thread engine's commands go through the link's dispatcher and come back in the engine's words.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a test fails by panicking"
+)]
+
+use orch_api_core::backplane::Link;
+use orch_api_core::thread_engine::{DispatchCommands, start};
+use orch_config::ServerConfig;
+use orch_db::Db;
+use orch_db::queries::resources::testing::insert_machine;
+use orch_engine::commands::{Commands, CommandsError, Outcome, Outgoing, Stage};
+use orch_engine::views::ReadError;
+use orch_link_contract::commands::{SerialKey, SessionClose};
+use orch_testkit::clock;
+use orch_testkit::database::TestDb;
+use orch_types::{Clock, Id, ManualClock, new_id};
+use std::sync::Arc;
+
+struct Fixture {
+    _test: TestDb,
+    db: Db,
+    handle: Arc<dyn Clock>,
+    time: ManualClock,
+    config: ServerConfig,
+    link: Link,
+    machine: Id,
+    commands: DispatchCommands,
+}
+
+async fn fixture() -> Fixture {
+    let test = TestDb::fresh().await;
+    let db = Db::from_pool(test.pool.clone());
+    let time = ManualClock::new(clock::start());
+    let handle: Arc<dyn Clock> = Arc::new(time.clone());
+    let config = ServerConfig::default();
+    let link = Link::detached(db.clone(), Arc::clone(&handle), Arc::new(config.clone())).unwrap();
+    let machine = {
+        let mut conn = db.acquire().await.unwrap();
+        insert_machine(&mut conn, "m", "connected").await.unwrap()
+    };
+    let commands = DispatchCommands::new(link.dispatcher());
+    Fixture {
+        _test: test,
+        db,
+        handle,
+        time,
+        config,
+        link,
+        machine,
+        commands,
+    }
+}
+
+fn close(machine: Id) -> Outgoing {
+    let thread = new_id();
+    Outgoing::new(
+        new_id(),
+        machine,
+        SerialKey::Thread(thread),
+        &SessionClose { thread_id: thread },
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_command_stands_queued_until_a_machine_takes_it_and_asking_twice_makes_one() {
+    let fixture = fixture().await;
+    let command = close(fixture.machine);
+    let id = command.id;
+    fixture.commands.issue(command.clone()).await.unwrap();
+    fixture.commands.issue(command).await.unwrap();
+
+    let info = fixture.commands.status(id).await.unwrap().unwrap();
+    assert_eq!(info.stage, Stage::Queued, "no machine has a session here");
+    assert_eq!(info.issued_at, fixture.handle.now());
+    assert!(info.outcome.is_none());
+    let mut conn = fixture.db.acquire().await.unwrap();
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM commands WHERE id = $1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    assert_eq!(
+        rows, 1,
+        "a command asked for twice under one identifier is made once"
+    );
+}
+
+#[tokio::test]
+async fn a_command_that_is_cancelled_ends_as_cancelled_and_waiting_for_it_says_so() {
+    let fixture = fixture().await;
+    let command = close(fixture.machine);
+    let id = command.id;
+    fixture.commands.issue(command).await.unwrap();
+
+    assert!(
+        fixture.commands.cancel(id).await.unwrap(),
+        "it was not over"
+    );
+    assert_eq!(fixture.commands.wait(id).await.unwrap(), Outcome::Cancelled);
+    let info = fixture.commands.status(id).await.unwrap().unwrap();
+    assert_eq!(
+        (info.stage, info.outcome),
+        (Stage::Over, Some(Outcome::Cancelled))
+    );
+    assert!(!fixture.commands.cancel(id).await.unwrap(), "and now it is");
+}
+
+#[tokio::test]
+async fn a_command_nobody_knows_is_nothing_and_cancelling_it_cancels_nothing() {
+    let fixture = fixture().await;
+    let unknown = new_id();
+    assert!(fixture.commands.status(unknown).await.unwrap().is_none());
+    assert!(!fixture.commands.cancel(unknown).await.unwrap());
+    assert!(fixture.commands.wait(unknown).await.is_err());
+}
+
+#[tokio::test]
+async fn a_command_for_a_machine_the_system_does_not_know_is_refused() {
+    let fixture = fixture().await;
+    let refused = fixture.commands.issue(close(new_id())).await;
+    assert!(
+        matches!(refused, Err(CommandsError::UnknownMachine)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_native_queue_consumes_its_writers_check_after_the_actual_parent_scan_wait() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for expire in [false, true] {
+        let fixture = fixture().await;
+        let command = close(fixture.machine);
+        let id = command.id;
+        let deadline = fixture.handle.now() + chrono::Duration::hours(1);
+        // The native parent discovery is effect-free and precedes the actual
+        // writer's row scan. Hold this command's real retained parent only.
+        let parent = new_id();
+        let plan = serde_json::json!({"active_command":{"id":id}});
+        orch_db::queries::jobs::insert(
+            &mut fixture.db.acquire().await.unwrap(),
+            &orch_db::queries::jobs::NewJob {
+                id: parent,
+                kind: "thread_fork",
+                node_id: None,
+                environment_id: None,
+                provider_id: None,
+                plan: &plan,
+                progress: &serde_json::json!({}),
+                created_by: None,
+            },
+            fixture.handle.now(),
+        )
+        .await
+        .unwrap();
+        let mut blocker = fixture.db.pool().begin().await.unwrap();
+        sqlx::query("SELECT id FROM jobs WHERE id=$1 FOR UPDATE")
+            .bind(parent)
+            .execute(&mut *blocker)
+            .await
+            .unwrap();
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *blocker)
+            .await
+            .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let clock = Arc::clone(&fixture.handle);
+        let commands = DispatchCommands::new(fixture.link.dispatcher());
+        let pending = tokio::spawn(async move {
+            commands
+                .issue_before(
+                    command,
+                    Box::new(move || {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        if clock.now() >= deadline {
+                            Err(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::PermissionDenied,
+                                "the actual native writer check ended",
+                            ))
+                                as Box<dyn std::error::Error + Send + Sync>)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                assert!(!pending.is_finished(), "the actual native parent-scan wait must be reached");
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid)) AND query ILIKE '%FROM jobs%FOR UPDATE%')")
+                    .bind(pid).fetch_one(fixture.db.pool()).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "an outer check before the native wait is insufficient"
+        );
+        if expire {
+            fixture.time.advance(chrono::Duration::hours(2));
+        }
+        blocker.commit().await.unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), pending)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if expire {
+            assert!(matches!(result, Err(CommandsError::BeforeEffect(_))));
+        } else {
+            result.unwrap();
+        }
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM commands WHERE id=$1")
+            .bind(id)
+            .fetch_one(fixture.db.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, i64::from(!expire));
+    }
+}
+
+#[tokio::test]
+async fn the_engine_of_the_process_is_built_over_the_link_and_answers_requests() {
+    let fixture = fixture().await;
+    let engine = start(&fixture.db, &fixture.handle, &fixture.config, &fixture.link);
+    let missing = engine.sync(new_id(), None, None, 10).await;
+    assert!(matches!(missing, Err(ReadError::NotFound)), "{missing:?}");
+    engine.stop();
+}

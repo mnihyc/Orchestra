@@ -17,6 +17,7 @@ export function settingKeyOf(article: string | null): string | null {
 
 /** Search settings keep their full entries and link to the authored workflow at the relevant heading. */
 export function authoredSettingGuide(key: string): { article: string; heading: string; title: TranslationKey } | null {
+  if (key === 'threads.agent_schedules' || key === 'threads.agent_schedule_hours' || key === 'threads.agent_schedule_runs') return { article: 'agent-schedules', heading: 'enable-agent-schedules', title: 'agentSchedules.title' };
   if (key.startsWith('related.')) return { article: 'related-items', heading: 'choose-ranking', title: 'related.title' };
   if (key.startsWith('documents.links.')) return { article: 'document-links', heading: 'choose-the-numbers', title: 'links.title' };
   const semantic: Readonly<Record<string, string>> = {

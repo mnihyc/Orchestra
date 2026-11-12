@@ -1,6 +1,6 @@
 /** Production UI with the native-shaped test API: drafts survive presentation changes and local-save failures. */
 import { expect, test, type Page } from '@playwright/test';
-import { scenario, signIn } from './support';
+import { scenario, signIn, screenAddress } from './support';
 import { DOCS, openDocument } from './documents-support';
 import { showWorkbenchView } from './workbench-support';
 
@@ -53,7 +53,9 @@ for (const theme of ['light', 'dark'] as const) test(`unsent comments survive de
   await expect(field).toHaveValue('Unsent words stay with this document');
   await page.reload(); await expect(field).toHaveValue('Unsent words stay with this document');
   expect(await field.evaluate((element: HTMLTextAreaElement) => [element.selectionStart, element.selectionEnd, element.selectionDirection])).toEqual(selection);
-  await expect(page).toHaveURL(new RegExp(`/doc/${DOCS.plan}$`)); expect(writes).toEqual([]);
+  // Document History keeps its list choices in the address.
+  await expect(page).toHaveURL(screenAddress(`/doc/${DOCS.plan}`));
+  expect(writes).toEqual([]);
   await page.screenshot({ path: info.outputPath(`comments-recovered-${theme}.png`), animations: 'disabled' });
   await comments(page).getByRole('button', { name: 'Send', exact: true }).click();
   await expect(comments(page).getByRole('region', { name: 'Discussion', exact: true })).toContainText('Unsent words stay with this document');

@@ -18,7 +18,7 @@ import { EmptyState } from '@/ui/EmptyState';
 import { ThreadIdentity } from '@/features/people/ThreadIdentity';
 import { useStore } from 'zustand';
 
-import { ApiError, client } from '@/api/client';
+import { ApiError, client, ReceiptAcknowledged } from '@/api/client';
 import { nodeQuery } from '@/api/nodes';
 import { holds } from '@/lib/permissions';
 import { mentionNames } from '@/features/people/wording';
@@ -190,6 +190,13 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
       onForwarded?.(reply);
       onClose();
     } catch (error) {
+      if (error instanceof ReceiptAcknowledged) {
+        // The atomic forward committed. Keep full-result callbacks separate from this acknowledgement;
+        // closing also prevents the original submit control from offering to repeat accepted work.
+        toast({ tone: 'success', title: t('forward.done', { count: chosen.length }) });
+        onClose();
+        return;
+      }
       setRefusal({ error, destination: error instanceof ApiError ? refusedDestination(chosen, error.problem.object) : null });
       setPending(false);
     }
@@ -261,7 +268,7 @@ function ForwardForm({ source, onClose, onForwarded, initialDestinations }: { so
               className={`${fieldBoxClasses} input-leading-icon`}
             />
           </label>
-          <div role="group" aria-label={t('forward.found')} className="flex max-h-[30dvh] flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
+          <div role="group" aria-label={t('forward.found')} data-scroll-allow="choices" className="flex max-h-[30dvh] flex-col gap-1 overflow-y-auto rounded-lg border border-border p-1">
             {choices.length === 0 ? (
               <EmptyState compact className="px-2" title={t('forward.nothing')} />
             ) : (

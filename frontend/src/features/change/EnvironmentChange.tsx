@@ -1,3 +1,4 @@
+import { ResourcePicker } from '@/ui/ResourcePicker';
 /** An environment brought up to date, made again or moved to another host: what changes, what stays, what ends, and the threads it holds meanwhile.
  *
  * The same four views as a switch, for a thing that is not a thread. Updating gives the environment the unit it would
@@ -29,11 +30,13 @@ import { Blockers } from '@/features/change/Blockers';
 import { Frame, type View } from '@/features/change/Frame';
 import { PlanLists } from '@/features/change/Lists';
 import { MeasurementReason, Measurements, waitsForCount } from '@/features/change/Measurements';
-import { copyLines, filesLines, type Line, mcpLines, mountLines, rangeWords } from '@/features/change/plan';
+import { addedResourcesOf, copyLines, filesLines, keptResourcesOf, type Line, rangeWords, removedResourcesOf } from '@/features/change/plan';
 import { JobProgress, committed } from '@/features/change/Progress';
 import { useRefreshWhenOver } from '@/features/change/refresh';
 import { Result } from '@/features/change/Result';
+import { transferFacts, transferWords } from '@/features/change/environmentTransfer';
 import { HostChoices } from '@/features/change/Where';
+import { templateChoice } from '@/features/resources/choiceAvailability';
 import { FilesChoice } from '@/features/change/Files';
 import { ALL_FILES, type FileChoice, type MountPick, mountChoicesOf, selectionOf, withFate, withPick } from '@/features/change/choices';
 import { MountFates } from '@/features/change/MountFates';
@@ -49,9 +52,7 @@ import { ErrorAlert, ErrorState } from '@/ui/ErrorState';
 import { InlineAlert } from '@/ui/InlineAlert';
 import { Input } from '@/ui/Input';
 import { SegmentedControl } from '@/ui/SegmentedControl';
-import { Select } from '@/ui/Select';
 import { SkeletonRows } from '@/ui/Skeleton';
-import { resourceChoice } from '@/features/resource-facts/ResourceFacts';
 
 type Kind = 'update' | 'recreate' | 'move';
 
@@ -89,7 +90,7 @@ export function EnvironmentChange(props: EnvironmentChangeProps) {
   if (environment.isPending || environment.isError) {
     return (
       <Frame title={t(`change.env.title.${props.kind}`, { name: '' })} at="plan" open={props.open} onClose={props.onClose} footer={<Button onClick={props.onClose}>{t('common.close')}</Button>}>
-        {environment.isError ? <ErrorState compact error={environment.error} retrying={environment.isRefetching} onRetry={() => void environment.refetch()} /> : <SkeletonRows rows={4} />}
+        {environment.isError ? <ErrorState compact error={environment.error} retrying={environment.isRefetching} onRetry={() => void environment.refetch()} /> : <SkeletonRows read={environment} rows={4} />}
       </Frame>
     );
   }
@@ -139,11 +140,14 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
     onSuccess: (checked, { key }) => { queryClient.setQueriesData({ queryKey: key, exact: true }, checked); },
   });
   const checkError = JSON.stringify(fingerprints.variables?.body) === JSON.stringify(moveBody) ? fingerprints.error : null;
-  const current = plan.data;
+  const current = plan.isError ? undefined : plan.data;
+  const currentMove = current !== undefined && 'to' in current ? current : undefined;
+  const reviewedTransfer = transferFacts(currentMove);
+  const reviewedDestination = currentMove === undefined ? null : destinationName(currentMove, t);
   const stale = plan.isPlaceholderData || plan.isFetching || fingerprints.isPending;
 
   const jobAnswer = useQuery({ ...jobQuery(jobId ?? ''), enabled: jobId !== null });
-  const running = jobAnswer.data;
+  const running = jobAnswer.isError ? undefined : jobAnswer.data;
   useRefreshWhenOver(running !== undefined && isOver(running.state), running?.id, running?.environment_id === undefined || running.environment_id === null ? [] : [running.environment_id]);
   const view: View = running === undefined ? 'plan' : running.state === 'queued' || running.state === 'running' ? 'progress' : 'done';
 
@@ -158,7 +162,7 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
     },
     onSuccess: (started) => {
       queryClient.setQueryData(forkKeys.job(started.id), started);
-      if (current !== undefined) setRan({ done: move ? t('change.env.doneMove', { name, host: destinationName(current as EnvironmentMovePlan, t) }) : t('change.env.doneUpdate', { name }), threads: current.threads.length });
+      if (current !== undefined) setRan({ done: move ? transferWords(reviewedTransfer, name, reviewedDestination, t).done : t('change.env.doneUpdate', { name }), threads: current.threads.length });
       setJobId(started.id);
     },
     onError: (error) => {
@@ -174,9 +178,12 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
 
   // A job that was opened by its number says what it is itself: a move or an update.
   const shown: Kind = running?.kind === 'environment_move' ? 'move' : kind;
-  const title = t(`change.env.title.${shown}`, { name });
-  const about = t(`change.env.about.${shown}`);
-  const heading = t(`change.env.heading.${shown}`, { name, host: shown === 'move' ? destinationName(current as EnvironmentMovePlan | undefined, t) : '' });
+  const hasJobContext = running === undefined || running.environment_id === environmentId;
+  const transfer = hasJobContext ? reviewedTransfer : transferFacts(undefined);
+  const words = transferWords(transfer, name, hasJobContext ? reviewedDestination : null, t);
+  const title = shown === 'move' ? hasJobContext ? words.title : t('envTransfer.operation') : t(`change.env.title.${shown}`, { name });
+  const about = shown === 'move' ? undefined : t(`change.env.about.${shown}`);
+  const heading = shown === 'move' ? hasJobContext ? words.heading : t('envTransfer.operation') : t(`change.env.heading.${shown}`, { name, host: '' });
   const blockers = confirm.error instanceof ApiError && confirm.error.is('plan.blocked') ? blockersOf(confirm.error) : (current?.blockers ?? []);
   const held = heldBy(confirm.error);
   const canConfirm = current !== undefined && !stale && blockers.length === 0 && !confirm.isPending;
@@ -184,7 +191,6 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
   const turnRunning = current?.threads.some((entry) => entry.turn_running) === true;
   const minutes = chosen.waitMinutes ?? current?.options.wait_minutes ?? 10;
   const activeTurn = chosen.activeTurn ?? current?.options.active_turn ?? 'wait';
-  const currentMove = move ? current as EnvironmentMovePlan | undefined : undefined;
   const chosenMachine = machineId ?? (hostId === null && currentMove !== undefined && !('automatic' in currentMove.to) ? currentMove.to.machine.id : null);
 
   if (running !== undefined) {
@@ -227,11 +233,11 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
         }
       >
         {over ? (
-          <Result job={running} done={ran?.done ?? t('change.env.doneUpdate', { name })} stoppedTurn={false} waited={minutes} subject={name}>
-            {running.state === 'succeeded' && ran !== null && ran.threads > 0 && <p className="text-sm text-text-muted">{t('change.env.threadsOpen', { count: ran.threads })}</p>}
+          <Result job={running} done={shown === 'move' ? hasJobContext ? ran?.done ?? words.done : t('envTransfer.finishedGeneric') : ran?.done ?? t('change.env.doneUpdate', { name })} stoppedTurn={false} waited={minutes} subject={name}>
+            {hasJobContext && running.state === 'succeeded' && ran !== null && ran.threads > 0 && <p className="text-sm text-text-muted">{t('change.env.threadsOpen', { count: ran.threads })}</p>}
           </Result>
         ) : (
-          <JobProgress job={running} heading={heading} reconnecting={jobAnswer.failureCount > 0} />
+          <JobProgress job={running} heading={heading} transfer={transfer} reconnecting={jobAnswer.failureCount > 0} />
         )}
         {cancel.error !== null && <ErrorAlert error={cancel.error} />}
         <ConfirmDialog open={cancelling} onOpenChange={setCancelling} title={t('change.cancel.title')} confirmLabel={t('change.progress.cancel')} danger pending={cancel.isPending} error={cancel.error ?? undefined} onConfirm={() => cancel.mutate()}>
@@ -243,7 +249,7 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
   if (jobId !== null) {
     return (
       <Frame title={title} about={about} at="progress" open={open} onClose={onClose} footer={<Button onClick={onClose}>{t('change.progress.hide')}</Button>}>
-        {jobAnswer.isError ? <ErrorState compact error={jobAnswer.error} retrying={jobAnswer.isRefetching} onRetry={() => void jobAnswer.refetch()} /> : <SkeletonRows rows={3} />}
+        {jobAnswer.isError ? <ErrorState compact error={jobAnswer.error} retrying={jobAnswer.isRefetching} onRetry={() => void jobAnswer.refetch()} /> : <SkeletonRows read={jobAnswer} rows={3} />}
       </Frame>
     );
   }
@@ -276,7 +282,7 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
             {t('common.cancel')}
           </Button>
           <Button variant="primary" pending={confirm.isPending} blocked={!canConfirm && !confirm.isPending} aria-describedby={waitsForCount(current) ? reasonId : undefined} onClick={() => canConfirm && confirm.mutate()} data-confirm>
-            {waitsForCount(current) ? t('liveWork.waitCount') : move && threads > 0 ? t('change.env.confirm.moveThreads', { count: threads }) : t(`change.env.confirm.${kind}`)}
+            {waitsForCount(current) ? t('liveWork.waitCount') : move ? transfer.kind === 'move' && threads > 0 ? t('change.env.confirm.moveThreads', { count: threads }) : words.confirm : t(`change.env.confirm.${kind}`)}
           </Button>
         </>
       }
@@ -289,10 +295,10 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
         <>
           {move && (
             <div className="flex min-w-0 flex-col gap-3" data-change-destination>
-              {!hasUnit && <Select label={t('environments.make.template')}
+              {!hasUnit && <ResourcePicker pickerKey="change.EnvironmentChange.environments.make.template" label={t('environments.make.template')}
                 value={templateId ?? 'inherited'} onValueChange={(next) => { setTemplateId(next === 'inherited' ? null : next); setHostId(null); }}
                 options={[{ value: 'inherited', name: t('uniformMoves.inheritedTemplate'), description: t('uniformMoves.inheritedTemplateAbout') },
-                  ...(templates.data ?? []).filter((entry) => entry.enabled && entry.access.permissions.includes('template.use')).map((entry) => ({ value: entry.id, name: entry.name, ...resourceChoice({ kind: 'template', template: entry }) }))]} />}
+                  ...(templates.data ?? []).map((entry) => templateChoice(entry, t))]} />}
               {!hasUnit && templates.isError && <ErrorAlert error={templates.error} />}
               {places.isError && <ErrorAlert error={places.error} />}
               <HostChoices hosts={hosts} value={hostId} onChange={setHostId} loading={places.isPending} machines={machines} machine={chosenMachine} onMachine={(next) => { setMachineId(next); if (next !== null) setHostId(null); }} />
@@ -321,7 +327,7 @@ function Body({ environmentId, kind, job, open, onClose, name, hasUnit, carryHom
           )}
           {plan.isError && <ErrorAlert error={plan.error} message={!move && plan.error instanceof ApiError && plan.error.is('request.invalid') ? t('programVersions.planRefused', { reason: plan.error.problem.detail }) : undefined} action={<Button size="sm" onClick={() => void plan.refetch()}>{t('common.tryAgain')}</Button>} />}
           {move && <FilesChoice value={files} onChange={setFiles} />}
-          {plan.isPending && <><p role="status" className="text-sm text-text-muted">{t('liveWork.planning')}</p><SkeletonRows rows={4} /></>}
+          {plan.isPending && <><p role="status" className="text-sm text-text-muted">{t('liveWork.planning')}</p><SkeletonRows read={plan} rows={4} /></>}
           {current !== undefined && (
             <div className={stale ? 'flex flex-col gap-4 opacity-60 transition-opacity' : 'flex flex-col gap-4'} aria-busy={stale} data-plan>
               {planGone(confirm.error) && (
@@ -373,7 +379,7 @@ function updateLists(plan: EnvironmentUpdatePlan, t: TFunction): { changes: Line
       ? [{ id: 'recreate', tone: 'plain', text: t('change.env.plan.recreate') }]
       : plan.updates.map((update) => ({ id: `update-${update.name}`, tone: 'plain', text: update.what === 'harness' ? programChangeText(update, t) : isTechnicalChange(update) ? runtimeChangeText(update, t) : t('change.env.plan.update', { name: update.name, from: update.from ?? '', to: update.to ?? '' }), ...(isTechnicalChange(update) ? { technical: update } : {}) }));
   const stays: Line[] = [
-    { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }) },
+    { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }), people: [plan.environment.owner] },
     ...plan.kept.map((entry, index): Line => ({ id: `kept-${index}`, tone: 'plain', text: entry })),
   ];
   const ends: Line[] = [
@@ -385,28 +391,29 @@ function updateLists(plan: EnvironmentUpdatePlan, t: TFunction): { changes: Line
   return { changes, stays, ends, ifFails };
 }
 
-function moveLists(plan: EnvironmentMovePlan, locale: string, t: TFunction): { changes: Line[]; stays: Line[]; ends: Line[] } {
+export function moveLists(plan: EnvironmentMovePlan, locale: string, t: TFunction): { changes: Line[]; stays: Line[]; ends: Line[] } {
   const source = plan.from?.name ?? plan.from_machine?.name ?? t('uniformMoves.source');
+  const facts = transferFacts(plan);
   const changes: Line[] = [
-    { id: 'moves', tone: 'plain', text: t('change.env.plan.moves', { from: source, to: destinationName(plan, t) }) },
+    { id: 'moves', tone: 'plain', text: t(facts.kind === 'switch_copy' ? 'envTransfer.copyPlan' : 'change.env.plan.moves', { from: source, to: destinationName(plan, t) }) },
     ...filesLines(plan.files, locale, t),
-    ...mountLines(plan.mounts.filter((mount) => mount.action !== 'detach'), t),
+    ...addedResourcesOf(plan, t),
     ...copyLines(plan.mounts, locale, t),
-    ...mcpLines(plan.mcp.filter((server) => server.fate === 'new'), t),
     ...(plan.files.home === null ? [{ id: 'home-left', tone: 'plain' as const, text: t('mountPlan.homeLeft') }] : []),
   ];
   if (plan.held_still) changes.push({ id: 'still', tone: 'plain', text: t('change.env.plan.heldStill') });
   const stays: Line[] = [
-    { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }) },
+    { id: 'owner', tone: 'plain', text: t('change.env.plan.staysOwners', { name: plan.environment.owner.display_name }), people: [plan.environment.owner] },
     { id: 'page', tone: 'plain', text: t('change.env.plan.pageStays') },
+    ...keptResourcesOf(plan, t),
     ...plan.threads.map((entry, index): Line => ({ id: `thread-${index}`, tone: entry.action === 'blocked' ? 'danger' : 'plain', text: t(`change.env.plan.thread.${entry.action}`, { name: entry.thread?.name ?? t('change.env.plan.hidden'), note: entry.note }) })),
   ];
   const ends: Line[] = [
     { id: 'processes', tone: 'plain', text: t('change.env.plan.processes') },
     ...(moveRemovesSoftware(plan) ? [{ id: 'software', tone: 'warning' as const, text: t('isolation.replaced') }] : []),
-    ...mountLines(plan.mounts.filter((mount) => mount.action === 'detach'), t),
-    ...mcpLines(plan.mcp.filter((server) => server.fate === 'lost' || server.fate === 'unavailable'), t),
-    { id: 'old', tone: 'plain', text: plan.from === null ? t('uniformMoves.oldDirectory') : t('change.env.plan.oldUnit', { name: source }) },
+    ...removedResourcesOf(plan, t),
+    ...(facts.sourceHasUnit === true ? [{ id: 'old', tone: 'plain' as const, text: t('change.env.plan.oldUnit', { name: source }) }]
+      : facts.sourceHasUnit === false ? [{ id: 'old', tone: 'plain' as const, text: t('envTransfer.oldKept') }] : []),
   ];
   return { changes, stays, ends };
 }

@@ -22,9 +22,10 @@ export function PutBack({ doc, change, changes, onStale }: { doc: Document; chan
   const [stale, setStale] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const batch = useRef<GuardedOpsBody | null>(null);
-  if (!holds(doc.access, 'doc.edit') || doc.archived || doc.deleted) return null;
+  const reason = doc.deleted ? t('implicitAvailability.docDeleted') : doc.archived ? t('implicitAvailability.docArchived')
+    : !holds(doc.access, 'doc.edit') ? t('implicitAvailability.docEdit') : undefined;
   const apply = async () => {
-    if (pending) return;
+    if (pending || reason !== undefined) return;
     const current = useDocumentStore.getState().byId.get(doc.id);
     if (!current?.document || !holds(current.document.access, 'doc.edit')) { setStale(true); onStale(); return; }
     if (batch.current === null) {
@@ -44,7 +45,7 @@ export function PutBack({ doc, change, changes, onStale }: { doc: Document; chan
   };
   const explanation = change.before === null ? 'people.putBackAdded' : change.after === null ? 'people.putBackRemoved' : 'people.putBackUpdate';
   return <div className="mt-2 flex flex-col items-start gap-1">
-    {done ? <span role="status" className="flex items-center gap-1 text-xs text-success"><Check aria-hidden className="size-4" />{t('people.putBackDone')}</span> : <Button size="sm" variant="ghost" icon={<Undo2 aria-hidden />} pending={pending} disabled={stale} title={t(explanation)} onClick={() => void apply()}>{t('people.putBack')}</Button>}
+    {done ? <span role="status" className="flex items-center gap-1 text-xs text-success"><Check aria-hidden className="size-4" />{t('people.putBackDone')}</span> : <Button size="sm" variant="ghost" icon={<Undo2 aria-hidden />} pending={pending} disabled={stale} blocked={reason !== undefined} reason={reason} title={t(explanation)} onClick={() => void apply()}>{t('people.putBack')}</Button>}
     {stale && <StateLine role="alert" tone="warning" compact message={t('people.laterChange')} />}
     {error !== null && <ErrorAlert error={error} />}
   </div>;

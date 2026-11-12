@@ -2,6 +2,7 @@
 import { readFile } from 'node:fs/promises';
 
 import { expect, type Locator, type Page, test } from '@playwright/test';
+import english from '../../src/i18n/en.json' with { type: 'json' };
 
 import { id } from '../doubles/fixtures.ts';
 import { ACME, changeTree, PEOPLE, scenario, signIn } from './support.ts';
@@ -220,13 +221,13 @@ test.describe('one archive of a place', () => {
     await dialog.getByRole('radio', { name: 'JSON', exact: true }).click();
     await expect(dialog.getByRole('combobox', { name: /Conversations/ })).toBeVisible();
     await expect(dialog.getByRole('checkbox', { name: 'Attachments' })).toBeVisible();
-    await expect(dialog.getByLabel('From', { exact: true })).toBeVisible();
-    await expect(dialog.getByLabel('To', { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: 'From', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: 'To', exact: true })).toBeVisible();
     await dialog.getByRole('combobox', { name: /Conversations/ }).click();
     await page.getByRole('option', { name: 'Full', exact: true }).click();
     await dialog.getByRole('checkbox', { name: 'Attachments' }).click();
-    await dialog.getByLabel('From').fill('2026-10-01');
-    await dialog.getByLabel('To', { exact: true }).fill('2026-10-09');
+    await dialog.getByRole('textbox', { name: 'From', exact: true }).fill('2026-10-01');
+    await dialog.getByRole('textbox', { name: 'To', exact: true }).fill('2026-10-09');
     await expect(plan(dialog)).toContainText('allowed here');
     await exportButton(dialog).click();
     await expect(dialog).toBeHidden();
@@ -311,7 +312,8 @@ test.describe('the job and the download', () => {
     await expect(statusBar(page).getByRole('button', { name: 'Export failed' })).toHaveCount(0);
     await expect(statusBar(page).getByRole('button', { name: 'Your exports' }).locator('[data-action-icon="yourExports"]')).toBeVisible();
 
-    await statusBar(page).getByRole('button', { name: 'Your exports' }).click();
+    // The deliberately persistent failure notice can cover the footer; its action remains reachable by keyboard.
+    await statusBar(page).getByRole('button', { name: 'Your exports' }).press('Enter');
     await page.waitForURL(/\/settings\/exports/);
     const line = page.getByRole('row', { name: /Shop/ });
     await expect(line).toContainText('Failed');
@@ -358,16 +360,18 @@ test.describe('what may be read and not taken away', () => {
     await expect(ask).toContainText('Asked Ada Lovelace. You will be told when they answer.');
   });
 
-  test('somebody who may take it away has it offered, and a viewer’s row menu leaves out what they may not do', async ({ page }) => {
+  test('a visible row keeps Export with its reason for a viewer who may not take it away', async ({ page }) => {
     await steer('/bar', { username: 'dora', permission: 'thread.export', object: ACME.repro });
     await signIn(page, PEOPLE.dora);
     // The left bar opens the topic the thread lies in, so that both threads are in it.
     await page.goto(`/thread/${ACME.mainThread}`);
-    // In the left bar the entry is left out for the thread dora may not export, and there for the one she may.
+    // In the left bar the same known Export action explains the refused thread and stays usable for the allowed one.
     await page.getByRole('button', { name: 'Actions for Repro' }).first().click();
     await expect(page.getByRole('menuitem', { name: 'Rename…' })).toBeVisible();
     await expect(page.getByText(/Checking what you can do/)).toHaveCount(0);
-    await expect(page.getByRole('menuitem', { name: 'Export…' })).toHaveCount(0);
+    await expect(page.getByRole('menuitem', { name: 'Export…' })).toHaveAttribute('aria-disabled', 'true');
+    await expect(page.getByRole('menuitem', { name: 'Export…' })).toContainText('Taking this away as a file is for people Ada Lovelace names');
+    await expect(page.getByRole('menuitem', { name: 'Request access' })).toBeVisible();
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: 'Actions for Main thread' }).first().click();
     await expect(page.getByRole('menuitem', { name: 'Export…' })).toBeVisible();
@@ -430,7 +434,7 @@ test.describe('Your exports', () => {
     await expect(ready.getByRole('button', { name: /^Download/ })).toBeVisible();
     await expect(table.getByRole('row', { name: /Infra/ })).toContainText('Writing');
     await expect(table.getByRole('row', { name: /Shop/ })).toContainText('Failed');
-    await expect(table.getByRole('row', { name: /Research/ })).toContainText('Removed');
+    await expect(table.getByRole('row', { name: /Research/ })).toContainText(english.export.list.removed);
     await expect(table.getByRole('row', { name: /Payroll/ })).toContainText('Expired');
     const orphan = table.getByRole('row', { name: /A place that is gone/ });
     await expect(orphan).toContainText('Ready');
@@ -440,11 +444,11 @@ test.describe('Your exports', () => {
     await expect(table.getByRole('row', { name: /Research/ }).getByRole('button')).toHaveCount(0);
 
     await ready.getByRole('button', { name: /Actions for the archive of Web/ }).click();
-    await page.getByRole('menuitem', { name: 'Remove' }).click();
-    const confirm = page.getByRole('alertdialog', { name: 'Remove the archive of Web?' });
+    await page.getByRole('menuitem', { name: english.export.list.remove, exact: true }).click();
+    const confirm = page.getByRole('alertdialog', { name: english.export.list.removeTitle.replace('{{name}}', 'Web') });
     await expect(confirm).toContainText('cannot be downloaded again');
-    await confirm.getByRole('button', { name: 'Remove the archive of Web' }).click();
-    await expect(table.getByRole('row', { name: /Web/ })).toContainText('Removed');
+    await confirm.getByRole('button', { name: english.export.list.removeDo.replace('{{name}}', 'Web') }).click();
+    await expect(table.getByRole('row', { name: /Web/ })).toContainText(english.export.list.removed);
     await expect(table.getByRole('row', { name: /Web/ }).getByRole('button', { name: /^Download/ })).toHaveCount(0);
   });
 
@@ -527,7 +531,7 @@ test.describe('Your exports', () => {
     await signIn(page);
     await page.goto('/settings/exports');
     await expect(page.getByText('Nothing exported yet')).toBeVisible();
-    await expect(page.getByText('Open the menu of an org, a project or a topic and choose Export…')).toBeVisible();
+    await expect(page.getByText(english.export.page.emptyAbout, { exact: true })).toBeVisible();
   });
 });
 

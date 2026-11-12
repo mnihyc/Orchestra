@@ -69,6 +69,7 @@
 //! | `chunk <n>` | Characters in one piece of the text that follows: 8 unless said, never inside a character |
 //! | `delay <ms>` | Wait before each piece of the text that follows: 0 unless said |
 //! | `sleep <ms>` | Wait once, here |
+//! | `hold <name>` | Wait here until the test releases the hold of that name ([`MockLlm::release`]); an answer that comes to a hold already released does not wait |
 //! | `keepalive` | An SSE comment line (`: keep-alive`), here |
 //! | `gateway` | Write the stream the way a gateway in front of the vendors does: the Responses format with no `event:` lines and an empty comment line first, both formats ending with `data: [DONE]` |
 //! | `usage <input> <output> [cached=N] [reasoning=N] [cache_write=N] [cost=D]` | The figures of use; `input=`/`output=` also work. Unsaid, input is one token to four characters of the request and output one to four of the response. Cached and written tokens are parts of the input, reasoning is part of the output |
@@ -127,7 +128,7 @@
 //! Each request to the model interface is recorded when it arrives and completed as it ends:
 //! [`RecordedRequest`] has its method, path, query, headers, body, format, model, whether it streams, the check
 //! of its credential, which script answered (`directive`, `queue`, `default`, `echo`, and its round), the status,
-//! and how the answer ended (`pending` while it is sent, then `completed`, `error`, `cut`, `truncated` or
+//! the use the answer states (`usage`, [`Answered`], where it was answered with a response), and how the answer ended (`pending` while it is sent, then `completed`, `error`, `cut`, `truncated` or
 //! `client_gone`). Header names are lower case. A header is secret when its name
 //! has `auth`, `key`, `token`, `secret`, `password`, `cookie` or `credential` in it, or when the server was told
 //! so; a secret, and the credential wherever it occurs, is written as `[secret:` and eight hexadecimal digits of
@@ -165,7 +166,8 @@ use serde::{Deserialize, Serialize};
 
 pub use client::{ClientError, ClientReply, ClientRequest, ModelClient, OpenReply};
 pub use record::{
-    CredentialCheck, Outcome, Presentation, RecordedRequest, ScriptSource, Verdict, fingerprint,
+    Answered, CredentialCheck, Outcome, Presentation, RecordedRequest, ScriptSource, Verdict,
+    fingerprint,
 };
 pub use request::Format;
 pub use script::{
@@ -178,6 +180,10 @@ use server::Shared;
 /// The moment a server reports unless it is told another: midnight of the day this was written, so that the
 /// same script gives the same bytes.
 pub const DEFAULT_CREATED_AT: i64 = 1_791_676_800;
+
+/// How long a stream waits at a `hold` for its release unless the server is told another time: long against what a
+/// test takes to do what it holds the stream for, and short against the limit of the test itself.
+pub const DEFAULT_HOLD_LIMIT: Duration = Duration::from_secs(30);
 
 /// The model a response is reported for when the request names none.
 pub const DEFAULT_MODEL: &str = "mock-large";
@@ -254,6 +260,9 @@ pub struct MockConfig {
     /// The clock a limit that ends after so many seconds is dated by (`resets=+N` of a plan limit); nothing
     /// else reads it.
     pub clock: Arc<dyn Clock>,
+    /// How long a stream waits at a `hold` for its release before it ends with an error that names the hold, so that a
+    /// release that never comes fails the test that missed it at once, with its cause.
+    pub hold_limit: Duration,
 }
 
 impl Default for MockConfig {
@@ -271,11 +280,19 @@ impl Default for MockConfig {
             created_at: DEFAULT_CREATED_AT,
             default_script: None,
             clock: Arc::new(SystemClock),
+            hold_limit: DEFAULT_HOLD_LIMIT,
         }
     }
 }
 
 impl MockConfig {
+    /// The same set-up with this time for a stream to wait at a `hold` for its release.
+    #[must_use]
+    pub fn with_hold_limit(mut self, limit: Duration) -> Self {
+        self.hold_limit = limit;
+        self
+    }
+
     /// The same set-up with a credential to check.
     #[must_use]
     pub fn with_credential(mut self, credential: &str) -> Self {
@@ -397,6 +414,13 @@ impl MockLlm {
         ModelClient::new(&self.url())
     }
 
+    /// Releases the hold of this name (`hold <name>` in a script): the answers that wait at it go on, and so do those
+    /// that come to it later. A test that must have an answer wait for something that happens outside the server (the
+    /// end of another turn, say) holds it so and releases it then, not after a time.
+    pub fn release(&self, name: &str) {
+        self.shared.release(name);
+    }
+
     /// What was received so far, in order of arrival.
     #[must_use]
     pub fn requests(&self) -> Vec<RecordedRequest> {
@@ -440,6 +464,18 @@ impl MockLlm {
         control::enqueue(&self.shared, script, filter, times).map(|_| ())
     }
 
+    /// Queue fixture responses selected by actual request structure, not model identity alone.
+    pub fn queue_matching(
+        &self,
+        script: &str,
+        filter: &QueueFilter,
+        times: u64,
+        matches: impl Fn(&serde_json::Value) -> bool + Send + Sync + 'static,
+    ) -> Result<(), ScriptError> {
+        control::enqueue_matching(&self.shared, script, filter, times, Some(Arc::new(matches)))
+            .map(|_| ())
+    }
+
     /// Sets the script that answers any request nothing else answers.
     pub fn set_default(&self, script: &str) -> Result<(), ScriptError> {
         control::set_default(&self.shared, Some(script))
@@ -481,5 +517,42 @@ impl MockLlm {
 impl Drop for MockLlm {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+#[cfg(test)]
+mod structural_queue_tests {
+    use super::*;
+    #[tokio::test]
+    async fn same_model_main_request_cannot_consume_a_classifier_response()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let model = MockLlm::start(MockConfig::default()).await?;
+        model.queue_matching(
+            "say <severity>0</severity>",
+            &QueueFilter::default(),
+            1,
+            |body| {
+                body.pointer("/probe_role")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("classifier")
+            },
+        )?;
+        model.set_default("error permission unmatched-request")?;
+        let client = reqwest::Client::new();
+        let request = |role: &str| {
+            serde_json::json!({"model":"same-model","max_tokens":64,"probe_role":role,
+            "messages":[{"role":"user","content":"bounded fixture request"}]})
+        };
+        let url = format!("http://{}/v1/messages", model.addr());
+        let main = client.post(&url).json(&request("main")).send().await?;
+        assert_eq!(main.status().as_u16(), 403);
+        let classifier = client
+            .post(&url)
+            .json(&request("classifier"))
+            .send()
+            .await?;
+        assert_eq!(classifier.status().as_u16(), 200);
+        assert!(classifier.text().await?.contains("<severity>0</severity>"));
+        Ok(())
     }
 }

@@ -11,20 +11,39 @@ import type { Delivery } from '@/generated/api-types';
 import { i18n, setLocale } from '@/i18n';
 import { show } from './support';
 
-const calls = vi.hoisted(() => ({ interrupt: vi.fn(), send: vi.fn<(delivery: Delivery) => void>(), apply: vi.fn(), aside: vi.fn() }));
+const calls = vi.hoisted(() => ({ interrupt: vi.fn(), send: vi.fn<(delivery: Delivery) => void>(), apply: vi.fn(), aside: vi.fn(), schedule: vi.fn() }));
 vi.mock('@/api/threads', async (load) => ({ ...await load<typeof ThreadsApi>(), interruptTurn: calls.interrupt }));
 vi.mock('@/realtime/stores/thread', async (load) => { const actual = await load<typeof ThreadState>(); return { ...actual, threadWriter: { ...actual.threadWriter, apply: calls.apply } }; });
 
-function Harness({ active = true, empty = false, mayDrive = true, live = true, noSteer = false, waitingFiles = false, side = false, sideUnavailable = false }: { active?: boolean; empty?: boolean; mayDrive?: boolean; live?: boolean; noSteer?: boolean; waitingFiles?: boolean; side?: boolean; sideUnavailable?: string | false }) {
-  const stop = useStop('thread-1', active ? 'turn-1' : null, live);
-  return <DeliveryControl state={{ active, starting: false, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop} turnId={active ? 'turn-1' : null}
-    mayDrive={mayDrive} empty={empty} tooLong={false} attachmentsWaiting={waitingFiles} onSend={calls.send} onAskOnSide={side ? calls.aside : undefined} sideUnavailable={sideUnavailable} />;
+function Harness({ active = true, empty = false, mayDrive = true, live = true, noSteer = false, waitingFiles = false, side = false, sideUnavailable = false, missingTurn = false, schedule = false }: { active?: boolean; empty?: boolean; mayDrive?: boolean; live?: boolean; noSteer?: boolean; waitingFiles?: boolean; side?: boolean; sideUnavailable?: string | false; missingTurn?: boolean; schedule?: boolean }) {
+  const turnId = active && !missingTurn ? 'turn-1' : null;
+  const stop = useStop('thread-1', turnId, live);
+  return <DeliveryControl state={{ active, starting: false, live, cannotSteer: noSteer, agent: 'Scripted agent' }} stop={stop} turnId={turnId}
+    mayDrive={mayDrive} empty={empty} tooLong={false} attachmentsWaiting={waitingFiles} onSend={calls.send} onAskOnSide={side ? calls.aside : undefined} sideUnavailable={sideUnavailable}
+    onSchedule={schedule ? calls.schedule : undefined} scheduleUnavailable={false} />;
 }
 
-beforeEach(() => { calls.send.mockClear(); calls.aside.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ id: 'turn-1', state: 'interrupted' }); });
+beforeEach(() => { calls.send.mockClear(); calls.aside.mockClear(); calls.schedule.mockClear(); calls.interrupt.mockReset(); calls.apply.mockClear(); calls.interrupt.mockResolvedValue({ id: 'turn-1', state: 'interrupted' }); });
 afterEach(async () => { await setLocale('en'); });
 
 describe('the message delivery action', () => {
+  it.each(['en', 'zh-CN'] as const)('keeps Send later available while the running turn is still being read in %s', async (locale) => {
+    await setLocale(locale);
+    const view = show(<Harness missingTurn schedule />);
+    expect(screen.getByRole('button', { name: i18n.t('composer.stop') })).toBeDisabled();
+    const more = screen.getByRole('button', { name: i18n.t('composer.deliveryMenu') });
+    expect(more).toBeEnabled();
+    await userEvent.click(more);
+    const later = screen.getByRole('menuitem', { name: i18n.t('sendLater.title') });
+    expect(later).not.toHaveAttribute('aria-disabled', 'true');
+    await userEvent.click(later);
+    expect(calls.schedule).toHaveBeenCalledExactlyOnceWith();
+    expect(calls.interrupt).not.toHaveBeenCalled();
+    expect(calls.send).not.toHaveBeenCalled();
+    view.rerender(<Harness missingTurn schedule live={false} />);
+    expect(screen.getByRole('button', { name: i18n.t('composer.deliveryMenu') })).toBeDisabled();
+  });
+
   it.each(['en', 'zh-CN'] as const)('explains an attachment refusal for a supported aside and preserves normal delivery in %s', async (locale) => {
     await setLocale(locale);
     const reason = i18n.t('side.unavailable.attachments');

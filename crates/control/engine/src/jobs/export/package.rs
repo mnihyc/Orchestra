@@ -5,7 +5,7 @@
 //! hold (who made each thing and when it last changed, where a document lies, what a place is called and about) and
 //! puts it all in the manifest, with the SHA-256 that the zip kept of every entry it was given.
 
-use super::{Archive, Exporting, Tally};
+use super::{Archive, Exporting, Tally, source_failed};
 use crate::export_layout::Layout;
 use crate::exports::{Selected, node_kind};
 use crate::jobs::runner::{Failure, INTERNAL, Stop};
@@ -162,7 +162,7 @@ impl Exporting {
         selected: &Selected,
         request: &ExportRequest,
         layout: &Layout,
-        archive: &Archive,
+        archive: &mut Archive,
         tally: &Tally,
         counts: ExportCounts,
         left_out: &[ExportLeftOut],
@@ -170,7 +170,6 @@ impl Exporting {
     ) -> Result<PackageManifest, Stop> {
         let mut conn = self.engine.inner.db.acquire().await?;
         let principal = self.principal(&mut conn).await?;
-        let digest = |path: &str| archive.digest_of(path).unwrap_or_default();
         let by_id: HashMap<Id, &PlaceRow> =
             selected.scope.iter().map(|node| (node.id, node)).collect();
         let root = selected.place.id;
@@ -276,6 +275,64 @@ impl Exporting {
             }
         };
 
+        let mut blocked_nodes = HashSet::new();
+        let mut blocked_folders = HashSet::new();
+        if let Some(request) = &self.request {
+            use crate::operation_scope::targets;
+            use orch_api_contract::{export_sources::Source, operations::FacetUsage};
+            let ids = nodes.iter().copied().collect::<Vec<_>>();
+            let mut graph = orch_authz::engine::Graph::load(&mut conn, &ids)
+                .await
+                .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
+            let folder_ids = containers
+                .iter()
+                .map(|folder| folder.id)
+                .collect::<Vec<_>>();
+            let folders = orch_authz::documents::read_into(&mut conn, &mut graph, &folder_ids)
+                .await
+                .map_err(|error| Failure::new(INTERNAL, error.to_string()))?;
+            for node in &nodes {
+                let target = targets::from_node_identity(&graph, *node)
+                    .ok_or_else(|| Failure::new(INTERNAL, "a package path is unavailable"))?;
+                if !request
+                    .permits_field(
+                        principal.caller(),
+                        Source::Contents,
+                        FacetUsage::Required,
+                        &target,
+                    )
+                    .map_err(source_failed)?
+                {
+                    blocked_nodes.insert(*node);
+                } else if !selected.viewable.contains_key(node) {
+                    archive.observe(crate::exports::operation::Subject::NodePath(*node));
+                }
+            }
+            for folder in &folders {
+                let site = orch_authz::documents::site_of(&graph, folder)
+                    .ok_or_else(|| Failure::new(INTERNAL, "a package folder is unavailable"))?;
+                let target = targets::from_site(&graph, &site)
+                    .ok_or_else(|| Failure::new(INTERNAL, "a package folder has no path"))?;
+                if !request
+                    .permits_field(
+                        principal.caller(),
+                        Source::Contents,
+                        FacetUsage::Required,
+                        &target,
+                    )
+                    .map_err(source_failed)?
+                {
+                    blocked_folders.insert(folder.id);
+                } else {
+                    archive.observe(if readable.contains(&folder.id) {
+                        crate::exports::operation::Subject::Folder(folder.id)
+                    } else {
+                        crate::exports::operation::Subject::FolderPath(folder.id)
+                    });
+                }
+            }
+        }
+        let digest = |path: &str| archive.digest_of(path).unwrap_or_default();
         // The objects, a place before what lies in it.
         let mut people: BTreeSet<Id> = archive.people.clone().unwrap_or_default();
         people.insert(self.user);
@@ -288,8 +345,9 @@ impl Exporting {
         places.sort_by_key(|node| (node.path.len(), node.created_at, node.id));
         for node in places {
             let row = node_meta.get(&node.id);
-            let hidden = !selected.viewable.contains_key(&node.id);
-            if let Some(row) = row {
+            let hidden =
+                !selected.viewable.contains_key(&node.id) || blocked_nodes.contains(&node.id);
+            if let Some(row) = row.filter(|_| !blocked_nodes.contains(&node.id)) {
                 people.insert(row.created_by);
             }
             objects.push(PackageObject {
@@ -308,9 +366,11 @@ impl Exporting {
                     node.description.clone()
                 },
                 hidden,
-                created_at: Some(time(node.created_at)),
-                updated_at: Some(time(node.updated_at)),
-                creator: row.map(|row| row.created_by),
+                created_at: (!blocked_nodes.contains(&node.id)).then(|| time(node.created_at)),
+                updated_at: (!blocked_nodes.contains(&node.id)).then(|| time(node.updated_at)),
+                creator: row
+                    .filter(|_| !blocked_nodes.contains(&node.id))
+                    .map(|row| row.created_by),
                 sha256: None,
                 bytes: 0,
                 messages: None,
@@ -334,8 +394,9 @@ impl Exporting {
                 .iter()
                 .find(|entry| entry.kind == PackageKind::Thread && entry.id == node.id);
             let row = node_meta.get(&node.id);
-            let hidden = !selected.viewable.contains_key(&node.id);
-            if let Some(row) = row {
+            let hidden =
+                !selected.viewable.contains_key(&node.id) || blocked_nodes.contains(&node.id);
+            if let Some(row) = row.filter(|_| !blocked_nodes.contains(&node.id)) {
                 people.insert(row.created_by);
             }
             let (sha256, bytes) = entry
@@ -358,9 +419,11 @@ impl Exporting {
                     node.description.clone()
                 },
                 hidden,
-                created_at: Some(time(node.created_at)),
-                updated_at: Some(time(node.updated_at)),
-                creator: row.map(|row| row.created_by),
+                created_at: (!blocked_nodes.contains(&node.id)).then(|| time(node.created_at)),
+                updated_at: (!blocked_nodes.contains(&node.id)).then(|| time(node.updated_at)),
+                creator: row
+                    .filter(|_| !blocked_nodes.contains(&node.id))
+                    .map(|row| row.created_by),
                 sha256,
                 bytes,
                 messages: None,
@@ -392,8 +455,11 @@ impl Exporting {
         let mut folders: Vec<&meta::FolderMeta> = containers.iter().collect();
         folders.sort_by_key(|folder| (depth(folder.id), folder.created_at, folder.id));
         for folder in folders {
-            let named = readable.contains(&folder.id);
-            if let Some(maker) = folder.created_by {
+            let named = readable.contains(&folder.id) && !blocked_folders.contains(&folder.id);
+            if let Some(maker) = folder
+                .created_by
+                .filter(|_| !blocked_folders.contains(&folder.id))
+            {
                 people.insert(maker);
             }
             objects.push(PackageObject {
@@ -408,9 +474,13 @@ impl Exporting {
                 },
                 description: String::new(),
                 hidden: !named,
-                created_at: Some(time(folder.created_at)),
-                updated_at: Some(time(folder.updated_at)),
-                creator: folder.created_by,
+                created_at: (!blocked_folders.contains(&folder.id))
+                    .then(|| time(folder.created_at)),
+                updated_at: (!blocked_folders.contains(&folder.id))
+                    .then(|| time(folder.updated_at)),
+                creator: folder
+                    .created_by
+                    .filter(|_| !blocked_folders.contains(&folder.id)),
                 sha256: None,
                 bytes: 0,
                 messages: None,
@@ -514,6 +584,7 @@ impl Exporting {
                 .map(|effective| manages(&effective.held))
                 .unwrap_or(false);
         let access: Option<Vec<PackageAccess>> = if scope_manages {
+            archive.observe(crate::exports::operation::Subject::NodeAccess(root));
             let mut shared: Vec<PackageAccess> = Vec::new();
             let mut places: Vec<Id> = Vec::new();
             for object in objects.iter().filter(|object| {
@@ -537,6 +608,7 @@ impl Exporting {
                 .unwrap_or(false);
                 if held {
                     places.push(object.id);
+                    archive.observe(crate::exports::operation::Subject::NodeAccess(object.id));
                 }
             }
             let documents: Vec<Id> = objects
@@ -558,6 +630,9 @@ impl Exporting {
                         .map(|listed| listed.document.id),
                 );
                 tokio::task::yield_now().await;
+            }
+            for id in &managed_documents {
+                archive.observe(crate::exports::operation::Subject::DocumentAccess(*id));
             }
             for (page, ids) in [("node", &places), ("document", &managed_documents)] {
                 if ids.is_empty() {
@@ -581,25 +656,48 @@ impl Exporting {
 
         // The people.
         let ids: Vec<Id> = people.iter().copied().collect();
-        let principals: Vec<PackagePrincipal> = meta::people_meta(&mut conn, &ids)
-            .await?
-            .into_iter()
-            .map(|person| {
-                let mayread = self.emails || person.id == self.user;
-                PackagePrincipal {
-                    id: person.id,
-                    kind: if person.kind == "service" {
-                        UserKind::Service
-                    } else {
-                        UserKind::Human
-                    },
-                    username: person.username,
-                    display_name: person.display_name,
-                    email: person.email.filter(|_| mayread),
-                    email_verified: mayread && person.email_verified,
+        let mut principals = Vec::new();
+        for person in meta::people_meta(&mut conn, &ids).await? {
+            let native = (self.emails && principal.is_system_admin()) || person.id == self.user;
+            let allowed = if let Some(request) = &self.request {
+                if principal
+                    .caller()
+                    .grant()
+                    .is_some_and(|grant| grant.operation_scope().is_some())
+                {
+                    request
+                        .permits_person(
+                            &mut conn,
+                            self.engine.inner.clock.as_ref(),
+                            person.id,
+                            false,
+                        )
+                        .await
+                        .map_err(source_failed)?
+                } else {
+                    true
                 }
-            })
-            .collect();
+            } else {
+                true
+            };
+            let mayread = native && allowed;
+            if mayread && (person.email.is_some() || person.email_verified) {
+                archive.observe(crate::exports::operation::Subject::Email(person.id));
+            }
+            principals.push(PackagePrincipal {
+                id: person.id,
+                kind: if person.kind == "service" {
+                    UserKind::Service
+                } else {
+                    UserKind::Human
+                },
+                username: person.username,
+                display_name: person.display_name,
+                email: person.email.filter(|_| mayread),
+                email_verified: mayread && person.email_verified,
+            });
+        }
+        archive.all_sources();
 
         let mut left: Vec<PackageLeftOut> = left_out.iter().map(PackageLeftOut::from).collect();
         left.extend(NEVER_CARRIED.iter().map(|what| PackageLeftOut {

@@ -30,6 +30,13 @@ const planned: AdoptPlan = {
   turns: 3,
   history_missing: null,
   adopted_thread_id: null,
+  agent_access: {
+    preset: { where: 'nothing', parts: {} },
+    choices: [
+      { where: 'nothing', parts: {} }, { where: 'thread', parts: {} },
+      { where: 'topic', parts: {} }, { where: 'project', parts: {} },
+    ],
+  },
 };
 
 let listed: () => Promise<NativeSession[]> = () => Promise.resolve(sessions);
@@ -105,7 +112,7 @@ it('says what adopting would do once a topic is chosen, and adopts into that top
   await user.click(confirm);
   await waitFor(() => expect(adoptSession).toHaveBeenCalledTimes(1));
   expect(vi.mocked(adoptSession).mock.calls[0]![0]).toBe('topic-login');
-  expect(vi.mocked(adoptSession).mock.calls[0]![1]).toEqual({ provider_id: 'provider-laptop', agent_id: 'agent-codex', native_session_ref: 'native-a' });
+  expect(vi.mocked(adoptSession).mock.calls[0]![1]).toEqual({ provider_id: 'provider-laptop', agent_id: 'agent-codex', native_session_ref: 'native-a', agent_access: { where: 'nothing', parts: {} } });
 });
 
 it('names the folder to register first and adopts nothing while none of the person’s environments holds it', async () => {

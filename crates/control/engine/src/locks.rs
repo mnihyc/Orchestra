@@ -152,6 +152,45 @@ pub async fn blocked_while_held(
     }))
 }
 
+/// The ordinary decision writer, shared with a caller that already owns a guarded Unit.
+pub(crate) async fn cancel_pending_approvals_in(
+    unit: &mut Unit<'_>,
+    thread: Id,
+) -> Result<(), EngineError> {
+    let Some(_row) = threads::lock(&mut *unit.conn, thread).await? else {
+        return Ok(());
+    };
+    let now = unit.now();
+    for approval in approval_queries::pending_of_thread(&mut *unit.conn, thread).await? {
+        if approval.kind != "harness" {
+            continue;
+        }
+        let Some(refusal) = refusal_for(&approval) else {
+            continue;
+        };
+        unit.before_effect()?;
+        if approval_queries::decide(&mut *unit.conn, approval.id, "denied", None, &refusal, now)
+            .await?
+        {
+            crate::notifications::approval_settled(unit, approval.id).await?;
+            let seq = unit.stamp(thread).await?;
+            if let Some(item) = approval.item_id {
+                threads::set_item_status(
+                    &mut *unit.conn,
+                    item,
+                    &["pending"],
+                    "cancelled",
+                    now,
+                    seq,
+                )
+                .await?;
+            }
+        }
+    }
+    unit.wake(thread);
+    Ok(())
+}
+
 impl Engine {
     /// Cancels the approvals that wait in a thread: nobody is to be asked about work that is about to
     /// be put somewhere else. The harness is told they were refused, so that a turn that waited for one
@@ -160,44 +199,7 @@ impl Engine {
         let mut tx = self.inner.db.begin().await?;
         let finished = {
             let mut unit = Unit::new(&mut tx, self.inner.clock.now());
-            let Some(_row) = threads::lock(&mut *unit.conn, thread).await? else {
-                return Ok(());
-            };
-            let now = unit.now();
-            for approval in approval_queries::pending_of_thread(&mut *unit.conn, thread).await? {
-                if approval.kind != "harness" {
-                    continue;
-                }
-                let Some(refusal) = refusal_for(&approval) else {
-                    // Nothing in it refuses: it is cancelled with the turn when that ends.
-                    continue;
-                };
-                if approval_queries::decide(
-                    &mut *unit.conn,
-                    approval.id,
-                    "denied",
-                    None,
-                    &refusal,
-                    now,
-                )
-                .await?
-                {
-                    crate::notifications::approval_settled(&mut unit, approval.id).await?;
-                    let seq = unit.stamp(thread).await?;
-                    if let Some(item) = approval.item_id {
-                        threads::set_item_status(
-                            &mut *unit.conn,
-                            item,
-                            &["pending"],
-                            "cancelled",
-                            now,
-                            seq,
-                        )
-                        .await?;
-                    }
-                }
-            }
-            unit.wake(thread);
+            cancel_pending_approvals_in(&mut unit, thread).await?;
             unit.finish().await?
         };
         self.commit(tx, finished).await?;

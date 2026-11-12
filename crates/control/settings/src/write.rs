@@ -112,6 +112,9 @@ pub struct Written {
 /// Why a value could not be written.
 #[derive(Debug, thiserror::Error)]
 pub enum WriteError {
+    /// The native operation closed after preparation, before its first write.
+    #[error("the original operation no longer permits this setting write")]
+    OperationRefused,
     /// The database refused.
     #[error(transparent)]
     Db(#[from] DbError),
@@ -297,15 +300,108 @@ async fn refreshed(
     Ok(snapshot.view(def))
 }
 
-/// Writes `request.value` at the place, for the caller to commit.
-pub async fn write(
+/// Actual immutable native write operands, selected before any row is changed.
+#[derive(Debug, Clone)]
+pub struct PreparedWrite {
+    snapshot: Snapshot,
+    def: &'static SettingDef,
+    before: SettingView,
+    target: Target,
+    value: Json,
+    wants_locked: bool,
+    lock: LockChange,
+    same_value: bool,
+    changed: bool,
+    expected_revision: Option<Revision>,
+}
+/// Actual immutable native clear operands, including the ordinary absent-row no-op.
+#[derive(Debug, Clone)]
+pub struct PreparedClear {
+    snapshot: Snapshot,
+    def: &'static SettingDef,
+    before: SettingView,
+    target: Target,
+    changed: bool,
+    expected_revision: Option<Revision>,
+}
+impl PreparedWrite {
+    #[must_use]
+    pub fn changes_lock(&self) -> bool {
+        self.lock != LockChange::Kept
+    }
+    #[must_use]
+    pub fn proposed_view(&self, actor: Actor, at: DateTime<Utc>) -> SettingView {
+        if !self.changed {
+            return self.before.clone();
+        }
+        let mut snapshot = self.snapshot.clone();
+        snapshot.rows_mut().put(queries::SettingRow {
+            node_id: node_of(self.target),
+            key: self.def.key.to_owned(),
+            value: self.value.clone(),
+            locked: self.wants_locked,
+            // Only the prospective resolved value is consumed before SQL. The real writer
+            // remains the authority on its returned revision and overflow failure.
+            revision: self
+                .before
+                .own
+                .as_ref()
+                .map_or(1, |own| own.revision.saturating_add(1)),
+            updated_by: user_of(actor),
+            updated_at: at,
+        });
+        snapshot.view(self.def)
+    }
+}
+impl PreparedClear {
+    #[must_use]
+    pub fn changes_lock(&self) -> bool {
+        self.before.own.as_ref().is_some_and(|own| own.locked)
+    }
+    #[must_use]
+    pub fn proposed_view(&self) -> SettingView {
+        let mut snapshot = self.snapshot.clone();
+        snapshot.rows_mut().take(node_of(self.target), self.def.key);
+        snapshot.view(self.def)
+    }
+}
+
+/// Native validation or the exact entry owner's opaque first-effect error.
+#[derive(Debug)]
+pub enum WriteFailure<E> {
+    Native(WriteError),
+    BeforeEffect(E),
+}
+impl<E> From<WriteError> for WriteFailure<E> {
+    fn from(error: WriteError) -> Self {
+        Self::Native(error)
+    }
+}
+impl<E> From<DbError> for WriteFailure<E> {
+    fn from(error: DbError) -> Self {
+        Self::Native(error.into())
+    }
+}
+
+fn revision_matches(before: &SettingView, expected: Option<Revision>) -> bool {
+    expected.is_none_or(|seen| match &before.own {
+        Some(own) => seen == own.revision,
+        None => seen == 0,
+    })
+}
+
+/// The original native validation, with no writer, audit, trial mutation or projected reference.
+pub async fn prepare_write(
     conn: &mut Conn,
     request: &Write<'_>,
-    now: DateTime<Utc>,
-) -> Result<Written, WriteError> {
+) -> Result<PreparedWrite, WriteError> {
     let def =
         registry::get(request.key).ok_or_else(|| Invalid::UnknownKey(request.key.to_owned()))?;
-    let mut snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
+    if def.key == keys::ORG_TERMS {
+        // Keep the actual lock/provenance snapshot after this source wait, through its write.
+        queries::lock_org_terms(conn, node_of(request.target), true).await?;
+    }
+    let snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
     if snapshot.is_side_thread() {
         return Err(WriteError::SideThread);
     }
@@ -316,7 +412,6 @@ pub async fn write(
     if let Some(lock) = before.lock_above() {
         return Err(WriteError::Locked { by: lock.clone() });
     }
-    let node = node_of(request.target);
     let (was_locked, was_value) = before
         .own
         .as_ref()
@@ -329,71 +424,38 @@ pub async fn write(
             .expected_revision
             .is_none_or(|seen| seen == own.revision)
     });
-    if same_value && lock == LockChange::Kept && at_revision {
-        return Ok(Written {
-            view: before.clone(),
-            before,
-            changed: false,
+    if !revision_matches(&before, request.expected_revision) {
+        return Err(WriteError::Stale {
+            current: Box::new(before),
         });
     }
-    let stored = Stored {
-        value: &value,
-        locked: wants_locked,
-        by: user_of(request.actor),
-        at: now,
-    };
-    let row = match queries::put(conn, node, def.key, &stored, request.expected_revision).await? {
-        Put::Written(row) => row,
-        Put::Stale => {
-            let current = refreshed(conn, &mut snapshot, node, def).await?;
-            return Err(WriteError::Stale {
-                current: Box::new(current),
-            });
-        }
-    };
-    let action = match request.target {
-        Target::System => orch_db::audit::action!(AuditAction::SystemSettingsUpdated),
-        Target::Node(_) => orch_db::audit::action!(AuditAction::SettingsUpdated),
-    };
-    let summary = summary_of_write(def, &value, !same_value, lock);
-    let mut details = json!({
-        "key": def.key,
-        "scope": scope.as_str(),
-        "locked": row.locked,
-        "revision": row.revision,
-    });
-    if let Some(text) = shown(def, &value) {
-        details["value"] = json!(text);
-    }
-    if let Some(text) = was_value.and_then(|was| shown(def, was)) {
-        details["was"] = json!(text);
-    }
-    snapshot.rows_mut().put(row);
-    let line = Line {
-        actor: request.actor,
-        origin: request.origin,
-        action,
-        summary,
-        details,
-    };
-    audit_change(conn, &snapshot, line, now).await?;
-    Ok(Written {
-        view: snapshot.view(def),
+    let changed = !(same_value && lock == LockChange::Kept && at_revision);
+    Ok(PreparedWrite {
+        snapshot,
+        def,
         before,
-        changed: true,
+        target: request.target,
+        value,
+        wants_locked,
+        lock,
+        same_value,
+        changed,
+        expected_revision: request.expected_revision,
     })
 }
 
-/// Takes back the value written at the place, so that the key is inherited
-/// again, for the caller to commit.
-pub async fn clear(
+/// The same native validation of a clear and its exact missing-row/revision/lock behavior.
+pub async fn prepare_clear(
     conn: &mut Conn,
     request: &Clear<'_>,
-    now: DateTime<Utc>,
-) -> Result<Written, WriteError> {
+) -> Result<PreparedClear, WriteError> {
     let def =
         registry::get(request.key).ok_or_else(|| Invalid::UnknownKey(request.key.to_owned()))?;
-    let mut snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
+    if def.key == keys::ORG_TERMS {
+        // Keep the actual lock/provenance snapshot after this source wait, through its write.
+        queries::lock_org_terms(conn, node_of(request.target), true).await?;
+    }
+    let snapshot = Snapshot::load(conn, request.target.into(), Wanted::Keys(&[def])).await?;
     if snapshot.is_side_thread() {
         return Err(WriteError::SideThread);
     }
@@ -409,26 +471,133 @@ pub async fn clear(
     if let Some(lock) = before.lock_above() {
         return Err(WriteError::Locked { by: lock.clone() });
     }
-    let node = node_of(request.target);
-    let Some(own) = before.own.clone() else {
-        return match request.expected_revision {
-            Some(_) => Err(WriteError::Stale {
-                current: Box::new(before),
-            }),
-            None => Ok(Written {
-                view: before.clone(),
-                before,
-                changed: false,
-            }),
-        };
-    };
-    if own.locked && !request.may_lock {
+    let changed = before.own.is_some();
+    if before.own.as_ref().is_some_and(|own| own.locked) && !request.may_lock {
         return Err(Refusal::NotPermitted.into());
     }
-    match queries::remove(conn, node, def.key, request.expected_revision).await? {
+    if (!changed && request.expected_revision.is_some())
+        || (changed && !revision_matches(&before, request.expected_revision))
+    {
+        return Err(WriteError::Stale {
+            current: Box::new(before),
+        });
+    }
+    Ok(PreparedClear {
+        snapshot,
+        def,
+        before,
+        target: request.target,
+        changed,
+        expected_revision: request.expected_revision,
+    })
+}
+
+/// Consume the native prepared value and check exactly at its first UPSERT.
+pub async fn apply_write_before<E, F: FnOnce() -> Result<(), E>>(
+    conn: &mut Conn,
+    prepared: &PreparedWrite,
+    actor: Actor,
+    origin: &Origin,
+    now: DateTime<Utc>,
+    before_effect: F,
+) -> Result<Written, WriteFailure<E>> {
+    let mut snapshot = prepared.snapshot.clone();
+    let def = prepared.def;
+    let before = prepared.before.clone();
+    if !prepared.changed {
+        return Ok(Written {
+            view: before.clone(),
+            before,
+            changed: false,
+        });
+    }
+    let scope = snapshot.scope();
+    let node = node_of(prepared.target);
+    if def.key == keys::ORG_TERMS {
+        queries::lock_org_terms(conn, node, true).await?;
+    }
+    let value = prepared.value.clone();
+    let wants_locked = prepared.wants_locked;
+    let same_value = prepared.same_value;
+    let lock = prepared.lock;
+    before_effect().map_err(WriteFailure::BeforeEffect)?;
+    let stored = Stored {
+        value: &value,
+        locked: wants_locked,
+        by: user_of(actor),
+        at: now,
+    };
+    let row = match queries::put(conn, node, def.key, &stored, prepared.expected_revision).await? {
+        Put::Written(row) => row,
+        Put::Stale => {
+            let current = refreshed(conn, &mut snapshot, node, def).await?;
+            return Err(WriteFailure::Native(WriteError::Stale {
+                current: Box::new(current),
+            }));
+        }
+    };
+    let action = match prepared.target {
+        Target::System => orch_db::audit::action!(AuditAction::SystemSettingsUpdated),
+        Target::Node(_) => orch_db::audit::action!(AuditAction::SettingsUpdated),
+    };
+    let summary = summary_of_write(def, &value, !same_value, lock);
+    let mut details = json!({
+        "key": def.key,
+        "scope": scope.as_str(),
+        "locked": row.locked,
+        "revision": row.revision,
+    });
+    if let Some(text) = shown(def, &value) {
+        details["value"] = json!(text);
+    }
+    if let Some(text) = before.own.as_ref().and_then(|own| shown(def, &own.value)) {
+        details["was"] = json!(text);
+    }
+    snapshot.rows_mut().put(row);
+    let line = Line {
+        actor,
+        origin,
+        action,
+        summary,
+        details,
+    };
+    audit_change(conn, &snapshot, line, now).await?;
+    Ok(Written {
+        view: snapshot.view(def),
+        before,
+        changed: true,
+    })
+}
+
+/// Consume the native prepared clear and check exactly at its first DELETE.
+pub async fn apply_clear_before<E, F: FnOnce() -> Result<(), E>>(
+    conn: &mut Conn,
+    prepared: &PreparedClear,
+    actor: Actor,
+    origin: &Origin,
+    now: DateTime<Utc>,
+    before_effect: F,
+) -> Result<Written, WriteFailure<E>> {
+    let mut snapshot = prepared.snapshot.clone();
+    let def = prepared.def;
+    let before = prepared.before.clone();
+    if !prepared.changed {
+        return Ok(Written {
+            view: before.clone(),
+            before,
+            changed: false,
+        });
+    }
+    let scope = snapshot.scope();
+    let node = node_of(prepared.target);
+    if def.key == keys::ORG_TERMS {
+        queries::lock_org_terms(conn, node, true).await?;
+    }
+    before_effect().map_err(WriteFailure::BeforeEffect)?;
+    match queries::remove(conn, node, def.key, prepared.expected_revision).await? {
         Removed::Gone(row) => {
             snapshot.rows_mut().take(node, def.key);
-            let action = match request.target {
+            let action = match prepared.target {
                 Target::System => AuditAction::SystemSettingsUpdated,
                 Target::Node(_) => orch_db::audit::action!(AuditAction::SettingsReset),
             };
@@ -443,8 +612,8 @@ pub async fn clear(
                 details["was"] = json!(text);
             }
             let line = Line {
-                actor: request.actor,
-                origin: request.origin,
+                actor,
+                origin,
                 action,
                 summary,
                 details,
@@ -463,10 +632,49 @@ pub async fn clear(
         }),
         Removed::Stale => {
             let current = refreshed(conn, &mut snapshot, node, def).await?;
-            Err(WriteError::Stale {
+            Err(WriteFailure::Native(WriteError::Stale {
                 current: Box::new(current),
-            })
+            }))
         }
+    }
+}
+
+/// The original native public writers retain their signatures and use that same producer.
+pub async fn write(
+    conn: &mut Conn,
+    request: &Write<'_>,
+    now: DateTime<Utc>,
+) -> Result<Written, WriteError> {
+    write_before(conn, request, now, || Ok(())).await
+}
+
+/// The same published native boundary, now consuming its exact shared preparation.
+pub async fn write_before(
+    conn: &mut Conn,
+    request: &Write<'_>,
+    now: DateTime<Utc>,
+    guard: impl FnOnce() -> Result<(), WriteError>,
+) -> Result<Written, WriteError> {
+    let prepared = prepare_write(conn, request).await?;
+    match apply_write_before(conn, &prepared, request.actor, request.origin, now, guard).await {
+        Ok(written) => Ok(written),
+        Err(WriteFailure::Native(error) | WriteFailure::BeforeEffect(error)) => Err(error),
+    }
+}
+pub async fn clear(
+    conn: &mut Conn,
+    request: &Clear<'_>,
+    now: DateTime<Utc>,
+) -> Result<Written, WriteError> {
+    let prepared = prepare_clear(conn, request).await?;
+    match apply_clear_before(conn, &prepared, request.actor, request.origin, now, || {
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .await
+    {
+        Ok(written) => Ok(written),
+        Err(WriteFailure::Native(error)) => Err(error),
+        Err(WriteFailure::BeforeEffect(never)) => match never {},
     }
 }
 
